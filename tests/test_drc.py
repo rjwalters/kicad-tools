@@ -284,3 +284,154 @@ class TestDRCViolationMethods:
         assert "message" in d
         assert "locations" in d
         assert d["type"] == "clearance"
+
+
+class TestViolationTypeFromString:
+    """Additional tests for ViolationType.from_string."""
+
+    def test_edge_clearance(self):
+        """Test copper edge clearance detection."""
+        assert ViolationType.from_string("copper_edge_clearance") == ViolationType.COPPER_EDGE_CLEARANCE
+        assert ViolationType.from_string("edge clearance violation") == ViolationType.COPPER_EDGE_CLEARANCE
+
+    def test_courtyard(self):
+        """Test courtyard overlap detection."""
+        assert ViolationType.from_string("courtyard_overlap") == ViolationType.COURTYARD_OVERLAP
+        assert ViolationType.from_string("Courtyard overlapping") == ViolationType.COURTYARD_OVERLAP
+
+    def test_track_width(self):
+        """Test track width detection."""
+        assert ViolationType.from_string("track_width") == ViolationType.TRACK_WIDTH
+        assert ViolationType.from_string("Track width too small") == ViolationType.TRACK_WIDTH
+
+    def test_via_types(self):
+        """Test via-related violations."""
+        assert ViolationType.from_string("via_annular_width") == ViolationType.VIA_ANNULAR_WIDTH
+        assert ViolationType.from_string("Via annular ring too small") == ViolationType.VIA_ANNULAR_WIDTH
+        assert ViolationType.from_string("Via hole larger than pad") == ViolationType.VIA_HOLE_LARGER_THAN_PAD
+        assert ViolationType.from_string("Micro via hole") == ViolationType.MICRO_VIA_HOLE_TOO_SMALL
+
+    def test_drill_hole(self):
+        """Test drill hole detection."""
+        assert ViolationType.from_string("drill_hole_too_small") == ViolationType.DRILL_HOLE_TOO_SMALL
+        assert ViolationType.from_string("Drill size too small") == ViolationType.DRILL_HOLE_TOO_SMALL
+
+    def test_silk_types(self):
+        """Test silkscreen violations."""
+        assert ViolationType.from_string("silk_over_copper") == ViolationType.SILK_OVER_COPPER
+        assert ViolationType.from_string("Silk over copper pad") == ViolationType.SILK_OVER_COPPER
+        assert ViolationType.from_string("silk_overlap") == ViolationType.SILK_OVERLAP
+        assert ViolationType.from_string("Silkscreen overlap") == ViolationType.SILK_OVERLAP
+
+    def test_solder_mask(self):
+        """Test solder mask bridge detection."""
+        assert ViolationType.from_string("solder_mask_bridge") == ViolationType.SOLDER_MASK_BRIDGE
+        assert ViolationType.from_string("Solder mask bridge") == ViolationType.SOLDER_MASK_BRIDGE
+
+    def test_footprint_types(self):
+        """Test footprint-related violations."""
+        assert ViolationType.from_string("footprint") == ViolationType.FOOTPRINT
+        assert ViolationType.from_string("duplicate_footprint") == ViolationType.DUPLICATE_FOOTPRINT
+        assert ViolationType.from_string("Duplicate footprint found") == ViolationType.DUPLICATE_FOOTPRINT
+        assert ViolationType.from_string("extra_footprint") == ViolationType.EXTRA_FOOTPRINT
+        assert ViolationType.from_string("Extra footprint on board") == ViolationType.EXTRA_FOOTPRINT
+        assert ViolationType.from_string("missing_footprint") == ViolationType.MISSING_FOOTPRINT
+        assert ViolationType.from_string("Missing footprint") == ViolationType.MISSING_FOOTPRINT
+
+    def test_outline(self):
+        """Test outline detection."""
+        assert ViolationType.from_string("malformed_outline") == ViolationType.MALFORMED_OUTLINE
+        assert ViolationType.from_string("Board outline malformed") == ViolationType.MALFORMED_OUTLINE
+
+
+class TestLocationParsing:
+    """Tests for Location.from_string parsing."""
+
+    def test_parse_standard_format(self):
+        """Test parsing standard @(x mm, y mm) format."""
+        from kicad_tools.drc.violation import Location
+
+        loc = Location.from_string("@(162.4500 mm, 100.3250 mm)")
+        assert loc is not None
+        assert loc.x_mm == pytest.approx(162.45)
+        assert loc.y_mm == pytest.approx(100.325)
+
+    def test_parse_with_spaces(self):
+        """Test parsing with extra spaces."""
+        from kicad_tools.drc.violation import Location
+
+        loc = Location.from_string("@( 100.0 mm , 50.0 mm )")
+        assert loc is not None
+        assert loc.x_mm == pytest.approx(100.0)
+        assert loc.y_mm == pytest.approx(50.0)
+
+    def test_parse_json_format(self):
+        """Test parsing JSON pos format."""
+        from kicad_tools.drc.violation import Location
+
+        loc = Location.from_string('{"x": 123.45, "y": 67.89}')
+        assert loc is not None
+        assert loc.x_mm == pytest.approx(123.45)
+        assert loc.y_mm == pytest.approx(67.89)
+
+    def test_parse_invalid(self):
+        """Test parsing invalid format returns None."""
+        from kicad_tools.drc.violation import Location
+
+        loc = Location.from_string("invalid string")
+        assert loc is None
+
+    def test_location_str(self):
+        """Test Location string representation."""
+        from kicad_tools.drc.violation import Location
+
+        loc = Location(x_mm=100.0, y_mm=50.0)
+        assert "(100.00, 50.00) mm" in str(loc)
+
+        loc_with_layer = Location(x_mm=100.0, y_mm=50.0, layer="F.Cu")
+        assert "F.Cu" in str(loc_with_layer)
+
+
+class TestDRCViolationProperties:
+    """Tests for DRCViolation property methods."""
+
+    def test_primary_location_exists(self):
+        """Test primary_location when locations exist."""
+        from kicad_tools.drc.violation import DRCViolation, Location, ViolationType, Severity
+
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+            locations=[Location(100.0, 50.0)],
+        )
+        assert v.primary_location is not None
+        assert v.primary_location.x_mm == 100.0
+
+    def test_primary_location_empty(self):
+        """Test primary_location when no locations."""
+        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
+        assert v.primary_location is None
+
+    def test_violation_str(self):
+        """Test DRCViolation string representation."""
+        from kicad_tools.drc.violation import DRCViolation, Location, ViolationType, Severity
+
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test message",
+            locations=[Location(100.0, 50.0)],
+        )
+        s = str(v)
+        assert "clearance" in s
+        assert "Test message" in s
