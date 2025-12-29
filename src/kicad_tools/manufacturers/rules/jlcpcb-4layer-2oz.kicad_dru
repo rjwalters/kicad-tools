@@ -1,0 +1,17 @@
+(version 1)
+(rule "Trace Width"
+  (constraint track_width (min 0.2032mm)))
+(rule "Clearance"
+  (constraint clearance (min 0.1016mm)))
+(rule "Via Drill"
+  (constraint hole_size (min 0.2mm)))
+(rule "Via Diameter"
+  (constraint via_diameter (min 0.45mm)))
+(rule "Annular Ring"
+  (constraint annular_width (min 0.125mm)))
+(rule "Copper to Edge"
+  (constraint edge_clearance (min 0.3mm)))
+(rule "Hole to Edge"
+  (constraint hole_to_hole (min 0.4mm)))
+(rule "Silkscreen Width"
+  (constraint silk_clearance (min 0.15mm)))

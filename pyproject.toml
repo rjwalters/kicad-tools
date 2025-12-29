@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kicad-tools"
+version = "0.1.0"
+description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "RJ Walters" }
+]
+keywords = [
+    "kicad",
+    "eda",
+    "pcb",
+    "schematic",
+    "electronics",
+    "hardware",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+[project.urls]
+Homepage = "https://github.com/rjwalters/kicad-tools"
+Repository = "https://github.com/rjwalters/kicad-tools"
+Issues = "https://github.com/rjwalters/kicad-tools/issues"
+
+[project.scripts]
+# Schematic tools
+kicad-sch-summary = "kicad_tools.cli.sch_summary:main"
+kicad-sch-symbols = "kicad_tools.cli.sch_list_symbols:main"
+kicad-sch-labels = "kicad_tools.cli.sch_list_labels:main"
+kicad-sch-wires = "kicad_tools.cli.sch_list_wires:main"
+kicad-sch-hierarchy = "kicad_tools.cli.sch_hierarchy:main"
+kicad-sch-symbol-info = "kicad_tools.cli.sch_symbol_info:main"
+kicad-sch-pin-positions = "kicad_tools.cli.sch_pin_positions:main"
+kicad-sch-trace-nets = "kicad_tools.cli.sch_trace_nets:main"
+kicad-sch-check-connections = "kicad_tools.cli.sch_check_connections:main"
+kicad-sch-find-unconnected = "kicad_tools.cli.sch_find_unconnected:main"
+kicad-sch-validate = "kicad_tools.cli.sch_validate:main"
+kicad-sch-replace-symbol = "kicad_tools.cli.sch_replace_symbol:main"
+kicad-sch-bom = "kicad_tools.cli.sch_generate_bom:main"
+kicad-sch-erc = "kicad_tools.cli.sch_run_erc:main"
+
+# PCB tools
+kicad-pcb-query = "kicad_tools.cli.pcb_query:main"
+kicad-pcb-modify = "kicad_tools.cli.pcb_modify:main"
+
+# Library tools
+kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kicad_tools"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]  # line too long - handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
