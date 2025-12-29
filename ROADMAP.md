@@ -29,135 +29,190 @@ Standalone Python tools for parsing and manipulating KiCad schematic and PCB fil
 
 ---
 
-## v0.2.0 (Next): Enhanced Python API
+## v0.2.0 (Next): Manufacturing Readiness
+
+Focus: Complete the design-to-manufacturing workflow with parts database integration and assembly export.
+
+### LCSC Parts Integration
+
+Connect BOM generation to JLCPCB's LCSC parts database for availability checking and pricing.
+
+```python
+from kicad_tools.parts import LCSCClient
+
+# Direct part lookup
+client = LCSCClient()
+part = client.lookup("C123456")
+print(f"Stock: {part.stock}, Price: ${part.price_usd}")
+
+# Search for parts
+results = client.search("100nF 0402 X7R")
+for part in results[:5]:
+    print(f"{part.lcsc}: {part.description} - ${part.price_usd}")
+```
+
+```python
+from kicad_tools.schema.bom import extract_bom
+
+# BOM with availability checking
+bom = extract_bom("project.kicad_sch", hierarchical=True)
+availability = bom.check_availability("jlcpcb")
+
+print(f"Available: {availability.available_count}/{availability.total_count}")
+
+for item in availability.unavailable:
+    print(f"  {item.reference}: {item.value} ({item.lcsc or 'no LCSC#'})")
+    for alt in item.alternates[:3]:
+        print(f"    → {alt.lcsc}: {alt.description} ({alt.stock} in stock)")
+```
+
+```bash
+# CLI commands
+kct bom project.kicad_sch --check-lcsc
+kct bom project.kicad_sch --check-lcsc --mfr jlcpcb --format csv
+
+kct parts lookup C123456
+kct parts search "100nF 0402 X7R" --in-stock
+```
+
+### Assembly Package Export
+
+Generate complete manufacturing packages for JLCPCB, Seeed, and other fabs.
+
+```bash
+# Full assembly package (gerbers + BOM + pick-and-place)
+kct export assembly board.kicad_pcb --mfr jlcpcb --output mfr/
+# Creates:
+#   mfr/gerbers.zip          - Gerber + drill files
+#   mfr/bom_jlcpcb.csv       - BOM in JLCPCB format (LCSC part numbers)
+#   mfr/cpl_jlcpcb.csv       - Component placement list
+
+# Individual exports
+kct export gerbers board.kicad_pcb --mfr jlcpcb --output gerbers/
+kct export pnp board.kicad_pcb --mfr jlcpcb --output cpl.csv
+kct export bom project.kicad_sch --format jlcpcb --output bom.csv
+```
+
+```python
+from kicad_tools.export import AssemblyPackage
+
+# Python API
+pkg = AssemblyPackage.create(
+    pcb="board.kicad_pcb",
+    schematic="project.kicad_sch",
+    manufacturer="jlcpcb"
+)
+pkg.export("manufacturing/")
+
+# Or step by step
+from kicad_tools.export import GerberExporter, PickAndPlace, BOMExporter
+
+gerbers = GerberExporter(pcb, manufacturer="jlcpcb")
+gerbers.export("gerbers/")
+gerbers.create_zip("gerbers.zip")
+
+pnp = PickAndPlace(pcb, manufacturer="jlcpcb")
+pnp.export("cpl_jlcpcb.csv")
+
+bom_exp = BOMExporter(bom, manufacturer="jlcpcb")
+bom_exp.export("bom_jlcpcb.csv")
+```
 
 ### Fluent Query API
-```python
-from kicad_tools import Schematic
 
+Improved Python API for common schematic and PCB queries.
+
+```python
+from kicad_tools import Schematic, PCB
+
+# Schematic queries
 sch = Schematic.load("project.kicad_sch")
+u1 = sch.symbols.by_reference("U1")
+caps = sch.symbols.filter(value="100nF")
+power_symbols = sch.symbols.filter(lib_id__startswith="power:")
 
-# Find symbols
-dac = sch.symbols.by_reference("U1")
-caps = sch.symbols.by_value("100nF")
-
-# Access properties
-print(dac.footprint)
-print(dac.properties["MPN"])
-
-# Modify
-dac.move_to(100, 200)
-dac.properties["Value"] = "PCM5122"
-sch.save()
-```
-
-### PCB API
-```python
-from kicad_tools import PCB
-
+# PCB queries
 pcb = PCB.load("board.kicad_pcb")
-
-# Query
-u1 = pcb.footprints.by_reference("U1")
-gnd_net = pcb.nets["GND"]
-
-# Analyze
-print(f"GND trace length: {gnd_net.total_length}mm")
-print(f"Via count: {len(gnd_net.vias)}")
-
-# Modify
-u1.move_to(50, 50)
-u1.rotate(90)
-pcb.save()
+fp = pcb.footprints.by_reference("U1")
+gnd = pcb.nets["GND"]
+qfp_footprints = pcb.footprints.filter(footprint__contains="QFP")
 ```
 
-### Cross-Reference
+### Cross-Reference API
+
+Link schematics to PCBs for unified project queries.
+
 ```python
-# Link schematic to PCB
+from kicad_tools import Project
+
 project = Project.load("project.kicad_pro")
-sch = project.schematic
-pcb = project.pcb
 
-# Find all capacitors and their PCB locations
-for cap in sch.symbols.by_prefix("C"):
-    fp = pcb.footprints.by_reference(cap.reference)
-    print(f"{cap.reference}: {cap.value} at {fp.position}")
+# Cross-reference symbols to footprints
+for sym in project.schematic.symbols.filter(prefix="C"):
+    fp = project.pcb.footprints.by_reference(sym.reference)
+    if fp:
+        print(f"{sym.reference}: {sym.value} at PCB position {fp.position}")
+
+# Find unplaced components
+unplaced = project.find_unplaced_symbols()
+for sym in unplaced:
+    print(f"Not on PCB: {sym.reference} ({sym.value})")
+```
+
+### What's NOT in v0.2.0
+- Pure Python DRC (deferred to v0.3.0)
+- Symbol/footprint library creation (deferred to v0.4.0)
+- Cost estimation and quoting
+- Autorouter CLI exposure
+
+---
+
+## v0.3.0: Validation & CI/CD
+
+Focus: Pure Python design rule checking without requiring kicad-cli.
+
+### Pure Python DRC
+```python
+from kicad_tools.validate import DRCChecker
+
+# Check PCB against manufacturer rules (no kicad-cli needed)
+checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+results = checker.check_all()
+
+for violation in results.violations:
+    print(f"{violation.severity}: {violation.message}")
+    print(f"  Location: {violation.location}")
+    print(f"  Rule: {violation.rule}")
+```
+
+### CI/CD Integration
+```bash
+# Exit codes for CI pipelines
+kct check board.kicad_pcb --mfr jlcpcb --format json
+# Returns: 0 = pass, 1 = errors, 2 = warnings only
+
+# Pre-commit hook
+kct validate project.kicad_sch --strict
+```
+
+### Design Rule Comparison
+```python
+from kicad_tools.validate import compare_to_rules
+
+# Check if design meets manufacturer requirements
+pcb = PCB.load("board.kicad_pcb")
+results = compare_to_rules(pcb, manufacturer="jlcpcb")
+
+if results.compatible:
+    print("Design is compatible with JLCPCB")
+else:
+    for issue in results.issues:
+        print(f"Incompatible: {issue}")
 ```
 
 ---
 
-## Future: Validation & Design Rules
-
-### Built-in Validation
-```python
-from kicad_tools.validate import ERCChecker, DRCChecker
-
-# Schematic validation
-erc = ERCChecker(schematic)
-issues = erc.check_all()
-for issue in issues:
-    print(f"{issue.severity}: {issue.message} at {issue.location}")
-
-# PCB validation
-drc = DRCChecker(pcb, rules="jlcpcb-4layer")
-violations = drc.check_all()
-```
-
-### Manufacturer Profiles
-```python
-from kicad_tools.manufacturers import JLCPCB, OSHPark
-
-# Check PCB against manufacturer rules
-jlcpcb = JLCPCB(layer_count=4, copper_weight="1oz")
-violations = jlcpcb.check(pcb)
-
-# Get manufacturing capabilities
-print(jlcpcb.min_trace_width)    # 0.127mm
-print(jlcpcb.min_via_diameter)   # 0.3mm
-```
-
-### BOM Validation
-```python
-from kicad_tools.bom import BOMValidator
-
-validator = BOMValidator(bom)
-validator.check_availability("jlcpcb")  # Check JLCPCB parts library
-validator.check_alternates()            # Suggest alternates for unavailable parts
-```
-
----
-
-## Future: Manufacturing Automation
-
-### Gerber Export
-```bash
-kicad gerbers board.kicad_pcb --manufacturer jlcpcb --output gerbers/
-```
-
-```python
-from kicad_tools.export import GerberExporter
-
-exporter = GerberExporter(pcb, manufacturer="jlcpcb")
-exporter.export("gerbers/")
-exporter.create_zip("board_gerbers.zip")
-```
-
-### Pick & Place
-```bash
-kicad pnp board.kicad_pcb --format jlcpcb --output pnp.csv
-```
-
-### Assembly Package
-```bash
-kicad package board.kicad_pcb \
-  --manufacturer jlcpcb \
-  --output assembly/
-# Creates: gerbers.zip, bom.csv, pnp.csv
-```
-
----
-
-## Future: Library Management
+## v0.4.0: Library Management
 
 ### Symbol Library Tools
 ```python
@@ -189,7 +244,7 @@ lib.create_qfp(pins=48, pitch=0.5, name="LQFP-48")
 
 ---
 
-## Future: Advanced Features
+## v0.5.0: Advanced Features
 
 ### Netlist Operations
 ```python
@@ -208,20 +263,14 @@ shorts = netlist.find_potential_shorts()
 
 ### Diff & Merge
 ```bash
-kicad diff old.kicad_sch new.kicad_sch --output diff.html
-kicad diff old.kicad_pcb new.kicad_pcb --visual
+kct diff old.kicad_sch new.kicad_sch --output diff.html
+kct diff old.kicad_pcb new.kicad_pcb --visual
 ```
 
-### AI Integration Hooks
-```python
-from kicad_tools.hooks import DesignAssistant
-
-assistant = DesignAssistant(schematic)
-
-# Get suggestions
-suggestions = assistant.suggest_decoupling()
-suggestions = assistant.check_power_integrity()
-suggestions = assistant.review_component_selection()
+### Autorouter CLI
+```bash
+# Expose the existing Python autorouter via CLI
+kct route board.kicad_pcb --strategy adaptive --output routed.kicad_pcb
 ```
 
 ---
@@ -238,6 +287,7 @@ kicad_tools/
 │   ├── schematic.py      # Schematic model
 │   ├── symbol.py         # Symbol model
 │   ├── pcb.py            # PCB model
+│   ├── bom.py            # BOM extraction
 │   ├── library.py        # Library models
 │   └── ...
 ├── cli/
@@ -247,17 +297,25 @@ kicad_tools/
 │   ├── generate_bom.py   # BOM commands
 │   ├── mfr.py            # Manufacturer commands
 │   └── ...
-├── validate/
+├── parts/                # v0.2.0: Parts database
+│   ├── lcsc.py           # LCSC API client
+│   ├── cache.py          # Local caching
+│   └── models.py         # Part data models
+├── export/               # v0.2.0: Manufacturing export
+│   ├── gerber.py         # Gerber generation
+│   ├── pnp.py            # Pick-and-place files
+│   ├── bom_formats.py    # Manufacturer BOM formats
+│   └── assembly.py       # Assembly package
+├── validate/             # v0.3.0: Validation
 │   ├── erc.py            # Electrical rules
 │   └── drc.py            # Design rules
 ├── manufacturers/
 │   ├── jlcpcb.py
 │   ├── oshpark.py
 │   └── rules/            # Design rule files
-├── export/
-│   ├── gerber.py
-│   ├── bom.py
-│   └── pnp.py
+├── router/               # Autorouter (existing)
+│   ├── autorouter.py
+│   └── heuristics.py
 └── tests/
 ```
 
@@ -291,8 +349,8 @@ kicad_tools/
 | Version | Focus | Status |
 |---------|-------|--------|
 | 0.1.0 | Unified CLI (`kct`), core parsing, manufacturer rules | Released |
-| 0.2.0 | Enhanced Python API | Next |
-| 0.3.0 | Validation & BOM checking | Planned |
-| 0.4.0 | Manufacturing automation (gerbers, pick-and-place) | Planned |
-| 0.5.0 | Library management | Planned |
-| 1.0.0 | Stable API, full documentation | Planned |
+| 0.2.0 | Manufacturing readiness: LCSC integration, assembly export, fluent API | Next |
+| 0.3.0 | Validation & CI/CD: Pure Python DRC, design rule checking | Planned |
+| 0.4.0 | Library management: Symbol/footprint creation and editing | Planned |
+| 0.5.0 | Advanced: Diff/merge, netlist analysis, autorouter CLI | Planned |
+| 1.0.0 | Stable API, full documentation, production ready | Planned |
