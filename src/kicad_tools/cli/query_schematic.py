@@ -32,6 +32,7 @@ KICAD_SCRIPTS = Path(__file__).resolve().parent
 @dataclass
 class SymbolProperty:
     """A property on a symbol."""
+
     name: str
     value: str
     position: tuple[float, float] = (0, 0)
@@ -44,12 +45,12 @@ class SymbolProperty:
         value = sexp.get_string(1) or ""
         pos = (0.0, 0.0)
         rot = 0.0
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
         visible = True
-        if effects := sexp.find('effects'):
-            if effects.find('hide'):
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
                 visible = False
         return cls(name=name, value=value, position=pos, rotation=rot, visible=visible)
 
@@ -57,6 +58,7 @@ class SymbolProperty:
 @dataclass
 class SymbolInstance:
     """A symbol instance in a schematic."""
+
     lib_id: str
     uuid: str
     position: tuple[float, float] = (0, 0)
@@ -68,54 +70,64 @@ class SymbolInstance:
 
     @property
     def reference(self) -> str:
-        if 'Reference' in self.properties:
-            return self.properties['Reference'].value
+        if "Reference" in self.properties:
+            return self.properties["Reference"].value
         return ""
 
     @property
     def value(self) -> str:
-        if 'Value' in self.properties:
-            return self.properties['Value'].value
+        if "Value" in self.properties:
+            return self.properties["Value"].value
         return ""
 
     @property
     def footprint(self) -> str:
-        if 'Footprint' in self.properties:
-            return self.properties['Footprint'].value
+        if "Footprint" in self.properties:
+            return self.properties["Footprint"].value
         return ""
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> "SymbolInstance":
         lib_id = ""
-        if lid := sexp.find('lib_id'):
+        if lid := sexp.find("lib_id"):
             lib_id = lid.get_string(0) or ""
         uuid = ""
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         pos = (0.0, 0.0)
         rot = 0.0
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
         mirror = ""
-        if m := sexp.find('mirror'):
+        if m := sexp.find("mirror"):
             mirror = m.get_string(0) or ""
         unit = 1
-        if u := sexp.find('unit'):
+        if u := sexp.find("unit"):
             unit = u.get_int(0) or 1
         properties = {}
-        for prop in sexp.find_all('property'):
+        for prop in sexp.find_all("property"):
             sp = SymbolProperty.from_sexp(prop)
             properties[sp.name] = sp
         pins = []
-        for pin in sexp.find_all('pin'):
+        for pin in sexp.find_all("pin"):
             pins.append(pin.get_string(0) or "")
-        return cls(lib_id=lib_id, uuid=uuid, position=pos, rotation=rot, mirror=mirror, unit=unit, properties=properties, pins=pins)
+        return cls(
+            lib_id=lib_id,
+            uuid=uuid,
+            position=pos,
+            rotation=rot,
+            mirror=mirror,
+            unit=unit,
+            properties=properties,
+            pins=pins,
+        )
 
 
 @dataclass
 class Wire:
     """A wire segment."""
+
     start: tuple[float, float]
     end: tuple[float, float]
     uuid: str = ""
@@ -125,12 +137,12 @@ class Wire:
         start = (0.0, 0.0)
         end = (0.0, 0.0)
         uuid = ""
-        if pts := sexp.find('pts'):
-            xy_nodes = pts.find_all('xy')
+        if pts := sexp.find("pts"):
+            xy_nodes = pts.find_all("xy")
             if len(xy_nodes) >= 2:
                 start = (xy_nodes[0].get_float(0) or 0, xy_nodes[0].get_float(1) or 0)
                 end = (xy_nodes[1].get_float(0) or 0, xy_nodes[1].get_float(1) or 0)
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         return cls(start=start, end=end, uuid=uuid)
 
@@ -144,6 +156,7 @@ class Wire:
 @dataclass
 class Bus:
     """A bus segment."""
+
     start: tuple[float, float]
     end: tuple[float, float]
     uuid: str = ""
@@ -153,12 +166,12 @@ class Bus:
         start = (0.0, 0.0)
         end = (0.0, 0.0)
         uuid = ""
-        if pts := sexp.find('pts'):
-            xy_nodes = pts.find_all('xy')
+        if pts := sexp.find("pts"):
+            xy_nodes = pts.find_all("xy")
             if len(xy_nodes) >= 2:
                 start = (xy_nodes[0].get_float(0) or 0, xy_nodes[0].get_float(1) or 0)
                 end = (xy_nodes[1].get_float(0) or 0, xy_nodes[1].get_float(1) or 0)
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         return cls(start=start, end=end, uuid=uuid)
 
@@ -166,6 +179,7 @@ class Bus:
 @dataclass
 class Junction:
     """A junction point."""
+
     position: tuple[float, float]
     uuid: str = ""
 
@@ -173,9 +187,9 @@ class Junction:
     def from_sexp(cls, sexp: SExp) -> "Junction":
         pos = (0.0, 0.0)
         uuid = ""
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         return cls(position=pos, uuid=uuid)
 
@@ -183,6 +197,7 @@ class Junction:
 @dataclass
 class Label:
     """A local net label."""
+
     text: str
     position: tuple[float, float]
     rotation: float = 0
@@ -194,10 +209,10 @@ class Label:
         pos = (0.0, 0.0)
         rot = 0.0
         uuid = ""
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         return cls(text=text, position=pos, rotation=rot, uuid=uuid)
 
@@ -205,6 +220,7 @@ class Label:
 @dataclass
 class HierarchicalLabel:
     """A hierarchical label."""
+
     text: str
     position: tuple[float, float]
     rotation: float = 0
@@ -218,12 +234,12 @@ class HierarchicalLabel:
         rot = 0.0
         shape = "input"
         uuid = ""
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
-        if s := sexp.find('shape'):
+        if s := sexp.find("shape"):
             shape = s.get_string(0) or "input"
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         return cls(text=text, position=pos, rotation=rot, shape=shape, uuid=uuid)
 
@@ -231,6 +247,7 @@ class HierarchicalLabel:
 @dataclass
 class GlobalLabel:
     """A global label."""
+
     text: str
     position: tuple[float, float]
     rotation: float = 0
@@ -244,12 +261,12 @@ class GlobalLabel:
         rot = 0.0
         shape = "input"
         uuid = ""
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
-        if s := sexp.find('shape'):
+        if s := sexp.find("shape"):
             shape = s.get_string(0) or "input"
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
         return cls(text=text, position=pos, rotation=rot, shape=shape, uuid=uuid)
 
@@ -257,6 +274,7 @@ class GlobalLabel:
 @dataclass
 class PowerSymbol:
     """A power symbol."""
+
     lib_id: str
     position: tuple[float, float]
     rotation: float = 0
@@ -266,21 +284,21 @@ class PowerSymbol:
     @classmethod
     def from_symbol_sexp(cls, sexp: SExp) -> Optional["PowerSymbol"]:
         lib_id = ""
-        if lid := sexp.find('lib_id'):
+        if lid := sexp.find("lib_id"):
             lib_id = lid.get_string(0) or ""
-        if not lib_id.startswith('power:'):
+        if not lib_id.startswith("power:"):
             return None
         pos = (0.0, 0.0)
         rot = 0.0
         uuid = ""
         value = ""
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
-        for prop in sexp.find_all('property'):
-            if prop.get_string(0) == 'Value':
+        for prop in sexp.find_all("property"):
+            if prop.get_string(0) == "Value":
                 value = prop.get_string(1) or ""
                 break
         return cls(lib_id=lib_id, position=pos, rotation=rot, uuid=uuid, value=value)
@@ -289,6 +307,7 @@ class PowerSymbol:
 @dataclass
 class SchematicInfo:
     """Parsed schematic information."""
+
     path: Path
     version: int = 0
     generator: str = ""
@@ -395,7 +414,13 @@ class SchematicInfo:
 
         # Parse hierarchical sheets
         for sheet in sexp.find_all("sheet"):
-            sheet_info = {"uuid": "", "name": "", "filename": "", "position": (0, 0), "size": (0, 0)}
+            sheet_info = {
+                "uuid": "",
+                "name": "",
+                "filename": "",
+                "position": (0, 0),
+                "size": (0, 0),
+            }
 
             if u := sheet.find("uuid"):
                 sheet_info["uuid"] = u.get_string(0) or ""
@@ -444,9 +469,9 @@ class SchematicInfo:
 
 def print_summary(info: SchematicInfo):
     """Print schematic summary."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"SCHEMATIC: {info.path.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if info.title:
         print(f"Title: {info.title}")
@@ -462,7 +487,7 @@ def print_summary(info: SchematicInfo):
         for c in info.comments:
             print(f"  {c}")
 
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print("CONTENTS:")
     print(f"  Symbols:             {len(info.symbols)}")
     print(f"  Power Symbols:       {len(info.power_symbols)}")
@@ -477,7 +502,7 @@ def print_summary(info: SchematicInfo):
 
     # Symbol summary by type
     if info.symbols:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("SYMBOLS BY TYPE:")
         by_prefix = defaultdict(list)
         for sym in info.symbols:
@@ -493,14 +518,14 @@ def print_summary(info: SchematicInfo):
 
     # Hierarchical sheets
     if info.sheets:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("HIERARCHICAL SHEETS:")
         for sheet in info.sheets:
             print(f"  {sheet['name']}: {sheet['filename']}")
-            if sheet.get('pins'):
-                for pin in sheet['pins'][:5]:
+            if sheet.get("pins"):
+                for pin in sheet["pins"][:5]:
                     print(f"    - {pin['name']} ({pin['shape']})")
-                if len(sheet.get('pins', [])) > 5:
+                if len(sheet.get("pins", [])) > 5:
                     print(f"    ... and {len(sheet['pins']) - 5} more pins")
 
 
@@ -515,9 +540,9 @@ def print_symbols(info: SchematicInfo, filter_ref: Optional[str] = None, verbose
         print("No symbols found")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"SYMBOLS ({len(symbols)})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     for sym in sorted(symbols, key=lambda s: s.reference):
         print(f"\n{sym.reference}: {sym.value}")
@@ -551,13 +576,15 @@ def print_wires(info: SchematicInfo, verbose: bool = False):
         print("No wires found")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"WIRES ({len(info.wires)})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if verbose:
         for i, wire in enumerate(info.wires):
-            print(f"\n{i+1}. ({wire.start[0]:.2f}, {wire.start[1]:.2f}) -> ({wire.end[0]:.2f}, {wire.end[1]:.2f})")
+            print(
+                f"\n{i + 1}. ({wire.start[0]:.2f}, {wire.start[1]:.2f}) -> ({wire.end[0]:.2f}, {wire.end[1]:.2f})"
+            )
             print(f"   Length: {wire.length:.2f}")
             print(f"   UUID: {wire.uuid}")
     else:
@@ -583,15 +610,20 @@ def print_wires(info: SchematicInfo, verbose: bool = False):
 
 def print_labels(info: SchematicInfo, verbose: bool = False):
     """Print label list."""
-    total = len(info.labels) + len(info.hierarchical_labels) + len(info.global_labels) + len(info.power_symbols)
+    total = (
+        len(info.labels)
+        + len(info.hierarchical_labels)
+        + len(info.global_labels)
+        + len(info.power_symbols)
+    )
 
     if total == 0:
         print("No labels found")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"LABELS ({total})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if info.labels:
         print(f"\nLocal Labels ({len(info.labels)}):")
@@ -624,9 +656,9 @@ def print_labels(info: SchematicInfo, verbose: bool = False):
 
 def print_hierarchy(info: SchematicInfo):
     """Print hierarchical structure."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"HIERARCHY: {info.path.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print(f"\nThis Sheet: {info.title or info.path.stem}")
 
@@ -638,18 +670,18 @@ def print_hierarchy(info: SchematicInfo):
             print(f"    Position: {sheet['position']}")
             print(f"    Size: {sheet['size']}")
 
-            if sheet.get('pins'):
+            if sheet.get("pins"):
                 print(f"    Pins ({len(sheet['pins'])}):")
                 by_shape = defaultdict(list)
-                for pin in sheet['pins']:
-                    by_shape[pin['shape']].append(pin['name'])
+                for pin in sheet["pins"]:
+                    by_shape[pin["shape"]].append(pin["name"])
 
-                for shape in ['input', 'output', 'bidirectional', 'passive']:
+                for shape in ["input", "output", "bidirectional", "passive"]:
                     if shape in by_shape:
                         pins = by_shape[shape]
                         print(f"      {shape}: {', '.join(pins[:5])}", end="")
                         if len(pins) > 5:
-                            print(f" (+{len(pins)-5} more)", end="")
+                            print(f" (+{len(pins) - 5} more)", end="")
                         print()
 
     if info.hierarchical_labels:
@@ -658,12 +690,12 @@ def print_hierarchy(info: SchematicInfo):
         for lbl in info.hierarchical_labels:
             by_shape[lbl.shape].append(lbl.text)
 
-        for shape in ['input', 'output', 'bidirectional', 'passive']:
+        for shape in ["input", "output", "bidirectional", "passive"]:
             if shape in by_shape:
                 labels = by_shape[shape]
                 print(f"  {shape}: {', '.join(sorted(labels)[:10])}", end="")
                 if len(labels) > 10:
-                    print(f" (+{len(labels)-10} more)", end="")
+                    print(f" (+{len(labels) - 10} more)", end="")
                 print()
 
 
@@ -678,9 +710,9 @@ def print_lib_symbols(info: SchematicInfo, symbol_filter: Optional[str] = None):
         print("No embedded library symbols found")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"EMBEDDED LIBRARY SYMBOLS ({len(lib_syms)})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     for name in sorted(lib_syms.keys()):
         sym = lib_syms[name]
@@ -792,28 +824,24 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("schematic", nargs="?", type=Path,
-                        help="Path to KiCad schematic file (.kicad_sch)")
-    parser.add_argument("--symbol", "-s", type=str, metavar="REF",
-                        help="Filter/show specific symbol by reference")
-    parser.add_argument("--lib", "-l", type=str, metavar="LIB_ID",
-                        help="Filter symbols by library ID")
+    parser.add_argument(
+        "schematic", nargs="?", type=Path, help="Path to KiCad schematic file (.kicad_sch)"
+    )
+    parser.add_argument(
+        "--symbol", "-s", type=str, metavar="REF", help="Filter/show specific symbol by reference"
+    )
+    parser.add_argument(
+        "--lib", "-l", type=str, metavar="LIB_ID", help="Filter symbols by library ID"
+    )
 
     # Output modes
-    parser.add_argument("--symbols", action="store_true",
-                        help="Show symbol list")
-    parser.add_argument("--wires", action="store_true",
-                        help="Show wire list")
-    parser.add_argument("--labels", action="store_true",
-                        help="Show label list")
-    parser.add_argument("--hierarchy", action="store_true",
-                        help="Show hierarchical structure")
-    parser.add_argument("--lib-symbols", action="store_true",
-                        help="Show embedded library symbols")
-    parser.add_argument("--json", action="store_true",
-                        help="Output as JSON")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show detailed information")
+    parser.add_argument("--symbols", action="store_true", help="Show symbol list")
+    parser.add_argument("--wires", action="store_true", help="Show wire list")
+    parser.add_argument("--labels", action="store_true", help="Show label list")
+    parser.add_argument("--hierarchy", action="store_true", help="Show hierarchical structure")
+    parser.add_argument("--lib-symbols", action="store_true", help="Show embedded library symbols")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed information")
 
     args = parser.parse_args()
 

@@ -10,6 +10,7 @@ from .violation import DRCViolation, ViolationType
 
 class CheckResult(Enum):
     """Result of a manufacturer rule check."""
+
     PASS = "pass"
     FAIL = "fail"
     WARNING = "warning"
@@ -19,6 +20,7 @@ class CheckResult(Enum):
 @dataclass
 class ManufacturerCheck:
     """Result of checking a violation against manufacturer rules."""
+
     violation: DRCViolation
     result: CheckResult
     message: str

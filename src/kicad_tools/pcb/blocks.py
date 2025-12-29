@@ -38,6 +38,7 @@ from typing import Optional
 # Import footprint reader for accurate pad positions
 try:
     from kicad_footprint_reader import get_footprint_pads as _get_library_pads
+
     _FOOTPRINT_READER_AVAILABLE = True
 except ImportError:
     _FOOTPRINT_READER_AVAILABLE = False
@@ -48,9 +49,11 @@ except ImportError:
 # Geometry Primitives
 # =============================================================================
 
+
 @dataclass
 class Point:
     """2D point in mm."""
+
     x: float
     y: float
 
@@ -86,6 +89,7 @@ class Point:
 @dataclass
 class Rectangle:
     """Axis-aligned bounding box."""
+
     min_x: float
     min_y: float
     max_x: float
@@ -101,10 +105,7 @@ class Rectangle:
 
     @property
     def center(self) -> Point:
-        return Point(
-            (self.min_x + self.max_x) / 2,
-            (self.min_y + self.max_y) / 2
-        )
+        return Point((self.min_x + self.max_x) / 2, (self.min_y + self.max_y) / 2)
 
     def contains(self, p: Point) -> bool:
         return self.min_x <= p.x <= self.max_x and self.min_y <= p.y <= self.max_y
@@ -112,33 +113,33 @@ class Rectangle:
     def expand(self, margin: float) -> "Rectangle":
         """Return expanded rectangle."""
         return Rectangle(
-            self.min_x - margin,
-            self.min_y - margin,
-            self.max_x + margin,
-            self.max_y + margin
+            self.min_x - margin, self.min_y - margin, self.max_x + margin, self.max_y + margin
         )
 
 
 class Layer(Enum):
     """PCB layers."""
-    F_CU = "F.Cu"        # Front copper
-    B_CU = "B.Cu"        # Back copper
-    F_SILK = "F.SilkS"   # Front silkscreen
-    B_SILK = "B.SilkS"   # Back silkscreen
-    F_MASK = "F.Mask"    # Front solder mask
-    B_MASK = "B.Mask"    # Back solder mask
+
+    F_CU = "F.Cu"  # Front copper
+    B_CU = "B.Cu"  # Back copper
+    F_SILK = "F.SilkS"  # Front silkscreen
+    B_SILK = "B.SilkS"  # Back silkscreen
+    F_MASK = "F.Mask"  # Front solder mask
+    B_MASK = "B.Mask"  # Back solder mask
     F_PASTE = "F.Paste"  # Front solder paste
     B_PASTE = "B.Paste"  # Back solder paste
-    EDGE = "Edge.Cuts"   # Board outline
+    EDGE = "Edge.Cuts"  # Board outline
 
 
 # =============================================================================
 # PCB Elements
 # =============================================================================
 
+
 @dataclass
 class Pad:
     """A pad/connection point."""
+
     name: str
     position: Point
     layer: Layer = Layer.F_CU
@@ -159,11 +160,12 @@ class Port:
     should connect to this block. The actual physical connection
     might be to a component pad inside the block.
     """
+
     name: str
-    position: Point              # Position relative to block origin
+    position: Point  # Position relative to block origin
     layer: Layer = Layer.F_CU
-    direction: str = "inout"     # in, out, inout, power
-    net: Optional[str] = None    # Net name when connected
+    direction: str = "inout"  # in, out, inout, power
+    net: Optional[str] = None  # Net name when connected
 
     # What this port connects to inside the block
     internal_pad: Optional[str] = None  # e.g., "U1.VDD" or "C12.1"
@@ -172,6 +174,7 @@ class Port:
 @dataclass
 class TraceSegment:
     """A segment of copper trace."""
+
     start: Point
     end: Point
     width: float = 0.25  # mm
@@ -182,9 +185,10 @@ class TraceSegment:
 @dataclass
 class Via:
     """A via connecting layers."""
+
     position: Point
-    drill: float = 0.3      # mm
-    size: float = 0.6       # mm (annular ring outer diameter)
+    drill: float = 0.3  # mm
+    size: float = 0.6  # mm (annular ring outer diameter)
     layers: tuple[Layer, Layer] = (Layer.F_CU, Layer.B_CU)
     net: Optional[str] = None
 
@@ -192,17 +196,19 @@ class Via:
 @dataclass
 class ComponentPlacement:
     """Placement of a component within a block."""
-    ref: str                    # Reference designator (U1, C12, etc.)
-    footprint: str              # KiCad footprint name
-    position: Point             # Position relative to block origin
-    rotation: float = 0         # Degrees
-    layer: Layer = Layer.F_CU   # F.Cu = top, B.Cu = bottom
+
+    ref: str  # Reference designator (U1, C12, etc.)
+    footprint: str  # KiCad footprint name
+    position: Point  # Position relative to block origin
+    rotation: float = 0  # Degrees
+    layer: Layer = Layer.F_CU  # F.Cu = top, B.Cu = bottom
 
     # Pad positions (relative to component position, before rotation)
     pads: dict[str, Point] = field(default_factory=dict)
 
-    def pad_position(self, pad_name: str, block_origin: Point = None,
-                     block_rotation: float = 0) -> Point:
+    def pad_position(
+        self, pad_name: str, block_origin: Point = None, block_rotation: float = 0
+    ) -> Point:
         """Get absolute pad position after block placement."""
         if pad_name not in self.pads:
             raise KeyError(f"Pad '{pad_name}' not found on {self.ref}")
@@ -230,6 +236,7 @@ class ComponentPlacement:
 # =============================================================================
 # PCB Block Base Class
 # =============================================================================
+
 
 class PCBBlock:
     """
@@ -263,9 +270,16 @@ class PCBBlock:
         # Computed after components added
         self._bounding_box: Optional[Rectangle] = None
 
-    def add_component(self, ref: str, footprint: str, x: float, y: float,
-                      rotation: float = 0, pads: dict[str, tuple] = None,
-                      layer: Layer = Layer.F_CU) -> ComponentPlacement:
+    def add_component(
+        self,
+        ref: str,
+        footprint: str,
+        x: float,
+        y: float,
+        rotation: float = 0,
+        pads: dict[str, tuple] = None,
+        layer: Layer = Layer.F_CU,
+    ) -> ComponentPlacement:
         """Add a component to the block."""
         pad_points = {}
         if pads:
@@ -277,36 +291,47 @@ class PCBBlock:
             position=Point(x, y),
             rotation=rotation,
             layer=layer,
-            pads=pad_points
+            pads=pad_points,
         )
         self.components[ref] = comp
         self._bounding_box = None  # Invalidate cache
         return comp
 
-    def add_trace(self, start: tuple | Point, end: tuple | Point,
-                  width: float = 0.25, layer: Layer = Layer.F_CU,
-                  net: str = None) -> TraceSegment:
+    def add_trace(
+        self,
+        start: tuple | Point,
+        end: tuple | Point,
+        width: float = 0.25,
+        layer: Layer = Layer.F_CU,
+        net: str = None,
+    ) -> TraceSegment:
         """Add an internal trace segment."""
         if isinstance(start, tuple):
             start = Point(start[0], start[1])
         if isinstance(end, tuple):
             end = Point(end[0], end[1])
 
-        trace = TraceSegment(start=start, end=end, width=width,
-                            layer=layer, net=net)
+        trace = TraceSegment(start=start, end=end, width=width, layer=layer, net=net)
         self.traces.append(trace)
         return trace
 
-    def add_via(self, x: float, y: float, net: str = None,
-                drill: float = 0.3, size: float = 0.6) -> Via:
+    def add_via(
+        self, x: float, y: float, net: str = None, drill: float = 0.3, size: float = 0.6
+    ) -> Via:
         """Add an internal via."""
         via = Via(position=Point(x, y), drill=drill, size=size, net=net)
         self.vias.append(via)
         return via
 
-    def add_port(self, name: str, x: float, y: float,
-                 direction: str = "inout", internal_pad: str = None,
-                 layer: Layer = Layer.F_CU) -> Port:
+    def add_port(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        direction: str = "inout",
+        internal_pad: str = None,
+        layer: Layer = Layer.F_CU,
+    ) -> Port:
         """
         Add an external port to the block.
 
@@ -321,14 +346,19 @@ class PCBBlock:
             position=Point(x, y),
             layer=layer,
             direction=direction,
-            internal_pad=internal_pad
+            internal_pad=internal_pad,
         )
         self.ports[name] = port
         return port
 
-    def route_to_port(self, pad_ref: str, port_name: str,
-                      width: float = 0.25, layer: Layer = Layer.F_CU,
-                      net: str = None):
+    def route_to_port(
+        self,
+        pad_ref: str,
+        port_name: str,
+        width: float = 0.25,
+        layer: Layer = Layer.F_CU,
+        net: str = None,
+    ):
         """
         Add trace from internal pad to external port.
 
@@ -402,8 +432,10 @@ class PCBBlock:
         ys = [c.position.y for c in self.components.values()]
 
         self._bounding_box = Rectangle(
-            min(xs) - 2, min(ys) - 2,  # 2mm margin
-            max(xs) + 2, max(ys) + 2
+            min(xs) - 2,
+            min(ys) - 2,  # 2mm margin
+            max(xs) + 2,
+            max(ys) + 2,
         )
         return self._bounding_box
 
@@ -412,14 +444,16 @@ class PCBBlock:
         result = []
         for ref, comp in self.components.items():
             pos = self.component_position(ref)
-            result.append({
-                "ref": ref,
-                "footprint": comp.footprint,
-                "x": pos.x,
-                "y": pos.y,
-                "rotation": (comp.rotation + self.rotation) % 360,
-                "layer": comp.layer.value
-            })
+            result.append(
+                {
+                    "ref": ref,
+                    "footprint": comp.footprint,
+                    "x": pos.x,
+                    "y": pos.y,
+                    "rotation": (comp.rotation + self.rotation) % 360,
+                    "layer": comp.layer.value,
+                }
+            )
         return result
 
     def get_placed_traces(self) -> list[dict]:
@@ -437,13 +471,15 @@ class PCBBlock:
             start = start + self.origin
             end = end + self.origin
 
-            result.append({
-                "start": start.tuple(),
-                "end": end.tuple(),
-                "width": trace.width,
-                "layer": trace.layer.value,
-                "net": trace.net
-            })
+            result.append(
+                {
+                    "start": start.tuple(),
+                    "end": end.tuple(),
+                    "width": trace.width,
+                    "layer": trace.layer.value,
+                    "net": trace.net,
+                }
+            )
         return result
 
     def __repr__(self):
@@ -537,6 +573,7 @@ def get_footprint_pads(footprint: str) -> dict[str, tuple]:
 # Pre-defined Block Types
 # =============================================================================
 
+
 class MCUBlock(PCBBlock):
     """
     MCU with bypass capacitors.
@@ -550,13 +587,15 @@ class MCUBlock(PCBBlock):
         - Bypass caps placed to left of chip
     """
 
-    def __init__(self,
-                 mcu_ref: str = "U1",
-                 mcu_footprint: str = "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
-                 bypass_caps: list[str] = None,
-                 cap_footprint: str = "Capacitor_SMD:C_0603_1608Metric",
-                 vdd_pin: str = "4",
-                 vss_pin: str = "5"):
+    def __init__(
+        self,
+        mcu_ref: str = "U1",
+        mcu_footprint: str = "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+        bypass_caps: list[str] = None,
+        cap_footprint: str = "Capacitor_SMD:C_0603_1608Metric",
+        vdd_pin: str = "4",
+        vss_pin: str = "5",
+    ):
         super().__init__(name=f"MCU_{mcu_ref}")
 
         if bypass_caps is None:
@@ -567,10 +606,7 @@ class MCUBlock(PCBBlock):
         cap_pads = get_footprint_pads(cap_footprint)
 
         # Place MCU at block center
-        self.mcu = self.add_component(
-            mcu_ref, mcu_footprint, 0, 0,
-            pads=mcu_pads
-        )
+        self.mcu = self.add_component(mcu_ref, mcu_footprint, 0, 0, pads=mcu_pads)
 
         # VDD/VSS pad positions
         vdd_pos = Point(mcu_pads[vdd_pin][0], mcu_pads[vdd_pin][1])
@@ -582,11 +618,14 @@ class MCUBlock(PCBBlock):
         cap_spacing = 2.0
 
         for i, cap_ref in enumerate(bypass_caps):
-            cap_y = (vdd_pos.y + vss_pos.y) / 2 + (i - len(bypass_caps)/2 + 0.5) * cap_spacing
+            cap_y = (vdd_pos.y + vss_pos.y) / 2 + (i - len(bypass_caps) / 2 + 0.5) * cap_spacing
             self.add_component(
-                cap_ref, cap_footprint, cap_x, cap_y,
+                cap_ref,
+                cap_footprint,
+                cap_x,
+                cap_y,
                 rotation=90,  # Rotate for vertical orientation
-                pads=cap_pads
+                pads=cap_pads,
             )
 
         # Internal routing: VDD to cap pin 1, cap pin 2 to VSS
@@ -605,10 +644,12 @@ class MCUBlock(PCBBlock):
 
         # External ports - positioned at block edges
         # Power ports on left side
-        self.add_port("VDD", cap_x - 2, vdd_pos.y, direction="power",
-                     internal_pad=f"{bypass_caps[0]}.1")
-        self.add_port("GND", cap_x - 2, vss_pos.y, direction="power",
-                     internal_pad=f"{bypass_caps[-1]}.2")
+        self.add_port(
+            "VDD", cap_x - 2, vdd_pos.y, direction="power", internal_pad=f"{bypass_caps[0]}.1"
+        )
+        self.add_port(
+            "GND", cap_x - 2, vss_pos.y, direction="power", internal_pad=f"{bypass_caps[-1]}.2"
+        )
 
         # Signal ports on right side (expose MCU pins)
         # This would be customized based on actual pin usage
@@ -619,8 +660,13 @@ class MCUBlock(PCBBlock):
             pin_name = str(pin_num)
             if pin_name in mcu_pads:
                 pin_pos = Point(mcu_pads[pin_name][0], mcu_pads[pin_name][1])
-                self.add_port(f"PIN{pin_num}", right_edge, pin_pos.y,
-                            direction="inout", internal_pad=f"{mcu_ref}.{pin_num}")
+                self.add_port(
+                    f"PIN{pin_num}",
+                    right_edge,
+                    pin_pos.y,
+                    direction="inout",
+                    internal_pad=f"{mcu_ref}.{pin_num}",
+                )
 
 
 class LDOBlock(PCBBlock):
@@ -633,12 +679,14 @@ class LDOBlock(PCBBlock):
               GND
     """
 
-    def __init__(self,
-                 ldo_ref: str = "U1",
-                 ldo_footprint: str = "Package_TO_SOT_SMD:SOT-23-5",
-                 input_cap: str = "C1",
-                 output_caps: list[str] = None,
-                 cap_footprint: str = "Capacitor_SMD:C_0805_2012Metric"):
+    def __init__(
+        self,
+        ldo_ref: str = "U1",
+        ldo_footprint: str = "Package_TO_SOT_SMD:SOT-23-5",
+        input_cap: str = "C1",
+        output_caps: list[str] = None,
+        cap_footprint: str = "Capacitor_SMD:C_0805_2012Metric",
+    ):
         super().__init__(name=f"LDO_{ldo_ref}")
 
         if output_caps is None:
@@ -658,13 +706,11 @@ class LDOBlock(PCBBlock):
         self.ldo = self.add_component(ldo_ref, ldo_footprint, 0, 0, pads=ldo_pads)
 
         # Place input cap to the left
-        self.add_component(input_cap, cap_footprint, -3.5, 0,
-                          rotation=90, pads=cap_pads)
+        self.add_component(input_cap, cap_footprint, -3.5, 0, rotation=90, pads=cap_pads)
 
         # Place output caps to the right
         for i, cap_ref in enumerate(output_caps):
-            self.add_component(cap_ref, cap_footprint, 3.5 + i * 2.5, 0,
-                             rotation=90, pads=cap_pads)
+            self.add_component(cap_ref, cap_footprint, 3.5 + i * 2.5, 0, rotation=90, pads=cap_pads)
 
         # Internal routing
         trace_width = 0.4  # Power traces
@@ -706,19 +752,21 @@ class OscillatorBlock(PCBBlock):
     Crystal oscillator with decoupling capacitor.
     """
 
-    def __init__(self,
-                 osc_ref: str = "Y1",
-                 osc_footprint: str = "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm",
-                 cap_ref: str = "C1",
-                 cap_footprint: str = "Capacitor_SMD:C_0603_1608Metric"):
+    def __init__(
+        self,
+        osc_ref: str = "Y1",
+        osc_footprint: str = "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm",
+        cap_ref: str = "C1",
+        cap_footprint: str = "Capacitor_SMD:C_0603_1608Metric",
+    ):
         super().__init__(name=f"OSC_{osc_ref}")
 
         # Simplified oscillator pads (4-pin)
         osc_pads = {
             "1": (-1.25, -0.95),  # EN
-            "2": (-1.25, 0.95),   # GND
-            "3": (1.25, 0.95),    # OUT
-            "4": (1.25, -0.95),   # VDD
+            "2": (-1.25, 0.95),  # GND
+            "3": (1.25, 0.95),  # OUT
+            "4": (1.25, -0.95),  # VDD
         }
         cap_pads = get_footprint_pads(cap_footprint)
 
@@ -726,8 +774,7 @@ class OscillatorBlock(PCBBlock):
         self.add_component(osc_ref, osc_footprint, 0, 0, pads=osc_pads)
 
         # Place decoupling cap near VDD
-        self.add_component(cap_ref, cap_footprint, 3.0, -1,
-                          rotation=0, pads=cap_pads)
+        self.add_component(cap_ref, cap_footprint, 3.0, -1, rotation=0, pads=cap_pads)
 
         # Internal routing: VDD to cap
         vdd_pos = Point(osc_pads["4"][0], osc_pads["4"][1])
@@ -749,11 +796,13 @@ class LEDBlock(PCBBlock):
     LED with current-limiting resistor.
     """
 
-    def __init__(self,
-                 led_ref: str = "D1",
-                 res_ref: str = "R1",
-                 led_footprint: str = "LED_SMD:LED_0603_1608Metric",
-                 res_footprint: str = "Resistor_SMD:R_0603_1608Metric"):
+    def __init__(
+        self,
+        led_ref: str = "D1",
+        res_ref: str = "R1",
+        led_footprint: str = "LED_SMD:LED_0603_1608Metric",
+        res_footprint: str = "Resistor_SMD:R_0603_1608Metric",
+    ):
         super().__init__(name=f"LED_{led_ref}")
 
         led_pads = {"1": (-0.8, 0), "2": (0.8, 0)}  # 1=cathode, 2=anode
@@ -766,8 +815,7 @@ class LEDBlock(PCBBlock):
         # LED cathode to resistor
         led = self.components[led_ref]
         res = self.components[res_ref]
-        self.add_trace(led.pad_position("1"), res.pad_position("1"),
-                      width=0.25, net="LED_MID")
+        self.add_trace(led.pad_position("1"), res.pad_position("1"), width=0.25, net="LED_MID")
 
         # External ports
         self.add_port("ANODE", -2.5, 0, direction="in", internal_pad=f"{led_ref}.2")
@@ -777,6 +825,7 @@ class LEDBlock(PCBBlock):
 # =============================================================================
 # Block Placement and Export
 # =============================================================================
+
 
 class PCBLayout:
     """
@@ -796,10 +845,16 @@ class PCBLayout:
         self.blocks[name] = block
         return block
 
-    def route(self, from_block: str, from_port: str,
-              to_block: str, to_port: str,
-              width: float = 0.25, layer: Layer = Layer.F_CU,
-              net: str = None):
+    def route(
+        self,
+        from_block: str,
+        from_port: str,
+        to_block: str,
+        to_port: str,
+        width: float = 0.25,
+        layer: Layer = Layer.F_CU,
+        net: str = None,
+    ):
         """
         Route between two block ports.
 
@@ -809,8 +864,7 @@ class PCBLayout:
         start = self.blocks[from_block].port(from_port)
         end = self.blocks[to_block].port(to_port)
 
-        trace = TraceSegment(start=start, end=end, width=width,
-                            layer=layer, net=net)
+        trace = TraceSegment(start=start, end=end, width=width, layer=layer, net=net)
         self.inter_block_traces.append(trace)
         return trace
 
@@ -831,13 +885,15 @@ class PCBLayout:
 
         # Inter-block traces
         for trace in self.inter_block_traces:
-            result.append({
-                "start": trace.start.tuple(),
-                "end": trace.end.tuple(),
-                "width": trace.width,
-                "layer": trace.layer.value,
-                "net": trace.net
-            })
+            result.append(
+                {
+                    "start": trace.start.tuple(),
+                    "end": trace.end.tuple(),
+                    "width": trace.width,
+                    "layer": trace.layer.value,
+                    "net": trace.net,
+                }
+            )
 
         return result
 
@@ -873,6 +929,7 @@ class PCBLayout:
 # KiCad PCB Export
 # =============================================================================
 
+
 class KiCadPCBExporter:
     """
     Export PCBLayout to KiCad PCB format (.kicad_pcb).
@@ -906,6 +963,7 @@ class KiCadPCBExporter:
     def _uuid(self) -> str:
         """Generate a UUID for KiCad elements."""
         import uuid
+
         return str(uuid.uuid4())
 
     def _format_coord(self, val: float) -> str:
@@ -975,8 +1033,16 @@ class KiCadPCBExporter:
 
         return "\n".join(lines)
 
-    def _generate_footprint(self, ref: str, footprint: str, x: float, y: float,
-                           rotation: float, layer: str, value: str = "") -> str:
+    def _generate_footprint(
+        self,
+        ref: str,
+        footprint: str,
+        x: float,
+        y: float,
+        rotation: float,
+        layer: str,
+        value: str = "",
+    ) -> str:
         """Generate a footprint placement."""
         uuid = self._uuid()
         ref_uuid = self._uuid()
@@ -1023,8 +1089,9 @@ class KiCadPCBExporter:
 		)
 	)'''
 
-    def _generate_segment(self, start: tuple, end: tuple, width: float,
-                         layer: str, net: int) -> str:
+    def _generate_segment(
+        self, start: tuple, end: tuple, width: float, layer: str, net: int
+    ) -> str:
         """Generate a trace segment."""
         uuid = self._uuid()
         return f'''	(segment
@@ -1036,8 +1103,9 @@ class KiCadPCBExporter:
 		(uuid "{uuid}")
 	)'''
 
-    def _generate_via(self, x: float, y: float, size: float, drill: float,
-                     layers: tuple, net: int) -> str:
+    def _generate_via(
+        self, x: float, y: float, size: float, drill: float, layers: tuple, net: int
+    ) -> str:
         """Generate a via."""
         uuid = self._uuid()
         layer_str = f'"{layers[0]}" "{layers[1]}"'
@@ -1073,7 +1141,7 @@ class KiCadPCBExporter:
                 y=placement["y"],
                 rotation=placement["rotation"],
                 layer=placement["layer"],
-                value=""  # Could add component values
+                value="",  # Could add component values
             )
             footprint_lines.append(fp)
         sections.append("\n".join(footprint_lines))
@@ -1087,7 +1155,7 @@ class KiCadPCBExporter:
                 end=trace["end"],
                 width=trace["width"],
                 layer=trace["layer"],
-                net=net_num
+                net=net_num,
             )
             trace_lines.append(seg)
         sections.append("\n".join(trace_lines))
@@ -1109,7 +1177,7 @@ class KiCadPCBExporter:
                     size=via.size,
                     drill=via.drill,
                     layers=(via.layers[0].value, via.layers[1].value),
-                    net=net_num
+                    net=net_num,
                 )
                 via_lines.append(v)
 
@@ -1121,7 +1189,7 @@ class KiCadPCBExporter:
                 size=via.size,
                 drill=via.drill,
                 layers=(via.layers[0].value, via.layers[1].value),
-                net=net_num
+                net=net_num,
             )
             via_lines.append(v)
 
@@ -1136,6 +1204,7 @@ class KiCadPCBExporter:
     def write(self, filepath: str):
         """Write PCB to file."""
         from pathlib import Path
+
         content = self.generate()
         Path(filepath).write_text(content)
         print(f"Wrote PCB: {filepath}")
@@ -1148,11 +1217,7 @@ class KiCadPCBExporter:
         """
         result = {}
         for placement in self.layout.export_placements():
-            result[placement["ref"]] = (
-                placement["x"],
-                placement["y"],
-                placement["rotation"]
-            )
+            result[placement["ref"]] = (placement["x"], placement["y"], placement["rotation"])
         return result
 
     def generate_trace_segments(self) -> list[str]:
@@ -1165,7 +1230,7 @@ class KiCadPCBExporter:
                 end=trace["end"],
                 width=trace["width"],
                 layer=trace["layer"],
-                net=net_num
+                net=net_num,
             )
             segments.append(seg)
         return segments
@@ -1200,13 +1265,15 @@ def update_pcb_placements(source_pcb: str, layout: PCBLayout, output_pcb: str):
         # Then finding the (at X Y R) line above it
 
         # Find footprint containing this reference
-        pattern = rf'(\(footprint\s+"[^"]+"\s+.*?\(property\s+"Reference"\s+"{re.escape(ref)}".*?\))'
+        pattern = (
+            rf'(\(footprint\s+"[^"]+"\s+.*?\(property\s+"Reference"\s+"{re.escape(ref)}".*?\))'
+        )
 
         def update_position(match):
             footprint_text = match.group(1)
             # Update the (at ...) line within this footprint
-            at_pattern = r'\(at\s+[\d.-]+\s+[\d.-]+(?:\s+[\d.-]+)?\)'
-            new_at = f'(at {x:.4f} {y:.4f} {rotation})'
+            at_pattern = r"\(at\s+[\d.-]+\s+[\d.-]+(?:\s+[\d.-]+)?\)"
+            new_at = f"(at {x:.4f} {y:.4f} {rotation})"
             updated = re.sub(at_pattern, new_at, footprint_text, count=1)
             return updated
 
@@ -1262,7 +1329,7 @@ if __name__ == "__main__":
 
     print("\nInter-block traces:")
     for i, t in enumerate(layout.inter_block_traces):
-        print(f"  {i+1}: {t.start.tuple()} → {t.end.tuple()} ({t.net})")
+        print(f"  {i + 1}: {t.start.tuple()} → {t.end.tuple()} ({t.net})")
 
     # Export to KiCad PCB
     print("\n" + "=" * 60)

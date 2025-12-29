@@ -51,10 +51,7 @@ class RoutingGrid:
 
         # 3D grid: [layer][y][x]
         self.grid: List[List[List[GridCell]]] = [
-            [
-                [GridCell(x, y, layer) for x in range(self.cols)]
-                for y in range(self.rows)
-            ]
+            [[GridCell(x, y, layer) for x in range(self.cols)] for y in range(self.rows)]
             for layer in range(self.num_layers)
         ]
 
@@ -65,10 +62,7 @@ class RoutingGrid:
 
         # Congestion counts: [layer][cy][cx] = number of blocked cells
         self.congestion: List[List[List[int]]] = [
-            [
-                [0 for _ in range(self.congestion_cols)]
-                for _ in range(self.congestion_rows)
-            ]
+            [[0 for _ in range(self.congestion_cols)] for _ in range(self.congestion_rows)]
             for _ in range(self.num_layers)
         ]
 
@@ -176,9 +170,7 @@ class RoutingGrid:
         grid_margin = self.resolution * 0.71  # sqrt(2)/2
 
         # Clearance model
-        clearance = (
-            grid_margin + self.rules.trace_width / 2 + self.rules.trace_clearance
-        )
+        clearance = grid_margin + self.rules.trace_width / 2 + self.rules.trace_clearance
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
@@ -227,8 +219,7 @@ class RoutingGrid:
                         cell.blocked = True
 
                         is_metal_area = (
-                            metal_gx1 <= gx <= metal_gx2
-                            and metal_gy1 <= gy <= metal_gy2
+                            metal_gx1 <= gx <= metal_gx2 and metal_gy1 <= gy <= metal_gy2
                         )
 
                         if is_metal_area:
@@ -464,9 +455,7 @@ class RoutingGrid:
 
         return cells_used
 
-    def unmark_route_usage(
-        self, route: Route, net_cells: Optional[Dict[int, Set]] = None
-    ) -> None:
+    def unmark_route_usage(self, route: Route, net_cells: Optional[Dict[int, Set]] = None) -> None:
         """Remove a route's usage (rip-up), decrementing usage count."""
         cells_used: Set[Tuple[int, int, int]] = set()
 

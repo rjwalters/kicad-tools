@@ -11,7 +11,7 @@ Modules:
     erc: Electrical Rule Check report parsing
     manufacturers: PCB manufacturer design rules (JLCPCB, OSHPark, etc.)
     operations: Schematic and PCB operations
-    router: PCB autorouter (experimental, requires numpy)
+    router: PCB autorouter with A* pathfinding
 """
 
 __version__ = "0.1.0"

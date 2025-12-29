@@ -28,7 +28,7 @@ warnings.warn(
     "kicad_tools.optim is experimental and not yet fully implemented. "
     "Classes will raise NotImplementedError.",
     category=FutureWarning,
-    stacklevel=2
+    stacklevel=2,
 )
 
 

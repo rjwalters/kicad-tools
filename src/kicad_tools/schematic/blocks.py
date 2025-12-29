@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 @dataclass
 class Port:
     """A connection point on a circuit block."""
+
     name: str
     x: float
     y: float
@@ -157,12 +158,7 @@ class LEDIndicator(CircuitBlock):
             "GND": r_pin2,
         }
 
-    def connect_to_rails(
-        self,
-        vcc_rail_y: float,
-        gnd_rail_y: float,
-        add_junctions: bool = True
-    ):
+    def connect_to_rails(self, vcc_rail_y: float, gnd_rail_y: float, add_junctions: bool = True):
         """
         Connect LED to power rails.
 
@@ -239,7 +235,7 @@ class DecouplingCaps(CircuitBlock):
             cap = sch.add_symbol(cap_symbol, cap_x, y, ref, value)
             self.caps.append(cap)
 
-        self.components = {f"C{i+1}": cap for i, cap in enumerate(self.caps)}
+        self.components = {f"C{i + 1}": cap for i, cap in enumerate(self.caps)}
 
         # Calculate port positions (at first and last cap)
         first_cap = self.caps[0]
@@ -261,10 +257,7 @@ class DecouplingCaps(CircuitBlock):
         self._gnd_y = p2[1]
 
     def connect_to_rails(
-        self,
-        vcc_rail_y: float,
-        gnd_rail_y: float,
-        wire_between_caps: bool = True
+        self, vcc_rail_y: float, gnd_rail_y: float, wire_between_caps: bool = True
     ):
         """
         Connect all caps to power rails.
@@ -338,7 +331,7 @@ class LDOBlock(CircuitBlock):
         # Spacing constants
         cap_spacing = 15
         input_cap_offset = -20  # Left of LDO
-        output_cap_offset = 20   # Right of LDO
+        output_cap_offset = 20  # Right of LDO
 
         # Place LDO
         self.ldo = sch.add_symbol(ldo_symbol, x, y, ref, value)
@@ -362,7 +355,7 @@ class LDOBlock(CircuitBlock):
             "C_IN": self.input_cap,
         }
         for i, cap in enumerate(self.output_caps):
-            self.components[f"C_OUT{i+1}"] = cap
+            self.components[f"C_OUT{i + 1}"] = cap
 
         # Get LDO pin positions
         vin_pos = self.ldo.pin_position("VIN")
@@ -593,6 +586,7 @@ class DebugHeader(CircuitBlock):
 
 # Factory functions for common configurations
 
+
 def create_power_led(
     sch: "Schematic",
     x: float,
@@ -622,7 +616,9 @@ def create_3v3_ldo(
 ) -> LDOBlock:
     """Create a 3.3V LDO block with standard capacitors."""
     return LDOBlock(
-        sch, x, y,
+        sch,
+        x,
+        y,
         ref=ref,
         value="XC6206-3.3V",
         ldo_symbol="Regulator_Linear:AP2204K-1.5",
@@ -642,7 +638,9 @@ def create_mclk_oscillator(
 ) -> OscillatorBlock:
     """Create an audio MCLK oscillator block."""
     return OscillatorBlock(
-        sch, x, y,
+        sch,
+        x,
+        y,
         ref=ref,
         value=frequency,
         decoupling_cap="100nF",

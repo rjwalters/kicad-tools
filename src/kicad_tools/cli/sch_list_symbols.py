@@ -34,17 +34,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="List symbols in a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["table", "json", "csv"],
-                        default="table", help="Output format")
-    parser.add_argument("--filter", dest="pattern",
-                        help="Filter by reference pattern (e.g., 'U*')")
-    parser.add_argument("--lib", dest="lib_id",
-                        help="Filter by library ID")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show additional details")
+    parser.add_argument(
+        "--format", choices=["table", "json", "csv"], default="table", help="Output format"
+    )
+    parser.add_argument("--filter", dest="pattern", help="Filter by reference pattern (e.g., 'U*')")
+    parser.add_argument("--lib", dest="lib_id", help="Filter by library ID")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show additional details")
 
     args = parser.parse_args()
 
@@ -67,7 +65,7 @@ def main():
         symbols = [s for s in symbols if args.lib_id in s.lib_id]
 
     # Sort by reference
-    symbols.sort(key=lambda s: (s.reference[0] if s.reference else '', s.reference))
+    symbols.sort(key=lambda s: (s.reference[0] if s.reference else "", s.reference))
 
     # Output
     if args.format == "json":
@@ -98,20 +96,26 @@ def output_table(symbols, verbose):
         fp_width = max(len(s.footprint) for s in symbols)
         fp_width = max(fp_width, 9)  # "Footprint" header
 
-        print(f"{'Ref':<{ref_width}}  {'Value':<{val_width}}  "
-              f"{'Library ID':<{lib_width}}  {'Footprint':<{fp_width}}  Position")
+        print(
+            f"{'Ref':<{ref_width}}  {'Value':<{val_width}}  "
+            f"{'Library ID':<{lib_width}}  {'Footprint':<{fp_width}}  Position"
+        )
         print("-" * (ref_width + val_width + lib_width + fp_width + 30))
 
         for sym in symbols:
-            print(f"{sym.reference:<{ref_width}}  {sym.value:<{val_width}}  "
-                  f"{sym.lib_id:<{lib_width}}  {sym.footprint:<{fp_width}}  "
-                  f"({sym.position[0]:.1f}, {sym.position[1]:.1f})")
+            print(
+                f"{sym.reference:<{ref_width}}  {sym.value:<{val_width}}  "
+                f"{sym.lib_id:<{lib_width}}  {sym.footprint:<{fp_width}}  "
+                f"({sym.position[0]:.1f}, {sym.position[1]:.1f})"
+            )
     else:
         print(f"{'Ref':<{ref_width}}  {'Value':<{val_width}}  {'Library ID':<{lib_width}}")
         print("-" * (ref_width + val_width + lib_width + 6))
 
         for sym in symbols:
-            print(f"{sym.reference:<{ref_width}}  {sym.value:<{val_width}}  {sym.lib_id:<{lib_width}}")
+            print(
+                f"{sym.reference:<{ref_width}}  {sym.value:<{val_width}}  {sym.lib_id:<{lib_width}}"
+            )
 
     print(f"\nTotal: {len(symbols)} symbols")
 
@@ -127,15 +131,17 @@ def output_json(symbols, verbose):
             "footprint": sym.footprint,
         }
         if verbose:
-            entry.update({
-                "position": list(sym.position),
-                "rotation": sym.rotation,
-                "unit": sym.unit,
-                "uuid": sym.uuid,
-                "in_bom": sym.in_bom,
-                "dnp": sym.dnp,
-                "pins": [{"number": p.number, "uuid": p.uuid} for p in sym.pins],
-            })
+            entry.update(
+                {
+                    "position": list(sym.position),
+                    "rotation": sym.rotation,
+                    "unit": sym.unit,
+                    "uuid": sym.uuid,
+                    "in_bom": sym.in_bom,
+                    "dnp": sym.dnp,
+                    "pins": [{"number": p.number, "uuid": p.uuid} for p in sym.pins],
+                }
+            )
         data.append(entry)
 
     print(json.dumps(data, indent=2))
@@ -146,8 +152,10 @@ def output_csv(symbols, verbose):
     if verbose:
         print("Reference,Value,Library ID,Footprint,X,Y,Rotation,Unit,UUID")
         for sym in symbols:
-            print(f"{sym.reference},{sym.value},{sym.lib_id},{sym.footprint},"
-                  f"{sym.position[0]},{sym.position[1]},{sym.rotation},{sym.unit},{sym.uuid}")
+            print(
+                f"{sym.reference},{sym.value},{sym.lib_id},{sym.footprint},"
+                f"{sym.position[0]},{sym.position[1]},{sym.rotation},{sym.unit},{sym.uuid}"
+            )
     else:
         print("Reference,Value,Library ID,Footprint")
         for sym in symbols:

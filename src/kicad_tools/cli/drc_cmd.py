@@ -58,7 +58,8 @@ def main(argv: List[str] | None = None) -> int:
         help="Exit with error code on warnings",
     )
     parser.add_argument(
-        "--type", "-t",
+        "--type",
+        "-t",
         dest="filter_type",
         help="Filter by violation type (partial match)",
     )
@@ -67,12 +68,14 @@ def main(argv: List[str] | None = None) -> int:
         help="Filter by net name",
     )
     parser.add_argument(
-        "--mfr", "-m",
+        "--mfr",
+        "-m",
         choices=get_manufacturer_ids(),
         help="Target manufacturer for rules check",
     )
     parser.add_argument(
-        "--layers", "-l",
+        "--layers",
+        "-l",
         type=int,
         default=2,
         help="Number of copper layers (default: 2)",
@@ -88,7 +91,8 @@ def main(argv: List[str] | None = None) -> int:
         help="Compare design rules across manufacturers",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Show detailed violation information",
     )
@@ -98,7 +102,8 @@ def main(argv: List[str] | None = None) -> int:
         help="Keep the DRC report file after running",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         help="Save DRC report to this path",
     )
@@ -160,16 +165,13 @@ def main(argv: List[str] | None = None) -> int:
     if args.filter_type:
         filter_lower = args.filter_type.lower()
         violations = [
-            v for v in violations
-            if filter_lower in v.type_str.lower()
-            or filter_lower in v.message.lower()
+            v
+            for v in violations
+            if filter_lower in v.type_str.lower() or filter_lower in v.message.lower()
         ]
 
     if args.net:
-        violations = [
-            v for v in violations
-            if args.net in v.nets
-        ]
+        violations = [v for v in violations if args.net in v.nets]
 
     # Output
     if args.format == "json":
@@ -239,9 +241,9 @@ def output_table(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("DRC VALIDATION SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if report.source_file:
         print(f"File: {Path(report.source_file).name}")
@@ -253,7 +255,7 @@ def output_table(
     print(f"  Warnings:   {warning_count}")
 
     if not violations:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("DRC PASSED - No violations found")
         return
 
@@ -267,9 +269,11 @@ def output_table(
         else:
             by_type[v.type_str]["warnings"] += 1
 
-    print(f"\n{'-'*60}")
+    print(f"\n{'-' * 60}")
     print("BY TYPE:")
-    for vtype, counts in sorted(by_type.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])):
+    for vtype, counts in sorted(
+        by_type.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])
+    ):
         parts = []
         if counts["errors"]:
             parts.append(f"{counts['errors']} error{'s' if counts['errors'] != 1 else ''}")
@@ -282,13 +286,13 @@ def output_table(
     warnings = [v for v in violations if not v.is_error]
 
     if errors:
-        print(f"\n{'-'*60}")
+        print(f"\n{'-' * 60}")
         print("ERRORS (must fix):")
         for v in errors:
             _print_single(v, verbose)
 
     if warnings:
-        print(f"\n{'-'*60}")
+        print(f"\n{'-' * 60}")
         print("WARNINGS (review recommended):")
         display_warnings = warnings if verbose else warnings[:10]
         for v in display_warnings:
@@ -296,7 +300,7 @@ def output_table(
         if len(warnings) > 10 and not verbose:
             print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     if errors:
         print("DRC FAILED - Fix errors before manufacturing")
     else:
@@ -374,9 +378,9 @@ def output_manufacturer_check(
     """Check DRC violations against manufacturer limits."""
     profile = get_profile(mfr)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"MANUFACTURER COMPATIBILITY: {profile.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Layer count: {layers}")
     print(f"Website: {profile.website}")
 
@@ -392,18 +396,20 @@ def output_manufacturer_check(
             incompatible.append(check)
 
     if incompatible:
-        print(f"\n{'-'*60}")
+        print(f"\n{'-' * 60}")
         print(f"INCOMPATIBLE VIOLATIONS ({len(incompatible)}):")
         for check in incompatible:
             print(f"\n  [X] {check.violation.type_str}")
             print(f"      {check.violation.message}")
             if check.actual_value is not None and check.manufacturer_limit is not None:
-                print(f"      Actual: {check.actual_value:.3f}mm, Limit: {check.manufacturer_limit:.3f}mm")
+                print(
+                    f"      Actual: {check.actual_value:.3f}mm, Limit: {check.manufacturer_limit:.3f}mm"
+                )
     else:
-        print(f"\n{'-'*60}")
+        print(f"\n{'-' * 60}")
         print(f"All {compatible_count} checked violations are compatible!")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Compatible: {compatible_count}, Incompatible: {len(incompatible)}")
 
     if profile.supports_assembly():
@@ -421,13 +427,17 @@ def print_manufacturer_rules(mfr: str, layers: int) -> None:
     profile = get_profile(mfr)
     rules = profile.get_design_rules(layers)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()} {layers}-LAYER PCB CAPABILITIES")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nMinimum Values:")
-    print(f"  Trace width:      {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
-    print(f"  Trace spacing:    {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
+    print(
+        f"  Trace width:      {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
+    )
+    print(
+        f"  Trace spacing:    {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
+    )
     print(f"  Via drill:        {rules.min_via_drill_mm} mm")
     print(f"  Via diameter:     {rules.min_via_diameter_mm} mm")
     print(f"  Annular ring:     {rules.min_annular_ring_mm} mm")
@@ -454,16 +464,16 @@ def print_manufacturer_rules(mfr: str, layers: int) -> None:
     else:
         print("\nAssembly: Not available (PCB only)")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def print_comparison(layers: int) -> None:
     """Print comparison of design rules across manufacturers."""
     rules_by_mfr = compare_design_rules(layers=layers)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"MANUFACTURER COMPARISON - {layers}-LAYER PCB")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # Header
     mfrs = list(rules_by_mfr.keys())
@@ -512,7 +522,7 @@ def print_comparison(layers: int) -> None:
         row += f"{'Yes':>12}" if profile.supports_assembly() else f"{'No':>12}"
     print(row)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
 
 
 if __name__ == "__main__":

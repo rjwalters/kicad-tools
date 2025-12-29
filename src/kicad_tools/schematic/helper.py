@@ -83,6 +83,7 @@ from kicad_tools.sexp.builders import fmt as sexp_fmt
 # Symbol registry for caching and better error messages
 try:
     from kicad_tools.schematic.registry import get_registry as _get_symbol_registry
+
     _REGISTRY_AVAILABLE = True
 except ImportError:
     _REGISTRY_AVAILABLE = False
@@ -165,12 +166,15 @@ def _log_warning(msg: str) -> None:
 # Error Handling and Suggestions
 # =============================================================================
 
+
 def _string_similarity(a: str, b: str) -> float:
     """Calculate similarity ratio between two strings (0.0 to 1.0)."""
     return SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-def _find_similar(target: str, candidates: list[str], threshold: float = 0.4, max_results: int = 5) -> list[str]:
+def _find_similar(
+    target: str, candidates: list[str], threshold: float = 0.4, max_results: int = 5
+) -> list[str]:
     """Find similar strings from a list of candidates.
 
     Args:
@@ -213,7 +217,6 @@ PIN_ALIASES = {
     "dvcc": ["dvdd", "vcc", "vdd", "vd"],
     "agnd": ["gnda", "gnd", "vss", "va-"],
     "dgnd": ["gndd", "gnd", "vss", "vd-"],
-
     # Enable/Chip Select pins
     "en": ["enable", "ena", "ce", "chip_enable", "~en", "en/", "oe", "stby"],
     "enable": ["en", "ena", "ce", "oe"],
@@ -221,11 +224,9 @@ PIN_ALIASES = {
     "cs": ["~cs", "cs/", "ncs", "ss", "~ss", "nss", "ce", "chip_select"],
     "ss": ["~ss", "nss", "cs", "~cs", "ncs", "slave_select"],
     "oe": ["~oe", "noe", "output_enable", "en"],
-
     # I2C pins
     "sda": ["data", "sdio", "i2c_sda", "twi_sda", "ser_data"],
     "scl": ["i2c_scl", "twi_scl", "i2c_clk", "ser_clk"],
-
     # SPI pins
     "sck": ["sclk", "clk", "clock", "spi_clk", "ser_clk"],
     "sclk": ["sck", "clk", "clock", "spi_clk"],
@@ -233,7 +234,6 @@ PIN_ALIASES = {
     "miso": ["sdo", "dout", "data_out", "so", "spi_miso", "din"],
     "sdi": ["mosi", "din", "si", "data_in"],
     "sdo": ["miso", "dout", "so", "data_out"],
-
     # UART/Serial pins
     "tx": ["txd", "uart_tx", "ser_tx", "dout", "td"],
     "rx": ["rxd", "uart_rx", "ser_rx", "din", "rd"],
@@ -241,23 +241,19 @@ PIN_ALIASES = {
     "rxd": ["rx", "uart_rx", "din"],
     "rts": ["~rts", "nrts", "uart_rts"],
     "cts": ["~cts", "ncts", "uart_cts"],
-
     # Clock pins
     "clk": ["clock", "sclk", "sck", "bclk", "mclk", "clkin", "xin", "osc_in"],
     "mclk": ["master_clk", "clk", "clock", "xtal"],
     "bclk": ["bit_clk", "sclk", "i2s_bclk"],
     "lrclk": ["wclk", "ws", "lrck", "i2s_lrclk", "frame_sync", "fs"],
     "wclk": ["lrclk", "ws", "lrck", "word_clk"],
-
     # Reset pins
     "rst": ["reset", "~reset", "nreset", "~rst", "rstn", "mrst", "por"],
     "reset": ["rst", "~reset", "nreset", "~rst", "rstn"],
     "nreset": ["~reset", "rstn", "rst", "reset"],
-
     # Interrupt pins
     "int": ["~int", "irq", "~irq", "interrupt", "intr"],
     "irq": ["int", "~int", "interrupt", "~irq"],
-
     # Audio I2S pins
     "dout": ["sdo", "data_out", "i2s_dout", "sdout"],
     "din": ["sdi", "data_in", "i2s_din", "sdin"],
@@ -322,11 +318,7 @@ class PinNotFoundError(ValueError):
     """Raised when a pin cannot be found on a symbol."""
 
     def __init__(
-        self,
-        pin_name: str,
-        symbol_name: str,
-        available_pins: list,
-        suggestions: list[str] = None
+        self, pin_name: str, symbol_name: str, available_pins: list, suggestions: list[str] = None
     ):
         self.pin_name = pin_name
         self.symbol_name = symbol_name
@@ -359,7 +351,7 @@ class SymbolNotFoundError(ValueError):
         symbol_name: str,
         library_file: str,
         available_symbols: list[str] = None,
-        suggestions: list[str] = None
+        suggestions: list[str] = None,
     ):
         self.symbol_name = symbol_name
         self.library_file = library_file
@@ -407,19 +399,21 @@ class LibraryNotFoundError(FileNotFoundError):
 # Grid Constants and Snapping
 # =============================================================================
 
+
 class GridSize(Enum):
     """Standard KiCad grid sizes."""
+
     # Schematic grids (in mm)
-    SCH_COARSE = 2.54      # 100 mil - large component spacing
-    SCH_STANDARD = 1.27    # 50 mil - standard schematic grid
-    SCH_FINE = 0.635       # 25 mil - fine placement
-    SCH_ULTRA_FINE = 0.254 # 10 mil - text/label alignment
+    SCH_COARSE = 2.54  # 100 mil - large component spacing
+    SCH_STANDARD = 1.27  # 50 mil - standard schematic grid
+    SCH_FINE = 0.635  # 25 mil - fine placement
+    SCH_ULTRA_FINE = 0.254  # 10 mil - text/label alignment
 
     # PCB grids (in mm)
-    PCB_COARSE = 1.0       # 1mm - coarse placement
-    PCB_STANDARD = 0.5     # 0.5mm - standard placement
-    PCB_FINE = 0.25        # 0.25mm - fine placement
-    PCB_ULTRA_FINE = 0.1   # 0.1mm - precision placement
+    PCB_COARSE = 1.0  # 1mm - coarse placement
+    PCB_STANDARD = 0.5  # 0.5mm - standard placement
+    PCB_FINE = 0.25  # 0.25mm - fine placement
+    PCB_ULTRA_FINE = 0.1  # 0.1mm - precision placement
 
 
 # Default grid for schematic operations
@@ -469,10 +463,7 @@ def is_on_grid(value: float, grid: float = DEFAULT_GRID, tolerance: float = 0.00
 
 
 def check_grid_alignment(
-    point: tuple[float, float],
-    grid: float = DEFAULT_GRID,
-    context: str = "",
-    warn: bool = True
+    point: tuple[float, float], grid: float = DEFAULT_GRID, context: str = "", warn: bool = True
 ) -> bool:
     """Check if a point is on the grid, optionally warning if not.
 
@@ -494,7 +485,7 @@ def check_grid_alignment(
         warnings.warn(
             f"Off-grid coordinate{ctx}: ({point[0]}, {point[1]}) -> "
             f"nearest grid: ({snapped[0]}, {snapped[1]})",
-            stacklevel=3
+            stacklevel=3,
         )
 
     return x_ok and y_ok
@@ -511,6 +502,7 @@ KICAD_SYMBOL_PATHS = [
 @dataclass
 class Pin:
     """Represents a symbol pin with position and properties."""
+
     name: str
     number: str
     x: float  # Position relative to symbol center
@@ -555,19 +547,14 @@ class Pin:
         number = str(number_node.children[0].value) if number_node else ""
 
         return cls(
-            name=name,
-            number=number,
-            x=x,
-            y=y,
-            angle=angle,
-            length=length,
-            pin_type=pin_type
+            name=name, number=number, x=x, y=y, angle=angle, length=length, pin_type=pin_type
         )
 
 
 @dataclass
 class SymbolDef:
     """Symbol definition extracted from library."""
+
     lib_id: str
     name: str
     raw_sexp: str  # Original S-expression for embedding (legacy, kept for compatibility)
@@ -596,15 +583,18 @@ class SymbolDef:
                 lib_id=cached.lib_id,
                 name=cached.name,
                 raw_sexp=cached.raw_sexp,
-                pins=[Pin(
-                    name=p.name,
-                    number=p.number,
-                    x=p.x,
-                    y=p.y,
-                    angle=p.angle,
-                    length=p.length,
-                    pin_type=p.pin_type
-                ) for p in cached.pins]
+                pins=[
+                    Pin(
+                        name=p.name,
+                        number=p.number,
+                        x=p.x,
+                        y=p.y,
+                        angle=p.angle,
+                        length=p.length,
+                        pin_type=p.pin_type,
+                    )
+                    for p in cached.pins
+                ],
             )
 
         # Parse library using SExp
@@ -660,7 +650,7 @@ class SymbolDef:
                 symbol_name=sym_name,
                 library_file=lib_file,
                 available_symbols=all_symbols,
-                suggestions=suggestions
+                suggestions=suggestions,
             )
 
         # Check if this symbol extends another (symbol inheritance)
@@ -691,7 +681,7 @@ class SymbolDef:
             raw_sexp=raw_sexp,
             pins=pins,
             _sexp_node=sym_node,
-            _parent_node=parent_node
+            _parent_node=parent_node,
         )
 
     @classmethod
@@ -733,12 +723,12 @@ class SymbolDef:
                     # First child of a symbol is its name
                     sym_name = str(child.value)
                     # Only prefix main symbols, not unit symbols (which have _N_N suffix)
-                    if not re.match(r'.+_\d+_\d+$', sym_name):
+                    if not re.match(r".+_\d+_\d+$", sym_name):
                         new_node.append(SExp.atom(f"{lib_name}:{sym_name}"))
                     else:
                         # Unit symbol - prefix the base name part
                         # e.g., "AP2204K-1.5_0_1" → "Lib:AP2204K-1.5_0_1"
-                        match = re.match(r'(.+?)(_\d+_\d+)$', sym_name)
+                        match = re.match(r"(.+?)(_\d+_\d+)$", sym_name)
                         if match:
                             base, suffix = match.groups()
                             new_node.append(SExp.atom(f"{lib_name}:{base}{suffix}"))
@@ -772,9 +762,12 @@ class SymbolDef:
         else:
             # Fall back to parsing raw_sexp string
             from kicad_sexp import parse_string
+
             # Parse the raw_sexp which may contain multiple symbols
             # wrapped each (symbol ...) in parsing
-            parts = re.findall(r'\(symbol\s+"[^"]+(?:_\d+_\d+)?"[^)]*(?:\([^)]*\)[^)]*)*\)', self.raw_sexp)
+            parts = re.findall(
+                r'\(symbol\s+"[^"]+(?:_\d+_\d+)?"[^)]*(?:\([^)]*\)[^)]*)*\)', self.raw_sexp
+            )
             for part in parts:
                 try:
                     parsed = parse_string(part)
@@ -813,12 +806,13 @@ def _fmt_coord(val: float) -> str:
     if rounded == int(rounded):
         return str(int(rounded))
     else:
-        return f"{rounded:.2f}".rstrip('0').rstrip('.')
+        return f"{rounded:.2f}".rstrip("0").rstrip(".")
 
 
 @dataclass
 class SymbolInstance:
     """A placed symbol instance in the schematic."""
+
     symbol_def: SymbolDef
     x: float
     y: float
@@ -884,7 +878,7 @@ class SymbolInstance:
                 pin_name=pin_name_or_number,
                 symbol_name=f"{self.reference} ({self.symbol_def.lib_id})",
                 available_pins=self.symbol_def.pins,
-                suggestions=suggestions
+                suggestions=suggestions,
             )
 
         # Apply rotation transformation
@@ -913,7 +907,8 @@ class SymbolInstance:
         _y = sexp_fmt(self.y)  # noqa: F841
 
         # Build main symbol node
-        sym = SExp.list("symbol",
+        sym = SExp.list(
+            "symbol",
             SExp.list("lib_id", self.symbol_def.lib_id),
             at(self.x, self.y, self.rotation),
             SExp.list("unit", self.unit),
@@ -925,22 +920,17 @@ class SymbolInstance:
         )
 
         # Add properties
-        sym.append(symbol_property_node("Reference", self.reference,
-                                        self.x, self.y - 5.08))
-        sym.append(symbol_property_node("Value", self.value,
-                                        self.x, self.y - 2.54))
-        sym.append(symbol_property_node("Footprint", self.footprint,
-                                        self.x, self.y, hide=True))
-        sym.append(symbol_property_node("Datasheet", "~",
-                                        self.x, self.y, hide=True))
+        sym.append(symbol_property_node("Reference", self.reference, self.x, self.y - 5.08))
+        sym.append(symbol_property_node("Value", self.value, self.x, self.y - 2.54))
+        sym.append(symbol_property_node("Footprint", self.footprint, self.x, self.y, hide=True))
+        sym.append(symbol_property_node("Datasheet", "~", self.x, self.y, hide=True))
 
         # Add pin UUIDs
         for pin in self.symbol_def.pins:
             sym.append(pin_uuid_node(pin.number, str(uuid.uuid4())))
 
         # Add instances
-        sym.append(symbol_instances_node(project_name, sheet_path,
-                                         self.reference, self.unit))
+        sym.append(symbol_instances_node(project_name, sheet_path, self.reference, self.unit))
 
         return sym
 
@@ -948,8 +938,7 @@ class SymbolInstance:
         """Generate S-expression for this symbol instance."""
         # Generate pin UUID mappings
         pin_uuids = "\n".join(
-            f'\t\t(pin "{p.number}" (uuid "{uuid.uuid4()}"))'
-            for p in self.symbol_def.pins
+            f'\t\t(pin "{p.number}" (uuid "{uuid.uuid4()}"))' for p in self.symbol_def.pins
         )
 
         # Use _fmt_coord to avoid floating-point precision issues
@@ -1017,7 +1006,7 @@ class SymbolInstance:
         cls,
         node: SExp,
         symbol_defs: dict[str, "SymbolDef"] = None,
-        lib_symbols: dict[str, SExp] = None
+        lib_symbols: dict[str, SExp] = None,
     ) -> "SymbolInstance":
         """Parse a SymbolInstance from an S-expression node.
 
@@ -1092,7 +1081,7 @@ class SymbolInstance:
                 name=lib_id.split(":")[1] if ":" in lib_id else lib_id,
                 raw_sexp=lib_sym_node.to_string(),
                 pins=pins,
-                _sexp_node=lib_sym_node
+                _sexp_node=lib_sym_node,
             )
 
         # Finally try to look up from library
@@ -1106,7 +1095,7 @@ class SymbolInstance:
                     lib_id=lib_id,
                     name=lib_id.split(":")[1] if ":" in lib_id else lib_id,
                     raw_sexp="",
-                    pins=[]
+                    pins=[],
                 )
 
         return cls(
@@ -1118,13 +1107,14 @@ class SymbolInstance:
             value=value,
             unit=unit,
             uuid_str=uuid_str,
-            footprint=footprint
+            footprint=footprint,
         )
 
 
 @dataclass
 class Wire:
     """A wire segment connecting two points."""
+
     x1: float
     y1: float
     x2: float
@@ -1135,12 +1125,7 @@ class Wire:
     def between(cls, p1: tuple[float, float], p2: tuple[float, float]) -> "Wire":
         """Create a wire between two points."""
         # Round coordinates for consistent matching
-        return cls(
-            x1=round(p1[0], 2),
-            y1=round(p1[1], 2),
-            x2=round(p2[0], 2),
-            y2=round(p2[1], 2)
-        )
+        return cls(x1=round(p1[0], 2), y1=round(p1[1], 2), x2=round(p2[0], 2), y2=round(p2[1], 2))
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression tree for this wire."""
@@ -1173,13 +1158,14 @@ class Wire:
             y1=round(float(p1_atoms[1]), 2),
             x2=round(float(p2_atoms[0]), 2),
             y2=round(float(p2_atoms[1]), 2),
-            uuid_str=str(uuid_str)
+            uuid_str=str(uuid_str),
         )
 
 
 @dataclass
 class Junction:
     """A junction point where wires connect."""
+
     x: float
     y: float
     uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -1210,16 +1196,13 @@ class Junction:
         uuid_node = node.get("uuid")
         uuid_str = uuid_node.get_first_atom() if uuid_node else str(uuid.uuid4())
 
-        return cls(
-            x=round(float(atoms[0]), 2),
-            y=round(float(atoms[1]), 2),
-            uuid_str=str(uuid_str)
-        )
+        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=str(uuid_str))
 
 
 @dataclass
 class Label:
     """A net label."""
+
     text: str
     x: float
     y: float
@@ -1255,18 +1238,13 @@ class Label:
         uuid_node = node.get("uuid")
         uuid_str = uuid_node.get_first_atom() if uuid_node else str(uuid.uuid4())
 
-        return cls(
-            text=str(text),
-            x=x,
-            y=y,
-            rotation=rotation,
-            uuid_str=str(uuid_str)
-        )
+        return cls(text=str(text), x=x, y=y, rotation=rotation, uuid_str=str(uuid_str))
 
 
 @dataclass
 class HierarchicalLabel:
     """A hierarchical sheet label."""
+
     text: str
     x: float
     y: float
@@ -1276,8 +1254,7 @@ class HierarchicalLabel:
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression tree for this hierarchical label."""
-        return hier_label_node(self.text, self.x, self.y, self.shape,
-                               self.rotation, self.uuid_str)
+        return hier_label_node(self.text, self.x, self.y, self.shape, self.rotation, self.uuid_str)
 
     def to_sexp(self) -> str:
         """Generate S-expression string (delegates to to_sexp_node)."""
@@ -1309,18 +1286,14 @@ class HierarchicalLabel:
         uuid_str = uuid_node.get_first_atom() if uuid_node else str(uuid.uuid4())
 
         return cls(
-            text=str(text),
-            x=x,
-            y=y,
-            shape=str(shape),
-            rotation=rotation,
-            uuid_str=str(uuid_str)
+            text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=str(uuid_str)
         )
 
 
 @dataclass
 class PowerSymbol:
     """A power symbol (GND, VCC, etc.)."""
+
     lib_id: str  # e.g., "power:GND", "power:+3.3V"
     x: float
     y: float
@@ -1335,7 +1308,8 @@ class PowerSymbol:
         value = self.lib_id.split(":")[1]
 
         # Build symbol node with all standard fields
-        sym = SExp.list("symbol",
+        sym = SExp.list(
+            "symbol",
             SExp.list("lib_id", self.lib_id),
             at(self.x, self.y, self.rotation),
             SExp.list("unit", 1),
@@ -1347,14 +1321,12 @@ class PowerSymbol:
         )
 
         # Add properties - Reference (hidden), Value (visible), Footprint, Datasheet
-        sym.append(symbol_property_node("Reference", self.reference,
-                                        self.x, self.y + 2.54, hide=True))
-        sym.append(symbol_property_node("Value", value,
-                                        self.x, self.y + 5.08, hide=False))
-        sym.append(symbol_property_node("Footprint", "",
-                                        self.x, self.y, hide=True))
-        sym.append(symbol_property_node("Datasheet", "",
-                                        self.x, self.y, hide=True))
+        sym.append(
+            symbol_property_node("Reference", self.reference, self.x, self.y + 2.54, hide=True)
+        )
+        sym.append(symbol_property_node("Value", value, self.x, self.y + 5.08, hide=False))
+        sym.append(symbol_property_node("Footprint", "", self.x, self.y, hide=True))
+        sym.append(symbol_property_node("Datasheet", "", self.x, self.y, hide=True))
 
         # Power symbols always have pin "1"
         sym.append(pin_uuid_node("1", str(uuid.uuid4())))
@@ -1408,12 +1380,7 @@ class PowerSymbol:
                 break
 
         return cls(
-            lib_id=lib_id,
-            x=x,
-            y=y,
-            rotation=rotation,
-            reference=reference,
-            uuid_str=uuid_str
+            lib_id=lib_id, x=x, y=y, rotation=rotation, reference=reference, uuid_str=uuid_str
         )
 
     @staticmethod
@@ -1442,10 +1409,11 @@ class PowerSymbol:
 
 class SnapMode(Enum):
     """Grid snapping behavior modes."""
-    OFF = "off"           # No snapping, no warnings
-    WARN = "warn"         # Don't snap but warn on off-grid coordinates
-    AUTO = "auto"         # Automatically snap to grid (default)
-    STRICT = "strict"     # Snap and warn if original was off-grid
+
+    OFF = "off"  # No snapping, no warnings
+    WARN = "warn"  # Don't snap but warn on off-grid coordinates
+    AUTO = "auto"  # Automatically snap to grid (default)
+    STRICT = "strict"  # Snap and warn if original was off-grid
 
 
 class Schematic:
@@ -1465,7 +1433,7 @@ class Schematic:
         parent_uuid: str = None,
         page: str = "1",
         grid: float = DEFAULT_GRID,
-        snap_mode: SnapMode = SnapMode.AUTO
+        snap_mode: SnapMode = SnapMode.AUTO,
     ):
         self.title = title
         self.date = date
@@ -1591,7 +1559,7 @@ class Schematic:
             comment2=comment2,
             paper=paper,
             sheet_uuid=sheet_uuid,
-            snap_mode=SnapMode.OFF  # Preserve original coordinates
+            snap_mode=SnapMode.OFF,  # Preserve original coordinates
         )
 
         # Store embedded lib_symbols for round-trip
@@ -1617,9 +1585,7 @@ class Schematic:
                     sch.power_symbols.append(pwr)
                 else:
                     sym = SymbolInstance.from_sexp(
-                        child,
-                        symbol_defs=sch._symbol_defs,
-                        lib_symbols=embedded_lib_symbols
+                        child, symbol_defs=sch._symbol_defs, lib_symbols=embedded_lib_symbols
                     )
                     sch.symbols.append(sym)
                     # Cache the symbol def
@@ -1668,9 +1634,11 @@ class Schematic:
                     pass
         sch._pwr_counter = max_pwr + 1
 
-        _log_info(f"Loaded schematic: {len(sch.symbols)} symbols, "
-                  f"{len(sch.power_symbols)} power symbols, "
-                  f"{len(sch.wires)} wires")
+        _log_info(
+            f"Loaded schematic: {len(sch.symbols)} symbols, "
+            f"{len(sch.power_symbols)} power symbols, "
+            f"{len(sch.wires)} wires"
+        )
 
         return sch
 
@@ -1699,8 +1667,7 @@ class Schematic:
             if not on_grid:
                 snapped = snap_to_grid(value, self.grid)
                 warnings.warn(
-                    f"Off-grid coordinate ({context}): {value} -> nearest: {snapped}",
-                    stacklevel=4
+                    f"Off-grid coordinate ({context}): {value} -> nearest: {snapped}", stacklevel=4
                 )
             return round(value, 2)
 
@@ -1709,7 +1676,7 @@ class Schematic:
                 snapped = snap_to_grid(value, self.grid)
                 warnings.warn(
                     f"Auto-snapping off-grid coordinate ({context}): {value} -> {snapped}",
-                    stacklevel=4
+                    stacklevel=4,
                 )
             return snap_to_grid(value, self.grid)
 
@@ -1728,7 +1695,7 @@ class Schematic:
         """
         return (
             self._snap_coord(point[0], f"{context} x"),
-            self._snap_coord(point[1], f"{context} y")
+            self._snap_coord(point[1], f"{context} y"),
         )
 
     def add_symbol(
@@ -1740,7 +1707,7 @@ class Schematic:
         value: str = None,
         rotation: float = 0,
         footprint: str = "",
-        snap: bool = True
+        snap: bool = True,
     ) -> SymbolInstance:
         """Add a symbol to the schematic.
 
@@ -1774,7 +1741,7 @@ class Schematic:
             rotation=rotation,
             reference=ref,
             value=value or sym_def.name,
-            footprint=footprint
+            footprint=footprint,
         )
 
         self.symbols.append(instance)
@@ -1783,12 +1750,7 @@ class Schematic:
         return instance
 
     def add_power(
-        self,
-        lib_id: str,
-        x: float,
-        y: float,
-        rotation: float = 0,
-        snap: bool = True
+        self, lib_id: str, x: float, y: float, rotation: float = 0, snap: bool = True
     ) -> PowerSymbol:
         """Add a power symbol (GND, VCC, etc.).
 
@@ -1819,7 +1781,7 @@ class Schematic:
             y=y,
             rotation=rotation,
             reference=ref,
-            _symbol_def=self._symbol_defs[lib_id]
+            _symbol_def=self._symbol_defs[lib_id],
         )
         self.power_symbols.append(pwr)
         _log_info(f"Added power symbol {lib_id.split(':')[1]} at ({x}, {y})")
@@ -1833,12 +1795,7 @@ class Schematic:
         """
         return self.add_power("power:PWR_FLAG", x, y, rotation=0)
 
-    def add_wire(
-        self,
-        p1: tuple[float, float],
-        p2: tuple[float, float],
-        snap: bool = True
-    ) -> Wire:
+    def add_wire(self, p1: tuple[float, float], p2: tuple[float, float], snap: bool = True) -> Wire:
         """Add a wire between two points.
 
         Args:
@@ -1892,12 +1849,7 @@ class Schematic:
         return junc
 
     def add_label(
-        self,
-        text: str,
-        x: float,
-        y: float,
-        rotation: float = 0,
-        snap: bool = True
+        self, text: str, x: float, y: float, rotation: float = 0, snap: bool = True
     ) -> Label:
         """Add a net label.
 
@@ -1921,7 +1873,7 @@ class Schematic:
         y: float,
         shape: str = "input",
         rotation: float = 0,
-        snap: bool = True
+        snap: bool = True,
     ) -> HierarchicalLabel:
         """Add a hierarchical label.
 
@@ -1961,7 +1913,7 @@ class Schematic:
         symbol: SymbolInstance,
         pin_name: str,
         target: tuple[float, float],
-        route: str = "auto"
+        route: str = "auto",
     ) -> list[Wire]:
         """Wire a symbol pin to a target point using orthogonal routing.
 
@@ -1978,12 +1930,7 @@ class Schematic:
         return self._route_orthogonal(pin_pos, target, route)
 
     def wire_pins(
-        self,
-        sym1: SymbolInstance,
-        pin1: str,
-        sym2: SymbolInstance,
-        pin2: str,
-        route: str = "auto"
+        self, sym1: SymbolInstance, pin1: str, sym2: SymbolInstance, pin2: str, route: str = "auto"
     ) -> list[Wire]:
         """Wire two symbol pins together using orthogonal routing.
 
@@ -2007,7 +1954,7 @@ class Schematic:
         pin_name: str,
         rail_y: float,
         extend_to_x: float = None,
-        add_junction: bool = True
+        add_junction: bool = True,
     ) -> list[Wire]:
         """Connect a pin vertically to a horizontal rail.
 
@@ -2038,12 +1985,7 @@ class Schematic:
         return wires
 
     def add_rail(
-        self,
-        y: float,
-        x_start: float,
-        x_end: float,
-        net_label: str = None,
-        snap: bool = True
+        self, y: float, x_start: float, x_end: float, net_label: str = None, snap: bool = True
     ) -> Wire:
         """Add a horizontal power/ground rail.
 
@@ -2068,7 +2010,7 @@ class Schematic:
         power_lib_id: str,
         symbol: SymbolInstance,
         pin_name: str,
-        power_offset: tuple[float, float] = (0, -10)
+        power_offset: tuple[float, float] = (0, -10),
     ) -> PowerSymbol:
         """Add a power symbol and wire it to a pin.
 
@@ -2095,7 +2037,7 @@ class Schematic:
         cap: SymbolInstance,
         power_rail_y: float,
         gnd_rail_y: float,
-        add_junctions: bool = True
+        add_junctions: bool = True,
     ) -> list[Wire]:
         """Wire a decoupling capacitor between power and ground rails.
 
@@ -2196,58 +2138,42 @@ class Schematic:
         # Place capacitors side by side (100nF left, 10uF right)
         cap_100nf = self.add_symbol(
             "Device:C_Small",
-            x=x - 2*grid, y=y,
+            x=x - 2 * grid,
+            y=y,
             ref=ref_100nf,
             value="100nF",
-            footprint=footprint_100nf
+            footprint=footprint_100nf,
         )
         cap_10uf = self.add_symbol(
             "Device:C_Small",
-            x=x + 2*grid, y=y,
+            x=x + 2 * grid,
+            y=y,
             ref=ref_10uf,
             value="10uF",
-            footprint=footprint_10uf
+            footprint=footprint_10uf,
         )
 
         # Add power symbol above caps
-        power = self.add_power(power_symbol, x=x, y=y - 3*grid)
+        power = self.add_power(power_symbol, x=x, y=y - 3 * grid)
 
         # Wire from caps to power symbol (top side)
         # Vertical wires from each cap up to bus level
-        wires.append(self.add_wire(
-            (x - 2*grid, y - grid),
-            (x - 2*grid, y - 2*grid)
-        ))
-        wires.append(self.add_wire(
-            (x + 2*grid, y - grid),
-            (x + 2*grid, y - 2*grid)
-        ))
+        wires.append(self.add_wire((x - 2 * grid, y - grid), (x - 2 * grid, y - 2 * grid)))
+        wires.append(self.add_wire((x + 2 * grid, y - grid), (x + 2 * grid, y - 2 * grid)))
         # Horizontal bus connecting caps at power level
-        wires.append(self.add_wire(
-            (x - 2*grid, y - 2*grid),
-            (x + 2*grid, y - 2*grid)
-        ))
-        self.add_junction(x, y - 2*grid)
+        wires.append(self.add_wire((x - 2 * grid, y - 2 * grid), (x + 2 * grid, y - 2 * grid)))
+        self.add_junction(x, y - 2 * grid)
 
         # Wire from caps to IC pin (bottom side)
         # Vertical wires from each cap down to bus level
-        wires.append(self.add_wire(
-            (x - 2*grid, y + grid),
-            (x - 2*grid, y + 2*grid)
-        ))
-        wires.append(self.add_wire(
-            (x + 2*grid, y + grid),
-            (x + 2*grid, y + 2*grid)
-        ))
+        wires.append(self.add_wire((x - 2 * grid, y + grid), (x - 2 * grid, y + 2 * grid)))
+        wires.append(self.add_wire((x + 2 * grid, y + grid), (x + 2 * grid, y + 2 * grid)))
         # Horizontal bus connecting caps
-        wires.append(self.add_wire(
-            (x - 2*grid, y + 2*grid),
-            (x + 2*grid, y + 2*grid)
-        ))
-        self.add_junction(x, y + 2*grid)
+        wires.append(self.add_wire((x - 2 * grid, y + 2 * grid), (x + 2 * grid, y + 2 * grid)))
+        self.add_junction(x, y + 2 * grid)
 
         # Wire from center of bottom bus to IC pin
-        wires.append(self.add_wire((x, y + 2*grid), ic_pin))
+        wires.append(self.add_wire((x, y + 2 * grid), ic_pin))
 
         _log_info(f"Added decoupling pair {ref_100nf}/{ref_10uf} at ({x}, {y}) -> IC pin")
 
@@ -2307,7 +2233,7 @@ class Schematic:
 
         # Power symbol position
         pwr_x = first_pin_x + x_offset
-        pwr_y = center_y + 3*grid if "GND" in power_symbol else center_y - 3*grid
+        pwr_y = center_y + 3 * grid if "GND" in power_symbol else center_y - 3 * grid
 
         # Add power symbol
         pwr = self.add_power(power_symbol, x=pwr_x, y=pwr_y)
@@ -2339,7 +2265,7 @@ class Schematic:
         input_rail_y: float,
         output_rail_y: float,
         gnd_rail_y: float,
-        tie_en_to_vin: bool = True
+        tie_en_to_vin: bool = True,
     ) -> list[Wire]:
         """Wire an LDO regulator (AP2204K-1.5 or similar) to power rails.
 
@@ -2382,10 +2308,7 @@ class Schematic:
         return wires
 
     def _route_orthogonal(
-        self,
-        start: tuple[float, float],
-        end: tuple[float, float],
-        route: str = "auto"
+        self, start: tuple[float, float], end: tuple[float, float], route: str = "auto"
     ) -> list[Wire]:
         """Route between two points using orthogonal (Manhattan) routing.
 
@@ -2417,10 +2340,7 @@ class Schematic:
         else:  # vertical_first
             mid = (x1, y2)
 
-        return [
-            self.add_wire(start, mid),
-            self.add_wire(mid, end)
-        ]
+        return [self.add_wire(start, mid), self.add_wire(mid, end)]
 
     def connect_hier_label_to_pin(
         self,
@@ -2428,7 +2348,7 @@ class Schematic:
         symbol: SymbolInstance,
         pin_name: str,
         label_offset: float = 15,
-        shape: str = None
+        shape: str = None,
     ) -> HierarchicalLabel:
         """Add a hierarchical label connected to a symbol pin.
 
@@ -2469,7 +2389,7 @@ class Schematic:
         self,
         symbols_and_pins: list[tuple[SymbolInstance, str]],
         bus_y: float = None,
-        bus_x: float = None
+        bus_x: float = None,
     ) -> list[Wire]:
         """Wire multiple pins to a common bus line.
 
@@ -2531,12 +2451,7 @@ class Schematic:
             pos = symbol.pin_position(pin.name)
             print(f"  {pin.name} ({pin.number}): ({pos[0]:.2f}, {pos[1]:.2f})")
 
-    def wire_ferrite_bead(
-        self,
-        fb: SymbolInstance,
-        rail1_y: float,
-        rail2_y: float
-    ) -> list[Wire]:
+    def wire_ferrite_bead(self, fb: SymbolInstance, rail1_y: float, rail2_y: float) -> list[Wire]:
         """Wire a ferrite bead between two ground rails.
 
         Args:
@@ -2566,7 +2481,7 @@ class Schematic:
         power_rail_y: float,
         gnd_rail_y: float,
         output_label: str = None,
-        tie_en_to_vdd: bool = True
+        tie_en_to_vdd: bool = True,
     ) -> list[Wire]:
         """Wire an oscillator (like ASE-xxxMHz) to power rails.
 
@@ -2629,7 +2544,7 @@ class Schematic:
         endpoint: tuple[float, float] = None,
         near: tuple[float, float] = None,
         tolerance: float = None,
-        connected_to_label: str = None
+        connected_to_label: str = None,
     ) -> list[Wire]:
         """Find wires matching specified criteria.
 
@@ -2685,8 +2600,9 @@ class Schematic:
                     results.append(wire)
             elif near:
                 # Check if either endpoint is within tolerance
-                if self._point_near(wire_p1, near, tolerance) or \
-                   self._point_near(wire_p2, near, tolerance):
+                if self._point_near(wire_p1, near, tolerance) or self._point_near(
+                    wire_p2, near, tolerance
+                ):
                     results.append(wire)
             else:
                 # No filter - return all wires
@@ -2718,6 +2634,7 @@ class Schematic:
             List of matching Label objects
         """
         import fnmatch
+
         if pattern is None:
             return list(self.labels)
         return [lbl for lbl in self.labels if fnmatch.fnmatch(lbl.text, pattern)]
@@ -2746,6 +2663,7 @@ class Schematic:
             List of matching HierarchicalLabel objects
         """
         import fnmatch
+
         if pattern is None:
             return list(self.hier_labels)
         return [hl for hl in self.hier_labels if fnmatch.fnmatch(hl.text, pattern)]
@@ -2774,24 +2692,19 @@ class Schematic:
             List of matching SymbolInstance objects
         """
         import fnmatch
+
         if pattern is None:
             return list(self.symbols)
         return [s for s in self.symbols if fnmatch.fnmatch(s.reference, pattern)]
 
     def _points_equal(
-        self,
-        p1: tuple[float, float],
-        p2: tuple[float, float],
-        tolerance: float = 0.01
+        self, p1: tuple[float, float], p2: tuple[float, float], tolerance: float = 0.01
     ) -> bool:
         """Check if two points are equal within tolerance."""
         return abs(p1[0] - p2[0]) < tolerance and abs(p1[1] - p2[1]) < tolerance
 
     def _point_near(
-        self,
-        p1: tuple[float, float],
-        p2: tuple[float, float],
-        tolerance: float
+        self, p1: tuple[float, float], p2: tuple[float, float], tolerance: float
     ) -> bool:
         """Check if two points are within tolerance distance."""
         dx = p1[0] - p2[0]
@@ -2818,11 +2731,7 @@ class Schematic:
         except ValueError:
             return False
 
-    def remove_wires_at(
-        self,
-        point: tuple[float, float],
-        tolerance: float = None
-    ) -> int:
+    def remove_wires_at(self, point: tuple[float, float], tolerance: float = None) -> int:
         """Remove all wires with an endpoint at or near a point.
 
         Args:
@@ -2876,11 +2785,7 @@ class Schematic:
             return True
         return False
 
-    def remove_net(
-        self,
-        name: str,
-        tolerance: float = None
-    ) -> dict:
+    def remove_net(self, name: str, tolerance: float = None) -> dict:
         """Remove a net: its label and all directly connected wires.
 
         This is a convenience method that removes a label/hier_label and any
@@ -2903,11 +2808,7 @@ class Schematic:
         if tolerance is None:
             tolerance = self.grid
 
-        result = {
-            "label_removed": False,
-            "hier_label_removed": False,
-            "wires_removed": 0
-        }
+        result = {"label_removed": False, "hier_label_removed": False, "wires_removed": 0}
 
         # Find and remove regular label
         label = self.find_label(name)
@@ -2928,9 +2829,11 @@ class Schematic:
             result["wires_removed"] += self.remove_wires_at(hl_pos, tolerance)
 
         if result["label_removed"] or result["hier_label_removed"]:
-            _log_info(f"Removed net '{name}': label={result['label_removed']}, "
-                      f"hier_label={result['hier_label_removed']}, "
-                      f"wires={result['wires_removed']}")
+            _log_info(
+                f"Removed net '{name}': label={result['label_removed']}, "
+                f"hier_label={result['hier_label_removed']}, "
+                f"wires={result['wires_removed']}"
+            )
 
         return result
 
@@ -3007,7 +2910,8 @@ class Schematic:
     def to_sexp_node(self) -> SExp:
         """Build complete schematic as SExp tree."""
         # Build root with header
-        root = SExp.list("kicad_sch",
+        root = SExp.list(
+            "kicad_sch",
             SExp.list("version", 20250114),
             SExp.list("generator", "eeschema"),
             SExp.list("generator_version", "9.0"),
@@ -3016,14 +2920,16 @@ class Schematic:
         )
 
         # Title block
-        root.append(title_block(
-            title=self.title,
-            date=self.date,
-            revision=self.revision,
-            company=self.company,
-            comment1=self.comment1,
-            comment2=self.comment2
-        ))
+        root.append(
+            title_block(
+                title=self.title,
+                date=self.date,
+                revision=self.revision,
+                company=self.company,
+                comment1=self.comment1,
+                comment2=self.comment2,
+            )
+        )
 
         # Library symbols (parsed from string until Phase 5)
         root.append(self._build_lib_symbols_node())
@@ -3070,7 +2976,9 @@ class Schematic:
         path = Path(path)
         content = self.to_sexp()
         path.write_text(content)
-        _log_info(f"Wrote schematic to {path} ({len(self.symbols)} symbols, {len(self.wires)} wires)")
+        _log_info(
+            f"Wrote schematic to {path} ({len(self.symbols)} symbols, {len(self.wires)} wires)"
+        )
 
     # =========================================================================
     # Validation and Debugging (Agent-Focused)
@@ -3111,13 +3019,15 @@ class Schematic:
         refs = {}
         for sym in self.symbols:
             if sym.reference in refs:
-                issues.append({
-                    "severity": "error",
-                    "type": "duplicate_reference",
-                    "message": f"Duplicate reference '{sym.reference}' at ({sym.x}, {sym.y})",
-                    "location": (sym.x, sym.y),
-                    "fix_applied": False
-                })
+                issues.append(
+                    {
+                        "severity": "error",
+                        "type": "duplicate_reference",
+                        "message": f"Duplicate reference '{sym.reference}' at ({sym.x}, {sym.y})",
+                        "location": (sym.x, sym.y),
+                        "fix_applied": False,
+                    }
+                )
             refs[sym.reference] = sym
 
         # Check for off-grid symbols
@@ -3128,7 +3038,7 @@ class Schematic:
                     "type": "off_grid_symbol",
                     "message": f"Symbol {sym.reference} at ({sym.x}, {sym.y}) is off-grid",
                     "location": (sym.x, sym.y),
-                    "fix_applied": False
+                    "fix_applied": False,
                 }
                 if fix_auto:
                     sym.x = snap_to_grid(sym.x, self.grid)
@@ -3141,13 +3051,15 @@ class Schematic:
         for wire in self.wires:
             for coord, name in [((wire.x1, wire.y1), "start"), ((wire.x2, wire.y2), "end")]:
                 if not is_on_grid(coord[0], self.grid) or not is_on_grid(coord[1], self.grid):
-                    issues.append({
-                        "severity": "warning",
-                        "type": "off_grid_wire",
-                        "message": f"Wire {name} at ({coord[0]}, {coord[1]}) is off-grid",
-                        "location": coord,
-                        "fix_applied": False
-                    })
+                    issues.append(
+                        {
+                            "severity": "warning",
+                            "type": "off_grid_wire",
+                            "message": f"Wire {name} at ({coord[0]}, {coord[1]}) is off-grid",
+                            "location": coord,
+                            "fix_applied": False,
+                        }
+                    )
 
         # Check wire connectivity (floating endpoints)
         connectivity_issues = self._check_wire_connectivity()
@@ -3236,23 +3148,27 @@ class Schematic:
                 if self._point_on_segment(endpoint, seg_start, seg_end):
                     on_wire = True
                     # This is a T-junction without a junction dot - warn
-                    issues.append({
-                        "severity": "warning",
-                        "type": "missing_junction",
-                        "message": f"Wire endpoint at ({endpoint[0]}, {endpoint[1]}) forms T-junction without junction dot",
-                        "location": endpoint,
-                        "fix_applied": False
-                    })
+                    issues.append(
+                        {
+                            "severity": "warning",
+                            "type": "missing_junction",
+                            "message": f"Wire endpoint at ({endpoint[0]}, {endpoint[1]}) forms T-junction without junction dot",
+                            "location": endpoint,
+                            "fix_applied": False,
+                        }
+                    )
                     break
 
             if not on_wire:
-                issues.append({
-                    "severity": "error",
-                    "type": "floating_wire",
-                    "message": f"Wire endpoint at ({endpoint[0]}, {endpoint[1]}) is not connected to anything",
-                    "location": endpoint,
-                    "fix_applied": False
-                })
+                issues.append(
+                    {
+                        "severity": "error",
+                        "type": "floating_wire",
+                        "message": f"Wire endpoint at ({endpoint[0]}, {endpoint[1]}) is not connected to anything",
+                        "location": endpoint,
+                        "fix_applied": False,
+                    }
+                )
 
         return issues
 
@@ -3288,13 +3204,15 @@ class Schematic:
                     pos_rounded = (round(pos[0], 2), round(pos[1], 2))
 
                     if pos_rounded not in connected_points:
-                        issues.append({
-                            "severity": "warning",
-                            "type": "unconnected_power_pin",
-                            "message": f"Power pin {pin.name or pin.number} on {sym.reference} at ({pos[0]}, {pos[1]}) may be unconnected",
-                            "location": pos_rounded,
-                            "fix_applied": False
-                        })
+                        issues.append(
+                            {
+                                "severity": "warning",
+                                "type": "unconnected_power_pin",
+                                "message": f"Power pin {pin.name or pin.number} on {sym.reference} at ({pos[0]}, {pos[1]}) may be unconnected",
+                                "location": pos_rounded,
+                                "fix_applied": False,
+                            }
+                        )
 
         return issues
 
@@ -3345,12 +3263,14 @@ class Schematic:
             List of matching SymbolInstance objects
         """
         import fnmatch
+
         return [s for s in self.symbols if fnmatch.fnmatch(s.symbol_def.lib_id, lib_pattern)]
 
 
 # =============================================================================
 # Discovery Functions (Agent-Focused)
 # =============================================================================
+
 
 def list_libraries(lib_paths: list[Path] = None) -> list[str]:
     """List all available KiCad symbol libraries.
@@ -3529,7 +3449,9 @@ def describe_symbol(symbol: SymbolInstance) -> str:
             lines.append(f"  [{group_name}]")
             for pin in pins:
                 pos = symbol.pin_position(pin.name if pin.name else pin.number)
-                lines.append(f"    {pin.name or pin.number} (pin {pin.number}): at ({pos[0]:.2f}, {pos[1]:.2f})")
+                lines.append(
+                    f"    {pin.name or pin.number} (pin {pin.number}): at ({pos[0]:.2f}, {pos[1]:.2f})"
+                )
 
     return "\n".join(lines)
 
@@ -3543,6 +3465,8 @@ if __name__ == "__main__":
         print(f"Loaded: {sym.lib_id}")
         print(f"Pins ({len(sym.pins)}):")
         for pin in sym.pins:
-            print(f"  {pin.number:>2}: {pin.name:<20} at ({pin.x:>6.2f}, {pin.y:>6.2f}) angle={pin.angle}")
+            print(
+                f"  {pin.number:>2}: {pin.name:<20} at ({pin.x:>6.2f}, {pin.y:>6.2f}) angle={pin.angle}"
+            )
     except Exception as e:
         print(f"Error: {e}")

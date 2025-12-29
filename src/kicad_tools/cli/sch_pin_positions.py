@@ -33,8 +33,9 @@ def main():
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument("reference", help="Symbol reference (e.g., U1)")
     parser.add_argument("--lib", required=True, help="Path to symbol library file")
-    parser.add_argument("--format", choices=["table", "json"],
-                        default="table", help="Output format")
+    parser.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
 
     args = parser.parse_args()
 
@@ -70,8 +71,8 @@ def main():
     # Find the library symbol
     # Extract symbol name from lib_id (e.g., "chorus-revA:TPA3116D2" -> "TPA3116D2")
     lib_id = symbol.lib_id
-    if ':' in lib_id:
-        sym_name = lib_id.split(':', 1)[1]
+    if ":" in lib_id:
+        sym_name = lib_id.split(":", 1)[1]
     else:
         sym_name = lib_id
 
@@ -111,7 +112,14 @@ def output_table(symbol, lib_sym, pin_positions):
     print(f"\n{'Pin':<5}  {'Name':<15}  {'Type':<12}  {'Schematic Position':<25}")
     print("-" * 70)
 
-    for pin in sorted(lib_sym.pins, key=lambda p: (not p.number.isdigit(), int(p.number) if p.number.isdigit() else 0, p.number)):
+    for pin in sorted(
+        lib_sym.pins,
+        key=lambda p: (
+            not p.number.isdigit(),
+            int(p.number) if p.number.isdigit() else 0,
+            p.number,
+        ),
+    ):
         if pin.number in pin_positions:
             pos = pin_positions[pin.number]
             pos_str = f"({pos[0]:.2f}, {pos[1]:.2f})"
@@ -137,10 +145,12 @@ def output_json(symbol, lib_sym, pin_positions):
                 "name": pin.name,
                 "type": pin.type,
                 "library_position": list(pin.position),
-                "schematic_position": list(pin_positions[pin.number]) if pin.number in pin_positions else None,
+                "schematic_position": list(pin_positions[pin.number])
+                if pin.number in pin_positions
+                else None,
             }
             for pin in lib_sym.pins
-        ]
+        ],
     }
     print(json.dumps(data, indent=2))
 

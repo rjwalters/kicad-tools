@@ -29,6 +29,7 @@ from kicad_tools.core.sexp import SExp, parse_sexp
 @dataclass
 class ComponentPin:
     """A pin on a component."""
+
     number: str
     name: str
     pin_type: str = ""
@@ -37,6 +38,7 @@ class ComponentPin:
 @dataclass
 class Component:
     """A component in the schematic."""
+
     reference: str
     value: str
     footprint: str
@@ -95,6 +97,7 @@ class Component:
 @dataclass
 class NetNode:
     """A connection point in a net."""
+
     reference: str
     pin: str
     pin_function: str = ""
@@ -128,6 +131,7 @@ class NetNode:
 @dataclass
 class Net:
     """A net (electrical connection) in the schematic."""
+
     code: int
     name: str
     nodes: list[NetNode] = field(default_factory=list)
@@ -159,6 +163,7 @@ class Net:
 @dataclass
 class SheetInfo:
     """Information about a schematic sheet."""
+
     number: int
     name: str
     path: str
@@ -169,6 +174,7 @@ class SheetInfo:
 @dataclass
 class Netlist:
     """Parsed netlist data."""
+
     source_file: str = ""
     tool: str = ""
     date: str = ""
@@ -214,13 +220,15 @@ class Netlist:
                     if s := tb.find("source"):
                         source = s.get_string(0) or ""
 
-                netlist.sheets.append(SheetInfo(
-                    number=sheet_num,
-                    name=sheet_name,
-                    path=sheet_path,
-                    title=title,
-                    source=source,
-                ))
+                netlist.sheets.append(
+                    SheetInfo(
+                        number=sheet_num,
+                        name=sheet_name,
+                        path=sheet_path,
+                        title=title,
+                        source=source,
+                    )
+                )
 
         # Parse components
         if components := sexp.find("components"):
@@ -313,9 +321,14 @@ def export_netlist(
         Tuple of (success, error_message)
     """
     cmd = [
-        str(kicad_cli), "sch", "export", "netlist",
-        "--format", format,
-        "--output", str(output_path),
+        str(kicad_cli),
+        "sch",
+        "export",
+        "netlist",
+        "--format",
+        format,
+        "--output",
+        str(output_path),
         str(sch_path),
     ]
 
@@ -342,9 +355,9 @@ def load_netlist(path: Path) -> Netlist:
 
 def print_summary(netlist: Netlist):
     """Print netlist summary."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("NETLIST SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if netlist.source_file:
         print(f"Source: {Path(netlist.source_file).name}")
@@ -373,7 +386,9 @@ def print_summary(netlist: Netlist):
     print(f"\nNets: {len(netlist.nets)}")
     if netlist.nets:
         # Find key nets
-        power_nets = [n for n in netlist.nets if n.name.startswith("+") or n.name in ("GND", "PGND", "AGND")]
+        power_nets = [
+            n for n in netlist.nets if n.name.startswith("+") or n.name in ("GND", "PGND", "AGND")
+        ]
         signal_nets = [n for n in netlist.nets if n not in power_nets]
 
         if power_nets:
@@ -391,7 +406,7 @@ def print_summary(netlist: Netlist):
     if not netlist.components and not netlist.nets:
         print("\n  (No components or nets - schematic may be incomplete)")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def print_components(netlist: Netlist, filter_ref: Optional[str] = None):
@@ -405,9 +420,9 @@ def print_components(netlist: Netlist, filter_ref: Optional[str] = None):
         print("No components found")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"COMPONENTS ({len(components)})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     for comp in sorted(components, key=lambda c: c.reference):
         print(f"\n{comp.reference}: {comp.value}")
@@ -440,9 +455,9 @@ def print_nets(netlist: Netlist, filter_name: Optional[str] = None):
         print("No nets found")
         return
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"NETS ({len(nets)})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     for net in sorted(nets, key=lambda n: n.name):
         print(f"\n{net.name} (code {net.code})")
@@ -508,26 +523,39 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("schematic", nargs="?", type=Path,
-                        help="Path to KiCad schematic file (.kicad_sch)")
-    parser.add_argument("--format", "-f", choices=["summary", "json", "components", "nets"],
-                        default="summary", help="Output format (default: summary)")
-    parser.add_argument("--component", "-c", type=str, metavar="REF",
-                        help="Filter/show specific component by reference")
-    parser.add_argument("--net", "-n", type=str, metavar="NAME",
-                        help="Filter/show specific net by name")
-    parser.add_argument("--output", "-o", type=Path,
-                        help="Save netlist to file (instead of temp)")
-    parser.add_argument("--keep-netlist", action="store_true",
-                        help="Keep the exported netlist file")
+    parser.add_argument(
+        "schematic", nargs="?", type=Path, help="Path to KiCad schematic file (.kicad_sch)"
+    )
+    parser.add_argument(
+        "--format",
+        "-f",
+        choices=["summary", "json", "components", "nets"],
+        default="summary",
+        help="Output format (default: summary)",
+    )
+    parser.add_argument(
+        "--component",
+        "-c",
+        type=str,
+        metavar="REF",
+        help="Filter/show specific component by reference",
+    )
+    parser.add_argument(
+        "--net", "-n", type=str, metavar="NAME", help="Filter/show specific net by name"
+    )
+    parser.add_argument("--output", "-o", type=Path, help="Save netlist to file (instead of temp)")
+    parser.add_argument(
+        "--keep-netlist", action="store_true", help="Keep the exported netlist file"
+    )
 
     # Shortcut flags
-    parser.add_argument("--components", action="store_true",
-                        help="Show component list (same as --format components)")
-    parser.add_argument("--nets", action="store_true",
-                        help="Show net list (same as --format nets)")
-    parser.add_argument("--json", action="store_true",
-                        help="Output JSON (same as --format json)")
+    parser.add_argument(
+        "--components",
+        action="store_true",
+        help="Show component list (same as --format components)",
+    )
+    parser.add_argument("--nets", action="store_true", help="Show net list (same as --format nets)")
+    parser.add_argument("--json", action="store_true", help="Output JSON (same as --format json)")
 
     args = parser.parse_args()
 
@@ -563,7 +591,9 @@ def main():
         return 1
 
     # Export netlist
-    output_path = args.output or (args.schematic.parent / f"{args.schematic.stem}-netlist.kicad_net")
+    output_path = args.output or (
+        args.schematic.parent / f"{args.schematic.stem}-netlist.kicad_net"
+    )
 
     print(f"Exporting netlist from: {args.schematic.name}")
     success, error = export_netlist(args.schematic, output_path, kicad_cli)

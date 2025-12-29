@@ -37,6 +37,7 @@ POINT_TOLERANCE = 0.5  # mm - slightly larger for pin matching
 @dataclass
 class UnconnectedPin:
     """An unconnected pin."""
+
     reference: str
     pin_number: str
     symbol_value: str
@@ -47,6 +48,7 @@ class UnconnectedPin:
 @dataclass
 class ConnectionIssue:
     """A potential connection issue."""
+
     type: str  # "floating_wire", "stacked_symbols", "missing_junction"
     description: str
     position: Tuple[float, float]
@@ -134,45 +136,64 @@ def analyze_schematic(
 
         # Check symbol position (simplified - assumes pins are at symbol center)
         # A more complete implementation would parse the symbol library for exact pin positions
-        if not point_has_connection(sym.position, wire_endpoints, junction_positions, label_positions):
+        if not point_has_connection(
+            sym.position, wire_endpoints, junction_positions, label_positions
+        ):
             # Symbol center not connected - check if this is expected
             # For multi-pin symbols, we'd need library info to know exact pin positions
             for pin in sym.pins:
-                unconnected.append(UnconnectedPin(
-                    reference=sym.reference,
-                    pin_number=pin.number,
-                    symbol_value=sym.value,
-                    lib_id=sym.lib_id,
-                    position=sym.position,
-                ))
+                unconnected.append(
+                    UnconnectedPin(
+                        reference=sym.reference,
+                        pin_number=pin.number,
+                        symbol_value=sym.value,
+                        lib_id=sym.lib_id,
+                        position=sym.position,
+                    )
+                )
 
     # Check for stacked symbols (potential issues)
     for pos, refs in symbol_positions.items():
         if len(refs) > 1:
-            issues.append(ConnectionIssue(
-                type="stacked_symbols",
-                description=f"Multiple symbols at same position: {', '.join(refs)}",
-                position=pos,
-            ))
+            issues.append(
+                ConnectionIssue(
+                    type="stacked_symbols",
+                    description=f"Multiple symbols at same position: {', '.join(refs)}",
+                    position=pos,
+                )
+            )
 
     # Check for floating wire ends
     for wire in schematic.wires:
         for point in [wire.start, wire.end]:
             key = (round(point[0], 1), round(point[1], 1))
             # Count connections at this point
-            connection_count = sum([
-                len([w for w in schematic.wires if
-                     (round(w.start[0], 1), round(w.start[1], 1)) == key or
-                     (round(w.end[0], 1), round(w.end[1], 1)) == key]),
-            ])
+            connection_count = sum(
+                [
+                    len(
+                        [
+                            w
+                            for w in schematic.wires
+                            if (round(w.start[0], 1), round(w.start[1], 1)) == key
+                            or (round(w.end[0], 1), round(w.end[1], 1)) == key
+                        ]
+                    ),
+                ]
+            )
             # If only one wire touches this point and no junction/label, it might be floating
-            if connection_count == 1 and key not in junction_positions and key not in label_positions:
+            if (
+                connection_count == 1
+                and key not in junction_positions
+                and key not in label_positions
+            ):
                 # Check if it connects to a symbol (would need library info for exact check)
-                issues.append(ConnectionIssue(
-                    type="possible_floating_wire",
-                    description="Wire endpoint may be floating",
-                    position=point,
-                ))
+                issues.append(
+                    ConnectionIssue(
+                        type="possible_floating_wire",
+                        description="Wire endpoint may be floating",
+                        position=point,
+                    )
+                )
 
     return unconnected, issues
 
@@ -184,14 +205,12 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["table", "json"],
-                        default="table", help="Output format")
-    parser.add_argument("--filter", dest="pattern",
-                        help="Filter by symbol reference pattern")
-    parser.add_argument("--include-power", action="store_true",
-                        help="Include power symbols")
-    parser.add_argument("--include-dnp", action="store_true",
-                        help="Include DNP symbols")
+    parser.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
+    parser.add_argument("--filter", dest="pattern", help="Filter by symbol reference pattern")
+    parser.add_argument("--include-power", action="store_true", help="Include power symbols")
+    parser.add_argument("--include-dnp", action="store_true", help="Include DNP symbols")
 
     args = parser.parse_args()
 
@@ -282,7 +301,7 @@ def output_json(unconnected: List[UnconnectedPin], issues: List[ConnectionIssue]
             "unconnected_pin_count": len(unconnected),
             "issue_count": len(issues),
             "symbols_with_issues": len(set(p.reference for p in unconnected)),
-        }
+        },
     }
     print(json.dumps(data, indent=2))
 

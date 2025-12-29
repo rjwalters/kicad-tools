@@ -19,6 +19,7 @@ class Wire:
 
     Wires carry electrical signals between pins, labels, and junctions.
     """
+
     start: Tuple[float, float]
     end: Tuple[float, float]
     uuid: str = ""
@@ -34,19 +35,19 @@ class Wire:
         stroke_width = 0.0
         stroke_type = "default"
 
-        if pts := sexp.find('pts'):
-            xy_nodes = pts.find_all('xy')
+        if pts := sexp.find("pts"):
+            xy_nodes = pts.find_all("xy")
             if len(xy_nodes) >= 2:
                 start = (xy_nodes[0].get_float(0) or 0, xy_nodes[0].get_float(1) or 0)
                 end = (xy_nodes[1].get_float(0) or 0, xy_nodes[1].get_float(1) or 0)
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
-        if stroke := sexp.find('stroke'):
-            if w := stroke.find('width'):
+        if stroke := sexp.find("stroke"):
+            if w := stroke.find("width"):
                 stroke_width = w.get_float(0) or 0
-            if t := stroke.find('type'):
+            if t := stroke.find("type"):
                 stroke_type = t.get_string(0) or "default"
 
         return cls(
@@ -97,6 +98,7 @@ class Junction:
 
     Junctions explicitly mark connection points between wires.
     """
+
     position: Tuple[float, float]
     uuid: str = ""
     diameter: float = 0
@@ -108,13 +110,13 @@ class Junction:
         uuid = ""
         diameter = 0.0
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
-        if d := sexp.find('diameter'):
+        if d := sexp.find("diameter"):
             diameter = d.get_float(0) or 0
 
         return cls(position=pos, uuid=uuid, diameter=diameter)
@@ -128,6 +130,7 @@ class Bus:
     """
     A bus segment (multiple signals grouped together).
     """
+
     start: Tuple[float, float]
     end: Tuple[float, float]
     uuid: str = ""
@@ -139,13 +142,13 @@ class Bus:
         end = (0.0, 0.0)
         uuid = ""
 
-        if pts := sexp.find('pts'):
-            xy_nodes = pts.find_all('xy')
+        if pts := sexp.find("pts"):
+            xy_nodes = pts.find_all("xy")
             if len(xy_nodes) >= 2:
                 start = (xy_nodes[0].get_float(0) or 0, xy_nodes[0].get_float(1) or 0)
                 end = (xy_nodes[1].get_float(0) or 0, xy_nodes[1].get_float(1) or 0)
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         return cls(start=start, end=end, uuid=uuid)

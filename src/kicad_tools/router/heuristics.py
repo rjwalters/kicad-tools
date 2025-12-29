@@ -221,9 +221,7 @@ class CongestionAwareHeuristic(Heuristic):
         congestion_cost = 0.0
         if dx + dy > 0 and context.get_congestion_cost is not None:
             # Sample at current position
-            congestion_cost += (
-                context.get_congestion_cost(x, y, layer) * self.congestion_weight
-            )
+            congestion_cost += context.get_congestion_cost(x, y, layer) * self.congestion_weight
             # Sample at midpoint
             mid_x = (x + context.goal_x) // 2
             mid_y = (y + context.goal_y) // 2
@@ -292,9 +290,7 @@ class WeightedCongestionHeuristic(Heuristic):
                 sample_x = int(x + t * (context.goal_x - x))
                 sample_y = int(y + t * (context.goal_y - y))
                 sample_cost = context.get_congestion_cost(sample_x, sample_y, layer)
-                congestion_cost += (
-                    sample_cost * self.congestion_multiplier / self.num_samples
-                )
+                congestion_cost += sample_cost * self.congestion_multiplier / self.num_samples
 
         return (base_cost + congestion_cost) * context.cost_multiplier
 

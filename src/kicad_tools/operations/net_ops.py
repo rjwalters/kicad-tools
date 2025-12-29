@@ -16,7 +16,9 @@ from ..schema.wire import Wire
 POINT_TOLERANCE = 0.1
 
 
-def points_equal(p1: Tuple[float, float], p2: Tuple[float, float], tol: float = POINT_TOLERANCE) -> bool:
+def points_equal(
+    p1: Tuple[float, float], p2: Tuple[float, float], tol: float = POINT_TOLERANCE
+) -> bool:
     """Check if two points are equal within tolerance."""
     return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
 
@@ -29,6 +31,7 @@ def point_on_wire(point: Tuple[float, float], wire: Wire, tol: float = POINT_TOL
 @dataclass
 class NetConnection:
     """A connection point on a net."""
+
     point: Tuple[float, float]
     type: str  # "pin", "wire_end", "junction", "label"
     reference: str = ""  # Symbol reference or label text
@@ -39,6 +42,7 @@ class NetConnection:
 @dataclass
 class Net:
     """A traced net with all its connections."""
+
     name: str  # Net name from label, or auto-generated
     connections: List[NetConnection] = field(default_factory=list)
     wires: List[Wire] = field(default_factory=list)
@@ -153,21 +157,25 @@ class NetTracer:
             if label:
                 net.name = label
                 net.has_label = True
-                net.connections.append(NetConnection(
-                    point=point,
-                    type="label",
-                    reference=label,
-                    uuid="",
-                ))
+                net.connections.append(
+                    NetConnection(
+                        point=point,
+                        type="label",
+                        reference=label,
+                        uuid="",
+                    )
+                )
 
             # Check for junction at this point
             for junc in self.sch.junctions:
                 if points_equal(junc.position, point):
-                    net.connections.append(NetConnection(
-                        point=point,
-                        type="junction",
-                        uuid=junc.uuid,
-                    ))
+                    net.connections.append(
+                        NetConnection(
+                            point=point,
+                            type="junction",
+                            uuid=junc.uuid,
+                        )
+                    )
                     break
 
             # Find wires at this point
@@ -205,17 +213,18 @@ class NetTracer:
         # Also trace from labels that might not be connected to wires yet
         for lbl in self.sch.labels:
             already_traced = any(
-                any(points_equal(lbl.position, c.point) for c in n.connections)
-                for n in nets
+                any(points_equal(lbl.position, c.point) for c in n.connections) for n in nets
             )
             if not already_traced:
                 net = Net(name=lbl.text, has_label=True)
-                net.connections.append(NetConnection(
-                    point=lbl.position,
-                    type="label",
-                    reference=lbl.text,
-                    uuid=lbl.uuid,
-                ))
+                net.connections.append(
+                    NetConnection(
+                        point=lbl.position,
+                        type="label",
+                        reference=lbl.text,
+                        uuid=lbl.uuid,
+                    )
+                )
                 nets.append(net)
 
         return nets

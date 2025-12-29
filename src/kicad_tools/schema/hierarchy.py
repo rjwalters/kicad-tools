@@ -20,6 +20,7 @@ class SheetPin:
 
     Sheet pins connect to hierarchical labels in the child sheet.
     """
+
     name: str
     direction: str  # "input", "output", "bidirectional", "passive"
     position: Tuple[float, float]
@@ -36,11 +37,11 @@ class SheetPin:
         rot = 0.0
         uuid = ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         return cls(
@@ -59,6 +60,7 @@ class SheetInstance:
 
     Represents a sub-schematic that is instantiated in the parent.
     """
+
     name: str  # Display name (from Sheetname property)
     filename: str  # Filename (from Sheetfile property)
     uuid: str
@@ -85,17 +87,17 @@ class SheetInstance:
         name = ""
         filename = ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
 
-        if sz := sexp.find('size'):
+        if sz := sexp.find("size"):
             size = (sz.get_float(0) or 50.8, sz.get_float(1) or 25.4)
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         # Parse properties
-        for prop in sexp.find_all('property'):
+        for prop in sexp.find_all("property"):
             prop_name = prop.get_string(0)
             prop_value = prop.get_string(1) or ""
             if prop_name == "Sheetname":
@@ -105,7 +107,7 @@ class SheetInstance:
 
         # Parse pins
         pins = []
-        for pin_sexp in sexp.find_all('pin'):
+        for pin_sexp in sexp.find_all("pin"):
             pins.append(SheetPin.from_sexp(pin_sexp))
 
         return cls(
@@ -128,6 +130,7 @@ class HierarchyNode:
 
     Represents a schematic and its children.
     """
+
     name: str
     path: str  # Full path to schematic file
     uuid: str
@@ -172,7 +175,7 @@ class HierarchyNode:
 
     def find_by_path(self, path: str) -> Optional[HierarchyNode]:
         """Find a node by hierarchical path (e.g., '/Power/Regulator')."""
-        parts = [p for p in path.split('/') if p]
+        parts = [p for p in path.split("/") if p]
         current = self
         for part in parts:
             found = None
@@ -265,17 +268,17 @@ class HierarchyBuilder:
 
         # Get UUID
         uuid = ""
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         # Parse sheets
         sheets = []
-        for sheet_sexp in sexp.find_all('sheet'):
+        for sheet_sexp in sexp.find_all("sheet"):
             sheets.append(SheetInstance.from_sexp(sheet_sexp))
 
         # Parse hierarchical labels
         h_labels = []
-        for label_sexp in sexp.find_all('hierarchical_label'):
+        for label_sexp in sexp.find_all("hierarchical_label"):
             label_text = label_sexp.get_string(0)
             if label_text:
                 h_labels.append(label_text)
@@ -345,13 +348,13 @@ def print_hierarchy_tree(node: HierarchyNode, indent: str = "") -> str:
     # Print children
     child_indent = indent + "  "
     for i, child in enumerate(node.children):
-        is_last = (i == len(node.children) - 1)
+        is_last = i == len(node.children) - 1
         prefix = "└─ " if is_last else "├─ "
         child_lines = print_hierarchy_tree(child, child_indent + "  ")
         # Insert prefix on first line
-        child_lines_list = child_lines.split('\n')
+        child_lines_list = child_lines.split("\n")
         if child_lines_list:
             child_lines_list[0] = f"{indent}{prefix}{child_lines_list[0].lstrip()}"
             lines.extend(child_lines_list)
 
-    return '\n'.join(lines)
+    return "\n".join(lines)

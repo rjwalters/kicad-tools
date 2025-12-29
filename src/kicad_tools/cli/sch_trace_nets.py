@@ -36,11 +36,11 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["table", "json"],
-                        default="table", help="Output format")
+    parser.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
     parser.add_argument("--net", help="Trace a specific net by label")
-    parser.add_argument("--stats", action="store_true",
-                        help="Show net statistics only")
+    parser.add_argument("--stats", action="store_true", help="Show net statistics only")
 
     args = parser.parse_args()
 
@@ -62,7 +62,9 @@ def main():
             all_nets = trace_nets(sch)
             labeled = [n for n in all_nets if n.has_label]
             if labeled:
-                print(f"Available labeled nets: {', '.join(n.name for n in labeled)}", file=sys.stderr)
+                print(
+                    f"Available labeled nets: {', '.join(n.name for n in labeled)}", file=sys.stderr
+                )
             sys.exit(1)
 
         if args.format == "json":
@@ -109,8 +111,10 @@ def output_net_detail(net):
         print("\nWire segments:")
         print("-" * 50)
         for i, wire in enumerate(net.wires, 1):
-            print(f"  {i}. ({wire.start[0]:.1f}, {wire.start[1]:.1f}) → "
-                  f"({wire.end[0]:.1f}, {wire.end[1]:.1f}) [{wire.length:.2f} mm]")
+            print(
+                f"  {i}. ({wire.start[0]:.1f}, {wire.start[1]:.1f}) → "
+                f"({wire.end[0]:.1f}, {wire.end[1]:.1f}) [{wire.length:.2f} mm]"
+            )
 
 
 def output_net_json(net):
@@ -169,8 +173,10 @@ def output_all_table(nets):
         if len(conn_types) > 3:
             conn_str += f" +{len(conn_types) - 3} more"
 
-        print(f"{net.name:<25}  {label_mark:<5}  {len(net.wires):<6}  "
-              f"{total_length:>7.2f} mm  {conn_str}")
+        print(
+            f"{net.name:<25}  {label_mark:<5}  {len(net.wires):<6}  "
+            f"{total_length:>7.2f} mm  {conn_str}"
+        )
 
     print(f"\nTotal: {len(nets)} nets")
 
@@ -179,13 +185,15 @@ def output_all_json(nets):
     """Output all nets as JSON."""
     data = []
     for net in nets:
-        data.append({
-            "name": net.name,
-            "has_label": net.has_label,
-            "wire_count": len(net.wires),
-            "total_length": sum(w.length for w in net.wires),
-            "connection_count": len(net.connections),
-        })
+        data.append(
+            {
+                "name": net.name,
+                "has_label": net.has_label,
+                "wire_count": len(net.wires),
+                "total_length": sum(w.length for w in net.wires),
+                "connection_count": len(net.connections),
+            }
+        )
     print(json.dumps(data, indent=2))
 
 

@@ -44,6 +44,7 @@ def generate_uuid() -> str:
 
 # Text-based modification functions (preserve original formatting)
 
+
 def find_symbol_text_range(text: str, reference: str) -> Optional[tuple[int, int, dict]]:
     """
     Find the text range of a symbol instance by reference.
@@ -55,12 +56,12 @@ def find_symbol_text_range(text: str, reference: str) -> Optional[tuple[int, int
 
     # First find all symbol instance blocks (not lib_symbols)
     symbol_pattern = re.compile(
-        r'\n(\t\(symbol\n'
+        r"\n(\t\(symbol\n"
         r'\t\t\(lib_id "[^"]+"\)'
-        r'.*?'
-        r'\t\t\(instances\n.*?\t\t\)\n'
-        r'\t\))',
-        re.DOTALL
+        r".*?"
+        r"\t\t\(instances\n.*?\t\t\)\n"
+        r"\t\))",
+        re.DOTALL,
     )
 
     for match in symbol_pattern.finditer(text):
@@ -70,14 +71,16 @@ def find_symbol_text_range(text: str, reference: str) -> Optional[tuple[int, int
         if ref_pattern.search(block):
             # Extract info
             lib_id_match = re.search(r'\(lib_id "([^"]+)"\)', block)
-            pos_match = re.search(r'\(at ([\d.]+) ([\d.]+)', block)
+            pos_match = re.search(r"\(at ([\d.]+) ([\d.]+)", block)
             uuid_match = re.search(r'\(uuid "([^"]+)"\)', block)
             # Value property spans multiple lines - just capture the quoted value
             value_match = re.search(r'\(property "Value" "([^"]*)"', block)
 
             info = {
                 "lib_id": lib_id_match.group(1) if lib_id_match else "",
-                "position": (float(pos_match.group(1)), float(pos_match.group(2))) if pos_match else (0, 0),
+                "position": (float(pos_match.group(1)), float(pos_match.group(2)))
+                if pos_match
+                else (0, 0),
                 "uuid": uuid_match.group(1) if uuid_match else "",
                 "value": value_match.group(1) if value_match else "",
             }
@@ -119,7 +122,7 @@ def set_value_text(text: str, reference: str, new_value: str) -> tuple[str, bool
 
     start, end, info = result
     block = text[start:end]
-    old_value = info['value']
+    old_value = info["value"]
 
     # Replace the value property in this block (handles multi-line)
     # Match (property "Value" "..." without requiring closing paren on same line
@@ -147,7 +150,7 @@ def set_lib_id_text(text: str, reference: str, new_lib_id: str) -> tuple[str, bo
 
     start, end, info = result
     block = text[start:end]
-    old_lib_id = info['lib_id']
+    old_lib_id = info["lib_id"]
 
     # Replace the lib_id in this block
     lib_id_pattern = re.compile(r'(\(lib_id )"[^"]*"')
@@ -175,10 +178,7 @@ def add_lib_symbol_text(text: str, lib_file: Path) -> tuple[str, bool, str]:
 
     # Extract symbol definitions from the library
     # Find (symbol "NAME" ...) blocks
-    symbol_pattern = re.compile(
-        r'\n(\t\(symbol "[^"]+".*?\n\t\))',
-        re.DOTALL
-    )
+    symbol_pattern = re.compile(r'\n(\t\(symbol "[^"]+".*?\n\t\))', re.DOTALL)
 
     symbols_to_add = []
     for match in symbol_pattern.finditer(lib_text):
@@ -192,7 +192,7 @@ def add_lib_symbol_text(text: str, lib_file: Path) -> tuple[str, bool, str]:
         return text, False, f"No symbols found in library: {lib_file}"
 
     # Find lib_symbols section end
-    lib_symbols_end = re.search(r'\n\t\(lib_symbols\n.*?\n\t\)', text, re.DOTALL)
+    lib_symbols_end = re.search(r"\n\t\(lib_symbols\n.*?\n\t\)", text, re.DOTALL)
     if not lib_symbols_end:
         return text, False, "Schematic has no lib_symbols section"
 
@@ -356,7 +356,9 @@ def delete_symbol(sexp: SExp, reference: str, dry_run: bool = False) -> tuple[bo
     return True, f"Deleted: {reference} ({info['lib_id']}) at {info['position']}"
 
 
-def set_symbol_value(sexp: SExp, reference: str, new_value: str, dry_run: bool = False) -> tuple[bool, str]:
+def set_symbol_value(
+    sexp: SExp, reference: str, new_value: str, dry_run: bool = False
+) -> tuple[bool, str]:
     """
     Set a symbol's Value property.
 
@@ -382,7 +384,9 @@ def set_symbol_value(sexp: SExp, reference: str, new_value: str, dry_run: bool =
     return False, f"Value property not found on {reference}"
 
 
-def set_symbol_lib_id(sexp: SExp, reference: str, new_lib_id: str, dry_run: bool = False) -> tuple[bool, str]:
+def set_symbol_lib_id(
+    sexp: SExp, reference: str, new_lib_id: str, dry_run: bool = False
+) -> tuple[bool, str]:
     """
     Change a symbol's library reference.
 
@@ -522,31 +526,43 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("schematic", type=Path,
-                        help="Path to KiCad schematic file (.kicad_sch)")
+    parser.add_argument("schematic", type=Path, help="Path to KiCad schematic file (.kicad_sch)")
 
     # Operations
     ops = parser.add_argument_group("Operations")
-    ops.add_argument("--delete", "-d", type=str, metavar="REF",
-                     help="Delete symbol by reference (e.g., U1)")
-    ops.add_argument("--set-value", nargs=2, metavar=("REF", "VALUE"),
-                     help="Set symbol value property")
-    ops.add_argument("--set-lib-id", nargs=2, metavar=("REF", "LIB_ID"),
-                     help="Change symbol library reference")
-    ops.add_argument("--add-lib-symbol", type=Path, metavar="FILE",
-                     help="Add library symbol from .kicad_sym file")
-    ops.add_argument("--regen-uuids", type=str, metavar="REF",
-                     help="Regenerate UUIDs for symbol and pins")
+    ops.add_argument(
+        "--delete", "-d", type=str, metavar="REF", help="Delete symbol by reference (e.g., U1)"
+    )
+    ops.add_argument(
+        "--set-value", nargs=2, metavar=("REF", "VALUE"), help="Set symbol value property"
+    )
+    ops.add_argument(
+        "--set-lib-id", nargs=2, metavar=("REF", "LIB_ID"), help="Change symbol library reference"
+    )
+    ops.add_argument(
+        "--add-lib-symbol",
+        type=Path,
+        metavar="FILE",
+        help="Add library symbol from .kicad_sym file",
+    )
+    ops.add_argument(
+        "--regen-uuids", type=str, metavar="REF", help="Regenerate UUIDs for symbol and pins"
+    )
 
     # Options
-    parser.add_argument("--dry-run", "-n", action="store_true",
-                        help="Show what would be done without making changes")
-    parser.add_argument("--no-backup", action="store_true",
-                        help="Don't create backup before modifying")
-    parser.add_argument("--list", "-l", action="store_true",
-                        help="List all symbols in schematic")
-    parser.add_argument("--output", "-o", type=Path,
-                        help="Write to different file instead of modifying in place")
+    parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Show what would be done without making changes",
+    )
+    parser.add_argument(
+        "--no-backup", action="store_true", help="Don't create backup before modifying"
+    )
+    parser.add_argument("--list", "-l", action="store_true", help="List all symbols in schematic")
+    parser.add_argument(
+        "--output", "-o", type=Path, help="Write to different file instead of modifying in place"
+    )
 
     args = parser.parse_args()
 
@@ -587,7 +603,13 @@ def main():
         return 0
 
     # Check if any operation specified
-    operations = [args.delete, args.set_value, args.set_lib_id, args.add_lib_symbol, args.regen_uuids]
+    operations = [
+        args.delete,
+        args.set_value,
+        args.set_lib_id,
+        args.add_lib_symbol,
+        args.regen_uuids,
+    ]
     if not any(operations):
         parser.print_help()
         print("\nError: No operation specified")
@@ -649,16 +671,27 @@ def main():
     if args.add_lib_symbol:
         if args.dry_run:
             # Just check what would be added
-            lib_text = args.add_lib_symbol.read_text(encoding="utf-8") if args.add_lib_symbol.exists() else ""
+            lib_text = (
+                args.add_lib_symbol.read_text(encoding="utf-8")
+                if args.add_lib_symbol.exists()
+                else ""
+            )
             import re as re_mod
+
             symbols = re_mod.findall(r'\(symbol "([^"]+)"', lib_text)
             if symbols:
-                existing = [s for s in symbols if re_mod.search(r'\(symbol "' + re_mod.escape(s) + r'"', modified_text)]
+                existing = [
+                    s
+                    for s in symbols
+                    if re_mod.search(r'\(symbol "' + re_mod.escape(s) + r'"', modified_text)
+                ]
                 new = [s for s in symbols if s not in existing]
                 if new:
                     results.append(("Add Lib Symbol", True, f"Would add: {', '.join(new)}"))
                 elif existing:
-                    results.append(("Add Lib Symbol", True, f"Skipped (already exist): {', '.join(existing)}"))
+                    results.append(
+                        ("Add Lib Symbol", True, f"Skipped (already exist): {', '.join(existing)}")
+                    )
             else:
                 results.append(("Add Lib Symbol", False, "No symbols found in library"))
         else:
@@ -683,9 +716,9 @@ def main():
                 modified = True
 
     # Print results
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"SCHEMATIC MODIFICATION {'(DRY RUN)' if args.dry_run else ''}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"File: {args.schematic.name}")
 
     for op_name, success, msg in results:

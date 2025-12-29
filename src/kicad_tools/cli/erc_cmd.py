@@ -55,7 +55,8 @@ def main(argv: List[str] | None = None) -> int:
         help="Exit with error code on warnings",
     )
     parser.add_argument(
-        "--type", "-t",
+        "--type",
+        "-t",
         dest="filter_type",
         help="Filter by violation type (partial match)",
     )
@@ -69,7 +70,8 @@ def main(argv: List[str] | None = None) -> int:
         help="Group violations by sheet",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Show detailed violation information",
     )
@@ -79,7 +81,8 @@ def main(argv: List[str] | None = None) -> int:
         help="Keep the ERC report file after running",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=Path,
         help="Save ERC report to this path",
     )
@@ -134,7 +137,8 @@ def main(argv: List[str] | None = None) -> int:
     if args.filter_type:
         filter_lower = args.filter_type.lower()
         violations = [
-            v for v in violations
+            v
+            for v in violations
             if filter_lower in v.type_str.lower()
             or filter_lower in v.description.lower()
             or filter_lower in v.type_description.lower()
@@ -212,9 +216,9 @@ def output_table(
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("ERC VALIDATION SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if report.source_file:
         print(f"File: {Path(report.source_file).name}")
@@ -228,7 +232,7 @@ def output_table(
         print(f"  Excluded:   {report.exclusion_count} (not counted)")
 
     if not violations:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("ERC PASSED - No violations found")
         return
 
@@ -242,9 +246,11 @@ def output_table(
         else:
             by_type[v.type_str]["warnings"] += 1
 
-    print(f"\n{'-'*60}")
+    print(f"\n{'-' * 60}")
     print("BY TYPE:")
-    for vtype, counts in sorted(by_type.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])):
+    for vtype, counts in sorted(
+        by_type.items(), key=lambda x: -(x[1]["errors"] + x[1]["warnings"])
+    ):
         desc = ERC_TYPE_DESCRIPTIONS.get(vtype, vtype)
         parts = []
         if counts["errors"]:
@@ -258,19 +264,19 @@ def output_table(
     warnings = [v for v in violations if not v.is_error]
 
     if errors:
-        print(f"\n{'-'*60}")
+        print(f"\n{'-' * 60}")
         print("ERRORS (must fix):")
         _print_violations(errors, verbose, by_sheet)
 
     if warnings:
-        print(f"\n{'-'*60}")
+        print(f"\n{'-' * 60}")
         print("WARNINGS (review recommended):")
         display_warnings = warnings if verbose else warnings[:20]
         _print_violations(display_warnings, verbose, by_sheet)
         if len(warnings) > 20 and not verbose:
             print(f"\n  ... and {len(warnings) - 20} more warnings (use --verbose)")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     if errors:
         print("ERC FAILED - Fix errors before proceeding")
     else:

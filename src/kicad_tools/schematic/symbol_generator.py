@@ -55,6 +55,7 @@ from typing import Optional
 
 class PinType(Enum):
     """KiCad pin electrical types."""
+
     INPUT = "input"
     OUTPUT = "output"
     BIDIRECTIONAL = "bidirectional"
@@ -72,6 +73,7 @@ class PinType(Enum):
 
 class PinStyle(Enum):
     """KiCad pin graphic styles."""
+
     LINE = "line"
     INVERTED = "inverted"
     CLOCK = "clock"
@@ -85,6 +87,7 @@ class PinStyle(Enum):
 
 class PinSide(Enum):
     """Which side of the symbol the pin appears on."""
+
     LEFT = "left"
     RIGHT = "right"
     TOP = "top"
@@ -94,6 +97,7 @@ class PinSide(Enum):
 @dataclass
 class PinDef:
     """Pin definition for symbol generation."""
+
     number: str
     name: str
     pin_type: PinType = PinType.PASSIVE
@@ -122,13 +126,14 @@ class PinDef:
             pin_type=pin_type,
             style=style,
             side=side,
-            hidden=d.get("hidden", False)
+            hidden=d.get("hidden", False),
         )
 
 
 @dataclass
 class SymbolDef:
     """Complete symbol definition."""
+
     name: str
     pins: list[PinDef]
     reference: str = "U"
@@ -151,77 +156,67 @@ class SymbolDef:
 # Pin type detection patterns
 PIN_TYPE_PATTERNS = [
     # Power input
-    (r'^V(CC|DD|BAT|IN|BUS|IO|REF|A|D|S|L)[\dA-Z]*$', PinType.POWER_IN),
-    (r'^(PVCC|AVCC|DVCC|AVDD|DVDD|PVDD)[\dA-Z]*$', PinType.POWER_IN),
-    (r'^[+-]?(3V3|5V|12V|1V8|2V5|VCC|VDD)', PinType.POWER_IN),
-    (r'^(GND|VSS|AGND|DGND|PGND|GNDA|GNDD)[\dA-Z]*$', PinType.POWER_IN),
-    (r'^(EP|EPAD|PAD|THERMAL)$', PinType.POWER_IN),  # Exposed pad
-
+    (r"^V(CC|DD|BAT|IN|BUS|IO|REF|A|D|S|L)[\dA-Z]*$", PinType.POWER_IN),
+    (r"^(PVCC|AVCC|DVCC|AVDD|DVDD|PVDD)[\dA-Z]*$", PinType.POWER_IN),
+    (r"^[+-]?(3V3|5V|12V|1V8|2V5|VCC|VDD)", PinType.POWER_IN),
+    (r"^(GND|VSS|AGND|DGND|PGND|GNDA|GNDD)[\dA-Z]*$", PinType.POWER_IN),
+    (r"^(EP|EPAD|PAD|THERMAL)$", PinType.POWER_IN),  # Exposed pad
     # No connect
-    (r'^N/?C[\dA-Z]*$', PinType.NO_CONNECT),
-    (r'^(NC|DNC|RSVD|RESERVED)[\dA-Z]*$', PinType.NO_CONNECT),
-
+    (r"^N/?C[\dA-Z]*$", PinType.NO_CONNECT),
+    (r"^(NC|DNC|RSVD|RESERVED)[\dA-Z]*$", PinType.NO_CONNECT),
     # Clock inputs (with clock style)
-    (r'^(CLK|CLOCK|SCK|SCLK|BCLK|MCLK|LRCLK|WS)', PinType.INPUT),
-    (r'^X(TAL)?IN[\dA-Z]*$', PinType.INPUT),
-
+    (r"^(CLK|CLOCK|SCK|SCLK|BCLK|MCLK|LRCLK|WS)", PinType.INPUT),
+    (r"^X(TAL)?IN[\dA-Z]*$", PinType.INPUT),
     # Reset (active low)
-    (r'^(~?RST|~?RESET|~?NRST|RST_?N|RESET_?N)', PinType.INPUT),
-
+    (r"^(~?RST|~?RESET|~?NRST|RST_?N|RESET_?N)", PinType.INPUT),
     # Standard inputs
-    (r'^(SDA|SPI_?MOSI|DIN|DATA_?IN|RX|RXD|D\d*IN)', PinType.INPUT),
-    (r'^(EN|ENABLE|~?SHDN|~?SHUTDOWN|~?MUTE|~?STBY|STANDBY)', PinType.INPUT),
-    (r'^(GAIN\d*|MODE\d*|SEL\d*|ADR\d*|ADDR\d*)', PinType.INPUT),
-
+    (r"^(SDA|SPI_?MOSI|DIN|DATA_?IN|RX|RXD|D\d*IN)", PinType.INPUT),
+    (r"^(EN|ENABLE|~?SHDN|~?SHUTDOWN|~?MUTE|~?STBY|STANDBY)", PinType.INPUT),
+    (r"^(GAIN\d*|MODE\d*|SEL\d*|ADR\d*|ADDR\d*)", PinType.INPUT),
     # Standard outputs
-    (r'^(SCL|SPI_?MISO|DOUT|DATA_?OUT|TX|TXD|D\d*OUT)', PinType.OUTPUT),
-    (r'^(OUT[LRP]?[+-]?|OUTP|OUTN|VOUT|AOUT|DOUT)', PinType.OUTPUT),
-    (r'^(FAULT|~?FAULT|ERR|~?ERR|FLAG|INT|~?INT)', PinType.OUTPUT),
-
+    (r"^(SCL|SPI_?MISO|DOUT|DATA_?OUT|TX|TXD|D\d*OUT)", PinType.OUTPUT),
+    (r"^(OUT[LRP]?[+-]?|OUTP|OUTN|VOUT|AOUT|DOUT)", PinType.OUTPUT),
+    (r"^(FAULT|~?FAULT|ERR|~?ERR|FLAG|INT|~?INT)", PinType.OUTPUT),
     # Bidirectional
-    (r'^(GPIO\d*|P[A-Z]?\d+|IO\d*|D\d+)', PinType.BIDIRECTIONAL),
-    (r'^(I2C_?SDA|SDA\d*)', PinType.BIDIRECTIONAL),
-
+    (r"^(GPIO\d*|P[A-Z]?\d+|IO\d*|D\d+)", PinType.BIDIRECTIONAL),
+    (r"^(I2C_?SDA|SDA\d*)", PinType.BIDIRECTIONAL),
     # Audio/analog
-    (r'^(INL|INR|LINEIN|RINEIN|L_?IN|R_?IN)', PinType.INPUT),
-    (r'^(OUTL|OUTR|LINEOUT|ROUTOUT|L_?OUT|R_?OUT|HP)', PinType.OUTPUT),
-    (r'^(AIN\d*|ADC\d*)', PinType.INPUT),
-    (r'^(AOUT\d*|DAC\d*)', PinType.OUTPUT),
-
+    (r"^(INL|INR|LINEIN|RINEIN|L_?IN|R_?IN)", PinType.INPUT),
+    (r"^(OUTL|OUTR|LINEOUT|ROUTOUT|L_?OUT|R_?OUT|HP)", PinType.OUTPUT),
+    (r"^(AIN\d*|ADC\d*)", PinType.INPUT),
+    (r"^(AOUT\d*|DAC\d*)", PinType.OUTPUT),
     # Crystal oscillator
-    (r'^X(TAL)?OUT[\dA-Z]*$', PinType.OUTPUT),
+    (r"^X(TAL)?OUT[\dA-Z]*$", PinType.OUTPUT),
 ]
 
 # Pin side assignment patterns (for intelligent layout)
 PIN_SIDE_PATTERNS = [
     # Power on top and bottom
-    (r'^V(CC|DD|BAT|IN|BUS|IO|REF|A|D|S|L)[\dA-Z]*$', PinSide.TOP),
-    (r'^(PVCC|AVCC|DVCC|AVDD|DVDD|PVDD)[\dA-Z]*$', PinSide.TOP),
-    (r'^[+-]?(3V3|5V|12V|1V8|2V5|VCC|VDD)', PinSide.TOP),
-    (r'^(GND|VSS|AGND|DGND|PGND|GNDA|GNDD)[\dA-Z]*$', PinSide.BOTTOM),
-    (r'^(EP|EPAD|PAD|THERMAL)$', PinSide.BOTTOM),
-
+    (r"^V(CC|DD|BAT|IN|BUS|IO|REF|A|D|S|L)[\dA-Z]*$", PinSide.TOP),
+    (r"^(PVCC|AVCC|DVCC|AVDD|DVDD|PVDD)[\dA-Z]*$", PinSide.TOP),
+    (r"^[+-]?(3V3|5V|12V|1V8|2V5|VCC|VDD)", PinSide.TOP),
+    (r"^(GND|VSS|AGND|DGND|PGND|GNDA|GNDD)[\dA-Z]*$", PinSide.BOTTOM),
+    (r"^(EP|EPAD|PAD|THERMAL)$", PinSide.BOTTOM),
     # Inputs on left
-    (r'^(IN|INPUT|SDA|MOSI|DIN|RX|CLK|SCK|EN|RST|~?RST|NRST)', PinSide.LEFT),
-    (r'^(GAIN|MODE|SEL|ADR|ADDR|LINEIN|RINEIN|AIN|ADC)', PinSide.LEFT),
-
+    (r"^(IN|INPUT|SDA|MOSI|DIN|RX|CLK|SCK|EN|RST|~?RST|NRST)", PinSide.LEFT),
+    (r"^(GAIN|MODE|SEL|ADR|ADDR|LINEIN|RINEIN|AIN|ADC)", PinSide.LEFT),
     # Outputs on right
-    (r'^(OUT|OUTPUT|SCL|MISO|DOUT|TX|FAULT|ERR|FLAG|INT)', PinSide.RIGHT),
-    (r'^(LINEOUT|ROUTOUT|HP|AOUT|DAC)', PinSide.RIGHT),
+    (r"^(OUT|OUTPUT|SCL|MISO|DOUT|TX|FAULT|ERR|FLAG|INT)", PinSide.RIGHT),
+    (r"^(LINEOUT|ROUTOUT|HP|AOUT|DAC)", PinSide.RIGHT),
 ]
 
 # Patterns that indicate clock style pins
 CLOCK_PATTERNS = [
-    r'^(CLK|CLOCK|SCK|SCLK|BCLK|MCLK|LRCLK|WS|TCK)',
-    r'^X(TAL)?IN[\dA-Z]*$',
+    r"^(CLK|CLOCK|SCK|SCLK|BCLK|MCLK|LRCLK|WS|TCK)",
+    r"^X(TAL)?IN[\dA-Z]*$",
 ]
 
 # Patterns that indicate inverted (active low) pins
 INVERTED_PATTERNS = [
-    r'^~',  # KiCad tilde notation
-    r'_N$',  # Suffix _N
-    r'N$',   # Suffix N (for RST_N, CS_N)
-    r'^/(RST|CS|SS|EN|INT|IRQ)',  # /RST notation
+    r"^~",  # KiCad tilde notation
+    r"_N$",  # Suffix _N
+    r"N$",  # Suffix N (for RST_N, CS_N)
+    r"^/(RST|CS|SS|EN|INT|IRQ)",  # /RST notation
 ]
 
 
@@ -315,7 +310,7 @@ def parse_csv(path: Path, name: str) -> SymbolDef:
     """
     pins = []
 
-    with open(path, newline='') as f:
+    with open(path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             # Normalize column names
@@ -348,13 +343,15 @@ def parse_csv(path: Path, name: str) -> SymbolDef:
             else:
                 style = detect_pin_style(row.get("name", ""), pin_type)
 
-            pins.append(PinDef(
-                number=row.get("number", row.get("pin", "")),
-                name=row.get("name", ""),
-                pin_type=pin_type,
-                side=side,
-                style=style,
-            ))
+            pins.append(
+                PinDef(
+                    number=row.get("number", row.get("pin", "")),
+                    name=row.get("name", ""),
+                    pin_type=pin_type,
+                    side=side,
+                    style=style,
+                )
+            )
 
     return SymbolDef(name=name, pins=pins)
 
@@ -371,14 +368,14 @@ def parse_datasheet_text(text: str, name: str) -> SymbolDef:
     """
     pins = []
 
-    for line in text.strip().split('\n'):
+    for line in text.strip().split("\n"):
         line = line.strip()
-        if not line or line.startswith('#'):
+        if not line or line.startswith("#"):
             continue
 
         # Try different separators
         parts = None
-        for sep in ['\t', ',', '  ', ' ']:
+        for sep in ["\t", ",", "  ", " "]:
             parts = [p.strip() for p in line.split(sep) if p.strip()]
             if len(parts) >= 2:
                 break
@@ -410,13 +407,15 @@ def parse_datasheet_text(text: str, name: str) -> SymbolDef:
             elif "no connect" in type_hint_lower or "n/c" in type_hint_lower:
                 pin_type = PinType.NO_CONNECT
 
-        pins.append(PinDef(
-            number=pin_num,
-            name=pin_name,
-            pin_type=pin_type,
-            side=detect_pin_side(pin_name, pin_type),
-            style=detect_pin_style(pin_name, pin_type),
-        ))
+        pins.append(
+            PinDef(
+                number=pin_num,
+                name=pin_name,
+                pin_type=pin_type,
+                side=detect_pin_side(pin_name, pin_type),
+                style=detect_pin_style(pin_name, pin_type),
+            )
+        )
 
     return SymbolDef(name=name, pins=pins)
 
@@ -675,8 +674,9 @@ PACKAGE_TEMPLATES = {
 def apply_template(sym: SymbolDef, template_name: str):
     """Apply a package template to pin layout."""
     if template_name not in PACKAGE_TEMPLATES:
-        raise ValueError(f"Unknown template: {template_name}. "
-                        f"Available: {list(PACKAGE_TEMPLATES.keys())}")
+        raise ValueError(
+            f"Unknown template: {template_name}. Available: {list(PACKAGE_TEMPLATES.keys())}"
+        )
 
     template = PACKAGE_TEMPLATES[template_name]
 
@@ -733,12 +733,14 @@ def create_pins_from_template(template_name: str) -> list[PinDef]:
             elif i in template.get("bottom_pins", []):
                 side = PinSide.BOTTOM
 
-        pins.append(PinDef(
-            number=str(i),
-            name=f"P{i}",
-            pin_type=PinType.PASSIVE,
-            side=side,
-        ))
+        pins.append(
+            PinDef(
+                number=str(i),
+                name=f"P{i}",
+                pin_type=PinType.PASSIVE,
+                side=side,
+            )
+        )
 
     return pins
 
@@ -788,45 +790,44 @@ Examples:
 
   # Detect pin types from names
   %(prog)s --csv pins.csv --name MyChip --auto-types --output MyLib.kicad_sym
-"""
+""",
     )
 
     input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument("--json", type=Path,
-                            help="JSON pin definition file")
-    input_group.add_argument("--csv", type=Path,
-                            help="CSV pin definition file")
-    input_group.add_argument("--template", choices=list(PACKAGE_TEMPLATES.keys()),
-                            help="Use package template")
-    input_group.add_argument("--interactive", action="store_true",
-                            help="Enter pins interactively")
-    input_group.add_argument("--text", type=Path,
-                            help="Datasheet-style text file")
+    input_group.add_argument("--json", type=Path, help="JSON pin definition file")
+    input_group.add_argument("--csv", type=Path, help="CSV pin definition file")
+    input_group.add_argument(
+        "--template", choices=list(PACKAGE_TEMPLATES.keys()), help="Use package template"
+    )
+    input_group.add_argument("--interactive", action="store_true", help="Enter pins interactively")
+    input_group.add_argument("--text", type=Path, help="Datasheet-style text file")
 
-    parser.add_argument("--name", "-n", required=False,
-                       help="Symbol name (required for CSV/template/interactive)")
-    parser.add_argument("--output", "-o", type=Path, required=True,
-                       help="Output .kicad_sym file")
-    parser.add_argument("--reference", "-r", default="U",
-                       help="Reference designator (default: U)")
-    parser.add_argument("--footprint", "-f", default="",
-                       help="Default footprint")
-    parser.add_argument("--description", "-d", default="",
-                       help="Symbol description")
-    parser.add_argument("--datasheet", default="",
-                       help="Datasheet URL")
-    parser.add_argument("--keywords", "-k", default="",
-                       help="Search keywords")
-    parser.add_argument("--auto-types", action="store_true",
-                       help="Auto-detect pin types from names")
-    parser.add_argument("--auto-sides", action="store_true",
-                       help="Auto-assign pin sides based on type")
-    parser.add_argument("--apply-template", choices=list(PACKAGE_TEMPLATES.keys()),
-                       help="Apply layout from package template")
-    parser.add_argument("--summary", action="store_true",
-                       help="Print pin summary before generating")
-    parser.add_argument("--dry-run", action="store_true",
-                       help="Show what would be generated without writing")
+    parser.add_argument(
+        "--name", "-n", required=False, help="Symbol name (required for CSV/template/interactive)"
+    )
+    parser.add_argument("--output", "-o", type=Path, required=True, help="Output .kicad_sym file")
+    parser.add_argument("--reference", "-r", default="U", help="Reference designator (default: U)")
+    parser.add_argument("--footprint", "-f", default="", help="Default footprint")
+    parser.add_argument("--description", "-d", default="", help="Symbol description")
+    parser.add_argument("--datasheet", default="", help="Datasheet URL")
+    parser.add_argument("--keywords", "-k", default="", help="Search keywords")
+    parser.add_argument(
+        "--auto-types", action="store_true", help="Auto-detect pin types from names"
+    )
+    parser.add_argument(
+        "--auto-sides", action="store_true", help="Auto-assign pin sides based on type"
+    )
+    parser.add_argument(
+        "--apply-template",
+        choices=list(PACKAGE_TEMPLATES.keys()),
+        help="Apply layout from package template",
+    )
+    parser.add_argument(
+        "--summary", action="store_true", help="Print pin summary before generating"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would be generated without writing"
+    )
 
     args = parser.parse_args()
 

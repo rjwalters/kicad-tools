@@ -26,10 +26,10 @@ def load_schematic(path: Union[str, Path]) -> SExp:
     if not path.exists():
         raise FileNotFoundError(f"Schematic not found: {path}")
 
-    text = path.read_text(encoding='utf-8')
+    text = path.read_text(encoding="utf-8")
     sexp = parse_sexp(text)
 
-    if sexp.tag != 'kicad_sch':
+    if sexp.tag != "kicad_sch":
         raise ValueError(f"Not a KiCad schematic: expected 'kicad_sch', got '{sexp.tag}'")
 
     return sexp
@@ -46,12 +46,12 @@ def save_schematic(sexp: SExp, path: Union[str, Path]) -> None:
     Raises:
         ValueError: If sexp is not a valid schematic
     """
-    if sexp.tag != 'kicad_sch':
+    if sexp.tag != "kicad_sch":
         raise ValueError(f"Not a KiCad schematic: expected 'kicad_sch', got '{sexp.tag}'")
 
     path = Path(path)
     text = serialize_sexp(sexp)
-    path.write_text(text, encoding='utf-8')
+    path.write_text(text, encoding="utf-8")
 
 
 def load_symbol_lib(path: Union[str, Path]) -> SExp:
@@ -68,11 +68,13 @@ def load_symbol_lib(path: Union[str, Path]) -> SExp:
     if not path.exists():
         raise FileNotFoundError(f"Symbol library not found: {path}")
 
-    text = path.read_text(encoding='utf-8')
+    text = path.read_text(encoding="utf-8")
     sexp = parse_sexp(text)
 
-    if sexp.tag != 'kicad_symbol_lib':
-        raise ValueError(f"Not a KiCad symbol library: expected 'kicad_symbol_lib', got '{sexp.tag}'")
+    if sexp.tag != "kicad_symbol_lib":
+        raise ValueError(
+            f"Not a KiCad symbol library: expected 'kicad_symbol_lib', got '{sexp.tag}'"
+        )
 
     return sexp
 
@@ -85,12 +87,14 @@ def save_symbol_lib(sexp: SExp, path: Union[str, Path]) -> None:
         sexp: The symbol library SExp tree
         path: Path to save to
     """
-    if sexp.tag != 'kicad_symbol_lib':
-        raise ValueError(f"Not a KiCad symbol library: expected 'kicad_symbol_lib', got '{sexp.tag}'")
+    if sexp.tag != "kicad_symbol_lib":
+        raise ValueError(
+            f"Not a KiCad symbol library: expected 'kicad_symbol_lib', got '{sexp.tag}'"
+        )
 
     path = Path(path)
     text = serialize_sexp(sexp)
-    path.write_text(text, encoding='utf-8')
+    path.write_text(text, encoding="utf-8")
 
 
 def load_pcb(path: Union[str, Path]) -> SExp:
@@ -111,10 +115,10 @@ def load_pcb(path: Union[str, Path]) -> SExp:
     if not path.exists():
         raise FileNotFoundError(f"PCB not found: {path}")
 
-    text = path.read_text(encoding='utf-8')
+    text = path.read_text(encoding="utf-8")
     sexp = parse_sexp(text)
 
-    if sexp.tag != 'kicad_pcb':
+    if sexp.tag != "kicad_pcb":
         raise ValueError(f"Not a KiCad PCB: expected 'kicad_pcb', got '{sexp.tag}'")
 
     return sexp
@@ -131,9 +135,9 @@ def save_pcb(sexp: SExp, path: Union[str, Path]) -> None:
     Raises:
         ValueError: If sexp is not a valid PCB
     """
-    if sexp.tag != 'kicad_pcb':
+    if sexp.tag != "kicad_pcb":
         raise ValueError(f"Not a KiCad PCB: expected 'kicad_pcb', got '{sexp.tag}'")
 
     path = Path(path)
     text = serialize_sexp(sexp)
-    path.write_text(text, encoding='utf-8')
+    path.write_text(text, encoding="utf-8")

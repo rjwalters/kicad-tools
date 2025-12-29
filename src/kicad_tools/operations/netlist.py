@@ -343,9 +343,7 @@ class Netlist:
 
         # Categorize nets
         power_names = {"GND", "PGND", "AGND", "VCC", "VDD", "VBUS"}
-        power_nets = [
-            n for n in self.nets if n.name.startswith("+") or n.name in power_names
-        ]
+        power_nets = [n for n in self.nets if n.name.startswith("+") or n.name in power_names]
 
         return {
             "source_file": self.source_file,

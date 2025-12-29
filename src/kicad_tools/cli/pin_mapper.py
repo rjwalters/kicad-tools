@@ -35,6 +35,7 @@ KICAD_SCRIPTS = Path(__file__).resolve().parent
 @dataclass
 class Pin:
     """Represents a symbol pin."""
+
     number: str
     name: str
     pin_type: str
@@ -46,11 +47,11 @@ class Pin:
         """Normalize pin name for matching."""
         name = self.name.upper()
         # Remove suffixes like _39, _40
-        name = re.sub(r'_\d+$', '', name)
+        name = re.sub(r"_\d+$", "", name)
         # Normalize common variations
-        name = name.replace('~{', '').replace('}', '')  # Active low markers
-        name = name.replace('/', '_')
-        name = name.replace('+', 'P').replace('-', 'N')
+        name = name.replace("~{", "").replace("}", "")  # Active low markers
+        name = name.replace("/", "_")
+        name = name.replace("+", "P").replace("-", "N")
         return name
 
     @property
@@ -59,45 +60,46 @@ class Pin:
         name_upper = self.name.upper()
 
         # Power pins
-        if any(p in name_upper for p in ['VCC', 'VDD', 'PVDD', 'AVDD', 'DVDD', 'GVDD', 'VBG']):
-            return 'power_positive'
-        if any(p in name_upper for p in ['GND', 'PGND', 'AGND', 'EP']):
-            return 'power_ground'
+        if any(p in name_upper for p in ["VCC", "VDD", "PVDD", "AVDD", "DVDD", "GVDD", "VBG"]):
+            return "power_positive"
+        if any(p in name_upper for p in ["GND", "PGND", "AGND", "EP"]):
+            return "power_ground"
 
         # Bootstrap pins
-        if 'BST' in name_upper:
-            return 'bootstrap'
+        if "BST" in name_upper:
+            return "bootstrap"
 
         # Audio inputs
-        if any(p in name_upper for p in ['INPUT', 'INP', 'INN', 'IN_']):
-            return 'audio_input'
+        if any(p in name_upper for p in ["INPUT", "INP", "INN", "IN_"]):
+            return "audio_input"
 
         # Audio outputs
-        if 'OUT' in name_upper:
-            return 'audio_output'
+        if "OUT" in name_upper:
+            return "audio_output"
 
         # Control/status pins
-        if any(p in name_upper for p in ['FAULT', 'CLIP', 'OTW', 'SD', 'MUTE', 'RESET']):
-            return 'status_control'
+        if any(p in name_upper for p in ["FAULT", "CLIP", "OTW", "SD", "MUTE", "RESET"]):
+            return "status_control"
 
         # Oscillator pins
-        if any(p in name_upper for p in ['OSC', 'FREQ']):
-            return 'oscillator'
+        if any(p in name_upper for p in ["OSC", "FREQ"]):
+            return "oscillator"
 
         # Configuration pins
-        if any(p in name_upper for p in ['GAIN', 'M1', 'M2', 'HEAD', 'PLIMIT', 'OC_ADJ']):
-            return 'configuration'
+        if any(p in name_upper for p in ["GAIN", "M1", "M2", "HEAD", "PLIMIT", "OC_ADJ"]):
+            return "configuration"
 
         # No connect
-        if name_upper in ['NC', 'N/C', 'N.C.']:
-            return 'no_connect'
+        if name_upper in ["NC", "N/C", "N.C."]:
+            return "no_connect"
 
-        return 'other'
+        return "other"
 
 
 @dataclass
 class PinMapping:
     """Represents a mapping between source and target pins."""
+
     source_pin: Pin
     target_pin: Optional[Pin]
     confidence: float  # 0.0 to 1.0
@@ -111,6 +113,7 @@ class PinMapping:
 @dataclass
 class MappingResult:
     """Complete mapping analysis between two symbols."""
+
     source_name: str
     target_name: str
     source_pins: list[Pin]
@@ -169,28 +172,30 @@ def extract_pins_from_symbol(symbol: SExp, recursive: bool = True) -> list[Pin]:
 
             # Map KiCad pin type to readable string
             type_map = {
-                'input': 'Input',
-                'output': 'Output',
-                'bidirectional': 'Bidirectional',
-                'tri_state': 'Tri-State',
-                'passive': 'Passive',
-                'free': 'Free',
-                'unspecified': 'Unspecified',
-                'power_in': 'Power Input',
-                'power_out': 'Power Output',
-                'open_collector': 'Open Collector',
-                'open_emitter': 'Open Emitter',
-                'no_connect': 'No Connect',
+                "input": "Input",
+                "output": "Output",
+                "bidirectional": "Bidirectional",
+                "tri_state": "Tri-State",
+                "passive": "Passive",
+                "free": "Free",
+                "unspecified": "Unspecified",
+                "power_in": "Power Input",
+                "power_out": "Power Output",
+                "open_collector": "Open Collector",
+                "open_emitter": "Open Emitter",
+                "no_connect": "No Connect",
             }
             pin_type = type_map.get(pin_type_raw, pin_type_raw)
 
-            pins.append(Pin(
-                number=number,
-                name=name,
-                pin_type=pin_type,
-                position=position,
-                orientation=orientation,
-            ))
+            pins.append(
+                Pin(
+                    number=number,
+                    name=name,
+                    pin_type=pin_type,
+                    position=position,
+                    orientation=orientation,
+                )
+            )
 
         # Recursively search nested symbols (sub-units like Symbol_0_1, Symbol_1_1)
         if recursive:
@@ -204,14 +209,14 @@ def extract_pins_from_symbol(symbol: SExp, recursive: bool = True) -> list[Pin]:
 
 def load_symbol_from_file(path: Path) -> tuple[str, list[Pin]]:
     """Load a symbol from a .kicad_sym file."""
-    text = path.read_text(encoding='utf-8')
+    text = path.read_text(encoding="utf-8")
     sexp = parse_sexp(text)
 
-    if sexp.tag != 'kicad_symbol_lib':
+    if sexp.tag != "kicad_symbol_lib":
         raise ValueError(f"Not a symbol library: {path}")
 
     # Get first symbol
-    symbols = sexp.find_all('symbol')
+    symbols = sexp.find_all("symbol")
     if not symbols:
         raise ValueError(f"No symbols found in: {path}")
 
@@ -219,7 +224,7 @@ def load_symbol_from_file(path: Path) -> tuple[str, list[Pin]]:
     main_symbol = None
     for sym in symbols:
         name = sym.get_string(0) or ""
-        if not re.search(r'_\d+_\d+$', name):  # Skip unit variants like Symbol_1_1
+        if not re.search(r"_\d+_\d+$", name):  # Skip unit variants like Symbol_1_1
             main_symbol = sym
             break
 
@@ -234,18 +239,18 @@ def load_symbol_from_file(path: Path) -> tuple[str, list[Pin]]:
 
 def load_symbol_from_schematic(sch_path: Path, lib_id: str) -> tuple[str, list[Pin]]:
     """Load an embedded symbol from a schematic's lib_symbols section."""
-    text = sch_path.read_text(encoding='utf-8')
+    text = sch_path.read_text(encoding="utf-8")
     sexp = parse_sexp(text)
 
-    if sexp.tag != 'kicad_sch':
+    if sexp.tag != "kicad_sch":
         raise ValueError(f"Not a schematic: {sch_path}")
 
-    lib_symbols = sexp.find('lib_symbols')
+    lib_symbols = sexp.find("lib_symbols")
     if not lib_symbols:
         raise ValueError(f"No lib_symbols section in: {sch_path}")
 
     # Find the requested symbol
-    for sym in lib_symbols.find_all('symbol'):
+    for sym in lib_symbols.find_all("symbol"):
         sym_name = sym.get_string(0) or ""
         if sym_name == lib_id:
             pins = extract_pins_from_symbol(sym)
@@ -254,7 +259,9 @@ def load_symbol_from_schematic(sch_path: Path, lib_id: str) -> tuple[str, list[P
     raise ValueError(f"Symbol '{lib_id}' not found in schematic lib_symbols")
 
 
-def match_pins(source_pins: list[Pin], target_pins: list[Pin]) -> tuple[list[PinMapping], list[Pin]]:
+def match_pins(
+    source_pins: list[Pin], target_pins: list[Pin]
+) -> tuple[list[PinMapping], list[Pin]]:
     """
     Match source pins to target pins using multiple strategies.
 
@@ -294,8 +301,9 @@ def match_pins(source_pins: list[Pin], target_pins: list[Pin]) -> tuple[list[Pin
         if not mapping:
             norm_name = src.normalized_name
             if norm_name in target_by_normalized:
-                candidates = [p for p in target_by_normalized[norm_name]
-                             if p.number not in used_targets]
+                candidates = [
+                    p for p in target_by_normalized[norm_name] if p.number not in used_targets
+                ]
                 if candidates:
                     # Prefer same pin type
                     same_type = [p for p in candidates if p.pin_type == src.pin_type]
@@ -310,15 +318,16 @@ def match_pins(source_pins: list[Pin], target_pins: list[Pin]) -> tuple[list[Pin
                 if tgt.number not in used_targets:
                     # Only if same category
                     if src.function_category == tgt.function_category:
-                        mapping = PinMapping(src, tgt, 0.4, f"Same pin number + category ({src.function_category})")
+                        mapping = PinMapping(
+                            src, tgt, 0.4, f"Same pin number + category ({src.function_category})"
+                        )
                         used_targets.add(tgt.number)
 
         # Strategy 4: Function category match (suggestion only)
         if not mapping:
             cat = src.function_category
-            if cat in target_by_category and cat != 'other':
-                candidates = [p for p in target_by_category[cat]
-                             if p.number not in used_targets]
+            if cat in target_by_category and cat != "other":
+                candidates = [p for p in target_by_category[cat] if p.number not in used_targets]
                 if candidates:
                     tgt = candidates[0]
                     mapping = PinMapping(src, tgt, 0.2, f"Category match ({cat})")
@@ -336,8 +345,9 @@ def match_pins(source_pins: list[Pin], target_pins: list[Pin]) -> tuple[list[Pin
     return mappings, unmatched
 
 
-def generate_mapping(source_name: str, source_pins: list[Pin],
-                     target_name: str, target_pins: list[Pin]) -> MappingResult:
+def generate_mapping(
+    source_name: str, source_pins: list[Pin], target_name: str, target_pins: list[Pin]
+) -> MappingResult:
     """Generate complete mapping analysis."""
     mappings, unmatched_target = match_pins(source_pins, target_pins)
 
@@ -351,12 +361,13 @@ def generate_mapping(source_name: str, source_pins: list[Pin],
     )
 
 
-def print_mapping_report(result: MappingResult, show_all: bool = True,
-                         show_unmatched_only: bool = False):
+def print_mapping_report(
+    result: MappingResult, show_all: bool = True, show_unmatched_only: bool = False
+):
     """Print human-readable mapping report."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"PIN MAPPING: {result.source_name} → {result.target_name}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"Source pins: {len(result.source_pins)}")
     print(f"Target pins: {len(result.target_pins)}")
     print(f"Matched: {result.matched_count} ({result.match_percentage:.1f}%)")
@@ -366,46 +377,46 @@ def print_mapping_report(result: MappingResult, show_all: bool = True,
     # Matched pins
     matched = [m for m in result.mappings if m.is_matched]
     if matched and not show_unmatched_only:
-        print(f"\n{'─'*70}")
+        print(f"\n{'─' * 70}")
         print("MATCHED PINS")
-        print(f"{'─'*70}")
+        print(f"{'─' * 70}")
         print(f"{'Source':<20} {'Target':<20} {'Conf':<6} {'Reason':<24}")
-        print(f"{'─'*20} {'─'*20} {'─'*6} {'─'*24}")
+        print(f"{'─' * 20} {'─' * 20} {'─' * 6} {'─' * 24}")
 
         # Group by confidence
         for m in sorted(matched, key=lambda x: -x.confidence):
             src_str = f"{m.source_pin.number}:{m.source_pin.name}"
             tgt_str = f"{m.target_pin.number}:{m.target_pin.name}"
-            conf_str = f"{m.confidence*100:.0f}%"
+            conf_str = f"{m.confidence * 100:.0f}%"
             print(f"{src_str:<20} {tgt_str:<20} {conf_str:<6} {m.match_reason:<24}")
 
     # Unmatched source pins
     unmatched_src = [m for m in result.mappings if not m.is_matched]
     if unmatched_src:
-        print(f"\n{'─'*70}")
+        print(f"\n{'─' * 70}")
         print("UNMATCHED SOURCE PINS (need manual mapping or removal)")
-        print(f"{'─'*70}")
+        print(f"{'─' * 70}")
         print(f"{'Pin':<8} {'Name':<20} {'Type':<15} {'Category':<15}")
-        print(f"{'─'*8} {'─'*20} {'─'*15} {'─'*15}")
+        print(f"{'─' * 8} {'─' * 20} {'─' * 15} {'─' * 15}")
         for m in unmatched_src:
             p = m.source_pin
             print(f"{p.number:<8} {p.name:<20} {p.pin_type:<15} {p.function_category:<15}")
 
     # Unmatched target pins
     if result.unmatched_target:
-        print(f"\n{'─'*70}")
+        print(f"\n{'─' * 70}")
         print("UNMATCHED TARGET PINS (new pins in target symbol)")
-        print(f"{'─'*70}")
+        print(f"{'─' * 70}")
         print(f"{'Pin':<8} {'Name':<20} {'Type':<15} {'Category':<15}")
-        print(f"{'─'*8} {'─'*20} {'─'*15} {'─'*15}")
+        print(f"{'─' * 8} {'─' * 20} {'─' * 15} {'─' * 15}")
         for p in result.unmatched_target:
             print(f"{p.number:<8} {p.name:<20} {p.pin_type:<15} {p.function_category:<15}")
 
     # Summary by category
     if show_all:
-        print(f"\n{'─'*70}")
+        print(f"\n{'─' * 70}")
         print("SUMMARY BY FUNCTION CATEGORY")
-        print(f"{'─'*70}")
+        print(f"{'─' * 70}")
 
         categories = set(p.function_category for p in result.source_pins)
         categories.update(p.function_category for p in result.target_pins)
@@ -413,8 +424,9 @@ def print_mapping_report(result: MappingResult, show_all: bool = True,
         for cat in sorted(categories):
             src_count = sum(1 for p in result.source_pins if p.function_category == cat)
             tgt_count = sum(1 for p in result.target_pins if p.function_category == cat)
-            matched_count = sum(1 for m in result.mappings
-                               if m.is_matched and m.source_pin.function_category == cat)
+            matched_count = sum(
+                1 for m in result.mappings if m.is_matched and m.source_pin.function_category == cat
+            )
             print(f"{cat:<20}: source={src_count}, target={tgt_count}, matched={matched_count}")
 
 
@@ -465,22 +477,25 @@ def main():
         epilog=__doc__,
     )
 
-    parser.add_argument("source", type=Path, nargs='?',
-                        help="Source symbol file (.kicad_sym) or schematic (.kicad_sch)")
-    parser.add_argument("target", type=Path, nargs='?',
-                        help="Target symbol file (.kicad_sym)")
+    parser.add_argument(
+        "source",
+        type=Path,
+        nargs="?",
+        help="Source symbol file (.kicad_sym) or schematic (.kicad_sch)",
+    )
+    parser.add_argument("target", type=Path, nargs="?", help="Target symbol file (.kicad_sym)")
 
-    parser.add_argument("--from", dest="from_lib", type=str,
-                        help="Source lib_id when using schematic (e.g., 'Amplifier_Audio:TPA3251')")
-    parser.add_argument("--to", dest="to_lib", type=str,
-                        help="Target lib_id or symbol file")
+    parser.add_argument(
+        "--from",
+        dest="from_lib",
+        type=str,
+        help="Source lib_id when using schematic (e.g., 'Amplifier_Audio:TPA3251')",
+    )
+    parser.add_argument("--to", dest="to_lib", type=str, help="Target lib_id or symbol file")
 
-    parser.add_argument("--json", action="store_true",
-                        help="Output as JSON")
-    parser.add_argument("--unmatched", action="store_true",
-                        help="Show only unmatched pins")
-    parser.add_argument("--brief", action="store_true",
-                        help="Show brief summary only")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--unmatched", action="store_true", help="Show only unmatched pins")
+    parser.add_argument("--brief", action="store_true", help="Show brief summary only")
 
     args = parser.parse_args()
 
@@ -490,12 +505,12 @@ def main():
 
     if args.from_lib and args.source:
         # Load from schematic's lib_symbols
-        if args.source.suffix == '.kicad_sch':
+        if args.source.suffix == ".kicad_sch":
             source_name, source_pins = load_symbol_from_schematic(args.source, args.from_lib)
         else:
             print(f"Error: --from requires a schematic file, got: {args.source}")
             return 1
-    elif args.source and args.source.suffix == '.kicad_sym':
+    elif args.source and args.source.suffix == ".kicad_sym":
         source_name, source_pins = load_symbol_from_file(args.source)
     else:
         parser.print_help()
@@ -509,15 +524,15 @@ def main():
     if args.to_lib:
         # Check if it's a file path or lib_id
         to_path = Path(args.to_lib)
-        if to_path.exists() and to_path.suffix == '.kicad_sym':
+        if to_path.exists() and to_path.suffix == ".kicad_sym":
             target_name, target_pins = load_symbol_from_file(to_path)
-        elif args.source and args.source.suffix == '.kicad_sch':
+        elif args.source and args.source.suffix == ".kicad_sch":
             target_name, target_pins = load_symbol_from_schematic(args.source, args.to_lib)
         else:
             print(f"Error: Cannot find target symbol: {args.to_lib}")
             return 1
     elif args.target:
-        if args.target.suffix == '.kicad_sym':
+        if args.target.suffix == ".kicad_sym":
             target_name, target_pins = load_symbol_from_file(args.target)
         else:
             print(f"Error: Target must be a .kicad_sym file: {args.target}")
@@ -535,12 +550,15 @@ def main():
         print(json.dumps(mapping_to_dict(result), indent=2))
     elif args.brief:
         print(f"{result.source_name} → {result.target_name}")
-        print(f"  Matched: {result.matched_count}/{len(result.source_pins)} ({result.match_percentage:.1f}%)")
+        print(
+            f"  Matched: {result.matched_count}/{len(result.source_pins)} ({result.match_percentage:.1f}%)"
+        )
         print(f"  Unmatched source: {result.unmatched_source_count}")
         print(f"  Unmatched target: {len(result.unmatched_target)}")
     else:
-        print_mapping_report(result, show_all=not args.unmatched,
-                            show_unmatched_only=args.unmatched)
+        print_mapping_report(
+            result, show_all=not args.unmatched, show_unmatched_only=args.unmatched
+        )
 
     return 0
 

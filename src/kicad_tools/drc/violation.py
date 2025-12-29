@@ -7,6 +7,7 @@ from typing import Optional
 
 class Severity(Enum):
     """Violation severity level."""
+
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
@@ -24,6 +25,7 @@ class Severity(Enum):
 
 class ViolationType(Enum):
     """Known DRC violation types."""
+
     # Clearance violations
     CLEARANCE = "clearance"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
@@ -119,6 +121,7 @@ class ViolationType(Enum):
 @dataclass
 class Location:
     """Position on the PCB."""
+
     x_mm: float
     y_mm: float
     layer: str = ""
@@ -129,7 +132,7 @@ class Location:
         import re
 
         # Match @(x mm, y mm) pattern
-        match = re.search(r'@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\)', s)
+        match = re.search(r"@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\)", s)
         if match:
             return cls(
                 x_mm=float(match.group(1)),
@@ -154,6 +157,7 @@ class Location:
 @dataclass
 class DRCViolation:
     """Represents a single DRC violation."""
+
     type: ViolationType
     type_str: str  # Original type string from report
     severity: Severity
@@ -196,8 +200,7 @@ class DRCViolation:
             "message": self.message,
             "rule": self.rule,
             "locations": [
-                {"x_mm": loc.x_mm, "y_mm": loc.y_mm, "layer": loc.layer}
-                for loc in self.locations
+                {"x_mm": loc.x_mm, "y_mm": loc.y_mm, "layer": loc.layer} for loc in self.locations
             ],
             "items": self.items,
             "nets": self.nets,

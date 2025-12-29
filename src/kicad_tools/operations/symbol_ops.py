@@ -17,6 +17,7 @@ from ..core.sexp import SExp, parse_sexp, serialize_sexp
 @dataclass
 class SymbolReplacement:
     """Details of a symbol replacement operation."""
+
     reference: str
     old_lib_id: str
     new_lib_id: str
@@ -37,9 +38,9 @@ def find_symbol_by_reference(sexp: SExp, reference: str) -> Optional[SExp]:
     Returns:
         The symbol SExp if found, None otherwise
     """
-    for symbol in sexp.find_all('symbol'):
-        for prop in symbol.find_all('property'):
-            if prop.get_string(0) == 'Reference':
+    for symbol in sexp.find_all("symbol"):
+        for prop in symbol.find_all("property"):
+            if prop.get_string(0) == "Reference":
                 if prop.get_string(1) == reference:
                     return symbol
     return None
@@ -47,7 +48,7 @@ def find_symbol_by_reference(sexp: SExp, reference: str) -> Optional[SExp]:
 
 def get_symbol_lib_id(symbol: SExp) -> str:
     """Get the lib_id from a symbol."""
-    lib_id = symbol.find('lib_id')
+    lib_id = symbol.find("lib_id")
     if lib_id:
         return lib_id.get_string(0) or ""
     return ""
@@ -55,7 +56,7 @@ def get_symbol_lib_id(symbol: SExp) -> str:
 
 def get_symbol_pins(symbol: SExp) -> list[SExp]:
     """Get all pins from a symbol."""
-    return symbol.find_all('pin')
+    return symbol.find_all("pin")
 
 
 def replace_symbol_lib_id(
@@ -109,19 +110,19 @@ def replace_symbol_lib_id(
     preserved = []
 
     # Update lib_id
-    lib_id_node = symbol.find('lib_id')
+    lib_id_node = symbol.find("lib_id")
     if lib_id_node and lib_id_node.values:
         lib_id_node.values[0] = new_lib_id
         changes.append(f"lib_id: {old_lib_id} → {new_lib_id}")
 
     # Update properties
-    for prop in symbol.find_all('property'):
+    for prop in symbol.find_all("property"):
         name = prop.get_string(0)
-        if name == 'Value' and new_value:
+        if name == "Value" and new_value:
             old_val = prop.get_string(1)
             prop.set_value(1, new_value)
             changes.append(f"Value: {old_val} → {new_value}")
-        elif name == 'Footprint' and new_footprint:
+        elif name == "Footprint" and new_footprint:
             old_fp = prop.get_string(1)
             prop.set_value(1, new_footprint)
             changes.append(f"Footprint: {old_fp} → {new_footprint}")
@@ -162,7 +163,7 @@ def update_symbol_pins(
     """
     changes = []
 
-    for pin in symbol.find_all('pin'):
+    for pin in symbol.find_all("pin"):
         old_num = pin.get_string(0)
         if old_num in pin_mapping:
             new_num = pin_mapping[old_num]
@@ -170,7 +171,7 @@ def update_symbol_pins(
             changes.append(f"Pin {old_num} → {new_num}")
 
             # Generate new UUID for the pin
-            uuid_node = pin.find('uuid')
+            uuid_node = pin.find("uuid")
             if uuid_node:
                 uuid_node.set_value(0, str(uuid_lib.uuid4()))
 
@@ -189,7 +190,7 @@ def clear_symbol_pins(symbol: SExp) -> int:
     """
     count = 0
     while True:
-        if symbol.remove_child('pin'):
+        if symbol.remove_child("pin"):
             count += 1
         else:
             break
@@ -204,9 +205,9 @@ def add_symbol_pin(symbol: SExp, pin_number: str) -> None:
         symbol: The symbol S-expression
         pin_number: The pin number to add
     """
-    pin = SExp('pin')
+    pin = SExp("pin")
     pin.add(pin_number)
-    pin.add(SExp('uuid').add(str(uuid_lib.uuid4())))
+    pin.add(SExp("uuid").add(str(uuid_lib.uuid4())))
     symbol.add(pin)
 
 
@@ -240,7 +241,7 @@ def create_replacement_symbol(
 
     # Find the symbol definition
     sym_def = None
-    for sym in template_sexp.find_all('symbol'):
+    for sym in template_sexp.find_all("symbol"):
         sym_def = sym
         break
 
@@ -251,33 +252,33 @@ def create_replacement_symbol(
     lib_id = sym_def.get_string(0)  # First value after 'symbol' tag is the name
 
     # Create instance
-    instance = SExp('symbol')
-    instance.add(SExp('lib_id').add(lib_id))
-    instance.add(SExp('at').add(position[0]).add(position[1]).add(rotation))
-    instance.add(SExp('unit').add(unit))
-    instance.add(SExp('in_bom').add('yes'))
-    instance.add(SExp('on_board').add('yes'))
-    instance.add(SExp('dnp').add('no'))
-    instance.add(SExp('uuid').add(str(uuid_lib.uuid4())))
+    instance = SExp("symbol")
+    instance.add(SExp("lib_id").add(lib_id))
+    instance.add(SExp("at").add(position[0]).add(position[1]).add(rotation))
+    instance.add(SExp("unit").add(unit))
+    instance.add(SExp("in_bom").add("yes"))
+    instance.add(SExp("on_board").add("yes"))
+    instance.add(SExp("dnp").add("no"))
+    instance.add(SExp("uuid").add(str(uuid_lib.uuid4())))
 
     # Add properties
     def add_property(name: str, val: str, x_off: float = 0, y_off: float = 0):
-        prop = SExp('property')
+        prop = SExp("property")
         prop.add(name)
         prop.add(val)
-        prop.add(SExp('at').add(position[0] + x_off).add(position[1] + y_off).add(0))
-        prop.add(SExp('effects').add(SExp('font').add(SExp('size').add(1.27).add(1.27))))
+        prop.add(SExp("at").add(position[0] + x_off).add(position[1] + y_off).add(0))
+        prop.add(SExp("effects").add(SExp("font").add(SExp("size").add(1.27).add(1.27))))
         instance.add(prop)
 
-    add_property('Reference', reference, 0, -5)
-    add_property('Value', value or lib_id, 0, -2.5)
-    add_property('Footprint', footprint, 0, 0)
-    add_property('Datasheet', '~', 0, 0)
+    add_property("Reference", reference, 0, -5)
+    add_property("Value", value or lib_id, 0, -2.5)
+    add_property("Footprint", footprint, 0, 0)
+    add_property("Datasheet", "~", 0, 0)
 
     # Add pins (from template)
-    for sym_unit in sym_def.find_all('symbol'):
-        for pin in sym_unit.find_all('pin'):
-            if number_node := pin.find('number'):
+    for sym_unit in sym_def.find_all("symbol"):
+        for pin in sym_unit.find_all("pin"):
+            if number_node := pin.find("number"):
                 pin_num = number_node.get_string(0)
                 if pin_num:
                     add_symbol_pin(instance, pin_num)

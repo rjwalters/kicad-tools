@@ -20,6 +20,7 @@ from .wire import Junction, Wire
 @dataclass
 class TitleBlock:
     """Schematic title block information."""
+
     title: str = ""
     date: str = ""
     rev: str = ""
@@ -30,18 +31,18 @@ class TitleBlock:
     def from_sexp(cls, sexp: SExp) -> TitleBlock:
         """Parse from S-expression."""
         tb = cls()
-        if title := sexp.find('title'):
+        if title := sexp.find("title"):
             tb.title = title.get_string(0) or ""
-        if date := sexp.find('date'):
+        if date := sexp.find("date"):
             tb.date = date.get_string(0) or ""
-        if rev := sexp.find('rev'):
+        if rev := sexp.find("rev"):
             tb.rev = rev.get_string(0) or ""
-        if company := sexp.find('company'):
+        if company := sexp.find("company"):
             tb.company = company.get_string(0) or ""
 
         # Parse comments - they're stored as (comment 1 "text")
         for child in sexp.iter_children():
-            if child.tag == 'comment':
+            if child.tag == "comment":
                 num = child.get_int(0)
                 text = child.get_string(1)
                 if num is not None and text is not None:
@@ -53,6 +54,7 @@ class TitleBlock:
 @dataclass
 class SheetInstance:
     """Reference to a hierarchical sheet."""
+
     name: str
     filename: str
     uuid: str
@@ -68,21 +70,21 @@ class SheetInstance:
         pos = (0.0, 0.0)
         size = (50.0, 25.0)
 
-        if sexp.find('property'):
-            for prop in sexp.find_all('property'):
+        if sexp.find("property"):
+            for prop in sexp.find_all("property"):
                 prop_name = prop.get_string(0)
                 if prop_name == "Sheetname":
                     name = prop.get_string(1) or ""
                 elif prop_name == "Sheetfile":
                     filename = prop.get_string(1) or ""
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
 
-        if sz := sexp.find('size'):
+        if sz := sexp.find("size"):
             size = (sz.get_float(0) or 50, sz.get_float(1) or 25)
 
         return cls(name=name, filename=filename, uuid=uuid, position=pos, size=size)
@@ -103,7 +105,7 @@ class Schematic:
             sexp: Parsed schematic S-expression
             path: Optional path to the source file
         """
-        if sexp.tag != 'kicad_sch':
+        if sexp.tag != "kicad_sch":
             raise ValueError(f"Not a schematic: {sexp.tag}")
 
         self._sexp = sexp
@@ -142,35 +144,35 @@ class Schematic:
     @property
     def version(self) -> Optional[int]:
         """Get the schematic version number."""
-        if v := self._sexp.find('version'):
+        if v := self._sexp.find("version"):
             return v.get_int(0)
         return None
 
     @property
     def generator(self) -> Optional[str]:
         """Get the generator program name."""
-        if g := self._sexp.find('generator'):
+        if g := self._sexp.find("generator"):
             return g.get_string(0)
         return None
 
     @property
     def title_block(self) -> TitleBlock:
         """Get the title block information."""
-        if tb := self._sexp.find('title_block'):
+        if tb := self._sexp.find("title_block"):
             return TitleBlock.from_sexp(tb)
         return TitleBlock()
 
     @property
     def paper(self) -> Optional[str]:
         """Get the paper size."""
-        if p := self._sexp.find('paper'):
+        if p := self._sexp.find("paper"):
             return p.get_string(0)
         return None
 
     @property
     def uuid(self) -> Optional[str]:
         """Get the schematic UUID."""
-        if u := self._sexp.find('uuid'):
+        if u := self._sexp.find("uuid"):
             return u.get_string(0)
         return None
 
@@ -180,10 +182,7 @@ class Schematic:
     def symbols(self) -> List[SymbolInstance]:
         """Get all symbol instances in the schematic."""
         if self._symbols is None:
-            self._symbols = [
-                SymbolInstance.from_sexp(s)
-                for s in self._sexp.find_all('symbol')
-            ]
+            self._symbols = [SymbolInstance.from_sexp(s) for s in self._sexp.find_all("symbol")]
         return self._symbols
 
     def get_symbol(self, reference: str) -> Optional[SymbolInstance]:
@@ -207,20 +206,14 @@ class Schematic:
     def wires(self) -> List[Wire]:
         """Get all wires in the schematic."""
         if self._wires is None:
-            self._wires = [
-                Wire.from_sexp(w)
-                for w in self._sexp.find_all('wire')
-            ]
+            self._wires = [Wire.from_sexp(w) for w in self._sexp.find_all("wire")]
         return self._wires
 
     @property
     def junctions(self) -> List[Junction]:
         """Get all junctions in the schematic."""
         if self._junctions is None:
-            self._junctions = [
-                Junction.from_sexp(j)
-                for j in self._sexp.find_all('junction')
-            ]
+            self._junctions = [Junction.from_sexp(j) for j in self._sexp.find_all("junction")]
         return self._junctions
 
     # Label operations
@@ -229,10 +222,7 @@ class Schematic:
     def labels(self) -> List[Label]:
         """Get all local labels."""
         if self._labels is None:
-            self._labels = [
-                Label.from_sexp(lbl)
-                for lbl in self._sexp.find_all('label')
-            ]
+            self._labels = [Label.from_sexp(lbl) for lbl in self._sexp.find_all("label")]
         return self._labels
 
     @property
@@ -241,17 +231,14 @@ class Schematic:
         if self._hierarchical_labels is None:
             self._hierarchical_labels = [
                 HierarchicalLabel.from_sexp(lbl)
-                for lbl in self._sexp.find_all('hierarchical_label')
+                for lbl in self._sexp.find_all("hierarchical_label")
             ]
         return self._hierarchical_labels
 
     @property
     def global_labels(self) -> List[GlobalLabel]:
         """Get all global labels."""
-        return [
-            GlobalLabel.from_sexp(lbl)
-            for lbl in self._sexp.find_all('global_label')
-        ]
+        return [GlobalLabel.from_sexp(lbl) for lbl in self._sexp.find_all("global_label")]
 
     # Sheet operations
 
@@ -259,10 +246,7 @@ class Schematic:
     def sheets(self) -> List[SheetInstance]:
         """Get all hierarchical sheet references."""
         if self._sheets is None:
-            self._sheets = [
-                SheetInstance.from_sexp(s)
-                for s in self._sexp.find_all('sheet')
-            ]
+            self._sheets = [SheetInstance.from_sexp(s) for s in self._sexp.find_all("sheet")]
         return self._sheets
 
     def is_hierarchical(self) -> bool:
@@ -274,12 +258,12 @@ class Schematic:
     @property
     def lib_symbols(self) -> Optional[SExp]:
         """Get the embedded library symbols section."""
-        return self._sexp.find('lib_symbols')
+        return self._sexp.find("lib_symbols")
 
     def get_lib_symbol(self, lib_id: str) -> Optional[SExp]:
         """Get an embedded library symbol definition by lib_id."""
         if lib_syms := self.lib_symbols:
-            for sym in lib_syms.find_all('symbol'):
+            for sym in lib_syms.find_all("symbol"):
                 sym_name = sym.get_string(0)
                 if sym_name == lib_id:
                     return sym

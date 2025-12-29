@@ -35,6 +35,7 @@ from kicad_tools.sexp.builders import fmt, segment_node, via_node, zone_node
 @dataclass
 class Point:
     """2D point in mm."""
+
     x: float
     y: float
 
@@ -46,6 +47,7 @@ class Point:
 @dataclass
 class Track:
     """PCB track/trace."""
+
     net: int
     start: Point
     end: Point
@@ -56,15 +58,21 @@ class Track:
     def to_sexp_node(self) -> SExp:
         """Build S-expression node for this track segment."""
         return segment_node(
-            self.start.x, self.start.y,
-            self.end.x, self.end.y,
-            self.width, self.layer, self.net, self.uuid_str
+            self.start.x,
+            self.start.y,
+            self.end.x,
+            self.end.y,
+            self.width,
+            self.layer,
+            self.net,
+            self.uuid_str,
         )
 
 
 @dataclass
 class Via:
     """PCB via."""
+
     net: int
     position: Point
     size: float
@@ -75,14 +83,20 @@ class Via:
     def to_sexp_node(self) -> SExp:
         """Build S-expression node for this via."""
         return via_node(
-            self.position.x, self.position.y,
-            self.size, self.drill, self.layers, self.net, self.uuid_str
+            self.position.x,
+            self.position.y,
+            self.size,
+            self.drill,
+            self.layers,
+            self.net,
+            self.uuid_str,
         )
 
 
 @dataclass
 class Zone:
     """Copper pour zone."""
+
     net: int
     net_name: str
     layer: str
@@ -95,8 +109,13 @@ class Zone:
         """Build S-expression node for this zone."""
         point_tuples = [(p.x, p.y) for p in self.points]
         return zone_node(
-            self.net, self.net_name, self.layer, point_tuples,
-            self.uuid_str, self.priority, self.min_thickness
+            self.net,
+            self.net_name,
+            self.layer,
+            point_tuples,
+            self.uuid_str,
+            self.priority,
+            self.min_thickness,
         )
 
 
@@ -174,15 +193,16 @@ class PCBEditor:
                     "y": y,
                     "rotation": rotation,
                     "layer": layer,
-                    "_node": fp_node  # Store reference for modification
+                    "_node": fp_node,  # Store reference for modification
                 }
 
     def get_net_number(self, net_name: str) -> int:
         """Get net number by name."""
         return self.nets.get(net_name, 0)
 
-    def place_component(self, ref: str, x: float, y: float, rotation: float = 0,
-                        layer: str = "F.Cu") -> bool:
+    def place_component(
+        self, ref: str, x: float, y: float, rotation: float = 0, layer: str = "F.Cu"
+    ) -> bool:
         """
         Move a component to specified position.
 
@@ -216,9 +236,14 @@ class PCBEditor:
 
         return False
 
-    def add_track(self, net_name: str, points: list[tuple[float, float]],
-                  width: float = 0.2, layer: str = "F.Cu",
-                  insert: bool = True) -> list[Track]:
+    def add_track(
+        self,
+        net_name: str,
+        points: list[tuple[float, float]],
+        width: float = 0.2,
+        layer: str = "F.Cu",
+        insert: bool = True,
+    ) -> list[Track]:
         """
         Add a multi-segment track.
 
@@ -241,7 +266,7 @@ class PCBEditor:
                 start=Point(*points[i]),
                 end=Point(*points[i + 1]),
                 width=width,
-                layer=layer
+                layer=layer,
             )
             tracks.append(track)
 
@@ -250,9 +275,14 @@ class PCBEditor:
 
         return tracks
 
-    def add_via(self, position: tuple[float, float], net_name: str,
-                drill: float = 0.3, size: float = 0.6,
-                insert: bool = True) -> Via:
+    def add_via(
+        self,
+        position: tuple[float, float],
+        net_name: str,
+        drill: float = 0.3,
+        size: float = 0.6,
+        insert: bool = True,
+    ) -> Via:
         """Add a via at specified position.
 
         Args:
@@ -263,10 +293,7 @@ class PCBEditor:
             insert: If True, insert into document immediately
         """
         via = Via(
-            net=self.get_net_number(net_name),
-            position=Point(*position),
-            size=size,
-            drill=drill
+            net=self.get_net_number(net_name), position=Point(*position), size=size, drill=drill
         )
 
         if insert and self.doc:
@@ -274,9 +301,14 @@ class PCBEditor:
 
         return via
 
-    def add_zone(self, net_name: str, layer: str,
-                 boundary: list[tuple[float, float]],
-                 priority: int = 0, insert: bool = True) -> Zone:
+    def add_zone(
+        self,
+        net_name: str,
+        layer: str,
+        boundary: list[tuple[float, float]],
+        priority: int = 0,
+        insert: bool = True,
+    ) -> Zone:
         """
         Add a copper pour zone.
 
@@ -295,7 +327,7 @@ class PCBEditor:
             net_name=net_name,
             layer=layer,
             points=[Point(*p) for p in boundary],
-            priority=priority
+            priority=priority,
         )
 
         if insert and self.doc:
@@ -303,9 +335,12 @@ class PCBEditor:
 
         return zone
 
-    def create_ground_pour(self, layer: str = "In1.Cu",
-                           boundary: Optional[list[tuple[float, float]]] = None,
-                           insert: bool = True) -> Zone:
+    def create_ground_pour(
+        self,
+        layer: str = "In1.Cu",
+        boundary: Optional[list[tuple[float, float]]] = None,
+        insert: bool = True,
+    ) -> Zone:
         """
         Generate a ground plane pour.
 
@@ -371,15 +406,15 @@ def add_via(net_name, pos, drill=0.3, size=0.6):
 # Routes
 '''
         for conn in connections:
-            net = conn.get('net', 'GND')
-            start = conn.get('from', (0, 0))
-            end = conn.get('to', (0, 0))
-            width = conn.get('width', 0.2)
-            layer = conn.get('layer', 'F.Cu')
+            net = conn.get("net", "GND")
+            start = conn.get("from", (0, 0))
+            end = conn.get("to", (0, 0))
+            width = conn.get("width", 0.2)
+            layer = conn.get("layer", "F.Cu")
 
             script += f"add_track('{net}', {start}, {end}, {width}, '{layer}')\n"
 
-            if conn.get('via'):
+            if conn.get("via"):
                 script += f"add_via('{net}', {end})\n"
 
         script += "\npcbnew.Refresh()\nprint('Routing complete!')\n"
@@ -411,15 +446,16 @@ def add_via(net_name, pos, drill=0.3, size=0.6):
 # DESIGN RULE HELPERS
 # =============================================================================
 
+
 class SeeedFusion4Layer:
     """Seeed Fusion 4-layer PCB design rules."""
 
     MIN_TRACE_WIDTH = 0.1  # mm (4 mil min, 6 mil recommended)
-    MIN_CLEARANCE = 0.1    # mm
-    MIN_VIA_DRILL = 0.2    # mm
-    MIN_VIA_SIZE = 0.45    # mm (drill + 2*annular ring)
-    MIN_HOLE = 0.3         # mm
-    COPPER_TO_EDGE = 0.3   # mm
+    MIN_CLEARANCE = 0.1  # mm
+    MIN_VIA_DRILL = 0.2  # mm
+    MIN_VIA_SIZE = 0.45  # mm (drill + 2*annular ring)
+    MIN_HOLE = 0.3  # mm
+    COPPER_TO_EDGE = 0.3  # mm
 
     RECOMMENDED_TRACE = 0.15  # 6 mil
     RECOMMENDED_VIA_DRILL = 0.3
@@ -431,7 +467,7 @@ class SeeedFusion4Layer:
         # IPC-2221 formula (simplified)
         # Area (mils²) = (I / (k * ΔT^b))^(1/c)
         # For external: k=0.048, b=0.44, c=0.725
-        area_mils2 = (current_ma / (0.048 * (temp_rise_c ** 0.44))) ** (1 / 0.725)
+        area_mils2 = (current_ma / (0.048 * (temp_rise_c**0.44))) ** (1 / 0.725)
         width_mils = area_mils2 / 1.4  # Assuming 1oz = 1.4 mils thick
         width_mm = width_mils * 0.0254
         return max(width_mm, cls.MIN_TRACE_WIDTH)
@@ -441,18 +477,14 @@ class SeeedFusion4Layer:
 # AUDIO PCB HELPERS
 # =============================================================================
 
+
 class AudioLayoutRules:
     """Best practices for audio PCB layout."""
 
     @staticmethod
     def analog_ground_zone(board_width: float, split_x: float) -> list[tuple[float, float]]:
         """Define analog ground zone (left side of board)."""
-        return [
-            (0, 0),
-            (split_x, 0),
-            (split_x, 56),
-            (0, 56)
-        ]
+        return [(0, 0), (split_x, 0), (split_x, 56), (0, 56)]
 
     @staticmethod
     def star_ground_point(analog_zone_center: tuple[float, float]) -> tuple[float, float]:
@@ -461,9 +493,9 @@ class AudioLayoutRules:
         return analog_zone_center
 
     @staticmethod
-    def clock_trace_length_match(source: tuple[float, float],
-                                  dest1: tuple[float, float],
-                                  dest2: tuple[float, float]) -> dict:
+    def clock_trace_length_match(
+        source: tuple[float, float], dest1: tuple[float, float], dest2: tuple[float, float]
+    ) -> dict:
         """
         Calculate serpentine requirements for clock length matching.
 
@@ -471,20 +503,21 @@ class AudioLayoutRules:
         """
         import math
 
-        len1 = math.sqrt((dest1[0] - source[0])**2 + (dest1[1] - source[1])**2)
-        len2 = math.sqrt((dest2[0] - source[0])**2 + (dest2[1] - source[1])**2)
+        len1 = math.sqrt((dest1[0] - source[0]) ** 2 + (dest1[1] - source[1]) ** 2)
+        len2 = math.sqrt((dest2[0] - source[0]) ** 2 + (dest2[1] - source[1]) ** 2)
 
         return {
-            'length_diff_mm': abs(len1 - len2),
-            'shorter_path': 'dest1' if len1 < len2 else 'dest2',
-            'serpentine_needed': abs(len1 - len2) > 1.0,  # >1mm diff
-            'recommended_meander': max(0, abs(len1 - len2))
+            "length_diff_mm": abs(len1 - len2),
+            "shorter_path": "dest1" if len1 < len2 else "dest2",
+            "serpentine_needed": abs(len1 - len2) > 1.0,  # >1mm diff
+            "recommended_meander": max(0, abs(len1 - len2)),
         }
 
 
 # =============================================================================
 # CLI INTERFACE
 # =============================================================================
+
 
 def main():
     import argparse
@@ -493,8 +526,9 @@ def main():
     parser.add_argument("pcb_file", help="Path to .kicad_pcb file")
     parser.add_argument("--info", action="store_true", help="Show board info")
     parser.add_argument("--nets", action="store_true", help="List all nets")
-    parser.add_argument("--ground-pour", type=str, metavar="LAYER",
-                        help="Generate ground pour for layer")
+    parser.add_argument(
+        "--ground-pour", type=str, metavar="LAYER", help="Generate ground pour for layer"
+    )
 
     args = parser.parse_args()
 

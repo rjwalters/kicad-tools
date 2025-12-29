@@ -129,9 +129,7 @@ class Autorouter:
             # Connect all pads on this component with short stubs
             # Use chain topology: pad0 -> pad1 -> pad2 -> ...
             # Sort by position to get sensible ordering
-            sorted_pairs = sorted(
-                zip(indices, pad_objs), key=lambda p: (p[1].x, p[1].y)
-            )
+            sorted_pairs = sorted(zip(indices, pad_objs), key=lambda p: (p[1].x, p[1].y))
 
             for j in range(len(sorted_pairs) - 1):
                 idx1, pad1 = sorted_pairs[j]
@@ -460,9 +458,7 @@ class Autorouter:
             # Check new overflow
             overflow = self.grid.get_total_overflow()
             overused = self.grid.find_overused_cells()
-            print(
-                f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow}"
-            )
+            print(f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow}")
 
             if overflow == 0:
                 print(f"  Convergence achieved at iteration {iteration}!")
@@ -477,9 +473,7 @@ class Autorouter:
 
         return list(self.routes)
 
-    def _route_net_negotiated(
-        self, net: int, present_cost_factor: float
-    ) -> List[Route]:
+    def _route_net_negotiated(self, net: int, present_cost_factor: float) -> List[Route]:
         """Route a single net in negotiated mode.
 
         Similar to route_net but uses negotiated routing with sharing allowed.
@@ -652,9 +646,7 @@ class Autorouter:
 
         total_vias = sum(len(r.vias) for r in routes)
         total_length = sum(
-            math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-            for r in routes
-            for s in r.segments
+            math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) for r in routes for s in r.segments
         )
 
         # Completion rate is most important (1000x weight)
@@ -984,9 +976,7 @@ class AdaptiveAutorouter:
 
         return nets_routed >= nets_requested and overflow == 0
 
-    def route(
-        self, method: str = "negotiated", max_iterations: int = 10
-    ) -> RoutingResult:
+    def route(self, method: str = "negotiated", max_iterations: int = 10) -> RoutingResult:
         """Route the board, increasing layers as needed.
 
         Args:
@@ -1001,9 +991,9 @@ class AdaptiveAutorouter:
 
         for stack in stacks_to_try:
             if self.verbose:
-                print(f"\n{'='*60}")
+                print(f"\n{'=' * 60}")
                 print(f"TRYING {stack.num_layers}-LAYER ROUTING ({stack.name})")
-                print(f"{'='*60}")
+                print(f"{'=' * 60}")
 
             # Create fresh autorouter with this layer stack
             router = self._create_autorouter(stack)
@@ -1058,9 +1048,9 @@ class AdaptiveAutorouter:
 
         # Return best result (even if not converged)
         if self.verbose:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print("ADAPTIVE ROUTING COMPLETE")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             if self.result:
                 print(f"  Final: {self.result}")
                 if not self.result.converged:

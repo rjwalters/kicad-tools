@@ -41,9 +41,7 @@ def main(argv: List[str] | None = None) -> int:
         help="Filter by reference pattern (e.g., 'U*')",
     )
     parser.add_argument("--lib", dest="lib_id", help="Filter by library ID")
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Show additional details"
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show additional details")
 
     args = parser.parse_args(argv)
 
@@ -112,15 +110,12 @@ def output_table(symbols: List[SymbolInstance], verbose: bool) -> None:
                 f"({sym.position[0]:.1f}, {sym.position[1]:.1f})"
             )
     else:
-        print(
-            f"{'Ref':<{ref_width}}  {'Value':<{val_width}}  {'Library ID':<{lib_width}}"
-        )
+        print(f"{'Ref':<{ref_width}}  {'Value':<{val_width}}  {'Library ID':<{lib_width}}")
         print("-" * (ref_width + val_width + lib_width + 6))
 
         for sym in symbols:
             print(
-                f"{sym.reference:<{ref_width}}  {sym.value:<{val_width}}  "
-                f"{sym.lib_id:<{lib_width}}"
+                f"{sym.reference:<{ref_width}}  {sym.value:<{val_width}}  {sym.lib_id:<{lib_width}}"
             )
 
     print(f"\nTotal: {len(symbols)} symbols")

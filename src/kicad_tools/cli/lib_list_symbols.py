@@ -25,19 +25,19 @@ from pathlib import Path
 from kicad_tools.schema import SymbolLibrary
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="List symbols in a KiCad symbol library",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument("library", help="Path to .kicad_sym file")
-    parser.add_argument("--format", choices=["table", "json"],
-                        default="table", help="Output format")
-    parser.add_argument("--pins", action="store_true",
-                        help="Show pin details")
+    parser.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
+    parser.add_argument("--pins", action="store_true", help="Show pin details")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         lib = SymbolLibrary.load(args.library)
@@ -68,12 +68,12 @@ def output_table(lib, show_pins):
         print("-" * 40)
 
         # Show properties
-        if 'Value' in sym.properties:
+        if "Value" in sym.properties:
             print(f"  Value:       {sym.properties['Value']}")
-        if 'Footprint' in sym.properties:
+        if "Footprint" in sym.properties:
             print(f"  Footprint:   {sym.properties['Footprint']}")
-        if 'Description' in sym.properties:
-            desc = sym.properties['Description']
+        if "Description" in sym.properties:
+            desc = sym.properties["Description"]
             if len(desc) > 50:
                 desc = desc[:47] + "..."
             print(f"  Description: {desc}")
@@ -84,7 +84,14 @@ def output_table(lib, show_pins):
             print("\n  Pins:")
             print(f"  {'#':<5}  {'Name':<15}  {'Type':<12}  Position")
             print("  " + "-" * 50)
-            for pin in sorted(sym.pins, key=lambda p: (p.number.isdigit(), int(p.number) if p.number.isdigit() else 0, p.number)):
+            for pin in sorted(
+                sym.pins,
+                key=lambda p: (
+                    p.number.isdigit(),
+                    int(p.number) if p.number.isdigit() else 0,
+                    p.number,
+                ),
+            ):
                 pos_str = f"({pin.position[0]:.1f}, {pin.position[1]:.1f})"
                 print(f"  {pin.number:<5}  {pin.name:<15}  {pin.type:<12}  {pos_str}")
 
@@ -93,11 +100,7 @@ def output_table(lib, show_pins):
 
 def output_json(lib, show_pins):
     """Output as JSON."""
-    data = {
-        "path": lib.path,
-        "symbol_count": len(lib.symbols),
-        "symbols": []
-    }
+    data = {"path": lib.path, "symbol_count": len(lib.symbols), "symbols": []}
 
     for name, sym in sorted(lib.symbols.items()):
         sym_data = {

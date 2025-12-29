@@ -37,14 +37,12 @@ ERC_TYPES = {
     "power_pin_not_driven": "Power input not driven",
     "no_connect_connected": "No-connect pin is connected",
     "no_connect_dangling": "No-connect flag not connected to pin",
-
     # Pin conflicts
     "conflicting_netclass": "Conflicting netclass assignments",
     "different_unit_footprint": "Different footprint across symbol units",
     "different_unit_net": "Different nets on same pin across units",
     "duplicate_pin_error": "Duplicate pin in symbol",
     "duplicate_reference": "Duplicate reference designator",
-
     # Symbol/sheet errors
     "endpoint_off_grid": "Wire endpoint off grid",
     "extra_units": "Extra units in multi-unit symbol",
@@ -57,7 +55,6 @@ ERC_TYPES = {
     "missing_power_pin": "Missing power pin",
     "missing_unit": "Missing unit in multi-unit symbol",
     "multiple_net_names": "Wire has multiple net names",
-
     # Schematic structure
     "bus_entry_needed": "Bus entry needed",
     "bus_to_bus_conflict": "Bus to bus conflict",
@@ -76,6 +73,7 @@ ERC_TYPES = {
 @dataclass
 class ERCViolation:
     """Represents an ERC violation."""
+
     type: str
     severity: str  # "error", "warning", or "exclusion"
     description: str
@@ -103,6 +101,7 @@ class ERCViolation:
 @dataclass
 class ERCReport:
     """Parsed ERC report."""
+
     violations: list[ERCViolation] = field(default_factory=list)
     source_file: str = ""
     kicad_version: str = ""
@@ -175,10 +174,15 @@ def run_kicad_erc(
     print(f"Running KiCad ERC on: {sch_path.name}")
 
     cmd = [
-        str(kicad_cli), "sch", "erc",
-        "--output", str(output_path),
-        "--format", "json",
-        "--units", "mm",
+        str(kicad_cli),
+        "sch",
+        "erc",
+        "--output",
+        str(output_path),
+        "--format",
+        "json",
+        "--units",
+        "mm",
     ]
 
     if severity_all:
@@ -240,9 +244,9 @@ def _matches_filter(violation: ERCViolation, filter_type: str) -> bool:
     """Check if violation matches filter (searches type, description, and type_description)."""
     filter_lower = filter_type.lower()
     return (
-        filter_lower in violation.type.lower() or
-        filter_lower in violation.description.lower() or
-        filter_lower in violation.type_description.lower()
+        filter_lower in violation.type.lower()
+        or filter_lower in violation.description.lower()
+        or filter_lower in violation.type_description.lower()
     )
 
 
@@ -262,9 +266,9 @@ def print_summary(
         errors = [e for e in errors if _matches_filter(e, filter_type)]
         warnings = [w for w in warnings if _matches_filter(w, filter_type)]
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("ERC VALIDATION SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if report.source_file:
         print(f"File: {Path(report.source_file).name}")
@@ -282,7 +286,9 @@ def print_summary(
 
     # Group by type summary (filtered)
     if filter_type:
-        filtered_violations = [v for v in report.violations if not v.excluded and _matches_filter(v, filter_type)]
+        filtered_violations = [
+            v for v in report.violations if not v.excluded and _matches_filter(v, filter_type)
+        ]
         by_type = defaultdict(list)
         for v in filtered_violations:
             by_type[v.type].append(v)
@@ -291,7 +297,7 @@ def print_summary(
         by_type = report.by_type()
 
     if by_type:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("BY TYPE:")
         for vtype, violations in sorted(by_type.items(), key=lambda x: -len(x[1])):
             type_errors = sum(1 for v in violations if v.severity == "error")
@@ -306,18 +312,18 @@ def print_summary(
 
     # Detailed output
     if errors:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("ERRORS (must fix):")
         _print_violations(errors, verbose, group_by_sheet)
 
     if warnings:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("WARNINGS (review recommended):")
         _print_violations(warnings[:20] if not verbose else warnings, verbose, group_by_sheet)
         if len(warnings) > 20 and not verbose:
             print(f"\n  ... and {len(warnings) - 20} more warnings (use --verbose)")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
     if not errors and not warnings:
         print("ERC PASSED - No violations found")
@@ -395,18 +401,46 @@ def print_types():
 
     # Group by category
     categories = {
-        "Connection": ["pin_not_connected", "pin_not_driven", "power_pin_not_driven",
-                       "no_connect_connected", "no_connect_dangling"],
-        "Pin Conflicts": ["conflicting_netclass", "different_unit_footprint",
-                          "different_unit_net", "duplicate_pin_error", "duplicate_reference"],
-        "Labels": ["global_label_dangling", "hier_label_mismatch", "label_dangling",
-                   "multiple_net_names", "similar_labels"],
-        "Structure": ["bus_entry_needed", "bus_to_bus_conflict", "bus_to_net_conflict",
-                      "endpoint_off_grid", "four_way_junction", "net_not_bus_member",
-                      "wire_dangling"],
-        "Symbols": ["extra_units", "lib_symbol_issues", "missing_bidi_pin",
-                    "missing_input_pin", "missing_power_pin", "missing_unit",
-                    "simulation_model", "unannotated"],
+        "Connection": [
+            "pin_not_connected",
+            "pin_not_driven",
+            "power_pin_not_driven",
+            "no_connect_connected",
+            "no_connect_dangling",
+        ],
+        "Pin Conflicts": [
+            "conflicting_netclass",
+            "different_unit_footprint",
+            "different_unit_net",
+            "duplicate_pin_error",
+            "duplicate_reference",
+        ],
+        "Labels": [
+            "global_label_dangling",
+            "hier_label_mismatch",
+            "label_dangling",
+            "multiple_net_names",
+            "similar_labels",
+        ],
+        "Structure": [
+            "bus_entry_needed",
+            "bus_to_bus_conflict",
+            "bus_to_net_conflict",
+            "endpoint_off_grid",
+            "four_way_junction",
+            "net_not_bus_member",
+            "wire_dangling",
+        ],
+        "Symbols": [
+            "extra_units",
+            "lib_symbol_issues",
+            "missing_bidi_pin",
+            "missing_input_pin",
+            "missing_power_pin",
+            "missing_unit",
+            "simulation_model",
+            "unannotated",
+        ],
         "Other": ["unresolved_variable", "unspecified"],
     }
 
@@ -423,24 +457,25 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("schematic", nargs="?", type=Path,
-                        help="Path to KiCad schematic file (.kicad_sch)")
-    parser.add_argument("--strict", action="store_true",
-                        help="Exit with error code on warnings")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show detailed violation information")
-    parser.add_argument("--json", action="store_true",
-                        help="Output in JSON format")
-    parser.add_argument("--filter", "-f", type=str, metavar="TYPE",
-                        help="Filter violations by type (partial match)")
-    parser.add_argument("--by-sheet", action="store_true",
-                        help="Group violations by sheet")
-    parser.add_argument("--output", "-o", type=Path,
-                        help="ERC report output path")
-    parser.add_argument("--list-types", action="store_true",
-                        help="List all known ERC violation types")
-    parser.add_argument("--keep-report", action="store_true",
-                        help="Keep the JSON report file after completion")
+    parser.add_argument(
+        "schematic", nargs="?", type=Path, help="Path to KiCad schematic file (.kicad_sch)"
+    )
+    parser.add_argument("--strict", action="store_true", help="Exit with error code on warnings")
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Show detailed violation information"
+    )
+    parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    parser.add_argument(
+        "--filter", "-f", type=str, metavar="TYPE", help="Filter violations by type (partial match)"
+    )
+    parser.add_argument("--by-sheet", action="store_true", help="Group violations by sheet")
+    parser.add_argument("--output", "-o", type=Path, help="ERC report output path")
+    parser.add_argument(
+        "--list-types", action="store_true", help="List all known ERC violation types"
+    )
+    parser.add_argument(
+        "--keep-report", action="store_true", help="Keep the JSON report file after completion"
+    )
 
     args = parser.parse_args()
 

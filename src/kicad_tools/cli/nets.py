@@ -32,9 +32,7 @@ def main(argv: List[str] | None = None) -> int:
         "--format", choices=["table", "json"], default="table", help="Output format"
     )
     parser.add_argument("--net", help="Trace a specific net by label")
-    parser.add_argument(
-        "--stats", action="store_true", help="Show net statistics only"
-    )
+    parser.add_argument("--stats", action="store_true", help="Show net statistics only")
 
     args = parser.parse_args(argv)
 
@@ -217,9 +215,7 @@ def output_stats(nets: List[Net]) -> None:
         # Find nets with most wires
         most_wires = max(nets, key=lambda n: len(n.wires))
         if most_wires.wires:
-            print(
-                f"\nLargest net:        {most_wires.name} ({len(most_wires.wires)} wires)"
-            )
+            print(f"\nLargest net:        {most_wires.name} ({len(most_wires.wires)} wires)")
 
 
 if __name__ == "__main__":

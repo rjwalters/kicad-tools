@@ -15,6 +15,7 @@ from ..core.sexp_file import load_pcb
 @dataclass
 class Layer:
     """PCB layer definition."""
+
     number: int
     name: str
     type: str  # signal, power, user
@@ -23,6 +24,7 @@ class Layer:
 @dataclass
 class Net:
     """PCB net definition."""
+
     number: int
     name: str
 
@@ -30,6 +32,7 @@ class Net:
 @dataclass
 class Pad:
     """Component pad."""
+
     number: str
     type: str  # smd, thru_hole
     shape: str  # roundrect, rect, circle, oval
@@ -67,9 +70,11 @@ class Pad:
 
         # Layers
         if layers := sexp.find("layers"):
-            pad.layers = [layers.get_string(i) or ""
-                          for i in range(len(layers.values))
-                          if isinstance(layers.values[i], str)]
+            pad.layers = [
+                layers.get_string(i) or ""
+                for i in range(len(layers.values))
+                if isinstance(layers.values[i], str)
+            ]
 
         # Net
         if net := sexp.find("net"):
@@ -90,6 +95,7 @@ class Pad:
 @dataclass
 class Footprint:
     """PCB component footprint."""
+
     name: str
     layer: str
     position: Tuple[float, float]
@@ -162,6 +168,7 @@ class Footprint:
 @dataclass
 class Segment:
     """PCB trace segment."""
+
     start: Tuple[float, float]
     end: Tuple[float, float]
     width: float
@@ -199,6 +206,7 @@ class Segment:
 @dataclass
 class Via:
     """PCB via."""
+
     position: Tuple[float, float]
     size: float
     drill: float
@@ -224,9 +232,11 @@ class Via:
         if drill := sexp.find("drill"):
             via.drill = drill.get_float(0) or 0.0
         if layers := sexp.find("layers"):
-            via.layers = [layers.get_string(i) or ""
-                          for i in range(len(layers.values))
-                          if isinstance(layers.values[i], str)]
+            via.layers = [
+                layers.get_string(i) or ""
+                for i in range(len(layers.values))
+                if isinstance(layers.values[i], str)
+            ]
         if net := sexp.find("net"):
             via.net_number = net.get_int(0) or 0
         if uuid := sexp.find("uuid"):
@@ -238,6 +248,7 @@ class Via:
 @dataclass
 class Zone:
     """PCB copper pour zone."""
+
     net_number: int
     net_name: str
     layer: str
@@ -270,6 +281,7 @@ class Zone:
 @dataclass
 class StackupLayer:
     """Stackup layer definition."""
+
     name: str
     type: str  # copper, prepreg, core, solder mask, silk screen
     thickness: float = 0.0
@@ -280,6 +292,7 @@ class StackupLayer:
 @dataclass
 class Setup:
     """PCB setup/design rules."""
+
     stackup: List[StackupLayer] = field(default_factory=list)
     pad_to_mask_clearance: float = 0.0
     copper_finish: str = ""
@@ -531,6 +544,7 @@ class PCB:
     def total_trace_length(self, layer: Optional[str] = None) -> float:
         """Calculate total trace length in mm."""
         import math
+
         total = 0.0
         for seg in self._segments:
             if layer is None or seg.layer == layer:

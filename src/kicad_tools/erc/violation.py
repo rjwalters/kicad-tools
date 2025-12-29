@@ -6,6 +6,7 @@ from enum import Enum
 
 class Severity(Enum):
     """Violation severity level."""
+
     ERROR = "error"
     WARNING = "warning"
     EXCLUSION = "exclusion"
@@ -25,6 +26,7 @@ class Severity(Enum):
 
 class ERCViolationType(Enum):
     """Known ERC violation types from KiCad."""
+
     # Connection errors
     PIN_NOT_CONNECTED = "pin_not_connected"
     PIN_NOT_DRIVEN = "pin_not_driven"
@@ -89,14 +91,12 @@ ERC_TYPE_DESCRIPTIONS = {
     "power_pin_not_driven": "Power input not driven",
     "no_connect_connected": "No-connect pin is connected",
     "no_connect_dangling": "No-connect flag not connected to pin",
-
     # Pin conflicts
     "conflicting_netclass": "Conflicting netclass assignments",
     "different_unit_footprint": "Different footprint across symbol units",
     "different_unit_net": "Different nets on same pin across units",
     "duplicate_pin_error": "Duplicate pin in symbol",
     "duplicate_reference": "Duplicate reference designator",
-
     # Symbol/sheet errors
     "endpoint_off_grid": "Wire endpoint off grid",
     "extra_units": "Extra units in multi-unit symbol",
@@ -109,7 +109,6 @@ ERC_TYPE_DESCRIPTIONS = {
     "missing_power_pin": "Missing power pin",
     "missing_unit": "Missing unit in multi-unit symbol",
     "multiple_net_names": "Wire has multiple net names",
-
     # Schematic structure
     "bus_entry_needed": "Bus entry needed",
     "bus_to_bus_conflict": "Bus to bus conflict",
@@ -122,7 +121,6 @@ ERC_TYPE_DESCRIPTIONS = {
     "unannotated": "Symbol not annotated",
     "unspecified": "Unspecified error",
     "wire_dangling": "Wire not connected at both ends",
-
     # Unknown
     "unknown": "Unknown violation type",
 }
@@ -130,36 +128,53 @@ ERC_TYPE_DESCRIPTIONS = {
 # Category groupings for display
 ERC_CATEGORIES = {
     "Connection": [
-        "pin_not_connected", "pin_not_driven", "power_pin_not_driven",
-        "no_connect_connected", "no_connect_dangling"
+        "pin_not_connected",
+        "pin_not_driven",
+        "power_pin_not_driven",
+        "no_connect_connected",
+        "no_connect_dangling",
     ],
     "Pin Conflicts": [
-        "conflicting_netclass", "different_unit_footprint",
-        "different_unit_net", "duplicate_pin_error", "duplicate_reference"
+        "conflicting_netclass",
+        "different_unit_footprint",
+        "different_unit_net",
+        "duplicate_pin_error",
+        "duplicate_reference",
     ],
     "Labels": [
-        "global_label_dangling", "hier_label_mismatch", "label_dangling",
-        "multiple_net_names", "similar_labels"
+        "global_label_dangling",
+        "hier_label_mismatch",
+        "label_dangling",
+        "multiple_net_names",
+        "similar_labels",
     ],
     "Structure": [
-        "bus_entry_needed", "bus_to_bus_conflict", "bus_to_net_conflict",
-        "endpoint_off_grid", "four_way_junction", "net_not_bus_member",
-        "wire_dangling"
+        "bus_entry_needed",
+        "bus_to_bus_conflict",
+        "bus_to_net_conflict",
+        "endpoint_off_grid",
+        "four_way_junction",
+        "net_not_bus_member",
+        "wire_dangling",
     ],
     "Symbols": [
-        "extra_units", "lib_symbol_issues", "missing_bidi_pin",
-        "missing_input_pin", "missing_power_pin", "missing_unit",
-        "simulation_model", "unannotated"
+        "extra_units",
+        "lib_symbol_issues",
+        "missing_bidi_pin",
+        "missing_input_pin",
+        "missing_power_pin",
+        "missing_unit",
+        "simulation_model",
+        "unannotated",
     ],
-    "Other": [
-        "unresolved_variable", "unspecified", "unknown"
-    ],
+    "Other": ["unresolved_variable", "unspecified", "unknown"],
 }
 
 
 @dataclass
 class ERCViolation:
     """Represents a single ERC violation."""
+
     type: ERCViolationType
     type_str: str  # Original type string from report
     severity: Severity
@@ -200,10 +215,7 @@ class ERCViolation:
     @property
     def type_description(self) -> str:
         """Get human-readable description of the violation type."""
-        return ERC_TYPE_DESCRIPTIONS.get(
-            self.type_str,
-            self.type_str.replace("_", " ").title()
-        )
+        return ERC_TYPE_DESCRIPTIONS.get(self.type_str, self.type_str.replace("_", " ").title())
 
     @property
     def location_str(self) -> str:

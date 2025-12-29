@@ -17,8 +17,8 @@ from .base import (
 # These are slightly more conservative than JLCPCB to ensure compatibility
 
 SEEED_2LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.1524,     # 6 mil
-    min_clearance_mm=0.1524,       # 6 mil
+    min_trace_width_mm=0.1524,  # 6 mil
+    min_clearance_mm=0.1524,  # 6 mil
     min_via_drill_mm=0.3,
     min_via_diameter_mm=0.6,
     min_annular_ring_mm=0.15,
@@ -35,8 +35,8 @@ SEEED_2LAYER_1OZ = DesignRules(
 )
 
 SEEED_2LAYER_2OZ = DesignRules(
-    min_trace_width_mm=0.2,        # 8 mil for 2oz
-    min_clearance_mm=0.2,          # 8 mil
+    min_trace_width_mm=0.2,  # 8 mil for 2oz
+    min_clearance_mm=0.2,  # 8 mil
     min_via_drill_mm=0.3,
     min_via_diameter_mm=0.6,
     min_annular_ring_mm=0.15,
@@ -53,8 +53,8 @@ SEEED_2LAYER_2OZ = DesignRules(
 )
 
 SEEED_4LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.1524,     # 6 mil (conservative)
-    min_clearance_mm=0.1524,       # 6 mil
+    min_trace_width_mm=0.1524,  # 6 mil (conservative)
+    min_clearance_mm=0.1524,  # 6 mil
     min_via_drill_mm=0.3,
     min_via_diameter_mm=0.6,
     min_annular_ring_mm=0.15,
@@ -71,8 +71,8 @@ SEEED_4LAYER_1OZ = DesignRules(
 )
 
 SEEED_4LAYER_2OZ = DesignRules(
-    min_trace_width_mm=0.2,        # 8 mil for 2oz outer
-    min_clearance_mm=0.2,          # 8 mil
+    min_trace_width_mm=0.2,  # 8 mil for 2oz outer
+    min_clearance_mm=0.2,  # 8 mil
     min_via_drill_mm=0.3,
     min_via_diameter_mm=0.6,
     min_annular_ring_mm=0.15,
@@ -94,16 +94,45 @@ SEEED_ASSEMBLY = AssemblyCapabilities(
     min_bga_pitch_mm=0.5,
     max_component_height_mm=25.0,
     supported_packages=[
-        "0201", "0402", "0603", "0805", "1206", "1210",
-        "SOT-23", "SOT-223", "SOT-363",
-        "SOIC-8", "SOIC-14", "SOIC-16",
-        "TSSOP-8", "TSSOP-14", "TSSOP-16", "TSSOP-20", "TSSOP-24", "TSSOP-28",
-        "SSOP-8", "SSOP-16", "SSOP-20", "SSOP-24", "SSOP-28",
-        "QFN-16", "QFN-20", "QFN-24", "QFN-32", "QFN-48",
-        "LQFP-32", "LQFP-48", "LQFP-64", "LQFP-100",
-        "TQFP-32", "TQFP-44", "TQFP-48", "TQFP-64",
+        "0201",
+        "0402",
+        "0603",
+        "0805",
+        "1206",
+        "1210",
+        "SOT-23",
+        "SOT-223",
+        "SOT-363",
+        "SOIC-8",
+        "SOIC-14",
+        "SOIC-16",
+        "TSSOP-8",
+        "TSSOP-14",
+        "TSSOP-16",
+        "TSSOP-20",
+        "TSSOP-24",
+        "TSSOP-28",
+        "SSOP-8",
+        "SSOP-16",
+        "SSOP-20",
+        "SSOP-24",
+        "SSOP-28",
+        "QFN-16",
+        "QFN-20",
+        "QFN-24",
+        "QFN-32",
+        "QFN-48",
+        "LQFP-32",
+        "LQFP-48",
+        "LQFP-64",
+        "LQFP-100",
+        "TQFP-32",
+        "TQFP-44",
+        "TQFP-48",
+        "TQFP-64",
         "BGA",
-        "TO-252", "TO-263",
+        "TO-252",
+        "TO-263",
     ],
     supports_double_sided=True,
     supports_bga=True,

@@ -20,6 +20,7 @@ class Label:
     Labels assign a name to a wire/net at a specific point.
     The same label name on different wires connects them.
     """
+
     text: str
     position: Tuple[float, float]
     rotation: float = 0
@@ -33,11 +34,11 @@ class Label:
         rot = 0.0
         uuid = ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         return cls(text=text, position=pos, rotation=rot, uuid=uuid)
@@ -54,6 +55,7 @@ class HierarchicalLabel:
     Hierarchical labels connect signals across schematic hierarchy.
     They appear on both the sub-sheet and the parent sheet.
     """
+
     text: str
     position: Tuple[float, float]
     rotation: float = 0
@@ -69,14 +71,14 @@ class HierarchicalLabel:
         shape = "input"
         uuid = ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
 
-        if s := sexp.find('shape'):
+        if s := sexp.find("shape"):
             shape = s.get_string(0) or "input"
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         return cls(text=text, position=pos, rotation=rot, shape=shape, uuid=uuid)
@@ -93,6 +95,7 @@ class GlobalLabel:
     Global labels connect signals across all sheets in a project
     without needing hierarchical connections.
     """
+
     text: str
     position: Tuple[float, float]
     rotation: float = 0
@@ -108,14 +111,14 @@ class GlobalLabel:
         shape = "input"
         uuid = ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
 
-        if s := sexp.find('shape'):
+        if s := sexp.find("shape"):
             shape = s.get_string(0) or "input"
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
         return cls(text=text, position=pos, rotation=rot, shape=shape, uuid=uuid)
@@ -131,6 +134,7 @@ class PowerSymbol:
 
     Power symbols are special labels that connect to power nets.
     """
+
     lib_id: str
     position: Tuple[float, float]
     rotation: float = 0
@@ -145,11 +149,11 @@ class PowerSymbol:
         Returns None if this is not a power symbol.
         """
         lib_id = ""
-        if lid := sexp.find('lib_id'):
+        if lid := sexp.find("lib_id"):
             lib_id = lid.get_string(0) or ""
 
         # Power symbols typically have lib_id starting with "power:"
-        if not lib_id.startswith('power:'):
+        if not lib_id.startswith("power:"):
             return None
 
         pos = (0.0, 0.0)
@@ -157,15 +161,15 @@ class PowerSymbol:
         uuid = ""
         value = ""
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
 
-        if uuid_node := sexp.find('uuid'):
+        if uuid_node := sexp.find("uuid"):
             uuid = uuid_node.get_string(0) or ""
 
-        for prop in sexp.find_all('property'):
-            if prop.get_string(0) == 'Value':
+        for prop in sexp.find_all("property"):
+            if prop.get_string(0) == "Value":
                 value = prop.get_string(1) or ""
                 break
 

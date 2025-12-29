@@ -94,10 +94,7 @@ def get_profile(manufacturer_id: str) -> ManufacturerProfile:
     # Get profile
     if normalized not in _PROFILES:
         available = ", ".join(sorted(_PROFILES.keys()))
-        raise ValueError(
-            f"Unknown manufacturer: {manufacturer_id!r}. "
-            f"Available: {available}"
-        )
+        raise ValueError(f"Unknown manufacturer: {manufacturer_id!r}. Available: {available}")
 
     return _PROFILES[normalized]
 
@@ -182,9 +179,11 @@ def find_compatible_manufacturers(
 
         # Check design rules
         rules = profile.get_design_rules(layers)
-        if (trace_width_mm >= rules.min_trace_width_mm and
-            clearance_mm >= rules.min_clearance_mm and
-            via_drill_mm >= rules.min_via_drill_mm):
+        if (
+            trace_width_mm >= rules.min_trace_width_mm
+            and clearance_mm >= rules.min_clearance_mm
+            and via_drill_mm >= rules.min_via_drill_mm
+        ):
             compatible.append(profile)
 
     return compatible

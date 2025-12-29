@@ -204,9 +204,7 @@ def load_pcb_for_routing(
         # Parse pads - match the entire pad block first, then extract fields
         pads: List[dict] = []
         # Pattern captures pad number, type, and full content up to closing paren chain
-        pad_block_pattern = re.compile(
-            r'\(pad\s+"([^"]+)"\s+(\w+)\s+\w+\s+(.+?)\n\s*\)', re.DOTALL
-        )
+        pad_block_pattern = re.compile(r'\(pad\s+"([^"]+)"\s+(\w+)\s+\w+\s+(.+?)\n\s*\)', re.DOTALL)
         for pad_match in re.finditer(pad_block_pattern, section):
             pad_num = pad_match.group(1)
             pad_type = pad_match.group(2)  # smd or thru_hole

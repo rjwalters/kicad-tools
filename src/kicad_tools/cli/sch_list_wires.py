@@ -35,12 +35,11 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["table", "json", "csv"],
-                        default="table", help="Output format")
-    parser.add_argument("--stats", action="store_true",
-                        help="Show statistics only")
-    parser.add_argument("--junctions", action="store_true",
-                        help="Include junction points")
+    parser.add_argument(
+        "--format", choices=["table", "json", "csv"], default="table", help="Output format"
+    )
+    parser.add_argument("--stats", action="store_true", help="Show statistics only")
+    parser.add_argument("--junctions", action="store_true", help="Include junction points")
 
     args = parser.parse_args()
 
@@ -141,7 +140,7 @@ def output_json(wires, junctions, show_junctions):
             "wire_count": len(wires),
             "total_length": sum(w.length for w in wires),
             "junction_count": len(junctions),
-        }
+        },
     }
 
     if show_junctions:

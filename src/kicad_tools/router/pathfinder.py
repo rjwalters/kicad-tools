@@ -32,9 +32,7 @@ class AStarNode:
     layer: int = field(compare=False)
     parent: Optional["AStarNode"] = field(compare=False, default=None)
     via_from_parent: bool = field(compare=False, default=False)
-    direction: Tuple[int, int] = field(
-        compare=False, default=(0, 0)
-    )  # (dx, dy) from parent
+    direction: Tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
 
 
 class Router:
@@ -94,8 +92,7 @@ class Router:
         self._via_half_cells = max(
             1,
             math.ceil(
-                (self.rules.via_diameter / 2 + self.rules.via_clearance)
-                / self.grid.resolution
+                (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
             ),
         )
 
@@ -116,12 +113,8 @@ class Router:
                           non-obstacle blocked cells (they'll get high cost instead)
         """
         # Check cells within trace width radius
-        for dy in range(
-            -self._trace_half_width_cells, self._trace_half_width_cells + 1
-        ):
-            for dx in range(
-                -self._trace_half_width_cells, self._trace_half_width_cells + 1
-            ):
+        for dy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
+            for dx in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
                 cx, cy = gx + dx, gy + dy
                 if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
                     return True
@@ -255,9 +248,7 @@ class Router:
 
         # Start nodes - add one for each valid start layer
         for sl in start_layers:
-            start_h = self.heuristic.estimate(
-                start_gx, start_gy, sl, (0, 0), heuristic_context
-            )
+            start_h = self.heuristic.estimate(start_gx, start_gy, sl, (0, 0), heuristic_context)
             start_node = AStarNode(start_h, 0, start_gx, start_gy, sl)
             heapq.heappush(open_set, start_node)
             g_scores[(start_gx, start_gy, sl)] = 0
@@ -276,11 +267,7 @@ class Router:
             closed_set.add(current_key)
 
             # Goal check - accept any valid end layer for PTH pads
-            if (
-                current.x == end_gx
-                and current.y == end_gy
-                and current.layer in end_layers
-            ):
+            if current.x == end_gx and current.y == end_gy and current.layer in end_layers:
                 return self._reconstruct_route(current, start, end)
 
             # Explore neighbors
@@ -321,12 +308,8 @@ class Router:
                 if cell.blocked:
                     # Check if this is exactly the start or end pad center
                     # For PTH pads, accept any valid layer
-                    is_start_center = (
-                        nx == start_gx and ny == start_gy and nlayer in start_layers
-                    )
-                    is_end_center = (
-                        nx == end_gx and ny == end_gy and nlayer in end_layers
-                    )
+                    is_start_center = nx == start_gx and ny == start_gy and nlayer in start_layers
+                    is_end_center = nx == end_gx and ny == end_gy and nlayer in end_layers
 
                     if is_start_center or is_end_center:
                         # Allow routing through our own pad centers
@@ -334,9 +317,7 @@ class Router:
                             continue  # Block if it's not our net
                     else:
                         # All other blocked cells are obstacles - use full check
-                        if self._is_trace_blocked(
-                            nx, ny, nlayer, start.net, allow_sharing
-                        ):
+                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
                             continue
 
                 neighbor_key = (nx, ny, nlayer)
@@ -371,9 +352,7 @@ class Router:
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
                     g_scores[neighbor_key] = new_g
-                    h = self.heuristic.estimate(
-                        nx, ny, nlayer, new_direction, heuristic_context
-                    )
+                    h = self.heuristic.estimate(nx, ny, nlayer, new_direction, heuristic_context)
                     f = new_g + weight * h  # Weighted A*
 
                     neighbor_node = AStarNode(
@@ -404,9 +383,7 @@ class Router:
                     continue
 
                 # Via cost + congestion at new layer
-                congestion_cost = self._get_congestion_cost(
-                    current.x, current.y, new_layer
-                )
+                congestion_cost = self._get_congestion_cost(current.x, current.y, new_layer)
 
                 # Add negotiated congestion cost if in negotiated mode
                 negotiated_cost = 0.0
@@ -416,10 +393,7 @@ class Router:
                     )
 
                 new_g = (
-                    current.g_score
-                    + self.rules.cost_via
-                    + congestion_cost
-                    + negotiated_cost
+                    current.g_score + self.rules.cost_via + congestion_cost + negotiated_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -438,9 +412,7 @@ class Router:
         # No path found
         return None
 
-    def _reconstruct_route(
-        self, end_node: AStarNode, start_pad: Pad, end_pad: Pad
-    ) -> Route:
+    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route:
         """Reconstruct the route from A* result."""
         route = Route(net=start_pad.net, net_name=start_pad.net_name)
 

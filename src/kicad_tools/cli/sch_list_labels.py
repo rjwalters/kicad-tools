@@ -29,21 +29,25 @@ import sys
 from kicad_tools.schema import Schematic
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="List labels in a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["table", "json", "csv"],
-                        default="table", help="Output format")
-    parser.add_argument("--type", choices=["all", "local", "global", "hierarchical", "power"],
-                        default="all", help="Filter by label type")
-    parser.add_argument("--filter", dest="pattern",
-                        help="Filter by label text pattern")
+    parser.add_argument(
+        "--format", choices=["table", "json", "csv"], default="table", help="Output format"
+    )
+    parser.add_argument(
+        "--type",
+        choices=["all", "local", "global", "hierarchical", "power"],
+        default="all",
+        help="Filter by label type",
+    )
+    parser.add_argument("--filter", dest="pattern", help="Filter by label text pattern")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     try:
         sch = Schematic.load(args.schematic)
@@ -59,47 +63,55 @@ def main():
 
     if args.type in ["all", "local"]:
         for lbl in sch.labels:
-            labels.append({
-                "type": "local",
-                "text": lbl.text,
-                "position": lbl.position,
-                "rotation": lbl.rotation,
-                "uuid": lbl.uuid,
-            })
+            labels.append(
+                {
+                    "type": "local",
+                    "text": lbl.text,
+                    "position": lbl.position,
+                    "rotation": lbl.rotation,
+                    "uuid": lbl.uuid,
+                }
+            )
 
     if args.type in ["all", "global"]:
         for lbl in sch.global_labels:
-            labels.append({
-                "type": "global",
-                "text": lbl.text,
-                "position": lbl.position,
-                "rotation": lbl.rotation,
-                "shape": lbl.shape,
-                "uuid": lbl.uuid,
-            })
+            labels.append(
+                {
+                    "type": "global",
+                    "text": lbl.text,
+                    "position": lbl.position,
+                    "rotation": lbl.rotation,
+                    "shape": lbl.shape,
+                    "uuid": lbl.uuid,
+                }
+            )
 
     if args.type in ["all", "hierarchical"]:
         for lbl in sch.hierarchical_labels:
-            labels.append({
-                "type": "hierarchical",
-                "text": lbl.text,
-                "position": lbl.position,
-                "rotation": lbl.rotation,
-                "shape": lbl.shape,
-                "uuid": lbl.uuid,
-            })
+            labels.append(
+                {
+                    "type": "hierarchical",
+                    "text": lbl.text,
+                    "position": lbl.position,
+                    "rotation": lbl.rotation,
+                    "shape": lbl.shape,
+                    "uuid": lbl.uuid,
+                }
+            )
 
     if args.type in ["all", "power"]:
         for sym in sch.symbols:
             if sym.lib_id.startswith("power:"):
-                labels.append({
-                    "type": "power",
-                    "text": sym.value,
-                    "position": sym.position,
-                    "rotation": sym.rotation,
-                    "lib_id": sym.lib_id,
-                    "uuid": sym.uuid,
-                })
+                labels.append(
+                    {
+                        "type": "power",
+                        "text": sym.value,
+                        "position": sym.position,
+                        "rotation": sym.rotation,
+                        "lib_id": sym.lib_id,
+                        "uuid": sym.uuid,
+                    }
+                )
 
     # Apply pattern filter
     if args.pattern:
@@ -162,8 +174,10 @@ def output_csv(labels):
     print("Type,Text,X,Y,Rotation,Shape,UUID")
     for lbl in labels:
         shape = lbl.get("shape", lbl.get("lib_id", ""))
-        print(f"{lbl['type']},{lbl['text']},{lbl['position'][0]},{lbl['position'][1]},"
-              f"{lbl['rotation']},{shape},{lbl['uuid']}")
+        print(
+            f"{lbl['type']},{lbl['text']},{lbl['position'][0]},{lbl['position'][1]},"
+            f"{lbl['rotation']},{shape},{lbl['uuid']}"
+        )
 
 
 if __name__ == "__main__":

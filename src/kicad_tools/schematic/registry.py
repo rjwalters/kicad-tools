@@ -59,6 +59,7 @@ def _default_symbol_paths() -> list[Path]:
 @dataclass
 class Pin:
     """Represents a symbol pin with position and properties."""
+
     name: str
     number: str
     x: float  # Position relative to symbol center
@@ -79,6 +80,7 @@ class Pin:
 @dataclass
 class SymbolDef:
     """Symbol definition extracted from library."""
+
     lib_id: str
     name: str
     raw_sexp: str  # Original S-expression for embedding
@@ -154,33 +156,28 @@ class SymbolDef:
 
         # Only add library prefix to the MAIN symbol definition, not unit symbols
         result = re.sub(
-            rf'\(symbol "{re.escape(sym_name)}"(?!_\d)',
-            f'(symbol "{lib_name}:{sym_name}"',
-            result
+            rf'\(symbol "{re.escape(sym_name)}"(?!_\d)', f'(symbol "{lib_name}:{sym_name}"', result
         )
 
         # Also update extends references to use the library prefix
-        result = re.sub(
-            r'\(extends "([^"]+)"\)',
-            f'(extends "{lib_name}:\\1")',
-            result
-        )
+        result = re.sub(r'\(extends "([^"]+)"\)', f'(extends "{lib_name}:\\1")', result)
 
         # Add proper indentation for embedding in lib_symbols
-        lines = result.split('\n')
+        lines = result.split("\n")
         indented_lines = []
         for line in lines:
             if line.strip():
-                if line.lstrip().startswith('(symbol "') and not line.startswith('\t'):
-                    indented_lines.append('\t\t' + line)
+                if line.lstrip().startswith('(symbol "') and not line.startswith("\t"):
+                    indented_lines.append("\t\t" + line)
                 else:
-                    indented_lines.append('\t' + line)
-        return '\n'.join(indented_lines)
+                    indented_lines.append("\t" + line)
+        return "\n".join(indented_lines)
 
 
 @dataclass
 class LibraryIndex:
     """Index of symbols in a library file."""
+
     path: Path
     name: str
     symbols: dict[str, int] = field(default_factory=dict)  # name -> byte offset
@@ -198,7 +195,7 @@ class LibraryIndex:
         for match in re.finditer(r'^\t\(symbol "([^"]+)"', content, re.MULTILINE):
             sym_name = match.group(1)
             # Skip unit symbols (have _N_N suffix)
-            if not re.match(r'.+_\d+_\d+$', sym_name):
+            if not re.match(r".+_\d+_\d+$", sym_name):
                 symbols[sym_name] = match.start()
 
         return cls(path=path, name=name, symbols=symbols, _content=content)
@@ -246,19 +243,15 @@ class SymbolRegistry:
             # Regulators
             "XC6206P332MR-G": "Regulator_Linear:XC6206PxxxMR",
             "XC6206-3.3V": "Regulator_Linear:AP2204K-1.5",  # Compatible pinout
-
             # Passive components
             "470R_FB": "Device:FerriteBead_Small",
-
             # Discretes
             "LED_0603": "Device:LED",
             "R_0603": "Device:R",
             "C_0603": "Device:C",
             "C_0805": "Device:C",
-
             # Connectors
             "PJ-312": "Connector_Audio:AudioJack3",
-
             # Oscillators
             "TCXO_24.576MHz": "Oscillator:ASE-xxxMHz",
         }
@@ -271,8 +264,9 @@ class SymbolRegistry:
         """Resolve an OPL part number to a lib_id."""
         if opl_part in self._opl_mapping:
             return self._opl_mapping[opl_part]
-        raise KeyError(f"Unknown OPL part: {opl_part}. "
-                      f"Known parts: {list(self._opl_mapping.keys())}")
+        raise KeyError(
+            f"Unknown OPL part: {opl_part}. Known parts: {list(self._opl_mapping.keys())}"
+        )
 
     def _get_library_index(self, lib_name: str) -> LibraryIndex:
         """Get or build library index."""
@@ -359,7 +353,7 @@ class SymbolRegistry:
             description=description,
             keywords=keywords,
             footprint=footprint,
-            datasheet=datasheet
+            datasheet=datasheet,
         )
 
     def _parse_pins(self, sexp: str) -> list[Pin]:
@@ -367,23 +361,23 @@ class SymbolRegistry:
         pins = []
 
         # Split on "(pin " to get individual pin sections
-        pin_sections = re.split(r'\n\s*\(pin\s+', sexp)[1:]
+        pin_sections = re.split(r"\n\s*\(pin\s+", sexp)[1:]
 
         for section in pin_sections:
             # Extract pin type and style from start
-            type_match = re.match(r'(\w+)\s+(\w+)', section)
+            type_match = re.match(r"(\w+)\s+(\w+)", section)
             if not type_match:
                 continue
 
             pin_type = type_match.group(1)
 
             # Extract position: (at X Y ANGLE)
-            at_match = re.search(r'\(at\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)', section)
+            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)", section)
             if not at_match:
                 continue
 
             # Extract length
-            length_match = re.search(r'\(length\s+([-\d.]+)\)', section)
+            length_match = re.search(r"\(length\s+([-\d.]+)\)", section)
             length = float(length_match.group(1)) if length_match else 2.54
 
             # Extract name
@@ -395,15 +389,17 @@ class SymbolRegistry:
             number = number_match.group(1) if number_match else ""
 
             if number:  # Must have at least a pin number
-                pins.append(Pin(
-                    name=name,
-                    number=number,
-                    x=float(at_match.group(1)),
-                    y=float(at_match.group(2)),
-                    angle=float(at_match.group(3)),
-                    length=length,
-                    pin_type=pin_type
-                ))
+                pins.append(
+                    Pin(
+                        name=name,
+                        number=number,
+                        x=float(at_match.group(1)),
+                        y=float(at_match.group(2)),
+                        angle=float(at_match.group(3)),
+                        length=length,
+                        pin_type=pin_type,
+                    )
+                )
 
         return pins
 
@@ -533,15 +529,11 @@ class SymbolRegistry:
         )
 
         # Symbols per library
-        symbols_per_lib = {
-            name: len(idx.symbols)
-            for name, idx in self._library_index.items()
-        }
+        symbols_per_lib = {name: len(idx.symbols) for name, idx in self._library_index.items()}
 
         # Which libraries have content cached
         content_cached = [
-            name for name, idx in self._library_index.items()
-            if idx._content is not None
+            name for name, idx in self._library_index.items() if idx._content is not None
         ]
 
         return {

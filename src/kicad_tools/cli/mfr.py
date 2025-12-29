@@ -30,9 +30,9 @@ from kicad_tools.manufacturers import (
 
 def cmd_list(args):
     """List available manufacturers."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("AVAILABLE MANUFACTURERS")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     for profile in list_manufacturers():
         assembly = "PCBA" if profile.supports_assembly() else "PCB only"
@@ -42,7 +42,7 @@ def cmd_list(args):
             print(f"  {'':<12} Parts: {parts}")
         print()
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print("Use 'mfr.py info <id>' for detailed information")
     print("Use 'mfr.py rules <id>' for design rules")
 
@@ -55,9 +55,9 @@ def cmd_info(args):
         print(f"Error: {e}")
         sys.exit(1)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nBasic Info:")
     print(f"  ID:       {profile.id}")
@@ -85,13 +85,13 @@ def cmd_info(args):
             print(f"  Catalog: {lib.catalog_url}")
         print("  Tiers:")
         for tier, info in lib.tiers.items():
-            desc = info.get('description', '')
-            lead = info.get('lead_time_days', '?')
-            fee = info.get('setup_fee_usd', 0)
+            desc = info.get("description", "")
+            lead = info.get("lead_time_days", "?")
+            fee = info.get("setup_fee_usd", 0)
             print(f"    {tier}: {desc}")
             print(f"          Lead time: {lead} days, Setup: ${fee}")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def cmd_rules(args):
@@ -104,13 +104,17 @@ def cmd_rules(args):
 
     rules = profile.get_design_rules(args.layers, args.copper)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()} - {args.layers}-LAYER {args.copper}oz RULES")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nTrace & Spacing:")
-    print(f"  Min trace width:    {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
-    print(f"  Min clearance:      {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
+    print(
+        f"  Min trace width:    {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
+    )
+    print(
+        f"  Min clearance:      {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
+    )
 
     print("\nVias:")
     print(f"  Min via drill:      {rules.min_via_drill_mm} mm")
@@ -139,11 +143,11 @@ def cmd_rules(args):
         print(f"  Inner copper:       {rules.inner_copper_oz} oz")
 
     if args.json:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("JSON:")
         print(json.dumps(rules.to_dict(), indent=2))
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def cmd_compare(args):
@@ -153,9 +157,9 @@ def cmd_compare(args):
         copper_oz=args.copper,
     )
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"MANUFACTURER COMPARISON - {args.layers}-LAYER {args.copper}oz")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # Header
     mfrs = list(rules_by_mfr.keys())
@@ -218,7 +222,7 @@ def cmd_compare(args):
         row += f"{lib[:12]:>12}"
     print(row)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
 
 
 def cmd_find(args):
@@ -231,9 +235,9 @@ def cmd_find(args):
         needs_assembly=args.assembly,
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("COMPATIBLE MANUFACTURERS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nDesign Constraints:")
     print(f"  Trace width: {args.trace} mil ({args.trace * 0.0254:.3f} mm)")
@@ -250,7 +254,7 @@ def cmd_find(args):
         print("\n✗ No compatible manufacturers found")
         print("  Consider relaxing constraints or using different design rules")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def cmd_export_dru(args):
@@ -264,7 +268,7 @@ def cmd_export_dru(args):
     rules = profile.get_design_rules(args.layers, args.copper)
 
     # Generate .kicad_dru content
-    dru_content = f'''(version 1)
+    dru_content = f"""(version 1)
 (rule "Trace Width"
   (constraint track_width (min {rules.min_trace_width_mm}mm)))
 (rule "Clearance"
@@ -281,7 +285,7 @@ def cmd_export_dru(args):
   (constraint hole_to_hole (min {rules.min_hole_to_edge_mm}mm)))
 (rule "Silkscreen Width"
   (constraint silk_clearance (min {rules.min_silkscreen_width_mm}mm)))
-'''
+"""
 
     # Output
     if args.output:
@@ -295,7 +299,7 @@ def cmd_export_dru(args):
     print(f"DRC rules exported to: {output_path}")
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="PCB Manufacturer Management Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -310,49 +314,49 @@ Examples:
         """,
     )
 
-    subparsers = parser.add_subparsers(dest='command', help='Command')
+    subparsers = parser.add_subparsers(dest="command", help="Command")
 
     # list
-    p_list = subparsers.add_parser('list', help='List manufacturers')
+    p_list = subparsers.add_parser("list", help="List manufacturers")
     p_list.set_defaults(func=cmd_list)
 
     # info
-    p_info = subparsers.add_parser('info', help='Show manufacturer info')
-    p_info.add_argument('manufacturer', help='Manufacturer ID')
+    p_info = subparsers.add_parser("info", help="Show manufacturer info")
+    p_info.add_argument("manufacturer", help="Manufacturer ID")
     p_info.set_defaults(func=cmd_info)
 
     # rules
-    p_rules = subparsers.add_parser('rules', help='Show design rules')
-    p_rules.add_argument('manufacturer', help='Manufacturer ID')
-    p_rules.add_argument('-l', '--layers', type=int, default=4, help='Layer count')
-    p_rules.add_argument('-c', '--copper', type=float, default=1.0, help='Copper weight (oz)')
-    p_rules.add_argument('--json', action='store_true', help='Include JSON output')
+    p_rules = subparsers.add_parser("rules", help="Show design rules")
+    p_rules.add_argument("manufacturer", help="Manufacturer ID")
+    p_rules.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_rules.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    p_rules.add_argument("--json", action="store_true", help="Include JSON output")
     p_rules.set_defaults(func=cmd_rules)
 
     # compare
-    p_compare = subparsers.add_parser('compare', help='Compare manufacturers')
-    p_compare.add_argument('-l', '--layers', type=int, default=4, help='Layer count')
-    p_compare.add_argument('-c', '--copper', type=float, default=1.0, help='Copper weight (oz)')
+    p_compare = subparsers.add_parser("compare", help="Compare manufacturers")
+    p_compare.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_compare.set_defaults(func=cmd_compare)
 
     # find
-    p_find = subparsers.add_parser('find', help='Find compatible manufacturers')
-    p_find.add_argument('--trace', type=float, default=5.0, help='Min trace width (mil)')
-    p_find.add_argument('--clearance', type=float, default=5.0, help='Min clearance (mil)')
-    p_find.add_argument('--via', type=float, default=0.3, help='Min via drill (mm)')
-    p_find.add_argument('-l', '--layers', type=int, default=4, help='Layer count')
-    p_find.add_argument('--assembly', action='store_true', help='Require assembly')
+    p_find = subparsers.add_parser("find", help="Find compatible manufacturers")
+    p_find.add_argument("--trace", type=float, default=5.0, help="Min trace width (mil)")
+    p_find.add_argument("--clearance", type=float, default=5.0, help="Min clearance (mil)")
+    p_find.add_argument("--via", type=float, default=0.3, help="Min via drill (mm)")
+    p_find.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_find.add_argument("--assembly", action="store_true", help="Require assembly")
     p_find.set_defaults(func=cmd_find)
 
     # export-dru
-    p_dru = subparsers.add_parser('export-dru', help='Export KiCad DRC rules')
-    p_dru.add_argument('manufacturer', help='Manufacturer ID')
-    p_dru.add_argument('-l', '--layers', type=int, default=4, help='Layer count')
-    p_dru.add_argument('-c', '--copper', type=float, default=1.0, help='Copper weight (oz)')
-    p_dru.add_argument('-o', '--output', type=Path, help='Output path')
+    p_dru = subparsers.add_parser("export-dru", help="Export KiCad DRC rules")
+    p_dru.add_argument("manufacturer", help="Manufacturer ID")
+    p_dru.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    p_dru.add_argument("-o", "--output", type=Path, help="Output path")
     p_dru.set_defaults(func=cmd_export_dru)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command is None:
         parser.print_help()

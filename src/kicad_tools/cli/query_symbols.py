@@ -44,6 +44,7 @@ PIN_TYPES = {
 @dataclass
 class SymbolPin:
     """A pin on a symbol."""
+
     number: str
     name: str
     pin_type: str
@@ -102,6 +103,7 @@ class SymbolPin:
 @dataclass
 class Symbol:
     """A symbol definition."""
+
     name: str
     reference: str = ""
     value: str = ""
@@ -218,6 +220,7 @@ class Symbol:
 @dataclass
 class SymbolLibrary:
     """A symbol library file."""
+
     path: Path
     version: int = 0
     generator: str = ""
@@ -263,36 +266,44 @@ class SymbolLibrary:
         query_lower = query.lower()
         results = []
         for sym in self.symbols:
-            if (query_lower in sym.name.lower() or
-                query_lower in sym.description.lower() or
-                query_lower in sym.keywords.lower()):
+            if (
+                query_lower in sym.name.lower()
+                or query_lower in sym.description.lower()
+                or query_lower in sym.keywords.lower()
+            ):
                 results.append(sym)
         return results
 
 
 def print_library_summary(lib: SymbolLibrary):
     """Print library summary."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"SYMBOL LIBRARY: {lib.path.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Path: {lib.path}")
     print(f"Version: {lib.version}")
     print(f"Generator: {lib.generator}")
     print(f"Symbols: {len(lib.symbols)}")
 
     if lib.symbols:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("SYMBOLS:")
         for sym in lib.symbols:
-            desc = f" - {sym.description[:50]}..." if len(sym.description) > 50 else f" - {sym.description}" if sym.description else ""
+            desc = (
+                f" - {sym.description[:50]}..."
+                if len(sym.description) > 50
+                else f" - {sym.description}"
+                if sym.description
+                else ""
+            )
             print(f"  {sym.name} ({sym.pin_count} pins){desc}")
 
 
 def print_symbol_detail(sym: Symbol, show_pins: bool = True):
     """Print detailed symbol information."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"SYMBOL: {sym.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nProperties:")
     print(f"  Reference: {sym.reference}")
@@ -321,10 +332,10 @@ def print_symbol_detail(sym: Symbol, show_pins: bool = True):
         print(f"  {desc}: {count}")
 
     if show_pins and sym.pins:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("PINS:")
         print(f"  {'#':<6} {'Name':<20} {'Type':<15} {'Dir':<6}")
-        print(f"  {'-'*6} {'-'*20} {'-'*15} {'-'*6}")
+        print(f"  {'-' * 6} {'-' * 20} {'-' * 15} {'-' * 6}")
 
         # Sort pins by number (numeric if possible)
         def pin_sort_key(p):
@@ -339,9 +350,9 @@ def print_symbol_detail(sym: Symbol, show_pins: bool = True):
 
 def print_pins_table(sym: Symbol, group_by_type: bool = False):
     """Print pins in tabular format."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"PINS: {sym.name} ({sym.pin_count} total)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if group_by_type:
         # Group by type
@@ -363,7 +374,7 @@ def print_pins_table(sym: Symbol, group_by_type: bool = False):
                 return (1, p.number)
 
         print(f"\n{'#':<6} {'Name':<25} {'Type':<15}")
-        print(f"{'-'*6} {'-'*25} {'-'*15}")
+        print(f"{'-' * 6} {'-' * 25} {'-' * 15}")
 
         for pin in sorted(sym.pins, key=pin_sort_key):
             print(f"{pin.number:<6} {pin.name:<25} {pin.type_description:<15}")
@@ -371,19 +382,19 @@ def print_pins_table(sym: Symbol, group_by_type: bool = False):
 
 def compare_symbols(sym1: Symbol, sym2: Symbol):
     """Compare two symbols side by side."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"COMPARISON: {sym1.name} vs {sym2.name}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # Basic comparison
     print(f"\n{'Property':<20} {sym1.name:<25} {sym2.name:<25}")
-    print(f"{'-'*20} {'-'*25} {'-'*25}")
+    print(f"{'-' * 20} {'-' * 25} {'-' * 25}")
     print(f"{'Pin Count':<20} {sym1.pin_count:<25} {sym2.pin_count:<25}")
     print(f"{'Footprint':<20} {sym1.footprint[:23]:<25} {sym2.footprint[:23]:<25}")
 
     # Pin type comparison
     print(f"\n{'Pin Types':<20} {sym1.name:<25} {sym2.name:<25}")
-    print(f"{'-'*20} {'-'*25} {'-'*25}")
+    print(f"{'-' * 20} {'-' * 25} {'-' * 25}")
 
     all_types = set()
     for pin in sym1.pins:
@@ -404,7 +415,7 @@ def compare_symbols(sym1: Symbol, sym2: Symbol):
     only1 = names1 - names2
     only2 = names2 - names1
 
-    print(f"\n{'─'*70}")
+    print(f"\n{'─' * 70}")
     print("Pin Name Analysis:")
     print(f"  Common pins: {len(common)}")
     print(f"  Only in {sym1.name}: {len(only1)}")
@@ -483,24 +494,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("libraries", nargs="*", type=Path,
-                        help="Symbol library file(s) (.kicad_sym)")
-    parser.add_argument("--symbol", "-s", type=str, metavar="NAME",
-                        help="Show specific symbol by name")
-    parser.add_argument("--find", "-f", type=str, metavar="QUERY",
-                        help="Search for symbols matching query")
-    parser.add_argument("--compare", "-c", type=Path, metavar="LIB2",
-                        help="Compare symbol with another library's symbol")
+    parser.add_argument(
+        "libraries", nargs="*", type=Path, help="Symbol library file(s) (.kicad_sym)"
+    )
+    parser.add_argument(
+        "--symbol", "-s", type=str, metavar="NAME", help="Show specific symbol by name"
+    )
+    parser.add_argument(
+        "--find", "-f", type=str, metavar="QUERY", help="Search for symbols matching query"
+    )
+    parser.add_argument(
+        "--compare",
+        "-c",
+        type=Path,
+        metavar="LIB2",
+        help="Compare symbol with another library's symbol",
+    )
 
     # Output modes
-    parser.add_argument("--list", "-l", action="store_true",
-                        help="List all symbols in library")
-    parser.add_argument("--pins", "-p", action="store_true",
-                        help="Show detailed pin information")
-    parser.add_argument("--group-pins", action="store_true",
-                        help="Group pins by type")
-    parser.add_argument("--json", action="store_true",
-                        help="Output as JSON")
+    parser.add_argument("--list", "-l", action="store_true", help="List all symbols in library")
+    parser.add_argument("--pins", "-p", action="store_true", help="Show detailed pin information")
+    parser.add_argument("--group-pins", action="store_true", help="Group pins by type")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
 

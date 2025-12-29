@@ -1,5 +1,9 @@
 # kicad-tools
 
+[![PyPI version](https://badge.fury.io/py/kicad-tools.svg)](https://pypi.org/project/kicad-tools/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Standalone Python tools for parsing and manipulating KiCad schematic and PCB files.
 
 **No running KiCad instance required** - works directly with `.kicad_sch` and `.kicad_pcb` files.
@@ -55,6 +59,27 @@ for sheet in sch.sheets:
     print(f"Sheet: {sheet.name}")
 ```
 
+### PCB Autorouter
+
+```python
+from kicad_tools.router import Autorouter, DesignRules
+
+# Configure design rules
+rules = DesignRules(
+    grid_resolution=0.25,  # mm
+    trace_width=0.2,       # mm
+    clearance=0.15,        # mm
+)
+
+# Create router and add components
+router = Autorouter(width=100, height=80, rules=rules)
+router.add_component("U1", pads=[...])
+
+# Route all nets
+result = router.route_all()
+print(f"Routed {result.routed_nets}/{result.total_nets} nets")
+```
+
 ## CLI Commands
 
 ### Unified CLI (`kct` or `kicad-tools`)
@@ -86,21 +111,54 @@ All commands support `--format json` for machine-readable output.
 |---------|-------------|
 | `kicad-lib-symbols` | List symbols in library |
 
+## Modules
+
+| Module | Description |
+|--------|-------------|
+| `core` | S-expression parsing and file I/O |
+| `schema` | Data models (Schematic, PCB, Symbol, Wire, Label) |
+| `drc` | Design Rule Check report parsing |
+| `erc` | Electrical Rule Check report parsing |
+| `manufacturers` | PCB fab profiles (JLCPCB, OSHPark, PCBWay, Seeed) |
+| `operations` | Schematic operations (net tracing, symbol replacement) |
+| `router` | A* PCB autorouter with pluggable heuristics |
+
 ## Features
 
-- **Pure Python** - No KiCad installation needed for parsing
-- **Round-trip editing** - Parse, modify, and save files
-- **Full S-expression support** - Handles all KiCad file formats
-- **Schematic analysis** - Symbols, wires, labels, hierarchy
+- **Pure Python parsing** - No KiCad installation needed
+- **Round-trip editing** - Parse, modify, and save files preserving formatting
+- **Full S-expression support** - Handles all KiCad 8.0+ file formats
+- **Schematic analysis** - Symbols, wires, labels, hierarchy traversal
 - **PCB analysis** - Footprints, nets, traces, vias, zones
 - **Manufacturer rules** - JLCPCB, PCBWay, OSHPark, Seeed design rules
+- **PCB autorouter** - A* pathfinding with net class awareness
 - **JSON output** - Machine-readable output for automation
 
 ## Requirements
 
 - Python 3.10+
-- No external dependencies for parsing
+- numpy (for router module)
 - KiCad 8+ (optional) - for running ERC/DRC via `kicad-cli`
+
+## Development
+
+```bash
+# Clone repository
+git clone https://github.com/rjwalters/kicad-tools.git
+cd kicad-tools
+
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/ -v
+
+# Run linter
+ruff check src/
+
+# Format code
+ruff format src/
+```
 
 ## License
 

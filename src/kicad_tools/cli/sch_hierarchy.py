@@ -39,22 +39,25 @@ from typing import Dict, List
 from kicad_tools.schema.hierarchy import HierarchyNode, build_hierarchy
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Navigate hierarchical KiCad schematics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to root .kicad_sch file")
-    parser.add_argument("command", nargs="?", default="tree",
-                        choices=["tree", "list", "labels", "path", "stats"],
-                        help="Command to run (default: tree)")
-    parser.add_argument("--format", choices=["tree", "json"],
-                        default="tree", help="Output format")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="tree",
+        choices=["tree", "list", "labels", "path", "stats"],
+        help="Command to run (default: tree)",
+    )
+    parser.add_argument("--format", choices=["tree", "json"], default="tree", help="Output format")
     parser.add_argument("--sheet", help="Focus on a specific sheet")
     parser.add_argument("--depth", type=int, help="Maximum depth to show")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Build hierarchy
     try:
@@ -105,14 +108,16 @@ def cmd_list(root: HierarchyNode, args):
     if args.format == "json":
         data = []
         for node in all_nodes:
-            data.append({
-                "name": node.name,
-                "path": node.get_path_string(),
-                "file": node.path,
-                "depth": node.depth,
-                "children": len(node.children),
-                "hierarchical_labels": node.hierarchical_labels,
-            })
+            data.append(
+                {
+                    "name": node.name,
+                    "path": node.get_path_string(),
+                    "file": node.path,
+                    "depth": node.depth,
+                    "children": len(node.children),
+                    "hierarchical_labels": node.hierarchical_labels,
+                }
+            )
         print(json.dumps(data, indent=2))
     else:
         print("Schematic Sheets")
@@ -144,24 +149,28 @@ def cmd_labels(root: HierarchyNode, args):
         for label in node.hierarchical_labels:
             if label not in connections:
                 connections[label] = []
-            connections[label].append({
-                "type": "label",
-                "sheet": node.name,
-                "path": node.get_path_string(),
-            })
+            connections[label].append(
+                {
+                    "type": "label",
+                    "sheet": node.name,
+                    "path": node.get_path_string(),
+                }
+            )
 
         # Pins on sheets in this schematic
         for sheet in node.sheets:
             for pin in sheet.pins:
                 if pin.name not in connections:
                     connections[pin.name] = []
-                connections[pin.name].append({
-                    "type": "pin",
-                    "direction": pin.direction,
-                    "sheet": sheet.name,
-                    "parent": node.name,
-                    "path": node.get_path_string(),
-                })
+                connections[pin.name].append(
+                    {
+                        "type": "pin",
+                        "direction": pin.direction,
+                        "sheet": sheet.name,
+                        "parent": node.name,
+                        "path": node.get_path_string(),
+                    }
+                )
 
     if args.format == "json":
         print(json.dumps(connections, indent=2))
@@ -179,7 +188,9 @@ def cmd_labels(root: HierarchyNode, args):
                 else:
                     direction = entry["direction"]
                     icon = "→" if direction == "output" else "←" if direction == "input" else "↔"
-                    print(f"   {icon} Pin ({direction}) on sheet {entry['sheet']} in {entry['parent']}")
+                    print(
+                        f"   {icon} Pin ({direction}) on sheet {entry['sheet']} in {entry['parent']}"
+                    )
 
         print(f"\nTotal: {len(connections)} unique signals")
 
@@ -199,10 +210,13 @@ def cmd_path(root: HierarchyNode, args):
         path_parts = []
         current = node
         while current:
-            path_parts.insert(0, {
-                "name": current.name,
-                "file": current.path,
-            })
+            path_parts.insert(
+                0,
+                {
+                    "name": current.name,
+                    "file": current.path,
+                },
+            )
             current = current.parent
         print(json.dumps(path_parts, indent=2))
     else:
@@ -220,7 +234,13 @@ def cmd_path(root: HierarchyNode, args):
             for sheet in node.sheets:
                 print(f"  📄 {sheet.name} ({sheet.filename})")
                 for pin in sheet.pins:
-                    icon = "→" if pin.direction == "output" else "←" if pin.direction == "input" else "↔"
+                    icon = (
+                        "→"
+                        if pin.direction == "output"
+                        else "←"
+                        if pin.direction == "input"
+                        else "↔"
+                    )
                     print(f"     {icon} {pin.name}")
 
 
@@ -231,20 +251,22 @@ def cmd_stats(root: HierarchyNode, args):
     total_sheets = len(all_nodes)
     max_depth = max(n.depth for n in all_nodes)
     total_labels = sum(len(n.hierarchical_labels) for n in all_nodes)
-    total_pins = sum(
-        sum(len(s.pins) for s in n.sheets)
-        for n in all_nodes
-    )
+    total_pins = sum(sum(len(s.pins) for s in n.sheets) for n in all_nodes)
     leaf_sheets = sum(1 for n in all_nodes if n.is_leaf)
 
     if args.format == "json":
-        print(json.dumps({
-            "total_sheets": total_sheets,
-            "max_depth": max_depth,
-            "leaf_sheets": leaf_sheets,
-            "total_hierarchical_labels": total_labels,
-            "total_sheet_pins": total_pins,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "total_sheets": total_sheets,
+                    "max_depth": max_depth,
+                    "leaf_sheets": leaf_sheets,
+                    "total_hierarchical_labels": total_labels,
+                    "total_sheet_pins": total_pins,
+                },
+                indent=2,
+            )
+        )
     else:
         print("Hierarchy Statistics")
         print("=" * 40)
@@ -255,7 +277,9 @@ def cmd_stats(root: HierarchyNode, args):
         print(f"Sheet pins:             {total_pins}")
 
 
-def format_tree(node: HierarchyNode, max_depth: int = None, prefix: str = "", is_last: bool = True) -> str:
+def format_tree(
+    node: HierarchyNode, max_depth: int = None, prefix: str = "", is_last: bool = True
+) -> str:
     """Format hierarchy as ASCII tree."""
     lines = []
 
@@ -285,16 +309,16 @@ def format_tree(node: HierarchyNode, max_depth: int = None, prefix: str = "", is
         if node.children:
             child_prefix = prefix + ("   " if is_last else "│  ")
             lines.append(f"{child_prefix}└─ ... ({len(node.children)} more)")
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
     # Children
     child_prefix = prefix + ("   " if is_last else "│  ")
     for i, child in enumerate(node.children):
-        child_is_last = (i == len(node.children) - 1)
+        child_is_last = i == len(node.children) - 1
         child_tree = format_tree(child, max_depth, child_prefix, child_is_last)
         lines.append(child_tree)
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def node_to_dict(node: HierarchyNode, max_depth: int = None) -> dict:
@@ -308,20 +332,14 @@ def node_to_dict(node: HierarchyNode, max_depth: int = None) -> dict:
             {
                 "name": s.name,
                 "file": s.filename,
-                "pins": [
-                    {"name": p.name, "direction": p.direction}
-                    for p in s.pins
-                ]
+                "pins": [{"name": p.name, "direction": p.direction} for p in s.pins],
             }
             for s in node.sheets
         ],
     }
 
     if max_depth is None or node.depth < max_depth:
-        result["children"] = [
-            node_to_dict(child, max_depth)
-            for child in node.children
-        ]
+        result["children"] = [node_to_dict(child, max_depth) for child in node.children]
     elif node.children:
         result["children_count"] = len(node.children)
 

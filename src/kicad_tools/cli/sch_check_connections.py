@@ -35,6 +35,7 @@ POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 @dataclass
 class PinStatus:
     """Status of a pin connection."""
+
     reference: str
     pin_number: str
     pin_name: str
@@ -120,21 +121,23 @@ def check_symbol_connections(
         lib_sym = lib_manager.get_symbol(symbol.lib_id)
         if not lib_sym:
             # Try without library prefix
-            if ':' in symbol.lib_id:
-                sym_name = symbol.lib_id.split(':', 1)[1]
+            if ":" in symbol.lib_id:
+                sym_name = symbol.lib_id.split(":", 1)[1]
                 lib_sym = lib_manager.get_symbol(sym_name)
 
         if not lib_sym:
             # Can't check - library not found
             # Add a result indicating library not found
-            results.append(PinStatus(
-                reference=symbol.reference,
-                pin_number="*",
-                pin_name="LIBRARY_NOT_FOUND",
-                pin_type=symbol.lib_id,
-                position=symbol.position,
-                connected=False,
-            ))
+            results.append(
+                PinStatus(
+                    reference=symbol.reference,
+                    pin_number="*",
+                    pin_name="LIBRARY_NOT_FOUND",
+                    pin_type=symbol.lib_id,
+                    position=symbol.position,
+                    connected=False,
+                )
+            )
             continue
 
         # Get pin positions
@@ -152,14 +155,16 @@ def check_symbol_connections(
             pos = pin_positions[lib_pin.number]
             connected = point_is_connected(pos, connection_points)
 
-            results.append(PinStatus(
-                reference=symbol.reference,
-                pin_number=lib_pin.number,
-                pin_name=lib_pin.name,
-                pin_type=lib_pin.type,
-                position=pos,
-                connected=connected,
-            ))
+            results.append(
+                PinStatus(
+                    reference=symbol.reference,
+                    pin_number=lib_pin.number,
+                    pin_name=lib_pin.name,
+                    pin_type=lib_pin.type,
+                    position=pos,
+                    connected=connected,
+                )
+            )
 
     return results
 
@@ -171,16 +176,17 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--lib-path", action="append", dest="lib_paths",
-                        help="Path to search for symbol libraries")
-    parser.add_argument("--lib", action="append", dest="libs",
-                        help="Specific library file to load")
-    parser.add_argument("--format", choices=["table", "json"],
-                        default="table", help="Output format")
-    parser.add_argument("--filter", dest="pattern",
-                        help="Filter by symbol reference pattern")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show all pins, not just unconnected")
+    parser.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Path to search for symbol libraries"
+    )
+    parser.add_argument("--lib", action="append", dest="libs", help="Specific library file to load")
+    parser.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
+    parser.add_argument("--filter", dest="pattern", help="Filter by symbol reference pattern")
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Show all pins, not just unconnected"
+    )
 
     args = parser.parse_args()
 
@@ -214,7 +220,10 @@ def main():
                 print(f"Error loading library {lib_path}: {e}", file=sys.stderr)
 
     if not lib_manager.libraries:
-        print("Warning: No symbol libraries loaded. Use --lib-path or --lib to specify libraries.", file=sys.stderr)
+        print(
+            "Warning: No symbol libraries loaded. Use --lib-path or --lib to specify libraries.",
+            file=sys.stderr,
+        )
         print("Without libraries, pin positions cannot be determined.", file=sys.stderr)
         sys.exit(1)
 
@@ -257,11 +266,18 @@ def output_table(results: List[PinStatus], show_all: bool):
         print(f"  {'Pin':<5}  {'Name':<15}  {'Type':<12}  {'Position':<20}  {'Status'}")
         print("  " + "-" * 65)
 
-        for pin in sorted(pins, key=lambda p: (not p.pin_number.isdigit(),
-                                                int(p.pin_number) if p.pin_number.isdigit() else 0)):
+        for pin in sorted(
+            pins,
+            key=lambda p: (
+                not p.pin_number.isdigit(),
+                int(p.pin_number) if p.pin_number.isdigit() else 0,
+            ),
+        ):
             pos_str = f"({pin.position[0]:.1f}, {pin.position[1]:.1f})"
             status = "✓" if pin.connected else "✗ UNCONNECTED"
-            print(f"  {pin.pin_number:<5}  {pin.pin_name:<15}  {pin.pin_type:<12}  {pos_str:<20}  {status}")
+            print(
+                f"  {pin.pin_number:<5}  {pin.pin_name:<15}  {pin.pin_type:<12}  {pos_str:<20}  {status}"
+            )
 
     # Summary
     total = len(results)
@@ -295,7 +311,7 @@ def output_json(results: List[PinStatus], show_all: bool):
             "connected": sum(1 for r in results if r.connected),
             "unconnected": sum(1 for r in results if not r.connected),
             "symbols_checked": len(set(p.reference for p in results)),
-        }
+        },
     }
     print(json.dumps(data, indent=2))
 

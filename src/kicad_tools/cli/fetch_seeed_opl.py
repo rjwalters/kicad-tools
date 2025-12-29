@@ -50,14 +50,40 @@ KEYSTONE_COMPONENTS = {
 # Standard OPL passive values we'll likely need
 OPL_PASSIVES = {
     "resistors_0402": [
-        "0R", "10R", "22R", "33R", "47R", "100R", "220R", "330R", "470R",
-        "1K", "2.2K", "3.3K", "4.7K", "10K", "22K", "33K", "47K", "100K",
+        "0R",
+        "10R",
+        "22R",
+        "33R",
+        "47R",
+        "100R",
+        "220R",
+        "330R",
+        "470R",
+        "1K",
+        "2.2K",
+        "3.3K",
+        "4.7K",
+        "10K",
+        "22K",
+        "33K",
+        "47K",
+        "100K",
     ],
     "capacitors_0402": [
-        "100pF", "1nF", "10nF", "100nF", "1uF", "2.2uF", "4.7uF", "10uF",
+        "100pF",
+        "1nF",
+        "10nF",
+        "100nF",
+        "1uF",
+        "2.2uF",
+        "4.7uF",
+        "10uF",
     ],
     "capacitors_0805": [
-        "10uF", "22uF", "47uF", "100uF",
+        "10uF",
+        "22uF",
+        "47uF",
+        "100uF",
     ],
 }
 
@@ -85,11 +111,7 @@ def clone_opl_library(force: bool = False):
         subprocess.run(["rm", "-rf", str(opl_dir)], check=True)
 
     print("Cloning Seeed OPL KiCad library...")
-    subprocess.run([
-        "git", "clone", "--depth=1",
-        SEEED_OPL_KICAD_URL,
-        str(opl_dir)
-    ], check=True)
+    subprocess.run(["git", "clone", "--depth=1", SEEED_OPL_KICAD_URL, str(opl_dir)], check=True)
 
     print(f"OPL library cloned to {opl_dir}")
     return opl_dir
@@ -102,9 +124,7 @@ def fetch_opl_csv():
 
     print("Fetching OPL component list...")
     try:
-        subprocess.run([
-            "curl", "-sL", "-o", str(csv_path), SEEED_OPL_CSV_URL
-        ], check=True)
+        subprocess.run(["curl", "-sL", "-o", str(csv_path), SEEED_OPL_CSV_URL], check=True)
         print(f"OPL CSV saved to {csv_path}")
         return csv_path
     except subprocess.CalledProcessError as e:
@@ -121,12 +141,13 @@ def search_opl(query: str):
         return []
 
     import csv
+
     results = []
-    with open(csv_path, newline='', encoding='utf-8', errors='replace') as f:
+    with open(csv_path, newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
         for row in reader:
             # Search across all fields
-            row_str = ' '.join(str(v) for v in row.values()).lower()
+            row_str = " ".join(str(v) for v in row.values()).lower()
             if query.lower() in row_str:
                 results.append(row)
 
@@ -142,12 +163,13 @@ def list_categories():
         return
 
     import csv
+
     categories = set()
-    with open(csv_path, newline='', encoding='utf-8', errors='replace') as f:
+    with open(csv_path, newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if 'Category' in row:
-                categories.add(row['Category'])
+            if "Category" in row:
+                categories.add(row["Category"])
 
     print("OPL Component Categories:")
     for cat in sorted(categories):
@@ -183,7 +205,9 @@ def generate_lib_table():
     for lib in sorted(sym_libs):
         name = lib.stem
         rel_path = lib.relative_to(REPO_ROOT)
-        print(f'(lib (name "OPL_{name}")(type "KiCad")(uri "${{KIPRJMOD}}/../../{rel_path}")(options "")(descr "Seeed OPL"))')
+        print(
+            f'(lib (name "OPL_{name}")(type "KiCad")(uri "${{KIPRJMOD}}/../../{rel_path}")(options "")(descr "Seeed OPL"))'
+        )
 
     # Find all footprint libraries
     fp_libs = list(opl_dir.glob("**/*.pretty"))
@@ -192,25 +216,21 @@ def generate_lib_table():
     for lib in sorted(fp_libs):
         name = lib.stem
         rel_path = lib.relative_to(REPO_ROOT)
-        print(f'(lib (name "OPL_{name}")(type "KiCad")(uri "${{KIPRJMOD}}/../../{rel_path}")(options "")(descr "Seeed OPL"))')
+        print(
+            f'(lib (name "OPL_{name}")(type "KiCad")(uri "${{KIPRJMOD}}/../../{rel_path}")(options "")(descr "Seeed OPL"))'
+        )
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Manage Seeed OPL library for KiCad"
+    parser = argparse.ArgumentParser(description="Manage Seeed OPL library for KiCad")
+    parser.add_argument("--update", action="store_true", help="Download/update OPL library")
+    parser.add_argument("--force", action="store_true", help="Force re-download of library")
+    parser.add_argument("--list", action="store_true", help="List OPL categories")
+    parser.add_argument("--search", type=str, help="Search OPL for components")
+    parser.add_argument("--keystone", action="store_true", help="Show keystone component status")
+    parser.add_argument(
+        "--lib-table", action="store_true", help="Generate KiCad library table entries"
     )
-    parser.add_argument("--update", action="store_true",
-                        help="Download/update OPL library")
-    parser.add_argument("--force", action="store_true",
-                        help="Force re-download of library")
-    parser.add_argument("--list", action="store_true",
-                        help="List OPL categories")
-    parser.add_argument("--search", type=str,
-                        help="Search OPL for components")
-    parser.add_argument("--keystone", action="store_true",
-                        help="Show keystone component status")
-    parser.add_argument("--lib-table", action="store_true",
-                        help="Generate KiCad library table entries")
 
     args = parser.parse_args()
 

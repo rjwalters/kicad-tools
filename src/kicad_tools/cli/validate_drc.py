@@ -29,15 +29,16 @@ from kicad_tools.manufacturers import (
 
 # Project-specific design rules (optional overlay)
 PROJECT_RULES = {
-    "power_trace_width_mm": 0.5,   # Minimum for power nets
-    "clock_trace_width_mm": 0.2,   # Clock distribution
-    "clock_max_length_mm": 50,     # Keep clock traces short
+    "power_trace_width_mm": 0.5,  # Minimum for power nets
+    "clock_trace_width_mm": 0.2,  # Clock distribution
+    "clock_max_length_mm": 50,  # Keep clock traces short
 }
 
 
 @dataclass
 class DRCViolation:
     """Represents a DRC violation."""
+
     type: str
     severity: str  # "error" or "warning"
     message: str
@@ -74,14 +75,23 @@ def run_kicad_drc(pcb_path: Path, output_path: Path, kicad_cli: Path) -> bool:
     print(f"Running KiCad DRC on: {pcb_path.name}")
 
     try:
-        result = subprocess.run([
-            str(kicad_cli), "pcb", "drc",
-            "--output", str(output_path),
-            "--format", "json",
-            "--schematic-parity",
-            "--units", "mm",
-            str(pcb_path)
-        ], capture_output=True, text=True)
+        result = subprocess.run(
+            [
+                str(kicad_cli),
+                "pcb",
+                "drc",
+                "--output",
+                str(output_path),
+                "--format",
+                "json",
+                "--schematic-parity",
+                "--units",
+                "mm",
+                str(pcb_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
 
         # DRC returns non-zero if there are violations
         if result.returncode != 0 and not output_path.exists():
@@ -114,7 +124,9 @@ def parse_drc_report(report_path: Path) -> list[DRCViolation]:
             pos_x=item.get("pos", {}).get("x", 0),
             pos_y=item.get("pos", {}).get("y", 0),
             item1=item.get("items", [{}])[0].get("description", "") if item.get("items") else "",
-            item2=item.get("items", [{}])[1].get("description", "") if len(item.get("items", [])) > 1 else "",
+            item2=item.get("items", [{}])[1].get("description", "")
+            if len(item.get("items", [])) > 1
+            else "",
         )
         violations.append(violation)
 
@@ -175,9 +187,9 @@ def print_summary(
     errors = [v for v in violations if v.severity == "error"]
     warnings = [v for v in violations if v.severity == "warning"]
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"DRC VALIDATION SUMMARY - {profile.name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nKiCad DRC Results:")
     print(f"  Errors:   {len(errors)}")
@@ -189,7 +201,7 @@ def print_summary(
             print(f"  ⚠ {w}")
 
     if errors:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("ERRORS (must fix before manufacturing):")
         for v in errors:
             print(f"\n  ✗ {v.type}")
@@ -200,7 +212,7 @@ def print_summary(
                 print(f"    Location: ({v.pos_x:.2f}, {v.pos_y:.2f}) mm")
 
     if warnings:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print("WARNINGS (review recommended):")
         for v in warnings[:10]:  # Limit output
             print(f"\n  ⚠ {v.type}")
@@ -208,7 +220,7 @@ def print_summary(
         if len(warnings) > 10:
             print(f"\n  ... and {len(warnings) - 10} more warnings")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
     if not errors and not warnings:
         print("✓ Design passes all DRC checks!")
@@ -225,13 +237,17 @@ def print_manufacturer_rules(profile: ManufacturerProfile, layers: int = 4):
     """Print manufacturing rules for a manufacturer."""
     rules = profile.get_design_rules(layers)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()} {layers}-LAYER PCB CAPABILITIES")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     print("\nMinimum Values:")
-    print(f"  Trace width:      {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
-    print(f"  Trace spacing:    {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
+    print(
+        f"  Trace width:      {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
+    )
+    print(
+        f"  Trace spacing:    {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
+    )
     print(f"  Via drill:        {rules.min_via_drill_mm} mm")
     print(f"  Via diameter:     {rules.min_via_diameter_mm} mm")
     print(f"  Annular ring:     {rules.min_annular_ring_mm} mm")
@@ -257,16 +273,16 @@ def print_manufacturer_rules(profile: ManufacturerProfile, layers: int = 4):
     else:
         print("\nAssembly: Not available (PCB only)")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def print_comparison(layers: int = 4):
     """Print comparison of design rules across manufacturers."""
     rules_by_mfr = compare_design_rules(layers=layers)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"MANUFACTURER COMPARISON - {layers}-LAYER PCB")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     # Header
     mfrs = list(rules_by_mfr.keys())
@@ -315,28 +331,28 @@ def print_comparison(layers: int = 4):
         row += f"{'Yes':>12}" if profile.supports_assembly() else f"{'No':>12}"
     print(row)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Validate PCB against manufacturer DRC rules"
+    parser = argparse.ArgumentParser(description="Validate PCB against manufacturer DRC rules")
+    parser.add_argument("pcb", nargs="?", type=Path, help="Path to KiCad PCB file")
+    parser.add_argument(
+        "-m",
+        "--manufacturer",
+        default="seeed",
+        choices=get_manufacturer_ids(),
+        help="Target manufacturer (default: seeed)",
     )
-    parser.add_argument("pcb", nargs="?", type=Path,
-                        help="Path to KiCad PCB file")
-    parser.add_argument("-m", "--manufacturer", default="seeed",
-                        choices=get_manufacturer_ids(),
-                        help="Target manufacturer (default: seeed)")
-    parser.add_argument("-l", "--layers", type=int, default=4,
-                        help="Layer count for rules lookup (default: 4)")
-    parser.add_argument("--strict", action="store_true",
-                        help="Treat warnings as errors")
-    parser.add_argument("--rules", action="store_true",
-                        help="Print manufacturer design rules")
-    parser.add_argument("--compare", action="store_true",
-                        help="Compare rules across all manufacturers")
-    parser.add_argument("--output", "-o", type=Path,
-                        help="DRC report output path")
+    parser.add_argument(
+        "-l", "--layers", type=int, default=4, help="Layer count for rules lookup (default: 4)"
+    )
+    parser.add_argument("--strict", action="store_true", help="Treat warnings as errors")
+    parser.add_argument("--rules", action="store_true", help="Print manufacturer design rules")
+    parser.add_argument(
+        "--compare", action="store_true", help="Compare rules across all manufacturers"
+    )
+    parser.add_argument("--output", "-o", type=Path, help="DRC report output path")
 
     args = parser.parse_args()
 

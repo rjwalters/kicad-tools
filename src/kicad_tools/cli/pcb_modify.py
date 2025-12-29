@@ -256,13 +256,13 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
-    parser.add_argument("command",
-                        choices=["move", "rotate", "flip", "update-value",
-                                 "rename", "delete-traces"],
-                        help="Command to run")
+    parser.add_argument(
+        "command",
+        choices=["move", "rotate", "flip", "update-value", "rename", "delete-traces"],
+        help="Command to run",
+    )
     parser.add_argument("args", nargs="*", help="Command arguments")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Show changes without applying")
+    parser.add_argument("--dry-run", action="store_true", help="Show changes without applying")
     parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
 
     args = parser.parse_args()

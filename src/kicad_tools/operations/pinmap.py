@@ -219,9 +219,7 @@ def extract_pins_from_sexp(symbol: SExp, recursive: bool = True) -> List[Pin]:
 
     extract_from_node(symbol)
 
-    return sorted(
-        pins, key=lambda p: (int(p.number) if p.number.isdigit() else 999, p.number)
-    )
+    return sorted(pins, key=lambda p: (int(p.number) if p.number.isdigit() else 999, p.number))
 
 
 def load_symbol_from_file(path: str | Path) -> Tuple[str, List[Pin]]:
@@ -321,17 +319,13 @@ def match_pins(
             norm_name = src.normalized_name
             if norm_name in target_by_normalized:
                 candidates = [
-                    p
-                    for p in target_by_normalized[norm_name]
-                    if p.number not in used_targets
+                    p for p in target_by_normalized[norm_name] if p.number not in used_targets
                 ]
                 if candidates:
                     # Prefer same pin type
                     same_type = [p for p in candidates if p.pin_type == src.pin_type]
                     tgt = same_type[0] if same_type else candidates[0]
-                    mapping = PinMapping(
-                        src, tgt, 0.8, f"Normalized name match ({norm_name})"
-                    )
+                    mapping = PinMapping(src, tgt, 0.8, f"Normalized name match ({norm_name})")
                     used_targets.add(tgt.number)
 
         # Strategy 3: Same pin number (low confidence)
@@ -353,9 +347,7 @@ def match_pins(
         if not mapping:
             cat = src.function_category
             if cat in target_by_category and cat != "other":
-                candidates = [
-                    p for p in target_by_category[cat] if p.number not in used_targets
-                ]
+                candidates = [p for p in target_by_category[cat] if p.number not in used_targets]
                 if candidates:
                     tgt = candidates[0]
                     mapping = PinMapping(src, tgt, 0.2, f"Category match ({cat})")
@@ -373,9 +365,7 @@ def match_pins(
     return mappings, unmatched
 
 
-def compare_symbols(
-    source_path: str | Path, target_path: str | Path
-) -> MappingResult:
+def compare_symbols(source_path: str | Path, target_path: str | Path) -> MappingResult:
     """
     Compare two symbol library files and generate pin mapping.
 

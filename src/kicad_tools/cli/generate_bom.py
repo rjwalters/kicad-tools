@@ -41,6 +41,7 @@ KICAD_SCRIPTS = Path(__file__).resolve().parent
 # Try to import sexp parser for direct schematic reading
 try:
     from kicad_tools.core.sexp import parse_sexp
+
     HAS_SEXP_PARSER = True
 except ImportError:
     HAS_SEXP_PARSER = False
@@ -49,6 +50,7 @@ except ImportError:
 @dataclass
 class Component:
     """Represents a BOM component."""
+
     reference: str
     value: str
     footprint: str
@@ -76,13 +78,13 @@ class Component:
     @property
     def ref_prefix(self) -> str:
         """Extract reference prefix (e.g., 'R' from 'R1')."""
-        match = re.match(r'^([A-Za-z_#]+)', self.reference)
+        match = re.match(r"^([A-Za-z_#]+)", self.reference)
         return match.group(1) if match else self.reference
 
     @property
     def ref_number(self) -> int:
         """Extract reference number for sorting."""
-        match = re.search(r'(\d+)', self.reference)
+        match = re.search(r"(\d+)", self.reference)
         return int(match.group(1)) if match else 0
 
     def get_field(self, name: str) -> str:
@@ -96,6 +98,7 @@ class Component:
 @dataclass
 class BOMLine:
     """Grouped BOM line (components with same value/footprint)."""
+
     components: list[Component] = field(default_factory=list)
 
     @property
@@ -107,10 +110,15 @@ class BOMLine:
         refs = []
         for c in self.components:
             refs.extend(c.reference_list)
-        return ", ".join(sorted(refs, key=lambda x: (
-            re.match(r'([A-Za-z_#]+)', x).group(1) if re.match(r'([A-Za-z_#]+)', x) else '',
-            int(re.search(r'(\d+)', x).group(1)) if re.search(r'(\d+)', x) else 0
-        )))
+        return ", ".join(
+            sorted(
+                refs,
+                key=lambda x: (
+                    re.match(r"([A-Za-z_#]+)", x).group(1) if re.match(r"([A-Za-z_#]+)", x) else "",
+                    int(re.search(r"(\d+)", x).group(1)) if re.search(r"(\d+)", x) else 0,
+                ),
+            )
+        )
 
     @property
     def value(self) -> str:
@@ -180,18 +188,18 @@ def extract_components_from_schematic(sch_path: Path, sheet_name: str = "") -> l
     if not HAS_SEXP_PARSER:
         raise RuntimeError("sexp parser not available - use --use-netlist instead")
 
-    text = sch_path.read_text(encoding='utf-8')
+    text = sch_path.read_text(encoding="utf-8")
     sexp = parse_sexp(text)
 
-    if sexp.tag != 'kicad_sch':
+    if sexp.tag != "kicad_sch":
         raise ValueError(f"Not a schematic: {sch_path}")
 
     components = []
 
     # Find symbol instances
-    for sym in sexp.find_all('symbol'):
+    for sym in sexp.find_all("symbol"):
         # Skip lib_symbols section (they don't have lib_id as first child)
-        lib_id_node = sym.find('lib_id')
+        lib_id_node = sym.find("lib_id")
         if not lib_id_node:
             continue
 
@@ -205,7 +213,7 @@ def extract_components_from_schematic(sch_path: Path, sheet_name: str = "") -> l
         datasheet = ""
         description = ""
 
-        for prop in sym.find_all('property'):
+        for prop in sym.find_all("property"):
             prop_name = prop.get_string(0) or ""
             prop_value = prop.get_string(1) or ""
 
@@ -224,21 +232,23 @@ def extract_components_from_schematic(sch_path: Path, sheet_name: str = "") -> l
                 props[prop_name] = prop_value
 
         if reference:
-            components.append(Component(
-                reference=reference,
-                value=value,
-                footprint=footprint,
-                datasheet=datasheet,
-                description=description,
-                sheet=sheet_name or sch_path.stem,
-                lib_id=lib_id,
-                mpn=props.get("MPN", props.get("Manufacturer_PN", "")),
-                manufacturer=props.get("Manufacturer", props.get("MFR", "")),
-                lcsc=props.get("LCSC", props.get("LCSC Part #", "")),
-                opl_sku=props.get("OPL", props.get("OPL_SKU", "")),
-                dnp=props.get("DNP", "").lower() in ("yes", "true", "1", "dnp"),
-                properties=props,
-            ))
+            components.append(
+                Component(
+                    reference=reference,
+                    value=value,
+                    footprint=footprint,
+                    datasheet=datasheet,
+                    description=description,
+                    sheet=sheet_name or sch_path.stem,
+                    lib_id=lib_id,
+                    mpn=props.get("MPN", props.get("Manufacturer_PN", "")),
+                    manufacturer=props.get("Manufacturer", props.get("MFR", "")),
+                    lcsc=props.get("LCSC", props.get("LCSC Part #", "")),
+                    opl_sku=props.get("OPL", props.get("OPL_SKU", "")),
+                    dnp=props.get("DNP", "").lower() in ("yes", "true", "1", "dnp"),
+                    properties=props,
+                )
+            )
 
     return components
 
@@ -265,12 +275,12 @@ def extract_components_hierarchical(main_sch: Path) -> list[Component]:
         all_components.extend(components)
 
         # Find sub-sheets
-        text = sch_path.read_text(encoding='utf-8')
+        text = sch_path.read_text(encoding="utf-8")
         sexp = parse_sexp(text)
 
-        for sheet in sexp.find_all('sheet'):
+        for sheet in sexp.find_all("sheet"):
             # Get sheet file property
-            for prop in sheet.find_all('property'):
+            for prop in sheet.find_all("property"):
                 prop_name = prop.get_string(0) or ""
                 if prop_name == "Sheetfile":
                     sheet_file = prop.get_string(1) or ""
@@ -278,7 +288,7 @@ def extract_components_hierarchical(main_sch: Path) -> list[Component]:
                         sub_path = sch_path.parent / sheet_file
                         # Get sheet name
                         sub_name = ""
-                        for p in sheet.find_all('property'):
+                        for p in sheet.find_all("property"):
                             if p.get_string(0) == "Sheetname":
                                 sub_name = p.get_string(1) or ""
                                 break
@@ -288,10 +298,12 @@ def extract_components_hierarchical(main_sch: Path) -> list[Component]:
     return all_components
 
 
-def filter_components(components: list[Component],
-                      exclude_refs: list[str] = None,
-                      exclude_values: list[str] = None,
-                      include_refs: list[str] = None) -> list[Component]:
+def filter_components(
+    components: list[Component],
+    exclude_refs: list[str] = None,
+    exclude_values: list[str] = None,
+    include_refs: list[str] = None,
+) -> list[Component]:
     """Filter components based on criteria."""
     filtered = []
 
@@ -386,17 +398,19 @@ def group_components(components: list[Component]) -> list[BOMLine]:
 def export_seeed_format(bom_lines: list[BOMLine], output_path: Path):
     """Export BOM in Seeed Fusion format."""
     # Seeed requires: Part Number, Description, Quantity, Designators, Footprint, Remarks
-    with open(output_path, 'w', newline='') as f:
+    with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "Part Number",
-            "Description",
-            "Quantity",
-            "Designators",
-            "Footprint",
-            "OPL SKU",
-            "Remarks"
-        ])
+        writer.writerow(
+            [
+                "Part Number",
+                "Description",
+                "Quantity",
+                "Designators",
+                "Footprint",
+                "OPL SKU",
+                "Remarks",
+            ]
+        )
 
         for line in sorted(bom_lines, key=lambda x: x.designators):
             remarks = ""
@@ -405,15 +419,17 @@ def export_seeed_format(bom_lines: list[BOMLine], output_path: Path):
             elif line.mpn:
                 remarks = "Customer Supplied" if not line.opl_sku else ""
 
-            writer.writerow([
-                line.mpn or line.value,
-                line.description or line.value,
-                line.quantity,
-                line.designators,
-                line.footprint,
-                line.opl_sku,
-                remarks,
-            ])
+            writer.writerow(
+                [
+                    line.mpn or line.value,
+                    line.description or line.value,
+                    line.quantity,
+                    line.designators,
+                    line.footprint,
+                    line.opl_sku,
+                    remarks,
+                ]
+            )
 
     print(f"Seeed BOM written to: {output_path}")
 
@@ -421,52 +437,53 @@ def export_seeed_format(bom_lines: list[BOMLine], output_path: Path):
 def export_jlcpcb_format(bom_lines: list[BOMLine], output_path: Path):
     """Export BOM in JLCPCB format."""
     # JLCPCB requires: Comment, Designator, Footprint, LCSC Part Number
-    with open(output_path, 'w', newline='') as f:
+    with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "Comment",
-            "Designator",
-            "Footprint",
-            "LCSC Part #"
-        ])
+        writer.writerow(["Comment", "Designator", "Footprint", "LCSC Part #"])
 
         for line in sorted(bom_lines, key=lambda x: x.designators):
             # Use lcsc field, fall back to opl_sku
             lcsc_part = line.lcsc or line.opl_sku
-            writer.writerow([
-                line.value,
-                line.designators,
-                line.footprint,
-                lcsc_part,
-            ])
+            writer.writerow(
+                [
+                    line.value,
+                    line.designators,
+                    line.footprint,
+                    lcsc_part,
+                ]
+            )
 
     print(f"JLCPCB BOM written to: {output_path}")
 
 
 def export_generic_csv(bom_lines: list[BOMLine], output_path: Path):
     """Export generic CSV BOM."""
-    with open(output_path, 'w', newline='') as f:
+    with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "Qty",
-            "Value",
-            "Designators",
-            "Footprint",
-            "Manufacturer",
-            "MPN",
-            "Description",
-        ])
+        writer.writerow(
+            [
+                "Qty",
+                "Value",
+                "Designators",
+                "Footprint",
+                "Manufacturer",
+                "MPN",
+                "Description",
+            ]
+        )
 
         for line in sorted(bom_lines, key=lambda x: x.designators):
-            writer.writerow([
-                line.quantity,
-                line.value,
-                line.designators,
-                line.footprint,
-                line.manufacturer,
-                line.mpn,
-                line.description,
-            ])
+            writer.writerow(
+                [
+                    line.quantity,
+                    line.value,
+                    line.designators,
+                    line.footprint,
+                    line.manufacturer,
+                    line.mpn,
+                    line.description,
+                ]
+            )
 
     print(f"Generic BOM written to: {output_path}")
 
@@ -509,7 +526,9 @@ def format_table(bom_lines: list[BOMLine], show_lcsc: bool = True) -> str:
     total_qty = sum(line.quantity for line in bom_lines)
     lcsc_count = sum(1 for line in bom_lines if line.lcsc or line.opl_sku)
     output.append(separator)
-    output.append(f"Total: {len(bom_lines)} unique parts, {total_qty} components, {lcsc_count} with LCSC")
+    output.append(
+        f"Total: {len(bom_lines)} unique parts, {total_qty} components, {lcsc_count} with LCSC"
+    )
 
     return "\n".join(output)
 
@@ -522,7 +541,7 @@ def format_json(bom_lines: list[BOMLine]) -> str:
             "unique_parts": len(bom_lines),
             "total_components": sum(line.quantity for line in bom_lines),
             "with_lcsc": sum(1 for line in bom_lines if line.lcsc or line.opl_sku),
-        }
+        },
     }
 
     for line in sorted(bom_lines, key=lambda x: x.designators):
@@ -558,11 +577,18 @@ def generate_bom_from_schematic(schematic_path: Path, output_dir: Path, format: 
         netlist_path = output_dir / "temp_netlist.xml"
         print("Generating netlist with kicad-cli...")
         try:
-            subprocess.run([
-                str(kicad_cli), "sch", "export", "netlist",
-                "--output", str(netlist_path),
-                str(schematic_path)
-            ], check=True)
+            subprocess.run(
+                [
+                    str(kicad_cli),
+                    "sch",
+                    "export",
+                    "netlist",
+                    "--output",
+                    str(netlist_path),
+                    str(schematic_path),
+                ],
+                check=True,
+            )
             components = extract_bom_from_netlist(netlist_path)
             netlist_path.unlink()  # Clean up
         except subprocess.CalledProcessError as e:
@@ -596,7 +622,9 @@ def generate_bom_from_schematic(schematic_path: Path, output_dir: Path, format: 
     print("\nBOM Summary:")
     print(f"  Total parts:  {total_parts}")
     print(f"  Unique parts: {unique_parts}")
-    print(f"  OPL parts:    {opl_parts} ({100*opl_parts//unique_parts if unique_parts else 0}%)")
+    print(
+        f"  OPL parts:    {opl_parts} ({100 * opl_parts // unique_parts if unique_parts else 0}%)"
+    )
 
 
 def generate_placeholder_bom() -> list[Component]:
@@ -727,33 +755,51 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("schematic", type=Path,
-                        help="Path to KiCad schematic (.kicad_sch)")
+    parser.add_argument("schematic", type=Path, help="Path to KiCad schematic (.kicad_sch)")
 
     # Output options
-    parser.add_argument("-o", "--output", type=Path,
-                        help="Output file (default: stdout for table/json, auto-named for csv)")
-    parser.add_argument("-f", "--format",
-                        choices=["table", "csv", "jlcpcb", "seeed", "json"],
-                        default="table", help="Output format (default: table)")
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output file (default: stdout for table/json, auto-named for csv)",
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        choices=["table", "csv", "jlcpcb", "seeed", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
 
     # Extraction options
-    parser.add_argument("--use-netlist", action="store_true",
-                        help="Use kicad-cli netlist export (more accurate for complex projects)")
-    parser.add_argument("--single-sheet", action="store_true",
-                        help="Only process the specified schematic, not sub-sheets")
+    parser.add_argument(
+        "--use-netlist",
+        action="store_true",
+        help="Use kicad-cli netlist export (more accurate for complex projects)",
+    )
+    parser.add_argument(
+        "--single-sheet",
+        action="store_true",
+        help="Only process the specified schematic, not sub-sheets",
+    )
 
     # Filter options
-    parser.add_argument("--exclude-refs", type=str, default="#PWR,#FLG,#SYM",
-                        help="Reference prefixes to exclude (comma-separated)")
-    parser.add_argument("--exclude-values", type=str,
-                        help="Values to exclude (comma-separated)")
-    parser.add_argument("--include-refs", type=str,
-                        help="Only include these reference prefixes (comma-separated)")
+    parser.add_argument(
+        "--exclude-refs",
+        type=str,
+        default="#PWR,#FLG,#SYM",
+        help="Reference prefixes to exclude (comma-separated)",
+    )
+    parser.add_argument("--exclude-values", type=str, help="Values to exclude (comma-separated)")
+    parser.add_argument(
+        "--include-refs", type=str, help="Only include these reference prefixes (comma-separated)"
+    )
 
     # Grouping
-    parser.add_argument("--no-group", action="store_true",
-                        help="Don't group components (list each individually)")
+    parser.add_argument(
+        "--no-group", action="store_true", help="Don't group components (list each individually)"
+    )
 
     args = parser.parse_args()
 
@@ -773,22 +819,35 @@ def main():
         # Use kicad-cli netlist export
         kicad_cli = find_kicad_cli()
         if not kicad_cli:
-            print("Error: kicad-cli not found. Install KiCad 8 or omit --use-netlist", file=sys.stderr)
+            print(
+                "Error: kicad-cli not found. Install KiCad 8 or omit --use-netlist", file=sys.stderr
+            )
             return 1
 
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
             netlist_path = Path(f.name)
 
         try:
-            subprocess.run([
-                str(kicad_cli), "sch", "export", "netlist",
-                "--output", str(netlist_path),
-                str(args.schematic)
-            ], check=True, capture_output=True)
+            subprocess.run(
+                [
+                    str(kicad_cli),
+                    "sch",
+                    "export",
+                    "netlist",
+                    "--output",
+                    str(netlist_path),
+                    str(args.schematic),
+                ],
+                check=True,
+                capture_output=True,
+            )
             components = extract_bom_from_netlist(netlist_path)
         except subprocess.CalledProcessError as e:
-            print(f"Error generating netlist: {e.stderr.decode() if e.stderr else e}", file=sys.stderr)
+            print(
+                f"Error generating netlist: {e.stderr.decode() if e.stderr else e}", file=sys.stderr
+            )
             return 1
         finally:
             netlist_path.unlink(missing_ok=True)
@@ -856,11 +915,15 @@ def main():
         export_generic_csv(bom_lines, output_path)
 
     elif args.format == "jlcpcb":
-        output_path = args.output or (args.schematic.parent / f"{args.schematic.stem}_bom_jlcpcb.csv")
+        output_path = args.output or (
+            args.schematic.parent / f"{args.schematic.stem}_bom_jlcpcb.csv"
+        )
         export_jlcpcb_format(bom_lines, output_path)
 
     elif args.format == "seeed":
-        output_path = args.output or (args.schematic.parent / f"{args.schematic.stem}_bom_seeed.csv")
+        output_path = args.output or (
+            args.schematic.parent / f"{args.schematic.stem}_bom_seeed.csv"
+        )
         export_seeed_format(bom_lines, output_path)
 
     return 0

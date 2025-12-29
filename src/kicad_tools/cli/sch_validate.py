@@ -34,6 +34,7 @@ from kicad_tools.schema.hierarchy import build_hierarchy
 @dataclass
 class ValidationIssue:
     """A single validation issue."""
+
     severity: str  # "error", "warning", "info"
     category: str  # "erc", "unconnected", "footprint", "hierarchy"
     message: str
@@ -43,6 +44,7 @@ class ValidationIssue:
 @dataclass
 class ValidationResult:
     """Complete validation results."""
+
     schematic: str
     issues: List[ValidationIssue] = field(default_factory=list)
     checks_run: List[str] = field(default_factory=list)
@@ -72,24 +74,36 @@ def run_erc(schematic_path: str) -> List[ValidationIssue]:
             text=True,
         )
         if result.returncode != 0:
-            issues.append(ValidationIssue(
-                severity="warning",
-                category="erc",
-                message="kicad-cli not found, ERC check skipped",
-            ))
+            issues.append(
+                ValidationIssue(
+                    severity="warning",
+                    category="erc",
+                    message="kicad-cli not found, ERC check skipped",
+                )
+            )
             return issues
 
         kicad_cli = result.stdout.strip()
 
         # Run ERC
         import tempfile
+
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             output_file = f.name
 
         try:
             result = subprocess.run(
-                [kicad_cli, "sch", "erc", "--format", "json",
-                 "--severity-all", "--output", output_file, schematic_path],
+                [
+                    kicad_cli,
+                    "sch",
+                    "erc",
+                    "--format",
+                    "json",
+                    "--severity-all",
+                    "--output",
+                    output_file,
+                    schematic_path,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -98,33 +112,40 @@ def run_erc(schematic_path: str) -> List[ValidationIssue]:
             # Parse results
             if Path(output_file).exists():
                 import json as json_mod
+
                 with open(output_file) as f:
                     content = f.read()
                     if content.strip():
                         data = json_mod.loads(content)
                         for sheet in data.get("sheets", []):
                             for violation in sheet.get("violations", []):
-                                issues.append(ValidationIssue(
-                                    severity=violation.get("severity", "warning"),
-                                    category="erc",
-                                    message=violation.get("description", "Unknown ERC issue"),
-                                    location=sheet.get("path", ""),
-                                ))
+                                issues.append(
+                                    ValidationIssue(
+                                        severity=violation.get("severity", "warning"),
+                                        category="erc",
+                                        message=violation.get("description", "Unknown ERC issue"),
+                                        location=sheet.get("path", ""),
+                                    )
+                                )
         finally:
             Path(output_file).unlink(missing_ok=True)
 
     except subprocess.TimeoutExpired:
-        issues.append(ValidationIssue(
-            severity="warning",
-            category="erc",
-            message="ERC check timed out",
-        ))
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="erc",
+                message="ERC check timed out",
+            )
+        )
     except Exception as e:
-        issues.append(ValidationIssue(
-            severity="warning",
-            category="erc",
-            message=f"ERC check failed: {e}",
-        ))
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="erc",
+                message=f"ERC check failed: {e}",
+            )
+        )
 
     return issues
 
@@ -150,21 +171,25 @@ def check_missing_footprints(schematic_path: str) -> List[ValidationIssue]:
 
                     # Check for missing footprint
                     if not sym.footprint or sym.footprint == "~":
-                        issues.append(ValidationIssue(
-                            severity="warning",
-                            category="footprint",
-                            message=f"Missing footprint: {sym.reference} ({sym.value})",
-                            location=node.get_path_string(),
-                        ))
+                        issues.append(
+                            ValidationIssue(
+                                severity="warning",
+                                category="footprint",
+                                message=f"Missing footprint: {sym.reference} ({sym.value})",
+                                location=node.get_path_string(),
+                            )
+                        )
             except Exception:
                 pass
 
     except Exception as e:
-        issues.append(ValidationIssue(
-            severity="warning",
-            category="footprint",
-            message=f"Footprint check failed: {e}",
-        ))
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="footprint",
+                message=f"Footprint check failed: {e}",
+            )
+        )
 
     return issues
 
@@ -186,21 +211,25 @@ def check_missing_values(schematic_path: str) -> List[ValidationIssue]:
 
                     # Check for missing value
                     if not sym.value or sym.value in ("~", "?"):
-                        issues.append(ValidationIssue(
-                            severity="warning",
-                            category="value",
-                            message=f"Missing value: {sym.reference}",
-                            location=node.get_path_string(),
-                        ))
+                        issues.append(
+                            ValidationIssue(
+                                severity="warning",
+                                category="value",
+                                message=f"Missing value: {sym.reference}",
+                                location=node.get_path_string(),
+                            )
+                        )
             except Exception:
                 pass
 
     except Exception as e:
-        issues.append(ValidationIssue(
-            severity="warning",
-            category="value",
-            message=f"Value check failed: {e}",
-        ))
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="value",
+                message=f"Value check failed: {e}",
+            )
+        )
 
     return issues
 
@@ -233,19 +262,23 @@ def check_hierarchy(schematic_path: str) -> List[ValidationIssue]:
         for name, locations in label_map.items():
             types = [loc[0] for loc in locations]
             if types.count("label") > 0 and types.count("pin") == 0:
-                issues.append(ValidationIssue(
-                    severity="warning",
-                    category="hierarchy",
-                    message=f"Hierarchical label '{name}' has no matching sheet pin",
-                    location=", ".join(loc[1] for loc in locations if loc[0] == "label"),
-                ))
+                issues.append(
+                    ValidationIssue(
+                        severity="warning",
+                        category="hierarchy",
+                        message=f"Hierarchical label '{name}' has no matching sheet pin",
+                        location=", ".join(loc[1] for loc in locations if loc[0] == "label"),
+                    )
+                )
 
     except Exception as e:
-        issues.append(ValidationIssue(
-            severity="warning",
-            category="hierarchy",
-            message=f"Hierarchy check failed: {e}",
-        ))
+        issues.append(
+            ValidationIssue(
+                severity="warning",
+                category="hierarchy",
+                message=f"Hierarchy check failed: {e}",
+            )
+        )
 
     return issues
 
@@ -273,23 +306,21 @@ def validate_schematic(schematic_path: str, lib_paths: List[str] = None) -> Vali
     return result
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Validate a KiCad schematic",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["text", "json"],
-                        default="text", help="Output format")
-    parser.add_argument("--lib-path", action="append", dest="lib_paths",
-                        help="Path to symbol libraries")
-    parser.add_argument("--strict", action="store_true",
-                        help="Exit with error on any warning")
-    parser.add_argument("--quiet", "-q", action="store_true",
-                        help="Only show errors")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Path to symbol libraries"
+    )
+    parser.add_argument("--strict", action="store_true", help="Exit with error on any warning")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Only show errors")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not Path(args.schematic).exists():
         print(f"Error: File not found: {args.schematic}", file=sys.stderr)
@@ -298,23 +329,28 @@ def main():
     result = validate_schematic(args.schematic, args.lib_paths)
 
     if args.format == "json":
-        print(json.dumps({
-            "schematic": result.schematic,
-            "passed": result.passed,
-            "error_count": result.error_count,
-            "warning_count": result.warning_count,
-            "checks_run": result.checks_run,
-            "issues": [
+        print(
+            json.dumps(
                 {
-                    "severity": i.severity,
-                    "category": i.category,
-                    "message": i.message,
-                    "location": i.location,
-                }
-                for i in result.issues
-                if not args.quiet or i.severity == "error"
-            ],
-        }, indent=2))
+                    "schematic": result.schematic,
+                    "passed": result.passed,
+                    "error_count": result.error_count,
+                    "warning_count": result.warning_count,
+                    "checks_run": result.checks_run,
+                    "issues": [
+                        {
+                            "severity": i.severity,
+                            "category": i.category,
+                            "message": i.message,
+                            "location": i.location,
+                        }
+                        for i in result.issues
+                        if not args.quiet or i.severity == "error"
+                    ],
+                },
+                indent=2,
+            )
+        )
     else:
         print_result(result, args.quiet)
 

@@ -25,17 +25,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Seeed Fusion layer naming convention
 SEEED_LAYER_NAMES = {
-    "F.Cu": "GTL",      # Top copper
-    "B.Cu": "GBL",      # Bottom copper
-    "In1.Cu": "G1",     # Inner layer 1
-    "In2.Cu": "G2",     # Inner layer 2
-    "F.Paste": "GTP",   # Top paste
-    "B.Paste": "GBP",   # Bottom paste
-    "F.SilkS": "GTO",   # Top silkscreen
-    "B.SilkS": "GBO",   # Bottom silkscreen
-    "F.Mask": "GTS",    # Top soldermask
-    "B.Mask": "GBS",    # Bottom soldermask
-    "Edge.Cuts": "GKO", # Board outline
+    "F.Cu": "GTL",  # Top copper
+    "B.Cu": "GBL",  # Bottom copper
+    "In1.Cu": "G1",  # Inner layer 1
+    "In2.Cu": "G2",  # Inner layer 2
+    "F.Paste": "GTP",  # Top paste
+    "B.Paste": "GBP",  # Bottom paste
+    "F.SilkS": "GTO",  # Top silkscreen
+    "B.SilkS": "GBO",  # Bottom silkscreen
+    "F.Mask": "GTS",  # Top soldermask
+    "B.Mask": "GBS",  # Bottom soldermask
+    "Edge.Cuts": "GKO",  # Board outline
 }
 
 # KiCad layer IDs for 4-layer board
@@ -88,29 +88,50 @@ def export_gerbers(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> bool:
 
     try:
         # Export Gerbers
-        subprocess.run([
-            str(kicad_cli), "pcb", "export", "gerbers",
-            "--output", str(output_dir) + "/",
-            "--layers", layers,
-            "--subtract-soldermask",
-            "--no-x2",  # Use legacy format for compatibility
-            "--no-netlist",
-            "--precision", "6",
-            str(pcb_path)
-        ], check=True)
+        subprocess.run(
+            [
+                str(kicad_cli),
+                "pcb",
+                "export",
+                "gerbers",
+                "--output",
+                str(output_dir) + "/",
+                "--layers",
+                layers,
+                "--subtract-soldermask",
+                "--no-x2",  # Use legacy format for compatibility
+                "--no-netlist",
+                "--precision",
+                "6",
+                str(pcb_path),
+            ],
+            check=True,
+        )
 
         # Export drill files
-        subprocess.run([
-            str(kicad_cli), "pcb", "export", "drill",
-            "--output", str(output_dir) + "/",
-            "--format", "excellon",
-            "--drill-origin", "absolute",
-            "--excellon-zeros-format", "decimal",
-            "--excellon-units", "mm",
-            "--generate-map",
-            "--map-format", "gerberx2",
-            str(pcb_path)
-        ], check=True)
+        subprocess.run(
+            [
+                str(kicad_cli),
+                "pcb",
+                "export",
+                "drill",
+                "--output",
+                str(output_dir) + "/",
+                "--format",
+                "excellon",
+                "--drill-origin",
+                "absolute",
+                "--excellon-zeros-format",
+                "decimal",
+                "--excellon-units",
+                "mm",
+                "--generate-map",
+                "--map-format",
+                "gerberx2",
+                str(pcb_path),
+            ],
+            check=True,
+        )
 
         return True
 
@@ -124,15 +145,25 @@ def export_position_file(pcb_path: Path, output_dir: Path, kicad_cli: Path) -> b
     print("Exporting position file...")
 
     try:
-        subprocess.run([
-            str(kicad_cli), "pcb", "export", "pos",
-            "--output", str(output_dir / "positions.csv"),
-            "--format", "csv",
-            "--units", "mm",
-            "--side", "both",
-            "--smd-only",
-            str(pcb_path)
-        ], check=True)
+        subprocess.run(
+            [
+                str(kicad_cli),
+                "pcb",
+                "export",
+                "pos",
+                "--output",
+                str(output_dir / "positions.csv"),
+                "--format",
+                "csv",
+                "--units",
+                "mm",
+                "--side",
+                "both",
+                "--smd-only",
+                str(pcb_path),
+            ],
+            check=True,
+        )
         return True
 
     except subprocess.CalledProcessError as e:
@@ -169,9 +200,9 @@ def create_zip(output_dir: Path, project_name: str) -> Path:
 
     print(f"Creating ZIP: {zip_path}")
 
-    with ZipFile(zip_path, 'w') as zf:
+    with ZipFile(zip_path, "w") as zf:
         for f in output_dir.iterdir():
-            if f.is_file() and not f.name.startswith('.'):
+            if f.is_file() and not f.name.startswith("."):
                 zf.write(f, f.name)
                 print(f"  Added: {f.name}")
 
@@ -238,7 +269,7 @@ See repository for design files and support.
 ================================================================================
 """
 
-    with open(notes_path, 'w') as f:
+    with open(notes_path, "w") as f:
         f.write(notes.strip())
 
     print(f"Fab notes written to: {notes_path}")
@@ -248,9 +279,9 @@ def preview_export(pcb_path: Path, output_dir: Path):
     """Preview what would be generated without actually exporting."""
     project_name = pcb_path.stem
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("GERBER EXPORT PREVIEW")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"\nSource:  {pcb_path}")
     print(f"Output:  {output_dir}")
     print(f"Project: {project_name}")
@@ -265,24 +296,24 @@ def preview_export(pcb_path: Path, output_dir: Path):
     print("\nZIP file:")
     print(f"  {project_name}_gerbers_YYYYMMDD.zip")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Export Gerbers for Seeed Fusion"
+    parser = argparse.ArgumentParser(description="Export Gerbers for Seeed Fusion")
+    parser.add_argument(
+        "pcb",
+        nargs="?",
+        type=Path,
+        default=REPO_ROOT / "hardware/chorus-hat-reva/kicad/chorus-hat-reva.kicad_pcb",
+        help="Path to KiCad PCB file",
     )
-    parser.add_argument("pcb", nargs="?", type=Path,
-                        default=REPO_ROOT / "hardware/chorus-hat-reva/kicad/chorus-hat-reva.kicad_pcb",
-                        help="Path to KiCad PCB file")
-    parser.add_argument("--output-dir", "-o", type=Path,
-                        help="Output directory")
-    parser.add_argument("--preview", action="store_true",
-                        help="Preview without exporting")
-    parser.add_argument("--no-zip", action="store_true",
-                        help="Don't create ZIP file")
-    parser.add_argument("--no-rename", action="store_true",
-                        help="Keep KiCad naming (don't rename for Seeed)")
+    parser.add_argument("--output-dir", "-o", type=Path, help="Output directory")
+    parser.add_argument("--preview", action="store_true", help="Preview without exporting")
+    parser.add_argument("--no-zip", action="store_true", help="Don't create ZIP file")
+    parser.add_argument(
+        "--no-rename", action="store_true", help="Keep KiCad naming (don't rename for Seeed)"
+    )
 
     args = parser.parse_args()
 

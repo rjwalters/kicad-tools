@@ -23,10 +23,9 @@ __all__ = [
 
 # Emit warning on import
 warnings.warn(
-    "kicad_tools.footprints is experimental. "
-    "Footprint.to_sexp() is not yet implemented.",
+    "kicad_tools.footprints is experimental. Footprint.to_sexp() is not yet implemented.",
     category=FutureWarning,
-    stacklevel=2
+    stacklevel=2,
 )
 
 
@@ -108,6 +107,5 @@ class Footprint:
     def to_sexp(self) -> str:
         """Export to KiCad S-expression format."""
         raise NotImplementedError(
-            "Footprint.to_sexp() is not yet implemented. "
-            "This is an experimental feature."
+            "Footprint.to_sexp() is not yet implemented. This is an experimental feature."
         )

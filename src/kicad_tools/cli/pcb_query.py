@@ -66,31 +66,36 @@ def cmd_footprints(pcb: PCB, args):
 
     # Apply filter
     if args.filter:
-        footprints = [
-            fp for fp in footprints
-            if fnmatch.fnmatch(fp.reference, args.filter)
-        ]
+        footprints = [fp for fp in footprints if fnmatch.fnmatch(fp.reference, args.filter)]
 
     # Sort
     if args.sorted:
-        footprints = sorted(footprints, key=lambda fp: (
-            fp.reference.rstrip("0123456789"),
-            int("".join(c for c in fp.reference if c.isdigit()) or "0")
-        ))
+        footprints = sorted(
+            footprints,
+            key=lambda fp: (
+                fp.reference.rstrip("0123456789"),
+                int("".join(c for c in fp.reference if c.isdigit()) or "0"),
+            ),
+        )
 
     if args.format == "json":
-        print(json.dumps([
-            {
-                "reference": fp.reference,
-                "value": fp.value,
-                "footprint": fp.name,
-                "layer": fp.layer,
-                "position": {"x": fp.position[0], "y": fp.position[1]},
-                "rotation": fp.rotation,
-                "pads": len(fp.pads),
-            }
-            for fp in footprints
-        ], indent=2))
+        print(
+            json.dumps(
+                [
+                    {
+                        "reference": fp.reference,
+                        "value": fp.value,
+                        "footprint": fp.name,
+                        "layer": fp.layer,
+                        "position": {"x": fp.position[0], "y": fp.position[1]},
+                        "rotation": fp.rotation,
+                        "pads": len(fp.pads),
+                    }
+                    for fp in footprints
+                ],
+                indent=2,
+            )
+        )
         return
 
     print(f"{'Ref':<10} {'Value':<20} {'Footprint':<25} {'Layer':<8} {'Pads'}")
@@ -113,28 +118,33 @@ def cmd_footprint(pcb: PCB, args):
         sys.exit(1)
 
     if args.format == "json":
-        print(json.dumps({
-            "reference": fp.reference,
-            "value": fp.value,
-            "footprint": fp.name,
-            "layer": fp.layer,
-            "position": {"x": fp.position[0], "y": fp.position[1]},
-            "rotation": fp.rotation,
-            "description": fp.description,
-            "tags": fp.tags,
-            "pads": [
+        print(
+            json.dumps(
                 {
-                    "number": p.number,
-                    "type": p.type,
-                    "shape": p.shape,
-                    "position": {"x": p.position[0], "y": p.position[1]},
-                    "size": {"w": p.size[0], "h": p.size[1]},
-                    "net": p.net_name,
-                    "layers": p.layers,
-                }
-                for p in fp.pads
-            ],
-        }, indent=2))
+                    "reference": fp.reference,
+                    "value": fp.value,
+                    "footprint": fp.name,
+                    "layer": fp.layer,
+                    "position": {"x": fp.position[0], "y": fp.position[1]},
+                    "rotation": fp.rotation,
+                    "description": fp.description,
+                    "tags": fp.tags,
+                    "pads": [
+                        {
+                            "number": p.number,
+                            "type": p.type,
+                            "shape": p.shape,
+                            "position": {"x": p.position[0], "y": p.position[1]},
+                            "size": {"w": p.size[0], "h": p.size[1]},
+                            "net": p.net_name,
+                            "layers": p.layers,
+                        }
+                        for p in fp.pads
+                    ],
+                },
+                indent=2,
+            )
+        )
         return
 
     print(f"Footprint: {fp.reference}")
@@ -152,10 +162,9 @@ def cmd_footprint(pcb: PCB, args):
     print(f"  {'#':<6} {'Type':<10} {'Net':<20} {'Layers'}")
     print("  " + "-" * 55)
 
-    for pad in sorted(fp.pads, key=lambda p: (
-        int(p.number) if p.number.isdigit() else 999,
-        p.number
-    )):
+    for pad in sorted(
+        fp.pads, key=lambda p: (int(p.number) if p.number.isdigit() else 999, p.number)
+    ):
         layers = ", ".join(pad.layers[:2])
         if len(pad.layers) > 2:
             layers += "..."
@@ -180,12 +189,14 @@ def cmd_nets(pcb: PCB, args):
         for net in nets:
             segments = list(pcb.segments_in_net(net.number))
             vias = list(pcb.vias_in_net(net.number))
-            net_stats.append({
-                "number": net.number,
-                "name": net.name,
-                "segments": len(segments),
-                "vias": len(vias),
-            })
+            net_stats.append(
+                {
+                    "number": net.number,
+                    "name": net.name,
+                    "segments": len(segments),
+                    "vias": len(vias),
+                }
+            )
         print(json.dumps(net_stats, indent=2))
         return
 
@@ -229,24 +240,29 @@ def cmd_net(pcb: PCB, args):
 
     # Calculate trace length
     import math
+
     trace_length = sum(
-        math.sqrt((s.end[0] - s.start[0])**2 + (s.end[1] - s.start[1])**2)
-        for s in segments
+        math.sqrt((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) for s in segments
     )
 
     # Get layers used
     layers = sorted(set(s.layer for s in segments))
 
     if args.format == "json":
-        print(json.dumps({
-            "number": net.number,
-            "name": net.name,
-            "segments": len(segments),
-            "vias": len(vias),
-            "trace_length_mm": round(trace_length, 2),
-            "layers": layers,
-            "pads": [{"ref": ref, "pad": pad} for ref, pad in pads],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "number": net.number,
+                    "name": net.name,
+                    "segments": len(segments),
+                    "vias": len(vias),
+                    "trace_length_mm": round(trace_length, 2),
+                    "layers": layers,
+                    "pads": [{"ref": ref, "pad": pad} for ref, pad in pads],
+                },
+                indent=2,
+            )
+        )
         return
 
     print(f"Net: {net.name} (#{net.number})")
@@ -277,11 +293,11 @@ def cmd_traces(pcb: PCB, args):
 
     # Calculate stats
     import math
+
     stats = {}
     for layer, segs in by_layer.items():
         lengths = [
-            math.sqrt((s.end[0] - s.start[0])**2 + (s.end[1] - s.start[1])**2)
-            for s in segs
+            math.sqrt((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) for s in segs
         ]
         widths = set(s.width for s in segs)
         stats[layer] = {
@@ -291,14 +307,19 @@ def cmd_traces(pcb: PCB, args):
         }
 
     if args.format == "json":
-        print(json.dumps({
-            layer: {
-                "segments": s["count"],
-                "total_length_mm": round(s["total_length"], 2),
-                "widths_mm": s["widths"],
-            }
-            for layer, s in stats.items()
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    layer: {
+                        "segments": s["count"],
+                        "total_length_mm": round(s["total_length"], 2),
+                        "widths_mm": s["widths"],
+                    }
+                    for layer, s in stats.items()
+                },
+                indent=2,
+            )
+        )
         return
 
     print("Trace Statistics")
@@ -323,16 +344,21 @@ def cmd_vias(pcb: PCB, args):
     vias = pcb.vias
 
     if args.format == "json":
-        print(json.dumps([
-            {
-                "position": {"x": v.position[0], "y": v.position[1]},
-                "size": v.size,
-                "drill": v.drill,
-                "layers": v.layers,
-                "net": pcb.get_net(v.net_number).name if pcb.get_net(v.net_number) else "",
-            }
-            for v in vias
-        ], indent=2))
+        print(
+            json.dumps(
+                [
+                    {
+                        "position": {"x": v.position[0], "y": v.position[1]},
+                        "size": v.size,
+                        "drill": v.drill,
+                        "layers": v.layers,
+                        "net": pcb.get_net(v.net_number).name if pcb.get_net(v.net_number) else "",
+                    }
+                    for v in vias
+                ],
+                indent=2,
+            )
+        )
         return
 
     # Group by size
@@ -372,16 +398,21 @@ def cmd_stackup(pcb: PCB, args):
     stackup = pcb.setup.stackup
 
     if args.format == "json":
-        print(json.dumps([
-            {
-                "name": layer.name,
-                "type": layer.type,
-                "thickness_mm": layer.thickness,
-                "material": layer.material,
-                "epsilon_r": layer.epsilon_r,
-            }
-            for layer in stackup
-        ], indent=2))
+        print(
+            json.dumps(
+                [
+                    {
+                        "name": layer.name,
+                        "type": layer.type,
+                        "thickness_mm": layer.thickness,
+                        "material": layer.material,
+                        "epsilon_r": layer.epsilon_r,
+                    }
+                    for layer in stackup
+                ],
+                indent=2,
+            )
+        )
         return
 
     print("Layer Stackup")
@@ -405,25 +436,27 @@ def cmd_stackup(pcb: PCB, args):
     print(f"\nTotal thickness: {total_thickness:.3f} mm")
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Query KiCad PCB files",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
-    parser.add_argument("command", nargs="?", default="summary",
-                        choices=["summary", "footprints", "footprint", "nets",
-                                 "net", "traces", "vias", "stackup"],
-                        help="Command to run")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="summary",
+        choices=["summary", "footprints", "footprint", "nets", "net", "traces", "vias", "stackup"],
+        help="Command to run",
+    )
     parser.add_argument("arg", nargs="?", help="Command argument (reference, net name)")
-    parser.add_argument("--format", choices=["text", "json"], default="text",
-                        help="Output format")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
     parser.add_argument("--filter", help="Filter pattern (e.g., 'U*', 'C*')")
     parser.add_argument("--sorted", action="store_true", help="Sort output")
     parser.add_argument("--layer", help="Filter by layer (for traces)")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not Path(args.pcb).exists():
         print(f"Error: File not found: {args.pcb}", file=sys.stderr)

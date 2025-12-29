@@ -16,6 +16,7 @@ from .schematic import Schematic
 @dataclass
 class BOMItem:
     """A single component in the BOM."""
+
     reference: str
     value: str
     footprint: str
@@ -45,6 +46,7 @@ class BOMItem:
 @dataclass
 class BOMGroup:
     """A group of identical components."""
+
     value: str
     footprint: str
     items: List[BOMItem] = field(default_factory=list)
@@ -56,10 +58,13 @@ class BOMGroup:
     @property
     def references(self) -> str:
         """Comma-separated list of references."""
-        refs = sorted(self.items, key=lambda x: (
-            x.reference[0] if x.reference else '',
-            int(''.join(filter(str.isdigit, x.reference)) or '0')
-        ))
+        refs = sorted(
+            self.items,
+            key=lambda x: (
+                x.reference[0] if x.reference else "",
+                int("".join(filter(str.isdigit, x.reference)) or "0"),
+            ),
+        )
         return ", ".join(item.reference for item in refs)
 
     @property
@@ -90,6 +95,7 @@ class BOMGroup:
 @dataclass
 class BOM:
     """Complete Bill of Materials."""
+
     items: List[BOMItem] = field(default_factory=list)
     source: str = ""  # Source schematic path
 
@@ -142,10 +148,13 @@ class BOM:
             groups[key].items.append(item)
 
         # Sort groups by reference prefix then number
-        return sorted(groups.values(), key=lambda g: (
-            g.items[0].reference[0] if g.items else '',
-            g.value,
-        ))
+        return sorted(
+            groups.values(),
+            key=lambda g: (
+                g.items[0].reference[0] if g.items else "",
+                g.value,
+            ),
+        )
 
     def filter(
         self,

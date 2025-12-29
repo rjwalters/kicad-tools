@@ -13,6 +13,7 @@ from .violation import DRCViolation, Location, Severity, ViolationType
 @dataclass
 class DRCReport:
     """Parsed DRC report from KiCad."""
+
     source_file: str
     created_at: Optional[datetime]
     pcb_name: str
@@ -62,10 +63,7 @@ class DRCReport:
         return result
 
     def violations_near(
-        self,
-        x_mm: float,
-        y_mm: float,
-        radius_mm: float = 5.0
+        self, x_mm: float, y_mm: float, radius_mm: float = 5.0
     ) -> list[DRCViolation]:
         """Find violations within a radius of a point."""
         result = []
@@ -90,9 +88,7 @@ class DRCReport:
             "by_type": {
                 vtype.value: len(violations)
                 for vtype, violations in sorted(
-                    by_type.items(),
-                    key=lambda x: len(x[1]),
-                    reverse=True
+                    by_type.items(), key=lambda x: len(x[1]), reverse=True
                 )
             },
         }
@@ -147,25 +143,25 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
     created_at = None
     footprint_errors = 0
 
-    header_pcb = re.search(r'\*\* Drc report for (.+?) \*\*', content)
+    header_pcb = re.search(r"\*\* Drc report for (.+?) \*\*", content)
     if header_pcb:
         pcb_name = header_pcb.group(1)
 
-    header_date = re.search(r'\*\* Created on (.+?) \*\*', content)
+    header_date = re.search(r"\*\* Created on (.+?) \*\*", content)
     if header_date:
         date_str = header_date.group(1).strip()
         try:
             # Python 3.10 fromisoformat doesn't handle all timezone formats
             # Try to normalize the timezone format first
-            if re.match(r'.*[+-]\d{4}$', date_str):
+            if re.match(r".*[+-]\d{4}$", date_str):
                 # Convert -0800 to -08:00 format
-                date_str = date_str[:-2] + ':' + date_str[-2:]
+                date_str = date_str[:-2] + ":" + date_str[-2:]
             created_at = datetime.fromisoformat(date_str)
         except ValueError:
             pass
 
     # Parse footprint error count
-    fp_match = re.search(r'\*\* Found (\d+) Footprint errors \*\*', content)
+    fp_match = re.search(r"\*\* Found (\d+) Footprint errors \*\*", content)
     if fp_match:
         footprint_errors = int(fp_match.group(1))
 
@@ -178,7 +174,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             continue
 
         # Start of new violation: [type]: message
-        violation_match = re.match(r'\[(\w+)\]:\s*(.+)', line)
+        violation_match = re.match(r"\[(\w+)\]:\s*(.+)", line)
         if violation_match:
             # Save previous violation
             if current_violation:
@@ -202,17 +198,14 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             continue
 
         # Rule line: Rule: ...; severity
-        rule_match = re.match(r'\s+Rule:\s*(.+);\s*(error|warning)', line, re.IGNORECASE)
+        rule_match = re.match(r"\s+Rule:\s*(.+);\s*(error|warning)", line, re.IGNORECASE)
         if rule_match:
             current_violation["rule"] = rule_match.group(1)
             current_violation["severity"] = Severity.from_string(rule_match.group(2))
             continue
 
         # Location line: @(x mm, y mm): description
-        loc_match = re.match(
-            r'\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)',
-            line
-        )
+        loc_match = re.match(r"\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)", line)
         if loc_match:
             x_mm = float(loc_match.group(1))
             y_mm = float(loc_match.group(2))
@@ -220,7 +213,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
 
             # Extract layer from description
             layer = ""
-            layer_match = re.search(r'on\s+(F\.Cu|B\.Cu|[\w.]+)', description)
+            layer_match = re.search(r"on\s+(F\.Cu|B\.Cu|[\w.]+)", description)
             if layer_match:
                 layer = layer_match.group(1)
 
@@ -228,7 +221,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
             current_violation["items"].append(description)
 
             # Extract net names from [NetName] pattern
-            net_matches = re.findall(r'\[([^\]]+)\]', description)
+            net_matches = re.findall(r"\[([^\]]+)\]", description)
             for net in net_matches:
                 if net != "<no net>" and net not in current_violation["nets"]:
                     current_violation["nets"].append(net)
@@ -277,10 +270,12 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
         # Parse position
         if "pos" in item:
             pos = item["pos"]
-            locations.append(Location(
-                x_mm=pos.get("x", 0),
-                y_mm=pos.get("y", 0),
-            ))
+            locations.append(
+                Location(
+                    x_mm=pos.get("x", 0),
+                    y_mm=pos.get("y", 0),
+                )
+            )
 
         # Parse items
         for item_data in item.get("items", []):
@@ -289,10 +284,12 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
 
             if "pos" in item_data:
                 pos = item_data["pos"]
-                locations.append(Location(
-                    x_mm=pos.get("x", 0),
-                    y_mm=pos.get("y", 0),
-                ))
+                locations.append(
+                    Location(
+                        x_mm=pos.get("x", 0),
+                        y_mm=pos.get("y", 0),
+                    )
+                )
 
             # Extract nets
             if "net" in item_data:
@@ -326,9 +323,7 @@ def _extract_values(data: dict, message: str) -> None:
     """Extract numeric values from violation message."""
     # Pattern: "clearance X.XXXX mm; actual Y.YYYY mm"
     clearance_match = re.search(
-        r'clearance\s+([\d.]+)\s*mm.*?actual\s+([\d.]+)\s*mm',
-        message,
-        re.IGNORECASE
+        r"clearance\s+([\d.]+)\s*mm.*?actual\s+([\d.]+)\s*mm", message, re.IGNORECASE
     )
     if clearance_match:
         data["required_value_mm"] = float(clearance_match.group(1))
@@ -337,9 +332,7 @@ def _extract_values(data: dict, message: str) -> None:
 
     # Pattern: "width X.XXXX mm; actual Y.YYYY mm"
     width_match = re.search(
-        r'width\s+([\d.]+)\s*mm.*?actual\s+([\d.]+)\s*mm',
-        message,
-        re.IGNORECASE
+        r"width\s+([\d.]+)\s*mm.*?actual\s+([\d.]+)\s*mm", message, re.IGNORECASE
     )
     if width_match:
         data["required_value_mm"] = float(width_match.group(1))

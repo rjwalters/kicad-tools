@@ -28,6 +28,7 @@ from typing import Optional
 @dataclass
 class PadInfo:
     """Information about a footprint pad."""
+
     name: str
     x: float
     y: float
@@ -48,52 +49,42 @@ COMMON_FOOTPRINTS = {
     # -------------------------------------------------------------------------
     # Passive Components
     # -------------------------------------------------------------------------
-
     "Capacitor_SMD:C_0402_1005Metric": {
         "1": (-0.48, 0),
         "2": (0.48, 0),
     },
-
     "Capacitor_SMD:C_0603_1608Metric": {
         "1": (-0.775, 0),
         "2": (0.775, 0),
     },
-
     "Capacitor_SMD:C_0805_2012Metric": {
         "1": (-0.95, 0),
         "2": (0.95, 0),
     },
-
     "Resistor_SMD:R_0402_1005Metric": {
         "1": (-0.48, 0),
         "2": (0.48, 0),
     },
-
     "Resistor_SMD:R_0603_1608Metric": {
         "1": (-0.775, 0),
         "2": (0.775, 0),
     },
-
     "Inductor_SMD:L_0603_1608Metric": {
         "1": (-0.775, 0),
         "2": (0.775, 0),
     },
-
     "LED_SMD:LED_0603_1608Metric": {
         # Pin 1 = Cathode (K), Pin 2 = Anode (A)
         "1": (-0.775, 0),
         "2": (0.775, 0),
     },
-
     "Diode_SMD:D_SOD-323": {
         "1": (-1.25, 0),
         "2": (1.25, 0),
     },
-
     # -------------------------------------------------------------------------
     # Voltage Regulators
     # -------------------------------------------------------------------------
-
     "Package_TO_SOT_SMD:SOT-23-5": {
         # Typical LDO pinout (e.g., XC6206, AP2112):
         # Pin 1: VIN (left, bottom)
@@ -107,18 +98,16 @@ COMMON_FOOTPRINTS = {
         "4": (1.1375, 0.95),
         "5": (1.1375, -0.95),
     },
-
     # -------------------------------------------------------------------------
     # MCU - STM32C011 (TSSOP-20)
     # -------------------------------------------------------------------------
-
     "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm": {
         # Left side (pins 1-10, top to bottom in schematic = bottom to top physically)
         "1": (-2.8625, -2.925),
         "2": (-2.8625, -2.275),
         "3": (-2.8625, -1.625),
-        "4": (-2.8625, -0.975),   # VDD
-        "5": (-2.8625, -0.325),   # VSS
+        "4": (-2.8625, -0.975),  # VDD
+        "5": (-2.8625, -0.325),  # VSS
         "6": (-2.8625, 0.325),
         "7": (-2.8625, 0.975),
         "8": (-2.8625, 1.625),
@@ -136,22 +125,18 @@ COMMON_FOOTPRINTS = {
         "19": (2.8625, -2.275),
         "20": (2.8625, -2.925),
     },
-
     # -------------------------------------------------------------------------
     # DAC - PCM5102A (TSSOP-28)
     # -------------------------------------------------------------------------
-
     "Package_SO:TSSOP-28_4.4x9.7mm_P0.65mm": {
         # Pins 1-14 on left, 15-28 on right
         # 0.65mm pitch, starting from center
-        **{str(i): (-2.8625, -4.225 + (i-1) * 0.65) for i in range(1, 15)},
-        **{str(i): (2.8625, 4.225 - (i-15) * 0.65) for i in range(15, 29)},
+        **{str(i): (-2.8625, -4.225 + (i - 1) * 0.65) for i in range(1, 15)},
+        **{str(i): (2.8625, 4.225 - (i - 15) * 0.65) for i in range(15, 29)},
     },
-
     # -------------------------------------------------------------------------
     # Oscillator - 3.2x2.5mm SMD
     # -------------------------------------------------------------------------
-
     "Oscillator:Oscillator_SMD_Abracon_ASE-4Pin_3.2x2.5mm": {
         # Standard 4-pin oscillator pinout:
         # Pin 1: EN (enable)
@@ -163,19 +148,16 @@ COMMON_FOOTPRINTS = {
         "3": (1.05, -0.825),
         "4": (-1.05, -0.825),
     },
-
     # -------------------------------------------------------------------------
     # Connectors
     # -------------------------------------------------------------------------
-
     "Connector_PinSocket_2.54mm:PinSocket_2x20_P2.54mm_Vertical": {
         # 40-pin Raspberry Pi header (2 rows x 20 pins)
         # Odd pins on left (1,3,5...), even on right (2,4,6...)
         # 2.54mm pitch
-        **{str(i): (-1.27, -24.13 + ((i-1)//2) * 2.54) for i in range(1, 40, 2)},
-        **{str(i): (1.27, -24.13 + ((i-2)//2) * 2.54) for i in range(2, 41, 2)},
+        **{str(i): (-1.27, -24.13 + ((i - 1) // 2) * 2.54) for i in range(1, 40, 2)},
+        **{str(i): (1.27, -24.13 + ((i - 2) // 2) * 2.54) for i in range(2, 41, 2)},
     },
-
     "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical": {
         # 4-pin debug header (SWD)
         "1": (0, 0),
@@ -183,7 +165,6 @@ COMMON_FOOTPRINTS = {
         "3": (0, 5.08),
         "4": (0, 7.62),
     },
-
     "Connector_Audio:Jack_3.5mm_CUI_SJ-3523-SMT_Horizontal": {
         # 3.5mm audio jack
         # Tip (L), Ring (R), Sleeve (GND)
@@ -216,6 +197,7 @@ FOOTPRINT_ALIASES = {
 # =============================================================================
 # Footprint Library Reader
 # =============================================================================
+
 
 class FootprintLibrary:
     """
@@ -353,7 +335,6 @@ STM32C011_PIN_MAP = {
     # Power
     "VDD": "4",
     "VSS": "5",
-
     # Port A
     "PA0": "7",
     "PA1": "8",
@@ -369,15 +350,12 @@ STM32C011_PIN_MAP = {
     "PA13": "18",  # SWDIO
     "PA14": "19",  # SWCLK
     "PA15": "20",
-
     # Port B
     "PB6": "1",
     "PB7": "2",
-
     # Port C
     "PC14": "3",
     "PC15": "6",
-
     # Port F
     "PF2": "6",  # Alternate function
 }

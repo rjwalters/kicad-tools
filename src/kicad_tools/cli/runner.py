@@ -49,6 +49,7 @@ def find_kicad_cli() -> Optional[Path]:
 @dataclass
 class KiCadCLIResult:
     """Result from running kicad-cli."""
+
     success: bool
     output_path: Optional[Path] = None
     stdout: str = ""
@@ -80,7 +81,7 @@ def run_erc(
         if kicad_cli is None:
             return KiCadCLIResult(
                 success=False,
-                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/"
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
             )
 
     # Determine output path
@@ -90,14 +91,20 @@ def run_erc(
         output_path = Path(temp_path)
         # Close the file descriptor - kicad-cli will write to it
         import os
+
         os.close(fd)
 
     # Build command
     cmd = [
-        str(kicad_cli), "sch", "erc",
-        "--output", str(output_path),
-        "--format", format,
-        "--units", "mm",
+        str(kicad_cli),
+        "sch",
+        "erc",
+        "--output",
+        str(output_path),
+        "--format",
+        format,
+        "--units",
+        "mm",
     ]
 
     if severity_all:
@@ -154,7 +161,7 @@ def run_drc(
         if kicad_cli is None:
             return KiCadCLIResult(
                 success=False,
-                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/"
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
             )
 
     # Determine output path
@@ -163,14 +170,20 @@ def run_drc(
         fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix="drc_")
         output_path = Path(temp_path)
         import os
+
         os.close(fd)
 
     # Build command
     cmd = [
-        str(kicad_cli), "pcb", "drc",
-        "--output", str(output_path),
-        "--format", format,
-        "--units", "mm",
+        str(kicad_cli),
+        "pcb",
+        "drc",
+        "--output",
+        str(output_path),
+        "--format",
+        format,
+        "--units",
+        "mm",
     ]
 
     if schematic_parity:
@@ -222,10 +235,7 @@ def run_netlist_export(
     if kicad_cli is None:
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
-            return KiCadCLIResult(
-                success=False,
-                stderr="kicad-cli not found"
-            )
+            return KiCadCLIResult(success=False, stderr="kicad-cli not found")
 
     # Determine output path
     if output_path is None:
@@ -233,12 +243,18 @@ def run_netlist_export(
         fd, temp_path = tempfile.mkstemp(suffix=suffix, prefix="netlist_")
         output_path = Path(temp_path)
         import os
+
         os.close(fd)
 
     cmd = [
-        str(kicad_cli), "sch", "export", "netlist",
-        "--output", str(output_path),
-        "--format", format,
+        str(kicad_cli),
+        "sch",
+        "export",
+        "netlist",
+        "--output",
+        str(output_path),
+        "--format",
+        format,
         str(schematic_path),
     ]
 

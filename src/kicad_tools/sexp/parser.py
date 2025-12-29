@@ -50,6 +50,7 @@ class SExp:
         123.45
         → SExp(name=None, value=123.45)
     """
+
     name: Optional[str] = None
     children: list[SExp] = field(default_factory=list)
     value: Optional[Union[str, int, float]] = None
@@ -234,13 +235,44 @@ class SExp:
 
         # Determine if this node forces structured children on separate lines
         force_structured_on_lines = self.name in {
-            "kicad_sch", "kicad_pcb", "lib_symbols", "symbol", "footprint",
-            "title_block", "sheet", "sheet_instances", "instances", "project",
-            "effects", "general", "layers", "layer", "stackup", "setup", "pcbplotparams",
-            "gr_rect", "gr_circle", "gr_line", "gr_text", "gr_arc", "gr_poly",
-            "zone", "segment", "via", "pad", "fp_text", "fp_line", "fp_circle",
-            "net", "property", "wire", "junction", "label", "hierarchical_label",
-            "stroke", "font",
+            "kicad_sch",
+            "kicad_pcb",
+            "lib_symbols",
+            "symbol",
+            "footprint",
+            "title_block",
+            "sheet",
+            "sheet_instances",
+            "instances",
+            "project",
+            "effects",
+            "general",
+            "layers",
+            "layer",
+            "stackup",
+            "setup",
+            "pcbplotparams",
+            "gr_rect",
+            "gr_circle",
+            "gr_line",
+            "gr_text",
+            "gr_arc",
+            "gr_poly",
+            "zone",
+            "segment",
+            "via",
+            "pad",
+            "fp_text",
+            "fp_line",
+            "fp_circle",
+            "net",
+            "property",
+            "wire",
+            "junction",
+            "label",
+            "hierarchical_label",
+            "stroke",
+            "font",
         }
 
         # Track if we've started putting things on new lines
@@ -292,17 +324,55 @@ class SExp:
         # Never inline top-level or major structural elements
         never_inline = {
             # Top-level containers
-            "kicad_sch", "kicad_pcb", "lib_symbols", "symbol", "footprint",
-            "title_block", "sheet", "sheet_instances", "instances", "project",
-            "path", "property", "effects", "font", "pin", "rectangle", "fill",
-            "polyline", "arc", "circle", "text", "wire", "junction", "label",
-            "hierarchical_label", "global_label", "no_connect",
+            "kicad_sch",
+            "kicad_pcb",
+            "lib_symbols",
+            "symbol",
+            "footprint",
+            "title_block",
+            "sheet",
+            "sheet_instances",
+            "instances",
+            "project",
+            "path",
+            "property",
+            "effects",
+            "font",
+            "pin",
+            "rectangle",
+            "fill",
+            "polyline",
+            "arc",
+            "circle",
+            "text",
+            "wire",
+            "junction",
+            "label",
+            "hierarchical_label",
+            "global_label",
+            "no_connect",
             # PCB-specific
-            "general", "layers", "layer", "stackup", "setup", "pcbplotparams",
-            "net", "gr_rect", "gr_circle", "gr_line", "gr_text", "zone",
-            "segment", "via", "pad", "fp_text", "fp_line", "fp_circle",
+            "general",
+            "layers",
+            "layer",
+            "stackup",
+            "setup",
+            "pcbplotparams",
+            "net",
+            "gr_rect",
+            "gr_circle",
+            "gr_line",
+            "gr_text",
+            "zone",
+            "segment",
+            "via",
+            "pad",
+            "fp_text",
+            "fp_line",
+            "fp_circle",
             # Common nested structures
-            "stroke", "fill",
+            "stroke",
+            "fill",
         }
         if self.name in never_inline:
             return False
@@ -316,18 +386,44 @@ class SExp:
 
         # Known inline elements in KiCad
         inline_names = {
-            "xy", "at", "size", "stroke", "width", "type", "color",
-            "diameter", "length", "thickness", "hide", "name", "number",
-            "uuid", "justify", "start", "end", "mid", "pts",
-            "exclude_from_sim", "in_bom", "on_board", "dnp",
-            "fields_autoplaced", "pin_numbers", "pin_names", "offset",
+            "xy",
+            "at",
+            "size",
+            "stroke",
+            "width",
+            "type",
+            "color",
+            "diameter",
+            "length",
+            "thickness",
+            "hide",
+            "name",
+            "number",
+            "uuid",
+            "justify",
+            "start",
+            "end",
+            "mid",
+            "pts",
+            "exclude_from_sim",
+            "in_bom",
+            "on_board",
+            "dnp",
+            "fields_autoplaced",
+            "pin_numbers",
+            "pin_names",
+            "offset",
         }
         if self.name in inline_names:
             # But only if children are simple
             if all(c.is_atom or c._should_inline() for c in self.children):
-                inline_str = "(" + self.name + " " + " ".join(
-                    c.to_string(compact=True) for c in self.children
-                ) + ")"
+                inline_str = (
+                    "("
+                    + self.name
+                    + " "
+                    + " ".join(c.to_string(compact=True) for c in self.children)
+                    + ")"
+                )
                 return len(inline_str) < 80
             return False
 
@@ -351,7 +447,7 @@ class SExp:
             # Check if needs quoting
             if self._needs_quoting(self.value):
                 escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
-                escaped = escaped.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
                 return f'"{escaped}"'
             return self.value
         # For numbers, use original string if available (for round-trip preservation)
@@ -370,7 +466,7 @@ class SExp:
         if not s:
             return False
         # Names can't start with a digit or dash (would look like number)
-        if s[0].isdigit() or s[0] == '-':
+        if s[0].isdigit() or s[0] == "-":
             return False
         # Names can't contain special chars that need quoting
         if any(c in s for c in ' \t\n\r"()'):
@@ -386,30 +482,64 @@ class SExp:
         # Known unquoted keywords in KiCad format
         unquoted_keywords = {
             # Boolean-like
-            'yes', 'no', 'true', 'false',
+            "yes",
+            "no",
+            "true",
+            "false",
             # Visibility
-            'hide', 'show',
+            "hide",
+            "show",
             # Fill types
-            'none', 'outline', 'background', 'solid',
+            "none",
+            "outline",
+            "background",
+            "solid",
             # Stroke types
-            'default', 'dash', 'dash_dot', 'dash_dot_dot', 'dot',
+            "default",
+            "dash",
+            "dash_dot",
+            "dash_dot_dot",
+            "dot",
             # Justify
-            'left', 'right', 'center', 'top', 'bottom', 'mirror',
+            "left",
+            "right",
+            "center",
+            "top",
+            "bottom",
+            "mirror",
             # Pin types
-            'input', 'output', 'bidirectional', 'tri_state', 'passive',
-            'free', 'unspecified', 'power_in', 'power_out', 'open_collector',
-            'open_emitter', 'no_connect', 'line', 'inverted', 'clock',
-            'inverted_clock', 'input_low', 'clock_low', 'output_low',
-            'edge_clock_high', 'non_logic',
+            "input",
+            "output",
+            "bidirectional",
+            "tri_state",
+            "passive",
+            "free",
+            "unspecified",
+            "power_in",
+            "power_out",
+            "open_collector",
+            "open_emitter",
+            "no_connect",
+            "line",
+            "inverted",
+            "clock",
+            "inverted_clock",
+            "input_low",
+            "clock_low",
+            "output_low",
+            "edge_clock_high",
+            "non_logic",
             # Layer type keywords in PCB
-            'signal', 'power', 'user',
+            "signal",
+            "power",
+            "user",
         }
 
         if s in unquoted_keywords:
             return False
 
         # Don't quote hex numbers
-        if s.startswith('0x') or s.startswith('0X'):
+        if s.startswith("0x") or s.startswith("0X"):
             return False
 
         # Quote everything else - KiCad uses quoted strings liberally
@@ -466,7 +596,7 @@ class Parser:
 
         char = self.text[self.pos]
 
-        if char == '(':
+        if char == "(":
             return self._parse_list()
         elif char == '"':
             return SExp(value=self._parse_string())
@@ -475,7 +605,7 @@ class Parser:
 
     def _parse_list(self) -> SExp:
         """Parse a list (name children...)."""
-        assert self.text[self.pos] == '('
+        assert self.text[self.pos] == "("
         self.pos += 1
 
         self._skip_whitespace()
@@ -483,7 +613,7 @@ class Parser:
         if self.pos >= self.length:
             raise ParseError("Unexpected end of input in list")
 
-        if self.text[self.pos] == ')':
+        if self.text[self.pos] == ")":
             self.pos += 1
             return SExp()  # Empty list
 
@@ -505,7 +635,7 @@ class Parser:
             if self.pos >= self.length:
                 raise ParseError("Unexpected end of input, expected ')'")
 
-            if self.text[self.pos] == ')':
+            if self.text[self.pos] == ")":
                 self.pos += 1
                 break
 
@@ -525,17 +655,17 @@ class Parser:
             if char == '"':
                 self.pos += 1
                 return "".join(result)
-            elif char == '\\':
+            elif char == "\\":
                 self.pos += 1
                 if self.pos >= self.length:
                     raise ParseError("Unexpected end of input in escape sequence")
                 escaped = self.text[self.pos]
-                if escaped == 'n':
-                    result.append('\n')
-                elif escaped == 't':
-                    result.append('\t')
-                elif escaped == 'r':
-                    result.append('\r')
+                if escaped == "n":
+                    result.append("\n")
+                elif escaped == "t":
+                    result.append("\t")
+                elif escaped == "r":
+                    result.append("\r")
                 else:
                     result.append(escaped)
             else:
@@ -551,18 +681,18 @@ class Parser:
 
         while self.pos < self.length:
             char = self.text[self.pos]
-            if char in ' \t\n\r()':
+            if char in " \t\n\r()":
                 break
             self.pos += 1
 
         if self.pos == start:
             raise ParseError(f"Expected atom at position {self.pos}")
 
-        token = self.text[start:self.pos]
+        token = self.text[start : self.pos]
 
         # Try to parse as number, but preserve original string for round-trip
         try:
-            if '.' in token or 'e' in token.lower():
+            if "." in token or "e" in token.lower():
                 node = SExp(value=float(token))
                 node._original_str = token  # Preserve for round-trip
                 return node
@@ -577,11 +707,11 @@ class Parser:
         while self.pos < self.length:
             char = self.text[self.pos]
 
-            if char in ' \t\n\r':
+            if char in " \t\n\r":
                 self.pos += 1
-            elif char == '#':
+            elif char == "#":
                 # Skip to end of line
-                while self.pos < self.length and self.text[self.pos] != '\n':
+                while self.pos < self.length and self.text[self.pos] != "\n":
                     self.pos += 1
             else:
                 break
@@ -589,6 +719,7 @@ class Parser:
 
 class ParseError(Exception):
     """Error during S-expression parsing."""
+
     pass
 
 
@@ -599,7 +730,7 @@ def parse_string(text: str) -> SExp:
 
 def parse_file(path: str | Path) -> SExp:
     """Parse an S-expression file."""
-    text = Path(path).read_text(encoding='utf-8')
+    text = Path(path).read_text(encoding="utf-8")
     return Parser(text).parse()
 
 
@@ -629,7 +760,7 @@ class Document:
         save_path = Path(path) if path else self.path
         if save_path is None:
             raise ValueError("No path specified for save")
-        save_path.write_text(self.root.to_string(), encoding='utf-8')
+        save_path.write_text(self.root.to_string(), encoding="utf-8")
 
     def find(self, name: str, **attrs) -> Optional[SExp]:
         """Find first element matching name and attributes."""
@@ -642,7 +773,7 @@ class Document:
 
 if __name__ == "__main__":
     # Test with a simple example
-    test_sexp = '''
+    test_sexp = """
     (kicad_sch
         (version 20231120)
         (generator "test")
@@ -657,7 +788,7 @@ if __name__ == "__main__":
             (pts (xy 10 20) (xy 30 40))
         )
     )
-    '''
+    """
 
     print("Parsing test S-expression...")
     doc = parse_string(test_sexp)

@@ -47,10 +47,7 @@ def at(x: float, y: float, rotation: float = 0) -> SExp:
 
 def stroke(width: float = 0, stroke_type: str = "solid") -> SExp:
     """Build a (stroke (width W) (type T)) node."""
-    return SExp.list("stroke",
-        SExp.list("width", width),
-        SExp.list("type", stroke_type)
-    )
+    return SExp.list("stroke", SExp.list("width", width), SExp.list("type", stroke_type))
 
 
 def font(size: float = 1.27) -> SExp:
@@ -90,9 +87,15 @@ def uuid_node(uuid_str: str) -> SExp:
     return SExp.list("uuid", uuid_str)
 
 
-def property_node(name: str, value: str, x: float, y: float,
-                  rotation: float = 0, font_size: float = 1.27,
-                  hide: bool = False) -> SExp:
+def property_node(
+    name: str,
+    value: str,
+    x: float,
+    y: float,
+    rotation: float = 0,
+    font_size: float = 1.27,
+    hide: bool = False,
+) -> SExp:
     """Build a complete property block for symbols.
 
     Args:
@@ -103,9 +106,8 @@ def property_node(name: str, value: str, x: float, y: float,
         font_size: Font size in mm
         hide: Whether to hide the property
     """
-    prop = SExp.list("property", name, value,
-        at(x, y, rotation),
-        effects(font_size=font_size, hide=hide)
+    prop = SExp.list(
+        "property", name, value, at(x, y, rotation), effects(font_size=font_size, hide=hide)
     )
     return prop
 
@@ -127,56 +129,54 @@ def pts(*points: SExp) -> SExp:
 # Higher-level builders for common schematic elements
 # =============================================================================
 
+
 def wire_node(x1: float, y1: float, x2: float, y2: float, uuid_str: str) -> SExp:
     """Build a complete wire S-expression."""
-    return SExp.list("wire",
-        pts(xy(x1, y1), xy(x2, y2)),
-        stroke(),
-        uuid_node(uuid_str)
-    )
+    return SExp.list("wire", pts(xy(x1, y1), xy(x2, y2)), stroke(), uuid_node(uuid_str))
 
 
 def junction_node(x: float, y: float, uuid_str: str) -> SExp:
     """Build a complete junction S-expression."""
-    return SExp.list("junction",
-        at(x, y),
-        SExp.list("diameter", 0),
-        color(),
-        uuid_node(uuid_str)
-    )
+    return SExp.list("junction", at(x, y), SExp.list("diameter", 0), color(), uuid_node(uuid_str))
 
 
-def label_node(text: str, x: float, y: float, rotation: float,
-               uuid_str: str) -> SExp:
+def label_node(text: str, x: float, y: float, rotation: float, uuid_str: str) -> SExp:
     """Build a complete label S-expression."""
-    return SExp.list("label", text,
+    return SExp.list(
+        "label",
+        text,
         at(x, y, rotation),
         SExp.list("fields_autoplaced", "yes"),
         effects(justify="left bottom"),
-        uuid_node(uuid_str)
+        uuid_node(uuid_str),
     )
 
 
-def hier_label_node(text: str, x: float, y: float, shape: str,
-                    rotation: float, uuid_str: str) -> SExp:
+def hier_label_node(
+    text: str, x: float, y: float, shape: str, rotation: float, uuid_str: str
+) -> SExp:
     """Build a complete hierarchical label S-expression."""
     justify = "right" if rotation == 180 else "left"
-    return SExp.list("hierarchical_label", text,
+    return SExp.list(
+        "hierarchical_label",
+        text,
         SExp.list("shape", shape),
         at(x, y, rotation),
         SExp.list("fields_autoplaced", "yes"),
         effects(justify=justify),
-        uuid_node(uuid_str)
+        uuid_node(uuid_str),
     )
 
 
 def text_node(text: str, x: float, y: float, uuid_str: str) -> SExp:
     """Build a complete text note S-expression."""
-    return SExp.list("text", text,
+    return SExp.list(
+        "text",
+        text,
         SExp.list("exclude_from_sim", "no"),
         at(x, y, 0),
         effects(font_size=1.524, justify="left"),
-        uuid_node(uuid_str)
+        uuid_node(uuid_str),
     )
 
 
@@ -184,8 +184,10 @@ def text_node(text: str, x: float, y: float, uuid_str: str) -> SExp:
 # Symbol builders
 # =============================================================================
 
-def symbol_property_node(name: str, value: str, x: float, y: float,
-                         rotation: float = 0, hide: bool = False) -> SExp:
+
+def symbol_property_node(
+    name: str, value: str, x: float, y: float, rotation: float = 0, hide: bool = False
+) -> SExp:
     """Build a complete property block for symbols.
 
     Args:
@@ -195,10 +197,7 @@ def symbol_property_node(name: str, value: str, x: float, y: float,
         rotation: Text rotation in degrees
         hide: Whether to hide the property
     """
-    prop = SExp.list("property", name, value,
-        at(x, y, rotation),
-        effects(hide=hide)
-    )
+    prop = SExp.list("property", name, value, at(x, y, rotation), effects(hide=hide))
     return prop
 
 
@@ -207,16 +206,17 @@ def pin_uuid_node(pin_number: str, pin_uuid: str) -> SExp:
     return SExp.list("pin", pin_number, uuid_node(pin_uuid))
 
 
-def symbol_instances_node(project_name: str, sheet_path: str,
-                          reference: str, unit: int) -> SExp:
+def symbol_instances_node(project_name: str, sheet_path: str, reference: str, unit: int) -> SExp:
     """Build the instances section of a symbol."""
-    return SExp.list("instances",
-        SExp.list("project", project_name,
-            SExp.list("path", sheet_path,
-                SExp.list("reference", reference),
-                SExp.list("unit", unit)
-            )
-        )
+    return SExp.list(
+        "instances",
+        SExp.list(
+            "project",
+            project_name,
+            SExp.list(
+                "path", sheet_path, SExp.list("reference", reference), SExp.list("unit", unit)
+            ),
+        ),
     )
 
 
@@ -224,10 +224,13 @@ def symbol_instances_node(project_name: str, sheet_path: str,
 # Title block and document structure builders
 # =============================================================================
 
-def title_block(title: str, date: str, revision: str,
-                company: str = "", comment1: str = "", comment2: str = "") -> SExp:
+
+def title_block(
+    title: str, date: str, revision: str, company: str = "", comment1: str = "", comment2: str = ""
+) -> SExp:
     """Build a title_block S-expression."""
-    return SExp.list("title_block",
+    return SExp.list(
+        "title_block",
         SExp.list("title", title),
         SExp.list("date", date),
         SExp.list("rev", revision),
@@ -239,19 +242,24 @@ def title_block(title: str, date: str, revision: str,
 
 def sheet_instances(sheet_path: str, page: str) -> SExp:
     """Build a sheet_instances S-expression."""
-    return SExp.list("sheet_instances",
-        SExp.list("path", sheet_path,
-            SExp.list("page", page)
-        )
-    )
+    return SExp.list("sheet_instances", SExp.list("path", sheet_path, SExp.list("page", page)))
 
 
 # =============================================================================
 # PCB element builders
 # =============================================================================
 
-def segment_node(start_x: float, start_y: float, end_x: float, end_y: float,
-                 width: float, layer: str, net: int, uuid_str: str) -> SExp:
+
+def segment_node(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    width: float,
+    layer: str,
+    net: int,
+    uuid_str: str,
+) -> SExp:
     """Build a PCB track segment S-expression.
 
     Args:
@@ -272,18 +280,20 @@ def segment_node(start_x: float, start_y: float, end_x: float, end_y: float,
             (uuid "...")
         )
     """
-    return SExp.list("segment",
+    return SExp.list(
+        "segment",
         SExp.list("start", fmt(start_x), fmt(start_y)),
         SExp.list("end", fmt(end_x), fmt(end_y)),
         SExp.list("width", fmt(width)),
         SExp.list("layer", layer),
         SExp.list("net", net),
-        uuid_node(uuid_str)
+        uuid_node(uuid_str),
     )
 
 
-def via_node(x: float, y: float, size: float, drill: float,
-             layers: tuple[str, str], net: int, uuid_str: str) -> SExp:
+def via_node(
+    x: float, y: float, size: float, drill: float, layers: tuple[str, str], net: int, uuid_str: str
+) -> SExp:
     """Build a PCB via S-expression.
 
     Args:
@@ -305,20 +315,29 @@ def via_node(x: float, y: float, size: float, drill: float,
         )
     """
     layers_node = SExp.list("layers", *layers)
-    return SExp.list("via",
+    return SExp.list(
+        "via",
         at(x, y),
         SExp.list("size", fmt(size)),
         SExp.list("drill", fmt(drill)),
         layers_node,
         SExp.list("net", net),
-        uuid_node(uuid_str)
+        uuid_node(uuid_str),
     )
 
 
-def zone_node(net: int, net_name: str, layer: str, points: list[tuple[float, float]],
-              uuid_str: str, priority: int = 0, min_thickness: float = 0.2,
-              clearance: float = 0.2, thermal_gap: float = 0.3,
-              thermal_bridge_width: float = 0.3) -> SExp:
+def zone_node(
+    net: int,
+    net_name: str,
+    layer: str,
+    points: list[tuple[float, float]],
+    uuid_str: str,
+    priority: int = 0,
+    min_thickness: float = 0.2,
+    clearance: float = 0.2,
+    thermal_gap: float = 0.3,
+    thermal_bridge_width: float = 0.3,
+) -> SExp:
     """Build a PCB copper zone (pour) S-expression.
 
     Args:
@@ -351,7 +370,8 @@ def zone_node(net: int, net_name: str, layer: str, points: list[tuple[float, flo
     pts_children = [xy(x, y) for x, y in points]
     polygon = SExp.list("polygon", SExp.list("pts", *pts_children))
 
-    zone = SExp.list("zone",
+    zone = SExp.list(
+        "zone",
         SExp.list("net", net),
         SExp.list("net_name", net_name),
         SExp.list("layer", layer),
@@ -367,10 +387,14 @@ def zone_node(net: int, net_name: str, layer: str, points: list[tuple[float, flo
     zone.append(SExp.list("connect_pads", SExp.list("clearance", fmt(clearance))))
     zone.append(SExp.list("min_thickness", fmt(min_thickness)))
     zone.append(SExp.list("filled_areas_thickness", "no"))
-    zone.append(SExp.list("fill", "yes",
-        SExp.list("thermal_gap", fmt(thermal_gap)),
-        SExp.list("thermal_bridge_width", fmt(thermal_bridge_width))
-    ))
+    zone.append(
+        SExp.list(
+            "fill",
+            "yes",
+            SExp.list("thermal_gap", fmt(thermal_gap)),
+            SExp.list("thermal_bridge_width", fmt(thermal_bridge_width)),
+        )
+    )
     zone.append(polygon)
 
     return zone

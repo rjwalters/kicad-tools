@@ -35,10 +35,8 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", choices=["text", "json"],
-                        default="text", help="Output format")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show more details")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show more details")
 
     args = parser.parse_args()
 
@@ -78,7 +76,9 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
             "sheets": [
                 {"name": n.name, "path": n.get_path_string(), "labels": len(n.hierarchical_labels)}
                 for n in all_nodes
-            ] if verbose else [n.name for n in all_nodes if n.name != "Root"],
+            ]
+            if verbose
+            else [n.name for n in all_nodes if n.name != "Root"],
         }
     except Exception:
         summary["hierarchy"] = {"total_sheets": 1, "sheets": []}
@@ -92,7 +92,7 @@ def gather_summary(schematic_path: str, verbose: bool = False) -> dict:
         ref_counts = Counter()
         for item in bom_filtered.items:
             if item.reference:
-                prefix = ''.join(c for c in item.reference if c.isalpha())
+                prefix = "".join(c for c in item.reference if c.isalpha())
                 ref_counts[prefix] += 1
 
         summary["components"] = {
@@ -164,7 +164,9 @@ def print_summary(summary: dict, verbose: bool = False):
         if isinstance(sheet_list, list) and sheet_list:
             if isinstance(sheet_list[0], dict):
                 for s in sheet_list[:8]:
-                    print(f"   {'/' if s['name'] == 'Root' else '├─'} {s['name']} ({s['labels']} labels)")
+                    print(
+                        f"   {'/' if s['name'] == 'Root' else '├─'} {s['name']} ({s['labels']} labels)"
+                    )
             else:
                 for name in sheet_list[:8]:
                     print(f"   ├─ {name}")
@@ -182,7 +184,9 @@ def print_summary(summary: dict, verbose: bool = False):
 
         by_type = c.get("by_type", {})
         if by_type:
-            type_str = ", ".join(f"{k}:{v}" for k, v in sorted(by_type.items(), key=lambda x: -x[1])[:6])
+            type_str = ", ".join(
+                f"{k}:{v}" for k, v in sorted(by_type.items(), key=lambda x: -x[1])[:6]
+            )
             print(f"   Types: {type_str}")
 
         if verbose and "top_parts" in c:
@@ -213,6 +217,34 @@ def print_summary(summary: dict, verbose: bool = False):
         print(f"   {signal_str}")
 
     print()
+
+
+def run_summary(schematic_path: Path, format: str = "text", verbose: bool = False) -> int:
+    """Run summary command programmatically.
+
+    Args:
+        schematic_path: Path to schematic file
+        format: Output format ("text" or "json")
+        verbose: Show detailed output
+
+    Returns:
+        Exit code (0 for success)
+    """
+    try:
+        summary = gather_summary(str(schematic_path), verbose)
+    except FileNotFoundError:
+        print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if format == "json":
+        print(json.dumps(summary, indent=2))
+    else:
+        print_summary(summary, verbose)
+
+    return 0
 
 
 if __name__ == "__main__":

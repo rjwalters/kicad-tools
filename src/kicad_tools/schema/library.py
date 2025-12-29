@@ -23,6 +23,7 @@ class LibraryPin:
     - Start from the pin's (at) position
     - The connection point is at the opposite end of the pin length
     """
+
     number: str
     name: str
     type: str  # power_in, passive, input, output, bidirectional, etc.
@@ -55,20 +56,20 @@ class LibraryPin:
         rot = 0.0
         length = 2.54
 
-        if at := sexp.find('at'):
+        if at := sexp.find("at"):
             pos = (at.get_float(0) or 0, at.get_float(1) or 0)
             rot = at.get_float(2) or 0
 
-        if ln := sexp.find('length'):
+        if ln := sexp.find("length"):
             length = ln.get_float(0) or 2.54
 
         name = ""
         number = ""
 
-        if name_node := sexp.find('name'):
+        if name_node := sexp.find("name"):
             name = name_node.get_string(0) or ""
 
-        if num_node := sexp.find('number'):
+        if num_node := sexp.find("number"):
             number = num_node.get_string(0) or ""
 
         return cls(
@@ -88,6 +89,7 @@ class LibrarySymbol:
 
     Contains the symbol's graphical elements and pin definitions.
     """
+
     name: str
     properties: Dict[str, str] = field(default_factory=dict)
     pins: List[LibraryPin] = field(default_factory=list)
@@ -176,7 +178,7 @@ class LibrarySymbol:
 
         # Parse properties
         properties = {}
-        for prop in sexp.find_all('property'):
+        for prop in sexp.find_all("property"):
             prop_name = prop.get_string(0)
             prop_value = prop.get_string(1)
             if prop_name:
@@ -184,11 +186,11 @@ class LibrarySymbol:
 
         # Parse pins from unit symbols
         pins = []
-        for unit_sym in sexp.find_all('symbol'):
+        for unit_sym in sexp.find_all("symbol"):
             _unit_name = unit_sym.get_string(0) or ""  # noqa: F841
             # Unit symbols have names like "TPA3116D2_1_1"
             # Format: {name}_{unit}_{variant}
-            for pin_sexp in unit_sym.find_all('pin'):
+            for pin_sexp in unit_sym.find_all("pin"):
                 pins.append(LibraryPin.from_sexp(pin_sexp))
 
         return cls(
@@ -205,6 +207,7 @@ class SymbolLibrary:
 
     Contains multiple symbol definitions.
     """
+
     path: str
     symbols: Dict[str, LibrarySymbol] = field(default_factory=dict)
 
@@ -221,11 +224,11 @@ class SymbolLibrary:
         text = Path(path).read_text()
         sexp = parse_sexp(text)
 
-        if sexp.tag != 'kicad_symbol_lib':
+        if sexp.tag != "kicad_symbol_lib":
             raise ValueError(f"Not a KiCad symbol library: {path}")
 
         symbols = {}
-        for sym_sexp in sexp.find_all('symbol'):
+        for sym_sexp in sexp.find_all("symbol"):
             sym = LibrarySymbol.from_sexp(sym_sexp)
             symbols[sym.name] = sym
 
@@ -268,14 +271,14 @@ class LibraryManager:
         Returns:
             The LibrarySymbol if found, None otherwise
         """
-        if ':' not in lib_id:
+        if ":" not in lib_id:
             # Search all libraries
             for lib in self.libraries.values():
                 if sym := lib.get_symbol(lib_id):
                     return sym
             return None
 
-        lib_name, sym_name = lib_id.split(':', 1)
+        lib_name, sym_name = lib_id.split(":", 1)
 
         # Check loaded libraries
         if lib_name in self.libraries:

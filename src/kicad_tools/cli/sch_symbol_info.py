@@ -91,10 +91,7 @@ def output_json(symbol, show_pins, show_properties):
         ]
 
     if show_pins:
-        data["pins"] = [
-            {"number": p.number, "uuid": p.uuid}
-            for p in symbol.pins
-        ]
+        data["pins"] = [{"number": p.number, "uuid": p.uuid} for p in symbol.pins]
 
     print(json.dumps(data, indent=2))
 

@@ -84,14 +84,30 @@ class AssemblyCapabilities:
     max_component_height_mm: float = 25.0
 
     # Supported package types
-    supported_packages: list[str] = field(default_factory=lambda: [
-        "0201", "0402", "0603", "0805", "1206", "1210",
-        "SOT-23", "SOT-223", "SOT-363",
-        "SOIC-8", "SOIC-14", "SOIC-16",
-        "TSSOP-14", "TSSOP-16", "TSSOP-20", "TSSOP-28",
-        "QFN", "QFP", "LQFP",
-        "BGA",
-    ])
+    supported_packages: list[str] = field(
+        default_factory=lambda: [
+            "0201",
+            "0402",
+            "0603",
+            "0805",
+            "1206",
+            "1210",
+            "SOT-23",
+            "SOT-223",
+            "SOT-363",
+            "SOIC-8",
+            "SOIC-14",
+            "SOIC-16",
+            "TSSOP-14",
+            "TSSOP-16",
+            "TSSOP-20",
+            "TSSOP-28",
+            "QFN",
+            "QFP",
+            "LQFP",
+            "BGA",
+        ]
+    )
 
     # Assembly type
     supports_double_sided: bool = True
@@ -149,12 +165,14 @@ class ManufacturerProfile:
     parts_library: Optional[PartsLibrary] = None
 
     # Lead times in working days
-    lead_times: dict[str, int] = field(default_factory=lambda: {
-        "pcb_standard": 5,
-        "pcb_expedited": 2,
-        "pcba_standard": 7,
-        "pcba_extended": 20,
-    })
+    lead_times: dict[str, int] = field(
+        default_factory=lambda: {
+            "pcb_standard": 5,
+            "pcb_expedited": 2,
+            "pcba_standard": 7,
+            "pcba_extended": 20,
+        }
+    )
 
     # BOM format for this manufacturer
     bom_format: str = "generic"
@@ -165,11 +183,7 @@ class ManufacturerProfile:
     # Pricing model
     pricing_model: str = "per_pcb"  # "per_pcb", "per_sqin", etc.
 
-    def get_design_rules(
-        self,
-        layers: int = 4,
-        copper_oz: float = 1.0
-    ) -> DesignRules:
+    def get_design_rules(self, layers: int = 4, copper_oz: float = 1.0) -> DesignRules:
         """Get design rules for a specific configuration."""
         # Try exact match first
         key = f"{layers}layer_{copper_oz:.0f}oz"

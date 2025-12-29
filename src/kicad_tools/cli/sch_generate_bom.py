@@ -44,19 +44,23 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
-    parser.add_argument("--format", "-f",
-                        choices=["table", "csv", "jlcpcb", "lcsc", "json"],
-                        default="table", help="Output format")
+    parser.add_argument(
+        "--format",
+        "-f",
+        choices=["table", "csv", "jlcpcb", "lcsc", "json"],
+        default="table",
+        help="Output format",
+    )
     parser.add_argument("--output", "-o", help="Output file")
-    parser.add_argument("--group",
-                        choices=["value+footprint", "value", "mpn"],
-                        default="value+footprint", help="Grouping mode")
-    parser.add_argument("--include-dnp", action="store_true",
-                        help="Include DNP components")
-    parser.add_argument("--no-hierarchy", action="store_true",
-                        help="Only process root schematic")
-    parser.add_argument("--filter", dest="pattern",
-                        help="Filter by reference pattern")
+    parser.add_argument(
+        "--group",
+        choices=["value+footprint", "value", "mpn"],
+        default="value+footprint",
+        help="Grouping mode",
+    )
+    parser.add_argument("--include-dnp", action="store_true", help="Include DNP components")
+    parser.add_argument("--no-hierarchy", action="store_true", help="Only process root schematic")
+    parser.add_argument("--filter", dest="pattern", help="Filter by reference pattern")
 
     args = parser.parse_args()
 
@@ -136,20 +140,20 @@ def format_csv(groups: list) -> str:
     writer = csv.writer(output)
 
     # Header
-    writer.writerow([
-        "Quantity", "Value", "Footprint", "References", "LCSC", "MPN", "Description"
-    ])
+    writer.writerow(["Quantity", "Value", "Footprint", "References", "LCSC", "MPN", "Description"])
 
     for group in groups:
-        writer.writerow([
-            group.quantity,
-            group.value,
-            group.footprint,
-            group.references,
-            group.lcsc,
-            group.mpn,
-            group.description,
-        ])
+        writer.writerow(
+            [
+                group.quantity,
+                group.value,
+                group.footprint,
+                group.references,
+                group.lcsc,
+                group.mpn,
+                group.description,
+            ]
+        )
 
     return output.getvalue()
 
@@ -167,12 +171,14 @@ def format_jlcpcb(groups: list) -> str:
     writer.writerow(["Comment", "Designator", "Footprint", "LCSC Part #"])
 
     for group in groups:
-        writer.writerow([
-            group.value,
-            group.references,
-            group.footprint,
-            group.lcsc,
-        ])
+        writer.writerow(
+            [
+                group.value,
+                group.references,
+                group.footprint,
+                group.lcsc,
+            ]
+        )
 
     return output.getvalue()
 
@@ -187,21 +193,21 @@ def format_lcsc(groups: list) -> str:
     writer = csv.writer(output)
 
     # Header
-    writer.writerow([
-        "LCSC Part #", "Quantity", "Value", "Footprint", "References"
-    ])
+    writer.writerow(["LCSC Part #", "Quantity", "Value", "Footprint", "References"])
 
     # Sort by LCSC presence (parts with LCSC first)
     sorted_groups = sorted(groups, key=lambda g: (not bool(g.lcsc), g.value))
 
     for group in sorted_groups:
-        writer.writerow([
-            group.lcsc or "NOT FOUND",
-            group.quantity,
-            group.value,
-            group.footprint,
-            group.references,
-        ])
+        writer.writerow(
+            [
+                group.lcsc or "NOT FOUND",
+                group.quantity,
+                group.value,
+                group.footprint,
+                group.references,
+            ]
+        )
 
     return output.getvalue()
 
@@ -239,7 +245,7 @@ def format_json(bom: BOM, groups: list) -> str:
             }
             for item in bom.items
             if not item.is_virtual
-        ]
+        ],
     }
 
     return json.dumps(data, indent=2)

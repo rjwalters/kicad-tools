@@ -16,8 +16,8 @@ from .base import (
 # Similar to JLCPCB with some variations
 
 PCBWAY_2LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.127,      # 5 mil
-    min_clearance_mm=0.127,        # 5 mil
+    min_trace_width_mm=0.127,  # 5 mil
+    min_clearance_mm=0.127,  # 5 mil
     min_via_drill_mm=0.2,
     min_via_diameter_mm=0.4,
     min_annular_ring_mm=0.1,
@@ -34,8 +34,8 @@ PCBWAY_2LAYER_1OZ = DesignRules(
 )
 
 PCBWAY_2LAYER_2OZ = DesignRules(
-    min_trace_width_mm=0.2,        # 8 mil for 2oz
-    min_clearance_mm=0.2,          # 8 mil
+    min_trace_width_mm=0.2,  # 8 mil for 2oz
+    min_clearance_mm=0.2,  # 8 mil
     min_via_drill_mm=0.2,
     min_via_diameter_mm=0.4,
     min_annular_ring_mm=0.1,
@@ -52,8 +52,8 @@ PCBWAY_2LAYER_2OZ = DesignRules(
 )
 
 PCBWAY_4LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.1016,     # 4 mil
-    min_clearance_mm=0.1016,       # 4 mil
+    min_trace_width_mm=0.1016,  # 4 mil
+    min_clearance_mm=0.1016,  # 4 mil
     min_via_drill_mm=0.2,
     min_via_diameter_mm=0.4,
     min_annular_ring_mm=0.1,
@@ -70,8 +70,8 @@ PCBWAY_4LAYER_1OZ = DesignRules(
 )
 
 PCBWAY_6LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.0889,     # 3.5 mil
-    min_clearance_mm=0.0889,       # 3.5 mil
+    min_trace_width_mm=0.0889,  # 3.5 mil
+    min_clearance_mm=0.0889,  # 3.5 mil
     min_via_drill_mm=0.15,
     min_via_diameter_mm=0.35,
     min_annular_ring_mm=0.1,
@@ -93,16 +93,56 @@ PCBWAY_ASSEMBLY = AssemblyCapabilities(
     min_bga_pitch_mm=0.4,
     max_component_height_mm=30.0,
     supported_packages=[
-        "0201", "0402", "0603", "0805", "1206", "1210", "2010", "2512",
-        "SOT-23", "SOT-223", "SOT-363", "SOT-89",
-        "SOIC-8", "SOIC-14", "SOIC-16",
-        "TSSOP-8", "TSSOP-14", "TSSOP-16", "TSSOP-20", "TSSOP-24", "TSSOP-28",
-        "SSOP-8", "SSOP-16", "SSOP-20", "SSOP-24", "SSOP-28",
-        "QFN-16", "QFN-20", "QFN-24", "QFN-32", "QFN-48", "QFN-64",
-        "LQFP-32", "LQFP-48", "LQFP-64", "LQFP-100", "LQFP-144", "LQFP-176",
-        "TQFP-32", "TQFP-44", "TQFP-48", "TQFP-64", "TQFP-100", "TQFP-144",
-        "BGA", "WLCSP", "CSP",
-        "TO-252", "TO-263", "TO-220",
+        "0201",
+        "0402",
+        "0603",
+        "0805",
+        "1206",
+        "1210",
+        "2010",
+        "2512",
+        "SOT-23",
+        "SOT-223",
+        "SOT-363",
+        "SOT-89",
+        "SOIC-8",
+        "SOIC-14",
+        "SOIC-16",
+        "TSSOP-8",
+        "TSSOP-14",
+        "TSSOP-16",
+        "TSSOP-20",
+        "TSSOP-24",
+        "TSSOP-28",
+        "SSOP-8",
+        "SSOP-16",
+        "SSOP-20",
+        "SSOP-24",
+        "SSOP-28",
+        "QFN-16",
+        "QFN-20",
+        "QFN-24",
+        "QFN-32",
+        "QFN-48",
+        "QFN-64",
+        "LQFP-32",
+        "LQFP-48",
+        "LQFP-64",
+        "LQFP-100",
+        "LQFP-144",
+        "LQFP-176",
+        "TQFP-32",
+        "TQFP-44",
+        "TQFP-48",
+        "TQFP-64",
+        "TQFP-100",
+        "TQFP-144",
+        "BGA",
+        "WLCSP",
+        "CSP",
+        "TO-252",
+        "TO-263",
+        "TO-220",
     ],
     supports_double_sided=True,
     supports_bga=True,

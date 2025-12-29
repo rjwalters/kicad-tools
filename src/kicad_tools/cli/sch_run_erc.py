@@ -37,6 +37,7 @@ from typing import List, Optional
 @dataclass
 class ERCViolation:
     """A single ERC violation."""
+
     severity: str  # "error" or "warning"
     code: str  # e.g., "pin_not_connected"
     message: str
@@ -56,6 +57,7 @@ class ERCViolation:
 @dataclass
 class ERCReport:
     """ERC report with all violations."""
+
     schematic: str
     violations: List[ERCViolation]
     error_count: int
@@ -115,13 +117,15 @@ def parse_json_report(json_text: str, schematic: str) -> ERCReport:
             else:
                 warning_count += 1
 
-            violations.append(ERCViolation(
-                severity=severity,
-                code=violation.get("type", "unknown"),
-                message=violation.get("description", ""),
-                sheet=sheet_path,
-                location=f"({violation.get('pos', {}).get('x', 0)}, {violation.get('pos', {}).get('y', 0)})",
-            ))
+            violations.append(
+                ERCViolation(
+                    severity=severity,
+                    code=violation.get("type", "unknown"),
+                    message=violation.get("description", ""),
+                    sheet=sheet_path,
+                    location=f"({violation.get('pos', {}).get('x', 0)}, {violation.get('pos', {}).get('y', 0)})",
+                )
+            )
 
     return ERCReport(
         schematic=schematic,
@@ -166,15 +170,17 @@ def parse_text_report(text: str, schematic: str) -> ERCReport:
                 # Message is the rest
                 message = rest
                 if loc_match:
-                    message = rest[:loc_match.start()].strip() + rest[loc_match.end():].strip()
+                    message = rest[: loc_match.start()].strip() + rest[loc_match.end() :].strip()
 
-                violations.append(ERCViolation(
-                    severity=severity,
-                    code=code,
-                    message=message,
-                    sheet="",
-                    location=location,
-                ))
+                violations.append(
+                    ERCViolation(
+                        severity=severity,
+                        code=code,
+                        message=message,
+                        sheet="",
+                        location=location,
+                    )
+                )
 
                 if severity == "error":
                     error_count += 1
@@ -197,7 +203,9 @@ def run_erc(
     """Run ERC on the schematic and return parsed results."""
     kicad_cli = find_kicad_cli()
     if not kicad_cli:
-        raise RuntimeError("kicad-cli not found. Please install KiCad 8.x or add kicad-cli to PATH.")
+        raise RuntimeError(
+            "kicad-cli not found. Please install KiCad 8.x or add kicad-cli to PATH."
+        )
 
     # Create temp file for output
     with tempfile.NamedTemporaryFile(
@@ -211,9 +219,12 @@ def run_erc(
         # Build command
         cmd = [
             kicad_cli,
-            "sch", "erc",
-            "--output", output_file,
-            "--format", "json",  # Always get JSON for parsing
+            "sch",
+            "erc",
+            "--output",
+            output_file,
+            "--format",
+            "json",  # Always get JSON for parsing
             "--severity-all",
         ]
         cmd.append(schematic)
@@ -286,22 +297,14 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument("schematic", help="Path to .kicad_sch file")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
     parser.add_argument(
-        "--format", choices=["text", "json"],
-        default="text", help="Output format"
+        "--severity", choices=["all", "error", "warning"], default="all", help="Filter by severity"
     )
     parser.add_argument(
-        "--severity", choices=["all", "error", "warning"],
-        default="all", help="Filter by severity"
+        "--exit-code", action="store_true", help="Exit with non-zero if violations found"
     )
-    parser.add_argument(
-        "--exit-code", action="store_true",
-        help="Exit with non-zero if violations found"
-    )
-    parser.add_argument(
-        "--output", "-o",
-        help="Write report to file"
-    )
+    parser.add_argument("--output", "-o", help="Write report to file")
 
     args = parser.parse_args()
 

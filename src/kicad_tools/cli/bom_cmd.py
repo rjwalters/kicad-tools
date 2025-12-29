@@ -178,22 +178,26 @@ def output_csv(items, grouped: bool) -> None:
     if grouped:
         writer.writerow(["Quantity", "Value", "Footprint", "MPN", "References"])
         for g in items:
-            writer.writerow([
-                g["quantity"],
-                g["value"],
-                g["footprint"],
-                g["mpn"] or "",
-                ", ".join(g["references"]),
-            ])
+            writer.writerow(
+                [
+                    g["quantity"],
+                    g["value"],
+                    g["footprint"],
+                    g["mpn"] or "",
+                    ", ".join(g["references"]),
+                ]
+            )
     else:
         writer.writerow(["Reference", "Value", "Footprint", "MPN"])
         for item in items:
-            writer.writerow([
-                item.reference,
-                item.value,
-                item.footprint,
-                item.mpn or "",
-            ])
+            writer.writerow(
+                [
+                    item.reference,
+                    item.value,
+                    item.footprint,
+                    item.mpn or "",
+                ]
+            )
 
     print(output.getvalue(), end="")
 

@@ -132,9 +132,7 @@ class LayerStack:
     def index_to_layer_enum(self, index: int) -> Layer:
         """Map grid index to Layer enum for this stackup."""
         if index < 0 or index >= len(self.layers):
-            raise ValueError(
-                f"Index {index} out of range for {self.num_layers}-layer stack"
-            )
+            raise ValueError(f"Index {index} out of range for {self.num_layers}-layer stack")
         layer_def = self.layers[index]
         for layer in Layer:
             if layer.kicad_name == layer_def.name:
@@ -194,9 +192,7 @@ class LayerStack:
                 LayerDefinition("F.Cu", 0, LayerType.SIGNAL, is_outer=True),
                 LayerDefinition("In1.Cu", 1, LayerType.SIGNAL, reference_plane="In2.Cu"),
                 LayerDefinition("In2.Cu", 2, LayerType.PLANE, plane_net="GND"),
-                LayerDefinition(
-                    "B.Cu", 3, LayerType.MIXED, is_outer=True, plane_net="+3.3V"
-                ),
+                LayerDefinition("B.Cu", 3, LayerType.MIXED, is_outer=True, plane_net="+3.3V"),
             ],
         )
 

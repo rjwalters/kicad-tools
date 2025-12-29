@@ -17,8 +17,8 @@ from .base import (
 # Source: Official JLCPCB capabilities + community-verified rules
 
 JLCPCB_2LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.127,      # 5 mil
-    min_clearance_mm=0.127,        # 5 mil
+    min_trace_width_mm=0.127,  # 5 mil
+    min_clearance_mm=0.127,  # 5 mil
     min_via_drill_mm=0.3,
     min_via_diameter_mm=0.6,
     min_annular_ring_mm=0.15,
@@ -35,8 +35,8 @@ JLCPCB_2LAYER_1OZ = DesignRules(
 )
 
 JLCPCB_2LAYER_2OZ = DesignRules(
-    min_trace_width_mm=0.2032,     # 8 mil (wider for 2oz)
-    min_clearance_mm=0.2032,       # 8 mil
+    min_trace_width_mm=0.2032,  # 8 mil (wider for 2oz)
+    min_clearance_mm=0.2032,  # 8 mil
     min_via_drill_mm=0.3,
     min_via_diameter_mm=0.6,
     min_annular_ring_mm=0.15,
@@ -53,8 +53,8 @@ JLCPCB_2LAYER_2OZ = DesignRules(
 )
 
 JLCPCB_4LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.1016,     # 4 mil
-    min_clearance_mm=0.1016,       # 4 mil
+    min_trace_width_mm=0.1016,  # 4 mil
+    min_clearance_mm=0.1016,  # 4 mil
     min_via_drill_mm=0.2,
     min_via_diameter_mm=0.45,
     min_annular_ring_mm=0.125,
@@ -71,8 +71,8 @@ JLCPCB_4LAYER_1OZ = DesignRules(
 )
 
 JLCPCB_4LAYER_2OZ = DesignRules(
-    min_trace_width_mm=0.2032,     # 8 mil outer, 4 mil inner
-    min_clearance_mm=0.1016,       # 4 mil
+    min_trace_width_mm=0.2032,  # 8 mil outer, 4 mil inner
+    min_clearance_mm=0.1016,  # 4 mil
     min_via_drill_mm=0.2,
     min_via_diameter_mm=0.45,
     min_annular_ring_mm=0.125,
@@ -89,8 +89,8 @@ JLCPCB_4LAYER_2OZ = DesignRules(
 )
 
 JLCPCB_6LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.0889,     # 3.5 mil
-    min_clearance_mm=0.0889,       # 3.5 mil
+    min_trace_width_mm=0.0889,  # 3.5 mil
+    min_clearance_mm=0.0889,  # 3.5 mil
     min_via_drill_mm=0.2,
     min_via_diameter_mm=0.45,
     min_annular_ring_mm=0.125,
@@ -112,16 +112,56 @@ JLCPCB_ASSEMBLY = AssemblyCapabilities(
     min_bga_pitch_mm=0.4,
     max_component_height_mm=25.0,
     supported_packages=[
-        "0201", "0402", "0603", "0805", "1206", "1210", "2010", "2512",
-        "SOT-23", "SOT-223", "SOT-363", "SOT-89", "SOT-323",
-        "SOIC-8", "SOIC-14", "SOIC-16", "SOP-8",
-        "TSSOP-8", "TSSOP-14", "TSSOP-16", "TSSOP-20", "TSSOP-24", "TSSOP-28",
-        "SSOP-8", "SSOP-16", "SSOP-20", "SSOP-24", "SSOP-28",
-        "QFN-16", "QFN-20", "QFN-24", "QFN-32", "QFN-48", "QFN-64",
-        "LQFP-32", "LQFP-48", "LQFP-64", "LQFP-100", "LQFP-144",
-        "TQFP-32", "TQFP-44", "TQFP-48", "TQFP-64", "TQFP-100",
-        "BGA", "WLCSP",
-        "TO-252", "TO-263", "DPAK", "D2PAK",
+        "0201",
+        "0402",
+        "0603",
+        "0805",
+        "1206",
+        "1210",
+        "2010",
+        "2512",
+        "SOT-23",
+        "SOT-223",
+        "SOT-363",
+        "SOT-89",
+        "SOT-323",
+        "SOIC-8",
+        "SOIC-14",
+        "SOIC-16",
+        "SOP-8",
+        "TSSOP-8",
+        "TSSOP-14",
+        "TSSOP-16",
+        "TSSOP-20",
+        "TSSOP-24",
+        "TSSOP-28",
+        "SSOP-8",
+        "SSOP-16",
+        "SSOP-20",
+        "SSOP-24",
+        "SSOP-28",
+        "QFN-16",
+        "QFN-20",
+        "QFN-24",
+        "QFN-32",
+        "QFN-48",
+        "QFN-64",
+        "LQFP-32",
+        "LQFP-48",
+        "LQFP-64",
+        "LQFP-100",
+        "LQFP-144",
+        "TQFP-32",
+        "TQFP-44",
+        "TQFP-48",
+        "TQFP-64",
+        "TQFP-100",
+        "BGA",
+        "WLCSP",
+        "TO-252",
+        "TO-263",
+        "DPAK",
+        "D2PAK",
     ],
     supports_double_sided=True,
     supports_bga=True,

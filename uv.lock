@@ -144,41 +144,28 @@ wheels = [
 name = "kicad-tools"
 version = "0.1.0"
 source = { editable = "." }
-
-[package.optional-dependencies]
-all = [
-    { name = "mypy" },
+dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
 ]
+
+[package.optional-dependencies]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
-router = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "mypy", marker = "extra == 'all'", specifier = ">=1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "numpy", marker = "extra == 'all'", specifier = ">=1.20" },
-    { name = "numpy", marker = "extra == 'router'", specifier = ">=1.20" },
-    { name = "pytest", marker = "extra == 'all'", specifier = ">=7.0" },
+    { name = "numpy", specifier = ">=1.20" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'all'", specifier = ">=4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
-    { name = "ruff", marker = "extra == 'all'", specifier = ">=0.1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
 ]
-provides-extras = ["router", "dev", "all"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "librt"

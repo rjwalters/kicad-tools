@@ -43,6 +43,7 @@ class SExp:
         tag: The first element of the list (e.g., "symbol", "property")
         values: The remaining elements (atoms or nested SExp)
     """
+
     tag: str
     values: List[SExpValue] = field(default_factory=list)
 
@@ -166,10 +167,10 @@ class SExpParser:
         """Skip whitespace and comments."""
         while self.pos < self.length:
             c = self.text[self.pos]
-            if c in ' \t\n\r':
+            if c in " \t\n\r":
                 self.pos += 1
-            elif c == ';':  # Comment to end of line
-                while self.pos < self.length and self.text[self.pos] != '\n':
+            elif c == ";":  # Comment to end of line
+                while self.pos < self.length and self.text[self.pos] != "\n":
                     self.pos += 1
             else:
                 break
@@ -183,7 +184,7 @@ class SExpParser:
 
         c = self.text[self.pos]
 
-        if c == '(':
+        if c == "(":
             return self._parse_list()
         elif c == '"':
             return self._parse_string()
@@ -192,7 +193,7 @@ class SExpParser:
 
     def _parse_list(self) -> SExp:
         """Parse a list: (tag value1 value2 ...)"""
-        assert self.text[self.pos] == '('
+        assert self.text[self.pos] == "("
         self.pos += 1
         self._skip_whitespace()
 
@@ -200,7 +201,7 @@ class SExpParser:
             raise ValueError("Unexpected end of input in list")
 
         # Parse the tag (first element)
-        if self.text[self.pos] == ')':
+        if self.text[self.pos] == ")":
             # Empty list - shouldn't happen in KiCad but handle it
             self.pos += 1
             return SExp("")
@@ -217,7 +218,7 @@ class SExpParser:
             self._skip_whitespace()
             if self.pos >= self.length:
                 raise ValueError("Unexpected end of input, expected ')'")
-            if self.text[self.pos] == ')':
+            if self.text[self.pos] == ")":
                 self.pos += 1
                 break
             result.values.append(self._parse_expr())
@@ -234,20 +235,20 @@ class SExpParser:
             c = self.text[self.pos]
             if c == '"':
                 self.pos += 1
-                return ''.join(result)
-            elif c == '\\':
+                return "".join(result)
+            elif c == "\\":
                 self.pos += 1
                 if self.pos >= self.length:
                     raise ValueError("Unexpected end of input in escape sequence")
                 escaped = self.text[self.pos]
-                if escaped == 'n':
-                    result.append('\n')
-                elif escaped == 't':
-                    result.append('\t')
-                elif escaped == 'r':
-                    result.append('\r')
-                elif escaped == '\\':
-                    result.append('\\')
+                if escaped == "n":
+                    result.append("\n")
+                elif escaped == "t":
+                    result.append("\t")
+                elif escaped == "r":
+                    result.append("\r")
+                elif escaped == "\\":
+                    result.append("\\")
                 elif escaped == '"':
                     result.append('"')
                 else:
@@ -265,18 +266,18 @@ class SExpParser:
 
         while self.pos < self.length:
             c = self.text[self.pos]
-            if c in ' \t\n\r()\"':
+            if c in ' \t\n\r()"':
                 break
             self.pos += 1
 
         if self.pos == start:
             raise ValueError(f"Expected atom at position {self.pos}")
 
-        token = self.text[start:self.pos]
+        token = self.text[start : self.pos]
 
         # Try to parse as number
         try:
-            if '.' in token or 'e' in token.lower():
+            if "." in token or "e" in token.lower():
                 return float(token)
             return int(token)
         except ValueError:
@@ -299,7 +300,7 @@ class SExpSerializer:
         """Serialize an SExp to string."""
         lines = []
         self._serialize_node(sexp, 0, lines)
-        return '\n'.join(lines) + '\n'
+        return "\n".join(lines) + "\n"
 
     def _serialize_node(self, sexp: SExp, depth: int, lines: List[str]) -> None:
         """Serialize a node, handling formatting."""
@@ -311,9 +312,23 @@ class SExpSerializer:
 
         # Special cases for compact formatting
         compact_tags = {
-            'at', 'size', 'xy', 'pts', 'start', 'end', 'mid',
-            'stroke', 'fill', 'effects', 'font', 'justify',
-            'color', 'uuid', 'number', 'name', 'offset',
+            "at",
+            "size",
+            "xy",
+            "pts",
+            "start",
+            "end",
+            "mid",
+            "stroke",
+            "fill",
+            "effects",
+            "font",
+            "justify",
+            "color",
+            "uuid",
+            "number",
+            "name",
+            "offset",
         }
         if sexp.tag in compact_tags:
             use_multiline = False
@@ -332,7 +347,7 @@ class SExpSerializer:
                     simple_values.append(v)
 
             if simple_values:
-                opening += ' ' + ' '.join(self._format_value(v) for v in simple_values)
+                opening += " " + " ".join(self._format_value(v) for v in simple_values)
 
             if complex_values:
                 lines.append(opening)
@@ -383,7 +398,7 @@ class SExpSerializer:
         """Check if a string needs to be quoted."""
         if not s:
             return True
-        if s[0].isdigit() or s[0] == '-':
+        if s[0].isdigit() or s[0] == "-":
             return True
         for c in s:
             if c in ' \t\n\r()"\\':
@@ -392,8 +407,8 @@ class SExpSerializer:
 
     def _quote_string(self, s: str) -> str:
         """Quote a string with proper escaping."""
-        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-        escaped = escaped.replace('\n', '\\n').replace('\t', '\\t').replace('\r', '\\r')
+        escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+        escaped = escaped.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
         return f'"{escaped}"'
 
 

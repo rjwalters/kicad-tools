@@ -13,6 +13,7 @@ from .violation import ERCViolation, ERCViolationType, Severity
 @dataclass
 class ERCReport:
     """Parsed ERC report from KiCad."""
+
     source_file: str = ""
     kicad_version: str = ""
     coordinate_units: str = "mm"
@@ -31,8 +32,7 @@ class ERCReport:
     @property
     def warning_count(self) -> int:
         """Number of warning-level violations."""
-        return sum(1 for v in self.violations
-                   if v.severity == Severity.WARNING and not v.excluded)
+        return sum(1 for v in self.violations if v.severity == Severity.WARNING and not v.excluded)
 
     @property
     def exclusion_count(self) -> int:
@@ -47,8 +47,7 @@ class ERCReport:
     @property
     def warnings(self) -> list[ERCViolation]:
         """Get only warning-level violations."""
-        return [v for v in self.violations
-                if v.severity == Severity.WARNING and not v.excluded]
+        return [v for v in self.violations if v.severity == Severity.WARNING and not v.excluded]
 
     @property
     def exclusions(self) -> list[ERCViolation]:
@@ -87,11 +86,13 @@ class ERCReport:
         """Filter violations by type (partial match on type, description, or type_description)."""
         filter_lower = type_filter.lower()
         return [
-            v for v in self.violations
-            if not v.excluded and (
-                filter_lower in v.type_str.lower() or
-                filter_lower in v.description.lower() or
-                filter_lower in v.type_description.lower()
+            v
+            for v in self.violations
+            if not v.excluded
+            and (
+                filter_lower in v.type_str.lower()
+                or filter_lower in v.description.lower()
+                or filter_lower in v.type_description.lower()
             )
         ]
 
@@ -108,9 +109,7 @@ class ERCReport:
             "by_type": {
                 vtype.value: len(violations)
                 for vtype, violations in sorted(
-                    by_type.items(),
-                    key=lambda x: len(x[1]),
-                    reverse=True
+                    by_type.items(), key=lambda x: len(x[1]), reverse=True
                 )
             },
         }
@@ -217,7 +216,7 @@ def parse_text_report(content: str, source_file: str = "") -> ERCReport:
     lines = content.splitlines()
 
     # Parse header
-    source_match = re.search(r'\*\* ERC report for (.+?) \*\*', content)
+    source_match = re.search(r"\*\* ERC report for (.+?) \*\*", content)
     if source_match:
         report.source_file = source_match.group(1)
 
@@ -230,7 +229,7 @@ def parse_text_report(content: str, source_file: str = "") -> ERCReport:
             continue
 
         # Start of new violation: [type]: message
-        violation_match = re.match(r'\[(\w+)\]:\s*(.+)', line)
+        violation_match = re.match(r"\[(\w+)\]:\s*(.+)", line)
         if violation_match:
             # Save previous violation
             if current_violation:
@@ -253,10 +252,7 @@ def parse_text_report(content: str, source_file: str = "") -> ERCReport:
             continue
 
         # Location line: @(x mm, y mm): description
-        loc_match = re.match(
-            r'\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)',
-            line
-        )
+        loc_match = re.match(r"\s+@\s*\(\s*([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm\s*\):\s*(.+)", line)
         if loc_match:
             current_violation["pos_x"] = float(loc_match.group(1))
             current_violation["pos_y"] = float(loc_match.group(2))
@@ -264,13 +260,13 @@ def parse_text_report(content: str, source_file: str = "") -> ERCReport:
             continue
 
         # Severity line: severity: error/warning
-        severity_match = re.match(r'\s+severity:\s*(\w+)', line, re.IGNORECASE)
+        severity_match = re.match(r"\s+severity:\s*(\w+)", line, re.IGNORECASE)
         if severity_match:
             current_violation["severity"] = Severity.from_string(severity_match.group(1))
             continue
 
         # Sheet line
-        sheet_match = re.match(r'\s+sheet:\s*(.+)', line, re.IGNORECASE)
+        sheet_match = re.match(r"\s+sheet:\s*(.+)", line, re.IGNORECASE)
         if sheet_match:
             current_violation["sheet"] = sheet_match.group(1).strip()
 
