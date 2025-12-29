@@ -5,13 +5,12 @@ Extracts component information from schematics for manufacturing.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import List, Dict, Optional, Set
-from collections import defaultdict
 
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+from .hierarchy import build_hierarchy
 from .schematic import Schematic
-from .hierarchy import build_hierarchy, HierarchyNode
 
 
 @dataclass

@@ -5,9 +5,10 @@ Represents sheet hierarchy and connections between sheets.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..core.sexp import SExp, parse_sexp
 
@@ -253,7 +254,7 @@ class HierarchyBuilder:
         try:
             text = full_path.read_text()
             sexp = parse_sexp(text)
-        except Exception as e:
+        except Exception:
             # Return empty node if file can't be loaded
             return HierarchyNode(
                 name=name,

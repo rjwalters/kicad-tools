@@ -27,7 +27,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
-
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
 

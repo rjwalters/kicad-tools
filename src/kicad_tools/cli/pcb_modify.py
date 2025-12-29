@@ -31,7 +31,6 @@ import argparse
 import sys
 from pathlib import Path
 
-
 from kicad_tools.core.sexp import SExp
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
@@ -57,7 +56,7 @@ def cmd_move(sexp: SExp, args) -> bool:
 
     at = fp.find("at")
     if not at:
-        print(f"Error: Footprint has no position", file=sys.stderr)
+        print("Error: Footprint has no position", file=sys.stderr)
         return False
 
     old_x = at.get_float(0) or 0.0
@@ -84,7 +83,7 @@ def cmd_rotate(sexp: SExp, args) -> bool:
 
     at = fp.find("at")
     if not at:
-        print(f"Error: Footprint has no position", file=sys.stderr)
+        print("Error: Footprint has no position", file=sys.stderr)
         return False
 
     x = at.get_float(0) or 0.0
@@ -116,7 +115,7 @@ def cmd_flip(sexp: SExp, args) -> bool:
 
     layer = fp.find("layer")
     if not layer:
-        print(f"Error: Footprint has no layer", file=sys.stderr)
+        print("Error: Footprint has no layer", file=sys.stderr)
         return False
 
     old_layer = layer.get_string(0) or ""
@@ -179,7 +178,7 @@ def cmd_update_value(sexp: SExp, args) -> bool:
 
             return True
 
-    print(f"Error: Footprint has no value text", file=sys.stderr)
+    print("Error: Footprint has no value text", file=sys.stderr)
     return False
 
 
@@ -195,7 +194,7 @@ def cmd_rename(sexp: SExp, args) -> bool:
         print(f"Error: Footprint '{args.old_reference}' not found", file=sys.stderr)
         return False
 
-    print(f"Renaming:")
+    print("Renaming:")
     print(f"  From: {args.old_reference}")
     print(f"  To:   {args.new_reference}")
 

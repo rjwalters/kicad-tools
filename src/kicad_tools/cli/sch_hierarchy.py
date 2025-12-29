@@ -34,10 +34,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List
 
-
-from kicad_tools.schema.hierarchy import build_hierarchy, HierarchyNode, print_hierarchy_tree
+from kicad_tools.schema.hierarchy import HierarchyNode, build_hierarchy
 
 
 def main():
@@ -212,12 +211,12 @@ def cmd_path(root: HierarchyNode, args):
         print(f"\nFile: {node.path}")
 
         if node.hierarchical_labels:
-            print(f"\nHierarchical labels in this sheet:")
+            print("\nHierarchical labels in this sheet:")
             for label in node.hierarchical_labels:
                 print(f"  ⚡ {label}")
 
         if node.sheets:
-            print(f"\nChild sheets:")
+            print("\nChild sheets:")
             for sheet in node.sheets:
                 print(f"  📄 {sheet.name} ({sheet.filename})")
                 for pin in sheet.pins:

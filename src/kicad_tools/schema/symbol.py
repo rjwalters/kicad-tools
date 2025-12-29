@@ -5,8 +5,9 @@ Represents a component instance placed in a schematic.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..core.sexp import SExp
 

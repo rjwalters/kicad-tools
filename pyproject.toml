@@ -19,6 +19,9 @@ keywords = [
     "schematic",
     "electronics",
     "hardware",
+    "automation",
+    "drc",
+    "erc",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -31,8 +34,11 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/rjwalters/kicad-tools"
@@ -64,10 +70,24 @@ kicad-pcb-modify = "kicad_tools.cli.pcb_modify:main"
 kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
 
 [project.optional-dependencies]
+# Router module (experimental, requires numpy)
+router = [
+    "numpy>=1.20",
+]
+# Development dependencies
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+# All optional dependencies
+all = [
+    "numpy>=1.20",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
 ]
 
 [tool.hatch.build.targets.wheel]

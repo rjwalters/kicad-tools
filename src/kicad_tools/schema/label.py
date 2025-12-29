@@ -5,8 +5,9 @@ Labels assign names to nets and enable connections across the schematic.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 from ..core.sexp import SExp
 

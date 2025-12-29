@@ -4,12 +4,12 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from ..core.sexp import SExp
-from ..core.sexp_file import load_pcb, save_pcb
+from ..core.sexp_file import load_pcb
 
 
 @dataclass

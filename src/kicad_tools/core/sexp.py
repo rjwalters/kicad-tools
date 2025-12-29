@@ -19,10 +19,9 @@ Example KiCad S-expression:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import Union, List, Optional, Iterator
-import re
 
+from dataclasses import dataclass, field
+from typing import Iterator, List, Optional, Union
 
 # Type alias for S-expression values
 SExpValue = Union[str, int, float, "SExp"]

@@ -29,7 +29,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-
 from kicad_tools.operations.symbol_ops import replace_symbol_lib_id
 
 

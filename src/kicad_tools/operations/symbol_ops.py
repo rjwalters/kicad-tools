@@ -5,10 +5,11 @@ Provides functions to modify, replace, and update symbol instances.
 """
 
 from __future__ import annotations
+
+import uuid as uuid_lib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any
-import uuid as uuid_lib
+from typing import Dict, Optional
 
 from ..core.sexp import SExp, parse_sexp, serialize_sexp
 

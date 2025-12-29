@@ -5,10 +5,11 @@ Represents KiCad symbol library definitions with pin geometry.
 """
 
 from __future__ import annotations
+
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-import math
+from typing import Dict, List, Optional, Tuple
 
 from ..core.sexp import SExp, parse_sexp
 

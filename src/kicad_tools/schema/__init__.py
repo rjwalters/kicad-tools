@@ -1,35 +1,35 @@
 """KiCad schematic data models."""
 
-from .schematic import Schematic
-from .symbol import SymbolInstance, SymbolPin
-from .wire import Wire, Junction
-from .label import Label, HierarchicalLabel, GlobalLabel
-from .library import SymbolLibrary, LibrarySymbol, LibraryPin, LibraryManager
+from .bom import (
+    BOM,
+    BOMGroup,
+    BOMItem,
+    extract_bom,
+)
 from .hierarchy import (
+    HierarchyBuilder,
     HierarchyNode,
     SheetInstance,
     SheetPin,
-    HierarchyBuilder,
     build_hierarchy,
 )
-from .bom import (
-    BOM,
-    BOMItem,
-    BOMGroup,
-    extract_bom,
-)
+from .label import GlobalLabel, HierarchicalLabel, Label
+from .library import LibraryManager, LibraryPin, LibrarySymbol, SymbolLibrary
 from .pcb import (
     PCB,
+    Footprint,
     Layer,
     Net,
-    Footprint,
     Pad,
     Segment,
-    Via,
-    Zone,
     Setup,
     StackupLayer,
+    Via,
+    Zone,
 )
+from .schematic import Schematic
+from .symbol import SymbolInstance, SymbolPin
+from .wire import Junction, Wire
 
 __all__ = [
     "Schematic",

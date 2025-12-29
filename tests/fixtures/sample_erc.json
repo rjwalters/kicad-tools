@@ -1,0 +1,91 @@
+{
+    "source": "test-schematic.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "00000000-0000-0000-0000-000000000000",
+            "violations": [
+                {
+                    "type": "pin_not_connected",
+                    "severity": "error",
+                    "description": "Pin not connected",
+                    "pos": {"x": 100.0, "y": 50.0},
+                    "items": [
+                        {"description": "Pin 1 (input) of R1"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "power_pin_not_driven",
+                    "severity": "error",
+                    "description": "Power input pin not driven by any power output",
+                    "pos": {"x": 120.0, "y": 60.0},
+                    "items": [
+                        {"description": "Pin VCC (power_in) of U1"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "label_dangling",
+                    "severity": "warning",
+                    "description": "Label not connected to anything",
+                    "pos": {"x": 140.0, "y": 70.0},
+                    "items": [
+                        {"description": "Label 'UNUSED_SIGNAL'"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "similar_labels",
+                    "severity": "warning",
+                    "description": "Labels are similar and may be confused",
+                    "pos": {"x": 150.0, "y": 80.0},
+                    "items": [
+                        {"description": "Label 'SIG1'"},
+                        {"description": "Label 'SIG_1'"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "duplicate_reference",
+                    "severity": "error",
+                    "description": "Duplicate reference designator",
+                    "pos": {"x": 160.0, "y": 90.0},
+                    "items": [
+                        {"description": "Symbol R1 at (100, 50)"},
+                        {"description": "Symbol R1 at (200, 50)"}
+                    ],
+                    "excluded": false
+                }
+            ]
+        },
+        {
+            "path": "/subsheet",
+            "uuid_path": "11111111-1111-1111-1111-111111111111",
+            "violations": [
+                {
+                    "type": "hier_label_mismatch",
+                    "severity": "error",
+                    "description": "Hierarchical label mismatch between sheet and parent",
+                    "pos": {"x": 50.0, "y": 30.0},
+                    "items": [
+                        {"description": "Hierarchical label 'CLK' on subsheet"}
+                    ],
+                    "excluded": false
+                },
+                {
+                    "type": "wire_dangling",
+                    "severity": "warning",
+                    "description": "Wire not connected at one or both ends",
+                    "pos": {"x": 80.0, "y": 40.0},
+                    "items": [
+                        {"description": "Wire endpoint at (80, 40)"}
+                    ],
+                    "excluded": true
+                }
+            ]
+        }
+    ]
+}

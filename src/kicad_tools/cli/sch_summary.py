@@ -23,10 +23,9 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-
 from kicad_tools.schema import Schematic
-from kicad_tools.schema.hierarchy import build_hierarchy
 from kicad_tools.schema.bom import extract_bom
+from kicad_tools.schema.hierarchy import build_hierarchy
 
 
 def main():

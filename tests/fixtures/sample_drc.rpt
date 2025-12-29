@@ -1,0 +1,27 @@
+** Drc report for test-board.kicad_pcb **
+** Created on 2025-01-15T10:30:00-0800 **
+
+** Found 5 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(100.0000 mm, 50.0000 mm): Pad 1 [VCC] of R1 on F.Cu
+    @(100.5000 mm, 50.0000 mm): Via [GND] on F.Cu - B.Cu
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1800 mm)
+    Rule: netclass 'Default'; warning
+    @(120.0000 mm, 60.0000 mm): Track [SIG1] on F.Cu, length 1.0000 mm
+    @(120.5000 mm, 60.5000 mm): Pad 2 [SIG2] of U1 on F.Cu
+[unconnected_items]: Missing connection between items
+    Local override; error
+    @(140.0000 mm, 70.0000 mm): Pad 1 [NET1] of C1 on F.Cu
+    @(141.0000 mm, 70.0000 mm): Pad 2 [NET1] of C1 on F.Cu
+[shorting_items]: Items shorting two nets (nets VCC and GND)
+    Local override; error
+    @(150.0000 mm, 80.0000 mm): Track [VCC] on B.Cu, length 0.5000 mm
+    @(150.0000 mm, 80.0000 mm): Via [GND] on F.Cu - B.Cu
+[track_width]: Track width violation (width 0.1000 mm; actual 0.0800 mm)
+    Rule: Default; error
+    @(160.0000 mm, 90.0000 mm): Track [SIGNAL] on F.Cu, length 2.0000 mm
+
+** Found 1 Footprint errors **
+
+** End of Report **

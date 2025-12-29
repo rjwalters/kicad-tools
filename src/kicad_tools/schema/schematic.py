@@ -5,15 +5,16 @@ Provides a high-level interface to KiCad schematic files.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict, Iterator, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from ..core.sexp import SExp
 from ..core.sexp_file import load_schematic, save_schematic
+from .label import GlobalLabel, HierarchicalLabel, Label
 from .symbol import SymbolInstance
-from .wire import Wire, Junction
-from .label import Label, HierarchicalLabel, GlobalLabel
+from .wire import Junction, Wire
 
 
 @dataclass
@@ -39,7 +40,7 @@ class TitleBlock:
             tb.company = company.get_string(0) or ""
 
         for i in range(1, 10):
-            if comment := sexp.find(f'comment'):
+            if comment := sexp.find('comment'):
                 # Comments are stored as (comment N "text")
                 pass
         # Parse comments - they're stored as (comment 1 "text")

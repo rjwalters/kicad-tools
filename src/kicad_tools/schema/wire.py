@@ -5,8 +5,9 @@ Represents electrical connections in a schematic.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple
 
 from ..core.sexp import SExp
 

@@ -25,11 +25,9 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Set, Tuple, Dict, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
-
-from kicad_tools.schema import Schematic, SymbolLibrary, LibraryManager
-
+from kicad_tools.schema import LibraryManager, Schematic
 
 POINT_TOLERANCE = 1.27  # mm - standard KiCad grid
 

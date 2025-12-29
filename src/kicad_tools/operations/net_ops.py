@@ -5,15 +5,12 @@ Provides functions to trace electrical connections and analyze nets.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import List, Set, Tuple, Optional, Dict
-import math
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..schema.schematic import Schematic
-from ..schema.symbol import SymbolInstance
-from ..schema.wire import Wire, Junction
-from ..schema.label import Label, GlobalLabel, HierarchicalLabel
-
+from ..schema.wire import Wire
 
 # Tolerance for point matching (in mm)
 POINT_TOLERANCE = 0.1

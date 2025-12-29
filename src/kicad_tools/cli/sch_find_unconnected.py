@@ -27,12 +27,9 @@ import fnmatch
 import json
 import sys
 from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Set, Tuple, Dict
-
+from typing import Dict, List, Set, Tuple
 
 from kicad_tools.schema import Schematic
-
 
 POINT_TOLERANCE = 0.5  # mm - slightly larger for pin matching
 
@@ -173,7 +170,7 @@ def analyze_schematic(
                 # Check if it connects to a symbol (would need library info for exact check)
                 issues.append(ConnectionIssue(
                     type="possible_floating_wire",
-                    description=f"Wire endpoint may be floating",
+                    description="Wire endpoint may be floating",
                     position=point,
                 ))
 

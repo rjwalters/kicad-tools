@@ -25,8 +25,6 @@ import argparse
 import fnmatch
 import json
 import sys
-from pathlib import Path
-
 
 from kicad_tools.schema import Schematic
 

@@ -24,11 +24,9 @@ Examples:
 import argparse
 import json
 import sys
-from pathlib import Path
 
-
+from kicad_tools.operations.net_ops import find_net, trace_nets
 from kicad_tools.schema import Schematic
-from kicad_tools.operations.net_ops import NetTracer, trace_nets, find_net
 
 
 def main():

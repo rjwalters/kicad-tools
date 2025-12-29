@@ -31,9 +31,9 @@ from .base import (
     PartsLibrary,
 )
 from .jlcpcb import JLCPCB_PROFILE
-from .seeed import SEEED_PROFILE
-from .pcbway import PCBWAY_PROFILE
 from .oshpark import OSHPARK_PROFILE
+from .pcbway import PCBWAY_PROFILE
+from .seeed import SEEED_PROFILE
 
 __all__ = [
     # Base classes

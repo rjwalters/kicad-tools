@@ -34,8 +34,7 @@ import sys
 from io import StringIO
 from pathlib import Path
 
-
-from kicad_tools.schema.bom import extract_bom, BOM, BOMGroup
+from kicad_tools.schema.bom import BOM, extract_bom
 
 
 def main():
