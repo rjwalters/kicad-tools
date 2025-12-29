@@ -2,7 +2,7 @@
 
 Standalone Python tools for parsing and manipulating KiCad schematic and PCB files.
 
-## v0.1.0 (Current)
+## v0.1.0 (Released)
 
 ### Core Infrastructure
 - [x] S-expression parser with round-trip editing
@@ -14,23 +14,22 @@ Standalone Python tools for parsing and manipulating KiCad schematic and PCB fil
 - [x] ERC/DRC report parsing
 - [x] KiCad CLI integration (kicad-cli wrapper)
 
-### Unified CLI (`kct`)
+### Unified CLI (`kicad-tools` / `kct`)
 - [x] `kct symbols` - List symbols with filtering
 - [x] `kct nets` - Trace and analyze nets
 - [x] `kct bom` - Generate bill of materials
 - [x] `kct erc` - Run/parse ERC reports
 - [x] `kct drc` - Run/parse DRC reports with manufacturer rules
+- [x] `kct sch` - Schematic tools (summary, hierarchy, labels, validate)
+- [x] `kct pcb` - PCB tools (summary, footprints, nets, traces, stackup)
+- [x] `kct lib` - Library tools (symbols)
+- [x] `kct mfr` - Manufacturer tools (list, info, rules, compare)
 - [x] JSON output for all commands
 - [x] Predictable exit codes (0=success, 1=error, 2=warnings)
 
-### Additional Tools
-- [x] `kicad-pcb-query` - PCB queries (summary, footprints, nets, traces)
-- [x] `kicad-pcb-modify` - PCB modifications (move, rotate, flip)
-- [x] `kicad-lib-symbols` - Library symbol listing
-
 ---
 
-## Next: Enhanced Python API
+## v0.2.0 (Next): Enhanced Python API
 
 ### Fluent Query API
 ```python
@@ -242,10 +241,11 @@ kicad_tools/
 │   ├── library.py        # Library models
 │   └── ...
 ├── cli/
-│   ├── main.py           # Unified CLI entry point
-│   ├── sch.py            # Schematic subcommands
-│   ├── pcb.py            # PCB subcommands
-│   ├── bom.py            # BOM commands
+│   ├── __init__.py       # Unified CLI entry point
+│   ├── sch_*.py          # Schematic subcommands
+│   ├── pcb_*.py          # PCB subcommands
+│   ├── generate_bom.py   # BOM commands
+│   ├── mfr.py            # Manufacturer commands
 │   └── ...
 ├── validate/
 │   ├── erc.py            # Electrical rules
@@ -290,9 +290,9 @@ kicad_tools/
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| 0.1.0 | Unified CLI (`kct`), core parsing, manufacturer rules | Current |
+| 0.1.0 | Unified CLI (`kct`), core parsing, manufacturer rules | Released |
 | 0.2.0 | Enhanced Python API | Next |
-| 0.3.0 | Validation & BOM checking | |
-| 0.4.0 | Manufacturing automation (gerbers, pick-and-place) | |
-| 0.5.0 | Library management | |
-| 1.0.0 | Stable API, full documentation | |
+| 0.3.0 | Validation & BOM checking | Planned |
+| 0.4.0 | Manufacturing automation (gerbers, pick-and-place) | Planned |
+| 0.5.0 | Library management | Planned |
+| 1.0.0 | Stable API, full documentation | Planned |
