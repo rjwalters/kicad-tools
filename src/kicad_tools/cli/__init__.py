@@ -12,6 +12,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools pcb <command> <file>   - PCB query tools
     kicad-tools lib <command> <file>   - Symbol library tools
     kicad-tools mfr <command>          - Manufacturer tools
+    kicad-tools parts <command>        - LCSC parts lookup and search
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -22,6 +23,8 @@ Examples:
     kct sch summary design.kicad_sch
     kct pcb summary board.kicad_pcb
     kct mfr compare
+    kct parts lookup C123456
+    kct parts search "100nF 0402" --in-stock
 """
 
 import argparse
@@ -199,6 +202,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     mfr_compare.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
     mfr_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
 
+    # PARTS subcommand - LCSC parts lookup
+    parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
+    parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
+
+    # parts lookup
+    parts_lookup = parts_subparsers.add_parser("lookup", help="Look up part by LCSC number")
+    parts_lookup.add_argument("part", help="LCSC part number (e.g., C123456)")
+    parts_lookup.add_argument("--format", choices=["text", "json"], default="text")
+    parts_lookup.add_argument("--no-cache", action="store_true", help="Bypass cache")
+
+    # parts search
+    parts_search = parts_subparsers.add_parser("search", help="Search for parts")
+    parts_search.add_argument("query", help="Search query")
+    parts_search.add_argument("--format", choices=["text", "json", "table"], default="table")
+    parts_search.add_argument("--limit", type=int, default=20, help="Max results")
+    parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
+    parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
+
+    # parts cache
+    parts_cache = parts_subparsers.add_parser("cache", help="Cache management")
+    parts_cache.add_argument(
+        "cache_action",
+        nargs="?",
+        choices=["stats", "clear", "clear-expired"],
+        default="stats",
+        help="Cache action (default: stats)",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -291,6 +322,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     elif args.command == "mfr":
         return _run_mfr_command(args)
+
+    elif args.command == "parts":
+        return _run_parts_command(args)
 
     return 0
 
@@ -461,6 +495,42 @@ def _run_mfr_command(args) -> int:
         if args.copper != 1.0:
             sub_argv.extend(["--copper", str(args.copper)])
         return mfr_main(sub_argv) or 0
+
+    return 1
+
+
+def _run_parts_command(args) -> int:
+    """Handle parts subcommands."""
+    if not args.parts_command:
+        print("Usage: kicad-tools parts <command> [options]")
+        print("Commands: lookup, search, cache")
+        return 1
+
+    from .parts_cmd import main as parts_main
+
+    if args.parts_command == "lookup":
+        sub_argv = ["lookup", args.part]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.no_cache:
+            sub_argv.append("--no-cache")
+        return parts_main(sub_argv) or 0
+
+    elif args.parts_command == "search":
+        sub_argv = ["search", args.query]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.limit != 20:
+            sub_argv.extend(["--limit", str(args.limit)])
+        if args.in_stock:
+            sub_argv.append("--in-stock")
+        if args.basic:
+            sub_argv.append("--basic")
+        return parts_main(sub_argv) or 0
+
+    elif args.parts_command == "cache":
+        sub_argv = ["cache", args.cache_action]
+        return parts_main(sub_argv) or 0
 
     return 1
 
