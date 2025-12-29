@@ -6,10 +6,13 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
 
 from ..core.sexp import SExp
 from ..core.sexp_file import load_pcb
+
+if TYPE_CHECKING:
+    from ..query.footprints import FootprintList
 
 
 @dataclass
@@ -147,7 +150,7 @@ class Footprint:
         if attr := sexp.find("attr"):
             fp.attr = attr.get_string(0) or ""
 
-        # Reference and value from fp_text
+        # Reference and value from fp_text (KiCad 7 format)
         for fp_text in sexp.find_all("fp_text"):
             text_type = fp_text.get_string(0)
             text_value = fp_text.get_string(1) or ""
@@ -155,6 +158,15 @@ class Footprint:
                 fp.reference = text_value
             elif text_type == "value":
                 fp.value = text_value
+
+        # Reference and value from property (KiCad 8+ format)
+        for prop in sexp.find_all("property"):
+            prop_name = prop.get_string(0)
+            prop_value = prop.get_string(1) or ""
+            if prop_name == "Reference":
+                fp.reference = prop_value
+            elif prop_name == "Value":
+                fp.value = prop_value
 
         # Pads
         for pad_sexp in sexp.find_all("pad"):
@@ -464,9 +476,20 @@ class PCB:
         return None
 
     @property
-    def footprints(self) -> List[Footprint]:
-        """All footprints."""
-        return self._footprints
+    def footprints(self) -> "FootprintList":
+        """All footprints.
+
+        Returns a FootprintList which extends list with query methods:
+            pcb.footprints.by_reference("U1")
+            pcb.footprints.filter(layer="F.Cu")
+            pcb.footprints.query().smd().on_top().all()
+
+        Backward compatible - all list operations still work.
+        """
+        # Import here to avoid circular import
+        from ..query.footprints import FootprintList
+
+        return FootprintList(self._footprints)
 
     def get_footprint(self, reference: str) -> Optional[Footprint]:
         """Get footprint by reference designator."""

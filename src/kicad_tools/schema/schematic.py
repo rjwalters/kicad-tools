@@ -8,13 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
 
 from ..core.sexp import SExp
 from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
 from .symbol import SymbolInstance
 from .wire import Junction, Wire
+
+if TYPE_CHECKING:
+    from ..query.symbols import SymbolList
 
 
 @dataclass
@@ -179,10 +182,22 @@ class Schematic:
     # Symbol operations
 
     @property
-    def symbols(self) -> List[SymbolInstance]:
-        """Get all symbol instances in the schematic."""
+    def symbols(self) -> "SymbolList":
+        """Get all symbol instances in the schematic.
+
+        Returns a SymbolList which extends list with query methods:
+            sch.symbols.by_reference("U1")
+            sch.symbols.filter(value="100nF")
+            sch.symbols.query().capacitors().all()
+
+        Backward compatible - all list operations still work.
+        """
         if self._symbols is None:
-            self._symbols = [SymbolInstance.from_sexp(s) for s in self._sexp.find_all("symbol")]
+            # Import here to avoid circular import
+            from ..query.symbols import SymbolList
+
+            items = [SymbolInstance.from_sexp(s) for s in self._sexp.find_all("symbol")]
+            self._symbols = SymbolList(items)
         return self._symbols
 
     def get_symbol(self, reference: str) -> Optional[SymbolInstance]:
