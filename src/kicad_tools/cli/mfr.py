@@ -20,9 +20,6 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Import manufacturer profiles
 from kicad_tools.manufacturers import (
     compare_design_rules,
     find_compatible_manufacturers,
@@ -65,7 +62,7 @@ def cmd_info(args):
     print("\nBasic Info:")
     print(f"  ID:       {profile.id}")
     print(f"  Website:  {profile.website}")
-    print(f"  Layers:   {', '.join(str(l) for l in profile.supported_layers)}")
+    print(f"  Layers:   {', '.join(str(layer) for layer in profile.supported_layers)}")
     print(f"  Pricing:  {profile.pricing_model}")
 
     print("\nLead Times:")

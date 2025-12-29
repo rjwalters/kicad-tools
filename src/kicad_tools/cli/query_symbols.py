@@ -22,9 +22,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Import our S-expression parser
 from kicad_tools.core.sexp import SExp, parse_sexp
 
 # Pin type descriptions
@@ -509,15 +506,10 @@ def main():
 
     # Find libraries if not specified
     if not args.libraries:
-        # Look for local symbol libraries
-        local_libs = list(REPO_ROOT.glob("hardware/**/lib/symbols/*.kicad_sym"))
-        if local_libs:
-            args.libraries = local_libs[:5]  # Limit to first 5
-        else:
-            parser.print_help()
-            print("\nError: No symbol libraries specified")
-            print("\nTry: scripts/kicad/query-symbols.py hardware/*/lib/symbols/*.kicad_sym")
-            return 1
+        parser.print_help()
+        print("\nError: No symbol libraries specified")
+        print("\nUsage: kicad-lib-symbols path/to/library.kicad_sym")
+        return 1
 
     # Load libraries
     libraries = []

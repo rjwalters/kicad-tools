@@ -118,7 +118,7 @@ def route_pcb(
 
     # Route nets
     print(f"Autorouting {len(nets_to_route)} nets...")
-    routes = router.route_all(nets_to_route)
+    router.route_all(nets_to_route)
 
     stats = router.get_statistics()
     print(

@@ -32,10 +32,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-KICAD_SCRIPTS = Path(__file__).resolve().parent
-
 from kicad_tools.core.sexp import SExp, parse_sexp
+
+KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 
 def generate_uuid() -> str:
@@ -485,9 +484,7 @@ def regenerate_symbol_uuids(sexp: SExp, reference: str, dry_run: bool = False) -
         return True, f"Would regenerate UUIDs for {reference} (1 symbol + {pin_count} pins)"
 
     # Regenerate symbol UUID
-    old_uuid = ""
     if u := sym.find("uuid"):
-        old_uuid = u.get_string(0) or ""
         u.set_value(0, generate_uuid())
 
     # Regenerate pin UUIDs

@@ -78,7 +78,7 @@ class NetTracer:
         for sym in self.sch.symbols:
             # Get symbol position
             sym_pos = sym.position
-            sym_rot = sym.rotation
+            _sym_rot = sym.rotation  # noqa: F841 - reserved for pin offset calculations
 
             # For now, we'll use a simplified approach:
             # Pins are at the symbol position (we'd need library info for exact positions)

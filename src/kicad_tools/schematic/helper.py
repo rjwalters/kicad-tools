@@ -908,8 +908,9 @@ class SymbolInstance:
 
     def to_sexp_node(self, project_name: str, sheet_path: str) -> SExp:
         """Build S-expression tree for this symbol instance."""
-        x = sexp_fmt(self.x)
-        y = sexp_fmt(self.y)
+        # Note: x, y formatting reserved for future position string output
+        _x = sexp_fmt(self.x)  # noqa: F841
+        _y = sexp_fmt(self.y)  # noqa: F841
 
         # Build main symbol node
         sym = SExp.list("symbol",
@@ -2719,7 +2720,7 @@ class Schematic:
         import fnmatch
         if pattern is None:
             return list(self.labels)
-        return [l for l in self.labels if fnmatch.fnmatch(l.text, pattern)]
+        return [lbl for lbl in self.labels if fnmatch.fnmatch(lbl.text, pattern)]
 
     def find_hier_label(self, name: str) -> Optional[HierarchicalLabel]:
         """Find a hierarchical label by exact name.
@@ -3319,22 +3320,8 @@ class Schematic:
             "power_symbol_count": len(self.power_symbols),
             "references": sorted([s.reference for s in self.symbols]),
             "power_nets": sorted(set(p.lib_id.split(":")[1] for p in self.power_symbols)),
-            "net_labels": sorted(set(l.text for l in self.labels)),
+            "net_labels": sorted(set(lbl.text for lbl in self.labels)),
         }
-
-    def find_symbol(self, reference: str) -> SymbolInstance | None:
-        """Find a symbol by reference designator.
-
-        Args:
-            reference: Reference designator (e.g., "U1", "C5")
-
-        Returns:
-            SymbolInstance or None if not found
-        """
-        for sym in self.symbols:
-            if sym.reference == reference:
-                return sym
-        return None
 
     def find_symbols_by_value(self, value: str) -> list[SymbolInstance]:
         """Find all symbols with a given value.

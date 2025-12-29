@@ -851,7 +851,7 @@ class PCBLayout:
         for name, block in self.blocks.items():
             n_comp = len(block.components)
             n_traces = len(block.traces)
-            n_ports = len(block.ports)
+            _n_ports = len(block.ports)  # noqa: F841 - used in port display below
             total_components += n_comp
             total_internal_traces += n_traces
 

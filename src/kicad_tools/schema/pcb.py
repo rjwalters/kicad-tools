@@ -432,7 +432,7 @@ class PCB:
     @property
     def copper_layers(self) -> List[Layer]:
         """Copper layers only."""
-        return [l for l in self._layers.values() if l.type in ("signal", "power")]
+        return [layer for layer in self._layers.values() if layer.type in ("signal", "power")]
 
     @property
     def nets(self) -> Dict[int, Net]:

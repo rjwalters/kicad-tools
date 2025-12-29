@@ -141,8 +141,6 @@ def parse_text_report(text: str, schematic: str) -> ERCReport:
     # Format: [type]: description @(x, y): message
     # Example: [pin_not_connected]: Pin not connected @(100.33mm, 50.80mm): U1 pin 5 (PWR_FLAG)
 
-    current_violation = None
-
     for line in text.split("\n"):
         line = line.strip()
 
@@ -221,7 +219,7 @@ def run_erc(
         cmd.append(schematic)
 
         # Run kicad-cli
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             capture_output=True,
             text=True,

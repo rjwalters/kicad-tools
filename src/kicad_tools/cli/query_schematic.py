@@ -23,11 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-KICAD_SCRIPTS = Path(__file__).resolve().parent
-
-# Import our S-expression parser
 from kicad_tools.core.sexp import SExp, parse_sexp
+
+KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 
 # Embedded data models (to avoid import complexity)
@@ -351,7 +349,7 @@ class SchematicInfo:
                 info.company = c.get_string(0) or ""
 
             for comment in tb.find_all("comment"):
-                num = comment.get_int(0)
+                _num = comment.get_int(0)  # noqa: F841 - comment number preserved
                 val = comment.get_string(1)
                 if val:
                     info.comments.append(val)
@@ -597,19 +595,19 @@ def print_labels(info: SchematicInfo, verbose: bool = False):
 
     if info.labels:
         print(f"\nLocal Labels ({len(info.labels)}):")
-        for lbl in sorted(info.labels, key=lambda l: l.text):
+        for lbl in sorted(info.labels, key=lambda lbl: lbl.text):
             pos = f"({lbl.position[0]:.2f}, {lbl.position[1]:.2f})" if verbose else ""
             print(f"  {lbl.text} {pos}")
 
     if info.hierarchical_labels:
         print(f"\nHierarchical Labels ({len(info.hierarchical_labels)}):")
-        for lbl in sorted(info.hierarchical_labels, key=lambda l: l.text):
+        for lbl in sorted(info.hierarchical_labels, key=lambda lbl: lbl.text):
             pos = f"({lbl.position[0]:.2f}, {lbl.position[1]:.2f})" if verbose else ""
             print(f"  {lbl.text} [{lbl.shape}] {pos}")
 
     if info.global_labels:
         print(f"\nGlobal Labels ({len(info.global_labels)}):")
-        for lbl in sorted(info.global_labels, key=lambda l: l.text):
+        for lbl in sorted(info.global_labels, key=lambda lbl: lbl.text):
             pos = f"({lbl.position[0]:.2f}, {lbl.position[1]:.2f})" if verbose else ""
             print(f"  {lbl.text} [{lbl.shape}] {pos}")
 
@@ -756,30 +754,30 @@ def print_json_output(info: SchematicInfo):
         ],
         "labels": [
             {
-                "text": l.text,
-                "position": {"x": l.position[0], "y": l.position[1]},
-                "rotation": l.rotation,
-                "uuid": l.uuid,
+                "text": lbl.text,
+                "position": {"x": lbl.position[0], "y": lbl.position[1]},
+                "rotation": lbl.rotation,
+                "uuid": lbl.uuid,
             }
-            for l in info.labels
+            for lbl in info.labels
         ],
         "hierarchical_labels": [
             {
-                "text": l.text,
-                "shape": l.shape,
-                "position": {"x": l.position[0], "y": l.position[1]},
-                "uuid": l.uuid,
+                "text": lbl.text,
+                "shape": lbl.shape,
+                "position": {"x": lbl.position[0], "y": lbl.position[1]},
+                "uuid": lbl.uuid,
             }
-            for l in info.hierarchical_labels
+            for lbl in info.hierarchical_labels
         ],
         "global_labels": [
             {
-                "text": l.text,
-                "shape": l.shape,
-                "position": {"x": l.position[0], "y": l.position[1]},
-                "uuid": l.uuid,
+                "text": lbl.text,
+                "shape": lbl.shape,
+                "position": {"x": lbl.position[0], "y": lbl.position[1]},
+                "uuid": lbl.uuid,
             }
-            for l in info.global_labels
+            for lbl in info.global_labels
         ],
         "sheets": info.sheets,
         "lib_symbols": list(info.lib_symbols.keys()),
@@ -821,19 +819,9 @@ def main():
 
     # Find schematic if not specified
     if not args.schematic:
-        defaults = [
-            REPO_ROOT / "hardware/chorus-revA/kicad/amplifier.kicad_sch",
-            REPO_ROOT / "hardware/chorus-revA/kicad/chorus-revA.kicad_sch",
-        ]
-        for default in defaults:
-            if default.exists():
-                args.schematic = default
-                break
-
-        if not args.schematic:
-            parser.print_help()
-            print("\nError: No schematic file specified")
-            return 1
+        parser.print_help()
+        print("\nError: No schematic file specified")
+        return 1
 
     if not args.schematic.exists():
         print(f"Error: Schematic not found: {args.schematic}")

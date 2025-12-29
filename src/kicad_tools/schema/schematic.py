@@ -39,10 +39,6 @@ class TitleBlock:
         if company := sexp.find('company'):
             tb.company = company.get_string(0) or ""
 
-        for i in range(1, 10):
-            if comment := sexp.find('comment'):
-                # Comments are stored as (comment N "text")
-                pass
         # Parse comments - they're stored as (comment 1 "text")
         for child in sexp.iter_children():
             if child.tag == 'comment':
@@ -72,7 +68,7 @@ class SheetInstance:
         pos = (0.0, 0.0)
         size = (50.0, 25.0)
 
-        if name_prop := sexp.find('property'):
+        if sexp.find('property'):
             for prop in sexp.find_all('property'):
                 prop_name = prop.get_string(0)
                 if prop_name == "Sheetname":

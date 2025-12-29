@@ -107,8 +107,8 @@ def analyze_schematic(
     junction_positions = find_junction_positions(schematic)
     label_positions = find_label_positions(schematic)
 
-    # Combine all connection points
-    all_connections = wire_endpoints | junction_positions | label_positions
+    # Combine all connection points (reserved for future proximity checks)
+    _all_connections = wire_endpoints | junction_positions | label_positions  # noqa: F841
 
     # Check each symbol
     symbol_positions: Dict[Tuple[float, float], List[str]] = {}

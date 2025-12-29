@@ -23,9 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Import our S-expression parser
 from kicad_tools.core.sexp import SExp, parse_sexp
 
 
@@ -78,7 +75,7 @@ class Component:
                 sheet_path = names.get_string(0) or ""
 
         # Parse properties
-        if props := sexp.find("property"):
+        if sexp.find("property"):
             for prop in sexp.find_all("property"):
                 prop_name = prop.get_string(0)
                 prop_value = prop.get_string(1)
@@ -550,19 +547,9 @@ def main():
 
     # Validate schematic path
     if not args.schematic:
-        defaults = [
-            REPO_ROOT / "hardware/chorus-revA/kicad/chorus-revA.kicad_sch",
-            REPO_ROOT / "hardware/chorus-test-revA/kicad/chorus-test-revA.kicad_sch",
-        ]
-        for default in defaults:
-            if default.exists():
-                args.schematic = default
-                break
-
-        if not args.schematic:
-            parser.print_help()
-            print("\nError: No schematic file specified")
-            return 1
+        parser.print_help()
+        print("\nError: No schematic file specified")
+        return 1
 
     if not args.schematic.exists():
         print(f"Error: Schematic not found: {args.schematic}")

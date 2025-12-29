@@ -218,7 +218,7 @@ def parse_erc_report(report_path: Path) -> ERCReport:
     # Parse violations
     for sheet_data in data.get("sheets", []):
         sheet_path = sheet_data.get("path", "")
-        sheet_uuid = sheet_data.get("uuid_path", "")
+        _sheet_uuid = sheet_data.get("uuid_path", "")  # noqa: F841 - preserved for future use
 
         for item in sheet_data.get("violations", []):
             violation = ERCViolation(

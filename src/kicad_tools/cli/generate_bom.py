@@ -35,13 +35,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 
 # Try to import sexp parser for direct schematic reading
 try:
-    from core.sexp import SExp, parse_sexp
+    from kicad_tools.core.sexp import parse_sexp
     HAS_SEXP_PARSER = True
 except ImportError:
     HAS_SEXP_PARSER = False
@@ -349,9 +348,9 @@ def extract_bom_from_netlist(netlist_path: Path) -> list[Component]:
 
         # Get fields
         fields = {}
-        for field in comp.findall(".//field"):
-            name = field.get("name", "")
-            fields[name.lower()] = field.text or ""
+        for fld in comp.findall(".//field"):
+            name = fld.get("name", "")
+            fields[name.lower()] = fld.text or ""
 
         component = Component(
             reference=ref,
@@ -592,7 +591,7 @@ def generate_bom_from_schematic(schematic_path: Path, output_dir: Path, format: 
     # Summary
     total_parts = sum(line.quantity for line in bom_lines)
     unique_parts = len(bom_lines)
-    opl_parts = len([l for l in bom_lines if l.opl_sku])
+    opl_parts = len([bom_line for bom_line in bom_lines if bom_line.opl_sku])
 
     print("\nBOM Summary:")
     print(f"  Total parts:  {total_parts}")

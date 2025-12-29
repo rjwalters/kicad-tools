@@ -27,10 +27,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-KICAD_SCRIPTS = Path(__file__).resolve().parent
-
 from kicad_tools.core.sexp import SExp, parse_sexp
+
+KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 
 @dataclass

@@ -103,10 +103,10 @@ def main():
 
     # Apply pattern filter
     if args.pattern:
-        labels = [l for l in labels if fnmatch.fnmatch(l["text"], args.pattern)]
+        labels = [lbl for lbl in labels if fnmatch.fnmatch(lbl["text"], args.pattern)]
 
     # Sort by text
-    labels.sort(key=lambda l: (l["type"], l["text"]))
+    labels.sort(key=lambda lbl: (lbl["type"], lbl["text"]))
 
     # Output
     if args.format == "json":
@@ -124,10 +124,10 @@ def output_table(labels):
         return
 
     # Calculate column widths
-    type_width = max(len(l["type"]) for l in labels)
+    type_width = max(len(lbl["type"]) for lbl in labels)
     type_width = max(type_width, 4)
 
-    text_width = max(len(l["text"]) for l in labels)
+    text_width = max(len(lbl["text"]) for lbl in labels)
     text_width = max(text_width, 4)
 
     print(f"{'Type':<{type_width}}  {'Text':<{text_width}}  {'Position':<20}  Shape/Lib")

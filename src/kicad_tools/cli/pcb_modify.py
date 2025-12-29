@@ -61,7 +61,7 @@ def cmd_move(sexp: SExp, args) -> bool:
 
     old_x = at.get_float(0) or 0.0
     old_y = at.get_float(1) or 0.0
-    rotation = at.get_float(2) or 0.0
+    _rotation = at.get_float(2) or 0.0  # noqa: F841
 
     print(f"Moving {args.reference}:")
     print(f"  From: ({old_x:.4f}, {old_y:.4f})")
@@ -86,8 +86,8 @@ def cmd_rotate(sexp: SExp, args) -> bool:
         print("Error: Footprint has no position", file=sys.stderr)
         return False
 
-    x = at.get_float(0) or 0.0
-    y = at.get_float(1) or 0.0
+    _x = at.get_float(0) or 0.0  # noqa: F841
+    _y = at.get_float(1) or 0.0  # noqa: F841
     old_rotation = at.get_float(2) or 0.0
 
     new_rotation = (old_rotation + args.angle) % 360

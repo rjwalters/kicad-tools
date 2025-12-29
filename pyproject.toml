@@ -46,7 +46,18 @@ Repository = "https://github.com/rjwalters/kicad-tools"
 Issues = "https://github.com/rjwalters/kicad-tools/issues"
 
 [project.scripts]
-# Schematic tools
+# Unified CLI
+kicad-tools = "kicad_tools.cli:main"
+kct = "kicad_tools.cli:main"
+
+# Standalone commands
+kicad-symbols = "kicad_tools.cli:symbols_main"
+kicad-nets = "kicad_tools.cli:nets_main"
+kicad-erc = "kicad_tools.cli:erc_main"
+kicad-drc = "kicad_tools.cli:drc_main"
+kicad-bom = "kicad_tools.cli:bom_main"
+
+# Schematic tools (legacy)
 kicad-sch-summary = "kicad_tools.cli.sch_summary:main"
 kicad-sch-symbols = "kicad_tools.cli.sch_list_symbols:main"
 kicad-sch-labels = "kicad_tools.cli.sch_list_labels:main"
@@ -104,3 +115,23 @@ ignore = ["E501"]  # line too long - handled by formatter
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "--cov=kicad_tools --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["src/kicad_tools"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+precision = 2

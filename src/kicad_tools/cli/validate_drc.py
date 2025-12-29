@@ -20,9 +20,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Import manufacturer profiles
 from kicad_tools.manufacturers import (
     ManufacturerProfile,
     compare_design_rules,
@@ -362,16 +359,11 @@ def main():
 
     # Mode: Validate PCB
     if not args.pcb:
-        # Try default path
-        default_pcb = REPO_ROOT / "hardware/chorus-hat-reva/kicad/chorus-hat-reva.kicad_pcb"
-        if default_pcb.exists():
-            args.pcb = default_pcb
-        else:
-            parser.print_help()
-            print("\nError: No PCB file specified")
-            print("\nTo see design rules, run with --rules")
-            print("To compare manufacturers, run with --compare")
-            sys.exit(1)
+        parser.print_help()
+        print("\nError: No PCB file specified")
+        print("\nTo see design rules, run with --rules")
+        print("To compare manufacturers, run with --compare")
+        sys.exit(1)
 
     if not args.pcb.exists():
         print(f"Error: PCB file not found: {args.pcb}")

@@ -18,9 +18,6 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Import manufacturer profiles
 from kicad_tools.manufacturers import (
     ManufacturerProfile,
     get_manufacturer_ids,

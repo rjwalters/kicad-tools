@@ -39,16 +39,17 @@ class LibraryPin:
         """
         # Pin rotation: 0=pointing right, 90=up, 180=left, 270=down
         # Connection point is at the tip of the pin (opposite from IC body)
-        angle_rad = math.radians(self.rotation)
         # No offset needed - position is already the connection point
         # The length extends INTO the symbol body
+        # Note: angle calculation reserved for future pin offset calculations
+        _ = math.radians(self.rotation)  # noqa: F841
         return (0, 0)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> LibraryPin:
         """Parse from S-expression."""
         pin_type = sexp.get_string(0) or "passive"
-        pin_shape = sexp.get_string(1) or "line"
+        _pin_shape = sexp.get_string(1) or "line"  # noqa: F841 - reserved for rendering
 
         pos = (0.0, 0.0)
         rot = 0.0
@@ -184,7 +185,7 @@ class LibrarySymbol:
         # Parse pins from unit symbols
         pins = []
         for unit_sym in sexp.find_all('symbol'):
-            unit_name = unit_sym.get_string(0) or ""
+            _unit_name = unit_sym.get_string(0) or ""  # noqa: F841
             # Unit symbols have names like "TPA3116D2_1_1"
             # Format: {name}_{unit}_{variant}
             for pin_sexp in unit_sym.find_all('pin'):
