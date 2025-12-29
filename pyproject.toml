@@ -50,34 +50,18 @@ Issues = "https://github.com/rjwalters/kicad-tools/issues"
 kicad-tools = "kicad_tools.cli:main"
 kct = "kicad_tools.cli:main"
 
-# Standalone commands
+# Standalone shortcuts
 kicad-symbols = "kicad_tools.cli:symbols_main"
 kicad-nets = "kicad_tools.cli:nets_main"
 kicad-erc = "kicad_tools.cli:erc_main"
 kicad-drc = "kicad_tools.cli:drc_main"
 kicad-bom = "kicad_tools.cli:bom_main"
 
-# Schematic tools (legacy)
-kicad-sch-summary = "kicad_tools.cli.sch_summary:main"
-kicad-sch-symbols = "kicad_tools.cli.sch_list_symbols:main"
-kicad-sch-labels = "kicad_tools.cli.sch_list_labels:main"
-kicad-sch-wires = "kicad_tools.cli.sch_list_wires:main"
-kicad-sch-hierarchy = "kicad_tools.cli.sch_hierarchy:main"
-kicad-sch-symbol-info = "kicad_tools.cli.sch_symbol_info:main"
-kicad-sch-pin-positions = "kicad_tools.cli.sch_pin_positions:main"
-kicad-sch-trace-nets = "kicad_tools.cli.sch_trace_nets:main"
-kicad-sch-check-connections = "kicad_tools.cli.sch_check_connections:main"
-kicad-sch-find-unconnected = "kicad_tools.cli.sch_find_unconnected:main"
-kicad-sch-validate = "kicad_tools.cli.sch_validate:main"
-kicad-sch-replace-symbol = "kicad_tools.cli.sch_replace_symbol:main"
-kicad-sch-bom = "kicad_tools.cli.sch_generate_bom:main"
-kicad-sch-erc = "kicad_tools.cli.sch_run_erc:main"
-
-# PCB tools
+# PCB tools (not yet in unified CLI)
 kicad-pcb-query = "kicad_tools.cli.pcb_query:main"
 kicad-pcb-modify = "kicad_tools.cli.pcb_modify:main"
 
-# Library tools
+# Library tools (not yet in unified CLI)
 kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
 
 [project.optional-dependencies]

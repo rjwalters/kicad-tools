@@ -2,7 +2,7 @@
 
 Standalone Python tools for parsing and manipulating KiCad schematic and PCB files.
 
-## Completed
+## v0.1.0 (Current)
 
 ### Core Infrastructure
 - [x] S-expression parser with round-trip editing
@@ -11,72 +11,28 @@ Standalone Python tools for parsing and manipulating KiCad schematic and PCB fil
 - [x] Symbol library parsing
 - [x] BOM extraction
 - [x] Manufacturer design rules (JLCPCB, OSHPark, PCBWay, Seeed)
+- [x] ERC/DRC report parsing
+- [x] KiCad CLI integration (kicad-cli wrapper)
 
-### CLI Tools (Current - Separate Commands)
-- [x] `kicad-sch-summary` - Schematic overview
-- [x] `kicad-sch-symbols` - List symbols
-- [x] `kicad-sch-labels` - List labels
-- [x] `kicad-sch-hierarchy` - Show sheet hierarchy
-- [x] `kicad-sch-bom` - Generate BOM
-- [x] `kicad-sch-validate` - Validate schematic
-- [x] `kicad-pcb-query` - PCB queries
-- [x] `kicad-pcb-modify` - PCB modifications
+### Unified CLI (`kct`)
+- [x] `kct symbols` - List symbols with filtering
+- [x] `kct nets` - Trace and analyze nets
+- [x] `kct bom` - Generate bill of materials
+- [x] `kct erc` - Run/parse ERC reports
+- [x] `kct drc` - Run/parse DRC reports with manufacturer rules
+- [x] JSON output for all commands
+- [x] Predictable exit codes (0=success, 1=error, 2=warnings)
 
----
-
-## Phase 1: Unified CLI (Next)
-
-**Goal**: Single `kicad` command with subcommands for better discoverability and consistency.
-
-### 1.1 CLI Structure
-```bash
-kicad <category> <command> [options] <file>
-
-# Schematic commands
-kicad sch summary project.kicad_sch
-kicad sch symbols project.kicad_sch --json
-kicad sch labels project.kicad_sch
-kicad sch hierarchy project.kicad_sch
-kicad sch nets project.kicad_sch
-
-# PCB commands
-kicad pcb summary board.kicad_pcb
-kicad pcb footprints board.kicad_pcb --filter "U*"
-kicad pcb nets board.kicad_pcb --sorted
-kicad pcb traces board.kicad_pcb --layer F.Cu
-
-# BOM & Manufacturing
-kicad bom project.kicad_sch --format jlcpcb
-kicad gerbers board.kicad_pcb --manufacturer jlcpcb
-
-# Validation
-kicad validate project.kicad_sch      # ERC
-kicad validate board.kicad_pcb        # DRC
-kicad validate board.kicad_pcb --rules jlcpcb
-
-# Library
-kicad lib symbols library.kicad_sym
-kicad lib footprints library.pretty/
-```
-
-### 1.2 Consistent Options
-All commands support:
-- `--json` - Structured JSON output (for agents/scripts)
-- `--quiet` - Minimal output
-- `--verbose` - Detailed output
-- `--help` - Command help
-
-### 1.3 Agent-Friendly Features
-- Predictable exit codes (0=success, 1=error, 2=warnings)
-- Machine-readable JSON output
-- Clear error messages with file:line references
-- Single `kicad --help` shows all available commands
+### Additional Tools
+- [x] `kicad-pcb-query` - PCB queries (summary, footprints, nets, traces)
+- [x] `kicad-pcb-modify` - PCB modifications (move, rotate, flip)
+- [x] `kicad-lib-symbols` - Library symbol listing
 
 ---
 
-## Phase 2: Enhanced Python API
+## Next: Enhanced Python API
 
-### 2.1 Fluent Query API
+### Fluent Query API
 ```python
 from kicad_tools import Schematic
 
@@ -96,7 +52,7 @@ dac.properties["Value"] = "PCM5122"
 sch.save()
 ```
 
-### 2.2 PCB API
+### PCB API
 ```python
 from kicad_tools import PCB
 
@@ -116,7 +72,7 @@ u1.rotate(90)
 pcb.save()
 ```
 
-### 2.3 Cross-Reference
+### Cross-Reference
 ```python
 # Link schematic to PCB
 project = Project.load("project.kicad_pro")
@@ -131,9 +87,9 @@ for cap in sch.symbols.by_prefix("C"):
 
 ---
 
-## Phase 3: Validation & Design Rules
+## Future: Validation & Design Rules
 
-### 3.1 Built-in Validation
+### Built-in Validation
 ```python
 from kicad_tools.validate import ERCChecker, DRCChecker
 
@@ -148,7 +104,7 @@ drc = DRCChecker(pcb, rules="jlcpcb-4layer")
 violations = drc.check_all()
 ```
 
-### 3.2 Manufacturer Profiles
+### Manufacturer Profiles
 ```python
 from kicad_tools.manufacturers import JLCPCB, OSHPark
 
@@ -161,7 +117,7 @@ print(jlcpcb.min_trace_width)    # 0.127mm
 print(jlcpcb.min_via_diameter)   # 0.3mm
 ```
 
-### 3.3 BOM Validation
+### BOM Validation
 ```python
 from kicad_tools.bom import BOMValidator
 
@@ -172,9 +128,9 @@ validator.check_alternates()            # Suggest alternates for unavailable par
 
 ---
 
-## Phase 4: Manufacturing Automation
+## Future: Manufacturing Automation
 
-### 4.1 Gerber Export
+### Gerber Export
 ```bash
 kicad gerbers board.kicad_pcb --manufacturer jlcpcb --output gerbers/
 ```
@@ -187,12 +143,12 @@ exporter.export("gerbers/")
 exporter.create_zip("board_gerbers.zip")
 ```
 
-### 4.2 Pick & Place
+### Pick & Place
 ```bash
 kicad pnp board.kicad_pcb --format jlcpcb --output pnp.csv
 ```
 
-### 4.3 Assembly Package
+### Assembly Package
 ```bash
 kicad package board.kicad_pcb \
   --manufacturer jlcpcb \
@@ -202,9 +158,9 @@ kicad package board.kicad_pcb \
 
 ---
 
-## Phase 5: Library Management
+## Future: Library Management
 
-### 5.1 Symbol Library Tools
+### Symbol Library Tools
 ```python
 from kicad_tools.library import SymbolLibrary
 
@@ -221,7 +177,7 @@ new_sym.add_pin("GND", 2, "power_in")
 lib.save()
 ```
 
-### 5.2 Footprint Library Tools
+### Footprint Library Tools
 ```python
 from kicad_tools.library import FootprintLibrary
 
@@ -234,9 +190,9 @@ lib.create_qfp(pins=48, pitch=0.5, name="LQFP-48")
 
 ---
 
-## Phase 6: Advanced Features
+## Future: Advanced Features
 
-### 6.1 Netlist Operations
+### Netlist Operations
 ```python
 from kicad_tools.netlist import Netlist
 
@@ -251,13 +207,13 @@ floating = netlist.find_floating_pins()
 shorts = netlist.find_potential_shorts()
 ```
 
-### 6.2 Diff & Merge
+### Diff & Merge
 ```bash
 kicad diff old.kicad_sch new.kicad_sch --output diff.html
 kicad diff old.kicad_pcb new.kicad_pcb --visual
 ```
 
-### 6.3 AI Integration Hooks
+### AI Integration Hooks
 ```python
 from kicad_tools.hooks import DesignAssistant
 
@@ -332,11 +288,11 @@ kicad_tools/
 
 ## Release Plan
 
-| Version | Focus | Target |
+| Version | Focus | Status |
 |---------|-------|--------|
-| 0.1.0 | Initial release, separate CLI tools | Done |
-| 0.2.0 | Unified CLI (`kicad` command) | Next |
-| 0.3.0 | Enhanced Python API | |
-| 0.4.0 | Validation & manufacturer profiles | |
-| 0.5.0 | Manufacturing automation | |
+| 0.1.0 | Unified CLI (`kct`), core parsing, manufacturer rules | Current |
+| 0.2.0 | Enhanced Python API | Next |
+| 0.3.0 | Validation & BOM checking | |
+| 0.4.0 | Manufacturing automation (gerbers, pick-and-place) | |
+| 0.5.0 | Library management | |
 | 1.0.0 | Stable API, full documentation | |

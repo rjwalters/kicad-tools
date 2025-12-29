@@ -12,20 +12,29 @@ pip install kicad-tools
 
 ## Quick Start
 
-### Command Line
+### Command Line (`kct`)
 
 ```bash
-# Schematic overview
-kicad-sch-summary project.kicad_sch
+# List symbols in a schematic
+kct symbols project.kicad_sch
+kct symbols project.kicad_sch --format json
 
-# List all symbols
-kicad-sch-symbols project.kicad_sch
+# Trace nets
+kct nets project.kicad_sch
+kct nets project.kicad_sch --net VCC
 
-# PCB overview
-kicad-pcb-query board.kicad_pcb summary
+# Generate bill of materials
+kct bom project.kicad_sch
+kct bom project.kicad_sch --format csv --group
 
-# List footprints
-kicad-pcb-query board.kicad_pcb footprints --sorted
+# Run ERC (requires kicad-cli)
+kct erc project.kicad_sch
+kct erc project.kicad_sch --strict
+
+# Run DRC with manufacturer rules
+kct drc board.kicad_pcb
+kct drc board.kicad_pcb --mfr jlcpcb
+kct drc --compare  # Compare manufacturer rules
 ```
 
 ### Python API
@@ -46,26 +55,19 @@ for sheet in sch.sheets:
     print(f"Sheet: {sheet.name}")
 ```
 
-## CLI Tools
+## CLI Commands
 
-### Schematic Tools
+### Unified CLI (`kct` or `kicad-tools`)
 
 | Command | Description |
 |---------|-------------|
-| `kicad-sch-summary` | Quick schematic overview |
-| `kicad-sch-symbols` | List all symbols |
-| `kicad-sch-labels` | List all labels |
-| `kicad-sch-wires` | List wires and connections |
-| `kicad-sch-hierarchy` | Show sheet hierarchy |
-| `kicad-sch-symbol-info` | Detailed symbol info |
-| `kicad-sch-pin-positions` | Symbol pin locations |
-| `kicad-sch-trace-nets` | Trace net connections |
-| `kicad-sch-check-connections` | Check pin connectivity |
-| `kicad-sch-find-unconnected` | Find unconnected pins |
-| `kicad-sch-validate` | Validate schematic |
-| `kicad-sch-replace-symbol` | Replace symbol lib_id |
-| `kicad-sch-bom` | Generate bill of materials |
-| `kicad-sch-erc` | Run electrical rules check |
+| `kct symbols <schematic>` | List symbols with filtering |
+| `kct nets <schematic>` | Trace and analyze nets |
+| `kct bom <schematic>` | Generate bill of materials |
+| `kct erc <schematic>` | Run electrical rules check |
+| `kct drc <pcb>` | Run design rules check |
+
+All commands support `--format json` for machine-readable output.
 
 ### PCB Tools
 
@@ -73,18 +75,10 @@ for sheet in sch.sheets:
 |---------|-------------|
 | `kicad-pcb-query summary` | Board overview |
 | `kicad-pcb-query footprints` | List footprints |
-| `kicad-pcb-query footprint <ref>` | Footprint details |
 | `kicad-pcb-query nets` | List all nets |
-| `kicad-pcb-query net <name>` | Net details |
 | `kicad-pcb-query traces` | Trace statistics |
-| `kicad-pcb-query vias` | Via summary |
-| `kicad-pcb-query stackup` | Layer stackup |
 | `kicad-pcb-modify move` | Move component |
 | `kicad-pcb-modify rotate` | Rotate component |
-| `kicad-pcb-modify flip` | Flip to opposite layer |
-| `kicad-pcb-modify update-value` | Update component value |
-| `kicad-pcb-modify rename` | Rename reference |
-| `kicad-pcb-modify delete-traces` | Delete net traces |
 
 ### Library Tools
 
@@ -94,17 +88,19 @@ for sheet in sch.sheets:
 
 ## Features
 
-- **Pure Python** - No KiCad installation needed
+- **Pure Python** - No KiCad installation needed for parsing
 - **Round-trip editing** - Parse, modify, and save files
 - **Full S-expression support** - Handles all KiCad file formats
 - **Schematic analysis** - Symbols, wires, labels, hierarchy
 - **PCB analysis** - Footprints, nets, traces, vias, zones
-- **Modification tools** - Move, rotate, update components
+- **Manufacturer rules** - JLCPCB, PCBWay, OSHPark, Seeed design rules
+- **JSON output** - Machine-readable output for automation
 
 ## Requirements
 
 - Python 3.10+
-- No external dependencies
+- No external dependencies for parsing
+- KiCad 8+ (optional) - for running ERC/DRC via `kicad-cli`
 
 ## License
 
