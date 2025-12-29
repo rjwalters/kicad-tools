@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
 readme = "README.md"
 license = "MIT"
@@ -67,11 +67,21 @@ kicad-pcb-modify = "kicad_tools.cli.pcb_modify:main"
 kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
 
 [project.optional-dependencies]
+# LCSC parts API access
+parts = [
+    "requests>=2.28",
+]
+# All optional features
+all = [
+    "requests>=2.28",
+]
+# Development dependencies
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
     "mypy>=1.0",
+    "responses>=0.23.0",
 ]
 
 [tool.hatch.build.targets.wheel]
