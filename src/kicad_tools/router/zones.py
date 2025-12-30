@@ -6,6 +6,7 @@ This module provides:
 - ZoneFiller: Grid-based flood fill for zone polygons
 - ThermalRelief: Thermal relief pattern for pad-to-zone connections
 - ConnectionType: Enum for pad connection types
+- ZoneManager: High-level zone management for Autorouter integration
 """
 
 import math
@@ -16,6 +17,8 @@ from typing import TYPE_CHECKING, List, Optional, Set, Tuple
 from kicad_tools.schema.pcb import Zone
 
 if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
+
     from .grid import RoutingGrid
     from .primitives import Pad
     from .rules import DesignRules
@@ -539,3 +542,195 @@ def fill_zones_by_priority(
         grid.add_zone_cells(zone, filled.filled_cells, layer_index)
 
     return results
+
+
+class ZoneManager:
+    """High-level zone management for the Autorouter.
+
+    Orchestrates the zone fill process:
+    1. Load zones from PCB or manual input
+    2. Sort zones by priority
+    3. Fill zones onto the routing grid
+    4. Generate and apply thermal reliefs
+    5. Make zone copper available for routing decisions
+
+    The ZoneManager works with the Autorouter to enable zone-aware routing
+    where routes can pass through same-net zones with reduced cost and
+    are blocked by other-net zones.
+
+    Example:
+        grid = RoutingGrid(100, 80, rules)
+        zone_manager = ZoneManager(grid, rules)
+
+        # Load zones from PCB
+        zones = zone_manager.load_zones(pcb)
+
+        # Fill all zones
+        filled_zones = zone_manager.fill_all_zones(zones, pads)
+
+        # Zones are now marked on grid, routing can proceed
+        router = Router(grid, rules)
+        route = router.route(start_pad, end_pad)  # Zone-aware
+    """
+
+    def __init__(self, grid: "RoutingGrid", rules: "DesignRules"):
+        """Initialize zone manager.
+
+        Args:
+            grid: The routing grid to fill zones onto
+            rules: Design rules including zone-specific parameters
+        """
+        self.grid = grid
+        self.rules = rules
+        self.filler = ZoneFiller(grid, rules)
+        self.filled_zones: List[FilledZone] = []
+        self._layer_map: dict = {}
+
+    def _build_layer_map(self) -> dict:
+        """Build mapping from KiCad layer names to grid indices."""
+        if self._layer_map:
+            return self._layer_map
+
+        from .layers import Layer
+
+        layer_map = {}
+        for layer in Layer:
+            try:
+                idx = self.grid.layer_to_index(layer.value)
+                layer_map[layer.kicad_name] = idx
+            except Exception:
+                pass  # Layer not in stack
+
+        self._layer_map = layer_map
+        return layer_map
+
+    def load_zones(self, pcb: "PCB") -> List[Zone]:
+        """Load and sort zones from a PCB.
+
+        Args:
+            pcb: PCB object containing zone definitions
+
+        Returns:
+            List of zones sorted by priority (highest first)
+        """
+        if not hasattr(pcb, "zones") or not pcb.zones:
+            return []
+
+        # Sort by priority (lower number = higher priority = fills first)
+        return sorted(pcb.zones, key=lambda z: z.priority)
+
+    def fill_zone(
+        self, zone: Zone, pads: Optional[List["Pad"]] = None
+    ) -> Optional[FilledZone]:
+        """Fill a single zone onto the grid.
+
+        Args:
+            zone: Zone to fill
+            pads: List of pads for thermal relief generation
+
+        Returns:
+            FilledZone result or None if zone couldn't be filled
+        """
+        layer_map = self._build_layer_map()
+
+        if zone.layer not in layer_map:
+            return None
+
+        layer_index = layer_map[zone.layer]
+
+        # Fill zone with clearance
+        filled = self.filler.fill_zone_with_clearance(zone, layer_index)
+
+        if not filled.filled_cells:
+            return filled
+
+        # Generate thermal reliefs for same-net pads
+        if pads:
+            reliefs = self.filler.generate_thermal_reliefs(filled, pads)
+            if reliefs:
+                self.filler.apply_thermal_reliefs(filled, reliefs)
+
+        return filled
+
+    def fill_all_zones(
+        self,
+        zones: List[Zone],
+        pads: Optional[List["Pad"]] = None,
+        apply_to_grid: bool = True,
+    ) -> List[FilledZone]:
+        """Fill all zones in priority order.
+
+        Args:
+            zones: List of zones to fill
+            pads: List of pads for thermal relief generation
+            apply_to_grid: Whether to mark filled cells on the grid
+
+        Returns:
+            List of FilledZone results
+        """
+        layer_map = self._build_layer_map()
+
+        # Sort by priority
+        sorted_zones = sorted(zones, key=lambda z: z.priority)
+
+        results: List[FilledZone] = []
+
+        for zone in sorted_zones:
+            if zone.layer not in layer_map:
+                continue
+
+            layer_index = layer_map[zone.layer]
+
+            # Fill with clearance
+            filled = self.filler.fill_zone_with_clearance(zone, layer_index)
+
+            if filled.filled_cells:
+                # Generate and apply thermal reliefs
+                if pads:
+                    reliefs = self.filler.generate_thermal_reliefs(filled, pads)
+                    if reliefs:
+                        self.filler.apply_thermal_reliefs(filled, reliefs)
+
+                # Mark on grid for subsequent zones and routing
+                if apply_to_grid:
+                    self.grid.add_zone_cells(zone, filled.filled_cells, layer_index)
+
+            results.append(filled)
+
+        self.filled_zones = results
+        return results
+
+    def clear_all_zones(self) -> None:
+        """Remove all zone markings from the grid."""
+        self.grid.clear_zones()
+        self.filled_zones = []
+
+    def get_zone_statistics(self) -> dict:
+        """Get statistics about filled zones.
+
+        Returns:
+            Dictionary with zone fill statistics
+        """
+        total_cells = 0
+        zone_count = len(self.filled_zones)
+        zone_stats = []
+
+        for filled in self.filled_zones:
+            cell_count = len(filled.filled_cells)
+            total_cells += cell_count
+            zone_stats.append(
+                {
+                    "zone_id": filled.zone.uuid,
+                    "net": filled.zone.net_number,
+                    "net_name": filled.zone.net_name,
+                    "layer": filled.zone.layer,
+                    "cells": cell_count,
+                    "priority": filled.zone.priority,
+                }
+            )
+
+        return {
+            "zone_count": zone_count,
+            "total_cells": total_cells,
+            "zones": zone_stats,
+        }
