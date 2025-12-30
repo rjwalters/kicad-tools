@@ -174,3 +174,144 @@ class TestCompatibleManufacturers:
         # OSHPark should not be in the list (no assembly)
         ids = {m.id for m in compatible}
         assert "oshpark" not in ids
+
+
+class TestProjectFile:
+    """Tests for project file handling."""
+
+    def test_apply_manufacturer_rules(self):
+        """Test applying manufacturer rules to project data."""
+        from kicad_tools.core.project_file import (
+            apply_manufacturer_rules,
+            get_design_settings,
+        )
+
+        data = {}
+        apply_manufacturer_rules(
+            data,
+            min_clearance_mm=0.127,
+            min_track_width_mm=0.127,
+            min_via_diameter_mm=0.6,
+            min_via_drill_mm=0.3,
+            min_annular_ring_mm=0.15,
+        )
+
+        settings = get_design_settings(data)
+        assert "rules" in settings
+        assert settings["rules"]["min_clearance"] == 0.127
+        assert settings["rules"]["min_track_width"] == 0.127
+        assert settings["rules"]["min_via_diameter"] == 0.6
+
+    def test_set_manufacturer_metadata(self):
+        """Test setting manufacturer metadata."""
+        from kicad_tools.core.project_file import (
+            set_manufacturer_metadata,
+            get_manufacturer_metadata,
+        )
+
+        data = {}
+        set_manufacturer_metadata(
+            data,
+            manufacturer_id="jlcpcb",
+            layers=4,
+            copper_oz=1.0,
+        )
+
+        meta = get_manufacturer_metadata(data)
+        assert meta["manufacturer"] == "jlcpcb"
+        assert meta["layers"] == 4
+        assert meta["copper_oz"] == 1.0
+
+    def test_save_and_load_project(self, tmp_path):
+        """Test saving and loading project file."""
+        from kicad_tools.core.project_file import (
+            apply_manufacturer_rules,
+            load_project,
+            save_project,
+            set_manufacturer_metadata,
+        )
+
+        data = {"project": {"name": "test"}}
+        apply_manufacturer_rules(
+            data,
+            min_clearance_mm=0.1016,
+            min_track_width_mm=0.1016,
+            min_via_diameter_mm=0.45,
+            min_via_drill_mm=0.2,
+            min_annular_ring_mm=0.125,
+        )
+        set_manufacturer_metadata(data, "jlcpcb", layers=4)
+
+        # Save
+        project_file = tmp_path / "test.kicad_pro"
+        save_project(data, project_file)
+        assert project_file.exists()
+
+        # Load
+        loaded = load_project(project_file)
+        assert loaded["board"]["design_settings"]["rules"]["min_clearance"] == 0.1016
+        assert loaded["meta"]["manufacturer"] == "jlcpcb"
+
+
+class TestMfrCLICommands:
+    """Tests for mfr CLI commands."""
+
+    def test_apply_rules_dry_run(self, tmp_path):
+        """Test apply-rules command with dry-run."""
+        from kicad_tools.cli.mfr import main as mfr_main
+        from pathlib import Path
+        import shutil
+
+        # Copy test file to temp directory
+        src_pcb = Path("demo/usb_joystick/usb_joystick.kicad_pcb")
+        if not src_pcb.exists():
+            pytest.skip("Demo PCB file not found")
+
+        test_pcb = tmp_path / "test.kicad_pcb"
+        shutil.copy(src_pcb, test_pcb)
+
+        # Run apply-rules with dry-run
+        result = mfr_main([
+            "apply-rules", str(test_pcb), "jlcpcb", "--dry-run"
+        ])
+
+        # Should return 0 (success) on dry-run
+        assert result is None  # main() doesn't return anything on success
+
+    def test_validate_command(self, tmp_path):
+        """Test validate command."""
+        from kicad_tools.cli.mfr import main as mfr_main
+        from pathlib import Path
+
+        src_pcb = Path("demo/usb_joystick/usb_joystick_routed.kicad_pcb")
+        if not src_pcb.exists():
+            pytest.skip("Demo PCB file not found")
+
+        # Run validate - should pass without violations
+        try:
+            mfr_main(["validate", str(src_pcb), "jlcpcb"])
+        except SystemExit as e:
+            # Should exit with 0 (success) if no violations
+            assert e.code == 0 or e.code is None
+
+    def test_validate_pcb_design(self):
+        """Test PCB design validation function."""
+        from kicad_tools.cli.mfr import _validate_pcb_design
+        from kicad_tools.core.sexp import SExp
+        from kicad_tools.manufacturers import get_profile
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2)
+
+        # Create a simple PCB sexp with a thin trace
+        sexp = SExp("kicad_pcb", [
+            SExp("segment", [
+                SExp("width", [0.05])  # 0.05mm, below minimum
+            ])
+        ])
+
+        violations = _validate_pcb_design(sexp, rules)
+
+        # Should find the trace width violation
+        assert len(violations) > 0
+        assert any("TRACE_WIDTH" in v[0] for v in violations)

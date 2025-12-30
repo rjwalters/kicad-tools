@@ -204,6 +204,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     mfr_compare.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
     mfr_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
 
+    # mfr apply-rules
+    mfr_apply = mfr_subparsers.add_parser(
+        "apply-rules", help="Apply manufacturer design rules to project/PCB"
+    )
+    mfr_apply.add_argument("file", help="Path to .kicad_pro or .kicad_pcb file")
+    mfr_apply.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_apply.add_argument("-l", "--layers", type=int, default=2, help="Layer count")
+    mfr_apply.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    mfr_apply.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    mfr_apply.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+
+    # mfr validate
+    mfr_validate = mfr_subparsers.add_parser(
+        "validate", help="Validate PCB against manufacturer rules"
+    )
+    mfr_validate.add_argument("file", help="Path to .kicad_pcb file")
+    mfr_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count")
+    mfr_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+
     # ROUTE subcommand - PCB autorouting
     route_parser = subparsers.add_parser("route", help="Autoroute a PCB")
     route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -495,7 +515,7 @@ def _run_mfr_command(args) -> int:
     """Handle manufacturer subcommands."""
     if not args.mfr_command:
         print("Usage: kicad-tools mfr <command> [options]")
-        print("Commands: list, info, rules, compare")
+        print("Commands: list, info, rules, compare, apply-rules, validate")
         return 1
 
     from .mfr import main as mfr_main
@@ -517,6 +537,26 @@ def _run_mfr_command(args) -> int:
     elif args.mfr_command == "compare":
         sub_argv = ["compare"]
         if args.layers != 4:
+            sub_argv.extend(["--layers", str(args.layers)])
+        if args.copper != 1.0:
+            sub_argv.extend(["--copper", str(args.copper)])
+        return mfr_main(sub_argv) or 0
+
+    elif args.mfr_command == "apply-rules":
+        sub_argv = ["apply-rules", args.file, args.manufacturer]
+        if args.layers != 2:
+            sub_argv.extend(["--layers", str(args.layers)])
+        if args.copper != 1.0:
+            sub_argv.extend(["--copper", str(args.copper)])
+        if args.output:
+            sub_argv.extend(["--output", args.output])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        return mfr_main(sub_argv) or 0
+
+    elif args.mfr_command == "validate":
+        sub_argv = ["validate", args.file, args.manufacturer]
+        if args.layers != 2:
             sub_argv.extend(["--layers", str(args.layers)])
         if args.copper != 1.0:
             sub_argv.extend(["--copper", str(args.copper)])
