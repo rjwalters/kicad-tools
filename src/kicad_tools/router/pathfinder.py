@@ -53,6 +53,7 @@ class Router:
         rules: DesignRules,
         net_class_map: Optional[Dict[str, NetClassRouting]] = None,
         heuristic: Optional[Heuristic] = None,
+        diagonal_routing: bool = True,
     ):
         """
         Args:
@@ -60,25 +61,34 @@ class Router:
             rules: Design rules for routing
             net_class_map: Mapping of net names to NetClassRouting
             heuristic: Heuristic for A* search (default: CongestionAwareHeuristic)
+            diagonal_routing: Enable 45° diagonal routing (default: True).
+                              When True, routes can use diagonal moves for shorter paths.
+                              When False, routes use only orthogonal (Manhattan) moves.
         """
         self.grid = grid
         self.rules = rules
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
         self.heuristic = heuristic or DEFAULT_HEURISTIC
+        self.diagonal_routing = diagonal_routing
 
         # Neighbor offsets: (dx, dy, dlayer, cost_multiplier)
-        # Same layer moves
+        # Same layer moves - orthogonal directions
         self.neighbors_2d = [
             (1, 0, 0, 1.0),  # Right
             (-1, 0, 0, 1.0),  # Left
             (0, 1, 0, 1.0),  # Down
             (0, -1, 0, 1.0),  # Up
-            # Diagonals (optional, can be disabled for Manhattan routing)
-            # (1, 1, 0, 1.414),
-            # (-1, 1, 0, 1.414),
-            # (1, -1, 0, 1.414),
-            # (-1, -1, 0, 1.414),
         ]
+
+        # Add diagonal directions if enabled (45° routing)
+        # Diagonal moves travel √2 ≈ 1.414x the distance of orthogonal moves
+        if diagonal_routing:
+            self.neighbors_2d.extend([
+                (1, 1, 0, 1.414),    # Down-Right
+                (-1, 1, 0, 1.414),   # Down-Left
+                (1, -1, 0, 1.414),   # Up-Right
+                (-1, -1, 0, 1.414),  # Up-Left
+            ])
 
         # Pre-calculate trace body radius in grid cells
         # Only trace_width/2 - clearance is already in pad blocking
@@ -134,6 +144,59 @@ class Router:
                         # Same-net cells (including pad metal) are passable
                         if cell.is_obstacle or cell.net != net:
                             return True
+        return False
+
+    def _is_diagonal_corner_blocked(
+        self, gx: int, gy: int, dx: int, dy: int, layer: int, net: int, allow_sharing: bool = False
+    ) -> bool:
+        """Check if diagonal move would cut through obstacle corners.
+
+        When moving diagonally from (gx, gy) to (gx+dx, gy+dy), we must verify
+        that both adjacent orthogonal cells are clear to prevent corner-cutting:
+
+            B │ D      Moving from A to D diagonally requires
+            ──┼──      both B (gx, gy+dy) and C (gx+dx, gy) to be clear
+            A │ C
+
+        Args:
+            gx, gy: Current grid position
+            dx, dy: Diagonal direction (both must be non-zero for diagonal move)
+            layer: Current layer
+            net: Net ID for same-net checking
+            allow_sharing: If True, allow routing through non-obstacle blocked cells
+
+        Returns:
+            True if the diagonal move is blocked (would cut corner), False if clear.
+        """
+        # Only check for actual diagonal moves
+        if dx == 0 or dy == 0:
+            return False
+
+        # Check the two adjacent orthogonal cells
+        # Cell B: same x, new y
+        # Cell C: new x, same y
+        adjacent_cells = [
+            (gx, gy + dy),      # B: vertical neighbor
+            (gx + dx, gy),      # C: horizontal neighbor
+        ]
+
+        for cx, cy in adjacent_cells:
+            # Check bounds
+            if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
+                return True  # Out of bounds = blocked
+
+            cell = self.grid.grid[layer][cy][cx]
+
+            if cell.blocked:
+                if allow_sharing and not cell.is_obstacle:
+                    # In negotiated mode, non-obstacle cells can be shared
+                    if cell.net != 0 and cell.net != net:
+                        continue  # Allow with cost penalty
+                else:
+                    # Standard mode: block if obstacle or different net
+                    if cell.is_obstacle or cell.net != net:
+                        return True
+
         return False
 
     def _is_via_blocked(
@@ -242,6 +305,7 @@ class Router:
             goal_layer=heuristic_goal_layer,
             rules=self.rules,
             cost_multiplier=cost_mult,
+            diagonal_routing=self.diagonal_routing,
             get_congestion=self.grid.get_congestion,
             get_congestion_cost=self._get_congestion_cost,
         )
@@ -299,6 +363,14 @@ class Router:
                 # Check grid bounds first
                 if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
                     continue
+
+                # For diagonal moves, check corner clearance to prevent cutting through obstacles
+                # This ensures we don't route diagonally through a corner where two obstacles meet
+                if dx != 0 and dy != 0:  # Diagonal move
+                    if self._is_diagonal_corner_blocked(
+                        current.x, current.y, dx, dy, nlayer, start.net, allow_sharing
+                    ):
+                        continue
 
                 # Check blocked cells carefully
                 # Only allow routing through blocked cells if:
