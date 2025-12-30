@@ -4,31 +4,29 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
-from kicad_tools.schematic.helper import (
-    # Grid functions
+from kicad_tools.schematic.grid import (
     GridSize,
     DEFAULT_GRID,
     snap_to_grid,
     snap_point,
     is_on_grid,
     check_grid_alignment,
-    # Error classes
+)
+from kicad_tools.schematic.exceptions import (
     PinNotFoundError,
     SymbolNotFoundError,
     LibraryNotFoundError,
-    # Helper functions
+)
+from kicad_tools.schematic.helpers import (
     _string_similarity,
     _find_similar,
     _expand_pin_aliases,
     _group_pins_by_type,
     _format_pin_list,
-    # Pin class
-    Pin,
-    # Logging
-    enable_verbose,
-    disable_verbose,
     PIN_ALIASES,
 )
+from kicad_tools.schematic.models import Pin
+from kicad_tools.schematic.logging import enable_verbose, disable_verbose
 
 
 class TestGridSize:
