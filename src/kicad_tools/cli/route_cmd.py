@@ -87,6 +87,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Show what would be done without writing output",
     )
+    parser.add_argument(
+        "--bus-routing",
+        action="store_true",
+        help="Enable bus-aware routing (routes bus signals together)",
+    )
+    parser.add_argument(
+        "--bus-mode",
+        choices=["parallel", "stacked", "bundled"],
+        default="parallel",
+        help="Bus routing mode (default: parallel)",
+    )
+    parser.add_argument(
+        "--bus-spacing",
+        type=float,
+        help="Spacing between bus signals in mm (default: trace_width + clearance)",
+    )
+    parser.add_argument(
+        "--bus-min-width",
+        type=int,
+        default=2,
+        help="Minimum signals to form a bus group (default: 2)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -111,7 +133,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
     # Import router modules
-    from kicad_tools.router import DesignRules, load_pcb_for_routing
+    from kicad_tools.router import (
+        BusRoutingConfig,
+        BusRoutingMode,
+        DesignRules,
+        load_pcb_for_routing,
+    )
 
     # Configure design rules
     rules = DesignRules(
@@ -131,9 +158,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Strategy: {args.strategy}")
     if skip_nets:
         print(f"Skip:     {', '.join(skip_nets)}")
+    if args.bus_routing:
+        print(f"Bus:      enabled ({args.bus_mode} mode)")
 
     if args.verbose:
-        print(f"\nDesign Rules:")
+        print("\nDesign Rules:")
         print(f"  Grid resolution: {rules.grid_resolution}mm")
         print(f"  Trace width:     {rules.trace_width}mm")
         print(f"  Clearance:       {rules.trace_clearance}mm")
@@ -165,10 +194,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                 pad_count = len(router.nets.get(net_num, []))
                 print(f"    {net_name}: {pad_count} pads")
 
+    # Configure bus routing if enabled
+    bus_config = None
+    if args.bus_routing:
+        bus_mode_map = {
+            "parallel": BusRoutingMode.PARALLEL,
+            "stacked": BusRoutingMode.STACKED,
+            "bundled": BusRoutingMode.BUNDLED,
+        }
+        bus_config = BusRoutingConfig(
+            enabled=True,
+            mode=bus_mode_map[args.bus_mode],
+            spacing=args.bus_spacing,
+            min_bus_width=args.bus_min_width,
+        )
+
+        # Show detected buses
+        if args.verbose:
+            analysis = router.get_bus_analysis()
+            if analysis["total_groups"] > 0:
+                print(f"\n  Detected {analysis['total_groups']} bus groups:")
+                for group in analysis["groups"]:
+                    status = "complete" if group["complete"] else "partial"
+                    print(f"    - {group['name']}: {group['width']} bits ({status})")
+            else:
+                print("\n  No bus signals detected")
+
     # Route
     print(f"\n--- Routing ({args.strategy}) ---")
     try:
-        if args.strategy == "basic":
+        if args.bus_routing and args.strategy == "basic":
+            # Use bus-aware routing for basic strategy
+            routes = router.route_all_with_buses(bus_config)
+        elif args.strategy == "basic":
             routes = router.route_all()
         elif args.strategy == "negotiated":
             routes = router.route_all_negotiated(max_iterations=args.iterations)
