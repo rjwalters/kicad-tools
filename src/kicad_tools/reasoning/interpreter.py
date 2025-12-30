@@ -7,20 +7,22 @@ The interpreter bridges the gap between:
 
 It uses the existing kicad-tools infrastructure:
 - PCBEditor for modifications
-- Router for pathfinding
+- Router for pathfinding (A* with obstacle avoidance)
 - DRC for verification
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from ..pcb.editor import PCBEditor, Point
 from ..router.core import Autorouter
-from ..router.primitives import Pad, Route
+from ..router.grid import RoutingGrid
+from ..router.pathfinder import Router
+from ..router.primitives import Pad, Route, Segment
 from ..router.rules import DesignRules
-from ..router.layers import Layer
+from ..router.layers import Layer, LayerStack
 
 from .state import PCBState, ComponentState, PadState, TraceState
 from .vocabulary import SpatialRegion, NetType, RoutingPriority
@@ -37,6 +39,144 @@ from .commands import (
 
 
 @dataclass
+class RoutingDiagnostic:
+    """Diagnostic information when routing fails."""
+
+    source_pad: str  # "U1.1"
+    target_pad: str  # "U2.3"
+    reason: str  # "no_path", "blocked_by_obstacle", "clearance_violation"
+    blocked_at: Optional[tuple[float, float]] = None  # Position where routing was blocked
+    blocking_net: Optional[str] = None  # Net that blocked the path
+    suggestions: list[str] = field(default_factory=list)
+
+
+class ObstacleGridBuilder:
+    """Builds a RoutingGrid from PCBState for A* routing.
+
+    This populates the grid with:
+    - All component pads as obstacles (except for routing net)
+    - Existing traces as obstacles
+    - Zones/keepouts as blocked regions
+    """
+
+    def __init__(self, state: PCBState, rules: DesignRules, layer_stack: Optional[LayerStack] = None):
+        self.state = state
+        self.rules = rules
+        self.layer_stack = layer_stack or LayerStack.two_layer()
+
+    def build(self) -> RoutingGrid:
+        """Build and return the routing grid."""
+        # Determine board dimensions from outline
+        width = self.state.outline.width or 100.0
+        height = self.state.outline.height or 100.0
+
+        # Find origin from outline
+        if self.state.outline.points:
+            xs = [p[0] for p in self.state.outline.points]
+            ys = [p[1] for p in self.state.outline.points]
+            origin_x = min(xs)
+            origin_y = min(ys)
+        else:
+            # Fallback: use component positions
+            all_pads = []
+            for comp in self.state.components.values():
+                all_pads.extend(comp.pads)
+            if all_pads:
+                origin_x = min(p.x for p in all_pads) - 5.0
+                origin_y = min(p.y for p in all_pads) - 5.0
+                max_x = max(p.x for p in all_pads) + 5.0
+                max_y = max(p.y for p in all_pads) + 5.0
+                width = max_x - origin_x
+                height = max_y - origin_y
+            else:
+                origin_x, origin_y = 0.0, 0.0
+
+        # Create the grid
+        grid = RoutingGrid(
+            width=width,
+            height=height,
+            rules=self.rules,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            layer_stack=self.layer_stack,
+        )
+
+        # Add all pads as obstacles
+        for comp in self.state.components.values():
+            for pad_state in comp.pads:
+                pad = self._pad_state_to_pad(pad_state)
+                grid.add_pad(pad)
+
+        # Add existing traces as obstacles
+        for trace in self.state.traces:
+            self._add_trace_to_grid(grid, trace)
+
+        # Add zones as keepouts (except for their own net)
+        for zone in self.state.zones:
+            if zone.net:
+                # Copper pour - add as blocked for other nets
+                self._add_zone_to_grid(grid, zone)
+
+        return grid
+
+    def _pad_state_to_pad(self, pad_state: PadState) -> Pad:
+        """Convert PadState to router Pad."""
+        # Map layer string to Layer enum
+        layer = self._layer_from_string(pad_state.layer)
+
+        return Pad(
+            x=pad_state.x,
+            y=pad_state.y,
+            width=pad_state.width,
+            height=pad_state.height,
+            net=pad_state.net_id,
+            net_name=pad_state.net,
+            layer=layer,
+            ref=pad_state.ref,
+            through_hole=pad_state.through_hole,
+        )
+
+    def _layer_from_string(self, layer_str: str) -> Layer:
+        """Convert layer string to Layer enum."""
+        layer_map = {
+            "F.Cu": Layer.F_CU,
+            "B.Cu": Layer.B_CU,
+            "In1.Cu": Layer.IN1_CU,
+            "In2.Cu": Layer.IN2_CU,
+            "In3.Cu": Layer.IN3_CU,
+            "In4.Cu": Layer.IN4_CU,
+        }
+        return layer_map.get(layer_str, Layer.F_CU)
+
+    def _add_trace_to_grid(self, grid: RoutingGrid, trace: TraceState) -> None:
+        """Add an existing trace to the grid as an obstacle."""
+        layer = self._layer_from_string(trace.layer)
+
+        # Create a segment and mark it on the grid
+        seg = Segment(
+            x1=trace.x1,
+            y1=trace.y1,
+            x2=trace.x2,
+            y2=trace.y2,
+            width=trace.width,
+            layer=layer,
+            net=trace.net_id,
+            net_name=trace.net,
+        )
+
+        # Create a minimal route to use the grid's mark_route method
+        route = Route(net=trace.net_id, net_name=trace.net)
+        route.segments.append(seg)
+        grid.mark_route(route)
+
+    def _add_zone_to_grid(self, grid: RoutingGrid, zone) -> None:
+        """Add a zone as a keepout for other nets."""
+        layer = self._layer_from_string(zone.layer)
+        x1, y1, x2, y2 = zone.bounds
+        grid.add_keepout(x1, y1, x2, y2, [layer])
+
+
+@dataclass
 class InterpreterConfig:
     """Configuration for the command interpreter."""
 
@@ -50,6 +190,12 @@ class InterpreterConfig:
     prefer_orthogonal: bool = True
     grid_size: float = 0.1  # mm
     max_routing_iterations: int = 1000
+
+    # A* routing options
+    use_astar: bool = True  # Use A* pathfinding instead of simple L-routing
+    astar_weight: float = 1.0  # A* weight (1.0=optimal, >1.0=faster)
+    use_negotiated: bool = False  # Use negotiated congestion routing
+    layer_count: int = 2  # Number of copper layers
 
     # Zone defaults
     zone_min_thickness: float = 0.2
@@ -86,6 +232,55 @@ class CommandInterpreter:
 
         # Track modifications
         self.modifications: list[str] = []
+
+        # A* routing infrastructure (lazy initialization)
+        self._routing_grid: Optional[RoutingGrid] = None
+        self._router: Optional[Router] = None
+        self._design_rules: Optional[DesignRules] = None
+
+    def _get_design_rules(self) -> DesignRules:
+        """Get or create design rules from config."""
+        if self._design_rules is None:
+            self._design_rules = DesignRules(
+                trace_width=self.config.trace_width,
+                trace_clearance=self.config.clearance,
+                via_drill=self.config.via_drill,
+                via_diameter=self.config.via_size,
+                grid_resolution=self.config.grid_size,
+            )
+        return self._design_rules
+
+    def _get_layer_stack(self) -> LayerStack:
+        """Get layer stack based on config."""
+        if self.config.layer_count == 2:
+            return LayerStack.two_layer()
+        elif self.config.layer_count == 4:
+            return LayerStack.four_layer_sig_gnd_pwr_sig()
+        elif self.config.layer_count >= 6:
+            return LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()
+        return LayerStack.two_layer()
+
+    def _get_routing_grid(self) -> RoutingGrid:
+        """Get or create the routing grid."""
+        if self._routing_grid is None:
+            rules = self._get_design_rules()
+            layer_stack = self._get_layer_stack()
+            builder = ObstacleGridBuilder(self.state, rules, layer_stack)
+            self._routing_grid = builder.build()
+        return self._routing_grid
+
+    def _get_router(self) -> Router:
+        """Get or create the A* router."""
+        if self._router is None:
+            grid = self._get_routing_grid()
+            rules = self._get_design_rules()
+            self._router = Router(grid, rules)
+        return self._router
+
+    def _invalidate_routing_cache(self) -> None:
+        """Invalidate routing grid cache (after modifications)."""
+        self._routing_grid = None
+        self._router = None
 
     def execute(self, command: Command) -> CommandResult:
         """Execute a command and return the result."""
@@ -198,7 +393,14 @@ class CommandInterpreter:
     # =========================================================================
 
     def _execute_route(self, cmd: RouteNetCommand) -> CommandResult:
-        """Execute a routing command."""
+        """Execute a routing command using A* pathfinding.
+
+        Uses the A* router with obstacle avoidance to find paths that:
+        - Avoid existing traces with configurable clearance
+        - Avoid component pads (except target net)
+        - Prefer orthogonal and 45° angles
+        - Use vias for layer changes when beneficial
+        """
         net = self.state.nets.get(cmd.net)
         if not net:
             return CommandResult(
@@ -235,7 +437,7 @@ class CommandInterpreter:
         if cmd.clearance is None:
             clearance = priority.clearance
 
-        # Build avoidance polygons from regions
+        # Build avoidance polygons from regions (for A* routing, add as keepouts)
         avoid_bounds = []
         for region_name in cmd.avoid_regions:
             region = self.region_map.get(region_name)
@@ -243,15 +445,15 @@ class CommandInterpreter:
                 avoid_bounds.append(region.bounds)
 
         # Set up routing
-        routes = []
         total_length = 0.0
         vias_added = 0
+        successful_routes = 0
+        failed_routes: list[RoutingDiagnostic] = []
 
-        # For simple case: create MST of pads and route each edge
-        # More sophisticated routing would use the full autorouter
+        # Build MST of pads and route each edge
         pad_positions = [(p.x, p.y, p) for p in pads]
 
-        # Simple greedy MST
+        # Simple greedy MST (Prim's algorithm)
         connected = {0}
         unconnected = set(range(1, len(pad_positions)))
         edges = []
@@ -274,9 +476,158 @@ class CommandInterpreter:
                 connected.add(best_edge[1])
                 unconnected.remove(best_edge[1])
 
-        # Route each edge
+        # Route each MST edge using A* or simple routing
+        if self.config.use_astar:
+            # Use A* pathfinding
+            successful_routes, failed_routes, total_length, vias_added = self._route_with_astar(
+                cmd, pads, pad_positions, edges, trace_width, avoid_bounds
+            )
+        else:
+            # Fallback to simple L-routing
+            successful_routes, failed_routes, total_length, vias_added = self._route_simple(
+                cmd, pads, pad_positions, edges, trace_width, avoid_bounds
+            )
+
+        self.modifications.append(
+            f"Routed {cmd.net}: {successful_routes}/{len(edges)} connections"
+        )
+
+        # Invalidate routing cache after modifications
+        self._invalidate_routing_cache()
+
+        if failed_routes:
+            # Build diagnostic details
+            details = {
+                "failed_routes": [
+                    {
+                        "source": d.source_pad,
+                        "target": d.target_pad,
+                        "reason": d.reason,
+                        "blocking_net": d.blocking_net,
+                        "suggestions": d.suggestions,
+                    }
+                    for d in failed_routes
+                ]
+            }
+            return CommandResult(
+                success=successful_routes > 0,
+                command_type=CommandType.ROUTE_NET,
+                message=f"Partially routed {cmd.net}: {successful_routes}/{len(edges)} connections",
+                details=details,
+                trace_length=total_length,
+                vias_added=vias_added,
+            )
+
+        return CommandResult(
+            success=True,
+            command_type=CommandType.ROUTE_NET,
+            message=f"Routed {cmd.net}: {len(edges)} connections, {total_length:.1f}mm total",
+            trace_length=total_length,
+            vias_added=vias_added,
+        )
+
+    def _route_with_astar(
+        self,
+        cmd: RouteNetCommand,
+        pads: list[PadState],
+        pad_positions: list[tuple[float, float, PadState]],
+        edges: list[tuple[int, int]],
+        trace_width: float,
+        avoid_bounds: list[tuple[float, float, float, float]],
+    ) -> tuple[int, list[RoutingDiagnostic], float, int]:
+        """Route MST edges using A* pathfinding.
+
+        Returns:
+            (successful_routes, failed_diagnostics, total_length, vias_added)
+        """
         successful_routes = 0
-        failed_routes = []
+        failed_routes: list[RoutingDiagnostic] = []
+        total_length = 0.0
+        vias_added = 0
+
+        # Get or create the A* router
+        router = self._get_router()
+        grid = self._get_routing_grid()
+
+        # Add avoid_bounds as temporary keepouts
+        for bounds in avoid_bounds:
+            x1, y1, x2, y2 = bounds
+            grid.add_keepout(x1, y1, x2, y2)
+
+        # Route each edge
+        for i, j in edges:
+            p1 = pad_positions[i]
+            p2 = pad_positions[j]
+            pad1 = p1[2]
+            pad2 = p2[2]
+
+            # Convert PadState to router Pad
+            source_pad = self._pad_state_to_router_pad(pad1)
+            target_pad = self._pad_state_to_router_pad(pad2)
+
+            # Use A* to find path
+            route = router.route(
+                source_pad,
+                target_pad,
+                negotiated_mode=self.config.use_negotiated,
+                weight=self.config.astar_weight,
+            )
+
+            if route and route.segments:
+                # Route found - add tracks to PCB
+                for seg in route.segments:
+                    path = [(seg.x1, seg.y1), (seg.x2, seg.y2)]
+                    tracks = self.editor.add_track(
+                        cmd.net,
+                        path,
+                        width=trace_width,
+                        layer=seg.layer.kicad_name,
+                    )
+                    if tracks:
+                        for t in tracks:
+                            length = ((t.end.x - t.start.x)**2 + (t.end.y - t.start.y)**2)**0.5
+                            total_length += length
+
+                # Add vias
+                for via in route.vias:
+                    self.editor.add_via(
+                        position=(via.x, via.y),
+                        net_name=cmd.net,
+                        size=self.config.via_size,
+                        drill=self.config.via_drill,
+                    )
+                    vias_added += 1
+
+                # Mark route on grid for subsequent routing
+                grid.mark_route(route)
+                successful_routes += 1
+            else:
+                # Route failed - generate diagnostic
+                diagnostic = self._generate_routing_diagnostic(
+                    pad1, pad2, grid, source_pad, target_pad
+                )
+                failed_routes.append(diagnostic)
+
+        return successful_routes, failed_routes, total_length, vias_added
+
+    def _route_simple(
+        self,
+        cmd: RouteNetCommand,
+        pads: list[PadState],
+        pad_positions: list[tuple[float, float, PadState]],
+        edges: list[tuple[int, int]],
+        trace_width: float,
+        avoid_bounds: list[tuple[float, float, float, float]],
+    ) -> tuple[int, list[RoutingDiagnostic], float, int]:
+        """Route MST edges using simple L-shaped routing (fallback).
+
+        Returns:
+            (successful_routes, failed_diagnostics, total_length, vias_added)
+        """
+        successful_routes = 0
+        failed_routes: list[RoutingDiagnostic] = []
+        total_length = 0.0
+        vias_added = 0
 
         for i, j in edges:
             p1 = pad_positions[i]
@@ -309,31 +660,132 @@ class CommandInterpreter:
                     if via_used:
                         vias_added += 1
             else:
-                failed_routes.append((
-                    f"{p1[2].ref}.{p1[2].number}",
-                    f"{p2[2].ref}.{p2[2].number}",
+                failed_routes.append(RoutingDiagnostic(
+                    source_pad=f"{p1[2].ref}.{p1[2].number}",
+                    target_pad=f"{p2[2].ref}.{p2[2].number}",
+                    reason="no_path_found",
+                    suggestions=["Try clearing obstructing traces", "Consider layer change"],
                 ))
 
-        self.modifications.append(
-            f"Routed {cmd.net}: {successful_routes}/{len(edges)} connections"
+        return successful_routes, failed_routes, total_length, vias_added
+
+    def _pad_state_to_router_pad(self, pad_state: PadState) -> Pad:
+        """Convert PadState to router Pad."""
+        layer_map = {
+            "F.Cu": Layer.F_CU,
+            "B.Cu": Layer.B_CU,
+            "In1.Cu": Layer.IN1_CU,
+            "In2.Cu": Layer.IN2_CU,
+            "In3.Cu": Layer.IN3_CU,
+            "In4.Cu": Layer.IN4_CU,
+        }
+        layer = layer_map.get(pad_state.layer, Layer.F_CU)
+
+        return Pad(
+            x=pad_state.x,
+            y=pad_state.y,
+            width=pad_state.width,
+            height=pad_state.height,
+            net=pad_state.net_id,
+            net_name=pad_state.net,
+            layer=layer,
+            ref=pad_state.ref,
+            through_hole=pad_state.through_hole,
         )
 
-        if failed_routes:
-            return CommandResult(
-                success=successful_routes > 0,
-                command_type=CommandType.ROUTE_NET,
-                message=f"Partially routed {cmd.net}: {successful_routes}/{len(edges)} connections",
-                details={"failed_routes": failed_routes},
-                trace_length=total_length,
-                vias_added=vias_added,
-            )
+    def _generate_routing_diagnostic(
+        self,
+        pad1: PadState,
+        pad2: PadState,
+        grid: RoutingGrid,
+        source_pad: Pad,
+        target_pad: Pad,
+    ) -> RoutingDiagnostic:
+        """Generate diagnostic information for a failed route.
 
-        return CommandResult(
-            success=True,
-            command_type=CommandType.ROUTE_NET,
-            message=f"Routed {cmd.net}: {len(edges)} connections, {total_length:.1f}mm total",
-            trace_length=total_length,
-            vias_added=vias_added,
+        Analyzes the grid to determine why routing failed and suggest fixes.
+        """
+        source_str = f"{pad1.ref}.{pad1.number}"
+        target_str = f"{pad2.ref}.{pad2.number}"
+
+        # Check if source or target is completely blocked
+        source_gx, source_gy = grid.world_to_grid(source_pad.x, source_pad.y)
+        target_gx, target_gy = grid.world_to_grid(target_pad.x, target_pad.y)
+
+        blocking_net = None
+        reason = "no_path"
+        suggestions: list[str] = []
+
+        # Check cells around source
+        source_blocked = True
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                gx, gy = source_gx + dx, source_gy + dy
+                if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
+                    # Check all routable layers
+                    for layer_idx in grid.get_routable_indices():
+                        cell = grid.grid[layer_idx][gy][gx]
+                        if not cell.blocked or cell.net == source_pad.net:
+                            source_blocked = False
+                            break
+                        elif cell.blocked and cell.net != 0 and cell.net != source_pad.net:
+                            # Find the blocking net name
+                            for net_name, net_state in self.state.nets.items():
+                                if net_state.net_id == cell.net:
+                                    blocking_net = net_name
+                                    break
+
+        # Check cells around target
+        target_blocked = True
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                gx, gy = target_gx + dx, target_gy + dy
+                if 0 <= gx < grid.cols and 0 <= gy < grid.rows:
+                    for layer_idx in grid.get_routable_indices():
+                        cell = grid.grid[layer_idx][gy][gx]
+                        if not cell.blocked or cell.net == target_pad.net:
+                            target_blocked = False
+                            break
+                        elif cell.blocked and cell.net != 0 and cell.net != target_pad.net:
+                            for net_name, net_state in self.state.nets.items():
+                                if net_state.net_id == cell.net:
+                                    blocking_net = net_name
+                                    break
+
+        # Determine reason and suggestions
+        if source_blocked:
+            reason = "source_blocked"
+            suggestions.append(f"Source pad {source_str} is surrounded by obstacles")
+            if blocking_net:
+                suggestions.append(f"Blocked by net '{blocking_net}' - consider rerouting it first")
+        elif target_blocked:
+            reason = "target_blocked"
+            suggestions.append(f"Target pad {target_str} is surrounded by obstacles")
+            if blocking_net:
+                suggestions.append(f"Blocked by net '{blocking_net}' - consider rerouting it first")
+        else:
+            reason = "path_congested"
+            suggestions.append("Path between pads is congested")
+            suggestions.append("Try routing on a different layer")
+            if self.config.layer_count == 2:
+                suggestions.append("Consider using a 4-layer board for more routing flexibility")
+
+        # Check congestion between source and target
+        congestion = grid.get_congestion(
+            (source_gx + target_gx) // 2,
+            (source_gy + target_gy) // 2,
+            0,  # Check layer 0
+        )
+        if congestion > 0.5:
+            suggestions.insert(0, f"High congestion ({congestion:.0%}) in routing area")
+
+        return RoutingDiagnostic(
+            source_pad=source_str,
+            target_pad=target_str,
+            reason=reason,
+            blocked_at=((source_pad.x + target_pad.x) / 2, (source_pad.y + target_pad.y) / 2),
+            blocking_net=blocking_net,
+            suggestions=suggestions,
         )
 
     def _get_net_pads(self, net_name: str) -> list[PadState]:
