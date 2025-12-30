@@ -449,7 +449,6 @@ def _update_zone_clearances(sexp, clearance_mm: float) -> int:
 
 def cmd_validate(args):
     """Validate a PCB design against manufacturer design rules."""
-    from kicad_tools.sexp import SExp
     from kicad_tools.core.sexp_file import load_pcb
 
     try:

@@ -31,8 +31,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from kicad_tools.sexp import SExp
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
+from kicad_tools.sexp import SExp
 
 
 def find_footprint_sexp(sexp: SExp, reference: str) -> SExp:
