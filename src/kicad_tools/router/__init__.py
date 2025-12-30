@@ -32,6 +32,18 @@ from .bus import (
     detect_bus_signals,
     group_buses,
 )
+from .diffpair import (
+    DifferentialPair,
+    DifferentialPairConfig,
+    DifferentialPairRules,
+    DifferentialPairType,
+    DifferentialSignal,
+    LengthMismatchWarning,
+    analyze_differential_pairs,
+    detect_differential_pairs,
+    detect_differential_signals,
+    group_differential_pairs,
+)
 from .core import AdaptiveAutorouter, Autorouter, RoutingResult
 from .grid import RoutingGrid
 from .heuristics import (
@@ -80,6 +92,17 @@ __all__ = [
     "analyze_buses",
     "detect_bus_signals",
     "group_buses",
+    # Differential pair routing
+    "DifferentialPair",
+    "DifferentialPairConfig",
+    "DifferentialPairRules",
+    "DifferentialPairType",
+    "DifferentialSignal",
+    "LengthMismatchWarning",
+    "analyze_differential_pairs",
+    "detect_differential_pairs",
+    "detect_differential_signals",
+    "group_differential_pairs",
     # Grid
     "RoutingGrid",
     # Pathfinding

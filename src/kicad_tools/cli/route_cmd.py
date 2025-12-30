@@ -109,6 +109,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=2,
         help="Minimum signals to form a bus group (default: 2)",
     )
+    parser.add_argument(
+        "--differential-pairs",
+        action="store_true",
+        help="Enable differential pair routing (routes paired signals together)",
+    )
+    parser.add_argument(
+        "--diffpair-spacing",
+        type=float,
+        help="Spacing between differential pair traces in mm (default: auto based on type)",
+    )
+    parser.add_argument(
+        "--diffpair-max-delta",
+        type=float,
+        help="Maximum length mismatch for differential pairs in mm (default: auto based on type)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -137,6 +152,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         BusRoutingConfig,
         BusRoutingMode,
         DesignRules,
+        DifferentialPairConfig,
         load_pcb_for_routing,
     )
 
@@ -160,6 +176,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Skip:     {', '.join(skip_nets)}")
     if args.bus_routing:
         print(f"Bus:      enabled ({args.bus_mode} mode)")
+    if args.differential_pairs:
+        print("DiffPair: enabled")
 
     if args.verbose:
         print("\nDesign Rules:")
@@ -220,10 +238,40 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 print("\n  No bus signals detected")
 
+    # Configure differential pair routing if enabled
+    diffpair_config = None
+    diffpair_warnings = []
+    if args.differential_pairs:
+        diffpair_config = DifferentialPairConfig(
+            enabled=True,
+            spacing=args.diffpair_spacing,
+            max_length_delta=args.diffpair_max_delta,
+        )
+
+        # Show detected differential pairs
+        if args.verbose:
+            analysis = router.analyze_differential_pairs()
+            if analysis["total_pairs"] > 0:
+                print(f"\n  Detected {analysis['total_pairs']} differential pairs:")
+                for pair in analysis["pairs"]:
+                    print(
+                        f"    - {pair['name']}: {pair['type']} "
+                        f"(spacing={pair['spacing']}mm, max_delta={pair['max_delta']}mm)"
+                    )
+                if analysis["unpaired"]:
+                    print(f"\n  Unpaired differential signals: {analysis['unpaired_signals']}")
+                    for sig in analysis["unpaired"]:
+                        print(f"    - {sig['net_name']} ({sig['polarity']})")
+            else:
+                print("\n  No differential pairs detected")
+
     # Route
     print(f"\n--- Routing ({args.strategy}) ---")
     try:
-        if args.bus_routing and args.strategy == "basic":
+        if args.differential_pairs and args.strategy == "basic":
+            # Use differential pair-aware routing for basic strategy
+            routes, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+        elif args.bus_routing and args.strategy == "basic":
             # Use bus-aware routing for basic strategy
             routes = router.route_all_with_buses(bus_config)
         elif args.strategy == "basic":
@@ -248,6 +296,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  Vias:            {stats['vias']}")
     print(f"  Total length:    {stats['total_length_mm']:.2f}mm")
     print(f"  Nets routed:     {stats['nets_routed']}/{nets_to_route}")
+
+    # Report differential pair length mismatch warnings
+    if diffpair_warnings:
+        print(f"\n--- Differential Pair Warnings ({len(diffpair_warnings)}) ---")
+        for warning in diffpair_warnings:
+            print(f"  {warning}")
 
     # Save output
     if args.dry_run:
