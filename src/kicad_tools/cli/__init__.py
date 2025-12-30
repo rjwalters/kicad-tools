@@ -14,6 +14,10 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools placement <command>    - Detect and fix placement conflicts
+    kicad-tools optimize-traces <pcb>  - Optimize PCB traces
+    kicad-tools validate-footprints    - Validate footprint pad spacing
+    kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -27,6 +31,8 @@ Examples:
     kct parts lookup C123456
     kct parts search "100nF 0402" --in-stock
     kct route board.kicad_pcb --strategy negotiated
+    kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
+    kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
 """
 
 import argparse
@@ -247,6 +253,71 @@ def main(argv: Optional[List[str]] = None) -> int:
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
 
+    # OPTIMIZE-TRACES subcommand - Trace optimization
+    optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
+    optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    optimize_parser.add_argument("--net", help="Only optimize traces matching this net pattern")
+    optimize_parser.add_argument("--no-merge", action="store_true", help="Disable collinear merging")
+    optimize_parser.add_argument("--no-zigzag", action="store_true", help="Disable zigzag elimination")
+    optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
+    optimize_parser.add_argument(
+        "--chamfer-size", type=float, default=0.5, help="45-degree chamfer size in mm (default: 0.5)"
+    )
+    optimize_parser.add_argument("-v", "--verbose", action="store_true")
+    optimize_parser.add_argument("--dry-run", action="store_true", help="Show results without writing")
+
+    # VALIDATE-FOOTPRINTS subcommand
+    validate_fp_parser = subparsers.add_parser(
+        "validate-footprints", help="Validate footprints for pad spacing issues"
+    )
+    validate_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    validate_fp_parser.add_argument(
+        "--min-pad-gap",
+        type=float,
+        default=0.15,
+        help="Minimum required gap between pads in mm (default: 0.15)",
+    )
+    validate_fp_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    validate_fp_parser.add_argument(
+        "--errors-only",
+        action="store_true",
+        help="Only show errors, not warnings",
+    )
+
+    # FIX-FOOTPRINTS subcommand
+    fix_fp_parser = subparsers.add_parser(
+        "fix-footprints", help="Fix footprint pad spacing issues"
+    )
+    fix_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_fp_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    fix_fp_parser.add_argument(
+        "--min-pad-gap",
+        type=float,
+        default=0.2,
+        help="Target gap between pads in mm (default: 0.2)",
+    )
+    fix_fp_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    fix_fp_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be changed without applying",
+    )
+
     # PARTS subcommand - LCSC parts lookup
     parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
     parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
@@ -274,6 +345,51 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="stats",
         help="Cache action (default: stats)",
     )
+
+    # PLACEMENT subcommand - placement conflict detection and resolution
+    placement_parser = subparsers.add_parser(
+        "placement", help="Detect and fix placement conflicts"
+    )
+    placement_subparsers = placement_parser.add_subparsers(
+        dest="placement_command", help="Placement commands"
+    )
+
+    # placement check
+    placement_check = placement_subparsers.add_parser(
+        "check", help="Check PCB for placement conflicts"
+    )
+    placement_check.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_check.add_argument(
+        "--format", choices=["table", "json", "summary"], default="table"
+    )
+    placement_check.add_argument(
+        "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
+    )
+    placement_check.add_argument(
+        "--hole-clearance", type=float, default=0.5, help="Min hole clearance (mm)"
+    )
+    placement_check.add_argument(
+        "--edge-clearance", type=float, default=0.3, help="Min edge clearance (mm)"
+    )
+    placement_check.add_argument("-v", "--verbose", action="store_true")
+
+    # placement fix
+    placement_fix = placement_subparsers.add_parser(
+        "fix", help="Suggest and apply placement fixes"
+    )
+    placement_fix.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_fix.add_argument("-o", "--output", help="Output file path")
+    placement_fix.add_argument(
+        "--strategy",
+        choices=["spread", "compact", "anchor"],
+        default="spread",
+        help="Fix strategy",
+    )
+    placement_fix.add_argument(
+        "--anchor", help="Comma-separated components to keep fixed"
+    )
+    placement_fix.add_argument("--dry-run", action="store_true")
+    placement_fix.add_argument("-v", "--verbose", action="store_true")
 
     args = parser.parse_args(argv)
 
@@ -374,7 +490,49 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.command == "route":
         return _run_route_command(args)
 
+    elif args.command == "placement":
+        return _run_placement_command(args)
+
+    elif args.command == "optimize-traces":
+        return _run_optimize_command(args)
+
+    elif args.command == "validate-footprints":
+        return _run_validate_footprints_command(args)
+
+    elif args.command == "fix-footprints":
+        return _run_fix_footprints_command(args)
+
     return 0
+
+
+def _run_validate_footprints_command(args) -> int:
+    """Handle validate-footprints command."""
+    from .footprint_cmd import main_validate
+
+    sub_argv = [args.pcb]
+    if args.min_pad_gap != 0.15:
+        sub_argv.extend(["--min-pad-gap", str(args.min_pad_gap)])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    if args.errors_only:
+        sub_argv.append("--errors-only")
+    return main_validate(sub_argv)
+
+
+def _run_fix_footprints_command(args) -> int:
+    """Handle fix-footprints command."""
+    from .footprint_cmd import main_fix
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.min_pad_gap != 0.2:
+        sub_argv.extend(["--min-pad-gap", str(args.min_pad_gap)])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    return main_fix(sub_argv)
 
 
 def _run_sch_command(args) -> int:
@@ -633,6 +791,70 @@ def _run_route_command(args) -> int:
     if args.dry_run:
         sub_argv.append("--dry-run")
     return route_main(sub_argv)
+
+
+def _run_placement_command(args) -> int:
+    """Handle placement command."""
+    if not args.placement_command:
+        print("Usage: kicad-tools placement <command> [options] <file>")
+        print("Commands: check, fix")
+        return 1
+
+    from .placement_cmd import main as placement_main
+
+    if args.placement_command == "check":
+        sub_argv = ["check", args.pcb]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pad_clearance != 0.1:
+            sub_argv.extend(["--pad-clearance", str(args.pad_clearance)])
+        if args.hole_clearance != 0.5:
+            sub_argv.extend(["--hole-clearance", str(args.hole_clearance)])
+        if args.edge_clearance != 0.3:
+            sub_argv.extend(["--edge-clearance", str(args.edge_clearance)])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "fix":
+        sub_argv = ["fix", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.strategy != "spread":
+            sub_argv.extend(["--strategy", args.strategy])
+        if args.anchor:
+            sub_argv.extend(["--anchor", args.anchor])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return placement_main(sub_argv) or 0
+
+    return 1
+
+
+def _run_optimize_command(args) -> int:
+    """Handle optimize-traces command."""
+    from .optimize_cmd import main as optimize_main
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.net:
+        sub_argv.extend(["--net", args.net])
+    if args.no_merge:
+        sub_argv.append("--no-merge")
+    if args.no_zigzag:
+        sub_argv.append("--no-zigzag")
+    if args.no_45:
+        sub_argv.append("--no-45")
+    if args.chamfer_size != 0.5:
+        sub_argv.extend(["--chamfer-size", str(args.chamfer_size)])
+    if args.verbose:
+        sub_argv.append("--verbose")
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    return optimize_main(sub_argv)
 
 
 def symbols_main() -> int:

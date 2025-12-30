@@ -287,10 +287,10 @@ class SExpParser:
 class SExpSerializer:
     """Serializer for S-expressions to KiCad format."""
 
-    def __init__(self, indent: str = "\t", newline_threshold: int = 1):
+    def __init__(self, indent: str = "  ", newline_threshold: int = 1):
         """
         Args:
-            indent: String to use for each indentation level
+            indent: String to use for each indentation level (default: 2 spaces for KiCad)
             newline_threshold: Put children on new lines if more than this many
         """
         self.indent = indent
@@ -403,6 +403,54 @@ class SExpSerializer:
         for c in s:
             if c in ' \t\n\r()"\\':
                 return True
+
+        # Known unquoted keywords in KiCad format
+        unquoted_keywords = {
+            # Boolean-like
+            "yes", "no", "true", "false",
+            # Visibility
+            "hide", "show",
+            # Fill types
+            "none", "outline", "background", "solid",
+            # Stroke types
+            "default", "dash", "dash_dot", "dash_dot_dot", "dot",
+            # Justify
+            "left", "right", "center", "top", "bottom", "mirror",
+            # Pin types
+            "input", "output", "bidirectional", "tri_state", "passive",
+            "free", "unspecified", "power_in", "power_out",
+            "open_collector", "open_emitter", "no_connect", "line",
+            "inverted", "clock", "inverted_clock", "input_low",
+            "clock_low", "output_low", "edge_clock_high", "non_logic",
+            # Layer types
+            "signal", "power", "user", "mixed", "jumper",
+            # Pad types
+            "thru_hole", "smd", "connect", "np_thru_hole",
+            # Pad shapes
+            "rect", "oval", "circle", "roundrect", "trapezoid", "custom",
+            # fp_text types
+            "reference", "value",
+            # Zone types
+            "thermal_reliefs", "full", "hatch", "hatched",
+            # Via types
+            "blind", "micro", "through",
+            # Arc modes
+            "arc", "start", "mid", "end",
+            # Text effects
+            "italic", "bold",
+            # Footprint attributes
+            "through_hole", "virtual", "exclude_from_pos_files",
+            "exclude_from_bom", "board_only", "dnp",
+        }
+
+        # If it's a known keyword, don't quote it
+        if s in unquoted_keywords:
+            return False
+
+        # Quote strings with dots (like layer names F.Cu, B.Cu)
+        if "." in s:
+            return True
+
         return False
 
     def _quote_string(self, s: str) -> str:
@@ -417,6 +465,14 @@ def parse_sexp(text: str) -> SExp:
     return SExpParser(text).parse()
 
 
-def serialize_sexp(sexp: SExp, indent: str = "\t") -> str:
-    """Serialize an SExp tree to text."""
+def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:
+    """Serialize an SExp tree to text.
+
+    Args:
+        sexp: The SExp tree to serialize
+        indent: String to use for each indentation level (default: 2 spaces for KiCad format)
+
+    Returns:
+        Serialized S-expression string
+    """
     return SExpSerializer(indent=indent).serialize(sexp)

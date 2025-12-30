@@ -1,9 +1,9 @@
 """Tests for the S-expression parser module."""
 
-import pytest
-from pathlib import Path
 
-from kicad_tools.sexp.parser import SExp, parse_string, parse_file
+import pytest
+
+from kicad_tools.sexp.parser import SExp, parse_file, parse_string
 
 
 class TestSExpAtoms:
@@ -323,9 +323,16 @@ class TestSerialization:
 
     def test_serialize_simple_list(self):
         """Serialize simple list."""
+        # Use a string that needs quoting (contains a period)
+        node = SExp.list("test", "my.value")
+        result = node.to_string(compact=True)
+        assert result == '(test "my.value")'
+
+    def test_serialize_keyword_unquoted(self):
+        """Keywords like 'value' are not quoted."""
         node = SExp.list("test", "value")
         result = node.to_string(compact=True)
-        assert result == '(test "value")'
+        assert result == '(test value)'  # 'value' is a keyword
 
     def test_serialize_roundtrip(self):
         """Parse and serialize preserves structure."""
@@ -412,3 +419,154 @@ class TestEdgeCases:
         node = SExp(name="root")
         results = node.find_all("missing")
         assert results == []
+
+
+class TestRoundTrip:
+    """Tests for round-trip parsing and serialization."""
+
+    def test_roundtrip_preserves_structure(self):
+        """Parse → serialize → parse preserves structure."""
+        original = '''(kicad_pcb
+            (version 20240108)
+            (generator "test")
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+        )'''
+        parsed = parse_string(original)
+        serialized = parsed.to_string()
+        reparsed = parse_string(serialized)
+
+        assert reparsed.name == "kicad_pcb"
+        assert reparsed["version"].get_first_atom() == 20240108
+        assert reparsed["generator"].get_first_atom() == "test"
+        layers = reparsed["layers"]
+        assert len(layers.children) == 2
+
+    def test_roundtrip_keywords_unquoted(self):
+        """Keywords like signal, thru_hole, rect are not quoted."""
+        sexp = '''(pad "1" thru_hole rect
+            (at 0 0)
+            (size 1.6 1.6)
+            (layers "*.Cu" "*.Mask")
+        )'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        # Keywords should not be quoted
+        assert "thru_hole" in serialized
+        assert '"thru_hole"' not in serialized
+        assert "rect" in serialized
+        assert '"rect"' not in serialized
+
+    def test_roundtrip_layer_names_quoted(self):
+        """Layer names like F.Cu are quoted."""
+        sexp = '''(layer "F.Cu")'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        # Layer names with dots should be quoted
+        assert '"F.Cu"' in serialized
+
+    def test_roundtrip_uses_spaces_not_tabs(self):
+        """Serialization uses 2-space indentation, not tabs."""
+        sexp = '''(kicad_pcb
+            (version 20240108)
+            (general
+                (thickness 1.6)
+            )
+        )'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        # Should not contain tabs
+        assert '\t' not in serialized
+        # Should use 2-space indentation
+        assert '  (version' in serialized
+
+    def test_roundtrip_fp_text_types_unquoted(self):
+        """fp_text types like reference, value are not quoted."""
+        sexp = '''(fp_text reference "U1"
+            (at 0 0)
+            (layer "F.SilkS")
+        )'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        # 'reference' keyword should not be quoted
+        assert "reference" in serialized
+        assert '"reference"' not in serialized
+        # But "U1" should be quoted
+        assert '"U1"' in serialized
+
+    def test_roundtrip_fill_types_unquoted(self):
+        """Fill types like none, solid are not quoted."""
+        sexp = '''(fill none)'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        assert "none" in serialized
+        assert '"none"' not in serialized
+
+    def test_roundtrip_boolean_values_unquoted(self):
+        """Boolean values like yes, no are not quoted."""
+        sexp = '''(legacy_teardrops no)'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        assert " no)" in serialized
+        assert '"no"' not in serialized
+
+    def test_roundtrip_preserves_numbers(self):
+        """Numbers are preserved correctly through round-trip."""
+        sexp = '''(at 125.0 147.5 90)'''
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+        reparsed = parse_string(serialized)
+
+        atoms = reparsed.get_atoms()
+        assert atoms[0] == pytest.approx(125.0)
+        assert atoms[1] == pytest.approx(147.5)
+        assert atoms[2] == 90
+
+    def test_roundtrip_pcb_file(self, tmp_path):
+        """Round-trip a sample PCB structure."""
+        pcb_content = '''(kicad_pcb
+            (version 20240108)
+            (generator "test")
+            (general
+                (thickness 1.6)
+                (legacy_teardrops no)
+            )
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+            (footprint "Package_DIP:DIP-8"
+                (layer "F.Cu")
+                (at 125.0 147.0)
+                (pad "1" thru_hole rect
+                    (at 0 0)
+                    (size 1.6 1.6)
+                    (drill 0.8)
+                    (layers "*.Cu" "*.Mask")
+                )
+            )
+        )'''
+        parsed = parse_string(pcb_content)
+
+        # Save to temp file
+        output_path = tmp_path / "test.kicad_pcb"
+        output_path.write_text(parsed.to_string())
+
+        # Reload and verify
+        reparsed = parse_file(output_path)
+        assert reparsed.name == "kicad_pcb"
+        assert reparsed["version"].get_first_atom() == 20240108
+
+        # Verify footprint structure
+        footprint = reparsed.find("footprint")
+        assert footprint is not None
+        pad = footprint.find("pad")
+        assert pad is not None
