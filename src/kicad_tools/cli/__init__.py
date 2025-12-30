@@ -14,6 +14,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools placement <command>    - Detect and fix placement conflicts
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
 
 Examples:
@@ -288,6 +289,51 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Cache action (default: stats)",
     )
 
+    # PLACEMENT subcommand - placement conflict detection and resolution
+    placement_parser = subparsers.add_parser(
+        "placement", help="Detect and fix placement conflicts"
+    )
+    placement_subparsers = placement_parser.add_subparsers(
+        dest="placement_command", help="Placement commands"
+    )
+
+    # placement check
+    placement_check = placement_subparsers.add_parser(
+        "check", help="Check PCB for placement conflicts"
+    )
+    placement_check.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_check.add_argument(
+        "--format", choices=["table", "json", "summary"], default="table"
+    )
+    placement_check.add_argument(
+        "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
+    )
+    placement_check.add_argument(
+        "--hole-clearance", type=float, default=0.5, help="Min hole clearance (mm)"
+    )
+    placement_check.add_argument(
+        "--edge-clearance", type=float, default=0.3, help="Min edge clearance (mm)"
+    )
+    placement_check.add_argument("-v", "--verbose", action="store_true")
+
+    # placement fix
+    placement_fix = placement_subparsers.add_parser(
+        "fix", help="Suggest and apply placement fixes"
+    )
+    placement_fix.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_fix.add_argument("-o", "--output", help="Output file path")
+    placement_fix.add_argument(
+        "--strategy",
+        choices=["spread", "compact", "anchor"],
+        default="spread",
+        help="Fix strategy",
+    )
+    placement_fix.add_argument(
+        "--anchor", help="Comma-separated components to keep fixed"
+    )
+    placement_fix.add_argument("--dry-run", action="store_true")
+    placement_fix.add_argument("-v", "--verbose", action="store_true")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -386,6 +432,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     elif args.command == "route":
         return _run_route_command(args)
+
+    elif args.command == "placement":
+        return _run_placement_command(args)
 
     elif args.command == "optimize-traces":
         return _run_optimize_command(args)
@@ -649,6 +698,46 @@ def _run_route_command(args) -> int:
     if args.dry_run:
         sub_argv.append("--dry-run")
     return route_main(sub_argv)
+
+
+def _run_placement_command(args) -> int:
+    """Handle placement command."""
+    if not args.placement_command:
+        print("Usage: kicad-tools placement <command> [options] <file>")
+        print("Commands: check, fix")
+        return 1
+
+    from .placement_cmd import main as placement_main
+
+    if args.placement_command == "check":
+        sub_argv = ["check", args.pcb]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pad_clearance != 0.1:
+            sub_argv.extend(["--pad-clearance", str(args.pad_clearance)])
+        if args.hole_clearance != 0.5:
+            sub_argv.extend(["--hole-clearance", str(args.hole_clearance)])
+        if args.edge_clearance != 0.3:
+            sub_argv.extend(["--edge-clearance", str(args.edge_clearance)])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "fix":
+        sub_argv = ["fix", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.strategy != "spread":
+            sub_argv.extend(["--strategy", args.strategy])
+        if args.anchor:
+            sub_argv.extend(["--anchor", args.anchor])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return placement_main(sub_argv) or 0
+
+    return 1
 
 
 def _run_optimize_command(args) -> int:
