@@ -90,8 +90,7 @@ class Footprint:
     """
     A KiCad footprint definition.
 
-    Note: Full implementation with generators pending migration from
-    hardware/chorus-test-revA/lib/footprint_lib.py
+    Note: Full implementation with footprint generators is pending.
     """
 
     def __init__(self, name: str):
