@@ -6,7 +6,12 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
-from kicad_tools.router.zones import ZoneFiller
+from kicad_tools.router.zones import (
+    ConnectionType,
+    ThermalRelief,
+    ZoneFiller,
+    get_connection_type,
+)
 from kicad_tools.schema.pcb import Zone
 
 
@@ -439,3 +444,293 @@ class TestZoneFillPerformance:
         # Should have filled a lot of cells
         # 80mm x 80mm at 0.1mm = 640,000 cells
         assert len(result.filled_cells) > 500000
+
+
+class TestConnectionType:
+    """Tests for connection type determination."""
+
+    def test_pth_pad_always_thermal(self):
+        """Through-hole pads always get thermal relief."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[], connect_pads="solid",  # Even with solid setting
+        )
+
+        assert get_connection_type(pad, zone) == ConnectionType.THERMAL
+
+    def test_smd_pad_follows_zone_thermal(self):
+        """SMD pads follow zone setting - thermal."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=False,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[], connect_pads="thermal_reliefs",
+        )
+
+        assert get_connection_type(pad, zone) == ConnectionType.THERMAL
+
+    def test_smd_pad_follows_zone_solid(self):
+        """SMD pads follow zone setting - solid."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=False,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[], connect_pads="solid",
+        )
+
+        assert get_connection_type(pad, zone) == ConnectionType.SOLID
+
+    def test_smd_pad_follows_zone_none(self):
+        """SMD pads follow zone setting - none."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=False,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[], connect_pads="none",
+        )
+
+        assert get_connection_type(pad, zone) == ConnectionType.NONE
+
+
+class TestThermalReliefGeneration:
+    """Tests for ThermalRelief cell generation."""
+
+    @pytest.fixture
+    def thermal_relief(self, grid):
+        """Standard thermal relief for testing."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+            thermal_gap=0.3,
+            thermal_bridge_width=0.3,
+        )
+        return ThermalRelief(
+            pad=pad, zone=zone,
+            gap=0.3, spoke_width=0.3,
+            spoke_count=4, spoke_angle=45.0,
+            layer_index=0,
+        )
+
+    def test_antipad_generates_cells(self, grid, thermal_relief):
+        """Antipad generation produces cells."""
+        cells = thermal_relief.generate_antipad_cells(grid)
+
+        # Should have cells (ring around pad)
+        assert len(cells) > 0
+
+    def test_antipad_ring_around_pad(self, grid, thermal_relief):
+        """Antipad cells form a ring around pad."""
+        cells = thermal_relief.generate_antipad_cells(grid)
+
+        pad_gx, pad_gy = grid.world_to_grid(5.0, 5.0)
+
+        # Pad center should NOT be in antipad
+        assert (pad_gx, pad_gy) not in cells
+
+        # Should have multiple cells forming the antipad ring
+        assert len(cells) > 10
+
+    def test_spoke_generates_cells(self, grid, thermal_relief):
+        """Spoke generation produces cells."""
+        cells = thermal_relief.generate_spoke_cells(grid)
+
+        # Should have cells (4 spokes)
+        assert len(cells) > 0
+
+    def test_four_spoke_45_degree(self, grid):
+        """Four spoke pattern at 45 degrees."""
+        pad = Pad(
+            x=5.0, y=5.0, width=0.8, height=0.8,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        )
+        relief = ThermalRelief(
+            pad=pad, zone=zone,
+            gap=0.5, spoke_width=0.3,
+            spoke_count=4, spoke_angle=45.0,
+            layer_index=0,
+        )
+
+        spoke_cells = relief.generate_spoke_cells(grid)
+
+        # Should have cells at 45, 135, 225, 315 degrees
+        assert len(spoke_cells) > 0
+
+    def test_four_spoke_0_degree(self, grid):
+        """Four spoke pattern at 0 degrees (cross pattern)."""
+        pad = Pad(
+            x=5.0, y=5.0, width=0.8, height=0.8,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        )
+        relief = ThermalRelief(
+            pad=pad, zone=zone,
+            gap=0.5, spoke_width=0.3,
+            spoke_count=4, spoke_angle=0.0,
+            layer_index=0,
+        )
+
+        spoke_cells = relief.generate_spoke_cells(grid)
+
+        # Should have cells at 0, 90, 180, 270 degrees
+        assert len(spoke_cells) > 0
+
+    def test_two_spoke_pattern(self, grid):
+        """Two spoke pattern."""
+        pad = Pad(
+            x=5.0, y=5.0, width=0.8, height=0.8,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+        )
+        relief = ThermalRelief(
+            pad=pad, zone=zone,
+            gap=0.5, spoke_width=0.3,
+            spoke_count=2, spoke_angle=0.0,
+            layer_index=0,
+        )
+
+        spoke_cells = relief.generate_spoke_cells(grid)
+
+        # Should have cells (2 spokes at 0 and 180)
+        assert len(spoke_cells) > 0
+
+
+class TestZoneFillerThermalIntegration:
+    """Tests for ZoneFiller thermal relief integration."""
+
+    def test_generate_thermal_reliefs_for_same_net(self, grid, rules, filler):
+        """Generate thermal reliefs for same-net pads."""
+        # Add PTH pad with same net
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(2, 2), (8, 2), (8, 8), (2, 8)],
+            thermal_gap=0.3,
+            thermal_bridge_width=0.3,
+        )
+
+        filled = filler.fill_zone(zone, layer_index=0)
+        reliefs = filler.generate_thermal_reliefs(filled, [pad])
+
+        assert len(reliefs) == 1
+        assert reliefs[0].pad is pad
+        assert reliefs[0].zone is zone
+
+    def test_no_thermal_for_different_net(self, grid, rules, filler):
+        """No thermal relief for different-net pads."""
+        # Pad with different net
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=2, net_name="+3.3V", layer=Layer.F_CU,
+            through_hole=True,
+        )
+
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(2, 2), (8, 2), (8, 8), (2, 8)],
+        )
+
+        filled = filler.fill_zone(zone, layer_index=0)
+        reliefs = filler.generate_thermal_reliefs(filled, [pad])
+
+        assert len(reliefs) == 0
+
+    def test_no_thermal_for_pad_outside_zone(self, grid, rules, filler):
+        """No thermal relief for pads outside zone polygon."""
+        # Pad outside zone boundary
+        pad = Pad(
+            x=1.0, y=1.0, width=0.5, height=0.5,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(3, 3), (7, 3), (7, 7), (3, 7)],  # Pad at 1,1 is outside
+        )
+
+        filled = filler.fill_zone(zone, layer_index=0)
+        reliefs = filler.generate_thermal_reliefs(filled, [pad])
+
+        assert len(reliefs) == 0
+
+    def test_apply_thermal_reliefs_modifies_zone(self, grid, rules, filler):
+        """Applying thermal reliefs modifies zone fill."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=True,
+        )
+        grid.add_pad(pad)
+
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(2, 2), (8, 2), (8, 8), (2, 8)],
+            thermal_gap=0.3,
+            thermal_bridge_width=0.3,
+        )
+
+        filled = filler.fill_zone(zone, layer_index=0)
+        original_count = len(filled.filled_cells)
+
+        reliefs = filler.generate_thermal_reliefs(filled, [pad])
+        filler.apply_thermal_reliefs(filled, reliefs)
+
+        # Count should change (antipad removed, spokes added)
+        # The antipad has more cells than spokes, so count decreases
+        assert len(filled.filled_cells) != original_count
+
+    def test_solid_connection_no_thermal(self, grid, rules, filler):
+        """SMD pad with solid connection gets no thermal relief."""
+        pad = Pad(
+            x=5.0, y=5.0, width=1.0, height=1.0,
+            net=1, net_name="GND", layer=Layer.F_CU,
+            through_hole=False,  # SMD
+        )
+
+        zone = Zone(
+            net_number=1, net_name="GND", layer="F.Cu", uuid="zone-1",
+            polygon=[(2, 2), (8, 2), (8, 8), (2, 8)],
+            connect_pads="solid",  # Solid connection for SMD
+        )
+
+        filled = filler.fill_zone(zone, layer_index=0)
+        reliefs = filler.generate_thermal_reliefs(filled, [pad])
+
+        assert len(reliefs) == 0  # No thermal relief for solid
