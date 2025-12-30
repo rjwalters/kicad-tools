@@ -15,6 +15,8 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
+    kicad-tools validate-footprints    - Validate footprint pad spacing
+    kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -28,6 +30,8 @@ Examples:
     kct parts lookup C123456
     kct parts search "100nF 0402" --in-stock
     kct route board.kicad_pcb --strategy negotiated
+    kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
+    kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
 """
 
 import argparse
@@ -260,6 +264,57 @@ def main(argv: Optional[List[str]] = None) -> int:
     optimize_parser.add_argument("-v", "--verbose", action="store_true")
     optimize_parser.add_argument("--dry-run", action="store_true", help="Show results without writing")
 
+    # VALIDATE-FOOTPRINTS subcommand
+    validate_fp_parser = subparsers.add_parser(
+        "validate-footprints", help="Validate footprints for pad spacing issues"
+    )
+    validate_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    validate_fp_parser.add_argument(
+        "--min-pad-gap",
+        type=float,
+        default=0.15,
+        help="Minimum required gap between pads in mm (default: 0.15)",
+    )
+    validate_fp_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    validate_fp_parser.add_argument(
+        "--errors-only",
+        action="store_true",
+        help="Only show errors, not warnings",
+    )
+
+    # FIX-FOOTPRINTS subcommand
+    fix_fp_parser = subparsers.add_parser(
+        "fix-footprints", help="Fix footprint pad spacing issues"
+    )
+    fix_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_fp_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    fix_fp_parser.add_argument(
+        "--min-pad-gap",
+        type=float,
+        default=0.2,
+        help="Target gap between pads in mm (default: 0.2)",
+    )
+    fix_fp_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    fix_fp_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be changed without applying",
+    )
+
     # PARTS subcommand - LCSC parts lookup
     parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
     parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
@@ -390,7 +445,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.command == "optimize-traces":
         return _run_optimize_command(args)
 
+    elif args.command == "validate-footprints":
+        return _run_validate_footprints_command(args)
+
+    elif args.command == "fix-footprints":
+        return _run_fix_footprints_command(args)
+
     return 0
+
+
+def _run_validate_footprints_command(args) -> int:
+    """Handle validate-footprints command."""
+    from .footprint_cmd import main_validate
+
+    sub_argv = [args.pcb]
+    if args.min_pad_gap != 0.15:
+        sub_argv.extend(["--min-pad-gap", str(args.min_pad_gap)])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    if args.errors_only:
+        sub_argv.append("--errors-only")
+    return main_validate(sub_argv)
+
+
+def _run_fix_footprints_command(args) -> int:
+    """Handle fix-footprints command."""
+    from .footprint_cmd import main_fix
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.min_pad_gap != 0.2:
+        sub_argv.extend(["--min-pad-gap", str(args.min_pad_gap)])
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    return main_fix(sub_argv)
 
 
 def _run_sch_command(args) -> int:
