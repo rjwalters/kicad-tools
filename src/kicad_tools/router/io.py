@@ -201,36 +201,43 @@ def load_pcb_for_routing(
             continue
         ref = ref_match.group(1)
 
-        # Parse pads - match the entire pad block first, then extract fields
+        # Parse pads - match each pad individually
         pads: List[dict] = []
-        # Pattern captures pad number, type, and full content up to closing paren chain
-        pad_block_pattern = re.compile(r'\(pad\s+"([^"]+)"\s+(\w+)\s+\w+\s+(.+?)\n\s*\)', re.DOTALL)
-        for pad_match in re.finditer(pad_block_pattern, section):
-            pad_num = pad_match.group(1)
-            pad_type = pad_match.group(2)  # smd or thru_hole
-            pad_content = pad_match.group(3)
+        # Find all (pad ...) blocks in the footprint section
+        # Use a line-by-line approach for robustness
+        for line in section.split('\n'):
+            line = line.strip()
+            if not line.startswith('(pad '):
+                continue
+
+            # Extract pad number and type
+            pad_start = re.match(r'\(pad\s+"([^"]+)"\s+(\w+)', line)
+            if not pad_start:
+                continue
+            pad_num = pad_start.group(1)
+            pad_type = pad_start.group(2)  # smd or thru_hole
 
             # Extract at position
-            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_content)
+            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", line)
             if not at_match:
                 continue
             pad_x = float(at_match.group(1))
             pad_y = float(at_match.group(2))
 
             # Extract size
-            size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", pad_content)
+            size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", line)
             if not size_match:
                 continue
             pad_w = float(size_match.group(1))
             pad_h = float(size_match.group(2))
 
             # Extract net (if present)
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', pad_content)
+            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', line)
             net_num = int(net_match.group(1)) if net_match else 0
             net_name = net_match.group(2) if net_match else ""
 
             # Extract drill size if present
-            drill_match = re.search(r"\(drill\s+([\d.]+)", pad_content)
+            drill_match = re.search(r"\(drill\s+([\d.]+)", line)
             drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
             # Override with netlist if provided

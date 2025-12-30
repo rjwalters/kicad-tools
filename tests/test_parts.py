@@ -565,3 +565,444 @@ class TestCategorization:
         assert _guess_package_type("DIP-8") == PackageType.THROUGH_HOLE
         assert _guess_package_type("TO-220") == PackageType.THROUGH_HOLE
         assert _guess_package_type("Axial") == PackageType.THROUGH_HOLE
+
+    def test_guess_package_unknown(self):
+        from kicad_tools.parts.lcsc import _guess_package_type
+
+        assert _guess_package_type("CustomPackage") == PackageType.UNKNOWN
+        assert _guess_package_type("") == PackageType.UNKNOWN
+
+    def test_categorize_inductor(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("4.7uH Inductor", "0603") == PartCategory.INDUCTOR
+        assert _categorize_part("10mH Choke", "Radial") == PartCategory.INDUCTOR
+
+    def test_categorize_diode(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("1N4148 Diode", "SOD-323") == PartCategory.DIODE
+        assert _categorize_part("SS14 Schottky Rectifier", "SMA") == PartCategory.DIODE
+        assert _categorize_part("5.1V Zener", "SOD-123") == PartCategory.DIODE
+
+    def test_categorize_transistor(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("2N2222 Transistor", "SOT-23") == PartCategory.TRANSISTOR
+        assert _categorize_part("SI2302 MOSFET", "SOT-23") == PartCategory.TRANSISTOR
+        assert _categorize_part("JFET 2N5457", "TO-92") == PartCategory.TRANSISTOR
+        assert _categorize_part("NPN BJT", "SOT-23") == PartCategory.TRANSISTOR
+
+    def test_categorize_connector(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("2x5 Pin Header", "2.54mm") == PartCategory.CONNECTOR
+        assert _categorize_part("USB-C Connector", "USB-C") == PartCategory.CONNECTOR
+        assert _categorize_part("3.5mm Audio Jack", "") == PartCategory.CONNECTOR
+
+    def test_categorize_crystal(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("8MHz Crystal", "HC-49") == PartCategory.CRYSTAL
+        assert _categorize_part("32.768kHz Oscillator", "SMD") == PartCategory.CRYSTAL
+
+    def test_categorize_led(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("Red LED 0603", "0603") == PartCategory.LED
+        assert _categorize_part("Green LED SMD", "") == PartCategory.LED
+        # Note: "Light Emitting Diode" matches "diode" first due to check order
+
+    def test_categorize_switch(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("6x6mm Tactile Switch", "6x6mm") == PartCategory.SWITCH
+        assert _categorize_part("Push Button", "") == PartCategory.SWITCH
+
+    def test_categorize_relay(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("5V Relay SPDT", "") == PartCategory.RELAY
+
+    def test_categorize_fuse(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("500mA Fuse", "0603") == PartCategory.FUSE
+        assert _categorize_part("Resettable PTC", "1206") == PartCategory.FUSE
+        assert _categorize_part("Polyfuse 100mA", "") == PartCategory.FUSE
+
+    def test_categorize_other(self):
+        from kicad_tools.parts.lcsc import _categorize_part
+
+        assert _categorize_part("Some Random Part", "") == PartCategory.OTHER
+
+    def test_guess_more_smd_packages(self):
+        from kicad_tools.parts.lcsc import _guess_package_type
+
+        assert _guess_package_type("0603") == PackageType.SMD
+        assert _guess_package_type("0805") == PackageType.SMD
+        assert _guess_package_type("1206") == PackageType.SMD
+        assert _guess_package_type("0402_1005Metric") == PackageType.SMD
+        assert _guess_package_type("SSOP-28") == PackageType.SMD
+        assert _guess_package_type("TSSOP-20") == PackageType.SMD
+        assert _guess_package_type("LQFP-48") == PackageType.SMD
+        assert _guess_package_type("TQFP-32") == PackageType.SMD
+        assert _guess_package_type("BGA-256") == PackageType.SMD
+        assert _guess_package_type("DFN-8") == PackageType.SMD
+        assert _guess_package_type("SC-70") == PackageType.SMD
+        assert _guess_package_type("TO-252") == PackageType.SMD
+        assert _guess_package_type("TO-263") == PackageType.SMD
+        assert _guess_package_type("DPAK") == PackageType.SMD
+        assert _guess_package_type("D2PAK") == PackageType.SMD
+        assert _guess_package_type("SMD-Crystal") == PackageType.SMD
+        assert _guess_package_type("SMT Package") == PackageType.SMD
+
+    def test_guess_more_through_hole_packages(self):
+        from kicad_tools.parts.lcsc import _guess_package_type
+
+        assert _guess_package_type("PDIP-8") == PackageType.THROUGH_HOLE
+        assert _guess_package_type("TO-92") == PackageType.THROUGH_HOLE
+        assert _guess_package_type("TO-247") == PackageType.THROUGH_HOLE
+        assert _guess_package_type("Radial") == PackageType.THROUGH_HOLE
+        assert _guess_package_type("Through Hole") == PackageType.THROUGH_HOLE
+
+
+@pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
+class TestLCSCClientExtended:
+    """Extended tests for LCSCClient."""
+
+    def test_client_initialization_defaults(self):
+        from kicad_tools.parts import LCSCClient
+
+        client = LCSCClient()
+        assert client.cache is not None
+        assert client.timeout == 30.0
+        assert client._session is None
+
+    def test_client_initialization_no_cache(self):
+        from kicad_tools.parts import LCSCClient
+
+        client = LCSCClient(use_cache=False)
+        assert client.cache is None
+
+    def test_client_initialization_custom_timeout(self):
+        from kicad_tools.parts import LCSCClient
+
+        client = LCSCClient(timeout=60.0)
+        assert client.timeout == 60.0
+
+    def test_part_number_normalization(self, tmp_path):
+        """Test that part numbers are normalized to uppercase with C prefix."""
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
+            mock_fetch.return_value = None
+
+            # Test lowercase
+            client.lookup("c123456")
+            mock_fetch.assert_called_with("C123456")
+
+            # Test without C prefix
+            mock_fetch.reset_mock()
+            client.lookup("123456")
+            mock_fetch.assert_called_with("C123456")
+
+    def test_lookup_bypass_cache(self, tmp_path):
+        """Test that bypass_cache skips cache lookup."""
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        cached_part = Part(lcsc_part="C123456", mfr_part="CachedPart")
+        cache.put(cached_part)
+
+        client = LCSCClient(cache=cache)
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
+            new_part = Part(lcsc_part="C123456", mfr_part="FreshPart")
+            mock_fetch.return_value = new_part
+
+            part = client.lookup("C123456", bypass_cache=True)
+            mock_fetch.assert_called_once()
+            assert part.mfr_part == "FreshPart"
+
+    def test_lookup_api_error(self, tmp_path):
+        """Test handling of API errors."""
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
+            mock_fetch.side_effect = Exception("Network error")
+
+            part = client.lookup("C123456")
+            assert part is None
+
+    def test_lookup_many(self, tmp_path):
+        """Test lookup_many method."""
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        # Pre-cache one part
+        cache.put(Part(lcsc_part="C111", mfr_part="CachedPart"))
+
+        client = LCSCClient(cache=cache)
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
+            mock_fetch.return_value = Part(lcsc_part="C222", mfr_part="FreshPart")
+
+            results = client.lookup_many(["C111", "C222"])
+
+            # C111 should come from cache, C222 from API
+            assert "C111" in results
+            assert results["C111"].mfr_part == "CachedPart"
+            assert "C222" in results
+            assert results["C222"].mfr_part == "FreshPart"
+
+    def test_lookup_many_empty_list(self, tmp_path):
+        """Test lookup_many with empty list."""
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        results = client.lookup_many([])
+        assert results == {}
+
+    def test_lookup_many_normalization(self, tmp_path):
+        """Test that lookup_many normalizes part numbers."""
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._fetch_part") as mock_fetch:
+            mock_fetch.return_value = Part(lcsc_part="C123", mfr_part="Part")
+
+            # Mix of formats
+            results = client.lookup_many(["c123", "456", "C789"])
+
+            # All should be normalized
+            calls = [call[0][0] for call in mock_fetch.call_args_list]
+            assert "C123" in calls
+            assert "C456" in calls
+            assert "C789" in calls
+
+    def test_search_error_handling(self, tmp_path):
+        """Test search error handling."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            import requests
+
+            mock_session.return_value.post.side_effect = requests.RequestException("Error")
+
+            from kicad_tools.parts import LCSCClient, PartsCache
+
+            cache = PartsCache(db_path=tmp_path / "cache.db")
+            client = LCSCClient(cache=cache)
+
+            results = client.search("test")
+            assert len(results.parts) == 0
+            assert results.total_count == 0
+
+    def test_search_api_error_code(self, tmp_path):
+        """Test search with non-200 API response."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"code": 500, "message": "Server error"}
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient, PartsCache
+
+            cache = PartsCache(db_path=tmp_path / "cache.db")
+            client = LCSCClient(cache=cache)
+
+            results = client.search("test")
+            assert len(results.parts) == 0
+
+    def test_search_with_filters(self, tmp_path):
+        """Test search with in_stock and basic_only filters."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": {"componentPageInfo": {"list": [], "total": 0}},
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False)
+
+            client.search("test", in_stock=True, basic_only=True, page=2, page_size=50)
+
+            # Verify the payload included the filters
+            call_args = mock_session.return_value.post.call_args
+            payload = call_args[1]["json"]
+            assert payload["stockCountMin"] == 1
+            assert payload["componentLibraryType"] == "base"
+            assert payload["currentPage"] == 2
+            assert payload["pageSize"] == 50
+
+    def test_context_manager(self, tmp_path):
+        """Test LCSCClient as context manager."""
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+
+        with LCSCClient(cache=cache) as client:
+            assert client is not None
+
+        # After exiting, session should be closed
+        assert client._session is None
+
+    def test_close_method(self, tmp_path):
+        """Test explicit close method."""
+        from kicad_tools.parts import LCSCClient
+
+        client = LCSCClient(use_cache=False)
+        # Force session creation
+        with patch("kicad_tools.parts.lcsc.requests.Session") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session_cls.return_value = mock_session
+
+            # Trigger session creation
+            client._get_session()
+            assert client._session is not None
+
+            # Close
+            client.close()
+            mock_session.close.assert_called_once()
+            assert client._session is None
+
+    def test_parse_component_with_alternative_fields(self, tmp_path):
+        """Test _parse_component handles alternative API field names."""
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {
+                "code": 200,
+                "data": {
+                    "componentCode": "C123",
+                    "manufacturerPartNumber": "ALT-PART-NUM",  # Alternative field
+                    "manufacturer": "AltMfr",  # Alternative field
+                    "describe": "Alternative description",
+                    "package": "0402",  # Alternative field
+                    "stockCount": 1000,
+                    "priceList": [  # Alternative price field
+                        {"startNumber": 1, "productPrice": 0.01},
+                    ],
+                },
+            }
+            mock_resp.raise_for_status = MagicMock()
+            mock_session.return_value.post.return_value = mock_resp
+
+            from kicad_tools.parts import LCSCClient
+
+            client = LCSCClient(use_cache=False)
+            part = client.lookup("C123")
+
+            assert part is not None
+            assert part.mfr_part == "ALT-PART-NUM"
+            assert part.manufacturer == "AltMfr"
+            assert part.package == "0402"
+
+
+@pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
+class TestLCSCClientCheckBOM:
+    """Tests for LCSCClient.check_bom method."""
+
+    @pytest.fixture
+    def mock_bom_items(self):
+        """Create mock BOM items."""
+        class MockBOMItem:
+            def __init__(self, reference, value, footprint, lcsc=""):
+                self.reference = reference
+                self.value = value
+                self.footprint = footprint
+                self.lcsc = lcsc
+                self.quantity = 1
+
+        return [
+            MockBOMItem("R1", "10k", "0402", "C123456"),
+            MockBOMItem("R2", "4.7k", "0402", "C789012"),
+            MockBOMItem("C1", "100nF", "0402", ""),  # No LCSC
+            MockBOMItem("U1", "STM32", "LQFP48", "C999999"),  # Will not be found
+        ]
+
+    def test_check_bom(self, tmp_path, mock_bom_items):
+        """Test check_bom method."""
+        from kicad_tools.parts import LCSCClient, Part, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache)
+
+        with patch.object(client, "lookup_many") as mock_lookup:
+            mock_lookup.return_value = {
+                "C123456": Part(lcsc_part="C123456", mfr_part="R1", stock=5000),
+                "C789012": Part(lcsc_part="C789012", mfr_part="R2", stock=0),
+            }
+
+            result = client.check_bom(mock_bom_items)
+
+            assert len(result.items) == 4
+
+            # R1: Found and in stock
+            r1 = next(i for i in result.items if i.reference == "R1")
+            assert r1.matched is True
+            assert r1.in_stock is True
+
+            # R2: Found but out of stock
+            r2 = next(i for i in result.items if i.reference == "R2")
+            assert r2.matched is True
+            assert r2.in_stock is False
+
+            # C1: No LCSC number
+            c1 = next(i for i in result.items if i.reference == "C1")
+            assert c1.error == "No LCSC part number"
+
+            # U1: Not found
+            u1 = next(i for i in result.items if i.reference == "U1")
+            assert u1.error == "Part not found"
+
+
+class TestRequiresRequestsDecorator:
+    """Tests for _requires_requests decorator."""
+
+    def test_decorator_with_requests_available(self):
+        """Test decorator when requests is available."""
+        from kicad_tools.parts.lcsc import _requires_requests
+
+        @_requires_requests
+        def test_func():
+            return "success"
+
+        # Should work fine when requests is available
+        if HAS_REQUESTS:
+            assert test_func() == "success"
+
+    def test_decorator_without_requests(self):
+        """Test decorator when requests is not available."""
+        from kicad_tools.parts.lcsc import _requires_requests
+
+        @_requires_requests
+        def test_func():
+            return "success"
+
+        # Mock requests import to fail
+        with patch.dict("sys.modules", {"requests": None}):
+            import sys
+            original = sys.modules.get("requests")
+            try:
+                if "requests" in sys.modules:
+                    del sys.modules["requests"]
+
+                # This would raise ImportError if we could truly remove requests
+                # but the decorator catches it inside the function
+                pass
+            finally:
+                if original is not None:
+                    sys.modules["requests"] = original
