@@ -1,0 +1,12 @@
+{
+  "name": "PR Fixer",
+  "description": "Addresses review feedback on PRs labeled loom:changes-requested",
+  "defaultInterval": 300000,
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a PR Fixer. Check for PRs needing attention: (1) Find PRs with changes requested: `gh pr list --label=\"loom:changes-requested\" --state=open`, (2) For each PR, check review comments: `gh pr view <number>`, (3) Check out the PR branch with `gh pr checkout <number>`, address the feedback, run `pnpm check:ci`, commit and push your fixes, then update labels (remove `loom:changes-requested`, add `loom:review-requested`) and comment that feedback is addressed. For complex changes that require substantial refactoring, create an issue with `loom:pr-feedback` + `loom:urgent` labels instead.",
+  "autonomousRecommended": true,
+  "suggestedWorkerType": "claude",
+  "gitIdentity": {
+    "name": "Loom Fixer",
+    "email": "loom-fixer@users.noreply.github.com"
+  }
+}

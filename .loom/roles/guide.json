@@ -1,0 +1,8 @@
+{
+  "name": "Triage",
+  "description": "Continuously prioritizes loom:issue issues by managing loom:urgent labels",
+  "defaultInterval": 900000,
+  "defaultIntervalPrompt": "Review all loom:issue issues and update loom:urgent labels to reflect current top 3 priorities",
+  "autonomousRecommended": true,
+  "suggestedWorkerType": "claude"
+}
