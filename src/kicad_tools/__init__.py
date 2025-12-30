@@ -59,6 +59,13 @@ from kicad_tools.query import (
     FootprintList,
 )
 
+# Reasoning - LLM-driven PCB layout
+from kicad_tools.reasoning import (
+    PCBReasoningAgent,
+    PCBState,
+    CommandInterpreter,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -83,4 +90,8 @@ __all__ = [
     "SymbolList",
     "FootprintQuery",
     "FootprintList",
+    # Reasoning - LLM-driven PCB layout
+    "PCBReasoningAgent",
+    "PCBState",
+    "CommandInterpreter",
 ]
