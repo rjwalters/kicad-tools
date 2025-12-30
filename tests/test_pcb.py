@@ -330,6 +330,133 @@ class TestFootprintLibrary:
             assert full_name in COMMON_FOOTPRINTS, f"Alias {alias} -> {full_name} not found"
 
 
+class TestZoneParsing:
+    """Tests for zone parsing with full polygon and thermal relief support."""
+
+    def test_zone_count(self, zone_test_pcb):
+        """Test that all zones are parsed."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        assert len(pcb.zones) == 3
+
+    def test_zone_basic_properties(self, zone_test_pcb):
+        """Test basic zone properties are parsed correctly."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        # First zone - GND on F.Cu
+        zone = pcb.zones[0]
+        assert zone.net_number == 1
+        assert zone.net_name == "GND"
+        assert zone.layer == "F.Cu"
+        assert zone.uuid == "zone-uuid-1"
+        assert zone.name == "GND_Zone"
+
+    def test_zone_priority(self, zone_test_pcb):
+        """Test zone priority parsing."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        assert pcb.zones[0].priority == 1
+        assert pcb.zones[1].priority == 0
+        assert pcb.zones[2].priority == 0  # Default
+
+    def test_zone_min_thickness(self, zone_test_pcb):
+        """Test minimum thickness parsing."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        assert pcb.zones[0].min_thickness == 0.15
+        assert pcb.zones[1].min_thickness == 0.2
+
+    def test_zone_clearance(self, zone_test_pcb):
+        """Test clearance parsing from connect_pads."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        assert pcb.zones[0].clearance == 0.25
+        assert pcb.zones[1].clearance == 0.2
+
+    def test_zone_thermal_parameters(self, zone_test_pcb):
+        """Test thermal gap and bridge width parsing."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        # First zone with custom thermal settings
+        assert pcb.zones[0].thermal_gap == 0.4
+        assert pcb.zones[0].thermal_bridge_width == 0.35
+
+        # Second zone with different settings
+        assert pcb.zones[1].thermal_gap == 0.3
+        assert pcb.zones[1].thermal_bridge_width == 0.3
+
+    def test_zone_connect_pads_types(self, zone_test_pcb):
+        """Test different connect_pads settings."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        # First zone - default thermal (only clearance specified)
+        assert pcb.zones[0].connect_pads == "thermal_reliefs"
+
+        # Second zone - solid connection (yes)
+        assert pcb.zones[1].connect_pads == "solid"
+
+        # Third zone - no connection (no)
+        assert pcb.zones[2].connect_pads == "none"
+
+    def test_zone_is_filled(self, zone_test_pcb):
+        """Test fill status parsing."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        assert pcb.zones[0].is_filled is True
+        assert pcb.zones[1].is_filled is False
+        assert pcb.zones[2].is_filled is True
+
+    def test_zone_polygon_parsing(self, zone_test_pcb):
+        """Test boundary polygon parsing."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        # First zone - rectangular
+        polygon = pcb.zones[0].polygon
+        assert len(polygon) == 4
+        assert polygon[0] == (100.0, 100.0)
+        assert polygon[1] == (130.0, 100.0)
+        assert polygon[2] == (130.0, 120.0)
+        assert polygon[3] == (100.0, 120.0)
+
+        # Third zone - hexagonal (6 points)
+        polygon = pcb.zones[2].polygon
+        assert len(polygon) == 6
+        assert polygon[0] == (140.0, 100.0)
+        assert polygon[5] == (140.0, 120.0)
+
+    def test_zone_filled_polygon_parsing(self, zone_test_pcb):
+        """Test filled polygon parsing."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        # First zone has a filled polygon
+        filled = pcb.zones[0].filled_polygons
+        assert len(filled) == 1
+        assert len(filled[0]) == 4
+        assert filled[0][0] == (100.1, 100.1)
+
+        # Second zone has no filled polygons (fill no)
+        assert len(pcb.zones[1].filled_polygons) == 0
+
+    def test_zone_defaults(self, zone_test_pcb):
+        """Test default values for optional zone properties."""
+        doc = load_pcb(str(zone_test_pcb))
+        pcb = PCB(doc)
+
+        # Third zone uses many defaults
+        zone = pcb.zones[2]
+        assert zone.fill_type == "solid"  # Default
+
+
 class TestPCBQueryMethods:
     """Tests for PCB query methods."""
 

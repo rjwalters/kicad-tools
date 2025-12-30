@@ -260,23 +260,58 @@ class Via:
 
 @dataclass
 class Zone:
-    """PCB copper pour zone."""
+    """PCB copper pour zone.
+
+    Represents a copper fill zone with boundary polygon and thermal relief settings.
+    Zones are used for ground planes, power planes, and copper pours.
+    """
 
     net_number: int
     net_name: str
     layer: str
     uuid: str = ""
     name: str = ""
+    # Boundary polygon points (x, y) in mm
+    polygon: List[Tuple[float, float]] = field(default_factory=list)
+    # Filled polygon regions after DRC (may differ from boundary due to clearances)
+    filled_polygons: List[List[Tuple[float, float]]] = field(default_factory=list)
+    # Zone fill priority (higher priority fills later, on top of lower priority)
+    priority: int = 0
+    # Minimum copper thickness in mm
+    min_thickness: float = 0.2
+    # Clearance to pads/traces of other nets in mm
+    clearance: float = 0.2
+    # Thermal relief gap (antipad) in mm
+    thermal_gap: float = 0.3
+    # Thermal relief spoke (bridge) width in mm
+    thermal_bridge_width: float = 0.3
+    # Pad connection type: "thermal_reliefs", "solid", "none"
+    connect_pads: str = "thermal_reliefs"
+    # Fill type: "solid" or "hatch"
+    fill_type: str = "solid"
+    # Whether zone is filled (has copper)
+    is_filled: bool = False
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Zone:
-        """Parse zone from S-expression."""
+        """Parse zone from S-expression.
+
+        Parses KiCad zone definitions including:
+        - Net assignment (net, net_name)
+        - Layer and name
+        - Boundary polygon points
+        - Filled polygon regions (actual copper after DRC)
+        - Thermal relief parameters (gap, bridge width)
+        - Connection type (thermal, solid, none)
+        - Priority and minimum thickness
+        """
         zone = cls(
             net_number=0,
             net_name="",
             layer="",
         )
 
+        # Basic properties
         if net := sexp.find("net"):
             zone.net_number = net.get_int(0) or 0
         if net_name := sexp.find("net_name"):
@@ -288,7 +323,71 @@ class Zone:
         if name := sexp.find("name"):
             zone.name = name.get_string(0) or ""
 
+        # Priority
+        if priority := sexp.find("priority"):
+            zone.priority = priority.get_int(0) or 0
+
+        # Minimum thickness
+        if min_thickness := sexp.find("min_thickness"):
+            zone.min_thickness = min_thickness.get_float(0) or 0.2
+
+        # Connect pads - can be (connect_pads yes) or (connect_pads (clearance X))
+        # or (connect_pads thru_hole_only (clearance X)) etc.
+        if connect_pads := sexp.find("connect_pads"):
+            # Check for connection type keyword
+            first_val = connect_pads.get_string(0)
+            if first_val == "no":
+                zone.connect_pads = "none"
+            elif first_val == "yes":
+                zone.connect_pads = "solid"
+            elif first_val == "thru_hole_only":
+                zone.connect_pads = "thermal_reliefs"
+            else:
+                # Default thermal reliefs if just clearance specified
+                zone.connect_pads = "thermal_reliefs"
+
+            # Extract clearance if present
+            if clearance := connect_pads.find("clearance"):
+                zone.clearance = clearance.get_float(0) or 0.2
+
+        # Fill settings - (fill yes/no (thermal_gap X) (thermal_bridge_width X))
+        if fill := sexp.find("fill"):
+            first_val = fill.get_string(0)
+            zone.is_filled = first_val == "yes"
+
+            if thermal_gap := fill.find("thermal_gap"):
+                zone.thermal_gap = thermal_gap.get_float(0) or 0.3
+            if thermal_bridge := fill.find("thermal_bridge_width"):
+                zone.thermal_bridge_width = thermal_bridge.get_float(0) or 0.3
+            if mode := fill.find("mode"):
+                fill_mode = mode.get_string(0)
+                if fill_mode == "hatch":
+                    zone.fill_type = "hatch"
+
+        # Parse boundary polygon - (polygon (pts (xy X Y) ...))
+        if polygon := sexp.find("polygon"):
+            zone.polygon = cls._parse_polygon_pts(polygon)
+
+        # Parse filled polygons - (filled_polygon (layer X) (pts (xy X Y) ...))
+        for filled_poly in sexp.find_all("filled_polygon"):
+            points = cls._parse_polygon_pts(filled_poly)
+            if points:
+                zone.filled_polygons.append(points)
+
         return zone
+
+    @staticmethod
+    def _parse_polygon_pts(polygon_sexp: SExp) -> List[Tuple[float, float]]:
+        """Parse polygon points from (pts (xy X Y) ...) structure."""
+        points: List[Tuple[float, float]] = []
+
+        if pts := polygon_sexp.find("pts"):
+            for xy in pts.find_all("xy"):
+                x = xy.get_float(0) or 0.0
+                y = xy.get_float(1) or 0.0
+                points.append((x, y))
+
+        return points
 
 
 @dataclass
