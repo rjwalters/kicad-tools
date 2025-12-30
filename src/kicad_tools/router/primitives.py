@@ -13,7 +13,7 @@ This module provides:
 
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .layers import Layer
 
@@ -73,6 +73,9 @@ class GridCell:
     usage_count: int = 0  # How many nets currently use this cell
     history_cost: float = 0.0  # Accumulated congestion from previous iterations
     is_obstacle: bool = False  # True for pads/keepouts (never allow sharing)
+    # Zone fields for copper pour support
+    is_zone: bool = False  # True if cell is part of a copper pour zone
+    zone_id: Optional[str] = None  # UUID of the zone (for multi-zone layers)
 
 
 @dataclass
