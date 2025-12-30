@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple, Union
 
-from ..core.sexp import SExp
+from kicad_tools.sexp import SExp
 from ..core.sexp_file import load_pcb, save_pcb
 
 if TYPE_CHECKING:

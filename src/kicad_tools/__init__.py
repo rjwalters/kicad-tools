@@ -38,7 +38,7 @@ Quick Start::
 __version__ = "0.2.0"
 
 # Core S-expression handling
-from kicad_tools.core.sexp import SExp
+from kicad_tools.sexp import SExp
 from kicad_tools.core.sexp_file import load_pcb, load_schematic, save_pcb, save_schematic
 
 # Schema models

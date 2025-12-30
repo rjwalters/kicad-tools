@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from kicad_tools.core.sexp import parse_sexp
+from kicad_tools.sexp import parse_sexp
 from kicad_tools.schema.schematic import Schematic
 from kicad_tools.schema.wire import Wire
 from kicad_tools.operations.pinmap import (

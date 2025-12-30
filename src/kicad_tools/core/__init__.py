@@ -1,12 +1,13 @@
 """KiCad core utilities for parsing and generating S-expression files."""
 
-from .sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 from .sexp_file import (
     load_pcb,
     load_schematic,
+    load_symbol_lib,
     save_pcb,
     save_schematic,
-    serialize_sexp,
+    save_symbol_lib,
 )
 
 __all__ = [
@@ -17,4 +18,6 @@ __all__ = [
     "save_schematic",
     "load_pcb",
     "save_pcb",
+    "load_symbol_lib",
+    "save_symbol_lib",
 ]

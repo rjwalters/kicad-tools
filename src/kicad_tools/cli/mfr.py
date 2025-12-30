@@ -425,24 +425,23 @@ def _update_zone_clearances(sexp, clearance_mm: float) -> int:
     Returns:
         Number of zones updated
     """
-    from kicad_tools.core.sexp import SExp
+    from kicad_tools.sexp import SExp
 
     zones_updated = 0
 
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "zone":
             # Find or create connect_pads element
-            connect_pads = child.find("connect_pads")
+            connect_pads = child.find_child("connect_pads")
             if connect_pads:
                 # Update existing clearance
-                clearance = connect_pads.find("clearance")
+                clearance = connect_pads.find_child("clearance")
                 if clearance:
                     clearance.set_value(0, clearance_mm)
                 else:
                     # Add clearance element
-                    from kicad_tools.core.sexp import SExp as SExpClass
-                    new_clearance = SExpClass("clearance", [clearance_mm])
-                    connect_pads.values.append(new_clearance)
+                    new_clearance = SExp.list("clearance", clearance_mm)
+                    connect_pads.children.append(new_clearance)
                 zones_updated += 1
 
     return zones_updated
@@ -450,7 +449,7 @@ def _update_zone_clearances(sexp, clearance_mm: float) -> int:
 
 def cmd_validate(args):
     """Validate a PCB design against manufacturer design rules."""
-    from kicad_tools.core.sexp import SExp
+    from kicad_tools.sexp import SExp
     from kicad_tools.core.sexp_file import load_pcb
 
     try:
@@ -517,14 +516,14 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
     Returns:
         List of (violation_type, details) tuples
     """
-    from kicad_tools.core.sexp import SExp
+    from kicad_tools.sexp import SExp
 
     violations = []
 
     # Check trace widths
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "segment":
-            width = child.find("width")
+            width = child.find_child("width")
             if width:
                 trace_width = width.get_float(0) or 0.0
                 if trace_width < rules.min_trace_width_mm:
@@ -536,8 +535,8 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
     # Check via diameters and drills
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "via":
-            size = child.find("size")
-            drill = child.find("drill")
+            size = child.find_child("size")
+            drill = child.find_child("drill")
 
             if size:
                 via_diameter = size.get_float(0) or 0.0
@@ -558,13 +557,13 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
     # Check zone clearances
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "zone":
-            connect_pads = child.find("connect_pads")
+            connect_pads = child.find_child("connect_pads")
             if connect_pads:
-                clearance = connect_pads.find("clearance")
+                clearance = connect_pads.find_child("clearance")
                 if clearance:
                     zone_clearance = clearance.get_float(0) or 0.0
                     if zone_clearance < rules.min_clearance_mm:
-                        net = child.find("net_name")
+                        net = child.find_child("net_name")
                         net_name = net.get_string(0) if net else "unknown"
                         violations.append((
                             "ZONE_CLEARANCE",
@@ -575,13 +574,13 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
     for child in sexp.values:
         if isinstance(child, SExp) and child.tag == "footprint":
             ref = None
-            for fp_text in child.find_all("fp_text"):
+            for fp_text in child.find_children("fp_text"):
                 if fp_text.get_string(0) == "reference":
                     ref = fp_text.get_string(1)
                     break
 
-            for pad in child.find_all("pad"):
-                drill = pad.find("drill")
+            for pad in child.find_children("pad"):
+                drill = pad.find_child("drill")
                 if drill:
                     drill_size = drill.get_float(0) or 0.0
                     if drill_size > 0 and drill_size < rules.min_hole_diameter_mm:

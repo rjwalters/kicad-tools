@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple
 
-from ..core.sexp import SExp
+from kicad_tools.sexp import SExp
 
 
 @dataclass

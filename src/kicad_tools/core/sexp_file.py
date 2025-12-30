@@ -5,7 +5,7 @@ File I/O utilities for KiCad S-expression files.
 from pathlib import Path
 from typing import Union
 
-from .sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 
 def load_schematic(path: Union[str, Path]) -> SExp:

@@ -31,7 +31,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from kicad_tools.core.sexp import SExp
+from kicad_tools.sexp import SExp
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
 
@@ -40,7 +40,7 @@ def find_footprint_sexp(sexp: SExp, reference: str) -> SExp:
     for child in sexp.iter_children():
         if child.tag == "footprint":
             # Look for fp_text with reference
-            for fp_text in child.find_all("fp_text"):
+            for fp_text in child.find_children("fp_text"):
                 if fp_text.get_string(0) == "reference":
                     if fp_text.get_string(1) == reference:
                         return child
@@ -54,7 +54,7 @@ def cmd_move(sexp: SExp, args) -> bool:
         print(f"Error: Footprint '{args.reference}' not found", file=sys.stderr)
         return False
 
-    at = fp.find("at")
+    at = fp.find_child("at")
     if not at:
         print("Error: Footprint has no position", file=sys.stderr)
         return False
@@ -81,7 +81,7 @@ def cmd_rotate(sexp: SExp, args) -> bool:
         print(f"Error: Footprint '{args.reference}' not found", file=sys.stderr)
         return False
 
-    at = fp.find("at")
+    at = fp.find_child("at")
     if not at:
         print("Error: Footprint has no position", file=sys.stderr)
         return False
@@ -113,7 +113,7 @@ def cmd_flip(sexp: SExp, args) -> bool:
         print(f"Error: Footprint '{args.reference}' not found", file=sys.stderr)
         return False
 
-    layer = fp.find("layer")
+    layer = fp.find_child("layer")
     if not layer:
         print("Error: Footprint has no layer", file=sys.stderr)
         return False
@@ -137,8 +137,8 @@ def cmd_flip(sexp: SExp, args) -> bool:
         layer.set_value(0, new_layer)
 
         # Also need to flip layer references in pads
-        for pad in fp.find_all("pad"):
-            layers = pad.find("layers")
+        for pad in fp.find_children("pad"):
+            layers = pad.find_child("layers")
             if layers:
                 for i, val in enumerate(layers.values):
                     if val == "F.Cu":
@@ -165,7 +165,7 @@ def cmd_update_value(sexp: SExp, args) -> bool:
         return False
 
     # Find value fp_text
-    for fp_text in fp.find_all("fp_text"):
+    for fp_text in fp.find_children("fp_text"):
         if fp_text.get_string(0) == "value":
             old_value = fp_text.get_string(1) or ""
 
@@ -200,7 +200,7 @@ def cmd_rename(sexp: SExp, args) -> bool:
 
     if not args.dry_run:
         # Update fp_text reference
-        for fp_text in fp.find_all("fp_text"):
+        for fp_text in fp.find_children("fp_text"):
             if fp_text.get_string(0) == "reference":
                 fp_text.set_value(1, args.new_reference)
                 break
@@ -229,11 +229,11 @@ def cmd_delete_traces(sexp: SExp, args) -> bool:
     for i, child in enumerate(sexp.values):
         if isinstance(child, SExp):
             if child.tag == "segment":
-                if net := child.find("net"):
+                if net := child.find_child("net"):
                     if net.get_int(0) == net_number:
                         segments_to_delete.append(i)
             elif child.tag == "via":
-                if net := child.find("net"):
+                if net := child.find_child("net"):
                     if net.get_int(0) == net_number:
                         vias_to_delete.append(i)
 

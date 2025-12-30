@@ -127,22 +127,32 @@ class SExp:
         """
         Find first descendant matching name and attributes.
 
+        Note: This searches descendants only, not self.
+
         Example:
             doc.find("symbol", lib_id="Audio:PCM5122PW")
         """
-        for node in self.iter_all():
-            if node.name == name:
-                if all(self._match_attr(node, k, v) for k, v in attrs.items()):
-                    return node
+        # Search descendants only (not self)
+        for child in self.children:
+            for node in child.iter_all():
+                if node.name == name:
+                    if all(self._match_attr(node, k, v) for k, v in attrs.items()):
+                        return node
         return None
 
     def find_all(self, name: str, **attrs) -> list[SExp]:
-        """Find all descendants matching name and attributes."""
+        """Find all descendants matching name and attributes.
+
+        Note: This searches descendants only, not self. To include self,
+        use iter_all() directly.
+        """
         results = []
-        for node in self.iter_all():
-            if node.name == name:
-                if all(self._match_attr(node, k, v) for k, v in attrs.items()):
-                    results.append(node)
+        # Search descendants only (not self) - iterate children and their descendants
+        for child in self.children:
+            for node in child.iter_all():
+                if node.name == name:
+                    if all(self._match_attr(node, k, v) for k, v in attrs.items()):
+                        results.append(node)
         return results
 
     def _match_attr(self, node: SExp, attr: str, value: Any) -> bool:
@@ -606,6 +616,136 @@ class SExp:
             return f"SExp(name={self.name!r}, children=[{len(self.children)} items])"
         return f"SExp(children=[{len(self.children)} items])"
 
+    # =========================================================================
+    # Backward compatibility with core/sexp.py API
+    # These properties and methods provide compatibility with the older API
+    # that used 'tag' and 'values' instead of 'name' and 'children'.
+    # =========================================================================
+
+    @property
+    def tag(self) -> Optional[str]:
+        """Alias for 'name' - provides backward compatibility with core/sexp.py."""
+        return self.name
+
+    @property
+    def values(self) -> list:
+        """
+        Return children in the format used by core/sexp.py.
+
+        In the old API, values was a mixed list of primitives (str, int, float)
+        and SExp nodes. This property returns children in that format for
+        backward compatibility.
+        """
+        result = []
+        for child in self.children:
+            if child.is_atom:
+                result.append(child.value)
+            else:
+                result.append(child)
+        return result
+
+    def get_value(self, index: int = 0) -> Optional[Union[str, int, float, "SExp"]]:
+        """Get a value by index (0 = first value after tag).
+
+        For atoms, returns the primitive value. For non-atoms, returns the SExp.
+        Provides backward compatibility with core/sexp.py.
+        """
+        if 0 <= index < len(self.children):
+            child = self.children[index]
+            if child.is_atom:
+                return child.value
+            return child
+        return None
+
+    def get_string(self, index: int = 0) -> Optional[str]:
+        """Get a string value by index."""
+        val = self.get_value(index)
+        return str(val) if val is not None else None
+
+    def get_int(self, index: int = 0) -> Optional[int]:
+        """Get an integer value by index."""
+        val = self.get_value(index)
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str):
+            try:
+                return int(val)
+            except ValueError:
+                return None
+        return None
+
+    def get_float(self, index: int = 0) -> Optional[float]:
+        """Get a float value by index."""
+        val = self.get_value(index)
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                return float(val)
+            except ValueError:
+                return None
+        return None
+
+    def iter_children(self) -> Iterator["SExp"]:
+        """Iterate over child SExp nodes (skipping atoms)."""
+        for child in self.children:
+            if not child.is_atom:
+                yield child
+
+    def has_tag(self, tag: str) -> bool:
+        """Check if any direct child has the given tag/name."""
+        return self.find_child(tag) is not None
+
+    def find_child(self, tag: str) -> Optional["SExp"]:
+        """Find the first direct child with the given tag/name.
+
+        Unlike find(), this only searches direct children, not descendants.
+        Provides backward compatibility with core/sexp.py's find() behavior.
+        """
+        for child in self.children:
+            if child.name == tag:
+                return child
+        return None
+
+    def find_children(self, tag: str) -> list["SExp"]:
+        """Find all direct children with the given tag/name.
+
+        Unlike find_all(), this only searches direct children, not descendants.
+        Provides backward compatibility with core/sexp.py's find_all() behavior.
+        """
+        return [child for child in self.children if child.name == tag]
+
+    def add(self, value: Union["SExp", str, int, float]) -> "SExp":
+        """Add a value and return self for chaining.
+
+        Provides backward compatibility with core/sexp.py's add() method.
+        """
+        if isinstance(value, SExp):
+            self.children.append(value)
+        else:
+            self.children.append(SExp(value=value))
+        return self
+
+    def set_value(self, index: int, value: Union[str, int, float]) -> None:
+        """Set a value at the given index.
+
+        Provides backward compatibility with core/sexp.py's set_value() method.
+        """
+        while len(self.children) <= index:
+            self.children.append(SExp(value=""))
+        self.children[index] = SExp(value=value)
+
+    def remove_child(self, tag: str) -> bool:
+        """Remove the first child with the given tag/name. Returns True if found.
+
+        Provides backward compatibility with core/sexp.py's remove_child() method.
+        """
+        for i, child in enumerate(self.children):
+            if child.name == tag:
+                del self.children[i]
+                return True
+        return False
+
     # Convenience constructors
     @classmethod
     def atom(cls, value: Union[str, int, float]) -> SExp:
@@ -675,10 +815,21 @@ class Parser:
         first = self._parse_expr()
 
         # If first is a simple unquoted atom, treat it as the list name
-        if first.is_atom and isinstance(first.value, str) and SExp._is_valid_name(first.value):
-            node = SExp(name=first.value)
+        # This includes integers (like layer numbers: (0 "F.Cu" signal))
+        if first.is_atom:
+            if isinstance(first.value, str) and SExp._is_valid_name(first.value):
+                # Valid identifier string - use as name
+                node = SExp(name=first.value)
+            elif isinstance(first.value, (int, float)):
+                # Numeric atom - convert to string and use as name
+                # This handles KiCad layer definitions like (0 "F.Cu" signal)
+                node = SExp(name=str(first.value))
+            else:
+                # Quoted string or other atom - make anonymous list
+                node = SExp()
+                node.children.append(first)
         else:
-            # Anonymous list with first element as child
+            # First is a nested list - anonymous list with first as child
             node = SExp()
             node.children.append(first)
 
@@ -763,23 +914,70 @@ class Parser:
 
             if char in " \t\n\r":
                 self.pos += 1
-            elif char == "#":
-                # Skip to end of line
+            elif char in "#;":
+                # Skip to end of line (supports both # and ; style comments)
                 while self.pos < self.length and self.text[self.pos] != "\n":
                     self.pos += 1
             else:
                 break
 
 
-class ParseError(Exception):
-    """Error during S-expression parsing."""
+class ParseError(ValueError):
+    """Error during S-expression parsing.
+
+    Inherits from ValueError for backward compatibility with code that
+    catches ValueError for parse errors.
+    """
 
     pass
+
+
+# Backward compatibility aliases
+SExpParser = Parser
+
+
+class SExpSerializer:
+    """Serializer for S-expressions to KiCad format.
+
+    Provides backward compatibility with core/sexp.py's SExpSerializer class.
+    """
+
+    def __init__(self, indent: str = "  ", newline_threshold: int = 1):
+        """
+        Args:
+            indent: String to use for each indentation level (ignored - uses KiCad format)
+            newline_threshold: Put children on new lines if more than this many (ignored)
+        """
+        self.indent = indent
+        self.newline_threshold = newline_threshold
+
+    def serialize(self, sexp: SExp) -> str:
+        """Serialize an SExp to string."""
+        return sexp.to_string() + "\n"
 
 
 def parse_string(text: str) -> SExp:
     """Parse an S-expression string."""
     return Parser(text).parse()
+
+
+# Backward compatibility alias
+parse_sexp = parse_string
+
+
+def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:
+    """Serialize an SExp tree to text.
+
+    Provides backward compatibility with core/sexp.py's serialize_sexp() function.
+
+    Args:
+        sexp: The SExp tree to serialize
+        indent: String to use for each indentation level (ignored - uses KiCad format)
+
+    Returns:
+        Serialized S-expression string
+    """
+    return sexp.to_string()
 
 
 def parse_file(path: str | Path) -> SExp:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
 
-from ..core.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 
 @dataclass
@@ -111,8 +111,8 @@ def replace_symbol_lib_id(
 
     # Update lib_id
     lib_id_node = symbol.find("lib_id")
-    if lib_id_node and lib_id_node.values:
-        lib_id_node.values[0] = new_lib_id
+    if lib_id_node:
+        lib_id_node.set_value(0, new_lib_id)
         changes.append(f"lib_id: {old_lib_id} → {new_lib_id}")
 
     # Update properties
