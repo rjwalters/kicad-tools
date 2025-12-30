@@ -1967,3 +1967,174 @@ class TestLoadPcbForRouting:
         # Should use default HAT dimensions
         assert router.grid.width == 65.0
         assert router.grid.height == 56.0
+
+
+# =============================================================================
+# Net Class Setup and PCB Merge Tests (Issue #45 - KiCad 7+ Compatibility)
+# =============================================================================
+
+from kicad_tools.router.io import generate_netclass_setup, merge_routes_into_pcb
+
+
+class TestGenerateNetclassSetup:
+    """Tests for generate_netclass_setup function - KiCad 7+ compatibility."""
+
+    def test_empty_returns_empty_string(self):
+        """Test that no net classes returns empty string."""
+        rules = DesignRules()
+        result = generate_netclass_setup(rules)
+        assert result == ""
+
+    def test_none_net_classes_returns_empty(self):
+        """Test that None net_classes returns empty string."""
+        rules = DesignRules()
+        result = generate_netclass_setup(rules, net_classes=None)
+        assert result == ""
+
+    def test_empty_dict_returns_empty(self):
+        """Test that empty dict returns empty string."""
+        rules = DesignRules()
+        result = generate_netclass_setup(rules, net_classes={})
+        assert result == ""
+
+    def test_generates_net_class_assignments(self):
+        """Test that net classes generate proper S-expressions."""
+        rules = DesignRules()
+        net_classes = {
+            "Power": ["+5V", "GND"],
+            "Signal": ["SDA", "SCL"],
+        }
+        result = generate_netclass_setup(rules, net_classes)
+
+        # Should contain net_class assignments
+        assert '(net_class "Power" "+5V")' in result
+        assert '(net_class "Power" "GND")' in result
+        assert '(net_class "Signal" "SDA")' in result
+        assert '(net_class "Signal" "SCL")' in result
+
+    def test_does_not_use_old_format(self):
+        """Test that old KiCad 6 format is not used."""
+        rules = DesignRules()
+        net_classes = {"Power": ["+5V"]}
+        result = generate_netclass_setup(rules, net_classes)
+
+        # Should NOT contain old format
+        assert "(net_settings" not in result
+        assert "Default net class" not in result
+        # Should not have nested net_class with clearance/trace_width
+        assert "clearance" not in result.lower()
+        assert "via_dia" not in result.lower()
+
+
+class TestMergeRoutesIntoPcb:
+    """Tests for merge_routes_into_pcb function."""
+
+    def test_empty_routes_returns_original(self):
+        """Test that empty routes returns original content."""
+        pcb_content = "(kicad_pcb\n  (version 20240108)\n)"
+        result = merge_routes_into_pcb(pcb_content, "")
+        assert result == pcb_content
+
+    def test_inserts_routes_before_closing_paren(self):
+        """Test that routes are inserted before final closing paren."""
+        pcb_content = "(kicad_pcb\n  (version 20240108)\n)"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = merge_routes_into_pcb(pcb_content, route_sexp)
+
+        assert "(segment" in result
+        assert result.endswith(")\n")
+        # Route should be before final paren
+        assert result.index("segment") < result.rfind(")")
+
+    def test_adds_autorouted_comment(self):
+        """Test that autorouted comment is added."""
+        pcb_content = "(kicad_pcb\n)"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = merge_routes_into_pcb(pcb_content, route_sexp)
+
+        assert "; Autorouted traces" in result
+
+    def test_handles_trailing_whitespace(self):
+        """Test handling of trailing whitespace in PCB content."""
+        pcb_content = "(kicad_pcb\n)   \n\n"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = merge_routes_into_pcb(pcb_content, route_sexp)
+
+        assert "(segment" in result
+        assert result.strip().endswith(")")
+
+    def test_preserves_original_content(self):
+        """Test that original PCB content is preserved."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 1 "VCC")
+  (footprint "Package_SO:SOIC-8")
+)"""
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = merge_routes_into_pcb(pcb_content, route_sexp)
+
+        assert 'version 20240108' in result
+        assert 'generator "test"' in result
+        assert 'net 1 "VCC"' in result
+        assert 'Package_SO:SOIC-8' in result
+
+    def test_does_not_add_net_settings(self):
+        """Test that no net_settings block is added (KiCad 7+ compatibility)."""
+        pcb_content = "(kicad_pcb\n)"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = merge_routes_into_pcb(pcb_content, route_sexp)
+
+        # Should NOT contain old net_settings format
+        assert "(net_settings" not in result
+        assert "(net_class" not in result
+
+
+class TestKicad7Compatibility:
+    """Integration tests for KiCad 7+ compatibility (Issue #45)."""
+
+    def test_routed_segments_are_self_contained(self):
+        """Test that segments embed trace width, making net class metadata optional."""
+        seg = Segment(
+            x1=0, y1=0, x2=10, y2=0, width=0.25,
+            layer=Layer.F_CU, net=1
+        )
+        sexp = seg.to_sexp()
+
+        # Width should be embedded in segment
+        assert "(width 0.25)" in sexp
+        # No external net class reference needed
+        assert "(net_class" not in sexp
+
+    def test_routed_vias_are_self_contained(self):
+        """Test that vias embed size and drill, making net class metadata optional."""
+        via = Via(
+            x=10.0, y=20.0, drill=0.3, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=1
+        )
+        sexp = via.to_sexp()
+
+        # Size and drill should be embedded
+        assert "(size 0.6)" in sexp
+        assert "(drill 0.3)" in sexp
+        # No external net class reference needed
+        assert "(net_class" not in sexp
+
+    def test_route_sexp_has_no_net_settings(self):
+        """Test that Route.to_sexp() doesn't generate net_settings."""
+        route = Route(net=1, net_name="VCC")
+        route.segments.append(Segment(0, 0, 10, 0, 0.2, Layer.F_CU, net=1))
+        route.vias.append(Via(10, 0, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net=1))
+
+        sexp = route.to_sexp()
+
+        # Should not contain net_settings (old KiCad 6 format)
+        assert "(net_settings" not in sexp
+        # Should contain segments and vias with embedded parameters
+        assert "(segment" in sexp
+        assert "(via" in sexp
