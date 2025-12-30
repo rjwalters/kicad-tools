@@ -6,10 +6,11 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple, Union
 
 from ..core.sexp import SExp
-from ..core.sexp_file import load_pcb
+from ..core.sexp_file import load_pcb, save_pcb
 
 if TYPE_CHECKING:
     from ..query.footprints import FootprintList
@@ -589,3 +590,83 @@ class PCB:
             "zones": len(self._zones),
             "trace_length_mm": round(self.total_trace_length(), 2),
         }
+
+    # Modification methods
+
+    def update_footprint_position(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: Optional[float] = None,
+    ) -> bool:
+        """
+        Update a footprint's position in the underlying S-expression.
+
+        Args:
+            reference: Reference designator (e.g., "U1")
+            x: New X position in mm
+            y: New Y position in mm
+            rotation: New rotation in degrees (optional)
+
+        Returns:
+            True if footprint was found and updated
+        """
+        # Find the footprint in the parsed data
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        # Update the parsed footprint object
+        old_pos = fp.position
+        fp.position = (x, y)
+        if rotation is not None:
+            fp.rotation = rotation
+
+        # Find and update the footprint in the SExp tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            # Check if this is the right footprint by looking at reference
+            ref_value = None
+
+            # KiCad 7 format: fp_text with type "reference"
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref_value = fp_text.get_string(1)
+                    break
+
+            # KiCad 8+ format: property with name "Reference"
+            if not ref_value:
+                for prop in child.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref_value = prop.get_string(1)
+                        break
+
+            if ref_value != reference:
+                continue
+
+            # Found the footprint, update its 'at' node
+            at_node = child.find("at")
+            if at_node:
+                at_node.set_value(0, x)
+                at_node.set_value(1, y)
+                if rotation is not None:
+                    # Handle cases where rotation may or may not exist
+                    if len(at_node.values) >= 3:
+                        at_node.set_value(2, rotation)
+                    elif rotation != 0.0:
+                        at_node.values.append(rotation)
+            return True
+
+        return False
+
+    def save(self, path: Union[str, Path]) -> None:
+        """
+        Save the PCB to a file.
+
+        Args:
+            path: Path to save to (.kicad_pcb)
+        """
+        save_pcb(self._sexp, path)

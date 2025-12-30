@@ -36,6 +36,7 @@ __all__ = [
     "Polygon",
     "Component",
     "Spring",
+    "Keepout",
     "PlacementConfig",
 ]
 
@@ -125,6 +126,17 @@ class Polygon:
                 Vector2D(x - hw, y + hh),
             ]
         )
+
+    @classmethod
+    def circle(cls, x: float, y: float, radius: float, segments: int = 16) -> "Polygon":
+        """Create a circle approximated as a polygon."""
+        vertices = []
+        for i in range(segments):
+            angle = 2 * math.pi * i / segments
+            vx = x + radius * math.cos(angle)
+            vy = y + radius * math.sin(angle)
+            vertices.append(Vector2D(vx, vy))
+        return cls(vertices=vertices)
 
     @classmethod
     def from_footprint_bounds(
@@ -236,9 +248,9 @@ class Component:
     mass: float = 1.0  # For physics simulation
 
     # Physics state
-    vx: float = 0.0  # Velocity
+    vx: float = 0.0  # Linear velocity
     vy: float = 0.0
-    accumulated_torque: float = 0.0  # Accumulated torque for rotation snapping
+    angular_velocity: float = 0.0  # Angular velocity (deg/step)
 
     # Store original relative pin positions for rotation
     _pin_offsets: List[Tuple[float, float]] = field(default_factory=list, repr=False)
@@ -302,49 +314,54 @@ class Component:
         self.vx += ax * dt
         self.vy += ay * dt
 
-    def add_torque(self, torque: float):
-        """Accumulate torque for rotation snapping."""
+    def apply_torque(self, torque: float, dt: float):
+        """Apply torque to update angular velocity."""
         if self.fixed:
             return
-        self.accumulated_torque += torque
+        # Moment of inertia for rectangle: I = m(w² + h²)/12
+        inertia = self.mass * (self.width**2 + self.height**2) / 12
+        angular_accel = torque / inertia
+        self.angular_velocity += angular_accel * dt
 
-    def snap_rotation(self, threshold: float) -> bool:
+    def compute_rotation_potential_torque(self, stiffness: float) -> float:
         """
-        Snap to next 90° orientation if accumulated torque exceeds threshold.
+        Compute torque from rotation potential with minima at 90° orientations.
 
-        Returns True if rotation snapped.
+        Uses E(θ) = -k * cos(4θ), so τ = -dE/dθ = -4k * sin(4θ)
+        This creates energy wells at 0°, 90°, 180°, 270°.
         """
         if self.fixed:
-            return False
+            return 0.0
+        # Convert to radians and multiply by 4 for 90° periodicity
+        theta_rad = math.radians(self.rotation * 4)
+        # Torque proportional to -sin(4θ), scaled by stiffness
+        # Negative sign makes it a restoring torque toward nearest well
+        return -stiffness * math.sin(theta_rad)
 
-        if self.accumulated_torque > threshold:
-            # Rotate 90° clockwise
-            self.rotation = (self.rotation + 90) % 360
-            self.accumulated_torque = 0.0
-            self.update_pin_positions()
-            return True
-        elif self.accumulated_torque < -threshold:
-            # Rotate 90° counter-clockwise
-            self.rotation = (self.rotation - 90) % 360
-            self.accumulated_torque = 0.0
-            self.update_pin_positions()
-            return True
+    def rotation_potential_energy(self, stiffness: float) -> float:
+        """Compute rotation potential energy (minima at 90° slots)."""
+        theta_rad = math.radians(self.rotation * 4)
+        # E = -k * cos(4θ), shifted so minimum is 0
+        return stiffness * (1 - math.cos(theta_rad))
 
-        return False
-
-    def update_position(self, dt: float):
-        """Update position from velocity."""
+    def update_position(self, dt: float, max_angular_velocity: float = 15.0):
+        """Update position and rotation from velocities."""
         if self.fixed:
             return
         self.x += self.vx * dt
         self.y += self.vy * dt
 
-    def apply_damping(self, damping: float):
+        # Clamp and apply angular velocity
+        if abs(self.angular_velocity) > max_angular_velocity:
+            self.angular_velocity = math.copysign(max_angular_velocity, self.angular_velocity)
+        self.rotation += self.angular_velocity * dt
+        self.rotation = self.rotation % 360
+
+    def apply_damping(self, linear: float, angular: float):
         """Apply velocity damping."""
-        self.vx *= damping
-        self.vy *= damping
-        # Decay accumulated torque slowly
-        self.accumulated_torque *= 0.95
+        self.vx *= linear
+        self.vy *= linear
+        self.angular_velocity *= angular
 
 
 @dataclass
@@ -367,6 +384,20 @@ class Spring:
     rest_length: float = 0.0  # Natural length (usually 0 for nets)
     net: int = 0
     net_name: str = ""
+
+
+@dataclass
+class Keepout:
+    """
+    A keepout zone where components cannot be placed.
+
+    Modeled as a charged polygon that repels all components.
+    Use for mounting holes, board edge clearances, or exclusion zones.
+    """
+
+    outline: Polygon
+    charge_multiplier: float = 10.0  # Higher = stronger repulsion
+    name: str = ""
 
 
 @dataclass
@@ -400,6 +431,10 @@ class PlacementConfig:
     energy_threshold: float = 0.01  # Stop when system energy below this
     velocity_threshold: float = 0.001  # Stop when max velocity below this
 
+    # Grid snapping
+    grid_size: float = 0.0  # Position grid in mm (0 = no snapping)
+    rotation_grid: float = 90.0  # Rotation grid in degrees (90 for cardinal)
+
 
 class PlacementOptimizer:
     """
@@ -429,6 +464,7 @@ class PlacementOptimizer:
         self.config = config or PlacementConfig()
         self.components: List[Component] = []
         self.springs: List[Spring] = []
+        self.keepouts: List[Keepout] = []
         self._component_map: Dict[str, Component] = {}
 
     @classmethod
@@ -436,6 +472,7 @@ class PlacementOptimizer:
         cls,
         pcb: "PCB",  # type: ignore[name-defined]
         config: Optional[PlacementConfig] = None,
+        fixed_refs: Optional[List[str]] = None,
     ) -> "PlacementOptimizer":
         """
         Create optimizer from a loaded PCB.
@@ -443,30 +480,36 @@ class PlacementOptimizer:
         Args:
             pcb: Loaded PCB object
             config: Optimization parameters
+            fixed_refs: List of reference designators for fixed components
+                       (e.g., ["J1", "J2"] for connectors)
         """
-        # Extract board outline (simplified - assumes rectangular)
-        # In practice, would parse Edge.Cuts layer
-        # For now, estimate from component positions
-        min_x = min_y = float("inf")
-        max_x = max_y = float("-inf")
+        fixed_refs = set(fixed_refs or [])
 
-        for fp in pcb.footprints:
-            x, y = fp.position
-            min_x = min(min_x, x - 10)
-            max_x = max(max_x, x + 10)
-            min_y = min(min_y, y - 10)
-            max_y = max(max_y, y + 10)
+        # Try to extract board outline from Edge.Cuts layer
+        board = cls._extract_board_outline(pcb)
 
-        if min_x == float("inf"):
-            # No footprints, use default
-            board = Polygon.rectangle(100, 100, 100, 80)
-        else:
-            board = Polygon.rectangle(
-                (min_x + max_x) / 2,
-                (min_y + max_y) / 2,
-                max_x - min_x,
-                max_y - min_y,
-            )
+        if board is None:
+            # Fall back to estimating from component positions
+            min_x = min_y = float("inf")
+            max_x = max_y = float("-inf")
+
+            for fp in pcb.footprints:
+                x, y = fp.position
+                min_x = min(min_x, x - 10)
+                max_x = max(max_x, x + 10)
+                min_y = min(min_y, y - 10)
+                max_y = max(max_y, y + 10)
+
+            if min_x == float("inf"):
+                # No footprints, use default
+                board = Polygon.rectangle(100, 100, 100, 80)
+            else:
+                board = Polygon.rectangle(
+                    (min_x + max_x) / 2,
+                    (min_y + max_y) / 2,
+                    max_x - min_x,
+                    max_y - min_y,
+                )
 
         optimizer = cls(board, config)
 
@@ -481,6 +524,14 @@ class PlacementOptimizer:
             else:
                 width, height = 2.0, 2.0
 
+            # Mark connectors, mounting holes, etc. as fixed
+            is_fixed = fp.reference in fixed_refs
+            # Auto-detect connectors and mounting holes
+            if not is_fixed:
+                ref_prefix = "".join(c for c in fp.reference if c.isalpha())
+                if ref_prefix in ("J", "H", "MH"):  # Connectors and mounting holes
+                    is_fixed = True
+
             comp = Component(
                 ref=fp.reference,
                 x=fp.position[0],
@@ -488,6 +539,7 @@ class PlacementOptimizer:
                 rotation=fp.rotation,
                 width=max(width, 1.0),
                 height=max(height, 1.0),
+                fixed=is_fixed,
                 pins=[
                     Pin(
                         number=p.number,
@@ -506,6 +558,116 @@ class PlacementOptimizer:
 
         return optimizer
 
+    @staticmethod
+    def _extract_board_outline(pcb: "PCB") -> Optional[Polygon]:  # type: ignore[name-defined]
+        """
+        Extract board outline from Edge.Cuts layer.
+
+        Attempts to find rectangular outline from gr_rect or gr_line elements.
+        Returns None if no outline found.
+        """
+        # Access the raw SExp to find Edge.Cuts graphics
+        sexp = pcb._sexp
+
+        # Look for gr_rect on Edge.Cuts (simple rectangular boards)
+        for child in sexp.iter_children():
+            if child.tag == "gr_rect":
+                layer = child.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    start = child.find("start")
+                    end = child.find("end")
+                    if start and end:
+                        x1 = start.get_float(0) or 0.0
+                        y1 = start.get_float(1) or 0.0
+                        x2 = end.get_float(0) or 0.0
+                        y2 = end.get_float(1) or 0.0
+                        return Polygon(vertices=[
+                            Vector2D(x1, y1),
+                            Vector2D(x2, y1),
+                            Vector2D(x2, y2),
+                            Vector2D(x1, y2),
+                        ])
+
+        # Look for gr_line elements on Edge.Cuts to build outline
+        edge_lines: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        for child in sexp.iter_children():
+            if child.tag == "gr_line":
+                layer = child.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    start = child.find("start")
+                    end = child.find("end")
+                    if start and end:
+                        x1 = start.get_float(0) or 0.0
+                        y1 = start.get_float(1) or 0.0
+                        x2 = end.get_float(0) or 0.0
+                        y2 = end.get_float(1) or 0.0
+                        edge_lines.append(((x1, y1), (x2, y2)))
+
+        if len(edge_lines) >= 4:
+            # Try to chain the lines into a closed polygon
+            vertices = PlacementOptimizer._chain_lines_to_polygon(edge_lines)
+            if vertices:
+                return Polygon(vertices=[Vector2D(x, y) for x, y in vertices])
+
+        return None
+
+    @staticmethod
+    def _chain_lines_to_polygon(
+        lines: List[Tuple[Tuple[float, float], Tuple[float, float]]]
+    ) -> Optional[List[Tuple[float, float]]]:
+        """Chain line segments into a closed polygon."""
+        if not lines:
+            return None
+
+        tolerance = 0.01  # mm tolerance for point matching
+        vertices = []
+        used = [False] * len(lines)
+
+        # Start with first line
+        vertices.append(lines[0][0])
+        current_end = lines[0][1]
+        used[0] = True
+
+        while True:
+            found = False
+            for i, (start, end) in enumerate(lines):
+                if used[i]:
+                    continue
+
+                # Check if this line continues from current_end
+                if abs(start[0] - current_end[0]) < tolerance and abs(start[1] - current_end[1]) < tolerance:
+                    vertices.append(start)
+                    current_end = end
+                    used[i] = True
+                    found = True
+                    break
+                elif abs(end[0] - current_end[0]) < tolerance and abs(end[1] - current_end[1]) < tolerance:
+                    vertices.append(end)
+                    current_end = start
+                    used[i] = True
+                    found = True
+                    break
+
+            if not found:
+                break
+
+        # Check if polygon closes
+        if vertices and abs(vertices[0][0] - current_end[0]) < tolerance and abs(vertices[0][1] - current_end[1]) < tolerance:
+            return vertices
+
+        # Polygon didn't close, return bounding box
+        if lines:
+            all_x = [p[0] for line in lines for p in line]
+            all_y = [p[1] for line in lines for p in line]
+            return [
+                (min(all_x), min(all_y)),
+                (max(all_x), min(all_y)),
+                (max(all_x), max(all_y)),
+                (min(all_x), max(all_y)),
+            ]
+
+        return None
+
     def add_component(self, comp: Component):
         """Add a component to the optimizer."""
         self.components.append(comp)
@@ -514,6 +676,42 @@ class PlacementOptimizer:
     def get_component(self, ref: str) -> Optional[Component]:
         """Get component by reference."""
         return self._component_map.get(ref)
+
+    def add_keepout(
+        self, outline: Polygon, charge_multiplier: float = 10.0, name: str = ""
+    ) -> Keepout:
+        """
+        Add a keepout zone that repels components.
+
+        Args:
+            outline: Polygon defining the keepout area
+            charge_multiplier: Repulsion strength relative to normal edges
+            name: Optional name for the keepout
+
+        Returns:
+            The created Keepout object
+        """
+        keepout = Keepout(outline=outline, charge_multiplier=charge_multiplier, name=name)
+        self.keepouts.append(keepout)
+        return keepout
+
+    def add_keepout_circle(
+        self, x: float, y: float, radius: float, charge_multiplier: float = 10.0, name: str = ""
+    ) -> Keepout:
+        """
+        Add a circular keepout zone (e.g., for mounting holes).
+
+        Args:
+            x, y: Center position
+            radius: Keepout radius in mm
+            charge_multiplier: Repulsion strength
+            name: Optional name
+
+        Returns:
+            The created Keepout object
+        """
+        outline = Polygon.circle(x, y, radius)
+        return self.add_keepout(outline, charge_multiplier, name)
 
     def create_springs_from_nets(self):
         """Create springs connecting all pins on the same net."""
@@ -754,20 +952,21 @@ class PlacementOptimizer:
 
         return total_force
 
-    def compute_forces(self) -> Dict[str, Vector2D]:
+    def compute_forces_and_torques(self) -> Tuple[Dict[str, Vector2D], Dict[str, float]]:
         """
-        Compute net forces on all components.
+        Compute net forces and torques on all components.
+
+        Uses edge-to-edge charge interactions where each component's edges
+        repel all other components' edges.
 
         Returns:
-            Dict mapping component ref to total force vector
+            Tuple of (forces dict, torques dict)
         """
         forces: Dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+        torques: Dict[str, float] = {comp.ref: 0.0 for comp in self.components}
 
-        # 1. Component-component repulsion (outline charges)
+        # 1. Component-component repulsion (edge-to-edge charges)
         for i, comp1 in enumerate(self.components):
-            if comp1.fixed:
-                continue
-
             outline1 = comp1.outline()
             center1 = comp1.position()
 
@@ -776,27 +975,84 @@ class PlacementOptimizer:
                     continue
 
                 outline2 = comp2.outline()
+                center2 = comp2.position()
 
-                # Force on comp1 from comp2's edges
-                for edge_start, edge_end in outline2.edges():
-                    force = self.compute_charge_force(center1, edge_start, edge_end)
-                    forces[comp1.ref] = forces[comp1.ref] + force
+                # For each edge of comp1, compute force from all edges of comp2
+                if not comp1.fixed:
+                    for e1_start, e1_end in outline1.edges():
+                        for e2_start, e2_end in outline2.edges():
+                            force, edge_torque = self.compute_edge_to_edge_force(
+                                e1_start, e1_end, e2_start, e2_end,
+                                num_samples=self.config.edge_samples
+                            )
+                            forces[comp1.ref] = forces[comp1.ref] + force
+                            # Convert edge torque to component torque
+                            edge_center = (e1_start + e1_end) * 0.5
+                            r = edge_center - center1
+                            torques[comp1.ref] += r.cross(force) + edge_torque
 
-                # Force on comp2 from comp1's edges
+                # Symmetric: forces on comp2 from comp1's edges
                 if not comp2.fixed:
-                    center2 = comp2.position()
-                    for edge_start, edge_end in outline1.edges():
-                        force = self.compute_charge_force(center2, edge_start, edge_end)
-                        forces[comp2.ref] = forces[comp2.ref] + force
+                    for e2_start, e2_end in outline2.edges():
+                        for e1_start, e1_end in outline1.edges():
+                            force, edge_torque = self.compute_edge_to_edge_force(
+                                e2_start, e2_end, e1_start, e1_end,
+                                num_samples=self.config.edge_samples
+                            )
+                            forces[comp2.ref] = forces[comp2.ref] + force
+                            edge_center = (e2_start + e2_end) * 0.5
+                            r = edge_center - center2
+                            torques[comp2.ref] += r.cross(force) + edge_torque
 
-        # 2. Board boundary forces
+        # 2. Board boundary forces (edge-to-edge with board)
         for comp in self.components:
             if comp.fixed:
                 continue
-            force = self.compute_boundary_force(comp.position())
-            forces[comp.ref] = forces[comp.ref] + force
+            outline = comp.outline()
+            center = comp.position()
+            inside = self.board_outline.contains_point(center)
+            scale = self.config.boundary_charge / self.config.charge_density
 
-        # 3. Spring forces (net connections)
+            for e_start, e_end in outline.edges():
+                for b_start, b_end in self.board_outline.edges():
+                    force, edge_torque = self.compute_edge_to_edge_force(
+                        e_start, e_end, b_start, b_end,
+                        num_samples=self.config.edge_samples
+                    )
+                    # Board edges repel to keep components inside
+                    if inside:
+                        force = force * scale
+                    else:
+                        # Strong repulsion to push back inside
+                        force = force * (-scale * 10)
+
+                    forces[comp.ref] = forces[comp.ref] + force
+                    edge_center = (e_start + e_end) * 0.5
+                    r = edge_center - center
+                    torques[comp.ref] += r.cross(force) + edge_torque * scale
+
+        # 3. Keepout zone forces
+        for keepout in self.keepouts:
+            for comp in self.components:
+                if comp.fixed:
+                    continue
+                outline = comp.outline()
+                center = comp.position()
+
+                for e_start, e_end in outline.edges():
+                    for k_start, k_end in keepout.outline.edges():
+                        force, edge_torque = self.compute_edge_to_edge_force(
+                            e_start, e_end, k_start, k_end,
+                            num_samples=self.config.edge_samples
+                        )
+                        # Keepouts always repel
+                        force = force * keepout.charge_multiplier
+                        forces[comp.ref] = forces[comp.ref] + force
+                        edge_center = (e_start + e_end) * 0.5
+                        r = edge_center - center
+                        torques[comp.ref] += r.cross(force) + edge_torque * keepout.charge_multiplier
+
+        # 4. Spring forces (net connections)
         for spring in self.springs:
             force1, force2 = self.compute_spring_force(spring)
 
@@ -805,9 +1061,30 @@ class PlacementOptimizer:
 
             if comp1 and not comp1.fixed:
                 forces[comp1.ref] = forces[comp1.ref] + force1
+                # Spring torque from pin position
+                pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+                if pin1:
+                    r = Vector2D(pin1.x, pin1.y) - comp1.position()
+                    torques[comp1.ref] += r.cross(force1)
+
             if comp2 and not comp2.fixed:
                 forces[comp2.ref] = forces[comp2.ref] + force2
+                pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+                if pin2:
+                    r = Vector2D(pin2.x, pin2.y) - comp2.position()
+                    torques[comp2.ref] += r.cross(force2)
 
+        # 4. Rotation potential torque (torsion spring toward 90° slots)
+        for comp in self.components:
+            if not comp.fixed:
+                rot_torque = comp.compute_rotation_potential_torque(self.config.rotation_stiffness)
+                torques[comp.ref] += rot_torque
+
+        return forces, torques
+
+    def compute_forces(self) -> Dict[str, Vector2D]:
+        """Compute net forces on all components (legacy wrapper)."""
+        forces, _ = self.compute_forces_and_torques()
         return forces
 
     def compute_torques(self) -> Dict[str, float]:
@@ -863,14 +1140,25 @@ class PlacementOptimizer:
         """
         Compute total system energy (kinetic + potential).
 
-        Used for convergence checking.
+        Includes:
+        - Linear kinetic energy (1/2 m v²)
+        - Rotational kinetic energy (1/2 I ω²)
+        - Spring potential energy (1/2 k x²)
+        - Rotation potential energy (torsion spring toward 90° slots)
         """
         kinetic = 0.0
         for comp in self.components:
             if not comp.fixed:
+                # Linear kinetic energy
                 kinetic += 0.5 * comp.mass * (comp.vx**2 + comp.vy**2)
+                # Rotational kinetic energy
+                inertia = comp.mass * (comp.width**2 + comp.height**2) / 12
+                omega_rad = math.radians(comp.angular_velocity)
+                kinetic += 0.5 * inertia * omega_rad**2
 
         potential = 0.0
+
+        # Spring potential energy
         for spring in self.springs:
             comp1 = self._component_map.get(spring.comp1_ref)
             comp2 = self._component_map.get(spring.comp2_ref)
@@ -890,20 +1178,12 @@ class PlacementOptimizer:
             extension = distance - spring.rest_length
             potential += 0.5 * spring.stiffness * extension * extension
 
+        # Rotation potential energy (torsion springs toward 90° slots)
+        for comp in self.components:
+            if not comp.fixed:
+                potential += comp.rotation_potential_energy(self.config.rotation_stiffness)
+
         return kinetic + potential
-
-    def _update_pin_positions(self, comp: Component):
-        """Update pin absolute positions after component moves."""
-        # Original pin positions are relative to component center at rotation=0
-        # We need to rotate and translate them
-        cos_r = math.cos(math.radians(comp.rotation))
-        sin_r = math.sin(math.radians(comp.rotation))
-
-        for pin in comp.pins:
-            # Get original relative position (stored when component was added)
-            # For now, assume pins don't move relative to component
-            # This should be improved to track original relative positions
-            pass
 
     def step(self, dt: float):
         """
@@ -912,11 +1192,10 @@ class PlacementOptimizer:
         Args:
             dt: Time step size
         """
-        # Compute forces and torques
-        forces = self.compute_forces()
-        torques = self.compute_torques()
+        # Compute forces and torques together (more efficient)
+        forces, torques = self.compute_forces_and_torques()
 
-        # Update velocities
+        # Update velocities and apply forces/torques
         for comp in self.components:
             if comp.fixed:
                 continue
@@ -927,32 +1206,26 @@ class PlacementOptimizer:
             comp.apply_force(force, dt)
             comp.apply_torque(torque, dt)
 
-            # Clamp velocities
+            # Clamp linear velocity
             speed = math.sqrt(comp.vx**2 + comp.vy**2)
             if speed > self.config.max_velocity:
                 scale = self.config.max_velocity / speed
                 comp.vx *= scale
                 comp.vy *= scale
 
-            if abs(comp.angular_velocity) > self.config.max_angular_velocity:
-                comp.angular_velocity = math.copysign(
-                    self.config.max_angular_velocity, comp.angular_velocity
-                )
-
             # Apply damping
             comp.apply_damping(self.config.damping, self.config.angular_damping)
 
-        # Update positions
+        # Update positions and rotations
         for comp in self.components:
-            old_x, old_y = comp.x, comp.y
+            if comp.fixed:
+                continue
+
+            # Update position and rotation
             comp.update_position(dt)
 
-            # Update pin positions
-            dx = comp.x - old_x
-            dy = comp.y - old_y
-            for pin in comp.pins:
-                pin.x += dx
-                pin.y += dy
+            # Update pin positions based on new position and rotation
+            comp.update_pin_positions()
 
     def run(
         self,
@@ -990,6 +1263,85 @@ class PlacementOptimizer:
                 return i + 1
 
         return iterations
+
+    def snap_rotations_to_90(self):
+        """
+        Force all components to exact 90° orientations.
+
+        Call after optimization to ensure components are at 0°, 90°, 180°, or 270°.
+        """
+        self.snap_rotations(90.0)
+
+    def snap_rotations(self, grid: Optional[float] = None):
+        """
+        Snap all component rotations to nearest grid angle.
+
+        Args:
+            grid: Rotation grid in degrees (default: config.rotation_grid)
+        """
+        grid = grid or self.config.rotation_grid
+        if grid <= 0:
+            return
+
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            # Snap to nearest grid angle
+            slot = round(comp.rotation / grid) * grid % 360
+            comp.rotation = slot
+            comp.angular_velocity = 0.0
+            comp.update_pin_positions()
+
+    def snap_positions(self, grid: Optional[float] = None):
+        """
+        Snap all component positions to nearest grid point.
+
+        Args:
+            grid: Position grid in mm (default: config.grid_size)
+        """
+        grid = grid or self.config.grid_size
+        if grid <= 0:
+            return
+
+        for comp in self.components:
+            if comp.fixed:
+                continue
+            # Snap to nearest grid point
+            comp.x = round(comp.x / grid) * grid
+            comp.y = round(comp.y / grid) * grid
+            comp.vx = 0.0
+            comp.vy = 0.0
+            comp.update_pin_positions()
+
+    def snap_to_grid(self, position_grid: Optional[float] = None, rotation_grid: Optional[float] = None):
+        """
+        Snap all components to position and rotation grids.
+
+        Args:
+            position_grid: Position grid in mm (default: config.grid_size)
+            rotation_grid: Rotation grid in degrees (default: config.rotation_grid)
+        """
+        self.snap_positions(position_grid)
+        self.snap_rotations(rotation_grid)
+
+    def write_to_pcb(self, pcb: "PCB") -> int:  # type: ignore[name-defined]
+        """
+        Write optimized component positions back to a PCB object.
+
+        Updates the footprint positions in the PCB's S-expression tree.
+        After calling this, use pcb.save() to write to a file.
+
+        Args:
+            pcb: PCB object to update
+
+        Returns:
+            Number of components successfully updated
+        """
+        updated = 0
+        for comp in self.components:
+            if pcb.update_footprint_position(comp.ref, comp.x, comp.y, comp.rotation):
+                updated += 1
+        return updated
 
     def total_wire_length(self) -> float:
         """Compute total estimated wire length (spring lengths)."""
