@@ -15,6 +15,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools placement <command>    - Detect and fix placement conflicts
+    kicad-tools optimize-traces <pcb>  - Optimize PCB traces
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -246,6 +247,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
 
+    # OPTIMIZE-TRACES subcommand - Trace optimization
+    optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
+    optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    optimize_parser.add_argument("--net", help="Only optimize traces matching this net pattern")
+    optimize_parser.add_argument("--no-merge", action="store_true", help="Disable collinear merging")
+    optimize_parser.add_argument("--no-zigzag", action="store_true", help="Disable zigzag elimination")
+    optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
+    optimize_parser.add_argument(
+        "--chamfer-size", type=float, default=0.5, help="45-degree chamfer size in mm (default: 0.5)"
+    )
+    optimize_parser.add_argument("-v", "--verbose", action="store_true")
+    optimize_parser.add_argument("--dry-run", action="store_true", help="Show results without writing")
+
     # PARTS subcommand - LCSC parts lookup
     parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
     parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
@@ -420,6 +435,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     elif args.command == "placement":
         return _run_placement_command(args)
+
+    elif args.command == "optimize-traces":
+        return _run_optimize_command(args)
 
     return 0
 
@@ -720,6 +738,30 @@ def _run_placement_command(args) -> int:
         return placement_main(sub_argv) or 0
 
     return 1
+
+
+def _run_optimize_command(args) -> int:
+    """Handle optimize-traces command."""
+    from .optimize_cmd import main as optimize_main
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.net:
+        sub_argv.extend(["--net", args.net])
+    if args.no_merge:
+        sub_argv.append("--no-merge")
+    if args.no_zigzag:
+        sub_argv.append("--no-zigzag")
+    if args.no_45:
+        sub_argv.append("--no-45")
+    if args.chamfer_size != 0.5:
+        sub_argv.extend(["--chamfer-size", str(args.chamfer_size)])
+    if args.verbose:
+        sub_argv.append("--verbose")
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    return optimize_main(sub_argv)
 
 
 def symbols_main() -> int:

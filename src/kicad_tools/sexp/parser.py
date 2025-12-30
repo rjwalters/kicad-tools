@@ -215,7 +215,8 @@ class SExp:
         if not self.name and not self.children:
             return "()"
 
-        tab = "\t"
+        # KiCad uses 2 spaces for indentation
+        tab = "  "
         tabs = tab * indent
 
         # Check if should render inline
@@ -282,7 +283,7 @@ class SExp:
             if child.is_atom:
                 if indent == 0 or started_new_lines:
                     # Already on new lines, continue that way
-                    lines.append(f"{tabs}\t{child.to_string(compact=True)}")
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
                     started_new_lines = True
                 else:
                     # Atoms go on same line as parent opener
@@ -290,11 +291,11 @@ class SExp:
             elif child._should_inline():
                 if indent == 0:
                     # Root level: each child on own line
-                    lines.append(f"{tabs}\t{child.to_string(compact=True)}")
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
                     started_new_lines = True
                 elif force_structured_on_lines or started_new_lines:
                     # Structured nodes get their own lines
-                    lines.append(f"{tabs}\t{child.to_string(compact=True)}")
+                    lines.append(f"{tabs}{tab}{child.to_string(compact=True)}")
                     started_new_lines = True
                 else:
                     # Inline children on same line
@@ -533,6 +534,59 @@ class SExp:
             "signal",
             "power",
             "user",
+            "mixed",
+            "jumper",
+            # Pad types
+            "thru_hole",
+            "smd",
+            "connect",
+            "np_thru_hole",
+            # Pad shapes
+            "rect",
+            "oval",
+            "circle",
+            "roundrect",
+            "trapezoid",
+            "custom",
+            # fp_text types
+            "reference",
+            "value",
+            "user",
+            # Zone connection types
+            "thermal_reliefs",
+            "full",
+            # Zone fill modes
+            "hatch",
+            "hatched",
+            # Via types
+            "blind",
+            "micro",
+            "through",
+            # Arc/curve modes
+            "arc",
+            "start",
+            "mid",
+            "end",
+            # Text effects
+            "italic",
+            "bold",
+            # Module/footprint attributes
+            "smd",
+            "through_hole",
+            "virtual",
+            "exclude_from_pos_files",
+            "exclude_from_bom",
+            "board_only",
+            "dnp",
+            # Net class
+            "clearance",
+            "trace_width",
+            "via_dia",
+            "via_drill",
+            "uvia_dia",
+            "uvia_drill",
+            "diff_pair_width",
+            "diff_pair_gap",
         }
 
         if s in unquoted_keywords:
