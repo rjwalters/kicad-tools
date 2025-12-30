@@ -74,9 +74,9 @@ def main():
     print(f"  Nets loaded: {len(net_map)}")
     print(f"  Nets to route: {len([n for n in router.nets if n > 0])}")
 
-    # Route all nets using negotiated congestion for best results
-    print("\n--- Routing (negotiated congestion) ---")
-    routes = router.route_all_negotiated(max_iterations=10)
+    # Route all nets using standard routing (DRC-safe)
+    print("\n--- Routing (standard mode) ---")
+    routes = router.route_all()
 
     # Get statistics
     stats = router.get_statistics()
@@ -100,7 +100,7 @@ def main():
     # Insert routes before final closing parenthesis
     if route_sexp:
         output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n  ; === AUTOROUTED TRACES ===\n"
+        output_content += "\n"
         output_content += f"  {route_sexp}\n"
         output_content += ")\n"
     else:

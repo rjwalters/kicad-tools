@@ -1,0 +1,56 @@
+** Drc report for charlieplex_3x3_routed.kicad_pcb **
+** Created on 2025-12-29T22:44:50-0800 **
+
+** Found 15 DRC violations **
+[holes_co_located]: Drilled holes co-located
+    Local override; warning
+    @(116.0000 mm, 110.0000 mm): Via [NODE_B] on F.Cu - B.Cu
+    @(116.0000 mm, 110.0000 mm): Via [NODE_B] on F.Cu - B.Cu
+[lib_footprint_mismatch]: Footprint 'DIP-8_W7.62mm' does not match copy in library 'Package_DIP'.
+    Local override; warning
+    @(125.0000 mm, 147.0000 mm): Footprint U1
+[lib_footprint_mismatch]: Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'.
+    Local override; warning
+    @(108.0000 mm, 138.0000 mm): Footprint R1
+[lib_footprint_mismatch]: Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'.
+    Local override; warning
+    @(118.0000 mm, 138.0000 mm): Footprint R2
+[lib_footprint_mismatch]: Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'.
+    Local override; warning
+    @(132.0000 mm, 138.0000 mm): Footprint R3
+[lib_footprint_mismatch]: Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'.
+    Local override; warning
+    @(142.0000 mm, 138.0000 mm): Footprint R4
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(117.0000 mm, 110.0000 mm): Footprint D1
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(125.0000 mm, 110.0000 mm): Footprint D2
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(133.0000 mm, 110.0000 mm): Footprint D3
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(117.0000 mm, 118.0000 mm): Footprint D4
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(125.0000 mm, 118.0000 mm): Footprint D5
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(133.0000 mm, 118.0000 mm): Footprint D6
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(117.0000 mm, 126.0000 mm): Footprint D7
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(125.0000 mm, 126.0000 mm): Footprint D8
+[lib_footprint_mismatch]: Footprint 'LED_0805_2012Metric' does not match copy in library 'LED_SMD'.
+    Local override; warning
+    @(133.0000 mm, 126.0000 mm): Footprint D9
+
+** Found 0 unconnected pads **
+
+** Found 0 Footprint errors **
+
+** End of Report **

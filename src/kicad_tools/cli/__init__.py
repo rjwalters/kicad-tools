@@ -13,6 +13,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools lib <command> <file>   - Symbol library tools
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
+    kicad-tools route <pcb>            - Autoroute a PCB
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -25,6 +26,7 @@ Examples:
     kct mfr compare
     kct parts lookup C123456
     kct parts search "100nF 0402" --in-stock
+    kct route board.kicad_pcb --strategy negotiated
 """
 
 import argparse
@@ -202,6 +204,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     mfr_compare.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
     mfr_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
 
+    # ROUTE subcommand - PCB autorouting
+    route_parser = subparsers.add_parser("route", help="Autoroute a PCB")
+    route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    route_parser.add_argument("-o", "--output", help="Output file path")
+    route_parser.add_argument(
+        "--strategy",
+        choices=["basic", "negotiated", "monte-carlo"],
+        default="negotiated",
+        help="Routing strategy (default: negotiated)",
+    )
+    route_parser.add_argument("--skip-nets", help="Comma-separated nets to skip")
+    route_parser.add_argument("--grid", type=float, default=0.25, help="Grid resolution in mm")
+    route_parser.add_argument("--trace-width", type=float, default=0.2, help="Trace width in mm")
+    route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
+    route_parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm")
+    route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
+    route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")
+    route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
+    route_parser.add_argument("-v", "--verbose", action="store_true")
+    route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
+
     # PARTS subcommand - LCSC parts lookup
     parts_parser = subparsers.add_parser("parts", help="LCSC parts lookup and search")
     parts_subparsers = parts_parser.add_subparsers(dest="parts_command", help="Parts commands")
@@ -325,6 +348,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     elif args.command == "parts":
         return _run_parts_command(args)
+
+    elif args.command == "route":
+        return _run_route_command(args)
 
     return 0
 
@@ -533,6 +559,38 @@ def _run_parts_command(args) -> int:
         return parts_main(sub_argv) or 0
 
     return 1
+
+
+def _run_route_command(args) -> int:
+    """Handle route command."""
+    from .route_cmd import main as route_main
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.strategy != "negotiated":
+        sub_argv.extend(["--strategy", args.strategy])
+    if args.skip_nets:
+        sub_argv.extend(["--skip-nets", args.skip_nets])
+    if args.grid != 0.25:
+        sub_argv.extend(["--grid", str(args.grid)])
+    if args.trace_width != 0.2:
+        sub_argv.extend(["--trace-width", str(args.trace_width)])
+    if args.clearance != 0.15:
+        sub_argv.extend(["--clearance", str(args.clearance)])
+    if args.via_drill != 0.3:
+        sub_argv.extend(["--via-drill", str(args.via_drill)])
+    if args.via_diameter != 0.6:
+        sub_argv.extend(["--via-diameter", str(args.via_diameter)])
+    if args.mc_trials != 10:
+        sub_argv.extend(["--mc-trials", str(args.mc_trials)])
+    if args.iterations != 15:
+        sub_argv.extend(["--iterations", str(args.iterations)])
+    if args.verbose:
+        sub_argv.append("--verbose")
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    return route_main(sub_argv)
 
 
 def symbols_main() -> int:

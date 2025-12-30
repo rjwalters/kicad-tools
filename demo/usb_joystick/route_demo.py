@@ -98,9 +98,9 @@ def main():
             pad_count = len(router.nets.get(net_num, []))
             print(f"    {net_name}: {pad_count} pads")
 
-    # Route all nets using advanced routing with rip-up and retry
-    print("\n--- Routing (negotiated congestion with rip-up) ---")
-    routes = router.route_all_negotiated(max_iterations=15)
+    # Route all nets using standard routing (DRC-safe, no overlaps)
+    print("\n--- Routing (standard mode) ---")
+    routes = router.route_all()
 
     # Get statistics
     stats = router.get_statistics()
@@ -124,7 +124,7 @@ def main():
     # Insert routes before final closing parenthesis
     if route_sexp:
         output_content = original_content.rstrip().rstrip(")")
-        output_content += "\n  ; === AUTOROUTED TRACES ===\n"
+        output_content += "\n"
         output_content += f"  {route_sexp}\n"
         output_content += ")\n"
     else:
