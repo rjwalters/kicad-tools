@@ -2,20 +2,33 @@
 
 import pytest
 
-from kicad_tools.router.primitives import (
-    Point, GridCell, Via, Segment, Route, Pad, Obstacle
-)
-from kicad_tools.router.rules import (
-    DesignRules, NetClassRouting, create_net_class_map,
-    NET_CLASS_POWER, NET_CLASS_CLOCK, NET_CLASS_DEFAULT, DEFAULT_NET_CLASS_MAP
+from kicad_tools.exceptions import RoutingError
+from kicad_tools.router.heuristics import (
+    DEFAULT_HEURISTIC,
+    CongestionAwareHeuristic,
+    DirectionBiasHeuristic,
+    GreedyHeuristic,
+    HeuristicContext,
+    ManhattanHeuristic,
+    WeightedCongestionHeuristic,
 )
 from kicad_tools.router.layers import (
-    Layer, LayerType, LayerDefinition, LayerStack, ViaType, ViaDefinition, ViaRules
+    Layer,
+    LayerDefinition,
+    LayerStack,
+    LayerType,
+    ViaDefinition,
+    ViaRules,
+    ViaType,
 )
-from kicad_tools.router.heuristics import (
-    HeuristicContext, ManhattanHeuristic, DirectionBiasHeuristic,
-    CongestionAwareHeuristic, WeightedCongestionHeuristic, GreedyHeuristic,
-    DEFAULT_HEURISTIC
+from kicad_tools.router.primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
+from kicad_tools.router.rules import (
+    DEFAULT_NET_CLASS_MAP,
+    NET_CLASS_CLOCK,
+    NET_CLASS_POWER,
+    DesignRules,
+    NetClassRouting,
+    create_net_class_map,
 )
 
 
@@ -399,7 +412,7 @@ class TestLayerStack:
     def test_layer_stack_validation(self):
         """Test layer stack validation."""
         # Non-sequential indices should raise
-        with pytest.raises(ValueError, match="sequential"):
+        with pytest.raises(RoutingError, match="Invalid layer stack"):
             LayerStack([
                 LayerDefinition("F.Cu", 0, LayerType.SIGNAL),
                 LayerDefinition("B.Cu", 5, LayerType.SIGNAL),  # Gap in indices
@@ -790,7 +803,7 @@ class TestRoutingGrid:
         rules = DesignRules()
         grid = RoutingGrid(10.0, 10.0, rules)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(RoutingError):
             grid.layer_to_index(999)
 
     def test_index_to_layer_invalid(self):
@@ -798,7 +811,7 @@ class TestRoutingGrid:
         rules = DesignRules()
         grid = RoutingGrid(10.0, 10.0, rules)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(RoutingError):
             grid.index_to_layer(999)
 
     def test_get_routable_indices(self):
@@ -1258,7 +1271,7 @@ class TestAutorouter:
 # RoutingResult Tests
 # =============================================================================
 
-from kicad_tools.router.core import RoutingResult, AdaptiveAutorouter
+from kicad_tools.router.core import AdaptiveAutorouter, RoutingResult
 
 
 class TestRoutingResult:
@@ -1325,7 +1338,7 @@ class TestRoutingResult:
 # Router (Pathfinder) Tests
 # =============================================================================
 
-from kicad_tools.router.pathfinder import Router, AStarNode
+from kicad_tools.router.pathfinder import AStarNode, Router
 
 
 class TestAStarNode:
@@ -1703,7 +1716,7 @@ class TestAdaptiveAutorouter:
 # Router I/O Tests
 # =============================================================================
 
-from kicad_tools.router.io import route_pcb, load_pcb_for_routing
+from kicad_tools.router.io import load_pcb_for_routing, route_pcb
 
 
 class TestRoutePcb:

@@ -14,6 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from kicad_tools.exceptions import (
+    ConfigurationError,
+    ExportError,
+)
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,12 +166,21 @@ class GerberExporter:
         """
         self.pcb_path = Path(pcb_path)
         if not self.pcb_path.exists():
-            raise FileNotFoundError(f"PCB file not found: {pcb_path}")
+            raise KiCadFileNotFoundError(
+                "PCB file not found",
+                context={"file": str(pcb_path)},
+                suggestions=["Check that the file path is correct"],
+            )
 
         self.kicad_cli = find_kicad_cli()
         if not self.kicad_cli:
-            raise RuntimeError(
-                "kicad-cli not found. Please install KiCad 7.0+ or add kicad-cli to PATH."
+            raise ConfigurationError(
+                "kicad-cli not found",
+                context={"searched": ["PATH", "/Applications/KiCad/KiCad.app/Contents/MacOS"]},
+                suggestions=[
+                    "Install KiCad 7.0 or later",
+                    "Add kicad-cli to your PATH",
+                ],
             )
 
     def export(
@@ -225,8 +240,12 @@ class GerberExporter:
         """
         preset = MANUFACTURER_PRESETS.get(manufacturer.lower())
         if preset is None:
-            available = ", ".join(MANUFACTURER_PRESETS.keys())
-            raise ValueError(f"Unknown manufacturer: {manufacturer}. Available: {available}")
+            available = list(MANUFACTURER_PRESETS.keys())
+            raise ConfigurationError(
+                f"Unknown manufacturer: {manufacturer}",
+                context={"manufacturer": manufacturer, "available": available},
+                suggestions=[f"Use one of: {', '.join(available)}"],
+            )
 
         logger.info(f"Exporting Gerbers for {preset.name}")
         return self.export(preset.config, output_dir)
@@ -272,7 +291,11 @@ class GerberExporter:
             logger.debug(f"kicad-cli output: {result.stdout}")
         except subprocess.CalledProcessError as e:
             logger.error(f"kicad-cli failed: {e.stderr}")
-            raise RuntimeError(f"Gerber export failed: {e.stderr}")
+            raise ExportError(
+                "Gerber export failed",
+                context={"pcb": str(self.pcb_path), "error": e.stderr},
+                suggestions=["Check the KiCad log for details"],
+            )
 
     def _export_drill(self, config: GerberConfig, output_dir: Path) -> None:
         """Export drill files using kicad-cli."""
@@ -308,7 +331,11 @@ class GerberExporter:
             logger.debug(f"kicad-cli output: {result.stdout}")
         except subprocess.CalledProcessError as e:
             logger.error(f"kicad-cli failed: {e.stderr}")
-            raise RuntimeError(f"Drill export failed: {e.stderr}")
+            raise ExportError(
+                "Drill export failed",
+                context={"pcb": str(self.pcb_path), "error": e.stderr},
+                suggestions=["Check the KiCad log for details"],
+            )
 
     def _get_default_layers(self, config: GerberConfig) -> List[str]:
         """Get default layers to export based on config."""

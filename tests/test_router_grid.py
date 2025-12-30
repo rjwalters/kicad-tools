@@ -2,10 +2,11 @@
 
 import pytest
 
+from kicad_tools.exceptions import RoutingError
 from kicad_tools.router.grid import RoutingGrid
-from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Obstacle, Pad, Segment, Via, Route
+from kicad_tools.router.primitives import Obstacle, Pad, Route, Segment, Via
+from kicad_tools.router.rules import DesignRules
 
 
 class TestRoutingGridBasic:
@@ -114,7 +115,7 @@ class TestRoutingGridLayers:
 
     def test_layer_to_index_invalid(self, grid):
         """Test invalid layer raises error."""
-        with pytest.raises(ValueError):
+        with pytest.raises(RoutingError):
             grid.layer_to_index(999)
 
     def test_index_to_layer(self, grid):
@@ -124,7 +125,7 @@ class TestRoutingGridLayers:
 
     def test_index_to_layer_invalid(self, grid):
         """Test invalid index raises error."""
-        with pytest.raises(ValueError):
+        with pytest.raises(RoutingError):
             grid.index_to_layer(999)
 
     def test_get_routable_indices(self, grid):
