@@ -40,6 +40,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from kicad_tools import __version__
+
 __all__ = [
     "main",
     "symbols_main",
@@ -58,7 +60,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--version", action="version", version="kicad-tools 0.1.0")
+    parser.add_argument("--version", action="version", version=f"kicad-tools {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

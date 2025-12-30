@@ -21,6 +21,7 @@ class TestCLIMain:
 
     def test_version_flag(self, capsys):
         """Test --version flag."""
+        from kicad_tools import __version__
         from kicad_tools.cli import main
 
         with pytest.raises(SystemExit) as exc_info:
@@ -28,7 +29,7 @@ class TestCLIMain:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert "0.1.0" in captured.out
+        assert __version__ in captured.out
 
     def test_unknown_command(self, capsys):
         """Test unknown command."""
