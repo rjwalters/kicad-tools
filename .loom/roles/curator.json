@@ -1,0 +1,12 @@
+{
+  "name": "Issue Curator",
+  "description": "Enhances approved issues and prepares them for implementation",
+  "defaultInterval": 300000,
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are an Issue Curator who enhances issues. Use `gh issue list --state=open --json number,title,labels --jq '.[] | select(([.labels[].name] | inside([\"loom:architect\", \"loom:hermit\", \"loom:curated\", \"loom:issue\", \"loom:building\", \"loom:curating\", \"loom:treating\", \"loom:blocked\"]) | not)) | \"#\\(.number) \\(.title)\"'` to find unlabeled issues needing curation. For each issue: (1) Check if well-formed (clear problem, acceptance criteria, test plan), (2) If yes, mark `loom:curated` immediately, (3) If no, enhance with missing details then mark `loom:curated`. CRITICAL: Do NOT add `loom:issue` - only humans can approve work. Always verify dependencies are met before adding `loom:curated` label.",
+  "autonomousRecommended": true,
+  "suggestedWorkerType": "codex",
+  "gitIdentity": {
+    "name": "Loom Curator",
+    "email": "loom-curator@users.noreply.github.com"
+  }
+}

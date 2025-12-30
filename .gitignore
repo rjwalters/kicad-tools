@@ -46,3 +46,7 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+.loom/state.json
+.loom/worktrees/
+.loom/*.log
+.loom/*.sock

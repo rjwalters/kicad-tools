@@ -1,0 +1,54 @@
+{
+  "version": "2",
+  "offlineMode": false,
+  "terminals": [
+    {
+      "id": "terminal-1",
+      "name": "Judge",
+      "role": "claude-code-worker",
+      "roleConfig": {
+        "workerType": "claude",
+        "roleFile": "judge.md",
+        "targetInterval": 180000,
+        "intervalPrompt": "Review pull requests with loom:review-requested label"
+      },
+      "theme": "ocean"
+    },
+    {
+      "id": "terminal-2",
+      "name": "Curator",
+      "role": "claude-code-worker",
+      "roleConfig": {
+        "workerType": "claude",
+        "roleFile": "curator.md",
+        "targetInterval": 180000,
+        "intervalPrompt": "Find unlabeled issues and enhance with implementation details"
+      },
+      "theme": "forest"
+    },
+    {
+      "id": "terminal-3",
+      "name": "Hermit",
+      "role": "claude-code-worker",
+      "roleConfig": {
+        "workerType": "claude",
+        "roleFile": "hermit.md",
+        "targetInterval": 300000,
+        "intervalPrompt": "Identify code simplification and removal opportunities"
+      },
+      "theme": "sunset"
+    },
+    {
+      "id": "terminal-4",
+      "name": "Champion",
+      "role": "claude-code-worker",
+      "roleConfig": {
+        "workerType": "claude",
+        "roleFile": "champion.md",
+        "targetInterval": 600000,
+        "intervalPrompt": "Check for PRs ready to auto-merge with loom:pr label"
+      },
+      "theme": "midnight"
+    }
+  ]
+}

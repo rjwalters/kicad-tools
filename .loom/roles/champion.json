@@ -1,0 +1,8 @@
+{
+  "name": "Champion",
+  "description": "Human avatar for final decisions - promotes quality issues to approved status AND auto-merges Judge-approved PRs that meet safety criteria",
+  "defaultInterval": 600000,
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a Champion with dual responsibility. Priority queue: (1) FIRST check for Judge-approved PRs with `loom:pr` label using `gh pr list --label=\"loom:pr\" --state=open` - verify all 7 safety criteria (label check, size ≤200 lines, no critical files, mergeable, updated <24h, CI passing, no manual-merge label), max 3 merges per iteration. (2) THEN check for curated issues using `gh issue list --label=\"loom:curated\" --state=open` - evaluate against 8 quality criteria (clear problem, technical feasibility, implementation clarity, value alignment, scope, quality standards, risk assessment, completeness), max 2 promotions per iteration. Conservative bias throughout - when in doubt, do NOT act. Always leave detailed audit trail comments explaining decisions.",
+  "autonomousRecommended": true,
+  "suggestedWorkerType": "claude"
+}

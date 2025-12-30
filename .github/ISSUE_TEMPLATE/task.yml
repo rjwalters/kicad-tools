@@ -1,0 +1,81 @@
+name: "Development Task"
+description: "Create a development task for Loom"
+labels: ["loom:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Welcome to Loom Issue Tracker**
+
+        **Important**: Loom uses GitHub Issues to control the AI-driven development process. Issues are actionable development tasks, not discussions.
+
+        - **For questions, ideas, or feedback**: Use [GitHub Discussions](https://github.com/rjwalters/loom/discussions)
+        - **For development tasks**: Use this template
+
+        **External contributors**: Your issue will be automatically labeled as `external` and reviewed by maintainers. Our AI agents focus on internal workflow, so external issues require manual triage.
+
+  - type: dropdown
+    id: task_type
+    attributes:
+      label: "Task Type"
+      description: "What type of development task is this?"
+      options:
+        - Bug Fix
+        - Feature
+        - Refactoring
+        - Documentation
+        - Testing
+        - Infrastructure
+        - Research
+        - Improvement
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Task Description"
+      description: "Clear, actionable description of what needs to be done"
+      placeholder: |
+        For bugs:
+        Steps to reproduce:
+        1. Launch Loom
+        2. Select workspace
+        3. Click "Start"
+
+        Expected: Engine starts successfully
+        Actual: Error message appears
+
+        For features/improvements:
+        - What problem does this solve?
+        - How should it work?
+        - Why is this needed?
+        - Acceptance criteria?
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical_notes
+    attributes:
+      label: "Technical Notes"
+      description: "Implementation details, affected files, environment details, dependencies"
+      placeholder: |
+        - Files to modify: src/lib/state.ts
+        - Related issues: #123, #456
+        - Environment: macOS 14.5, Loom 0.1.0
+        - Breaking changes: No
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "Priority (optional)"
+      description: "How urgent is this task?"
+      options:
+        - Low
+        - Medium
+        - High
+        - Critical
+    validations:
+      required: false

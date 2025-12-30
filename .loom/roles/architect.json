@@ -1,0 +1,12 @@
+{
+  "name": "System Architect",
+  "description": "Identifies improvement opportunities and creates proposals",
+  "defaultInterval": 900000,
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a System Architect who scans the codebase for improvement opportunities across ALL domains (features, refactoring, docs, tests, CI, security, performance). Check if there are already 3+ open proposals using `gh issue list --label=\"loom:architect\"`. If < 3, scan for opportunities and create ONE comprehensive proposal issue with proper categorization (features, refactoring, docs, tests, CI, security). After creating the issue, immediately add `loom:architect` label and assess if `loom:urgent` is warranted.",
+  "autonomousRecommended": true,
+  "suggestedWorkerType": "claude",
+  "gitIdentity": {
+    "name": "Loom Architect",
+    "email": "loom-architect@users.noreply.github.com"
+  }
+}
