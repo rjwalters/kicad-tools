@@ -13,12 +13,15 @@ Usage:
     python3 scripts/kicad/mfr.py compare                 # Compare all manufacturers
     python3 scripts/kicad/mfr.py compare --layers 6      # Compare 6-layer rules
     python3 scripts/kicad/mfr.py export-dru jlcpcb       # Export KiCad DRC rules
+    python3 scripts/kicad/mfr.py apply-rules proj.kicad_pro jlcpcb  # Apply rules
+    python3 scripts/kicad/mfr.py validate board.kicad_pcb jlcpcb    # Validate design
 """
 
 import argparse
 import json
 import sys
 from pathlib import Path
+from typing import List, Tuple
 
 from kicad_tools.manufacturers import (
     compare_design_rules,
@@ -299,6 +302,297 @@ def cmd_export_dru(args):
     print(f"DRC rules exported to: {output_path}")
 
 
+def cmd_apply_rules(args):
+    """Apply manufacturer design rules to a KiCad project or PCB file."""
+    from kicad_tools.core.project_file import (
+        apply_manufacturer_rules,
+        load_project,
+        save_project,
+        set_manufacturer_metadata,
+    )
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    rules = profile.get_design_rules(args.layers, args.copper)
+    file_path = Path(args.file)
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n{'=' * 60}")
+    print(f"APPLYING {profile.name.upper()} DESIGN RULES")
+    print(f"{'=' * 60}")
+    print(f"\nFile: {file_path}")
+    print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+
+    print("\nDesign Rules to Apply:")
+    print(f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
+    print(f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
+    print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
+    print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
+    print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
+    print(f"  Copper to edge:    {rules.min_copper_to_edge_mm:.3f} mm")
+
+    if args.dry_run:
+        print("\n(dry run - no changes made)")
+        print(f"\n{'=' * 60}")
+        return
+
+    # Handle project files (.kicad_pro)
+    if file_path.suffix == ".kicad_pro":
+        try:
+            data = load_project(file_path)
+        except Exception as e:
+            print(f"Error loading project: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Apply manufacturer rules
+        apply_manufacturer_rules(
+            data,
+            min_clearance_mm=rules.min_clearance_mm,
+            min_track_width_mm=rules.min_trace_width_mm,
+            min_via_diameter_mm=rules.min_via_diameter_mm,
+            min_via_drill_mm=rules.min_via_drill_mm,
+            min_annular_ring_mm=rules.min_annular_ring_mm,
+            min_hole_diameter_mm=rules.min_hole_diameter_mm,
+            min_copper_to_edge_mm=rules.min_copper_to_edge_mm,
+        )
+
+        # Set manufacturer metadata
+        set_manufacturer_metadata(
+            data,
+            manufacturer_id=profile.id,
+            layers=args.layers,
+            copper_oz=args.copper,
+        )
+
+        # Save
+        output_path = Path(args.output) if args.output else file_path
+        try:
+            save_project(data, output_path)
+            print(f"\nProject file updated: {output_path}")
+        except Exception as e:
+            print(f"Error saving project: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Handle PCB files (.kicad_pcb) - update zone clearances
+    elif file_path.suffix == ".kicad_pcb":
+        try:
+            sexp = load_pcb(file_path)
+        except Exception as e:
+            print(f"Error loading PCB: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        zones_updated = _update_zone_clearances(sexp, rules.min_clearance_mm)
+
+        if zones_updated > 0:
+            print(f"\nUpdated {zones_updated} zone(s) with clearance: {rules.min_clearance_mm:.4f} mm")
+        else:
+            print("\nNo zones found to update.")
+
+        # Save
+        output_path = Path(args.output) if args.output else file_path
+        try:
+            save_pcb(sexp, output_path)
+            print(f"PCB file updated: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    else:
+        print(f"Error: Unsupported file type: {file_path.suffix}", file=sys.stderr)
+        print("Supported: .kicad_pro, .kicad_pcb")
+        sys.exit(1)
+
+    print(f"\n{'=' * 60}")
+    print(f"Manufacturer set to: {profile.name} ({profile.id})")
+    print(f"{'=' * 60}")
+
+
+def _update_zone_clearances(sexp, clearance_mm: float) -> int:
+    """Update zone clearances in a PCB S-expression.
+
+    Args:
+        sexp: PCB S-expression tree
+        clearance_mm: New clearance value in mm
+
+    Returns:
+        Number of zones updated
+    """
+    from kicad_tools.core.sexp import SExp
+
+    zones_updated = 0
+
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "zone":
+            # Find or create connect_pads element
+            connect_pads = child.find("connect_pads")
+            if connect_pads:
+                # Update existing clearance
+                clearance = connect_pads.find("clearance")
+                if clearance:
+                    clearance.set_value(0, clearance_mm)
+                else:
+                    # Add clearance element
+                    from kicad_tools.core.sexp import SExp as SExpClass
+                    new_clearance = SExpClass("clearance", [clearance_mm])
+                    connect_pads.values.append(new_clearance)
+                zones_updated += 1
+
+    return zones_updated
+
+
+def cmd_validate(args):
+    """Validate a PCB design against manufacturer design rules."""
+    from kicad_tools.core.sexp import SExp
+    from kicad_tools.core.sexp_file import load_pcb
+
+    try:
+        profile = get_profile(args.manufacturer)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    rules = profile.get_design_rules(args.layers, args.copper)
+    file_path = Path(args.file)
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if file_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {file_path.suffix}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        sexp = load_pcb(file_path)
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n{'=' * 60}")
+    print(f"VALIDATING AGAINST {profile.name.upper()} RULES")
+    print(f"{'=' * 60}")
+    print(f"\nFile: {file_path}")
+    print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+
+    print("\nDesign Rules:")
+    print(f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
+    print(f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
+    print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
+    print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
+
+    # Run validation checks
+    violations = _validate_pcb_design(sexp, rules)
+
+    print(f"\n{'-' * 60}")
+
+    if violations:
+        print(f"\nVIOLATIONS FOUND: {len(violations)}")
+        print()
+
+        for v_type, v_details in violations:
+            print(f"  [{v_type}] {v_details}")
+
+        print(f"\n{'=' * 60}")
+        sys.exit(1)
+    else:
+        print("\nNo violations found - design meets manufacturer requirements.")
+        print(f"\n{'=' * 60}")
+
+
+def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
+    """Validate PCB design against manufacturer rules.
+
+    Args:
+        sexp: PCB S-expression tree
+        rules: DesignRules from manufacturer profile
+
+    Returns:
+        List of (violation_type, details) tuples
+    """
+    from kicad_tools.core.sexp import SExp
+
+    violations = []
+
+    # Check trace widths
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "segment":
+            width = child.find("width")
+            if width:
+                trace_width = width.get_float(0) or 0.0
+                if trace_width < rules.min_trace_width_mm:
+                    violations.append((
+                        "TRACE_WIDTH",
+                        f"Trace width {trace_width:.4f}mm < min {rules.min_trace_width_mm:.4f}mm"
+                    ))
+
+    # Check via diameters and drills
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "via":
+            size = child.find("size")
+            drill = child.find("drill")
+
+            if size:
+                via_diameter = size.get_float(0) or 0.0
+                if via_diameter < rules.min_via_diameter_mm:
+                    violations.append((
+                        "VIA_DIAMETER",
+                        f"Via diameter {via_diameter:.3f}mm < min {rules.min_via_diameter_mm:.3f}mm"
+                    ))
+
+            if drill:
+                via_drill = drill.get_float(0) or 0.0
+                if via_drill < rules.min_via_drill_mm:
+                    violations.append((
+                        "VIA_DRILL",
+                        f"Via drill {via_drill:.3f}mm < min {rules.min_via_drill_mm:.3f}mm"
+                    ))
+
+    # Check zone clearances
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "zone":
+            connect_pads = child.find("connect_pads")
+            if connect_pads:
+                clearance = connect_pads.find("clearance")
+                if clearance:
+                    zone_clearance = clearance.get_float(0) or 0.0
+                    if zone_clearance < rules.min_clearance_mm:
+                        net = child.find("net_name")
+                        net_name = net.get_string(0) if net else "unknown"
+                        violations.append((
+                            "ZONE_CLEARANCE",
+                            f"Zone '{net_name}' clearance {zone_clearance:.4f}mm < min {rules.min_clearance_mm:.4f}mm"
+                        ))
+
+    # Check pad drill sizes in footprints
+    for child in sexp.values:
+        if isinstance(child, SExp) and child.tag == "footprint":
+            ref = None
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref = fp_text.get_string(1)
+                    break
+
+            for pad in child.find_all("pad"):
+                drill = pad.find("drill")
+                if drill:
+                    drill_size = drill.get_float(0) or 0.0
+                    if drill_size > 0 and drill_size < rules.min_hole_diameter_mm:
+                        violations.append((
+                            "HOLE_SIZE",
+                            f"{ref or 'Unknown'}: Hole {drill_size:.3f}mm < min {rules.min_hole_diameter_mm:.3f}mm"
+                        ))
+
+    return violations
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="PCB Manufacturer Management Tool",
@@ -355,6 +649,34 @@ Examples:
     p_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_dru.add_argument("-o", "--output", type=Path, help="Output path")
     p_dru.set_defaults(func=cmd_export_dru)
+
+    # apply-rules
+    p_apply = subparsers.add_parser(
+        "apply-rules",
+        help="Apply manufacturer design rules to project/PCB",
+        description="Apply manufacturer design rules to a KiCad project (.kicad_pro) "
+        "or update zone clearances in a PCB file (.kicad_pcb).",
+    )
+    p_apply.add_argument("file", help="Path to .kicad_pro or .kicad_pcb file")
+    p_apply.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    p_apply.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_apply.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    p_apply.add_argument("-o", "--output", help="Output file (default: modify in place)")
+    p_apply.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    p_apply.set_defaults(func=cmd_apply_rules)
+
+    # validate
+    p_validate = subparsers.add_parser(
+        "validate",
+        help="Validate PCB against manufacturer rules",
+        description="Check a PCB design against manufacturer design rules. "
+        "Reports violations for trace widths, via sizes, zone clearances, etc.",
+    )
+    p_validate.add_argument("file", help="Path to .kicad_pcb file")
+    p_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    p_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
+    p_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    p_validate.set_defaults(func=cmd_validate)
 
     args = parser.parse_args(argv)
 
