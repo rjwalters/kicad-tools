@@ -4,9 +4,21 @@ PCB file I/O for autorouting.
 This module provides:
 - route_pcb: Route a PCB given component placements and net assignments
 - load_pcb_for_routing: Load a KiCad PCB file and create an Autorouter
+- merge_routes_into_pcb: Merge routed traces into an existing PCB file
+- generate_netclass_setup: Generate KiCad 7+ compatible net class setup
 
 These functions handle the translation between KiCad file formats and
 the autorouter's internal representations.
+
+Note on net class metadata:
+    Generated routes embed trace widths and via sizes directly in their
+    S-expressions, so net class metadata is NOT required for the routing
+    to work correctly. The generate_netclass_setup() function is provided
+    for users who want to add net class definitions for documentation or
+    DRC purposes, using the KiCad 7+ compatible format.
+
+    DO NOT use the old KiCad 6 format with (net_settings (net_class ...))
+    as this is incompatible with KiCad 7+.
 """
 
 import math
@@ -306,3 +318,116 @@ def load_pcb_for_routing(
         router.add_component(comp["ref"], comp["pads"])
 
     return router, net_map
+
+
+def generate_netclass_setup(
+    rules: DesignRules,
+    net_classes: Optional[Dict[str, List[str]]] = None,
+) -> str:
+    """
+    Generate KiCad 7+ compatible net class setup S-expression.
+
+    This function generates net class definitions in the format compatible
+    with KiCad 7.x and 8.x. Note that this is OPTIONAL - routes generated
+    by this library already embed trace widths and via sizes directly in
+    segment and via S-expressions.
+
+    IMPORTANT: Do NOT use the old KiCad 6 format:
+        (net_settings
+          (net_class "Default" "Default net class" ...)
+        )
+
+    This old format causes parsing errors in KiCad 7+:
+        "Error loading PCB '...'. Unexpected 'net_settings' in '...'"
+
+    Args:
+        rules: DesignRules containing trace width, clearance, via parameters
+        net_classes: Optional dict mapping class name to list of net names
+                     e.g., {"Power": ["+5V", "GND"], "Signal": ["SDA", "SCL"]}
+
+    Returns:
+        KiCad 7+ compatible S-expression string for net class setup.
+        Returns empty string if not needed (routes are self-contained).
+
+    Example:
+        >>> rules = DesignRules(trace_width=0.2, via_diameter=0.6, via_drill=0.3)
+        >>> sexp = generate_netclass_setup(rules)
+        >>> # Usually you don't need this - routes are self-contained
+        >>> print("Routes already have correct trace/via sizes embedded")
+    """
+    # Routes already embed trace widths and via sizes in their S-expressions.
+    # Net class setup is only needed for:
+    # 1. DRC checking in KiCad
+    # 2. Documentation purposes
+    # 3. Manual editing after autorouting
+    #
+    # If you do need net class definitions, here's the KiCad 7+ format:
+    #
+    # The net class definitions go in the setup section as part of
+    # design rules, not in a separate net_settings block.
+
+    if not net_classes:
+        # No net classes specified, and routes are self-contained
+        # so no net class setup is needed
+        return ""
+
+    # Generate KiCad 7+ compatible net class assignments
+    # These go in the setup section under design rules
+    parts = []
+    parts.append("  ; Net class definitions (KiCad 7+ format)")
+    parts.append("  ; Note: Routes already have trace/via sizes embedded")
+
+    for class_name, nets in net_classes.items():
+        for net_name in nets:
+            # In KiCad 7+, net-to-class assignments use this format
+            parts.append(f'  (net_class "{class_name}" "{net_name}")')
+
+    return "\n".join(parts)
+
+
+def merge_routes_into_pcb(
+    pcb_content: str,
+    route_sexp: str,
+) -> str:
+    """
+    Merge routed traces into an existing PCB file content.
+
+    This function safely inserts route S-expressions into a PCB file,
+    placing them before the final closing parenthesis. It does NOT
+    add any net_settings or net_class blocks, as routes already have
+    correct trace widths and via sizes embedded.
+
+    Args:
+        pcb_content: Original PCB file content as string
+        route_sexp: Route S-expressions from Autorouter.to_sexp()
+
+    Returns:
+        Modified PCB content with routes inserted.
+
+    Example:
+        >>> original = Path("board.kicad_pcb").read_text()
+        >>> routes = router.to_sexp()
+        >>> merged = merge_routes_into_pcb(original, routes)
+        >>> Path("board_routed.kicad_pcb").write_text(merged)
+
+    Note:
+        Routes contain embedded trace widths and via sizes, so no
+        net class metadata is required. Do NOT add (net_settings ...)
+        blocks with the old KiCad 6 format - this will cause parsing
+        errors in KiCad 7+.
+    """
+    if not route_sexp:
+        return pcb_content
+
+    # Remove trailing whitespace and closing parenthesis
+    content = pcb_content.rstrip()
+    if content.endswith(")"):
+        content = content[:-1].rstrip()
+
+    # Insert routes and close the file
+    result = content + "\n\n"
+    result += "  ; Autorouted traces\n"
+    result += f"  {route_sexp}\n"
+    result += ")\n"
+
+    return result

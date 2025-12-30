@@ -34,7 +34,12 @@ from .heuristics import (
     ManhattanHeuristic,
     WeightedCongestionHeuristic,
 )
-from .io import load_pcb_for_routing, route_pcb
+from .io import (
+    generate_netclass_setup,
+    load_pcb_for_routing,
+    merge_routes_into_pcb,
+    route_pcb,
+)
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
@@ -102,6 +107,8 @@ __all__ = [
     # I/O
     "route_pcb",
     "load_pcb_for_routing",
+    "generate_netclass_setup",
+    "merge_routes_into_pcb",
     # Optimizer
     "TraceOptimizer",
     "OptimizationConfig",
