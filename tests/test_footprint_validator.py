@@ -2,19 +2,19 @@
 
 import pytest
 
-from kicad_tools.footprints.validator import (
-    FootprintValidator,
-    FootprintIssue,
-    IssueType,
-    IssueSeverity,
-    _calculate_pad_gap,
-)
 from kicad_tools.footprints.fixer import (
-    FootprintFixer,
     FootprintFix,
+    FootprintFixer,
     PadAdjustment,
 )
-from kicad_tools.schema.pcb import Pad, Footprint
+from kicad_tools.footprints.validator import (
+    FootprintIssue,
+    FootprintValidator,
+    IssueSeverity,
+    IssueType,
+    _calculate_pad_gap,
+)
+from kicad_tools.schema.pcb import Footprint, Pad
 
 
 class TestPadGapCalculation:
