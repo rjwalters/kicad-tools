@@ -1,5 +1,7 @@
 """Tests for the footprints module."""
 
+import importlib
+import sys
 import warnings
 
 import pytest
@@ -10,14 +12,19 @@ class TestFootprintsImport:
 
     def test_import_emits_warning(self):
         """Test that importing footprints emits a FutureWarning."""
-        # Clear the module from cache if it exists
-        import sys
-        if "kicad_tools.footprints" in sys.modules:
-            del sys.modules["kicad_tools.footprints"]
+        # Clear all footprints-related modules from cache to force reimport
+        modules_to_remove = [
+            key for key in sys.modules.keys()
+            if key.startswith("kicad_tools.footprints")
+        ]
+        for mod in modules_to_remove:
+            del sys.modules[mod]
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            from kicad_tools import footprints  # noqa: F401
+            # Import and reload to ensure warning is triggered
+            import kicad_tools.footprints
+            importlib.reload(kicad_tools.footprints)
             # Check that a FutureWarning was emitted
             future_warnings = [x for x in w if issubclass(x.category, FutureWarning)]
             assert len(future_warnings) >= 1
