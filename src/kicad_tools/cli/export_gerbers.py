@@ -9,8 +9,9 @@ Generates:
 - ZIP archive ready for upload
 
 Usage:
-    python3 scripts/kicad/export-gerbers.py hardware/chorus-hat-reva/kicad/chorus-hat-reva.kicad_pcb
-    python3 scripts/kicad/export-gerbers.py --preview  # Show what would be generated
+    kicad-export-gerbers path/to/design.kicad_pcb
+    kicad-export-gerbers path/to/design.kicad_pcb --preview
+    kicad-export-gerbers path/to/design.kicad_pcb --output-dir ./gerbers
 """
 
 import argparse
@@ -20,8 +21,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from zipfile import ZipFile
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Seeed Fusion layer naming convention
 SEEED_LAYER_NAMES = {
@@ -216,7 +215,7 @@ def generate_fab_notes(output_dir: Path, project_name: str):
     notes = f"""
 ================================================================================
                         FABRICATION NOTES
-                     {project_name} Rev A
+                           {project_name}
                    Generated: {datetime.now().isoformat()}
 ================================================================================
 
@@ -239,13 +238,6 @@ L2 (GND):     Solid ground plane
 L3 (Power):   Power + signal
 L4 (Bottom):  Signal + components
 
-SPECIAL NOTES
--------------
-- This is a Raspberry Pi HAT form factor
-- 40-pin header must align with Pi GPIO
-- Mounting holes per HAT specification
-- Clock distribution traces require impedance control (optional for Rev-A)
-
 FILE INVENTORY
 --------------
 {project_name}.GTL    - Top copper
@@ -261,10 +253,6 @@ FILE INVENTORY
 {project_name}.GKO    - Board outline
 {project_name}.XLN    - Drill file (Excellon)
 positions.csv         - Pick-and-place positions
-
-CONTACT
--------
-See repository for design files and support.
 
 ================================================================================
 """
@@ -303,10 +291,8 @@ def main():
     parser = argparse.ArgumentParser(description="Export Gerbers for Seeed Fusion")
     parser.add_argument(
         "pcb",
-        nargs="?",
         type=Path,
-        default=REPO_ROOT / "hardware/chorus-hat-reva/kicad/chorus-hat-reva.kicad_pcb",
-        help="Path to KiCad PCB file",
+        help="Path to KiCad PCB file (.kicad_pcb)",
     )
     parser.add_argument("--output-dir", "-o", type=Path, help="Output directory")
     parser.add_argument("--preview", action="store_true", help="Preview without exporting")

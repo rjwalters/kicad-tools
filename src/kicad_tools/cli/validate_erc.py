@@ -26,9 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-
 # ERC violation types (from KiCad documentation)
 ERC_TYPES = {
     # Connection errors
@@ -486,20 +483,9 @@ def main():
 
     # Validate schematic path
     if not args.schematic:
-        # Try default paths
-        defaults = [
-            REPO_ROOT / "hardware/chorus-revA/kicad/chorus-revA.kicad_sch",
-            REPO_ROOT / "hardware/chorus-test-revA/kicad/chorus-test-revA.kicad_sch",
-        ]
-        for default in defaults:
-            if default.exists():
-                args.schematic = default
-                break
-
-        if not args.schematic:
-            parser.print_help()
-            print("\nError: No schematic file specified")
-            return 1
+        parser.print_help()
+        print("\nError: No schematic file specified")
+        return 1
 
     if not args.schematic.exists():
         print(f"Error: Schematic not found: {args.schematic}")

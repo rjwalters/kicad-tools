@@ -166,11 +166,10 @@ class RoutingGrid:
 
     def add_pad(self, pad: Pad) -> None:
         """Add a pad as an obstacle (except for its own net)."""
-        # Grid quantization margin
-        grid_margin = self.resolution * 0.71  # sqrt(2)/2
-
-        # Clearance model
-        clearance = grid_margin + self.rules.trace_width / 2 + self.rules.trace_clearance
+        # Clearance model: only trace clearance from pad edge
+        # The trace itself doesn't need additional margin since we're measuring
+        # from pad edge to trace edge, not center to center
+        clearance = self.rules.trace_clearance
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
