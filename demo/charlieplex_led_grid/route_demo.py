@@ -74,9 +74,9 @@ def main():
     print(f"  Nets loaded: {len(net_map)}")
     print(f"  Nets to route: {len([n for n in router.nets if n > 0])}")
 
-    # Route all nets
-    print("\n--- Routing ---")
-    routes = router.route_all()
+    # Route all nets using negotiated congestion for best results
+    print("\n--- Routing (negotiated congestion) ---")
+    routes = router.route_all_negotiated(max_iterations=10)
 
     # Get statistics
     stats = router.get_statistics()

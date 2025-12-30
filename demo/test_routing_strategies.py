@@ -162,10 +162,12 @@ def main():
     )
 
     # Test USB Joystick
+    # NOTE: TQFP-32 has 0.8mm pin pitch, so we need a finer grid (0.1mm)
+    # to route between pins. A coarser grid won't find paths through the dense QFP.
     usb_pcb = demo_dir / "usb_joystick" / "usb_joystick.kicad_pcb"
     usb_rules = DesignRules(
-        grid_resolution=0.25,
-        trace_width=0.25,
+        grid_resolution=0.1,
+        trace_width=0.2,
         trace_clearance=0.15,
     )
     test_demo(

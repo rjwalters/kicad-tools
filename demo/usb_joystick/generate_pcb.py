@@ -137,17 +137,19 @@ def generate_mcu() -> str:
     # Right (pins 17-24): GPIO, power
     # Top (pins 25-32): GPIO, power
 
+    # Pin assignments - USB signals on TOP side (near USB connector)
+    # This makes routing from USB-C to MCU much easier
     pin_nets = {
-        # Left side (bottom to top)
+        # Left side (bottom to top) - Crystal and power
         1: ("GND", 3),
-        2: ("USB_D-", 5),
-        3: ("USB_D+", 4),
+        2: ("XTAL1", 15),
+        3: ("XTAL2", 16),
         4: ("VCC", 2),
-        5: ("XTAL1", 15),
-        6: ("XTAL2", 16),
+        5: ("", 0),  # NC
+        6: ("", 0),  # NC
         7: ("GND", 3),
         8: ("VCC", 2),
-        # Bottom (left to right)
+        # Bottom (left to right) - GPIO
         9: ("JOY_X", 8),
         10: ("JOY_Y", 9),
         11: ("JOY_BTN", 10),
@@ -156,7 +158,7 @@ def generate_mcu() -> str:
         14: ("BTN3", 13),
         15: ("BTN4", 14),
         16: ("GND", 3),
-        # Right side (bottom to top)
+        # Right side (bottom to top) - Power
         17: ("VCC", 2),
         18: ("", 0),  # NC
         19: ("", 0),  # NC
@@ -165,14 +167,14 @@ def generate_mcu() -> str:
         22: ("", 0),  # NC
         23: ("GND", 3),
         24: ("VCC", 2),
-        # Top (right to left)
-        25: ("", 0),  # NC
-        26: ("", 0),  # NC
-        27: ("", 0),  # NC
-        28: ("", 0),  # NC
-        29: ("VBUS", 1),
-        30: ("USB_CC1", 6),
-        31: ("USB_CC2", 7),
+        # Top (right to left) - USB signals (closest to USB connector)
+        25: ("GND", 3),
+        26: ("USB_CC2", 7),
+        27: ("USB_CC1", 6),
+        28: ("USB_D-", 5),
+        29: ("USB_D+", 4),
+        30: ("VBUS", 1),
+        31: ("", 0),  # NC
         32: ("GND", 3),
     }
 
@@ -263,8 +265,8 @@ def generate_usb_connector() -> str:
     for pin, px, net_name in pins:
         net_num = NETS.get(net_name, 0)
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-        # A-side at y=0, B-side at y=0.7
-        py = 0 if pin.startswith("A") else 0.7
+        # A-side at y=0, B-side at y=1.0 (wider spacing for routing)
+        py = 0 if pin.startswith("A") else 1.0
         pads.append(f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.3 1.0) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
 
     # Shield/mounting tabs

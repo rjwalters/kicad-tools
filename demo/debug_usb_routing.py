@@ -35,8 +35,9 @@ def main():
             rules=rules,
         )
 
-        print(f"Grid size: {router.grid.grid_width}x{router.grid.grid_height}")
+        print(f"Grid size: {router.grid.cols}x{router.grid.rows}")
         print(f"Origin: ({router.grid.origin_x}, {router.grid.origin_y})")
+        print(f"Board: {router.grid.width}x{router.grid.height}mm")
 
         # Print component positions
         print("\nComponent pads:")
@@ -70,7 +71,7 @@ def main():
 
             # Check if source/target are blocked
             from kicad_tools.router.layers import Layer
-            layer = Layer.F_CU.value
+            layer = Layer.F_CU
             src_blocked = router.grid.is_blocked(gx1, gy1, layer)
             dst_blocked = router.grid.is_blocked(gx2, gy2, layer)
             print(f"  Source blocked: {src_blocked}")
@@ -78,13 +79,15 @@ def main():
 
             # Check cells around source
             print("\n  Cells around source:")
-            for dx in range(-2, 3):
-                for dy in range(-2, 3):
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
                     nx, ny = gx1 + dx, gy1 + dy
-                    if 0 <= nx < router.grid.grid_width and 0 <= ny < router.grid.grid_height:
+                    if 0 <= nx < router.grid.cols and 0 <= ny < router.grid.rows:
                         blocked = router.grid.is_blocked(nx, ny, layer)
                         c = "X" if blocked else "."
                         print(c, end="")
+                    else:
+                        print("O", end="")  # Out of bounds
                 print()
 
         # Try routing

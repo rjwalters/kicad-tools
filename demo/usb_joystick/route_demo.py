@@ -50,9 +50,12 @@ def main():
     print(f"Output: {output_path}")
 
     # Configure design rules
+    # NOTE: TQFP-32 has 0.8mm pin pitch, so we need a fine grid (0.1mm)
+    # to route between pins. A coarser grid (0.25mm) won't have enough
+    # resolution to find paths through the dense QFP pinout.
     rules = DesignRules(
-        grid_resolution=0.25,  # 0.25mm grid
-        trace_width=0.25,      # 0.25mm traces (10mil)
+        grid_resolution=0.1,   # 0.1mm grid (fine for dense QFP routing)
+        trace_width=0.2,       # 0.2mm traces (8mil)
         trace_clearance=0.15,  # 0.15mm clearance (6mil)
         via_drill=0.3,         # 0.3mm via drill
         via_diameter=0.6,      # 0.6mm via pad
@@ -95,9 +98,9 @@ def main():
             pad_count = len(router.nets.get(net_num, []))
             print(f"    {net_name}: {pad_count} pads")
 
-    # Route all nets
-    print("\n--- Routing ---")
-    routes = router.route_all()
+    # Route all nets using advanced routing with rip-up and retry
+    print("\n--- Routing (negotiated congestion with rip-up) ---")
+    routes = router.route_all_negotiated(max_iterations=15)
 
     # Get statistics
     stats = router.get_statistics()
