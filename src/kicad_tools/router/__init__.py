@@ -23,6 +23,15 @@ Example::
     print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 """
 
+from .bus import (
+    BusGroup,
+    BusRoutingConfig,
+    BusRoutingMode,
+    BusSignal,
+    analyze_buses,
+    detect_bus_signals,
+    group_buses,
+)
 from .core import AdaptiveAutorouter, Autorouter, RoutingResult
 from .grid import RoutingGrid
 from .heuristics import (
@@ -63,6 +72,14 @@ __all__ = [
     "Autorouter",
     "AdaptiveAutorouter",
     "RoutingResult",
+    # Bus routing
+    "BusGroup",
+    "BusRoutingConfig",
+    "BusRoutingMode",
+    "BusSignal",
+    "analyze_buses",
+    "detect_bus_signals",
+    "group_buses",
     # Grid
     "RoutingGrid",
     # Pathfinding

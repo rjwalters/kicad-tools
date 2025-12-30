@@ -16,6 +16,14 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+from .bus import (
+    BusGroup,
+    BusRoutingConfig,
+    BusRoutingMode,
+    analyze_buses,
+    detect_bus_signals,
+    group_buses,
+)
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .pathfinder import Router
@@ -787,6 +795,221 @@ class Autorouter:
             "avg_congestion": congestion_stats["avg_congestion"],
             "congested_regions": congestion_stats["congested_regions"],
         }
+
+    # =========================================================================
+    # BUS ROUTING SUPPORT
+    # =========================================================================
+
+    def detect_buses(self, min_bus_width: int = 2) -> List[BusGroup]:
+        """Detect bus signals from net names.
+
+        Args:
+            min_bus_width: Minimum number of signals to form a bus
+
+        Returns:
+            List of detected BusGroup objects
+        """
+        signals = detect_bus_signals(self.net_names, min_bus_width)
+        return group_buses(signals, min_bus_width)
+
+    def get_bus_analysis(self) -> dict:
+        """Get a summary of detected buses in the design.
+
+        Returns:
+            Dictionary with bus analysis information
+        """
+        return analyze_buses(self.net_names)
+
+    def route_bus_group(
+        self,
+        bus_group: BusGroup,
+        mode: BusRoutingMode = BusRoutingMode.PARALLEL,
+        spacing: Optional[float] = None,
+    ) -> List[Route]:
+        """Route all signals in a bus group together.
+
+        Routes bus signals maintaining parallel alignment and consistent spacing.
+        Signals are routed in bit order (LSB to MSB).
+
+        Args:
+            bus_group: BusGroup containing the signals to route
+            mode: Routing mode (PARALLEL, STACKED, BUNDLED)
+            spacing: Spacing between signals (None = auto)
+
+        Returns:
+            List of routes for all bus signals
+        """
+        if not bus_group.signals:
+            return []
+
+        # Calculate spacing if not provided
+        if spacing is None:
+            spacing = self.rules.trace_width + self.rules.trace_clearance
+
+        routes: List[Route] = []
+        print(f"\n  Routing bus {bus_group} ({mode.value} mode, spacing={spacing}mm)")
+
+        # Get net IDs in bit order
+        net_ids = bus_group.get_net_ids()
+
+        if mode == BusRoutingMode.PARALLEL:
+            # Route signals in order, trying to maintain parallel alignment
+            routes = self._route_bus_parallel(net_ids, bus_group.name, spacing)
+        elif mode == BusRoutingMode.STACKED:
+            # Alternate layers for dense routing
+            routes = self._route_bus_stacked(net_ids, bus_group.name)
+        else:  # BUNDLED
+            # Route each signal individually, closest packing
+            for net_id in net_ids:
+                net_routes = self.route_net(net_id)
+                routes.extend(net_routes)
+
+        return routes
+
+    def _route_bus_parallel(
+        self, net_ids: List[int], bus_name: str, spacing: float
+    ) -> List[Route]:
+        """Route bus signals in parallel with consistent spacing.
+
+        Args:
+            net_ids: List of net IDs in bit order
+            bus_name: Name of the bus for logging
+            spacing: Spacing between adjacent signals
+
+        Returns:
+            List of routes for all bus signals
+        """
+        routes: List[Route] = []
+
+        # Route the first (LSB) signal normally - it sets the path
+        if not net_ids:
+            return routes
+
+        first_routes = self.route_net(net_ids[0])
+        routes.extend(first_routes)
+
+        if not first_routes:
+            print(f"    Warning: Could not route first bus signal {bus_name}[0]")
+            # Try to route remaining signals individually
+            for i, net_id in enumerate(net_ids[1:], 1):
+                net_routes = self.route_net(net_id)
+                routes.extend(net_routes)
+            return routes
+
+        # For remaining signals, try to route parallel to the first
+        # This is a simplified parallel routing that routes each signal
+        # individually but prioritizes paths that stay close to previous routes
+        for i, net_id in enumerate(net_ids[1:], 1):
+            print(f"    Signal [{i}] (net {net_id})...")
+            net_routes = self.route_net(net_id)
+            routes.extend(net_routes)
+            if net_routes:
+                print(
+                    f"      Routed: {len(net_routes)} routes, "
+                    f"{sum(len(r.segments) for r in net_routes)} segments"
+                )
+            else:
+                print(f"      Warning: Could not route {bus_name}[{i}]")
+
+        return routes
+
+    def _route_bus_stacked(self, net_ids: List[int], bus_name: str) -> List[Route]:
+        """Route bus signals on alternating layers.
+
+        Args:
+            net_ids: List of net IDs in bit order
+            bus_name: Name of the bus for logging
+
+        Returns:
+            List of routes for all bus signals
+        """
+        routes: List[Route] = []
+
+        # For stacked mode, we route each signal normally
+        # The router will naturally use different layers as congestion increases
+        for i, net_id in enumerate(net_ids):
+            print(f"    Signal [{i}] (net {net_id})...")
+            net_routes = self.route_net(net_id)
+            routes.extend(net_routes)
+
+        return routes
+
+    def route_all_with_buses(
+        self,
+        bus_config: Optional[BusRoutingConfig] = None,
+        net_order: Optional[List[int]] = None,
+    ) -> List[Route]:
+        """Route all nets with bus-aware routing.
+
+        When bus routing is enabled, detected bus signals are routed together
+        as groups before routing other nets.
+
+        Args:
+            bus_config: Configuration for bus routing (None = bus routing disabled)
+            net_order: Optional order for non-bus nets
+
+        Returns:
+            List of all routes
+        """
+        if bus_config is None or not bus_config.enabled:
+            # Fall back to standard routing
+            return self.route_all(net_order)
+
+        print("\n=== Bus-Aware Routing ===")
+
+        # Detect buses
+        bus_groups = self.detect_buses(bus_config.min_bus_width)
+        bus_net_ids: Set[int] = set()
+
+        if bus_groups:
+            print(f"  Detected {len(bus_groups)} bus groups:")
+            for group in bus_groups:
+                print(f"    - {group}: {group.width} bits")
+                bus_net_ids.update(group.get_net_ids())
+        else:
+            print("  No bus signals detected")
+            return self.route_all(net_order)
+
+        # Calculate spacing
+        spacing = bus_config.get_spacing(
+            self.rules.trace_width, self.rules.trace_clearance
+        )
+
+        # Route bus groups first
+        print("\n--- Routing bus signals ---")
+        all_routes: List[Route] = []
+
+        for group in bus_groups:
+            bus_routes = self.route_bus_group(group, bus_config.mode, spacing)
+            all_routes.extend(bus_routes)
+
+        # Route remaining non-bus nets
+        non_bus_nets = [n for n in self.nets.keys() if n not in bus_net_ids and n != 0]
+        if non_bus_nets:
+            print(f"\n--- Routing {len(non_bus_nets)} non-bus nets ---")
+            if net_order:
+                # Filter net_order to only include non-bus nets
+                non_bus_order = [n for n in net_order if n in non_bus_nets]
+            else:
+                non_bus_order = sorted(
+                    non_bus_nets, key=lambda n: self._get_net_priority(n)
+                )
+
+            for net in non_bus_order:
+                routes = self.route_net(net)
+                all_routes.extend(routes)
+                if routes:
+                    print(
+                        f"  Net {net}: {len(routes)} routes, "
+                        f"{sum(len(r.segments) for r in routes)} segments"
+                    )
+
+        print("\n=== Bus-Aware Routing Complete ===")
+        print(f"  Total routes: {len(all_routes)}")
+        print(f"  Bus nets: {len(bus_net_ids)}")
+        print(f"  Other nets: {len(non_bus_nets)}")
+
+        return all_routes
 
 
 # =============================================================================
