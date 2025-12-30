@@ -5,7 +5,10 @@ This module provides:
 - RoutingGrid: 3D grid for routing with obstacle tracking and congestion awareness
 """
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import Zone
 
 from kicad_tools.exceptions import RoutingError
 
@@ -570,3 +573,84 @@ class RoutingGrid:
                     if usage > 1:
                         overflow += usage - 1
         return overflow
+
+    # =========================================================================
+    # ZONE (COPPER POUR) SUPPORT
+    # =========================================================================
+
+    def add_zone_cells(
+        self,
+        zone: "Zone",
+        filled_cells: Set[Tuple[int, int]],
+        layer_index: int,
+    ) -> None:
+        """Mark grid cells as belonging to a zone.
+
+        Args:
+            zone: Zone definition (for net and uuid)
+            filled_cells: Set of (gx, gy) grid coordinates to mark
+            layer_index: Grid layer index
+        """
+        from kicad_tools.schema.pcb import Zone as ZoneType  # noqa: F401
+
+        for gx, gy in filled_cells:
+            if 0 <= gx < self.cols and 0 <= gy < self.rows:
+                cell = self.grid[layer_index][gy][gx]
+                cell.is_zone = True
+                cell.zone_id = zone.uuid
+                cell.net = zone.net_number
+                # Zone copper is not an obstacle - routes can pass through same-net zones
+
+    def clear_zones(self, layer_index: Optional[int] = None) -> None:
+        """Remove all zone markings from the grid.
+
+        Args:
+            layer_index: If specified, only clear this layer. Otherwise clear all.
+        """
+        layers_to_clear = [layer_index] if layer_index is not None else range(self.num_layers)
+
+        for layer_idx in layers_to_clear:
+            for gy in range(self.rows):
+                for gx in range(self.cols):
+                    cell = self.grid[layer_idx][gy][gx]
+                    if cell.is_zone:
+                        cell.is_zone = False
+                        cell.zone_id = None
+                        # Only clear net if it was set by zone (not by a pad)
+                        if not cell.is_obstacle and not cell.blocked:
+                            cell.net = 0
+
+    def get_zone_cells(self, layer_index: int, zone_id: Optional[str] = None) -> Set[Tuple[int, int]]:
+        """Get all cells belonging to zones on a layer.
+
+        Args:
+            layer_index: Grid layer index
+            zone_id: If specified, only return cells for this zone
+
+        Returns:
+            Set of (gx, gy) coordinates
+        """
+        cells: Set[Tuple[int, int]] = set()
+
+        for gy in range(self.rows):
+            for gx in range(self.cols):
+                cell = self.grid[layer_index][gy][gx]
+                if cell.is_zone:
+                    if zone_id is None or cell.zone_id == zone_id:
+                        cells.add((gx, gy))
+
+        return cells
+
+    def is_zone_cell(self, gx: int, gy: int, layer_index: int) -> bool:
+        """Check if a cell is part of a zone.
+
+        Args:
+            gx, gy: Grid coordinates
+            layer_index: Grid layer index
+
+        Returns:
+            True if cell is marked as zone copper
+        """
+        if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+            return False
+        return self.grid[layer_index][gy][gx].is_zone
