@@ -11,8 +11,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.exceptions import ValidationError
+
 from .bom_formats import BOMExportConfig, export_bom
-from .gerber import GerberConfig, GerberExporter, MANUFACTURER_PRESETS
+from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import PnPExportConfig, export_pnp
 
 logger = logging.getLogger(__name__)
@@ -125,7 +128,11 @@ class AssemblyPackage:
         """
         self.pcb_path = Path(pcb_path)
         if not self.pcb_path.exists():
-            raise FileNotFoundError(f"PCB file not found: {pcb_path}")
+            raise KiCadFileNotFoundError(
+                "PCB file not found",
+                context={"file": str(pcb_path)},
+                suggestions=["Check that the file path is correct"],
+            )
 
         # Find schematic
         if schematic_path:
@@ -211,7 +218,11 @@ class AssemblyPackage:
     def _generate_bom(self, output_dir: Path) -> Path:
         """Generate BOM file."""
         if not self.schematic_path:
-            raise ValueError("Schematic path required for BOM generation")
+            raise ValidationError(
+                ["Schematic path required for BOM generation"],
+                context={"pcb": str(self.pcb_path)},
+                suggestions=["Provide a schematic file path when creating the AssemblyPackage"],
+            )
 
         # Import here to avoid circular imports
         from ..schema.bom import extract_bom
@@ -276,7 +287,6 @@ class AssemblyPackage:
 
     def _filter_references(self, items: list) -> list:
         """Filter items by excluded reference patterns."""
-        import fnmatch
         result = []
         for item in items:
             if not self._is_excluded(item.reference):

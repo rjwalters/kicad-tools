@@ -38,9 +38,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = [
-    "numpy>=1.20",
-]
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/rjwalters/kicad-tools"

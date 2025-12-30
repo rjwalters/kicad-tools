@@ -37,10 +37,12 @@ Examples:
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 from typing import List, Optional
 
 from kicad_tools import __version__
+from kicad_tools.exceptions import KiCadToolsError
 
 __all__ = [
     "main",
@@ -49,7 +51,29 @@ __all__ = [
     "erc_main",
     "drc_main",
     "bom_main",
+    "format_error",
 ]
+
+
+def format_error(e: Exception, verbose: bool = False) -> str:
+    """
+    Format an exception for user-friendly display.
+
+    Args:
+        e: The exception to format
+        verbose: If True, include full stack trace
+
+    Returns:
+        Formatted error message string
+    """
+    if verbose:
+        return traceback.format_exc()
+
+    if isinstance(e, KiCadToolsError):
+        return f"Error: {e}"
+
+    # For other exceptions, show type and message
+    return f"Error: {type(e).__name__}: {e}"
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -61,6 +85,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         epilog=__doc__,
     )
     parser.add_argument("--version", action="version", version=f"kicad-tools {__version__}")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show full stack traces on errors",
+        dest="global_verbose",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -397,6 +427,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
+    # Get global verbose flag (use getattr for backwards compatibility)
+    verbose = getattr(args, "global_verbose", False)
+
+    try:
+        return _dispatch_command(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted", file=sys.stderr)
+        return 130
+    except KiCadToolsError as e:
+        print(format_error(e, verbose), file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(format_error(e, verbose), file=sys.stderr)
+        return 1
+
+
+def _dispatch_command(args) -> int:
+    """Dispatch to the appropriate command handler."""
     if args.command == "symbols":
         from .symbols import main as symbols_cmd
 

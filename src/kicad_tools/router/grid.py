@@ -7,6 +7,8 @@ This module provides:
 
 from typing import Dict, List, Optional, Set, Tuple
 
+from kicad_tools.exceptions import RoutingError
+
 from .layers import Layer, LayerStack
 from .primitives import GridCell, Obstacle, Pad, Route, Segment, Via
 from .rules import DesignRules
@@ -76,13 +78,19 @@ class RoutingGrid:
         """Map Layer enum value to grid index."""
         if layer_enum_value in self._layer_to_index:
             return self._layer_to_index[layer_enum_value]
-        raise ValueError(f"Layer value {layer_enum_value} not in stack")
+        raise RoutingError(
+            "Layer value not in stack",
+            context={"layer_value": layer_enum_value, "available": list(self._layer_to_index.keys())},
+        )
 
     def index_to_layer(self, index: int) -> int:
         """Map grid index to Layer enum value."""
         if index in self._index_to_layer:
             return self._index_to_layer[index]
-        raise ValueError(f"Grid index {index} not in stack")
+        raise RoutingError(
+            "Grid index not in stack",
+            context={"index": index, "available": list(self._index_to_layer.keys())},
+        )
 
     def get_routable_indices(self) -> List[int]:
         """Get grid indices of routable signal layers."""

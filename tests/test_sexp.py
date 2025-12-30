@@ -1,13 +1,20 @@
 """Tests for S-expression parser and file I/O."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from kicad_tools.sexp import SExp, parse_sexp, SExpParser, SExpSerializer, serialize_sexp
 from kicad_tools.core.sexp_file import (
-    load_schematic, save_schematic,
-    load_pcb, save_pcb, load_symbol_lib, save_symbol_lib
+    load_pcb,
+    load_schematic,
+    load_symbol_lib,
+    save_pcb,
+    save_schematic,
+    save_symbol_lib,
 )
+from kicad_tools.exceptions import FileFormatError
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 
 
 class TestSExpBasicParsing:
@@ -309,14 +316,14 @@ class TestSExpFileIO:
 
     def test_load_schematic_not_found(self, tmp_path: Path):
         """Error on file not found."""
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(KiCadFileNotFoundError):
             load_schematic(tmp_path / "nonexistent.kicad_sch")
 
     def test_load_schematic_invalid(self, tmp_path: Path):
         """Error on invalid schematic."""
         bad_file = tmp_path / "bad.kicad_sch"
         bad_file.write_text("(not_a_schematic)")
-        with pytest.raises(ValueError, match="Not a KiCad schematic"):
+        with pytest.raises(FileFormatError, match="Not a KiCad schematic"):
             load_schematic(bad_file)
 
     def test_save_schematic(self, minimal_schematic: Path, tmp_path: Path):
@@ -332,7 +339,7 @@ class TestSExpFileIO:
     def test_save_schematic_invalid(self, tmp_path: Path):
         """Error on saving non-schematic."""
         sexp = SExp("not_kicad_sch")
-        with pytest.raises(ValueError):
+        with pytest.raises(FileFormatError):
             save_schematic(sexp, tmp_path / "bad.kicad_sch")
 
     def test_load_pcb(self, minimal_pcb: Path):
@@ -342,14 +349,14 @@ class TestSExpFileIO:
 
     def test_load_pcb_not_found(self, tmp_path: Path):
         """Error on PCB file not found."""
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(KiCadFileNotFoundError):
             load_pcb(tmp_path / "nonexistent.kicad_pcb")
 
     def test_load_pcb_invalid(self, tmp_path: Path):
         """Error on invalid PCB."""
         bad_file = tmp_path / "bad.kicad_pcb"
         bad_file.write_text("(not_a_pcb)")
-        with pytest.raises(ValueError, match="Not a KiCad PCB"):
+        with pytest.raises(FileFormatError, match="Not a KiCad PCB"):
             load_pcb(bad_file)
 
     def test_save_pcb(self, minimal_pcb: Path, tmp_path: Path):
@@ -362,7 +369,7 @@ class TestSExpFileIO:
     def test_save_pcb_invalid(self, tmp_path: Path):
         """Error on saving non-PCB."""
         sexp = SExp("not_kicad_pcb")
-        with pytest.raises(ValueError):
+        with pytest.raises(FileFormatError):
             save_pcb(sexp, tmp_path / "bad.kicad_pcb")
 
     def test_load_symbol_lib(self, tmp_path: Path):
@@ -377,14 +384,14 @@ class TestSExpFileIO:
 
     def test_load_symbol_lib_not_found(self, tmp_path: Path):
         """Error on symbol lib not found."""
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(KiCadFileNotFoundError):
             load_symbol_lib(tmp_path / "nonexistent.kicad_sym")
 
     def test_load_symbol_lib_invalid(self, tmp_path: Path):
         """Error on invalid symbol library."""
         bad_file = tmp_path / "bad.kicad_sym"
         bad_file.write_text("(not_a_symbol_lib)")
-        with pytest.raises(ValueError, match="Not a KiCad symbol library"):
+        with pytest.raises(FileFormatError, match="Not a KiCad symbol library"):
             load_symbol_lib(bad_file)
 
     def test_save_symbol_lib(self, tmp_path: Path):
@@ -398,5 +405,5 @@ class TestSExpFileIO:
     def test_save_symbol_lib_invalid(self, tmp_path: Path):
         """Error on saving non-symbol library."""
         sexp = SExp("not_kicad_symbol_lib")
-        with pytest.raises(ValueError):
+        with pytest.raises(FileFormatError):
             save_symbol_lib(sexp, tmp_path / "bad.kicad_sym")

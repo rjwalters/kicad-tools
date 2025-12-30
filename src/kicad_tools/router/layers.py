@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
 
+from kicad_tools.exceptions import RoutingError
+
 
 class Layer(Enum):
     """Routing layers - supports up to 6 layers."""
@@ -86,7 +88,11 @@ class LayerStack:
         # Validate layer indices are sequential
         indices = [layer.index for layer in self.layers]
         if indices != list(range(len(self.layers))):
-            raise ValueError("Layer indices must be sequential starting from 0")
+            raise RoutingError(
+                "Invalid layer stack configuration",
+                context={"indices": indices, "expected": list(range(len(self.layers)))},
+                suggestions=["Layer indices must be sequential starting from 0"],
+            )
 
     @property
     def num_layers(self) -> int:
@@ -127,17 +133,28 @@ class LayerStack:
         for layer_def in self.layers:
             if layer_def.name == kicad_name:
                 return layer_def.index
-        raise ValueError(f"Layer {layer.name} not in stack {self.name}")
+        raise RoutingError(
+            "Layer not found in stack",
+            context={"layer": layer.name, "stack": self.name},
+            suggestions=[f"Available layers: {[lyr.name for lyr in self.layers]}"],
+        )
 
     def index_to_layer_enum(self, index: int) -> Layer:
         """Map grid index to Layer enum for this stackup."""
         if index < 0 or index >= len(self.layers):
-            raise ValueError(f"Index {index} out of range for {self.num_layers}-layer stack")
+            raise RoutingError(
+                "Layer index out of range",
+                context={"index": index, "num_layers": self.num_layers},
+                suggestions=[f"Valid indices: 0 to {self.num_layers - 1}"],
+            )
         layer_def = self.layers[index]
         for layer in Layer:
             if layer.kicad_name == layer_def.name:
                 return layer
-        raise ValueError(f"No Layer enum for {layer_def.name}")
+        raise RoutingError(
+            "No Layer enum for layer definition",
+            context={"layer_name": layer_def.name},
+        )
 
     def get_routable_indices(self) -> List[int]:
         """Get grid indices of all routable layers."""

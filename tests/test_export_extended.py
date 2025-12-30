@@ -1,20 +1,20 @@
 """Extended tests for export modules (gerber, assembly, pnp, bom)."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-import tempfile
+from unittest.mock import patch
 
 import pytest
 
+from kicad_tools.exceptions import ConfigurationError
+from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.export.gerber import (
-    GerberConfig,
-    ManufacturerPreset,
     JLCPCB_PRESET,
-    PCBWAY_PRESET,
-    OSHPARK_PRESET,
     MANUFACTURER_PRESETS,
-    find_kicad_cli,
+    OSHPARK_PRESET,
+    PCBWAY_PRESET,
+    GerberConfig,
     GerberExporter,
+    find_kicad_cli,
 )
 
 
@@ -120,17 +120,17 @@ class TestGerberExporter:
     def test_init_file_not_found(self, tmp_path):
         """Test that FileNotFoundError is raised for missing PCB."""
         nonexistent = tmp_path / "nonexistent.kicad_pcb"
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(KiCadFileNotFoundError):
             GerberExporter(nonexistent)
 
     def test_export_for_manufacturer_unknown(self, mock_pcb_path):
-        """Test that unknown manufacturer raises ValueError."""
+        """Test that unknown manufacturer raises ConfigurationError."""
         with patch.object(GerberExporter, "__init__", lambda self, path: None):
             exporter = GerberExporter.__new__(GerberExporter)
             exporter.pcb_path = mock_pcb_path
             exporter.kicad_cli = Path("/usr/bin/kicad-cli")
 
-            with pytest.raises(ValueError, match="Unknown manufacturer"):
+            with pytest.raises(ConfigurationError, match="Unknown manufacturer"):
                 exporter.export_for_manufacturer("unknown_fab_house")
 
 
@@ -286,8 +286,8 @@ class TestGerberExporterMethods:
 # Import assembly module
 from kicad_tools.export.assembly import (
     AssemblyConfig,
-    AssemblyPackageResult,
     AssemblyPackage,
+    AssemblyPackageResult,
 )
 
 
@@ -378,11 +378,10 @@ class TestAssemblyPackage:
 
 # Import PnP module
 from kicad_tools.export.pnp import (
+    GenericPnPFormatter,
+    JLCPCBPnPFormatter,
     PlacementData,
     PnPExportConfig,
-    PnPFormatter,
-    JLCPCBPnPFormatter,
-    GenericPnPFormatter,
 )
 
 
@@ -502,9 +501,8 @@ class TestPnPFormatter:
 # Import BOM formats
 from kicad_tools.export.bom_formats import (
     BOMExportConfig,
-    BOMFormatter,
-    JLCPCBBOMFormatter,
     GenericBOMFormatter,
+    JLCPCBBOMFormatter,
 )
 
 

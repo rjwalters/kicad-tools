@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Type
 
+from kicad_tools.exceptions import ConfigurationError
+
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
 
@@ -292,8 +294,12 @@ def get_bom_formatter(manufacturer: str, config: Optional[BOMExportConfig] = Non
     """
     formatter_class = BOM_FORMATTERS.get(manufacturer.lower())
     if formatter_class is None:
-        available = ", ".join(BOM_FORMATTERS.keys())
-        raise ValueError(f"Unknown manufacturer: {manufacturer}. Available: {available}")
+        available = list(BOM_FORMATTERS.keys())
+        raise ConfigurationError(
+            f"Unknown manufacturer: {manufacturer}",
+            context={"manufacturer": manufacturer, "available": available},
+            suggestions=[f"Use one of: {', '.join(available)}"],
+        )
     return formatter_class(config)
 
 
