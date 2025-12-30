@@ -213,3 +213,113 @@ def routing_test_pcb(tmp_path: Path) -> Path:
     pcb_file = tmp_path / "routing_test.kicad_pcb"
     pcb_file.write_text(ROUTING_TEST_PCB)
     return pcb_file
+
+
+# PCB with zones for testing zone parsing
+ZONE_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 110 110)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "F.Cu")
+    (uuid "zone-uuid-1")
+    (name "GND_Zone")
+    (hatch edge 0.5)
+    (priority 1)
+    (connect_pads (clearance 0.25))
+    (min_thickness 0.15)
+    (filled_areas_thickness no)
+    (fill yes (thermal_gap 0.4) (thermal_bridge_width 0.35))
+    (polygon
+      (pts
+        (xy 100 100)
+        (xy 130 100)
+        (xy 130 120)
+        (xy 100 120)
+      )
+    )
+    (filled_polygon
+      (layer "F.Cu")
+      (pts
+        (xy 100.1 100.1)
+        (xy 129.9 100.1)
+        (xy 129.9 119.9)
+        (xy 100.1 119.9)
+      )
+    )
+  )
+  (zone
+    (net 2)
+    (net_name "+3.3V")
+    (layer "B.Cu")
+    (uuid "zone-uuid-2")
+    (hatch edge 0.5)
+    (priority 0)
+    (connect_pads yes (clearance 0.2))
+    (min_thickness 0.2)
+    (fill no (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon
+      (pts
+        (xy 100 100)
+        (xy 120 100)
+        (xy 120 115)
+        (xy 100 115)
+      )
+    )
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "B.Cu")
+    (uuid "zone-uuid-3")
+    (hatch edge 0.5)
+    (connect_pads no)
+    (min_thickness 0.2)
+    (fill yes)
+    (polygon
+      (pts
+        (xy 140 100)
+        (xy 160 100)
+        (xy 160 120)
+        (xy 155 125)
+        (xy 145 125)
+        (xy 140 120)
+      )
+    )
+  )
+)
+"""
+
+
+@pytest.fixture
+def zone_test_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with zones for testing zone parsing."""
+    pcb_file = tmp_path / "zone_test.kicad_pcb"
+    pcb_file.write_text(ZONE_TEST_PCB)
+    return pcb_file
