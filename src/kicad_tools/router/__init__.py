@@ -38,6 +38,7 @@ from .io import load_pcb_for_routing, route_pcb
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
+from .optimizer import OptimizationConfig, OptimizationStats, TraceOptimizer
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     NET_CLASS_AUDIO,
@@ -101,4 +102,8 @@ __all__ = [
     # I/O
     "route_pcb",
     "load_pcb_for_routing",
+    # Optimizer
+    "TraceOptimizer",
+    "OptimizationConfig",
+    "OptimizationStats",
 ]
