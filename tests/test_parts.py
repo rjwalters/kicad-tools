@@ -865,8 +865,9 @@ class TestLCSCClientExtended:
         from kicad_tools.parts import LCSCClient
 
         client = LCSCClient(use_cache=False)
-        # Force session creation
-        with patch("kicad_tools.parts.lcsc.requests.Session") as mock_session_cls:
+        # Force session creation - patch at requests module level since
+        # lcsc.py imports requests locally inside _get_session
+        with patch("requests.Session") as mock_session_cls:
             mock_session = MagicMock()
             mock_session_cls.return_value = mock_session
 

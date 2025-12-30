@@ -29,9 +29,11 @@ Standalone Python tools for parsing and manipulating KiCad schematic and PCB fil
 
 ---
 
-## v0.2.0 (Next): Manufacturing Readiness
+## v0.2.0 (Released): Manufacturing Readiness
 
 Focus: Complete the design-to-manufacturing workflow with parts database integration and assembly export.
+
+**Status: Released** - All planned features implemented plus significant bonus capabilities (autorouter, footprint tools, conflict detection).
 
 ### LCSC Parts Integration
 
@@ -349,8 +351,8 @@ kicad_tools/
 | Version | Focus | Status |
 |---------|-------|--------|
 | 0.1.0 | Unified CLI (`kct`), core parsing, manufacturer rules | Released |
-| 0.2.0 | Manufacturing readiness: LCSC integration, assembly export, fluent API | Next |
-| 0.3.0 | Validation & CI/CD: Pure Python DRC, design rule checking | Planned |
+| 0.2.0 | Manufacturing readiness: LCSC integration, assembly export, fluent API, autorouter, footprint tools | Released |
+| 0.3.0 | Validation & CI/CD: Pure Python DRC, design rule checking | Next |
 | 0.4.0 | Library management: Symbol/footprint creation and editing | Planned |
-| 0.5.0 | Advanced: Diff/merge, netlist analysis, autorouter CLI | Planned |
+| 0.5.0 | Advanced: Diff/merge, netlist analysis | Planned |
 | 1.0.0 | Stable API, full documentation, production ready | Planned |
