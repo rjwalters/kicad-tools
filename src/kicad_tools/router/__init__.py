@@ -65,6 +65,15 @@ from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from .optimizer import OptimizationConfig, OptimizationStats, TraceOptimizer
+from .zones import (
+    ConnectionType,
+    FilledZone,
+    ThermalRelief,
+    ZoneFiller,
+    ZoneManager,
+    fill_zones_by_priority,
+    get_connection_type,
+)
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     NET_CLASS_AUDIO,
@@ -76,6 +85,7 @@ from .rules import (
     NET_CLASS_POWER,
     DesignRules,
     NetClassRouting,
+    ZoneRules,
     create_net_class_map,
 )
 
@@ -135,6 +145,7 @@ __all__ = [
     # Rules
     "DesignRules",
     "NetClassRouting",
+    "ZoneRules",
     "create_net_class_map",
     "DEFAULT_NET_CLASS_MAP",
     "NET_CLASS_POWER",
@@ -153,4 +164,12 @@ __all__ = [
     "TraceOptimizer",
     "OptimizationConfig",
     "OptimizationStats",
+    # Zones
+    "ZoneManager",
+    "ZoneFiller",
+    "FilledZone",
+    "ThermalRelief",
+    "ConnectionType",
+    "fill_zones_by_priority",
+    "get_connection_type",
 ]

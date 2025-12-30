@@ -184,6 +184,96 @@ class Router:
             return self.rules.cost_congestion * (1.0 + excess * 2.0)
         return 0.0
 
+    def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
+        """Check if a cell is part of a zone (copper pour)."""
+        if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+            return False
+        return self.grid.grid[layer][gy][gx].is_zone
+
+    def _get_zone_net(self, gx: int, gy: int, layer: int) -> int:
+        """Get the net number of a zone cell, or 0 if not a zone."""
+        if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+            return 0
+        cell = self.grid.grid[layer][gy][gx]
+        if cell.is_zone:
+            return cell.net
+        return 0
+
+    def _is_zone_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
+        """Check if routing through this zone cell is blocked.
+
+        Zone cells allow routing through same-net zones but block
+        routing through other-net zones.
+
+        Args:
+            gx, gy: Grid coordinates
+            layer: Grid layer index
+            net: Net number of the route being planned
+
+        Returns:
+            True if blocked (other-net zone), False if passable
+        """
+        if not self._is_zone_cell(gx, gy, layer):
+            return False  # Not a zone, use normal blocking logic
+
+        zone_net = self._get_zone_net(gx, gy, layer)
+
+        # Same net: passable (can route through own zone copper)
+        if zone_net == net:
+            return False
+
+        # Different net: blocked (cannot route through other-net zone)
+        return True
+
+    def _get_zone_cost(self, gx: int, gy: int, layer: int, net: int) -> float:
+        """Get routing cost adjustment for zone cells.
+
+        Same-net zones have reduced cost (encourage using zone copper).
+        Different-net zones are blocked (handled elsewhere).
+
+        Args:
+            gx, gy: Grid coordinates
+            layer: Grid layer index
+            net: Net number of the route being planned
+
+        Returns:
+            Cost adjustment (0.0 for normal, negative for same-net zone)
+        """
+        if not self._is_zone_cell(gx, gy, layer):
+            return 0.0
+
+        zone_net = self._get_zone_net(gx, gy, layer)
+
+        if zone_net == net:
+            # Same net - encourage using zone copper with reduced cost
+            return self.rules.cost_zone_same_net - 1.0  # Net reduction
+        else:
+            # Different net - should be blocked, but return high cost as fallback
+            return 100.0
+
+    def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
+        """Check if via placement is legal considering zones on all layers.
+
+        A via can be placed if:
+        - No zone on any layer, OR
+        - All zones are same-net (via connects through same-net zones), OR
+        - Via is placed where there's no zone copper
+
+        Args:
+            gx, gy: Grid coordinates
+            net: Net number of the route being planned
+
+        Returns:
+            True if via can be placed, False if blocked by other-net zone
+        """
+        for layer_idx in range(self.grid.num_layers):
+            if self._is_zone_cell(gx, gy, layer_idx):
+                zone_net = self._get_zone_net(gx, gy, layer_idx)
+                if zone_net != net:
+                    # Via would pierce an other-net zone
+                    return False
+        return True
+
     def route(
         self,
         start: Pad,
@@ -320,6 +410,10 @@ class Router:
                         if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
                             continue
 
+                # Check zone blocking (other-net zones block routing)
+                if self._is_zone_blocked(nx, ny, nlayer, start.net):
+                    continue
+
                 neighbor_key = (nx, ny, nlayer)
                 if neighbor_key in closed_set:
                     continue
@@ -342,12 +436,16 @@ class Router:
                         nx, ny, nlayer, present_cost_factor
                     )
 
+                # Add zone cost (reduced for same-net zones)
+                zone_cost = self._get_zone_cost(nx, ny, nlayer, start.net)
+
                 new_g = (
                     current.g_score
                     + neighbor_cost_mult * self.rules.cost_straight
                     + turn_cost
                     + congestion_cost
                     + negotiated_cost
+                    + zone_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -376,6 +474,10 @@ class Router:
                         via_blocked = True
                         break
                 if via_blocked:
+                    continue
+
+                # Check zone blocking for via (would pierce other-net zones)
+                if not self._can_place_via_in_zones(current.x, current.y, start.net):
                     continue
 
                 neighbor_key = (current.x, current.y, new_layer)
