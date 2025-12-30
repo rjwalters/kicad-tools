@@ -5,25 +5,25 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
-from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.exceptions import ConfigurationError
 from kicad_tools.export.bom_formats import (
     BOMExportConfig,
+    GenericBOMFormatter,
     JLCPCBBOMFormatter,
     PCBWayBOMFormatter,
     SeeedBOMFormatter,
-    GenericBOMFormatter,
     export_bom,
     get_bom_formatter,
 )
 from kicad_tools.export.pnp import (
-    PlacementData,
-    PnPExportConfig,
+    GenericPnPFormatter,
     JLCPCBPnPFormatter,
     PCBWayPnPFormatter,
-    GenericPnPFormatter,
+    PlacementData,
+    PnPExportConfig,
     export_pnp,
     extract_placements,
     get_pnp_formatter,
@@ -194,7 +194,7 @@ class TestGetBOMFormatter:
         assert isinstance(formatter, JLCPCBBOMFormatter)
 
     def test_unknown_raises(self):
-        with pytest.raises(ValueError, match="Unknown manufacturer"):
+        with pytest.raises(ConfigurationError, match="Unknown manufacturer"):
             get_bom_formatter("unknown")
 
 
@@ -346,7 +346,7 @@ class TestGetPnPFormatter:
         assert isinstance(formatter, GenericPnPFormatter)
 
     def test_unknown_raises(self):
-        with pytest.raises(ValueError, match="Unknown manufacturer"):
+        with pytest.raises(ConfigurationError, match="Unknown manufacturer"):
             get_pnp_formatter("unknown")
 
 
