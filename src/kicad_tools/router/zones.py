@@ -4,16 +4,29 @@ Zone flood fill algorithm for copper pour support.
 This module provides:
 - FilledZone: Result of zone fill with cell coordinates
 - ZoneFiller: Grid-based flood fill for zone polygons
+- ThermalRelief: Thermal relief pattern for pad-to-zone connections
+- ConnectionType: Enum for pad connection types
 """
 
+import math
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, List, Optional, Set, Tuple
 
 from kicad_tools.schema.pcb import Zone
 
 if TYPE_CHECKING:
     from .grid import RoutingGrid
+    from .primitives import Pad
     from .rules import DesignRules
+
+
+class ConnectionType(Enum):
+    """Type of connection between pad and zone copper."""
+
+    THERMAL = "thermal"  # Thermal relief with spokes
+    SOLID = "solid"  # Direct solid connection
+    NONE = "none"  # No connection (antipad only)
 
 
 @dataclass
@@ -29,6 +42,196 @@ class FilledZone:
     zone: Zone
     filled_cells: Set[Tuple[int, int]] = field(default_factory=set)
     layer_index: int = 0
+
+
+@dataclass
+class ThermalRelief:
+    """Thermal relief pattern for connecting a pad to zone copper.
+
+    Thermal reliefs provide electrical connection while limiting heat
+    transfer, making hand soldering possible. They consist of:
+    - An antipad (clearance ring) around the pad
+    - Spokes connecting the pad to surrounding zone copper
+
+    Attributes:
+        pad: The pad being connected
+        zone: The zone providing copper
+        gap: Clearance distance from pad edge to zone copper (mm)
+        spoke_width: Width of connecting spokes (mm)
+        spoke_count: Number of spokes (typically 2 or 4)
+        spoke_angle: Rotation of spoke pattern in degrees (0 or 45)
+        layer_index: Grid layer index
+    """
+
+    pad: "Pad"
+    zone: Zone
+    gap: float
+    spoke_width: float
+    spoke_count: int = 4
+    spoke_angle: float = 45.0
+    layer_index: int = 0
+
+    def generate_antipad_cells(self, grid: "RoutingGrid") -> Set[Tuple[int, int]]:
+        """Generate grid cells forming the antipad (clearance ring).
+
+        The antipad is the area around the pad that must remain copper-free
+        except for the spoke connections.
+
+        Args:
+            grid: Routing grid for coordinate conversion
+
+        Returns:
+            Set of (gx, gy) grid cells in the antipad region
+        """
+        cells: Set[Tuple[int, int]] = set()
+
+        # Pad dimensions with gap
+        pad_half_w = self.pad.width / 2
+        pad_half_h = self.pad.height / 2
+        outer_radius = max(pad_half_w, pad_half_h) + self.gap
+
+        # Convert to grid cells
+        outer_cells = int(outer_radius / grid.resolution) + 1
+
+        # Get pad center in grid coordinates
+        pad_gx, pad_gy = grid.world_to_grid(self.pad.x, self.pad.y)
+
+        # Generate antipad ring (cells outside pad but within gap)
+        for dy in range(-outer_cells, outer_cells + 1):
+            for dx in range(-outer_cells, outer_cells + 1):
+                gx, gy = pad_gx + dx, pad_gy + dy
+
+                # Skip cells outside grid
+                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
+                    continue
+
+                # Get world position of cell
+                wx, wy = grid.grid_to_world(gx, gy)
+
+                # Distance from pad center
+                rel_x = wx - self.pad.x
+                rel_y = wy - self.pad.y
+
+                # Check if in antipad region (outside pad, inside outer boundary)
+                # Use rectangular check for pad shape
+                in_pad = abs(rel_x) <= pad_half_w and abs(rel_y) <= pad_half_h
+
+                # Use circular check for outer boundary
+                dist = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+                in_outer = dist <= outer_radius
+
+                if not in_pad and in_outer:
+                    cells.add((gx, gy))
+
+        return cells
+
+    def generate_spoke_cells(self, grid: "RoutingGrid") -> Set[Tuple[int, int]]:
+        """Generate grid cells forming the connecting spokes.
+
+        Spokes are narrow bridges of copper connecting the pad to
+        the surrounding zone copper through the antipad.
+
+        Args:
+            grid: Routing grid for coordinate conversion
+
+        Returns:
+            Set of (gx, gy) grid cells forming the spokes
+        """
+        cells: Set[Tuple[int, int]] = set()
+
+        # Pad dimensions
+        pad_half_w = self.pad.width / 2
+        pad_half_h = self.pad.height / 2
+        outer_radius = max(pad_half_w, pad_half_h) + self.gap
+
+        # Spoke parameters
+        spoke_half_width = self.spoke_width / 2
+        angle_step = 360.0 / self.spoke_count
+
+        # Get pad center in grid coordinates
+        pad_gx, pad_gy = grid.world_to_grid(self.pad.x, self.pad.y)
+
+        # Grid range to check
+        outer_cells = int(outer_radius / grid.resolution) + 2
+
+        for dy in range(-outer_cells, outer_cells + 1):
+            for dx in range(-outer_cells, outer_cells + 1):
+                gx, gy = pad_gx + dx, pad_gy + dy
+
+                # Skip cells outside grid
+                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
+                    continue
+
+                # Get world position of cell
+                wx, wy = grid.grid_to_world(gx, gy)
+
+                # Position relative to pad center
+                rel_x = wx - self.pad.x
+                rel_y = wy - self.pad.y
+
+                # Check if cell is in the antipad region
+                in_pad = abs(rel_x) <= pad_half_w and abs(rel_y) <= pad_half_h
+                dist = math.sqrt(rel_x * rel_x + rel_y * rel_y)
+                in_outer = dist <= outer_radius
+
+                if in_pad or not in_outer:
+                    continue  # Only care about antipad region
+
+                # Check if cell falls within any spoke
+                cell_angle = math.degrees(math.atan2(rel_y, rel_x))
+                if cell_angle < 0:
+                    cell_angle += 360
+
+                for i in range(self.spoke_count):
+                    spoke_angle = self.spoke_angle + i * angle_step
+                    spoke_angle = spoke_angle % 360
+
+                    # Angular distance to spoke center
+                    angle_diff = abs(cell_angle - spoke_angle)
+                    if angle_diff > 180:
+                        angle_diff = 360 - angle_diff
+
+                    # Convert angular width to linear at this distance
+                    if dist > 0:
+                        # Spoke width check: perpendicular distance from spoke line
+                        spoke_rad = math.radians(spoke_angle)
+                        # Project onto perpendicular to spoke direction
+                        perp_dist = abs(
+                            rel_x * math.sin(spoke_rad) - rel_y * math.cos(spoke_rad)
+                        )
+                        if perp_dist <= spoke_half_width:
+                            cells.add((gx, gy))
+                            break
+
+        return cells
+
+
+def get_connection_type(pad: "Pad", zone: Zone) -> ConnectionType:
+    """Determine connection type for a pad in a zone.
+
+    Rules:
+    - PTH (through-hole) pads always get thermal relief
+    - SMD pads follow zone's connect_pads setting
+
+    Args:
+        pad: Pad to check
+        zone: Zone the pad connects to
+
+    Returns:
+        ConnectionType for this pad-zone pair
+    """
+    # PTH pads always get thermal relief for solderability
+    if pad.through_hole:
+        return ConnectionType.THERMAL
+
+    # SMD pads follow zone setting
+    if zone.connect_pads == "solid":
+        return ConnectionType.SOLID
+    elif zone.connect_pads == "none":
+        return ConnectionType.NONE
+    else:
+        # Default: thermal_reliefs
+        return ConnectionType.THERMAL
 
 
 class ZoneFiller:
@@ -223,6 +426,76 @@ class ZoneFiller:
         result.filled_cells -= cells_to_remove
 
         return result
+
+    def generate_thermal_reliefs(
+        self, filled_zone: FilledZone, pads: List["Pad"]
+    ) -> List[ThermalRelief]:
+        """Generate thermal relief patterns for same-net pads in a zone.
+
+        Finds all pads that are:
+        1. On the same net as the zone
+        2. Within the zone boundary
+        3. Require thermal relief (based on connection type)
+
+        Args:
+            filled_zone: A filled zone to add thermal reliefs to
+            pads: List of all pads to check
+
+        Returns:
+            List of ThermalRelief objects for applicable pads
+        """
+        from .primitives import Pad as PadType  # noqa: F401
+
+        reliefs: List[ThermalRelief] = []
+        zone = filled_zone.zone
+
+        for pad in pads:
+            # Must be same net
+            if pad.net != zone.net_number:
+                continue
+
+            # Must be within zone polygon
+            if zone.polygon and not self.point_in_polygon(pad.x, pad.y, zone.polygon):
+                continue
+
+            # Determine connection type
+            conn_type = get_connection_type(pad, zone)
+
+            if conn_type == ConnectionType.THERMAL:
+                relief = ThermalRelief(
+                    pad=pad,
+                    zone=zone,
+                    gap=zone.thermal_gap,
+                    spoke_width=zone.thermal_bridge_width,
+                    spoke_count=4,  # Standard 4-spoke
+                    spoke_angle=45.0,  # Standard 45° rotation
+                    layer_index=filled_zone.layer_index,
+                )
+                reliefs.append(relief)
+
+        return reliefs
+
+    def apply_thermal_reliefs(
+        self, filled_zone: FilledZone, reliefs: List[ThermalRelief]
+    ) -> None:
+        """Apply thermal relief patterns to a filled zone.
+
+        This modifies the filled_cells set:
+        1. Removes antipad cells (clearance around pads)
+        2. Adds spoke cells (connections through antipad)
+
+        Args:
+            filled_zone: Zone to modify (mutated in place)
+            reliefs: Thermal relief patterns to apply
+        """
+        for relief in reliefs:
+            # Remove antipad cells from zone fill
+            antipad_cells = relief.generate_antipad_cells(self.grid)
+            filled_zone.filled_cells -= antipad_cells
+
+            # Add spoke cells back
+            spoke_cells = relief.generate_spoke_cells(self.grid)
+            filled_zone.filled_cells |= spoke_cells
 
 
 def fill_zones_by_priority(
