@@ -297,18 +297,18 @@ class TestMfrCLICommands:
     def test_validate_pcb_design(self):
         """Test PCB design validation function."""
         from kicad_tools.cli.mfr import _validate_pcb_design
-        from kicad_tools.core.sexp import SExp
+        from kicad_tools.sexp import SExp
         from kicad_tools.manufacturers import get_profile
 
         profile = get_profile("jlcpcb")
         rules = profile.get_design_rules(layers=2)
 
         # Create a simple PCB sexp with a thin trace
-        sexp = SExp("kicad_pcb", [
-            SExp("segment", [
-                SExp("width", [0.05])  # 0.05mm, below minimum
-            ])
-        ])
+        sexp = SExp.list("kicad_pcb",
+            SExp.list("segment",
+                SExp.list("width", 0.05)  # 0.05mm, below minimum
+            )
+        )
 
         violations = _validate_pcb_design(sexp, rules)
 

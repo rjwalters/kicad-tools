@@ -7,8 +7,7 @@ from typing import Union
 
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-
-from .sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 
 def load_schematic(path: Union[str, Path]) -> SExp:

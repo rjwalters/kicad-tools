@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from kicad_tools.core.sexp import parse_sexp
+from kicad_tools.sexp import parse_sexp
 from kicad_tools.schema.wire import Wire, Junction, Bus
 from kicad_tools.schema.label import Label, HierarchicalLabel, GlobalLabel, PowerSymbol
 from kicad_tools.schema.bom import BOMItem, BOMGroup, BOM

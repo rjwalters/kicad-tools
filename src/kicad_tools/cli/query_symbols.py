@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from kicad_tools.core.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_sexp
 
 # Pin type descriptions
 PIN_TYPES = {

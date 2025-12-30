@@ -448,7 +448,7 @@ class TestTraceInfo:
     def test_creation(self):
         """Test creating TraceInfo."""
         from kicad_tools.drc.fixer import TraceInfo
-        from kicad_tools.core.sexp import parse_sexp
+        from kicad_tools.sexp import parse_sexp
 
         node = parse_sexp("(segment)")
         info = TraceInfo(
@@ -478,7 +478,7 @@ class TestViaInfo:
     def test_creation(self):
         """Test creating ViaInfo."""
         from kicad_tools.drc.fixer import ViaInfo
-        from kicad_tools.core.sexp import parse_sexp
+        from kicad_tools.sexp import parse_sexp
 
         node = parse_sexp("(via)")
         info = ViaInfo(

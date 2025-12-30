@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
 
-from ..core.sexp import SExp
+from kicad_tools.sexp import SExp
 from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
 from .symbol import SymbolInstance

@@ -40,7 +40,7 @@ KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 # Try to import sexp parser for direct schematic reading
 try:
-    from kicad_tools.core.sexp import parse_sexp
+    from kicad_tools.sexp import parse_sexp
 
     HAS_SEXP_PARSER = True
 except ImportError:
