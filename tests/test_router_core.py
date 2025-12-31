@@ -1,12 +1,11 @@
 """Tests for router/core.py module."""
 
 import pytest
-import math
 
-from kicad_tools.router.core import Autorouter, AdaptiveAutorouter, RoutingResult
-from kicad_tools.router.rules import DesignRules
+from kicad_tools.router.core import AdaptiveAutorouter, Autorouter, RoutingResult
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Obstacle, Pad, Route, Segment
+from kicad_tools.router.primitives import Route, Segment
+from kicad_tools.router.rules import DesignRules
 
 
 class TestAutorouterInit:
@@ -52,8 +51,24 @@ class TestAutorouterAddComponent:
     def test_add_smd_component(self, router):
         """Test adding an SMD component with pads."""
         pads = [
-            {"number": "1", "x": 10.0, "y": 10.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "VCC"},
-            {"number": "2", "x": 11.0, "y": 10.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "GND"},
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "VCC",
+            },
+            {
+                "number": "2",
+                "x": 11.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "GND",
+            },
         ]
         router.add_component("R1", pads)
 
@@ -67,8 +82,17 @@ class TestAutorouterAddComponent:
     def test_add_through_hole_component(self, router):
         """Test adding a through-hole component."""
         pads = [
-            {"number": "1", "x": 10.0, "y": 10.0, "width": 1.7, "height": 1.7,
-             "net": 1, "net_name": "NET1", "through_hole": True, "drill": 1.0},
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 10.0,
+                "width": 1.7,
+                "height": 1.7,
+                "net": 1,
+                "net_name": "NET1",
+                "through_hole": True,
+                "drill": 1.0,
+            },
         ]
         router.add_component("U1", pads)
 
@@ -267,7 +291,7 @@ class TestRoutingResult:
             overflow=0,
             converged=True,
             iterations_used=5,
-            statistics={}
+            statistics={},
         )
         assert result.success_rate == 1.0
 
@@ -282,7 +306,7 @@ class TestRoutingResult:
             overflow=0,
             converged=False,
             iterations_used=10,
-            statistics={}
+            statistics={},
         )
         assert result.success_rate == 0.7
 
@@ -297,7 +321,7 @@ class TestRoutingResult:
             overflow=0,
             converged=True,
             iterations_used=1,
-            statistics={}
+            statistics={},
         )
         assert result.success_rate == 1.0
 
@@ -312,7 +336,7 @@ class TestRoutingResult:
             overflow=0,
             converged=True,
             iterations_used=3,
-            statistics={}
+            statistics={},
         )
         s = str(result)
         assert "CONVERGED" in s
@@ -330,7 +354,7 @@ class TestRoutingResult:
             overflow=5,
             converged=False,
             iterations_used=10,
-            statistics={}
+            statistics={},
         )
         s = str(result)
         assert "NOT CONVERGED" in s
@@ -346,10 +370,7 @@ class TestAdaptiveAutorouterInit:
         net_map = {}
 
         adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=components,
-            net_map=net_map
+            width=50.0, height=40.0, components=components, net_map=net_map
         )
 
         assert adaptive.width == 50.0
@@ -360,11 +381,7 @@ class TestAdaptiveAutorouterInit:
     def test_with_custom_max_layers(self):
         """Test AdaptiveAutorouter with custom max layers."""
         adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[],
-            net_map={},
-            max_layers=4
+            width=50.0, height=40.0, components=[], net_map={}, max_layers=4
         )
 
         assert adaptive.max_layers == 4
@@ -372,11 +389,7 @@ class TestAdaptiveAutorouterInit:
     def test_with_skip_nets(self):
         """Test AdaptiveAutorouter with skip nets."""
         adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[],
-            net_map={},
-            skip_nets=["GND", "VCC"]
+            width=50.0, height=40.0, components=[], net_map={}, skip_nets=["GND", "VCC"]
         )
 
         assert "GND" in adaptive.skip_nets
@@ -409,16 +422,13 @@ class TestAdaptiveAutorouterMethods:
             "pads": [
                 {"number": "1", "x": -0.5, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NET1"},
                 {"number": "2", "x": 0.5, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NET2"},
-            ]
+            ],
         }
 
     def test_create_autorouter(self, simple_component):
         """Test creating an autorouter from components."""
         adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[simple_component],
-            net_map={"NET1": 1, "NET2": 2}
+            width=50.0, height=40.0, components=[simple_component], net_map={"NET1": 1, "NET2": 2}
         )
 
         stack = LayerStack.two_layer()
@@ -429,35 +439,20 @@ class TestAdaptiveAutorouterMethods:
 
     def test_layer_count_no_result(self):
         """Test layer_count property with no result."""
-        adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[],
-            net_map={}
-        )
+        adaptive = AdaptiveAutorouter(width=50.0, height=40.0, components=[], net_map={})
 
         assert adaptive.layer_count == 0
 
     def test_get_routes_no_result_raises(self):
         """Test get_routes raises if not routed."""
-        adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[],
-            net_map={}
-        )
+        adaptive = AdaptiveAutorouter(width=50.0, height=40.0, components=[], net_map={})
 
         with pytest.raises(ValueError, match="No routing result"):
             adaptive.get_routes()
 
     def test_to_sexp_no_result_raises(self):
         """Test to_sexp raises if not routed."""
-        adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[],
-            net_map={}
-        )
+        adaptive = AdaptiveAutorouter(width=50.0, height=40.0, components=[], net_map={})
 
         with pytest.raises(ValueError, match="No routing result"):
             adaptive.to_sexp()
@@ -475,14 +470,11 @@ class TestAdaptiveAutorouterComponentTransform:
             "rotation": 90,  # 90 degree rotation
             "pads": [
                 {"number": "1", "x": 1.0, "y": 0.0, "net": "NET1"},
-            ]
+            ],
         }
 
         adaptive = AdaptiveAutorouter(
-            width=50.0,
-            height=40.0,
-            components=[component],
-            net_map={"NET1": 1}
+            width=50.0, height=40.0, components=[component], net_map={"NET1": 1}
         )
 
         stack = LayerStack.two_layer()

@@ -9,10 +9,9 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
-def find_kicad_cli() -> Optional[Path]:
+def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable.
 
     Searches common installation locations for KiCad 8+.
@@ -51,7 +50,7 @@ class KiCadCLIResult:
     """Result from running kicad-cli."""
 
     success: bool
-    output_path: Optional[Path] = None
+    output_path: Path | None = None
     stdout: str = ""
     stderr: str = ""
     return_code: int = 0
@@ -59,10 +58,10 @@ class KiCadCLIResult:
 
 def run_erc(
     schematic_path: Path,
-    output_path: Optional[Path] = None,
+    output_path: Path | None = None,
     format: str = "json",
     severity_all: bool = True,
-    kicad_cli: Optional[Path] = None,
+    kicad_cli: Path | None = None,
 ) -> KiCadCLIResult:
     """Run KiCad ERC on a schematic.
 
@@ -139,10 +138,10 @@ def run_erc(
 
 def run_drc(
     pcb_path: Path,
-    output_path: Optional[Path] = None,
+    output_path: Path | None = None,
     format: str = "json",
     schematic_parity: bool = True,
-    kicad_cli: Optional[Path] = None,
+    kicad_cli: Path | None = None,
 ) -> KiCadCLIResult:
     """Run KiCad DRC on a PCB.
 
@@ -217,9 +216,9 @@ def run_drc(
 
 def run_netlist_export(
     schematic_path: Path,
-    output_path: Optional[Path] = None,
+    output_path: Path | None = None,
     format: str = "kicad",
-    kicad_cli: Optional[Path] = None,
+    kicad_cli: Path | None = None,
 ) -> KiCadCLIResult:
     """Export netlist from schematic.
 
@@ -282,7 +281,7 @@ def run_netlist_export(
         return KiCadCLIResult(success=False, stderr=f"Failed to export netlist: {e}")
 
 
-def get_kicad_version(kicad_cli: Optional[Path] = None) -> Optional[str]:
+def get_kicad_version(kicad_cli: Path | None = None) -> str | None:
     """Get KiCad version string.
 
     Returns:

@@ -11,26 +11,23 @@ It provides the main interface for integrating with an LLM.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
 
 from ..drc.report import DRCReport
-from ..pcb.editor import PCBEditor
-
-from .state import PCBState
-from .vocabulary import SpatialRegion, NetType, create_hat_regions
 from .commands import (
     Command,
     CommandResult,
-    RouteNetCommand,
     DeleteTraceCommand,
     PlaceComponentCommand,
+    RouteNetCommand,
     parse_command,
 )
+from .diagnosis import DiagnosisEngine
 from .interpreter import CommandInterpreter, InterpreterConfig
-from .diagnosis import DiagnosisEngine, RoutingDiagnosis
+from .state import PCBState
+from .vocabulary import NetType, SpatialRegion, create_hat_regions
 
 
 @dataclass
@@ -41,7 +38,7 @@ class ReasoningStep:
     timestamp: str
     command: Command
     result: CommandResult
-    diagnosis: Optional[str] = None
+    diagnosis: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -121,10 +118,10 @@ class PCBReasoningAgent:
     def __init__(
         self,
         pcb_path: str,
-        state: Optional[PCBState] = None,
-        drc_report: Optional[DRCReport] = None,
-        config: Optional[InterpreterConfig] = None,
-        regions: Optional[list[SpatialRegion]] = None,
+        state: PCBState | None = None,
+        drc_report: DRCReport | None = None,
+        config: InterpreterConfig | None = None,
+        regions: list[SpatialRegion] | None = None,
     ):
         self.pcb_path = Path(pcb_path)
         self.config = config or InterpreterConfig()
@@ -165,8 +162,8 @@ class PCBReasoningAgent:
     def from_pcb(
         cls,
         pcb_path: str,
-        drc_path: Optional[str] = None,
-        config: Optional[InterpreterConfig] = None,
+        drc_path: str | None = None,
+        config: InterpreterConfig | None = None,
     ) -> "PCBReasoningAgent":
         """Create agent from PCB file path."""
         drc_report = None
@@ -247,9 +244,7 @@ class PCBReasoningAgent:
         # Check for critical violations first
         shorts = self.state.shorts
         if shorts:
-            lines.append(
-                f"PRIORITY: Fix {len(shorts)} short circuits before further routing"
-            )
+            lines.append(f"PRIORITY: Fix {len(shorts)} short circuits before further routing")
             v = shorts[0]
             if v.nets:
                 lines.append(
@@ -287,7 +282,7 @@ class PCBReasoningAgent:
     # Command Execution
     # =========================================================================
 
-    def execute(self, command: Command) -> tuple[CommandResult, Optional[str]]:
+    def execute(self, command: Command) -> tuple[CommandResult, str | None]:
         """Execute a command and return result with diagnosis.
 
         Args:
@@ -319,7 +314,7 @@ class PCBReasoningAgent:
 
         return result, diagnosis
 
-    def execute_dict(self, command_dict: dict) -> tuple[CommandResult, Optional[str]]:
+    def execute_dict(self, command_dict: dict) -> tuple[CommandResult, str | None]:
         """Execute a command from dictionary representation."""
         command = parse_command(command_dict)
         return self.execute(command)
@@ -338,16 +333,12 @@ class PCBReasoningAgent:
                 start = (pads[0].x, pads[0].y)
                 end = (pads[1].x, pads[1].y)
 
-                diagnosis = self.diagnosis_engine.diagnose_routing(
-                    result, command.net, start, end
-                )
+                diagnosis = self.diagnosis_engine.diagnose_routing(result, command.net, start, end)
                 return diagnosis.to_prompt()
 
         elif isinstance(command, PlaceComponentCommand):
             target = command.at or (0, 0)
-            diagnosis = self.diagnosis_engine.diagnose_placement(
-                result, command.ref, target
-            )
+            diagnosis = self.diagnosis_engine.diagnose_placement(result, command.ref, target)
             return diagnosis.to_prompt()
 
         return f"Command failed: {result.message}"
@@ -366,10 +357,7 @@ class PCBReasoningAgent:
         if self.state.unrouted_nets:
             return False
 
-        if len(self.state.violations) > max_violations:
-            return False
-
-        return True
+        return not len(self.state.violations) > max_violations
 
     def is_drc_clean(self) -> bool:
         """Check if there are no DRC violations."""
@@ -400,7 +388,7 @@ class PCBReasoningAgent:
                 )
             )
 
-    def run_drc_check(self, kicad_cli: str = "kicad-cli") -> Optional[DRCReport]:
+    def run_drc_check(self, kicad_cli: str = "kicad-cli") -> DRCReport | None:
         """Run DRC check using KiCad CLI (if available).
 
         Args:
@@ -419,7 +407,7 @@ class PCBReasoningAgent:
         # Run DRC
         drc_output = Path(tempfile.mktemp(suffix=".rpt"))
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [
                     kicad_cli,
                     "pcb",
@@ -439,7 +427,7 @@ class PCBReasoningAgent:
                 self.update_violations(report)
                 return report
 
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         finally:
             # Cleanup
@@ -454,7 +442,7 @@ class PCBReasoningAgent:
     # Save / Export
     # =========================================================================
 
-    def save(self, output_path: Optional[str] = None):
+    def save(self, output_path: str | None = None):
         """Save the current PCB state."""
         self.interpreter.save(output_path)
 

@@ -31,8 +31,9 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator, Optional, Union
+from typing import Any
 
 
 class SExp:
@@ -60,11 +61,11 @@ class SExp:
 
     def __init__(
         self,
-        name: Optional[str] = None,
-        children: Optional[list["SExp"]] = None,
-        value: Optional[Union[str, int, float]] = None,
+        name: str | None = None,
+        children: list[SExp] | None = None,
+        value: str | int | float | None = None,
         _inline: bool = False,
-        _original_str: Optional[str] = None,
+        _original_str: str | None = None,
     ):
         if name is not None and value is not None:
             raise ValueError("SExp cannot have both name and value")
@@ -84,7 +85,7 @@ class SExp:
         """True if this is a list node."""
         return self.name is not None or bool(self.children)
 
-    def __getitem__(self, key: Union[str, int, tuple]) -> SExp:
+    def __getitem__(self, key: str | int | tuple) -> SExp:
         """
         Access children by name or index.
 
@@ -127,14 +128,14 @@ class SExp:
         node_desc = f"'{self.name}'" if self.name else "root"
         raise KeyError(f"No child named '{key}' in {node_desc}. {available}")
 
-    def get(self, key: str, default: Any = None) -> Optional[SExp]:
+    def get(self, key: str, default: Any = None) -> SExp | None:
         """Get child by name, returning default if not found."""
         try:
             return self[key]
         except KeyError:
             return default
 
-    def find(self, name: str, **attrs) -> Optional[SExp]:
+    def find(self, name: str, **attrs) -> SExp | None:
         """
         Find first descendant matching name and attributes.
 
@@ -171,10 +172,7 @@ class SExp:
         child = node.get(attr)
         if child is None:
             # Check if it's stored as a direct child value
-            for c in node.children:
-                if c.is_atom and c.value == value:
-                    return True
-            return False
+            return any(c.is_atom and c.value == value for c in node.children)
 
         # Check child's first atom value
         if child.children and child.children[0].is_atom:
@@ -200,18 +198,18 @@ class SExp:
         except ValueError:
             return False
 
-    def get_atoms(self) -> list[Union[str, int, float]]:
+    def get_atoms(self) -> list[str | int | float]:
         """Get all atom values from direct children."""
         return [c.value for c in self.children if c.is_atom]
 
-    def get_first_atom(self) -> Optional[Union[str, int, float]]:
+    def get_first_atom(self) -> str | int | float | None:
         """Get the first atom value from children."""
         for c in self.children:
             if c.is_atom:
                 return c.value
         return None
 
-    def set_atom(self, index: int, value: Union[str, int, float]):
+    def set_atom(self, index: int, value: str | int | float):
         """Set the atom value at given index."""
         atom_idx = 0
         for i, c in enumerate(self.children):
@@ -300,7 +298,7 @@ class SExp:
         # Track if we've started putting things on new lines
         started_new_lines = False
 
-        for i, child in enumerate(self.children):
+        for _i, child in enumerate(self.children):
             if child.is_atom:
                 if indent == 0 or started_new_lines:
                     # Already on new lines, continue that way
@@ -394,7 +392,6 @@ class SExp:
             "fp_circle",
             # Common nested structures
             "stroke",
-            "fill",
         }
         if self.name in never_inline:
             return False
@@ -572,7 +569,6 @@ class SExp:
             # fp_text types
             "reference",
             "value",
-            "user",
             # Zone connection types
             "thermal_reliefs",
             "full",
@@ -592,7 +588,6 @@ class SExp:
             "italic",
             "bold",
             # Module/footprint attributes
-            "smd",
             "through_hole",
             "virtual",
             "exclude_from_pos_files",
@@ -634,7 +629,7 @@ class SExp:
     # =========================================================================
 
     @property
-    def tag(self) -> Optional[str]:
+    def tag(self) -> str | None:
         """Alias for 'name' - provides backward compatibility with core/sexp.py."""
         return self.name
 
@@ -655,7 +650,7 @@ class SExp:
                 result.append(child)
         return result
 
-    def get_value(self, index: int = 0) -> Optional[Union[str, int, float, "SExp"]]:
+    def get_value(self, index: int = 0) -> str | int | float | SExp | None:
         """Get a value by index (0 = first value after tag).
 
         For atoms, returns the primitive value. For non-atoms, returns the SExp.
@@ -668,12 +663,12 @@ class SExp:
             return child
         return None
 
-    def get_string(self, index: int = 0) -> Optional[str]:
+    def get_string(self, index: int = 0) -> str | None:
         """Get a string value by index."""
         val = self.get_value(index)
         return str(val) if val is not None else None
 
-    def get_int(self, index: int = 0) -> Optional[int]:
+    def get_int(self, index: int = 0) -> int | None:
         """Get an integer value by index."""
         val = self.get_value(index)
         if isinstance(val, int):
@@ -685,7 +680,7 @@ class SExp:
                 return None
         return None
 
-    def get_float(self, index: int = 0) -> Optional[float]:
+    def get_float(self, index: int = 0) -> float | None:
         """Get a float value by index."""
         val = self.get_value(index)
         if isinstance(val, (int, float)):
@@ -697,7 +692,7 @@ class SExp:
                 return None
         return None
 
-    def iter_children(self) -> Iterator["SExp"]:
+    def iter_children(self) -> Iterator[SExp]:
         """Iterate over child SExp nodes (skipping atoms)."""
         for child in self.children:
             if not child.is_atom:
@@ -707,7 +702,7 @@ class SExp:
         """Check if any direct child has the given tag/name."""
         return self.find_child(tag) is not None
 
-    def find_child(self, tag: str) -> Optional["SExp"]:
+    def find_child(self, tag: str) -> SExp | None:
         """Find the first direct child with the given tag/name.
 
         Unlike find(), this only searches direct children, not descendants.
@@ -718,7 +713,7 @@ class SExp:
                 return child
         return None
 
-    def find_children(self, tag: str) -> list["SExp"]:
+    def find_children(self, tag: str) -> list[SExp]:
         """Find all direct children with the given tag/name.
 
         Unlike find_all(), this only searches direct children, not descendants.
@@ -726,7 +721,7 @@ class SExp:
         """
         return [child for child in self.children if child.name == tag]
 
-    def add(self, value: Union["SExp", str, int, float]) -> "SExp":
+    def add(self, value: SExp | str | int | float) -> SExp:
         """Add a value and return self for chaining.
 
         Provides backward compatibility with core/sexp.py's add() method.
@@ -737,7 +732,7 @@ class SExp:
             self.children.append(SExp(value=value))
         return self
 
-    def set_value(self, index: int, value: Union[str, int, float]) -> None:
+    def set_value(self, index: int, value: str | int | float) -> None:
         """Set a value at the given index.
 
         Provides backward compatibility with core/sexp.py's set_value() method.
@@ -759,12 +754,12 @@ class SExp:
 
     # Convenience constructors
     @classmethod
-    def atom(cls, value: Union[str, int, float]) -> SExp:
+    def atom(cls, value: str | int | float) -> SExp:
         """Create an atom node."""
         return cls(value=value)
 
     @classmethod
-    def list(cls, name: str, *children: Union[SExp, str, int, float]) -> SExp:
+    def list(cls, name: str, *children: SExp | str | int | float) -> SExp:
         """Create a list node."""
         node = cls(name=name)
         for child in children:
@@ -1092,7 +1087,7 @@ class Document:
         doc.save()  # or doc.save("new_file.kicad_sch")
     """
 
-    def __init__(self, root: SExp, path: Optional[Path] = None):
+    def __init__(self, root: SExp, path: Path | None = None):
         self.root = root
         self.path = Path(path) if path else None
 
@@ -1103,14 +1098,14 @@ class Document:
         root = parse_file(path)
         return cls(root, path)
 
-    def save(self, path: Optional[str | Path] = None):
+    def save(self, path: str | Path | None = None):
         """Save document to file."""
         save_path = Path(path) if path else self.path
         if save_path is None:
             raise ValueError("No path specified for save")
         save_path.write_text(self.root.to_string(), encoding="utf-8")
 
-    def find(self, name: str, **attrs) -> Optional[SExp]:
+    def find(self, name: str, **attrs) -> SExp | None:
         """Find first element matching name and attributes."""
         return self.root.find(name, **attrs)
 

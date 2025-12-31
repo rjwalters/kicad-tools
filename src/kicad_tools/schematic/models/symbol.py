@@ -9,7 +9,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
@@ -48,8 +48,8 @@ class SymbolDef:
     raw_sexp: str  # Original S-expression for embedding (legacy, kept for compatibility)
     pins: list[Pin] = field(default_factory=list)
     # Parsed SExp nodes for structured access (optional, used when parsed with SExp)
-    _sexp_node: Optional[SExp] = field(default=None, repr=False)
-    _parent_node: Optional[SExp] = field(default=None, repr=False)
+    _sexp_node: SExp | None = field(default=None, repr=False)
+    _parent_node: SExp | None = field(default=None, repr=False)
 
     @classmethod
     def from_library(cls, lib_id: str, lib_paths: list[Path] = None) -> "SymbolDef":

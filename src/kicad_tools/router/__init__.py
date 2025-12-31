@@ -32,6 +32,7 @@ from .bus import (
     detect_bus_signals,
     group_buses,
 )
+from .core import AdaptiveAutorouter, Autorouter, RoutingResult
 from .diffpair import (
     DifferentialPair,
     DifferentialPairConfig,
@@ -44,7 +45,6 @@ from .diffpair import (
     detect_differential_signals,
     group_differential_pairs,
 )
-from .core import AdaptiveAutorouter, Autorouter, RoutingResult
 from .grid import RoutingGrid
 from .heuristics import (
     CongestionAwareHeuristic,
@@ -62,18 +62,9 @@ from .io import (
     route_pcb,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
+from .optimizer import OptimizationConfig, OptimizationStats, TraceOptimizer
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
-from .optimizer import OptimizationConfig, OptimizationStats, TraceOptimizer
-from .zones import (
-    ConnectionType,
-    FilledZone,
-    ThermalRelief,
-    ZoneFiller,
-    ZoneManager,
-    fill_zones_by_priority,
-    get_connection_type,
-)
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     NET_CLASS_AUDIO,
@@ -87,6 +78,15 @@ from .rules import (
     NetClassRouting,
     ZoneRules,
     create_net_class_map,
+)
+from .zones import (
+    ConnectionType,
+    FilledZone,
+    ThermalRelief,
+    ZoneFiller,
+    ZoneManager,
+    fill_zones_by_priority,
+    get_connection_type,
 )
 
 __all__ = [

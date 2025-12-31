@@ -11,11 +11,10 @@ This provides the LLM with actionable feedback to revise its strategy.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
-from .state import PCBState, ComponentState, TraceState, ViolationState
-from .vocabulary import SpatialRegion, describe_position, describe_distance
-from .commands import CommandResult, CommandType
+from .commands import CommandResult
+from .state import PCBState, ViolationState
+from .vocabulary import SpatialRegion
 
 
 class FailureReason(Enum):
@@ -46,7 +45,7 @@ class Obstacle:
     type: str  # "component", "trace", "via", "zone", "keepout"
     name: str  # Reference or description
     position: tuple[float, float]
-    bounds: Optional[tuple[float, float, float, float]] = None
+    bounds: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -54,9 +53,9 @@ class Alternative:
     """A suggested alternative approach."""
 
     description: str
-    direction: Optional[str] = None  # "north", "south", "east", "west"
-    layer: Optional[str] = None
-    detour_length: Optional[float] = None  # mm
+    direction: str | None = None  # "north", "south", "east", "west"
+    layer: str | None = None
+    detour_length: float | None = None  # mm
     via_count: int = 0
     trade_offs: list[str] = field(default_factory=list)
 
@@ -82,8 +81,8 @@ class RoutingDiagnosis:
     end_position: tuple[float, float]
 
     # Failure information
-    failure_reason: Optional[FailureReason] = None
-    failure_location: Optional[tuple[float, float]] = None
+    failure_reason: FailureReason | None = None
+    failure_location: tuple[float, float] | None = None
     failure_description: str = ""
 
     # Obstacles
@@ -124,7 +123,9 @@ class RoutingDiagnosis:
             lines.append("")
             lines.append("Blocking obstacles:")
             for obs in self.blocking_obstacles[:5]:
-                lines.append(f"  - {obs.type}: {obs.name} at ({obs.position[0]:.1f}, {obs.position[1]:.1f})")
+                lines.append(
+                    f"  - {obs.type}: {obs.name} at ({obs.position[0]:.1f}, {obs.position[1]:.1f})"
+                )
 
         if self.alternatives:
             lines.append("")
@@ -143,7 +144,7 @@ class PlacementDiagnosis:
     ref: str
     target_position: tuple[float, float]
 
-    failure_reason: Optional[FailureReason] = None
+    failure_reason: FailureReason | None = None
     failure_description: str = ""
 
     blocking_components: list[str] = field(default_factory=list)
@@ -180,7 +181,7 @@ class PlacementDiagnosis:
 class DiagnosisEngine:
     """Engine for analyzing failures and suggesting alternatives."""
 
-    def __init__(self, state: PCBState, regions: Optional[list[SpatialRegion]] = None):
+    def __init__(self, state: PCBState, regions: list[SpatialRegion] | None = None):
         self.state = state
         self.regions = regions or []
         self.region_map = {r.name: r for r in self.regions}
@@ -267,9 +268,7 @@ class DiagnosisEngine:
                 by_type[v.type] = []
             by_type[v.type].append(v)
 
-        for vtype, violations in sorted(
-            by_type.items(), key=lambda x: len(x[1]), reverse=True
-        ):
+        for vtype, violations in sorted(by_type.items(), key=lambda x: len(x[1]), reverse=True):
             lines.append(f"### {vtype}: {len(violations)}")
 
             # Analyze first few of each type
@@ -346,35 +345,47 @@ class DiagnosisEngine:
         for ref, comp in self.state.components.items():
             bounds = comp.bounds
             if self._line_intersects_box(x1, y1, x2, y2, bounds):
-                obstacles.append(Obstacle(
-                    type="component",
-                    name=ref,
-                    position=(comp.x, comp.y),
-                    bounds=bounds,
-                ))
+                obstacles.append(
+                    Obstacle(
+                        type="component",
+                        name=ref,
+                        position=(comp.x, comp.y),
+                        bounds=bounds,
+                    )
+                )
 
         # Check traces
         for trace in self.state.traces:
             if self._segments_intersect(
-                x1, y1, x2, y2,
-                trace.x1, trace.y1, trace.x2, trace.y2,
+                x1,
+                y1,
+                x2,
+                y2,
+                trace.x1,
+                trace.y1,
+                trace.x2,
+                trace.y2,
             ):
-                obstacles.append(Obstacle(
-                    type="trace",
-                    name=trace.net,
-                    position=((trace.x1 + trace.x2) / 2, (trace.y1 + trace.y2) / 2),
-                ))
+                obstacles.append(
+                    Obstacle(
+                        type="trace",
+                        name=trace.net,
+                        position=((trace.x1 + trace.x2) / 2, (trace.y1 + trace.y2) / 2),
+                    )
+                )
 
         # Check keepout regions
         for region in self.regions:
             if region.is_keepout:
                 if self._line_intersects_box(x1, y1, x2, y2, region.bounds):
-                    obstacles.append(Obstacle(
-                        type="keepout",
-                        name=region.name,
-                        position=region.center,
-                        bounds=region.bounds,
-                    ))
+                    obstacles.append(
+                        Obstacle(
+                            type="keepout",
+                            name=region.name,
+                            position=region.center,
+                            bounds=region.bounds,
+                        )
+                    )
 
         return obstacles
 
@@ -392,7 +403,7 @@ class DiagnosisEngine:
 
         x1, y1 = start
         x2, y2 = end
-        direct_length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
 
         # Find bounding box of obstacles
         all_bounds = [o.bounds for o in obstacles if o.bounds]
@@ -410,53 +421,63 @@ class DiagnosisEngine:
         if min_y > min(y1, y2):
             north_y = min_y - margin
             detour = abs(y1 - north_y) + abs(north_y - y2)
-            alternatives.append(Alternative(
-                description="Route north around obstacle",
-                direction="north",
-                detour_length=detour - abs(y2 - y1) if detour > abs(y2 - y1) else 0,
-                trade_offs=["longer path"],
-            ))
+            alternatives.append(
+                Alternative(
+                    description="Route north around obstacle",
+                    direction="north",
+                    detour_length=detour - abs(y2 - y1) if detour > abs(y2 - y1) else 0,
+                    trade_offs=["longer path"],
+                )
+            )
 
         # Southern route
         if max_y < max(y1, y2):
             south_y = max_y + margin
             detour = abs(y1 - south_y) + abs(south_y - y2)
-            alternatives.append(Alternative(
-                description="Route south around obstacle",
-                direction="south",
-                detour_length=detour - abs(y2 - y1) if detour > abs(y2 - y1) else 0,
-                trade_offs=["longer path"],
-            ))
+            alternatives.append(
+                Alternative(
+                    description="Route south around obstacle",
+                    direction="south",
+                    detour_length=detour - abs(y2 - y1) if detour > abs(y2 - y1) else 0,
+                    trade_offs=["longer path"],
+                )
+            )
 
         # Eastern route
         if max_x < max(x1, x2):
             east_x = max_x + margin
             detour = abs(x1 - east_x) + abs(east_x - x2)
-            alternatives.append(Alternative(
-                description="Route east around obstacle",
-                direction="east",
-                detour_length=detour - abs(x2 - x1) if detour > abs(x2 - x1) else 0,
-                trade_offs=["longer path"],
-            ))
+            alternatives.append(
+                Alternative(
+                    description="Route east around obstacle",
+                    direction="east",
+                    detour_length=detour - abs(x2 - x1) if detour > abs(x2 - x1) else 0,
+                    trade_offs=["longer path"],
+                )
+            )
 
         # Western route
         if min_x > min(x1, x2):
             west_x = min_x - margin
             detour = abs(x1 - west_x) + abs(west_x - x2)
-            alternatives.append(Alternative(
-                description="Route west around obstacle",
-                direction="west",
-                detour_length=detour - abs(x2 - x1) if detour > abs(x2 - x1) else 0,
-                trade_offs=["longer path"],
-            ))
+            alternatives.append(
+                Alternative(
+                    description="Route west around obstacle",
+                    direction="west",
+                    detour_length=detour - abs(x2 - x1) if detour > abs(x2 - x1) else 0,
+                    trade_offs=["longer path"],
+                )
+            )
 
         # Layer change
-        alternatives.append(Alternative(
-            description="Change layer using via",
-            layer="B.Cu",
-            via_count=2,
-            trade_offs=["adds vias", "uses back copper"],
-        ))
+        alternatives.append(
+            Alternative(
+                description="Change layer using via",
+                layer="B.Cu",
+                via_count=2,
+                trade_offs=["adds vias", "uses back copper"],
+            )
+        )
 
         return alternatives
 
@@ -465,7 +486,7 @@ class DiagnosisEngine:
         start: tuple[float, float],
         end: tuple[float, float],
         obstacles: list[Obstacle],
-    ) -> Optional[tuple[float, float]]:
+    ) -> tuple[float, float] | None:
         """Estimate where routing failed."""
         if not obstacles:
             return None
@@ -495,11 +516,11 @@ class DiagnosisEngine:
 
         # Count items in corridor
         trace_count = sum(
-            1 for t in self.state.traces
-            if min_x <= t.x1 <= max_x and min_y <= t.y1 <= max_y
+            1 for t in self.state.traces if min_x <= t.x1 <= max_x and min_y <= t.y1 <= max_y
         )
         comp_count = sum(
-            1 for c in self.state.components.values()
+            1
+            for c in self.state.components.values()
             if min_x <= c.x <= max_x and min_y <= c.y <= max_y
         )
 
@@ -520,17 +541,21 @@ class DiagnosisEngine:
         for trace in self.state.traces:
             # Check if trace is within 3mm of path
             dist = self._segment_distance(
-                x1, y1, x2, y2,
-                trace.x1, trace.y1, trace.x2, trace.y2,
+                x1,
+                y1,
+                x2,
+                y2,
+                trace.x1,
+                trace.y1,
+                trace.x2,
+                trace.y2,
             )
             if dist < 3.0:
                 nearby.add(trace.net)
 
         return list(nearby)[:10]
 
-    def _find_blocking_components(
-        self, position: tuple[float, float]
-    ) -> list[str]:
+    def _find_blocking_components(self, position: tuple[float, float]) -> list[str]:
         """Find components that would block a placement."""
         blocking = []
         x, y = position
@@ -563,7 +588,7 @@ class DiagnosisEngine:
 
         return suggestions
 
-    def _suggest_violation_fix(self, violation: ViolationState) -> Optional[str]:
+    def _suggest_violation_fix(self, violation: ViolationState) -> str | None:
         """Suggest a fix for a violation."""
         vtype = violation.type
 
@@ -591,8 +616,10 @@ class DiagnosisEngine:
 
     def _line_intersects_box(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
         bounds: tuple[float, float, float, float],
     ) -> bool:
         """Check if a line intersects a bounding box."""
@@ -615,8 +642,14 @@ class DiagnosisEngine:
 
     def _segments_intersect(
         self,
-        x1: float, y1: float, x2: float, y2: float,
-        x3: float, y3: float, x4: float, y4: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        x3: float,
+        y3: float,
+        x4: float,
+        y4: float,
     ) -> bool:
         """Check if two line segments intersect."""
         # Simplified: check if bounding boxes overlap and segments are close
@@ -631,8 +664,14 @@ class DiagnosisEngine:
 
     def _segment_distance(
         self,
-        x1: float, y1: float, x2: float, y2: float,
-        x3: float, y3: float, x4: float, y4: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        x3: float,
+        y3: float,
+        x4: float,
+        y4: float,
     ) -> float:
         """Calculate minimum distance between two line segments."""
         # Simplified: use center-to-center distance

@@ -6,7 +6,7 @@ Provides the import-dru command to parse and display design rules files.
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from kicad_tools.core.sexp_file import load_design_rules
 from kicad_tools.sexp import SExp
@@ -39,9 +39,9 @@ def import_dru(file_path: Path, output_format: str = "text") -> int:
     return 0
 
 
-def _extract_design_rules(sexp: SExp) -> Dict[str, Any]:
+def _extract_design_rules(sexp: SExp) -> dict[str, Any]:
     """Extract design rules from S-expression tree."""
-    rules: Dict[str, Any] = {
+    rules: dict[str, Any] = {
         "version": None,
         "rules": [],
     }
@@ -52,7 +52,11 @@ def _extract_design_rules(sexp: SExp) -> Dict[str, Any]:
 
         if child.tag == "version":
             if child.values:
-                rules["version"] = int(child.values[0]) if isinstance(child.values[0], (int, float)) else str(child.values[0])
+                rules["version"] = (
+                    int(child.values[0])
+                    if isinstance(child.values[0], (int, float))
+                    else str(child.values[0])
+                )
 
         elif child.tag == "rule":
             rule = _extract_rule(child)
@@ -62,9 +66,9 @@ def _extract_design_rules(sexp: SExp) -> Dict[str, Any]:
     return rules
 
 
-def _extract_rule(rule_sexp: SExp) -> Dict[str, Any]:
+def _extract_rule(rule_sexp: SExp) -> dict[str, Any]:
     """Extract a single rule definition."""
-    rule: Dict[str, Any] = {}
+    rule: dict[str, Any] = {}
 
     # Rule name is first value
     if rule_sexp.values and isinstance(rule_sexp.values[0], str):
@@ -88,9 +92,9 @@ def _extract_rule(rule_sexp: SExp) -> Dict[str, Any]:
     return rule
 
 
-def _extract_constraint(constraint_sexp: SExp) -> Dict[str, Any]:
+def _extract_constraint(constraint_sexp: SExp) -> dict[str, Any]:
     """Extract constraint details."""
-    constraint: Dict[str, Any] = {}
+    constraint: dict[str, Any] = {}
 
     # Constraint type is first value
     if constraint_sexp.values and isinstance(constraint_sexp.values[0], str):
@@ -109,7 +113,7 @@ def _extract_constraint(constraint_sexp: SExp) -> Dict[str, Any]:
     return constraint
 
 
-def _parse_value_with_unit(value: Any) -> Dict[str, Any]:
+def _parse_value_with_unit(value: Any) -> dict[str, Any]:
     """Parse a value that may have a unit suffix."""
     if isinstance(value, (int, float)):
         return {"value": float(value), "unit": None}
@@ -140,7 +144,7 @@ def _parse_value_with_unit(value: Any) -> Dict[str, Any]:
         return {"value": value_str, "unit": None}
 
 
-def _print_design_rules(file_path: Path, rules: Dict[str, Any]) -> None:
+def _print_design_rules(file_path: Path, rules: dict[str, Any]) -> None:
     """Print design rules in text format."""
     print(f"\nDesign Rules: {file_path.name}")
     print("=" * 60)

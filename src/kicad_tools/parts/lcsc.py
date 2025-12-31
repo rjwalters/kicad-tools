@@ -10,8 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional
-from urllib.parse import quote
+from typing import TYPE_CHECKING
 
 from .cache import PartsCache
 from .models import (
@@ -35,7 +34,9 @@ JLCPCB_API_BASE = "https://jlcpcb.com/api"
 LCSC_API_BASE = "https://wmsc.lcsc.com/ftps/wm"
 
 # Part lookup endpoint
-PART_LOOKUP_URL = f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentDetail"
+PART_LOOKUP_URL = (
+    f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentDetail"
+)
 
 # Search endpoint
 SEARCH_URL = f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList"
@@ -43,6 +44,7 @@ SEARCH_URL = f"{JLCPCB_API_BASE}/overseas-pcb-order/v1/shoppingCart/smtGood/sele
 
 def _requires_requests(func):
     """Decorator to check if requests is available."""
+
     def wrapper(*args, **kwargs):
         try:
             import requests  # noqa: F401
@@ -52,6 +54,7 @@ def _requires_requests(func):
                 "Install with: pip install kicad-tools[parts]"
             )
         return func(*args, **kwargs)
+
     return wrapper
 
 
@@ -69,7 +72,10 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         return PartCategory.DIODE
     if any(x in desc_lower for x in ["transistor", "mosfet", "bjt", "jfet"]):
         return PartCategory.TRANSISTOR
-    if any(x in desc_lower for x in ["mcu", "microcontroller", "op amp", "opamp", "regulator", "eeprom", "flash"]):
+    if any(
+        x in desc_lower
+        for x in ["mcu", "microcontroller", "op amp", "opamp", "regulator", "eeprom", "flash"]
+    ):
         return PartCategory.IC
     if any(x in desc_lower for x in ["connector", "header", "socket", "jack", "plug"]):
         return PartCategory.CONNECTOR
@@ -186,7 +192,7 @@ class LCSCClient:
 
     def __init__(
         self,
-        cache: Optional[PartsCache] = None,
+        cache: PartsCache | None = None,
         use_cache: bool = True,
         timeout: float = 30.0,
     ):
@@ -206,12 +212,13 @@ class LCSCClient:
         """Get or create requests session."""
         if self._session is None:
             import requests
+
             self._session = requests.Session()
             self._session.headers.update(self.DEFAULT_HEADERS)
         return self._session
 
     @_requires_requests
-    def lookup(self, lcsc_part: str, bypass_cache: bool = False) -> Optional[Part]:
+    def lookup(self, lcsc_part: str, bypass_cache: bool = False) -> Part | None:
         """
         Look up a single part by LCSC number.
 
@@ -244,7 +251,7 @@ class LCSCClient:
             logger.error(f"Failed to lookup {lcsc_part}: {e}")
             return None
 
-    def _fetch_part(self, lcsc_part: str) -> Optional[Part]:
+    def _fetch_part(self, lcsc_part: str) -> Part | None:
         """Fetch part from JLCPCB API."""
         import requests
 
@@ -400,7 +407,7 @@ class LCSCClient:
     @_requires_requests
     def lookup_many(
         self,
-        lcsc_parts: List[str],
+        lcsc_parts: list[str],
         bypass_cache: bool = False,
     ) -> dict[str, Part]:
         """
@@ -441,7 +448,7 @@ class LCSCClient:
 
     def check_bom(
         self,
-        items: List["BOMItem"],
+        items: list[BOMItem],
         bypass_cache: bool = False,
     ) -> BOMAvailability:
         """

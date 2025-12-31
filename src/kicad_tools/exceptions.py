@@ -26,7 +26,7 @@ Example::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 
 class KiCadToolsError(Exception):
@@ -43,8 +43,8 @@ class KiCadToolsError(Exception):
     def __init__(
         self,
         message: str,
-        context: Optional[Dict[str, Any]] = None,
-        suggestions: Optional[List[str]] = None,
+        context: dict[str, Any] | None = None,
+        suggestions: list[str] | None = None,
     ):
         self.message = message
         self.context = context or {}
@@ -90,11 +90,11 @@ class ParseError(KiCadToolsError):
     def __init__(
         self,
         message: str,
-        context: Optional[Dict[str, Any]] = None,
-        suggestions: Optional[List[str]] = None,
-        line: Optional[int] = None,
-        column: Optional[int] = None,
-        file_path: Optional[Union[str, Path]] = None,
+        context: dict[str, Any] | None = None,
+        suggestions: list[str] | None = None,
+        line: int | None = None,
+        column: int | None = None,
+        file_path: str | Path | None = None,
     ):
         # Build context from convenience parameters
         ctx = context or {}
@@ -130,9 +130,9 @@ class ValidationError(KiCadToolsError):
 
     def __init__(
         self,
-        errors: List[str],
-        context: Optional[Dict[str, Any]] = None,
-        suggestions: Optional[List[str]] = None,
+        errors: list[str],
+        context: dict[str, Any] | None = None,
+        suggestions: list[str] | None = None,
     ):
         self.errors = errors
         message = f"Validation failed with {len(errors)} error(s):\n"

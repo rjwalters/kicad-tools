@@ -14,8 +14,7 @@ class TestFootprintsImport:
         """Test that importing footprints emits a FutureWarning."""
         # Clear all footprints-related modules from cache to force reimport
         modules_to_remove = [
-            key for key in sys.modules.keys()
-            if key.startswith("kicad_tools.footprints")
+            key for key in sys.modules if key.startswith("kicad_tools.footprints")
         ]
         for mod in modules_to_remove:
             del sys.modules[mod]
@@ -24,6 +23,7 @@ class TestFootprintsImport:
             warnings.simplefilter("always")
             # Import and reload to ensure warning is triggered
             import kicad_tools.footprints
+
             importlib.reload(kicad_tools.footprints)
             # Check that a FutureWarning was emitted
             future_warnings = [x for x in w if issubclass(x.category, FutureWarning)]
@@ -36,18 +36,22 @@ class TestPadType:
 
     def test_smd_value(self):
         from kicad_tools.footprints import PadType
+
         assert PadType.SMD.value == "smd"
 
     def test_tht_value(self):
         from kicad_tools.footprints import PadType
+
         assert PadType.THT.value == "thru_hole"
 
     def test_npth_value(self):
         from kicad_tools.footprints import PadType
+
         assert PadType.NPTH.value == "np_thru_hole"
 
     def test_connect_value(self):
         from kicad_tools.footprints import PadType
+
         assert PadType.CONNECT.value == "connect"
 
 
@@ -56,22 +60,27 @@ class TestPadShape:
 
     def test_rect_value(self):
         from kicad_tools.footprints import PadShape
+
         assert PadShape.RECT.value == "rect"
 
     def test_roundrect_value(self):
         from kicad_tools.footprints import PadShape
+
         assert PadShape.ROUNDRECT.value == "roundrect"
 
     def test_circle_value(self):
         from kicad_tools.footprints import PadShape
+
         assert PadShape.CIRCLE.value == "circle"
 
     def test_oval_value(self):
         from kicad_tools.footprints import PadShape
+
         assert PadShape.OVAL.value == "oval"
 
     def test_trapezoid_value(self):
         from kicad_tools.footprints import PadShape
+
         assert PadShape.TRAPEZOID.value == "trapezoid"
 
 
@@ -80,46 +89,57 @@ class TestLayer:
 
     def test_front_copper(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.F_CU.value == "F.Cu"
 
     def test_back_copper(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.B_CU.value == "B.Cu"
 
     def test_front_paste(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.F_PASTE.value == "F.Paste"
 
     def test_back_paste(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.B_PASTE.value == "B.Paste"
 
     def test_front_mask(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.F_MASK.value == "F.Mask"
 
     def test_back_mask(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.B_MASK.value == "B.Mask"
 
     def test_front_silkscreen(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.F_SILKS.value == "F.SilkS"
 
     def test_back_silkscreen(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.B_SILKS.value == "B.SilkS"
 
     def test_front_courtyard(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.F_CRTYD.value == "F.CrtYd"
 
     def test_back_courtyard(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.B_CRTYD.value == "B.CrtYd"
 
     def test_edge_cuts(self):
         from kicad_tools.footprints import Layer
+
         assert Layer.EDGE_CUTS.value == "Edge.Cuts"
 
 
@@ -127,7 +147,7 @@ class TestPad:
     """Tests for Pad class."""
 
     def test_smd_pad_creation(self):
-        from kicad_tools.footprints import Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
 
         pad = Pad(
             number="1",
@@ -149,7 +169,7 @@ class TestPad:
         assert pad.drill == 0
 
     def test_tht_pad_with_drill(self):
-        from kicad_tools.footprints import Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
 
         pad = Pad(
             number="1",
@@ -168,7 +188,7 @@ class TestPad:
         assert Layer.B_CU in pad.layers
 
     def test_roundrect_pad(self):
-        from kicad_tools.footprints import Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
 
         pad = Pad(
             number="2",
@@ -182,7 +202,7 @@ class TestPad:
         assert pad.shape == PadShape.ROUNDRECT
 
     def test_oval_pad(self):
-        from kicad_tools.footprints import Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
 
         pad = Pad(
             number="3",
@@ -197,7 +217,7 @@ class TestPad:
         assert pad.shape == PadShape.OVAL
 
     def test_npth_pad(self):
-        from kicad_tools.footprints import Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Pad, PadShape, PadType
 
         pad = Pad(
             number="",
@@ -226,7 +246,7 @@ class TestFootprint:
         assert fp.courtyard == []
 
     def test_add_pad(self):
-        from kicad_tools.footprints import Footprint, Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
 
         fp = Footprint(name="R_0402_1005Metric")
 
@@ -276,7 +296,7 @@ class TestFootprintExports:
         assert set(__all__) == set(expected)
 
     def test_can_import_all_exports(self):
-        from kicad_tools.footprints import PadType, PadShape, Layer, Pad, Footprint
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
 
         # Just verify they're importable
         assert PadType is not None
@@ -291,7 +311,7 @@ class TestFootprintUsagePatterns:
 
     def test_create_0402_resistor_footprint(self):
         """Test creating a typical 0402 resistor footprint."""
-        from kicad_tools.footprints import Footprint, Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
 
         fp = Footprint(name="R_0402_1005Metric")
 
@@ -301,23 +321,27 @@ class TestFootprintUsagePatterns:
 
         smd_layers = [Layer.F_CU, Layer.F_PASTE, Layer.F_MASK]
 
-        fp.add_pad(Pad(
-            number="1",
-            pad_type=PadType.SMD,
-            shape=PadShape.ROUNDRECT,
-            position=(-pad_spacing, 0.0),
-            size=pad_size,
-            layers=smd_layers,
-        ))
+        fp.add_pad(
+            Pad(
+                number="1",
+                pad_type=PadType.SMD,
+                shape=PadShape.ROUNDRECT,
+                position=(-pad_spacing, 0.0),
+                size=pad_size,
+                layers=smd_layers,
+            )
+        )
 
-        fp.add_pad(Pad(
-            number="2",
-            pad_type=PadType.SMD,
-            shape=PadShape.ROUNDRECT,
-            position=(pad_spacing, 0.0),
-            size=pad_size,
-            layers=smd_layers,
-        ))
+        fp.add_pad(
+            Pad(
+                number="2",
+                pad_type=PadType.SMD,
+                shape=PadShape.ROUNDRECT,
+                position=(pad_spacing, 0.0),
+                size=pad_size,
+                layers=smd_layers,
+            )
+        )
 
         assert len(fp.pads) == 2
         assert fp.pads[0].position[0] < 0  # Left pad
@@ -325,7 +349,7 @@ class TestFootprintUsagePatterns:
 
     def test_create_soic8_footprint(self):
         """Test creating a SOIC-8 footprint."""
-        from kicad_tools.footprints import Footprint, Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
 
         fp = Footprint(name="SOIC-8_3.9x4.9mm_P1.27mm")
 
@@ -338,25 +362,29 @@ class TestFootprintUsagePatterns:
         # Add 8 pads (4 on each side)
         for i in range(4):
             # Left side pads (1-4)
-            fp.add_pad(Pad(
-                number=str(i + 1),
-                pad_type=PadType.SMD,
-                shape=PadShape.RECT,
-                position=(-x_offset, y_start + i * y_pitch),
-                size=pad_size,
-                layers=smd_layers,
-            ))
+            fp.add_pad(
+                Pad(
+                    number=str(i + 1),
+                    pad_type=PadType.SMD,
+                    shape=PadShape.RECT,
+                    position=(-x_offset, y_start + i * y_pitch),
+                    size=pad_size,
+                    layers=smd_layers,
+                )
+            )
 
         for i in range(4):
             # Right side pads (5-8, numbered bottom to top)
-            fp.add_pad(Pad(
-                number=str(8 - i),
-                pad_type=PadType.SMD,
-                shape=PadShape.RECT,
-                position=(x_offset, y_start + i * y_pitch),
-                size=pad_size,
-                layers=smd_layers,
-            ))
+            fp.add_pad(
+                Pad(
+                    number=str(8 - i),
+                    pad_type=PadType.SMD,
+                    shape=PadShape.RECT,
+                    position=(x_offset, y_start + i * y_pitch),
+                    size=pad_size,
+                    layers=smd_layers,
+                )
+            )
 
         assert len(fp.pads) == 8
         # Verify pin 1 is at expected position
@@ -365,7 +393,7 @@ class TestFootprintUsagePatterns:
 
     def test_create_through_hole_header(self):
         """Test creating a through-hole pin header footprint."""
-        from kicad_tools.footprints import Footprint, Pad, PadType, PadShape, Layer
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
 
         fp = Footprint(name="PinHeader_1x04_P2.54mm_Vertical")
 
@@ -375,15 +403,17 @@ class TestFootprintUsagePatterns:
         drill = 1.0
 
         for i in range(4):
-            fp.add_pad(Pad(
-                number=str(i + 1),
-                pad_type=PadType.THT,
-                shape=PadShape.OVAL if i > 0 else PadShape.RECT,  # Pin 1 is rect
-                position=(0.0, i * pitch),
-                size=pad_size,
-                layers=tht_layers,
-                drill=drill,
-            ))
+            fp.add_pad(
+                Pad(
+                    number=str(i + 1),
+                    pad_type=PadType.THT,
+                    shape=PadShape.OVAL if i > 0 else PadShape.RECT,  # Pin 1 is rect
+                    position=(0.0, i * pitch),
+                    size=pad_size,
+                    layers=tht_layers,
+                    drill=drill,
+                )
+            )
 
         assert len(fp.pads) == 4
         assert fp.pads[0].shape == PadShape.RECT  # Pin 1

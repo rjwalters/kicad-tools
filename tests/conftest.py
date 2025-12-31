@@ -1,7 +1,8 @@
 """Pytest fixtures for kicad-tools tests."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 @pytest.fixture
@@ -14,6 +15,7 @@ def fixtures_dir() -> Path:
 def simple_rc_schematic(fixtures_dir: Path) -> Path:
     """Return the path to the simple RC circuit schematic."""
     return fixtures_dir / "simple_rc.kicad_sch"
+
 
 # Minimal KiCad schematic for testing
 MINIMAL_SCHEMATIC = """(kicad_sch

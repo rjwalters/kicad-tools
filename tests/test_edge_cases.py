@@ -10,7 +10,6 @@ This module tests edge cases including:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
@@ -23,6 +22,7 @@ from kicad_tools.schema.schematic import Schematic
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 # --- Empty/Minimal File Edge Cases ---
+
 
 class TestEmptyMinimalFiles:
     """Tests for handling empty and minimal file structures."""
@@ -132,6 +132,7 @@ class TestEmptyMinimalFiles:
 
 # --- Malformed S-Expression Handling ---
 
+
 class TestMalformedSexp:
     """Tests for graceful handling of malformed S-expressions."""
 
@@ -218,6 +219,7 @@ class TestMalformedSexp:
 
 
 # --- Boundary Value Edge Cases ---
+
 
 class TestBoundaryValues:
     """Tests for boundary values like very long strings, special characters."""
@@ -392,12 +394,14 @@ class TestBoundaryValues:
 
 # --- Query Edge Cases ---
 
+
 @dataclass
 class MockQueryItem:
     """Mock item for query edge cases."""
+
     name: str
-    value: Optional[int] = None
-    category: Optional[str] = None
+    value: int | None = None
+    category: str | None = None
 
 
 class TestQueryEdgeCases:
@@ -516,18 +520,13 @@ class TestQueryEdgeCases:
             MockQueryItem("delta", 40, "B"),
         ]
         query = BaseQuery(items)
-        result = (
-            query
-            .filter(value__gte=15)
-            .exclude(category="B")
-            .filter(name__contains="a")
-            .all()
-        )
+        result = query.filter(value__gte=15).exclude(category="B").filter(name__contains="a").all()
         assert len(result) == 1
         assert result[0].name == "gamma"
 
 
 # --- Schematic/PCB Integration Edge Cases ---
+
 
 class TestSchematicEdgeCases:
     """Tests for schematic edge cases."""
@@ -731,6 +730,7 @@ class TestPCBEdgeCases:
 
 # --- S-Expression Serialization Edge Cases ---
 
+
 class TestSexpSerializationEdgeCases:
     """Tests for S-expression serialization edge cases."""
 
@@ -789,6 +789,7 @@ class TestSexpSerializationEdgeCases:
 
 
 # --- Hierarchical Schematic Edge Cases ---
+
 
 class TestHierarchyEdgeCases:
     """Tests for hierarchical schematic edge cases."""

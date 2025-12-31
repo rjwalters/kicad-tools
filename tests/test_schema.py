@@ -1,17 +1,17 @@
 """Tests for schema modules (wire, label, bom, schematic, library, hierarchy)."""
 
-import pytest
 from pathlib import Path
 
+import pytest
+
+from kicad_tools.schema.bom import BOM, BOMGroup, BOMItem
+from kicad_tools.schema.hierarchy import HierarchyNode, SheetPin
+from kicad_tools.schema.hierarchy import SheetInstance as HierarchySheetInstance
+from kicad_tools.schema.label import GlobalLabel, HierarchicalLabel, Label, PowerSymbol
+from kicad_tools.schema.library import LibraryManager, LibraryPin, LibrarySymbol, SymbolLibrary
+from kicad_tools.schema.schematic import Schematic, SheetInstance, TitleBlock
+from kicad_tools.schema.wire import Bus, Junction, Wire
 from kicad_tools.sexp import parse_sexp
-from kicad_tools.schema.wire import Wire, Junction, Bus
-from kicad_tools.schema.label import Label, HierarchicalLabel, GlobalLabel, PowerSymbol
-from kicad_tools.schema.bom import BOMItem, BOMGroup, BOM
-from kicad_tools.schema.schematic import Schematic, TitleBlock, SheetInstance
-from kicad_tools.schema.library import LibraryPin, LibrarySymbol, SymbolLibrary, LibraryManager
-from kicad_tools.schema.hierarchy import (
-    SheetPin, SheetInstance as HierarchySheetInstance, HierarchyNode, HierarchyBuilder
-)
 
 
 class TestWire:
@@ -386,7 +386,13 @@ class TestBOMGroup:
             footprint="R_0402",
             items=[
                 BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", lcsc="C25744"),
+                BOMItem(
+                    reference="R2",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    lcsc="C25744",
+                ),
             ],
         )
         assert group.lcsc == "C25744"
@@ -408,7 +414,13 @@ class TestBOMGroup:
             value="10k",
             footprint="R_0402",
             items=[
-                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R", mpn="RC0402FR-0710KL"),
+                BOMItem(
+                    reference="R1",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    mpn="RC0402FR-0710KL",
+                ),
             ],
         )
         assert group.mpn == "RC0402FR-0710KL"
@@ -419,7 +431,13 @@ class TestBOMGroup:
             value="10k",
             footprint="R_0402",
             items=[
-                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R", description="Resistor"),
+                BOMItem(
+                    reference="R1",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    description="Resistor",
+                ),
             ],
         )
         assert group.description == "Resistor"
@@ -430,110 +448,160 @@ class TestBOM:
 
     def test_bom_total_components(self):
         """Test total component count (excluding virtual and DNP)."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="#PWR01", value="GND", footprint="", lib_id="power:GND"),
-            BOMItem(reference="R3", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="#PWR01", value="GND", footprint="", lib_id="power:GND"),
+                BOMItem(
+                    reference="R3", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True
+                ),
+            ]
+        )
         assert bom.total_components == 2  # Only R1 and R2
 
     def test_bom_dnp_count(self):
         """Test DNP count."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True),
-            BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C", dnp=True),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True
+                ),
+                BOMItem(
+                    reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C", dnp=True
+                ),
+            ]
+        )
         assert bom.dnp_count == 2
 
     def test_bom_grouped_by_value_footprint(self):
         """Test grouping by value+footprint (default)."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R3", value="10k", footprint="R_0603", lib_id="Device:R"),
-            BOMItem(reference="R4", value="4.7k", footprint="R_0402", lib_id="Device:R"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R3", value="10k", footprint="R_0603", lib_id="Device:R"),
+                BOMItem(reference="R4", value="4.7k", footprint="R_0402", lib_id="Device:R"),
+            ]
+        )
         groups = bom.grouped()
         assert len(groups) == 3  # 10k/0402, 10k/0603, 4.7k/0402
 
     def test_bom_grouped_by_value(self):
         """Test grouping by value only."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0603", lib_id="Device:R"),
-            BOMItem(reference="R3", value="4.7k", footprint="R_0402", lib_id="Device:R"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0603", lib_id="Device:R"),
+                BOMItem(reference="R3", value="4.7k", footprint="R_0402", lib_id="Device:R"),
+            ]
+        )
         groups = bom.grouped(by="value")
         assert len(groups) == 2  # 10k, 4.7k
 
     def test_bom_grouped_by_footprint(self):
         """Test grouping by footprint only."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="4.7k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R3", value="10k", footprint="R_0603", lib_id="Device:R"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="4.7k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R3", value="10k", footprint="R_0603", lib_id="Device:R"),
+            ]
+        )
         groups = bom.grouped(by="footprint")
         assert len(groups) == 2  # R_0402, R_0603
 
     def test_bom_grouped_by_mpn(self):
         """Test grouping by MPN."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R", mpn="RC0402FR-0710KL"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", mpn="RC0402FR-0710KL"),
-            BOMItem(reference="R3", value="10k", footprint="R_0402", lib_id="Device:R", mpn="ERJ-2RKF1002X"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(
+                    reference="R1",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    mpn="RC0402FR-0710KL",
+                ),
+                BOMItem(
+                    reference="R2",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    mpn="RC0402FR-0710KL",
+                ),
+                BOMItem(
+                    reference="R3",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    mpn="ERJ-2RKF1002X",
+                ),
+            ]
+        )
         groups = bom.grouped(by="mpn")
         assert len(groups) == 2
 
     def test_bom_grouped_excludes_virtual(self):
         """Test that grouped excludes virtual components."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="#PWR01", value="GND", footprint="", lib_id="power:GND"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="#PWR01", value="GND", footprint="", lib_id="power:GND"),
+            ]
+        )
         groups = bom.grouped()
         assert len(groups) == 1
         assert groups[0].items[0].reference == "R1"
 
     def test_bom_unique_parts(self):
         """Test unique parts count."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
         assert bom.unique_parts == 2
 
     def test_bom_filter_exclude_dnp(self):
         """Test filtering to exclude DNP."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True
+                ),
+            ]
+        )
         filtered = bom.filter(include_dnp=False)
         assert len(filtered.items) == 1
         assert filtered.items[0].reference == "R1"
 
     def test_bom_filter_include_dnp(self):
         """Test filtering to include DNP."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True
+                ),
+            ]
+        )
         filtered = bom.filter(include_dnp=True)
         assert len(filtered.items) == 2
 
     def test_bom_filter_by_reference_pattern(self):
         """Test filtering by reference pattern."""
-        bom = BOM(items=[
-            BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
-            BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
-            BOMItem(reference="U1", value="ATmega", footprint="QFP", lib_id="MCU:ATmega"),
-        ])
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+                BOMItem(reference="U1", value="ATmega", footprint="QFP", lib_id="MCU:ATmega"),
+            ]
+        )
         filtered = bom.filter(reference_pattern="R*")
         assert len(filtered.items) == 2
         assert all(item.reference.startswith("R") for item in filtered.items)
@@ -760,8 +828,12 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(0, 0), rotation=0, length=2.54),
-                LibraryPin(number="2", name="B", type="output", position=(0, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(0, 0), rotation=0, length=2.54
+                ),
+                LibraryPin(
+                    number="2", name="B", type="output", position=(0, 0), rotation=0, length=2.54
+                ),
             ],
         )
         assert sym.pin_count == 2
@@ -771,8 +843,12 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(0, 0), rotation=0, length=2.54),
-                LibraryPin(number="2", name="B", type="output", position=(0, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(0, 0), rotation=0, length=2.54
+                ),
+                LibraryPin(
+                    number="2", name="B", type="output", position=(0, 0), rotation=0, length=2.54
+                ),
             ],
         )
         pin = sym.get_pin("2")
@@ -785,9 +861,30 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="GND", type="power_in", position=(0, 0), rotation=0, length=2.54),
-                LibraryPin(number="2", name="VCC", type="power_in", position=(0, 0), rotation=0, length=2.54),
-                LibraryPin(number="3", name="GND", type="power_in", position=(0, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1",
+                    name="GND",
+                    type="power_in",
+                    position=(0, 0),
+                    rotation=0,
+                    length=2.54,
+                ),
+                LibraryPin(
+                    number="2",
+                    name="VCC",
+                    type="power_in",
+                    position=(0, 0),
+                    rotation=0,
+                    length=2.54,
+                ),
+                LibraryPin(
+                    number="3",
+                    name="GND",
+                    type="power_in",
+                    position=(0, 0),
+                    rotation=0,
+                    length=2.54,
+                ),
             ],
         )
         gnd_pins = sym.get_pins_by_name("GND")
@@ -798,7 +895,9 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                ),
             ],
         )
         pos = sym.get_pin_position("1", instance_pos=(100, 100))
@@ -809,7 +908,9 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                ),
             ],
         )
         # 90 degree rotation
@@ -823,7 +924,9 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                ),
             ],
         )
         pos = sym.get_pin_position("1", instance_pos=(100, 100), mirror="x")
@@ -834,7 +937,9 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(0, 5), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(0, 5), rotation=0, length=2.54
+                ),
             ],
         )
         pos = sym.get_pin_position("1", instance_pos=(100, 100), mirror="y")
@@ -845,8 +950,12 @@ class TestLibrarySymbol:
         sym = LibrarySymbol(
             name="Test",
             pins=[
-                LibraryPin(number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54),
-                LibraryPin(number="2", name="B", type="output", position=(-5, 0), rotation=0, length=2.54),
+                LibraryPin(
+                    number="1", name="A", type="input", position=(5, 0), rotation=0, length=2.54
+                ),
+                LibraryPin(
+                    number="2", name="B", type="output", position=(-5, 0), rotation=0, length=2.54
+                ),
             ],
         )
         positions = sym.get_all_pin_positions(instance_pos=(100, 100))

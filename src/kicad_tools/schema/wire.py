@@ -7,7 +7,6 @@ Represents electrical connections in a schematic.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
 
 from kicad_tools.sexp import SExp
 
@@ -20,8 +19,8 @@ class Wire:
     Wires carry electrical signals between pins, labels, and junctions.
     """
 
-    start: Tuple[float, float]
-    end: Tuple[float, float]
+    start: tuple[float, float]
+    end: tuple[float, float]
     uuid: str = ""
     stroke_width: float = 0
     stroke_type: str = "default"
@@ -65,7 +64,7 @@ class Wire:
         dy = self.end[1] - self.start[1]
         return (dx * dx + dy * dy) ** 0.5
 
-    def contains_point(self, point: Tuple[float, float], tolerance: float = 0.1) -> bool:
+    def contains_point(self, point: tuple[float, float], tolerance: float = 0.1) -> bool:
         """Check if a point lies on this wire segment."""
         x, y = point
         x1, y1 = self.start
@@ -99,7 +98,7 @@ class Junction:
     Junctions explicitly mark connection points between wires.
     """
 
-    position: Tuple[float, float]
+    position: tuple[float, float]
     uuid: str = ""
     diameter: float = 0
 
@@ -131,8 +130,8 @@ class Bus:
     A bus segment (multiple signals grouped together).
     """
 
-    start: Tuple[float, float]
-    end: Tuple[float, float]
+    start: tuple[float, float]
+    end: tuple[float, float]
     uuid: str = ""
 
     @classmethod

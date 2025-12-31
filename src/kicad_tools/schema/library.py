@@ -9,7 +9,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -27,12 +26,12 @@ class LibraryPin:
     number: str
     name: str
     type: str  # power_in, passive, input, output, bidirectional, etc.
-    position: Tuple[float, float]  # Position relative to symbol origin
+    position: tuple[float, float]  # Position relative to symbol origin
     rotation: float  # Degrees: 0=right, 90=up, 180=left, 270=down
     length: float
 
     @property
-    def connection_offset(self) -> Tuple[float, float]:
+    def connection_offset(self) -> tuple[float, float]:
         """
         Get the connection point offset from the pin's at position.
 
@@ -91,32 +90,32 @@ class LibrarySymbol:
     """
 
     name: str
-    properties: Dict[str, str] = field(default_factory=dict)
-    pins: List[LibraryPin] = field(default_factory=list)
+    properties: dict[str, str] = field(default_factory=dict)
+    pins: list[LibraryPin] = field(default_factory=list)
     units: int = 1
 
     @property
     def pin_count(self) -> int:
         return len(self.pins)
 
-    def get_pin(self, number: str) -> Optional[LibraryPin]:
+    def get_pin(self, number: str) -> LibraryPin | None:
         """Get a pin by number."""
         for pin in self.pins:
             if pin.number == number:
                 return pin
         return None
 
-    def get_pins_by_name(self, name: str) -> List[LibraryPin]:
+    def get_pins_by_name(self, name: str) -> list[LibraryPin]:
         """Get all pins with a given name (e.g., GND, VCC)."""
         return [p for p in self.pins if p.name == name]
 
     def get_pin_position(
         self,
         pin_number: str,
-        instance_pos: Tuple[float, float],
+        instance_pos: tuple[float, float],
         instance_rot: float = 0,
         mirror: str = "",
-    ) -> Optional[Tuple[float, float]]:
+    ) -> tuple[float, float] | None:
         """
         Calculate the actual schematic position of a pin.
 
@@ -154,10 +153,10 @@ class LibrarySymbol:
 
     def get_all_pin_positions(
         self,
-        instance_pos: Tuple[float, float],
+        instance_pos: tuple[float, float],
         instance_rot: float = 0,
         mirror: str = "",
-    ) -> Dict[str, Tuple[float, float]]:
+    ) -> dict[str, tuple[float, float]]:
         """
         Get all pin positions for a symbol instance.
 
@@ -209,9 +208,9 @@ class SymbolLibrary:
     """
 
     path: str
-    symbols: Dict[str, LibrarySymbol] = field(default_factory=dict)
+    symbols: dict[str, LibrarySymbol] = field(default_factory=dict)
 
-    def get_symbol(self, name: str) -> Optional[LibrarySymbol]:
+    def get_symbol(self, name: str) -> LibrarySymbol | None:
         """Get a symbol by name."""
         return self.symbols.get(name)
 
@@ -243,14 +242,14 @@ class LibraryManager:
     """
 
     def __init__(self):
-        self.libraries: Dict[str, SymbolLibrary] = {}
-        self.search_paths: List[str] = []
+        self.libraries: dict[str, SymbolLibrary] = {}
+        self.search_paths: list[str] = []
 
     def add_library(self, name: str, library: SymbolLibrary) -> None:
         """Add a library with a given name."""
         self.libraries[name] = library
 
-    def load_library(self, path: str, name: Optional[str] = None) -> SymbolLibrary:
+    def load_library(self, path: str, name: str | None = None) -> SymbolLibrary:
         """Load a library from a file."""
         lib = SymbolLibrary.load(path)
         lib_name = name or Path(path).stem
@@ -261,7 +260,7 @@ class LibraryManager:
         """Add a directory to search for libraries."""
         self.search_paths.append(path)
 
-    def get_symbol(self, lib_id: str) -> Optional[LibrarySymbol]:
+    def get_symbol(self, lib_id: str) -> LibrarySymbol | None:
         """
         Get a symbol by lib_id.
 
@@ -296,10 +295,10 @@ class LibraryManager:
     def get_pin_positions(
         self,
         lib_id: str,
-        instance_pos: Tuple[float, float],
+        instance_pos: tuple[float, float],
         instance_rot: float = 0,
         mirror: str = "",
-    ) -> Dict[str, Tuple[float, float]]:
+    ) -> dict[str, tuple[float, float]]:
         """
         Get all pin positions for a symbol instance.
 

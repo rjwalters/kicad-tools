@@ -25,7 +25,6 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 from kicad_tools.schema import LibraryManager, Schematic
 
@@ -40,12 +39,12 @@ class PinStatus:
     pin_number: str
     pin_name: str
     pin_type: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
     connected: bool
     connection_type: str = ""  # "wire", "label", "junction"
 
 
-def find_all_connection_points(schematic: Schematic) -> Set[Tuple[int, int]]:
+def find_all_connection_points(schematic: Schematic) -> set[tuple[int, int]]:
     """
     Get all points where connections exist.
 
@@ -76,8 +75,8 @@ def find_all_connection_points(schematic: Schematic) -> Set[Tuple[int, int]]:
 
 
 def point_is_connected(
-    point: Tuple[float, float],
-    connection_points: Set[Tuple[int, int]],
+    point: tuple[float, float],
+    connection_points: set[tuple[int, int]],
     tolerance: float = POINT_TOLERANCE,
 ) -> bool:
     """Check if a point is connected to anything."""
@@ -98,8 +97,8 @@ def point_is_connected(
 def check_symbol_connections(
     schematic: Schematic,
     lib_manager: LibraryManager,
-    pattern: Optional[str] = None,
-) -> List[PinStatus]:
+    pattern: str | None = None,
+) -> list[PinStatus]:
     """
     Check all symbol pins for connections.
 
@@ -240,7 +239,7 @@ def main():
         output_table(results, args.verbose)
 
 
-def output_table(results: List[PinStatus], show_all: bool):
+def output_table(results: list[PinStatus], show_all: bool):
     """Output as formatted table."""
     if not results:
         if show_all:
@@ -250,7 +249,7 @@ def output_table(results: List[PinStatus], show_all: bool):
         return
 
     # Group by symbol
-    by_symbol: Dict[str, List[PinStatus]] = {}
+    by_symbol: dict[str, list[PinStatus]] = {}
     for pin in results:
         if pin.reference not in by_symbol:
             by_symbol[pin.reference] = []
@@ -292,7 +291,7 @@ def output_table(results: List[PinStatus], show_all: bool):
         print(f"  Unconnected: {unconnected}")
 
 
-def output_json(results: List[PinStatus], show_all: bool):
+def output_json(results: list[PinStatus], show_all: bool):
     """Output as JSON."""
     data = {
         "pins": [
@@ -310,7 +309,7 @@ def output_json(results: List[PinStatus], show_all: bool):
             "total_pins": len(results),
             "connected": sum(1 for r in results if r.connected),
             "unconnected": sum(1 for r in results if not r.connected),
-            "symbols_checked": len(set(p.reference for p in results)),
+            "symbols_checked": len({p.reference for p in results}),
         },
     }
     print(json.dumps(data, indent=2))

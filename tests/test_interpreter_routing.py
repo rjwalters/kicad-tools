@@ -7,8 +7,8 @@ Tests the obstacle-aware A* routing implementation in CommandInterpreter:
 """
 
 import pytest
-from dataclasses import dataclass, field
 
+from kicad_tools.reasoning.commands import CommandType, RouteNetCommand
 from kicad_tools.reasoning.interpreter import (
     CommandInterpreter,
     InterpreterConfig,
@@ -16,18 +16,16 @@ from kicad_tools.reasoning.interpreter import (
     RoutingDiagnostic,
 )
 from kicad_tools.reasoning.state import (
-    PCBState,
     BoardOutline,
     ComponentState,
-    PadState,
     NetState,
+    PadState,
+    PCBState,
     TraceState,
     ZoneState,
 )
-from kicad_tools.reasoning.commands import RouteNetCommand, CommandType
-from kicad_tools.router.rules import DesignRules
 from kicad_tools.router.layers import Layer, LayerStack
-
+from kicad_tools.router.rules import DesignRules
 
 # =============================================================================
 # Test Fixtures
@@ -38,34 +36,54 @@ from kicad_tools.router.layers import Layer, LayerStack
 def simple_pcb_state():
     """Create a minimal PCBState for testing."""
     # Create board outline
-    outline = BoardOutline.from_points([
-        (0.0, 0.0), (50.0, 0.0), (50.0, 40.0), (0.0, 40.0)
-    ])
+    outline = BoardOutline.from_points([(0.0, 0.0), (50.0, 0.0), (50.0, 40.0), (0.0, 40.0)])
 
     # Create components with pads
     pad1 = PadState(
-        ref="R1", number="1", x=10.0, y=10.0,
-        net="NET1", net_id=1, layer="F.Cu",
-        width=0.5, height=0.5, through_hole=False
+        ref="R1",
+        number="1",
+        x=10.0,
+        y=10.0,
+        net="NET1",
+        net_id=1,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
+        through_hole=False,
     )
     pad2 = PadState(
-        ref="R1", number="2", x=15.0, y=10.0,
-        net="NET1", net_id=1, layer="F.Cu",
-        width=0.5, height=0.5, through_hole=False
+        ref="R1",
+        number="2",
+        x=15.0,
+        y=10.0,
+        net="NET1",
+        net_id=1,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
+        through_hole=False,
     )
 
     comp = ComponentState(
-        ref="R1", footprint="Resistor_SMD:R_0603",
-        x=12.5, y=10.0, rotation=0.0, layer="F.Cu",
-        pads=[pad1, pad2], value="10k"
+        ref="R1",
+        footprint="Resistor_SMD:R_0603",
+        x=12.5,
+        y=10.0,
+        rotation=0.0,
+        layer="F.Cu",
+        pads=[pad1, pad2],
+        value="10k",
     )
 
     # Create net
     net = NetState(
-        name="NET1", net_id=1,
+        name="NET1",
+        net_id=1,
         pads=[("R1", "1"), ("R1", "2")],
-        is_power=False, is_ground=False, is_clock=False,
-        priority=10
+        is_power=False,
+        is_ground=False,
+        is_clock=False,
+        priority=10,
     )
 
     return PCBState(
@@ -84,66 +102,118 @@ def simple_pcb_state():
 @pytest.fixture
 def multi_net_pcb_state():
     """Create a PCBState with multiple nets for routing tests."""
-    outline = BoardOutline.from_points([
-        (0.0, 0.0), (50.0, 0.0), (50.0, 40.0), (0.0, 40.0)
-    ])
+    outline = BoardOutline.from_points([(0.0, 0.0), (50.0, 0.0), (50.0, 40.0), (0.0, 40.0)])
 
     # Component R1 with NET1
     r1_pad1 = PadState(
-        ref="R1", number="1", x=10.0, y=10.0,
-        net="NET1", net_id=1, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="R1",
+        number="1",
+        x=10.0,
+        y=10.0,
+        net="NET1",
+        net_id=1,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
     r1_pad2 = PadState(
-        ref="R1", number="2", x=15.0, y=10.0,
-        net="NET1", net_id=1, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="R1",
+        number="2",
+        x=15.0,
+        y=10.0,
+        net="NET1",
+        net_id=1,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
 
     # Component R2 with NET2
     r2_pad1 = PadState(
-        ref="R2", number="1", x=10.0, y=20.0,
-        net="NET2", net_id=2, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="R2",
+        number="1",
+        x=10.0,
+        y=20.0,
+        net="NET2",
+        net_id=2,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
     r2_pad2 = PadState(
-        ref="R2", number="2", x=15.0, y=20.0,
-        net="NET2", net_id=2, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="R2",
+        number="2",
+        x=15.0,
+        y=20.0,
+        net="NET2",
+        net_id=2,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
 
     # Component U1 with three-pad net (for MST testing)
     u1_pad1 = PadState(
-        ref="U1", number="1", x=30.0, y=10.0,
-        net="NET3", net_id=3, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="U1",
+        number="1",
+        x=30.0,
+        y=10.0,
+        net="NET3",
+        net_id=3,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
     u1_pad2 = PadState(
-        ref="U1", number="2", x=35.0, y=15.0,
-        net="NET3", net_id=3, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="U1",
+        number="2",
+        x=35.0,
+        y=15.0,
+        net="NET3",
+        net_id=3,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
     u1_pad3 = PadState(
-        ref="U1", number="3", x=30.0, y=20.0,
-        net="NET3", net_id=3, layer="F.Cu",
-        width=0.5, height=0.5
+        ref="U1",
+        number="3",
+        x=30.0,
+        y=20.0,
+        net="NET3",
+        net_id=3,
+        layer="F.Cu",
+        width=0.5,
+        height=0.5,
     )
 
     components = {
         "R1": ComponentState(
-            ref="R1", footprint="R_0603",
-            x=12.5, y=10.0, rotation=0.0, layer="F.Cu",
-            pads=[r1_pad1, r1_pad2]
+            ref="R1",
+            footprint="R_0603",
+            x=12.5,
+            y=10.0,
+            rotation=0.0,
+            layer="F.Cu",
+            pads=[r1_pad1, r1_pad2],
         ),
         "R2": ComponentState(
-            ref="R2", footprint="R_0603",
-            x=12.5, y=20.0, rotation=0.0, layer="F.Cu",
-            pads=[r2_pad1, r2_pad2]
+            ref="R2",
+            footprint="R_0603",
+            x=12.5,
+            y=20.0,
+            rotation=0.0,
+            layer="F.Cu",
+            pads=[r2_pad1, r2_pad2],
         ),
         "U1": ComponentState(
-            ref="U1", footprint="SOT-23",
-            x=32.5, y=15.0, rotation=0.0, layer="F.Cu",
-            pads=[u1_pad1, u1_pad2, u1_pad3]
+            ref="U1",
+            footprint="SOT-23",
+            x=32.5,
+            y=15.0,
+            rotation=0.0,
+            layer="F.Cu",
+            pads=[u1_pad1, u1_pad2, u1_pad3],
         ),
     }
 
@@ -239,9 +309,7 @@ class TestObstacleGridBuilder:
         """Test that existing traces are added to grid."""
         # Add a trace to the state
         trace = TraceState(
-            net="NET1", net_id=1,
-            x1=20.0, y1=10.0, x2=25.0, y2=10.0,
-            width=0.2, layer="F.Cu"
+            net="NET1", net_id=1, x1=20.0, y1=10.0, x2=25.0, y2=10.0, width=0.2, layer="F.Cu"
         )
         simple_pcb_state.traces.append(trace)
 
@@ -261,8 +329,7 @@ class TestObstacleGridBuilder:
         """Test that zones are added as keepouts."""
         # Add a zone
         zone = ZoneState(
-            net="GND", net_id=0, layer="F.Cu",
-            priority=0, bounds=(0.0, 0.0, 10.0, 10.0)
+            net="GND", net_id=0, layer="F.Cu", priority=0, bounds=(0.0, 0.0, 10.0, 10.0)
         )
         simple_pcb_state.zones.append(zone)
 
@@ -294,14 +361,18 @@ class TestObstacleGridBuilderDimensions:
         """Test grid dimensions when outline is missing."""
         # Create state without outline
         pad1 = PadState(
-            ref="R1", number="1", x=10.0, y=10.0,
-            net="NET1", net_id=1, layer="F.Cu",
-            width=0.5, height=0.5
+            ref="R1",
+            number="1",
+            x=10.0,
+            y=10.0,
+            net="NET1",
+            net_id=1,
+            layer="F.Cu",
+            width=0.5,
+            height=0.5,
         )
         comp = ComponentState(
-            ref="R1", footprint="R_0603",
-            x=10.0, y=10.0, rotation=0.0, layer="F.Cu",
-            pads=[pad1]
+            ref="R1", footprint="R_0603", x=10.0, y=10.0, rotation=0.0, layer="F.Cu", pads=[pad1]
         )
 
         state = PCBState(
@@ -309,7 +380,10 @@ class TestObstacleGridBuilderDimensions:
             layers=["F.Cu", "B.Cu"],
             components={"R1": comp},
             nets={"NET1": NetState(name="NET1", net_id=1)},
-            traces=[], vias=[], zones=[], violations=[],
+            traces=[],
+            vias=[],
+            zones=[],
+            violations=[],
         )
 
         rules = DesignRules()
@@ -331,11 +405,7 @@ class TestRoutingDiagnostic:
 
     def test_basic_diagnostic(self):
         """Test creating a basic diagnostic."""
-        diag = RoutingDiagnostic(
-            source_pad="U1.1",
-            target_pad="U2.3",
-            reason="no_path"
-        )
+        diag = RoutingDiagnostic(source_pad="U1.1", target_pad="U2.3", reason="no_path")
 
         assert diag.source_pad == "U1.1"
         assert diag.target_pad == "U2.3"
@@ -376,10 +446,7 @@ class TestInterpreterConfig:
     def test_astar_options(self):
         """Test A* configuration options."""
         config = InterpreterConfig(
-            use_astar=True,
-            astar_weight=1.5,
-            use_negotiated=True,
-            layer_count=4
+            use_astar=True, astar_weight=1.5, use_negotiated=True, layer_count=4
         )
 
         assert config.astar_weight == 1.5
@@ -429,7 +496,7 @@ class TestInterpreterAStarSetup:
     def test_layer_stack_two_layer(self, simple_pcb_state, tmp_path):
         """Test 2-layer stack creation."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         config = InterpreterConfig(layer_count=2)
         interp = CommandInterpreter(
@@ -444,7 +511,7 @@ class TestInterpreterAStarSetup:
     def test_layer_stack_four_layer(self, simple_pcb_state, tmp_path):
         """Test 4-layer stack creation."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         config = InterpreterConfig(layer_count=4)
         interp = CommandInterpreter(
@@ -459,7 +526,7 @@ class TestInterpreterAStarSetup:
     def test_routing_grid_lazy_init(self, simple_pcb_state, tmp_path):
         """Test routing grid is lazily initialized."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -477,7 +544,7 @@ class TestInterpreterAStarSetup:
     def test_router_lazy_init(self, simple_pcb_state, tmp_path):
         """Test router is lazily initialized."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -493,7 +560,7 @@ class TestInterpreterAStarSetup:
     def test_cache_invalidation(self, simple_pcb_state, tmp_path):
         """Test routing cache invalidation."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -501,8 +568,8 @@ class TestInterpreterAStarSetup:
         )
 
         # Create grid and router
-        grid = interp._get_routing_grid()
-        router = interp._get_router()
+        interp._get_routing_grid()
+        interp._get_router()
 
         # Invalidate
         interp._invalidate_routing_cache()
@@ -517,7 +584,7 @@ class TestInterpreterPadConversion:
     def test_pad_state_to_router_pad(self, simple_pcb_state, tmp_path):
         """Test converting PadState to router Pad."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -539,24 +606,38 @@ class TestInterpreterPadConversion:
     def test_through_hole_pad_conversion(self, tmp_path):
         """Test converting through-hole PadState."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         pad_state = PadState(
-            ref="J1", number="1", x=10.0, y=10.0,
-            net="NET1", net_id=1, layer="F.Cu",
-            width=1.7, height=1.7, through_hole=True
+            ref="J1",
+            number="1",
+            x=10.0,
+            y=10.0,
+            net="NET1",
+            net_id=1,
+            layer="F.Cu",
+            width=1.7,
+            height=1.7,
+            through_hole=True,
         )
         comp = ComponentState(
-            ref="J1", footprint="Connector",
-            x=10.0, y=10.0, rotation=0.0, layer="F.Cu",
-            pads=[pad_state]
+            ref="J1",
+            footprint="Connector",
+            x=10.0,
+            y=10.0,
+            rotation=0.0,
+            layer="F.Cu",
+            pads=[pad_state],
         )
         state = PCBState(
             outline=BoardOutline(points=[(0, 0), (50, 50)]),
             layers=["F.Cu", "B.Cu"],
             components={"J1": comp},
             nets={"NET1": NetState(name="NET1", net_id=1)},
-            traces=[], vias=[], zones=[], violations=[],
+            traces=[],
+            vias=[],
+            zones=[],
+            violations=[],
         )
 
         interp = CommandInterpreter(pcb_path=str(pcb_file), state=state)
@@ -576,7 +657,7 @@ class TestAStarRoutingExecution:
     def test_route_net_not_found(self, simple_pcb_state, tmp_path):
         """Test routing non-existent net."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -592,18 +673,22 @@ class TestAStarRoutingExecution:
     def test_route_single_pad_net(self, tmp_path):
         """Test routing net with only one pad."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         # Create state with single-pad net
         pad = PadState(
-            ref="R1", number="1", x=10.0, y=10.0,
-            net="NET1", net_id=1, layer="F.Cu",
-            width=0.5, height=0.5
+            ref="R1",
+            number="1",
+            x=10.0,
+            y=10.0,
+            net="NET1",
+            net_id=1,
+            layer="F.Cu",
+            width=0.5,
+            height=0.5,
         )
         comp = ComponentState(
-            ref="R1", footprint="R_0603",
-            x=10.0, y=10.0, rotation=0.0, layer="F.Cu",
-            pads=[pad]
+            ref="R1", footprint="R_0603", x=10.0, y=10.0, rotation=0.0, layer="F.Cu", pads=[pad]
         )
         net = NetState(name="NET1", net_id=1, pads=[("R1", "1")])
         state = PCBState(
@@ -611,7 +696,10 @@ class TestAStarRoutingExecution:
             layers=["F.Cu", "B.Cu"],
             components={"R1": comp},
             nets={"NET1": net},
-            traces=[], vias=[], zones=[], violations=[],
+            traces=[],
+            vias=[],
+            zones=[],
+            violations=[],
         )
 
         interp = CommandInterpreter(pcb_path=str(pcb_file), state=state)
@@ -624,7 +712,7 @@ class TestAStarRoutingExecution:
     def test_route_uses_astar_when_enabled(self, multi_net_pcb_state, tmp_path):
         """Test that A* routing is used when enabled."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         config = InterpreterConfig(use_astar=True)
         interp = CommandInterpreter(
@@ -645,7 +733,7 @@ class TestAStarRoutingExecution:
     def test_route_uses_simple_when_disabled(self, multi_net_pcb_state, tmp_path):
         """Test that simple routing is used when A* disabled."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         config = InterpreterConfig(use_astar=False)
         interp = CommandInterpreter(
@@ -668,15 +756,20 @@ class TestRoutingDiagnostics:
     def test_diagnostic_on_failed_route(self, multi_net_pcb_state, tmp_path):
         """Test that failed routes include diagnostic info."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         # Create heavily blocked PCB that will fail routing
         # Add many traces to block the routing area
         for i in range(10):
             trace = TraceState(
-                net=f"BLOCK{i}", net_id=100 + i,
-                x1=8.0 + i * 0.5, y1=5.0, x2=8.0 + i * 0.5, y2=15.0,
-                width=0.3, layer="F.Cu"
+                net=f"BLOCK{i}",
+                net_id=100 + i,
+                x1=8.0 + i * 0.5,
+                y1=5.0,
+                x2=8.0 + i * 0.5,
+                y2=15.0,
+                width=0.3,
+                layer="F.Cu",
             )
             multi_net_pcb_state.traces.append(trace)
 
@@ -710,7 +803,7 @@ class TestRouteCommand:
     def test_route_command_type(self, simple_pcb_state, tmp_path):
         """Test route command returns correct type."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -725,7 +818,7 @@ class TestRouteCommand:
     def test_route_with_trace_width(self, simple_pcb_state, tmp_path):
         """Test routing with custom trace width."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -740,7 +833,7 @@ class TestRouteCommand:
     def test_route_invalidates_cache(self, simple_pcb_state, tmp_path):
         """Test that routing invalidates the cache."""
         pcb_file = tmp_path / "test.kicad_pcb"
-        pcb_file.write_text('(kicad_pcb (version 20230000))')
+        pcb_file.write_text("(kicad_pcb (version 20230000))")
 
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
@@ -748,7 +841,7 @@ class TestRouteCommand:
         )
 
         # Initialize cache
-        grid = interp._get_routing_grid()
+        interp._get_routing_grid()
         assert interp._routing_grid is not None
 
         # Route should invalidate cache

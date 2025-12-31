@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class ConflictType(Enum):
@@ -110,7 +109,7 @@ class Rectangle:
         y_overlap = max(0, min(self.max_y, other.max_y) - max(self.min_y, other.min_y))
         return x_overlap * y_overlap
 
-    def overlap_vector(self, other: "Rectangle") -> Optional[Point]:
+    def overlap_vector(self, other: "Rectangle") -> Point | None:
         """Calculate minimum translation to separate from another rectangle.
 
         Returns None if rectangles don't overlap.
@@ -159,8 +158,8 @@ class ComponentInfo:
     layer: str = "F.Cu"  # Component layer
 
     # Bounding boxes (calculated from footprint)
-    courtyard: Optional[Rectangle] = None  # Courtyard boundary
-    pads_bbox: Optional[Rectangle] = None  # Bounding box of all pads
+    courtyard: Rectangle | None = None  # Courtyard boundary
+    pads_bbox: Rectangle | None = None  # Bounding box of all pads
 
     # Lists of features
     pads: list["PadInfo"] = field(default_factory=list)
@@ -212,9 +211,9 @@ class Conflict:
     location: Point  # Where the conflict occurs
 
     # Detailed measurements
-    actual_clearance: Optional[float] = None  # Current clearance in mm
-    required_clearance: Optional[float] = None  # Required clearance in mm
-    overlap_amount: Optional[float] = None  # Overlap in mm (for courtyard)
+    actual_clearance: float | None = None  # Current clearance in mm
+    required_clearance: float | None = None  # Required clearance in mm
+    overlap_amount: float | None = None  # Overlap in mm (for courtyard)
 
     def __str__(self) -> str:
         if self.actual_clearance is not None and self.required_clearance is not None:
@@ -254,8 +253,8 @@ class PlacementFix:
     confidence: float = 0.0  # 0-1, how confident we are this is a good fix
 
     # For verification
-    new_position: Optional[Point] = None
-    expected_clearance: Optional[float] = None
+    new_position: Point | None = None
+    expected_clearance: float | None = None
     creates_new_conflicts: bool = False  # If True, this fix might create new issues
 
     def __str__(self) -> str:
@@ -271,9 +270,7 @@ class PlacementFix:
             "move_vector": {"x": self.move_vector.x, "y": self.move_vector.y},
             "confidence": self.confidence,
             "new_position": (
-                {"x": self.new_position.x, "y": self.new_position.y}
-                if self.new_position
-                else None
+                {"x": self.new_position.x, "y": self.new_position.y} if self.new_position else None
             ),
             "expected_clearance": self.expected_clearance,
             "creates_new_conflicts": self.creates_new_conflicts,

@@ -13,10 +13,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import List, Optional
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Parts command entry point."""
     parser = argparse.ArgumentParser(
         prog="kct parts",
@@ -91,10 +90,7 @@ def _lookup(args) -> int:
             "stock": part.stock,
             "is_basic": part.is_basic,
             "is_preferred": part.is_preferred,
-            "prices": [
-                {"quantity": p.quantity, "unit_price": p.unit_price}
-                for p in part.prices
-            ],
+            "prices": [{"quantity": p.quantity, "unit_price": p.unit_price} for p in part.prices],
             "datasheet_url": part.datasheet_url,
             "product_url": part.product_url,
         }
@@ -167,7 +163,9 @@ def _search(args) -> int:
         print(f"Found {results.total_count} results for '{args.query}':")
         print()
         # Header
-        print(f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Stock':>8} {'Price':>8} {'Type':<8}")
+        print(
+            f"{'LCSC':<10} {'MFR Part':<25} {'Package':<12} {'Stock':>8} {'Price':>8} {'Type':<8}"
+        )
         print("-" * 80)
         for part in results.parts:
             price_str = f"${part.best_price:.4f}" if part.best_price else "N/A"
@@ -175,14 +173,18 @@ def _search(args) -> int:
             # Truncate long strings
             mfr = part.mfr_part[:24] if len(part.mfr_part) > 24 else part.mfr_part
             pkg = part.package[:11] if len(part.package) > 11 else part.package
-            print(f"{part.lcsc_part:<10} {mfr:<25} {pkg:<12} {part.stock:>8,} {price_str:>8} {type_str:<8}")
+            print(
+                f"{part.lcsc_part:<10} {mfr:<25} {pkg:<12} {part.stock:>8,} {price_str:>8} {type_str:<8}"
+            )
     else:  # text
         print(f"Found {results.total_count} results for '{args.query}':")
         print()
         for part in results.parts:
             price_str = f"${part.best_price:.4f}" if part.best_price else "N/A"
             basic_str = " [Basic]" if part.is_basic else ""
-            print(f"{part.lcsc_part}: {part.mfr_part} - {part.package} - {part.stock:,} in stock - {price_str}{basic_str}")
+            print(
+                f"{part.lcsc_part}: {part.mfr_part} - {part.package} - {part.stock:,} in stock - {price_str}{basic_str}"
+            )
 
     return 0
 
@@ -201,13 +203,13 @@ def _cache(args) -> int:
         print(f"  Valid:        {stats['valid']:,}")
         print(f"  Expired:      {stats['expired']:,}")
         print(f"  TTL:          {stats['ttl_days']} days")
-        if stats['oldest']:
+        if stats["oldest"]:
             print(f"  Oldest entry: {stats['oldest']}")
-        if stats['newest']:
+        if stats["newest"]:
             print(f"  Newest entry: {stats['newest']}")
-        if stats['categories']:
+        if stats["categories"]:
             print("  Categories:")
-            for cat, count in sorted(stats['categories'].items()):
+            for cat, count in sorted(stats["categories"].items()):
                 print(f"    {cat}: {count}")
 
     elif args.cache_action == "clear":

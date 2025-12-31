@@ -1,6 +1,5 @@
 """Tests for the S-expression parser module."""
 
-
 import pytest
 
 from kicad_tools.sexp.parser import SExp, parse_file, parse_string
@@ -46,10 +45,13 @@ class TestSExpLists:
 
     def test_list_with_children(self):
         """Create list with children."""
-        node = SExp(name="parent", children=[
-            SExp(value="child1"),
-            SExp(value="child2"),
-        ])
+        node = SExp(
+            name="parent",
+            children=[
+                SExp(value="child1"),
+                SExp(value="child2"),
+            ],
+        )
         assert len(node.children) == 2
 
     def test_append_child(self):
@@ -81,26 +83,35 @@ class TestSExpAccess:
 
     def test_getitem_by_index(self):
         """Access child by integer index."""
-        node = SExp(name="parent", children=[
-            SExp(value="first"),
-            SExp(value="second"),
-        ])
+        node = SExp(
+            name="parent",
+            children=[
+                SExp(value="first"),
+                SExp(value="second"),
+            ],
+        )
         assert node[0].value == "first"
         assert node[1].value == "second"
 
     def test_getitem_by_name(self):
         """Access child by name."""
-        node = SExp(name="parent", children=[
-            SExp(name="child", children=[SExp(value="data")]),
-        ])
+        node = SExp(
+            name="parent",
+            children=[
+                SExp(name="child", children=[SExp(value="data")]),
+            ],
+        )
         child = node["child"]
         assert child.name == "child"
 
     def test_getitem_not_found(self):
         """KeyError when child not found."""
-        node = SExp(name="parent", children=[
-            SExp(name="child1"),
-        ])
+        node = SExp(
+            name="parent",
+            children=[
+                SExp(name="child1"),
+            ],
+        )
         with pytest.raises(KeyError) as exc:
             _ = node["missing"]
         assert "missing" in str(exc.value)
@@ -108,11 +119,17 @@ class TestSExpAccess:
 
     def test_getitem_tuple(self):
         """Multi-level access with tuple key."""
-        node = SExp(name="parent", children=[
-            SExp(name="child", children=[
-                SExp(name="grandchild", children=[SExp(value="data")]),
-            ]),
-        ])
+        node = SExp(
+            name="parent",
+            children=[
+                SExp(
+                    name="child",
+                    children=[
+                        SExp(name="grandchild", children=[SExp(value="data")]),
+                    ],
+                ),
+            ],
+        )
         result = node["child", "grandchild"]
         assert result.name == "grandchild"
 
@@ -124,9 +141,12 @@ class TestSExpAccess:
 
     def test_get_existing(self):
         """get() returns child when found."""
-        node = SExp(name="parent", children=[
-            SExp(name="child"),
-        ])
+        node = SExp(
+            name="parent",
+            children=[
+                SExp(name="child"),
+            ],
+        )
         result = node.get("child")
         assert result.name == "child"
 
@@ -136,35 +156,47 @@ class TestSExpAtomMethods:
 
     def test_get_atoms(self):
         """Get all atom values."""
-        node = SExp(name="test", children=[
-            SExp(value=1),
-            SExp(name="nested"),
-            SExp(value=2),
-        ])
+        node = SExp(
+            name="test",
+            children=[
+                SExp(value=1),
+                SExp(name="nested"),
+                SExp(value=2),
+            ],
+        )
         atoms = node.get_atoms()
         assert atoms == [1, 2]
 
     def test_get_first_atom(self):
         """Get first atom value."""
-        node = SExp(name="test", children=[
-            SExp(name="nested"),
-            SExp(value="first"),
-            SExp(value="second"),
-        ])
+        node = SExp(
+            name="test",
+            children=[
+                SExp(name="nested"),
+                SExp(value="first"),
+                SExp(value="second"),
+            ],
+        )
         assert node.get_first_atom() == "first"
 
     def test_get_first_atom_none(self):
         """get_first_atom returns None when no atoms."""
-        node = SExp(name="test", children=[
-            SExp(name="nested"),
-        ])
+        node = SExp(
+            name="test",
+            children=[
+                SExp(name="nested"),
+            ],
+        )
         assert node.get_first_atom() is None
 
     def test_set_atom(self):
         """Set atom at index."""
-        node = SExp(name="test", children=[
-            SExp(value="old"),
-        ])
+        node = SExp(
+            name="test",
+            children=[
+                SExp(value="old"),
+            ],
+        )
         node.set_atom(0, "new")
         assert node.children[0].value == "new"
 
@@ -180,11 +212,17 @@ class TestSExpFind:
 
     def test_find_by_name(self):
         """Find descendant by name."""
-        node = SExp(name="root", children=[
-            SExp(name="a", children=[
-                SExp(name="target"),
-            ]),
-        ])
+        node = SExp(
+            name="root",
+            children=[
+                SExp(
+                    name="a",
+                    children=[
+                        SExp(name="target"),
+                    ],
+                ),
+            ],
+        )
         result = node.find("target")
         assert result is not None
         assert result.name == "target"
@@ -197,34 +235,52 @@ class TestSExpFind:
 
     def test_find_all(self):
         """Find all descendants by name."""
-        node = SExp(name="root", children=[
-            SExp(name="item", children=[SExp(value=1)]),
-            SExp(name="item", children=[SExp(value=2)]),
-            SExp(name="other"),
-        ])
+        node = SExp(
+            name="root",
+            children=[
+                SExp(name="item", children=[SExp(value=1)]),
+                SExp(name="item", children=[SExp(value=2)]),
+                SExp(name="other"),
+            ],
+        )
         results = node.find_all("item")
         assert len(results) == 2
 
     def test_find_with_attrs(self):
         """Find with attribute matching."""
-        node = SExp(name="root", children=[
-            SExp(name="item", children=[
-                SExp(name="id", children=[SExp(value="a")]),
-            ]),
-            SExp(name="item", children=[
-                SExp(name="id", children=[SExp(value="b")]),
-            ]),
-        ])
+        node = SExp(
+            name="root",
+            children=[
+                SExp(
+                    name="item",
+                    children=[
+                        SExp(name="id", children=[SExp(value="a")]),
+                    ],
+                ),
+                SExp(
+                    name="item",
+                    children=[
+                        SExp(name="id", children=[SExp(value="b")]),
+                    ],
+                ),
+            ],
+        )
         result = node.find("item", id="b")
         assert result is not None
 
     def test_iter_all(self):
         """Iterate all descendants."""
-        node = SExp(name="root", children=[
-            SExp(name="a", children=[
-                SExp(name="b"),
-            ]),
-        ])
+        node = SExp(
+            name="root",
+            children=[
+                SExp(
+                    name="a",
+                    children=[
+                        SExp(name="b"),
+                    ],
+                ),
+            ],
+        )
         names = [n.name for n in node.iter_all() if n.name]
         assert names == ["root", "a", "b"]
 
@@ -264,7 +320,7 @@ class TestParseString:
 
     def test_parse_nested(self):
         """Parse nested S-expression."""
-        result = parse_string('(outer (inner 42))')
+        result = parse_string("(outer (inner 42))")
         assert result.name == "outer"
         inner = result["inner"]
         assert inner.children[0].value == 42
@@ -299,10 +355,10 @@ class TestParseString:
 
     def test_parse_with_comments(self):
         """Parse with comments stripped (uses # style comments)."""
-        result = parse_string('''
+        result = parse_string("""
             (test # this is a comment
                 "value") # another comment
-        ''')
+        """)
         assert result.name == "test"
         assert result.children[0].value == "value"
 
@@ -332,7 +388,7 @@ class TestSerialization:
         """Keywords like 'value' are not quoted."""
         node = SExp.list("test", "value")
         result = node.to_string(compact=True)
-        assert result == '(test value)'  # 'value' is a keyword
+        assert result == "(test value)"  # 'value' is a keyword
 
     def test_serialize_roundtrip(self):
         """Parse and serialize preserves structure."""
@@ -383,10 +439,10 @@ class TestEdgeCases:
 
     def test_parse_kicad_schematic_header(self):
         """Parse minimal KiCad schematic header."""
-        sexp = '''(kicad_sch
+        sexp = """(kicad_sch
             (version 20231120)
             (generator "test")
-        )'''
+        )"""
         result = parse_string(sexp)
         assert result.name == "kicad_sch"
         version = result["version"]
@@ -426,14 +482,14 @@ class TestRoundTrip:
 
     def test_roundtrip_preserves_structure(self):
         """Parse → serialize → parse preserves structure."""
-        original = '''(kicad_pcb
+        original = """(kicad_pcb
             (version 20240108)
             (generator "test")
             (layers
                 (0 "F.Cu" signal)
                 (31 "B.Cu" signal)
             )
-        )'''
+        )"""
         parsed = parse_string(original)
         serialized = parsed.to_string()
         reparsed = parse_string(serialized)
@@ -446,11 +502,11 @@ class TestRoundTrip:
 
     def test_roundtrip_keywords_unquoted(self):
         """Keywords like signal, thru_hole, rect are not quoted."""
-        sexp = '''(pad "1" thru_hole rect
+        sexp = """(pad "1" thru_hole rect
             (at 0 0)
             (size 1.6 1.6)
             (layers "*.Cu" "*.Mask")
-        )'''
+        )"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
@@ -462,7 +518,7 @@ class TestRoundTrip:
 
     def test_roundtrip_layer_names_quoted(self):
         """Layer names like F.Cu are quoted."""
-        sexp = '''(layer "F.Cu")'''
+        sexp = """(layer "F.Cu")"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
@@ -471,26 +527,26 @@ class TestRoundTrip:
 
     def test_roundtrip_uses_spaces_not_tabs(self):
         """Serialization uses 2-space indentation, not tabs."""
-        sexp = '''(kicad_pcb
+        sexp = """(kicad_pcb
             (version 20240108)
             (general
                 (thickness 1.6)
             )
-        )'''
+        )"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
         # Should not contain tabs
-        assert '\t' not in serialized
+        assert "\t" not in serialized
         # Should use 2-space indentation
-        assert '  (version' in serialized
+        assert "  (version" in serialized
 
     def test_roundtrip_fp_text_types_unquoted(self):
         """fp_text types like reference, value are not quoted."""
-        sexp = '''(fp_text reference "U1"
+        sexp = """(fp_text reference "U1"
             (at 0 0)
             (layer "F.SilkS")
-        )'''
+        )"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
@@ -502,7 +558,7 @@ class TestRoundTrip:
 
     def test_roundtrip_fill_types_unquoted(self):
         """Fill types like none, solid are not quoted."""
-        sexp = '''(fill none)'''
+        sexp = """(fill none)"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
@@ -511,7 +567,7 @@ class TestRoundTrip:
 
     def test_roundtrip_boolean_values_unquoted(self):
         """Boolean values like yes, no are not quoted."""
-        sexp = '''(legacy_teardrops no)'''
+        sexp = """(legacy_teardrops no)"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
 
@@ -520,7 +576,7 @@ class TestRoundTrip:
 
     def test_roundtrip_preserves_numbers(self):
         """Numbers are preserved correctly through round-trip."""
-        sexp = '''(at 125.0 147.5 90)'''
+        sexp = """(at 125.0 147.5 90)"""
         parsed = parse_string(sexp)
         serialized = parsed.to_string()
         reparsed = parse_string(serialized)
@@ -532,7 +588,7 @@ class TestRoundTrip:
 
     def test_roundtrip_pcb_file(self, tmp_path):
         """Round-trip a sample PCB structure."""
-        pcb_content = '''(kicad_pcb
+        pcb_content = """(kicad_pcb
             (version 20240108)
             (generator "test")
             (general
@@ -553,7 +609,7 @@ class TestRoundTrip:
                     (layers "*.Cu" "*.Mask")
                 )
             )
-        )'''
+        )"""
         parsed = parse_string(pcb_content)
 
         # Save to temp file

@@ -17,7 +17,6 @@ Bus signals are detected from common naming conventions:
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
 
 
 class BusRoutingMode(Enum):
@@ -72,7 +71,7 @@ class BusGroup:
     """
 
     name: str
-    signals: List[BusSignal] = field(default_factory=list)
+    signals: list[BusSignal] = field(default_factory=list)
 
     @property
     def width(self) -> int:
@@ -101,7 +100,7 @@ class BusGroup:
         expected = set(range(self.min_index, self.max_index + 1))
         return indices == expected
 
-    def get_net_ids(self) -> List[int]:
+    def get_net_ids(self) -> list[int]:
         """Get net IDs in bit order (LSB to MSB)."""
         return [s.net_id for s in sorted(self.signals, key=lambda s: s.index)]
 
@@ -121,7 +120,7 @@ _UNDERSCORE_PATTERN = re.compile(r"^(.+)_(\d+)$")
 _NUMERIC_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9_]*[A-Za-z_])(\d+)$")
 
 
-def parse_bus_signal(net_name: str) -> Optional[Tuple[str, int, str]]:
+def parse_bus_signal(net_name: str) -> tuple[str, int, str] | None:
     """Parse a net name to extract bus information.
 
     Args:
@@ -150,9 +149,9 @@ def parse_bus_signal(net_name: str) -> Optional[Tuple[str, int, str]]:
 
 
 def detect_bus_signals(
-    net_names: Dict[int, str],
+    net_names: dict[int, str],
     min_bus_width: int = 2,
-) -> List[BusSignal]:
+) -> list[BusSignal]:
     """Detect bus signals from net names.
 
     Args:
@@ -162,11 +161,11 @@ def detect_bus_signals(
     Returns:
         List of detected BusSignal objects
     """
-    signals: List[BusSignal] = []
-    bus_counts: Dict[str, int] = {}  # Count signals per bus name
+    signals: list[BusSignal] = []
+    bus_counts: dict[str, int] = {}  # Count signals per bus name
 
     # First pass: parse all potential bus signals and count
-    potential_signals: List[BusSignal] = []
+    potential_signals: list[BusSignal] = []
     for net_id, net_name in net_names.items():
         parsed = parse_bus_signal(net_name)
         if parsed:
@@ -191,9 +190,9 @@ def detect_bus_signals(
 
 
 def group_buses(
-    signals: List[BusSignal],
+    signals: list[BusSignal],
     min_bus_width: int = 2,
-) -> List[BusGroup]:
+) -> list[BusGroup]:
     """Group bus signals into bus groups.
 
     Args:
@@ -204,14 +203,14 @@ def group_buses(
         List of BusGroup objects, sorted by bus name
     """
     # Group signals by bus name
-    groups_dict: Dict[str, List[BusSignal]] = {}
+    groups_dict: dict[str, list[BusSignal]] = {}
     for signal in signals:
         if signal.bus_name not in groups_dict:
             groups_dict[signal.bus_name] = []
         groups_dict[signal.bus_name].append(signal)
 
     # Create BusGroup objects
-    groups: List[BusGroup] = []
+    groups: list[BusGroup] = []
     for bus_name, bus_signals in sorted(groups_dict.items()):
         if len(bus_signals) >= min_bus_width:
             # Sort signals by index
@@ -222,9 +221,9 @@ def group_buses(
 
 
 def get_bus_routing_order(
-    groups: List[BusGroup],
+    groups: list[BusGroup],
     mode: BusRoutingMode = BusRoutingMode.PARALLEL,
-) -> List[List[int]]:
+) -> list[list[int]]:
     """Get the routing order for bus signals.
 
     Returns a list of routing batches. In PARALLEL mode, each batch contains
@@ -242,10 +241,10 @@ def get_bus_routing_order(
         # Route signals at the same bit position together across buses
         # This promotes parallel trace alignment
         max_width = max((g.width for g in groups), default=0)
-        batches: List[List[int]] = []
+        batches: list[list[int]] = []
 
         for i in range(max_width):
-            batch: List[int] = []
+            batch: list[int] = []
             for group in groups:
                 if i < len(group.signals):
                     batch.append(group.signals[i].net_id)
@@ -276,7 +275,7 @@ class BusRoutingConfig:
 
     enabled: bool = False
     mode: BusRoutingMode = BusRoutingMode.PARALLEL
-    spacing: Optional[float] = None  # None = auto (trace_width + clearance)
+    spacing: float | None = None  # None = auto (trace_width + clearance)
     min_bus_width: int = 2
     maintain_order: bool = True
 
@@ -287,7 +286,7 @@ class BusRoutingConfig:
         return trace_width + clearance
 
 
-def analyze_buses(net_names: Dict[int, str]) -> Dict[str, any]:
+def analyze_buses(net_names: dict[int, str]) -> dict[str, any]:
     """Analyze net names to provide a bus detection summary.
 
     Args:
@@ -312,7 +311,8 @@ def analyze_buses(net_names: Dict[int, str]) -> Dict[str, any]:
             for g in groups
         ],
         "non_bus_nets": [
-            name for net_id, name in net_names.items()
+            name
+            for net_id, name in net_names.items()
             if not any(s.net_id == net_id for s in signals)
         ],
     }

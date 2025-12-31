@@ -27,7 +27,6 @@ import fnmatch
 import json
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
 
 from kicad_tools.schema import Schematic
 
@@ -42,7 +41,7 @@ class UnconnectedPin:
     pin_number: str
     symbol_value: str
     lib_id: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
 
 
 @dataclass
@@ -51,10 +50,10 @@ class ConnectionIssue:
 
     type: str  # "floating_wire", "stacked_symbols", "missing_junction"
     description: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
 
 
-def find_wire_endpoints(schematic: Schematic) -> Set[Tuple[float, float]]:
+def find_wire_endpoints(schematic: Schematic) -> set[tuple[float, float]]:
     """Get all wire endpoints as a set of rounded positions."""
     endpoints = set()
     for wire in schematic.wires:
@@ -63,12 +62,12 @@ def find_wire_endpoints(schematic: Schematic) -> Set[Tuple[float, float]]:
     return endpoints
 
 
-def find_junction_positions(schematic: Schematic) -> Set[Tuple[float, float]]:
+def find_junction_positions(schematic: Schematic) -> set[tuple[float, float]]:
     """Get all junction positions."""
     return {(round(j.position[0], 1), round(j.position[1], 1)) for j in schematic.junctions}
 
 
-def find_label_positions(schematic: Schematic) -> Set[Tuple[float, float]]:
+def find_label_positions(schematic: Schematic) -> set[tuple[float, float]]:
     """Get all label positions."""
     positions = set()
     for lbl in schematic.labels:
@@ -81,10 +80,10 @@ def find_label_positions(schematic: Schematic) -> Set[Tuple[float, float]]:
 
 
 def point_has_connection(
-    point: Tuple[float, float],
-    wire_endpoints: Set[Tuple[float, float]],
-    junction_positions: Set[Tuple[float, float]],
-    label_positions: Set[Tuple[float, float]],
+    point: tuple[float, float],
+    wire_endpoints: set[tuple[float, float]],
+    junction_positions: set[tuple[float, float]],
+    label_positions: set[tuple[float, float]],
 ) -> bool:
     """Check if a point has any electrical connection."""
     key = (round(point[0], 1), round(point[1], 1))
@@ -96,7 +95,7 @@ def analyze_schematic(
     include_power: bool = False,
     include_dnp: bool = False,
     pattern: str = None,
-) -> Tuple[List[UnconnectedPin], List[ConnectionIssue]]:
+) -> tuple[list[UnconnectedPin], list[ConnectionIssue]]:
     """
     Analyze schematic for unconnected pins and issues.
 
@@ -113,7 +112,7 @@ def analyze_schematic(
     _all_connections = wire_endpoints | junction_positions | label_positions  # noqa: F841
 
     # Check each symbol
-    symbol_positions: Dict[Tuple[float, float], List[str]] = {}
+    symbol_positions: dict[tuple[float, float], list[str]] = {}
 
     for sym in schematic.symbols:
         # Skip power symbols unless requested
@@ -236,10 +235,10 @@ def main():
         output_table(unconnected, issues)
 
 
-def output_table(unconnected: List[UnconnectedPin], issues: List[ConnectionIssue]):
+def output_table(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue]):
     """Output as formatted table."""
     # Group unconnected pins by symbol
-    by_symbol: Dict[str, List[UnconnectedPin]] = {}
+    by_symbol: dict[str, list[UnconnectedPin]] = {}
     for pin in unconnected:
         if pin.reference not in by_symbol:
             by_symbol[pin.reference] = []
@@ -276,7 +275,7 @@ def output_table(unconnected: List[UnconnectedPin], issues: List[ConnectionIssue
     print("   requires parsing symbol libraries. Run KiCad's ERC for complete check.")
 
 
-def output_json(unconnected: List[UnconnectedPin], issues: List[ConnectionIssue]):
+def output_json(unconnected: list[UnconnectedPin], issues: list[ConnectionIssue]):
     """Output as JSON."""
     data = {
         "unconnected_pins": [
@@ -300,7 +299,7 @@ def output_json(unconnected: List[UnconnectedPin], issues: List[ConnectionIssue]
         "summary": {
             "unconnected_pin_count": len(unconnected),
             "issue_count": len(issues),
-            "symbols_with_issues": len(set(p.reference for p in unconnected)),
+            "symbols_with_issues": len({p.reference for p in unconnected}),
         },
     }
     print(json.dumps(data, indent=2))

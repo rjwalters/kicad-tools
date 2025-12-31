@@ -3,14 +3,13 @@ File I/O utilities for KiCad S-expression files.
 """
 
 from pathlib import Path
-from typing import Union
 
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 
-def load_schematic(path: Union[str, Path]) -> SExp:
+def load_schematic(path: str | Path) -> SExp:
     """
     Load a KiCad schematic file.
 
@@ -48,7 +47,7 @@ def load_schematic(path: Union[str, Path]) -> SExp:
     return sexp
 
 
-def save_schematic(sexp: SExp, path: Union[str, Path]) -> None:
+def save_schematic(sexp: SExp, path: str | Path) -> None:
     """
     Save a KiCad schematic file.
 
@@ -70,7 +69,7 @@ def save_schematic(sexp: SExp, path: Union[str, Path]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def load_symbol_lib(path: Union[str, Path]) -> SExp:
+def load_symbol_lib(path: str | Path) -> SExp:
     """
     Load a KiCad symbol library file.
 
@@ -104,7 +103,7 @@ def load_symbol_lib(path: Union[str, Path]) -> SExp:
     return sexp
 
 
-def save_symbol_lib(sexp: SExp, path: Union[str, Path]) -> None:
+def save_symbol_lib(sexp: SExp, path: str | Path) -> None:
     """
     Save a KiCad symbol library file.
 
@@ -123,7 +122,7 @@ def save_symbol_lib(sexp: SExp, path: Union[str, Path]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def load_pcb(path: Union[str, Path]) -> SExp:
+def load_pcb(path: str | Path) -> SExp:
     """
     Load a KiCad PCB file.
 
@@ -161,7 +160,7 @@ def load_pcb(path: Union[str, Path]) -> SExp:
     return sexp
 
 
-def save_pcb(sexp: SExp, path: Union[str, Path]) -> None:
+def save_pcb(sexp: SExp, path: str | Path) -> None:
     """
     Save a KiCad PCB file.
 
@@ -183,7 +182,7 @@ def save_pcb(sexp: SExp, path: Union[str, Path]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def load_footprint(path: Union[str, Path]) -> SExp:
+def load_footprint(path: str | Path) -> SExp:
     """
     Load a KiCad footprint file.
 
@@ -229,7 +228,7 @@ def load_footprint(path: Union[str, Path]) -> SExp:
     return sexp
 
 
-def save_footprint(sexp: SExp, path: Union[str, Path]) -> None:
+def save_footprint(sexp: SExp, path: str | Path) -> None:
     """
     Save a KiCad footprint file.
 
@@ -252,7 +251,7 @@ def save_footprint(sexp: SExp, path: Union[str, Path]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def load_design_rules(path: Union[str, Path]) -> SExp:
+def load_design_rules(path: str | Path) -> SExp:
     """
     Load a KiCad design rules file.
 
@@ -310,7 +309,7 @@ def load_design_rules(path: Union[str, Path]) -> SExp:
     return sexp
 
 
-def save_design_rules(sexp: SExp, path: Union[str, Path]) -> None:
+def save_design_rules(sexp: SExp, path: str | Path) -> None:
     """
     Save a KiCad design rules file.
 

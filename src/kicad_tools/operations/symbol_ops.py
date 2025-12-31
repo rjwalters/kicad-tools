@@ -9,7 +9,6 @@ from __future__ import annotations
 import uuid as uuid_lib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
 
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
@@ -27,7 +26,7 @@ class SymbolReplacement:
     changes_made: list[str]  # List of changes made
 
 
-def find_symbol_by_reference(sexp: SExp, reference: str) -> Optional[SExp]:
+def find_symbol_by_reference(sexp: SExp, reference: str) -> SExp | None:
     """
     Find a symbol S-expression by its reference designator.
 
@@ -40,9 +39,8 @@ def find_symbol_by_reference(sexp: SExp, reference: str) -> Optional[SExp]:
     """
     for symbol in sexp.find_all("symbol"):
         for prop in symbol.find_all("property"):
-            if prop.get_string(0) == "Reference":
-                if prop.get_string(1) == reference:
-                    return symbol
+            if prop.get_string(0) == "Reference" and prop.get_string(1) == reference:
+                return symbol
     return None
 
 
@@ -63,8 +61,8 @@ def replace_symbol_lib_id(
     schematic_path: str,
     reference: str,
     new_lib_id: str,
-    new_value: Optional[str] = None,
-    new_footprint: Optional[str] = None,
+    new_value: str | None = None,
+    new_footprint: str | None = None,
     dry_run: bool = False,
 ) -> SymbolReplacement:
     """
@@ -149,7 +147,7 @@ def replace_symbol_lib_id(
 
 def update_symbol_pins(
     symbol: SExp,
-    pin_mapping: Dict[str, str],
+    pin_mapping: dict[str, str],
 ) -> list[str]:
     """
     Update symbol pin numbers based on a mapping.

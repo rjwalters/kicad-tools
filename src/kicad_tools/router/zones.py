@@ -12,7 +12,7 @@ This module provides:
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING
 
 from kicad_tools.schema.pcb import Zone
 
@@ -43,7 +43,7 @@ class FilledZone:
     """
 
     zone: Zone
-    filled_cells: Set[Tuple[int, int]] = field(default_factory=set)
+    filled_cells: set[tuple[int, int]] = field(default_factory=set)
     layer_index: int = 0
 
 
@@ -74,7 +74,7 @@ class ThermalRelief:
     spoke_angle: float = 45.0
     layer_index: int = 0
 
-    def generate_antipad_cells(self, grid: "RoutingGrid") -> Set[Tuple[int, int]]:
+    def generate_antipad_cells(self, grid: "RoutingGrid") -> set[tuple[int, int]]:
         """Generate grid cells forming the antipad (clearance ring).
 
         The antipad is the area around the pad that must remain copper-free
@@ -86,7 +86,7 @@ class ThermalRelief:
         Returns:
             Set of (gx, gy) grid cells in the antipad region
         """
-        cells: Set[Tuple[int, int]] = set()
+        cells: set[tuple[int, int]] = set()
 
         # Pad dimensions with gap
         pad_half_w = self.pad.width / 2
@@ -128,7 +128,7 @@ class ThermalRelief:
 
         return cells
 
-    def generate_spoke_cells(self, grid: "RoutingGrid") -> Set[Tuple[int, int]]:
+    def generate_spoke_cells(self, grid: "RoutingGrid") -> set[tuple[int, int]]:
         """Generate grid cells forming the connecting spokes.
 
         Spokes are narrow bridges of copper connecting the pad to
@@ -140,7 +140,7 @@ class ThermalRelief:
         Returns:
             Set of (gx, gy) grid cells forming the spokes
         """
-        cells: Set[Tuple[int, int]] = set()
+        cells: set[tuple[int, int]] = set()
 
         # Pad dimensions
         pad_half_w = self.pad.width / 2
@@ -199,9 +199,7 @@ class ThermalRelief:
                         # Spoke width check: perpendicular distance from spoke line
                         spoke_rad = math.radians(spoke_angle)
                         # Project onto perpendicular to spoke direction
-                        perp_dist = abs(
-                            rel_x * math.sin(spoke_rad) - rel_y * math.cos(spoke_rad)
-                        )
+                        perp_dist = abs(rel_x * math.sin(spoke_rad) - rel_y * math.cos(spoke_rad))
                         if perp_dist <= spoke_half_width:
                             cells.add((gx, gy))
                             break
@@ -308,9 +306,7 @@ class ZoneFiller:
 
         return result
 
-    def point_in_polygon(
-        self, x: float, y: float, polygon: List[Tuple[float, float]]
-    ) -> bool:
+    def point_in_polygon(self, x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
         """Test if a point is inside a polygon using ray casting.
 
         Casts a ray from the point to the right (+X) and counts
@@ -342,9 +338,7 @@ class ZoneFiller:
 
         return inside
 
-    def _can_fill_cell(
-        self, gx: int, gy: int, layer_index: int, zone_net: int
-    ) -> bool:
+    def _can_fill_cell(self, gx: int, gy: int, layer_index: int, zone_net: int) -> bool:
         """Check if a cell can be filled with zone copper.
 
         Rules:
@@ -375,7 +369,7 @@ class ZoneFiller:
         return True
 
     def fill_zone_with_clearance(
-        self, zone: Zone, layer_index: int, clearance: Optional[float] = None
+        self, zone: Zone, layer_index: int, clearance: float | None = None
     ) -> FilledZone:
         """Fill zone with clearance around other-net obstacles.
 
@@ -402,7 +396,7 @@ class ZoneFiller:
         clear_cells = int(clear_dist / self.grid.resolution) + 1
 
         # Find cells to remove (within clearance of other-net obstacles)
-        cells_to_remove: Set[Tuple[int, int]] = set()
+        cells_to_remove: set[tuple[int, int]] = set()
 
         for gx, gy in result.filled_cells:
             # Check nearby cells for other-net obstacles
@@ -431,8 +425,8 @@ class ZoneFiller:
         return result
 
     def generate_thermal_reliefs(
-        self, filled_zone: FilledZone, pads: List["Pad"]
-    ) -> List[ThermalRelief]:
+        self, filled_zone: FilledZone, pads: list["Pad"]
+    ) -> list[ThermalRelief]:
         """Generate thermal relief patterns for same-net pads in a zone.
 
         Finds all pads that are:
@@ -449,7 +443,7 @@ class ZoneFiller:
         """
         from .primitives import Pad as PadType  # noqa: F401
 
-        reliefs: List[ThermalRelief] = []
+        reliefs: list[ThermalRelief] = []
         zone = filled_zone.zone
 
         for pad in pads:
@@ -478,9 +472,7 @@ class ZoneFiller:
 
         return reliefs
 
-    def apply_thermal_reliefs(
-        self, filled_zone: FilledZone, reliefs: List[ThermalRelief]
-    ) -> None:
+    def apply_thermal_reliefs(self, filled_zone: FilledZone, reliefs: list[ThermalRelief]) -> None:
         """Apply thermal relief patterns to a filled zone.
 
         This modifies the filled_cells set:
@@ -502,11 +494,11 @@ class ZoneFiller:
 
 
 def fill_zones_by_priority(
-    zones: List[Zone],
+    zones: list[Zone],
     grid: "RoutingGrid",
     rules: "DesignRules",
     layer_map: dict,
-) -> List[FilledZone]:
+) -> list[FilledZone]:
     """Fill multiple zones in priority order.
 
     Higher priority zones fill first and take precedence.
@@ -525,7 +517,7 @@ def fill_zones_by_priority(
     # Sort by priority (higher priority = lower number = first)
     sorted_zones = sorted(zones, key=lambda z: z.priority)
 
-    results: List[FilledZone] = []
+    results: list[FilledZone] = []
 
     for zone in sorted_zones:
         # Get layer index
@@ -583,7 +575,7 @@ class ZoneManager:
         self.grid = grid
         self.rules = rules
         self.filler = ZoneFiller(grid, rules)
-        self.filled_zones: List[FilledZone] = []
+        self.filled_zones: list[FilledZone] = []
         self._layer_map: dict = {}
 
     def _build_layer_map(self) -> dict:
@@ -604,7 +596,7 @@ class ZoneManager:
         self._layer_map = layer_map
         return layer_map
 
-    def load_zones(self, pcb: "PCB") -> List[Zone]:
+    def load_zones(self, pcb: "PCB") -> list[Zone]:
         """Load and sort zones from a PCB.
 
         Args:
@@ -619,9 +611,7 @@ class ZoneManager:
         # Sort by priority (lower number = higher priority = fills first)
         return sorted(pcb.zones, key=lambda z: z.priority)
 
-    def fill_zone(
-        self, zone: Zone, pads: Optional[List["Pad"]] = None
-    ) -> Optional[FilledZone]:
+    def fill_zone(self, zone: Zone, pads: list["Pad"] | None = None) -> FilledZone | None:
         """Fill a single zone onto the grid.
 
         Args:
@@ -654,10 +644,10 @@ class ZoneManager:
 
     def fill_all_zones(
         self,
-        zones: List[Zone],
-        pads: Optional[List["Pad"]] = None,
+        zones: list[Zone],
+        pads: list["Pad"] | None = None,
         apply_to_grid: bool = True,
-    ) -> List[FilledZone]:
+    ) -> list[FilledZone]:
         """Fill all zones in priority order.
 
         Args:
@@ -673,7 +663,7 @@ class ZoneManager:
         # Sort by priority
         sorted_zones = sorted(zones, key=lambda z: z.priority)
 
-        results: List[FilledZone] = []
+        results: list[FilledZone] = []
 
         for zone in sorted_zones:
             if zone.layer not in layer_map:

@@ -6,7 +6,6 @@ manufacturer profiles that can be used across different fabrication houses.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -133,7 +132,7 @@ class PartsLibrary:
 
     name: str  # "LCSC", "OPL", etc.
     search_url_template: str  # URL with {part_number} placeholder
-    catalog_url: Optional[str] = None
+    catalog_url: str | None = None
 
     # Library tiers
     tiers: dict[str, dict] = field(default_factory=dict)
@@ -159,10 +158,10 @@ class ManufacturerProfile:
     design_rules: dict[str, DesignRules]
 
     # Assembly capabilities (None if PCB-only)
-    assembly: Optional[AssemblyCapabilities] = None
+    assembly: AssemblyCapabilities | None = None
 
     # Parts library (None if no standard library)
-    parts_library: Optional[PartsLibrary] = None
+    parts_library: PartsLibrary | None = None
 
     # Lead times in working days
     lead_times: dict[str, int] = field(
@@ -202,7 +201,7 @@ class ManufacturerProfile:
         # Return first available
         return list(self.design_rules.values())[0]
 
-    def get_part_search_url(self, part_number: str) -> Optional[str]:
+    def get_part_search_url(self, part_number: str) -> str | None:
         """Get URL to search for a part in manufacturer's library."""
         if self.parts_library:
             return self.parts_library.get_search_url(part_number)

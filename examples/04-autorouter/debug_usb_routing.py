@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from kicad_tools.router import load_pcb_for_routing, DesignRules
+from kicad_tools.router import DesignRules, load_pcb_for_routing
 
 
 def main():
@@ -19,9 +19,9 @@ def main():
 
     # Try different grid resolutions
     for grid_res in [0.5, 0.25, 0.1]:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Testing grid resolution: {grid_res}mm")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         rules = DesignRules(
             grid_resolution=grid_res,
@@ -53,7 +53,7 @@ def main():
             for pin, x, y, net in pads[:3]:  # Show first 3 pads
                 print(f"    Pin {pin}: ({x:.2f}, {y:.2f}) net={net}")
             if len(pads) > 3:
-                print(f"    ... and {len(pads)-3} more")
+                print(f"    ... and {len(pads) - 3} more")
 
         # Try routing just the crystal connection
         print("\n\nTrying to route XTAL1 (net 15)...")
@@ -71,6 +71,7 @@ def main():
 
             # Check if source/target are blocked
             from kicad_tools.router.layers import Layer
+
             layer = Layer.F_CU
             src_blocked = router.grid.is_blocked(gx1, gy1, layer)
             dst_blocked = router.grid.is_blocked(gx2, gy2, layer)
@@ -91,7 +92,7 @@ def main():
                 print()
 
         # Try routing
-        routes = router.route_all()
+        router.route_all()
         stats = router.get_statistics()
         print(f"\nRouted: {stats['nets_routed']}/13 nets")
 

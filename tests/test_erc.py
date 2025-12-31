@@ -1,13 +1,14 @@
 """Tests for kicad_tools.erc module."""
 
-import pytest
 from pathlib import Path
+
+import pytest
+
 from kicad_tools.erc import (
+    ERC_TYPE_DESCRIPTIONS,
     ERCReport,
-    ERCViolation,
     ERCViolationType,
     Severity,
-    ERC_TYPE_DESCRIPTIONS,
 )
 
 
@@ -154,16 +155,24 @@ class TestERCViolationType:
 
     def test_from_string_pin_not_connected(self):
         """Test parsing pin_not_connected type."""
-        assert ERCViolationType.from_string("pin_not_connected") == ERCViolationType.PIN_NOT_CONNECTED
+        assert (
+            ERCViolationType.from_string("pin_not_connected") == ERCViolationType.PIN_NOT_CONNECTED
+        )
 
     def test_from_string_power_pin(self):
         """Test parsing power_pin_not_driven type."""
-        assert ERCViolationType.from_string("power_pin_not_driven") == ERCViolationType.POWER_PIN_NOT_DRIVEN
+        assert (
+            ERCViolationType.from_string("power_pin_not_driven")
+            == ERCViolationType.POWER_PIN_NOT_DRIVEN
+        )
 
     def test_from_string_label(self):
         """Test parsing label types."""
         assert ERCViolationType.from_string("label_dangling") == ERCViolationType.LABEL_DANGLING
-        assert ERCViolationType.from_string("global_label_dangling") == ERCViolationType.GLOBAL_LABEL_DANGLING
+        assert (
+            ERCViolationType.from_string("global_label_dangling")
+            == ERCViolationType.GLOBAL_LABEL_DANGLING
+        )
 
     def test_from_string_unknown(self):
         """Test parsing unknown type."""
@@ -199,7 +208,9 @@ class TestERCViolationMethods:
         assert report.violations[0].is_error
 
         # Find a warning
-        warnings = [v for v in report.violations if v.severity == Severity.WARNING and not v.excluded]
+        warnings = [
+            v for v in report.violations if v.severity == Severity.WARNING and not v.excluded
+        ]
         assert len(warnings) >= 1
         assert not warnings[0].is_error
 

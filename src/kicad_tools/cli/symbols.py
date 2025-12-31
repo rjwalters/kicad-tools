@@ -14,13 +14,12 @@ import argparse
 import fnmatch
 import json
 import sys
-from typing import List
 
 from ..schema.schematic import Schematic
 from ..schema.symbol import SymbolInstance
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-symbols command."""
     parser = argparse.ArgumentParser(
         prog="kicad-symbols",
@@ -77,7 +76,7 @@ def main(argv: List[str] | None = None) -> int:
     return 0
 
 
-def output_table(symbols: List[SymbolInstance], verbose: bool) -> None:
+def output_table(symbols: list[SymbolInstance], verbose: bool) -> None:
     """Output as formatted table."""
     if not symbols:
         print("No symbols found.")
@@ -121,7 +120,7 @@ def output_table(symbols: List[SymbolInstance], verbose: bool) -> None:
     print(f"\nTotal: {len(symbols)} symbols")
 
 
-def output_json(symbols: List[SymbolInstance], verbose: bool) -> None:
+def output_json(symbols: list[SymbolInstance], verbose: bool) -> None:
     """Output as JSON."""
     data = []
     for sym in symbols:
@@ -148,7 +147,7 @@ def output_json(symbols: List[SymbolInstance], verbose: bool) -> None:
     print(json.dumps(data, indent=2))
 
 
-def output_csv(symbols: List[SymbolInstance], verbose: bool) -> None:
+def output_csv(symbols: list[SymbolInstance], verbose: bool) -> None:
     """Output as CSV."""
     if verbose:
         print("Reference,Value,Library ID,Footprint,X,Y,Rotation,Unit,UUID")

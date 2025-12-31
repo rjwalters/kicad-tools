@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..schema.pcb import PCB, Footprint, Pad  # noqa: F401
@@ -50,7 +50,7 @@ class FootprintIssue:
         return f"{self.footprint_ref} ({self.footprint_name}): {self.severity.value.upper()} - {self.message}"
 
 
-def _calculate_pad_gap(pad1: "Pad", pad2: "Pad") -> float:
+def _calculate_pad_gap(pad1: Pad, pad2: Pad) -> float:
     """Calculate the gap between two pads.
 
     Takes into account pad positions and sizes to determine the minimum
@@ -125,7 +125,7 @@ class FootprintValidator:
         """
         self.min_pad_gap = min_pad_gap
 
-    def validate_footprint(self, footprint: "Footprint") -> List[FootprintIssue]:
+    def validate_footprint(self, footprint: Footprint) -> list[FootprintIssue]:
         """Validate a single footprint for issues.
 
         Args:
@@ -134,14 +134,14 @@ class FootprintValidator:
         Returns:
             List of detected issues
         """
-        issues: List[FootprintIssue] = []
+        issues: list[FootprintIssue] = []
 
         # Check pad spacing
         issues.extend(self._check_pad_spacing(footprint))
 
         return issues
 
-    def validate_pcb(self, pcb: "PCB") -> List[FootprintIssue]:
+    def validate_pcb(self, pcb: PCB) -> list[FootprintIssue]:
         """Validate all footprints in a PCB.
 
         Args:
@@ -150,14 +150,14 @@ class FootprintValidator:
         Returns:
             List of all detected issues across all footprints
         """
-        issues: List[FootprintIssue] = []
+        issues: list[FootprintIssue] = []
 
         for footprint in pcb.footprints:
             issues.extend(self.validate_footprint(footprint))
 
         return issues
 
-    def _check_pad_spacing(self, footprint: "Footprint") -> List[FootprintIssue]:
+    def _check_pad_spacing(self, footprint: Footprint) -> list[FootprintIssue]:
         """Check for pad spacing issues.
 
         Args:
@@ -166,7 +166,7 @@ class FootprintValidator:
         Returns:
             List of pad spacing issues
         """
-        issues: List[FootprintIssue] = []
+        issues: list[FootprintIssue] = []
         pads = footprint.pads
 
         # Check all pairs of pads
@@ -239,8 +239,8 @@ class FootprintValidator:
         return issues
 
     def group_by_footprint_name(
-        self, issues: List[FootprintIssue]
-    ) -> dict[str, List[FootprintIssue]]:
+        self, issues: list[FootprintIssue]
+    ) -> dict[str, list[FootprintIssue]]:
         """Group issues by footprint name.
 
         Useful for identifying which footprint types have issues.
@@ -251,14 +251,14 @@ class FootprintValidator:
         Returns:
             Dict mapping footprint name to list of issues
         """
-        grouped: dict[str, List[FootprintIssue]] = {}
+        grouped: dict[str, list[FootprintIssue]] = {}
         for issue in issues:
             if issue.footprint_name not in grouped:
                 grouped[issue.footprint_name] = []
             grouped[issue.footprint_name].append(issue)
         return grouped
 
-    def summarize(self, issues: List[FootprintIssue]) -> dict:
+    def summarize(self, issues: list[FootprintIssue]) -> dict:
         """Generate a summary of issues.
 
         Args:
@@ -285,5 +285,5 @@ class FootprintValidator:
             "by_type": by_type,
             "by_severity": by_severity,
             "by_footprint_name": by_footprint_name,
-            "footprints_with_issues": len(set(i.footprint_ref for i in issues)),
+            "footprints_with_issues": len({i.footprint_ref for i in issues}),
         }

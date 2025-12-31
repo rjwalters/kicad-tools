@@ -12,7 +12,7 @@ different routing strategies. See heuristics.py for available options.
 import heapq
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
@@ -32,7 +32,7 @@ class AStarNode:
     layer: int = field(compare=False)
     parent: Optional["AStarNode"] = field(compare=False, default=None)
     via_from_parent: bool = field(compare=False, default=False)
-    direction: Tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
+    direction: tuple[int, int] = field(compare=False, default=(0, 0))  # (dx, dy) from parent
 
 
 class Router:
@@ -51,8 +51,8 @@ class Router:
         self,
         grid: RoutingGrid,
         rules: DesignRules,
-        net_class_map: Optional[Dict[str, NetClassRouting]] = None,
-        heuristic: Optional[Heuristic] = None,
+        net_class_map: dict[str, NetClassRouting] | None = None,
+        heuristic: Heuristic | None = None,
         diagonal_routing: bool = True,
     ):
         """
@@ -83,12 +83,14 @@ class Router:
         # Add diagonal directions if enabled (45° routing)
         # Diagonal moves travel √2 ≈ 1.414x the distance of orthogonal moves
         if diagonal_routing:
-            self.neighbors_2d.extend([
-                (1, 1, 0, 1.414),    # Down-Right
-                (-1, 1, 0, 1.414),   # Down-Left
-                (1, -1, 0, 1.414),   # Up-Right
-                (-1, -1, 0, 1.414),  # Up-Left
-            ])
+            self.neighbors_2d.extend(
+                [
+                    (1, 1, 0, 1.414),  # Down-Right
+                    (-1, 1, 0, 1.414),  # Down-Left
+                    (1, -1, 0, 1.414),  # Up-Right
+                    (-1, -1, 0, 1.414),  # Up-Left
+                ]
+            )
 
         # Pre-calculate trace body radius in grid cells
         # Only trace_width/2 - clearance is already in pad blocking
@@ -106,7 +108,7 @@ class Router:
             ),
         )
 
-    def _get_net_class(self, net_name: str) -> Optional[NetClassRouting]:
+    def _get_net_class(self, net_name: str) -> NetClassRouting | None:
         """Get the net class for a net name."""
         return self.net_class_map.get(net_name)
 
@@ -176,8 +178,8 @@ class Router:
         # Cell B: same x, new y
         # Cell C: new x, same y
         adjacent_cells = [
-            (gx, gy + dy),      # B: vertical neighbor
-            (gx + dx, gy),      # C: horizontal neighbor
+            (gx, gy + dy),  # B: vertical neighbor
+            (gx + dx, gy),  # C: horizontal neighbor
         ]
 
         for cx, cy in adjacent_cells:
@@ -341,11 +343,11 @@ class Router:
         self,
         start: Pad,
         end: Pad,
-        net_class: Optional[NetClassRouting] = None,
+        net_class: NetClassRouting | None = None,
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
-    ) -> Optional[Route]:
+    ) -> Route | None:
         """Route between two pads using congestion-aware A*.
 
         Args:
@@ -383,8 +385,8 @@ class Router:
 
         # A* setup
         open_set: list[AStarNode] = []
-        closed_set: set[Tuple[int, int, int]] = set()
-        g_scores: Dict[Tuple[int, int, int], float] = {}
+        closed_set: set[tuple[int, int, int]] = set()
+        g_scores: dict[tuple[int, int, int], float] = {}
 
         # Create heuristic context - for PTH end pads, use closest routable layer
         # for heuristic estimation (the actual goal check will accept any)
@@ -425,7 +427,7 @@ class Router:
                 return self._reconstruct_route(current, start, end)
 
             # Explore neighbors
-            for dx, dy, dlayer, neighbor_cost_mult in self.neighbors_2d:
+            for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
 
@@ -591,8 +593,8 @@ class Router:
         route = Route(net=start_pad.net, net_name=start_pad.net_name)
 
         # Collect path points
-        path: list[Tuple[float, float, int, bool]] = []
-        node: Optional[AStarNode] = end_node
+        path: list[tuple[float, float, int, bool]] = []
+        node: AStarNode | None = end_node
         while node:
             wx, wy = self.grid.grid_to_world(node.x, node.y)
             path.append((wx, wy, node.layer, node.via_from_parent))
@@ -609,7 +611,7 @@ class Router:
         current_x, current_y = start_pad.x, start_pad.y
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
 
-        for i, (wx, wy, layer_idx, is_via) in enumerate(path):
+        for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
             if is_via:
                 # Add via - convert grid indices back to Layer enum values
                 via = Via(

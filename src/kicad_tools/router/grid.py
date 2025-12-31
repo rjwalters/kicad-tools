@@ -5,7 +5,7 @@ This module provides:
 - RoutingGrid: 3D grid for routing with obstacle tracking and congestion awareness
 """
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import Zone
@@ -27,7 +27,7 @@ class RoutingGrid:
         rules: DesignRules,
         origin_x: float = 0,
         origin_y: float = 0,
-        layer_stack: Optional[LayerStack] = None,
+        layer_stack: LayerStack | None = None,
     ):
         self.width = width
         self.height = height
@@ -41,8 +41,8 @@ class RoutingGrid:
         self.num_layers = self.layer_stack.num_layers
 
         # Build layer enum to grid index mapping
-        self._layer_to_index: Dict[int, int] = {}
-        self._index_to_layer: Dict[int, int] = {}
+        self._layer_to_index: dict[int, int] = {}
+        self._index_to_layer: dict[int, int] = {}
         for layer_def in self.layer_stack.layers:
             for layer_enum in Layer:
                 if layer_enum.kicad_name == layer_def.name:
@@ -55,7 +55,7 @@ class RoutingGrid:
         self.rows = int(height / self.resolution) + 1
 
         # 3D grid: [layer][y][x]
-        self.grid: List[List[List[GridCell]]] = [
+        self.grid: list[list[list[GridCell]]] = [
             [[GridCell(x, y, layer) for x in range(self.cols)] for y in range(self.rows)]
             for layer in range(self.num_layers)
         ]
@@ -66,13 +66,13 @@ class RoutingGrid:
         self.congestion_rows = max(1, self.rows // self.congestion_size)
 
         # Congestion counts: [layer][cy][cx] = number of blocked cells
-        self.congestion: List[List[List[int]]] = [
+        self.congestion: list[list[list[int]]] = [
             [[0 for _ in range(self.congestion_cols)] for _ in range(self.congestion_rows)]
             for _ in range(self.num_layers)
         ]
 
         # Track placed routes for net assignment
-        self.routes: List[Route] = []
+        self.routes: list[Route] = []
 
         # Alias for backward compatibility
         self.layers = self.num_layers
@@ -83,7 +83,10 @@ class RoutingGrid:
             return self._layer_to_index[layer_enum_value]
         raise RoutingError(
             "Layer value not in stack",
-            context={"layer_value": layer_enum_value, "available": list(self._layer_to_index.keys())},
+            context={
+                "layer_value": layer_enum_value,
+                "available": list(self._layer_to_index.keys()),
+            },
         )
 
     def index_to_layer(self, index: int) -> int:
@@ -95,7 +98,7 @@ class RoutingGrid:
             context={"index": index, "available": list(self._index_to_layer.keys())},
         )
 
-    def get_routable_indices(self) -> List[int]:
+    def get_routable_indices(self) -> list[int]:
         """Get grid indices of routable signal layers."""
         return self.layer_stack.get_routable_indices()
 
@@ -117,9 +120,9 @@ class RoutingGrid:
         max_cells = self.congestion_size * self.congestion_size
         return min(1.0, count / max_cells)
 
-    def get_congestion_map(self) -> Dict[str, float]:
+    def get_congestion_map(self) -> dict[str, float]:
         """Get congestion statistics for all regions."""
-        stats: Dict[str, float] = {
+        stats: dict[str, float] = {
             "max_congestion": 0.0,
             "avg_congestion": 0.0,
             "congested_regions": 0,
@@ -142,13 +145,13 @@ class RoutingGrid:
         stats["avg_congestion"] = total / count if count > 0 else 0.0
         return stats
 
-    def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
+    def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
         """Convert world coordinates to grid indices."""
         gx = int((x - self.origin_x) / self.resolution)
         gy = int((y - self.origin_y) / self.resolution)
         return (max(0, min(gx, self.cols - 1)), max(0, min(gy, self.rows - 1)))
 
-    def grid_to_world(self, gx: int, gy: int) -> Tuple[float, float]:
+    def grid_to_world(self, gx: int, gy: int) -> tuple[float, float]:
         """Convert grid indices to world coordinates."""
         return (
             self.origin_x + gx * self.resolution,
@@ -256,7 +259,7 @@ class RoutingGrid:
         y1: float,
         x2: float,
         y2: float,
-        layers: Optional[List[Layer]] = None,
+        layers: list[Layer] | None = None,
     ) -> None:
         """Add a keepout region."""
         if layers is None:
@@ -300,7 +303,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
-        marked_cells: Set[Tuple[int, int]] = set()
+        marked_cells: set[tuple[int, int]] = set()
 
         def mark_with_clearance(gx: int, gy: int) -> None:
             for dy in range(-clearance_cells, clearance_cells + 1):
@@ -441,10 +444,10 @@ class RoutingGrid:
                     self.grid[layer_idx][gy][gx].usage_count = 0
 
     def mark_route_usage(
-        self, route: Route, net_cells: Optional[Dict[int, Set]] = None
-    ) -> Set[Tuple[int, int, int]]:
+        self, route: Route, net_cells: dict[int, set] | None = None
+    ) -> set[tuple[int, int, int]]:
         """Mark cells used by a route, incrementing usage count."""
-        cells_used: Set[Tuple[int, int, int]] = set()
+        cells_used: set[tuple[int, int, int]] = set()
 
         for seg in route.segments:
             seg_cells = self._get_segment_cells(seg)
@@ -465,9 +468,9 @@ class RoutingGrid:
 
         return cells_used
 
-    def unmark_route_usage(self, route: Route, net_cells: Optional[Dict[int, Set]] = None) -> None:
+    def unmark_route_usage(self, route: Route, net_cells: dict[int, set] | None = None) -> None:
         """Remove a route's usage (rip-up), decrementing usage count."""
-        cells_used: Set[Tuple[int, int, int]] = set()
+        cells_used: set[tuple[int, int, int]] = set()
 
         for seg in route.segments:
             seg_cells = self._get_segment_cells(seg)
@@ -485,9 +488,9 @@ class RoutingGrid:
         if net_cells is not None and route.net in net_cells:
             net_cells[route.net] -= cells_used
 
-    def _get_segment_cells(self, seg: Segment) -> Set[Tuple[int, int, int]]:
+    def _get_segment_cells(self, seg: Segment) -> set[tuple[int, int, int]]:
         """Get all grid cells occupied by a segment."""
-        cells: Set[Tuple[int, int, int]] = set()
+        cells: set[tuple[int, int, int]] = set()
         gx1, gy1 = self.world_to_grid(seg.x1, seg.y1)
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
         layer_idx = self.layer_to_index(seg.layer.value)
@@ -518,15 +521,15 @@ class RoutingGrid:
                     gy += sy
         return cells
 
-    def _get_via_cells(self, via: Via) -> Set[Tuple[int, int, int]]:
+    def _get_via_cells(self, via: Via) -> set[tuple[int, int, int]]:
         """Get all grid cells occupied by a via (all layers for through-hole)."""
-        cells: Set[Tuple[int, int, int]] = set()
+        cells: set[tuple[int, int, int]] = set()
         gx, gy = self.world_to_grid(via.x, via.y)
         for layer_idx in range(self.num_layers):
             cells.add((gx, gy, layer_idx))
         return cells
 
-    def find_overused_cells(self) -> List[Tuple[int, int, int, int]]:
+    def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts)."""
         overused = []
         for layer_idx in range(self.layers):
@@ -581,7 +584,7 @@ class RoutingGrid:
     def add_zone_cells(
         self,
         zone: "Zone",
-        filled_cells: Set[Tuple[int, int]],
+        filled_cells: set[tuple[int, int]],
         layer_index: int,
     ) -> None:
         """Mark grid cells as belonging to a zone.
@@ -601,7 +604,7 @@ class RoutingGrid:
                 cell.net = zone.net_number
                 # Zone copper is not an obstacle - routes can pass through same-net zones
 
-    def clear_zones(self, layer_index: Optional[int] = None) -> None:
+    def clear_zones(self, layer_index: int | None = None) -> None:
         """Remove all zone markings from the grid.
 
         Args:
@@ -620,7 +623,7 @@ class RoutingGrid:
                         if not cell.is_obstacle and not cell.blocked:
                             cell.net = 0
 
-    def get_zone_cells(self, layer_index: int, zone_id: Optional[str] = None) -> Set[Tuple[int, int]]:
+    def get_zone_cells(self, layer_index: int, zone_id: str | None = None) -> set[tuple[int, int]]:
         """Get all cells belonging to zones on a layer.
 
         Args:
@@ -630,14 +633,13 @@ class RoutingGrid:
         Returns:
             Set of (gx, gy) coordinates
         """
-        cells: Set[Tuple[int, int]] = set()
+        cells: set[tuple[int, int]] = set()
 
         for gy in range(self.rows):
             for gx in range(self.cols):
                 cell = self.grid[layer_index][gy][gx]
-                if cell.is_zone:
-                    if zone_id is None or cell.zone_id == zone_id:
-                        cells.add((gx, gy))
+                if cell.is_zone and (zone_id is None or cell.zone_id == zone_id):
+                    cells.add((gx, gy))
 
         return cells
 

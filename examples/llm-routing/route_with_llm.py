@@ -150,9 +150,7 @@ def main():
 
         # Handle special "auto" net - route next priority net
         if command_dict.get("net") == "auto" and state.unrouted_nets:
-            command_dict["net"] = sorted(
-                state.unrouted_nets, key=lambda n: n.priority
-            )[0].name
+            command_dict["net"] = sorted(state.unrouted_nets, key=lambda n: n.priority)[0].name
             print(f"  Auto-selected net: {command_dict['net']}")
 
         # Execute command
@@ -181,9 +179,7 @@ def main():
     agent.save(str(output_path))
 
     # Export history for analysis
-    history_path = pcb_path.with_stem(pcb_path.stem + "_routing_history").with_suffix(
-        ".json"
-    )
+    history_path = pcb_path.with_stem(pcb_path.stem + "_routing_history").with_suffix(".json")
     agent.export_history(str(history_path))
     print(f"History exported to: {history_path}")
 

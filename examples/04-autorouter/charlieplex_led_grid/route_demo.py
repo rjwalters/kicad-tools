@@ -21,7 +21,7 @@ from pathlib import Path
 # Add src to path for development
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from kicad_tools.router import load_pcb_for_routing, DesignRules
+from kicad_tools.router import DesignRules, load_pcb_for_routing
 
 
 def main():
@@ -48,10 +48,10 @@ def main():
     # Configure design rules for this board
     rules = DesignRules(
         grid_resolution=0.25,  # 0.25mm grid (fine for 0805 components)
-        trace_width=0.3,       # 0.3mm traces (12mil)
-        trace_clearance=0.2,   # 0.2mm clearance (8mil)
-        via_drill=0.3,         # 0.3mm via drill
-        via_diameter=0.6,      # 0.6mm via pad
+        trace_width=0.3,  # 0.3mm traces (12mil)
+        trace_clearance=0.2,  # 0.2mm clearance (8mil)
+        via_drill=0.3,  # 0.3mm via drill
+        via_diameter=0.6,  # 0.6mm via pad
     )
 
     # Skip power nets (we won't route VCC/GND in this demo)
@@ -76,7 +76,7 @@ def main():
 
     # Route all nets using standard routing (DRC-safe)
     print("\n--- Routing (standard mode) ---")
-    routes = router.route_all()
+    router.route_all()
 
     # Get statistics
     stats = router.get_statistics()
@@ -113,14 +113,14 @@ def main():
     # Summary
     print("\n" + "=" * 60)
     total_nets = len([n for n in router.nets if n > 0])
-    if stats['nets_routed'] == total_nets:
+    if stats["nets_routed"] == total_nets:
         print("SUCCESS: All nets routed!")
     else:
         print(f"PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
         print("  Some nets may require manual routing or a different strategy.")
     print("=" * 60)
 
-    return 0 if stats['nets_routed'] == total_nets else 1
+    return 0 if stats["nets_routed"] == total_nets else 1
 
 
 if __name__ == "__main__":
