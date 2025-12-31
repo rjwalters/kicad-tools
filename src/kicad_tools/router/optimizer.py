@@ -7,12 +7,21 @@ Provides algorithms to optimize routed traces:
 - Staircase compression (compress alternating horizontal/diagonal patterns)
 - 45-degree corner conversion (smooth 90-degree turns)
 
+Collision detection is supported to prevent optimizations that would
+create DRC violations (shorts, track crossings).
+
 Example::
 
     from kicad_tools.router import TraceOptimizer, OptimizationConfig
 
-    # Optimize a route in memory
+    # Optimize a route in memory (no collision checking)
     optimizer = TraceOptimizer()
+    optimized_route = optimizer.optimize_route(route)
+
+    # Optimize with collision checking
+    from kicad_tools.router import GridCollisionChecker
+    checker = GridCollisionChecker(grid)
+    optimizer = TraceOptimizer(collision_checker=checker)
     optimized_route = optimizer.optimize_route(route)
 
     # Optimize traces in a PCB file
@@ -26,9 +35,168 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from .layers import Layer
 from .primitives import Route, Segment
+
+if TYPE_CHECKING:
+    from .grid import RoutingGrid
+
+
+class CollisionChecker(Protocol):
+    """Protocol for checking if a path is clear of obstacles.
+
+    Implementations can use different strategies:
+    - Grid-based: Use RoutingGrid obstacle data
+    - Segment intersection: Check for crossings with other nets
+    - Quadtree: Spatial indexing for efficient queries
+
+    The collision checker should return True if the path is clear,
+    False if it would cross obstacles or other nets.
+    """
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        """Check if a path from (x1, y1) to (x2, y2) is clear of obstacles.
+
+        Args:
+            x1, y1: Start point coordinates.
+            x2, y2: End point coordinates.
+            layer: The layer the path is on.
+            width: The trace width.
+            exclude_net: Net ID to exclude from collision checks (own net).
+
+        Returns:
+            True if the path is clear, False if it would cross obstacles.
+        """
+        ...
+
+
+class GridCollisionChecker:
+    """Collision checker using the routing grid.
+
+    Uses the RoutingGrid's obstacle data to check if paths are clear.
+    This reuses the same collision detection logic as the autorouter.
+    """
+
+    def __init__(self, grid: "RoutingGrid"):
+        """Initialize with a routing grid.
+
+        Args:
+            grid: The routing grid with obstacle and net data.
+        """
+        self.grid = grid
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        """Check if a path is clear using grid-based collision detection.
+
+        Uses Bresenham's line algorithm to check all grid cells along the path,
+        including a buffer for trace width and clearance.
+
+        Args:
+            x1, y1: Start point coordinates.
+            x2, y2: End point coordinates.
+            layer: The layer the path is on.
+            width: The trace width.
+            exclude_net: Net ID to exclude from collision checks.
+
+        Returns:
+            True if the path is clear, False if it would cross obstacles.
+        """
+        # Convert to grid coordinates
+        gx1, gy1 = self.grid.world_to_grid(x1, y1)
+        gx2, gy2 = self.grid.world_to_grid(x2, y2)
+
+        # Calculate clearance buffer in grid cells
+        total_clearance = width / 2 + self.grid.rules.trace_clearance
+        clearance_cells = int(total_clearance / self.grid.resolution) + 1
+
+        # Get layer index
+        try:
+            layer_idx = self.grid.layer_to_index(layer.value)
+        except Exception:
+            return False  # Invalid layer
+
+        # Check all cells along the path using Bresenham's algorithm
+        cells_to_check = self._get_path_cells(gx1, gy1, gx2, gy2, clearance_cells)
+
+        for gx, gy in cells_to_check:
+            if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
+                continue  # Out of bounds - skip but don't fail
+
+            cell = self.grid.grid[layer_idx][gy][gx]
+
+            # Check if blocked by another net
+            if cell.blocked:
+                # Cell is blocked - check if it's our net or another net
+                if cell.net != 0 and cell.net != exclude_net:
+                    return False  # Blocked by another net
+                if cell.is_obstacle:
+                    return False  # Hard obstacle (pad, keepout)
+
+        return True
+
+    def _get_path_cells(
+        self, gx1: int, gy1: int, gx2: int, gy2: int, clearance: int
+    ) -> list[tuple[int, int]]:
+        """Get all grid cells along a path with clearance buffer.
+
+        Uses Bresenham's line algorithm with clearance expansion.
+
+        Args:
+            gx1, gy1: Start grid coordinates.
+            gx2, gy2: End grid coordinates.
+            clearance: Clearance buffer in grid cells.
+
+        Returns:
+            List of (gx, gy) grid coordinates to check.
+        """
+        cells: set[tuple[int, int]] = set()
+
+        # Bresenham's line algorithm
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+
+        gx, gy = gx1, gy1
+        while True:
+            # Add cell and clearance buffer
+            for cy in range(-clearance, clearance + 1):
+                for cx in range(-clearance, clearance + 1):
+                    cells.add((gx + cx, gy + cy))
+
+            if gx == gx2 and gy == gy2:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+
+        return list(cells)
 
 
 @dataclass
@@ -88,16 +256,30 @@ class OptimizationStats:
 
 
 class TraceOptimizer:
-    """Optimizer for PCB trace cleanup and simplification."""
+    """Optimizer for PCB trace cleanup and simplification.
 
-    def __init__(self, config: OptimizationConfig | None = None):
+    Optionally uses a collision checker to ensure optimizations don't
+    create DRC violations (shorts, track crossings with other nets).
+    When a collision checker is provided, optimizations that would create
+    collisions are skipped, preserving the original path.
+    """
+
+    def __init__(
+        self,
+        config: OptimizationConfig | None = None,
+        collision_checker: CollisionChecker | None = None,
+    ):
         """
         Initialize the trace optimizer.
 
         Args:
             config: Optimization configuration. Uses defaults if None.
+            collision_checker: Optional collision checker for DRC-safe optimization.
+                When provided, optimizations that would create collisions are skipped.
+                When None, no collision checking is performed (original behavior).
         """
         self.config = config or OptimizationConfig()
+        self.collision_checker = collision_checker
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """
@@ -144,6 +326,28 @@ class TraceOptimizer:
 
         return all_optimized
 
+    def _path_is_clear(self, seg: Segment) -> bool:
+        """Check if a segment's path is clear using the collision checker.
+
+        Args:
+            seg: The segment to check.
+
+        Returns:
+            True if path is clear (or no collision checker), False if blocked.
+        """
+        if self.collision_checker is None:
+            return True  # No collision checking - allow all paths
+
+        return self.collision_checker.path_is_clear(
+            x1=seg.x1,
+            y1=seg.y1,
+            x2=seg.x2,
+            y2=seg.y2,
+            layer=seg.layer,
+            width=seg.width,
+            exclude_net=seg.net,
+        )
+
     def merge_collinear(self, segments: list[Segment]) -> list[Segment]:
         """
         Merge adjacent collinear segments.
@@ -152,6 +356,7 @@ class TraceOptimizer:
         - Are connected (end of one matches start of next)
         - Have the same direction
         - Are on the same layer
+        - Would not cross obstacles (if collision checker provided)
 
         Args:
             segments: List of segments to merge.
@@ -173,8 +378,8 @@ class TraceOptimizer:
                 and current.layer == next_seg.layer
                 and current.net == next_seg.net
             ):
-                # Extend current segment to include next
-                current = Segment(
+                # Create candidate merged segment
+                merged = Segment(
                     x1=current.x1,
                     y1=current.y1,
                     x2=next_seg.x2,
@@ -184,6 +389,13 @@ class TraceOptimizer:
                     net=current.net,
                     net_name=current.net_name,
                 )
+                # Only merge if the extended path is clear
+                if self._path_is_clear(merged):
+                    current = merged
+                else:
+                    # Collision detected - keep segments separate
+                    result.append(current)
+                    current = next_seg
             else:
                 # Can't merge, save current and start new
                 result.append(current)
@@ -197,7 +409,7 @@ class TraceOptimizer:
         Remove unnecessary zigzag patterns.
 
         Identifies segments where the path backtracks and removes
-        the unnecessary detour.
+        the unnecessary detour, but only if the shortcut path is clear.
 
         Args:
             segments: List of segments to process.
@@ -218,9 +430,8 @@ class TraceOptimizer:
 
             # Check if curr is a zigzag (backtrack)
             if self._is_zigzag(prev, curr, next_seg):
-                # Skip curr, connect prev directly to next's start
-                # Update the last segment in result
-                result[-1] = Segment(
+                # Create candidate shortcut segment
+                shortcut = Segment(
                     x1=prev.x1,
                     y1=prev.y1,
                     x2=curr.x2,  # Connect to where curr ends
@@ -230,7 +441,14 @@ class TraceOptimizer:
                     net=prev.net,
                     net_name=prev.net_name,
                 )
-                i += 1  # Skip curr
+                # Only eliminate zigzag if the shortcut path is clear
+                if self._path_is_clear(shortcut):
+                    result[-1] = shortcut
+                    i += 1  # Skip curr
+                else:
+                    # Collision detected - keep the zigzag
+                    result.append(curr)
+                    i += 1
             else:
                 result.append(curr)
                 i += 1
@@ -247,7 +465,7 @@ class TraceOptimizer:
 
         Identifies runs of segments alternating between two directions
         (e.g., horizontal and 45° diagonal) and replaces them with an
-        optimal 2-3 segment path.
+        optimal 2-3 segment path, but only if the replacement is clear.
 
         Args:
             segments: List of segments to process.
@@ -276,7 +494,16 @@ class TraceOptimizer:
                 # Generate optimal replacement path
                 template = segments[i]
                 replacement = self._optimal_path(start_point, end_point, template)
-                result.extend(replacement)
+
+                # Check if all replacement segments are clear
+                all_clear = all(self._path_is_clear(seg) for seg in replacement)
+
+                if all_clear and replacement:
+                    result.extend(replacement)
+                else:
+                    # Collision detected - keep original staircase segments
+                    for j in range(i, staircase_end):
+                        result.append(segments[j])
                 i = staircase_end
             else:
                 # Not a staircase or too short, keep the segment
@@ -451,7 +678,8 @@ class TraceOptimizer:
         """
         Convert 90-degree corners to 45-degree chamfers.
 
-        Replaces sharp 90-degree turns with smoother 45-degree entry/exit.
+        Replaces sharp 90-degree turns with smoother 45-degree entry/exit,
+        but only if the chamfer path is clear of obstacles.
 
         Args:
             segments: List of segments to process.
@@ -488,7 +716,7 @@ class TraceOptimizer:
                 if self._is_90_degree_corner(prev_seg, seg):
                     # Shorten start of this segment
                     shortened = self._shorten_segment_start(seg, chamfer)
-                    if shortened:
+                    if shortened and result:
                         # Add chamfer segment connecting prev end to this start
                         chamfer_seg = Segment(
                             x1=result[-1].x2,
@@ -500,8 +728,13 @@ class TraceOptimizer:
                             net=seg.net,
                             net_name=seg.net_name,
                         )
-                        result.append(chamfer_seg)
-                        result.append(shortened)
+                        # Only add chamfer if path is clear
+                        if self._path_is_clear(chamfer_seg):
+                            result.append(chamfer_seg)
+                            result.append(shortened)
+                        else:
+                            # Collision - keep original segment
+                            result.append(seg)
                     else:
                         result.append(seg)
                 else:
@@ -513,9 +746,10 @@ class TraceOptimizer:
                 next_seg = segments[i + 1]
 
                 modified_seg = seg
+                chamfer_added = False
 
                 # Handle corner with previous segment
-                if self._is_90_degree_corner(prev_seg, seg):
+                if self._is_90_degree_corner(prev_seg, seg) and result:
                     shortened = self._shorten_segment_start(modified_seg, chamfer)
                     if shortened:
                         # Add chamfer
@@ -529,8 +763,11 @@ class TraceOptimizer:
                             net=seg.net,
                             net_name=seg.net_name,
                         )
-                        result.append(chamfer_seg)
-                        modified_seg = shortened
+                        # Only add chamfer if path is clear
+                        if self._path_is_clear(chamfer_seg):
+                            result.append(chamfer_seg)
+                            modified_seg = shortened
+                            chamfer_added = True
 
                 # Handle corner with next segment
                 if self._is_90_degree_corner(seg, next_seg):
