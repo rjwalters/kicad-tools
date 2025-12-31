@@ -14,6 +14,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
     kicad-tools validate-footprints    - Validate footprint pad spacing
@@ -31,6 +32,8 @@ Examples:
     kct parts lookup C123456
     kct parts search "100nF 0402" --in-stock
     kct route board.kicad_pcb --strategy negotiated
+    kct reason board.kicad_pcb --export-state
+    kct reason board.kicad_pcb --analyze
     kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
     kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
 """
@@ -282,6 +285,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
+
+    # REASON subcommand - LLM-driven PCB layout
+    reason_parser = subparsers.add_parser("reason", help="LLM-driven PCB layout reasoning")
+    reason_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    reason_parser.add_argument("-o", "--output", help="Output file path")
+    reason_parser.add_argument(
+        "--export-state",
+        action="store_true",
+        help="Export state as JSON for external LLM",
+    )
+    reason_parser.add_argument("--state-output", help="Output path for state JSON")
+    reason_parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Run interactive reasoning loop",
+    )
+    reason_parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Print detailed analysis of PCB state",
+    )
+    reason_parser.add_argument(
+        "--auto-route",
+        action="store_true",
+        help="Auto-route priority nets without LLM",
+    )
+    reason_parser.add_argument(
+        "--max-nets",
+        type=int,
+        default=10,
+        help="Maximum nets to auto-route (default: 10)",
+    )
+    reason_parser.add_argument("--drc", help="Path to DRC report file")
+    reason_parser.add_argument("-v", "--verbose", action="store_true")
+    reason_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
 
     # OPTIMIZE-TRACES subcommand - Trace optimization
     optimize_parser = subparsers.add_parser("optimize-traces", help="Optimize PCB traces")
@@ -537,6 +575,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "route":
         return _run_route_command(args)
+
+    elif args.command == "reason":
+        return _run_reason_command(args)
 
     elif args.command == "placement":
         return _run_placement_command(args)
@@ -839,6 +880,34 @@ def _run_route_command(args) -> int:
     if args.dry_run:
         sub_argv.append("--dry-run")
     return route_main(sub_argv)
+
+
+def _run_reason_command(args) -> int:
+    """Handle reason command."""
+    from .reason_cmd import main as reason_main
+
+    sub_argv = [args.pcb]
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.export_state:
+        sub_argv.append("--export-state")
+    if args.state_output:
+        sub_argv.extend(["--state-output", args.state_output])
+    if args.interactive:
+        sub_argv.append("--interactive")
+    if args.analyze:
+        sub_argv.append("--analyze")
+    if args.auto_route:
+        sub_argv.append("--auto-route")
+    if args.max_nets != 10:
+        sub_argv.extend(["--max-nets", str(args.max_nets)])
+    if args.drc:
+        sub_argv.extend(["--drc", args.drc])
+    if args.verbose:
+        sub_argv.append("--verbose")
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    return reason_main(sub_argv)
 
 
 def _run_placement_command(args) -> int:

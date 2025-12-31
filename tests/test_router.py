@@ -2424,3 +2424,205 @@ class TestDiagonalRouting:
         # Diagonal path should be shorter or equal (never longer)
         # Note: May be equal if path is already orthogonal
         assert diag_length <= orth_length + 0.01
+
+
+# =============================================================================
+# ZONE RULES AND ZONE-AWARE ROUTING TESTS
+# =============================================================================
+
+
+class TestZoneRules:
+    """Tests for ZoneRules dataclass."""
+
+    def test_zone_rules_defaults(self):
+        """Test default values for ZoneRules."""
+        from kicad_tools.router.rules import ZoneRules
+
+        rules = ZoneRules()
+        assert rules.clearance == 0.2
+        assert rules.thermal_gap == 0.3
+        assert rules.thermal_bridge_width == 0.3
+        assert rules.thermal_spoke_count == 4
+        assert rules.thermal_spoke_angle == 45.0
+        assert rules.pth_connection == "thermal"
+        assert rules.smd_connection == "thermal"
+        assert rules.via_connection == "solid"
+        assert rules.remove_islands is True
+        assert rules.island_min_area == 0.5
+
+    def test_zone_rules_custom(self):
+        """Test custom ZoneRules values."""
+        from kicad_tools.router.rules import ZoneRules
+
+        rules = ZoneRules(
+            clearance=0.3,
+            thermal_gap=0.5,
+            thermal_spoke_count=2,
+            pth_connection="solid",
+        )
+        assert rules.clearance == 0.3
+        assert rules.thermal_gap == 0.5
+        assert rules.thermal_spoke_count == 2
+        assert rules.pth_connection == "solid"
+
+
+class TestDesignRulesZoneExtensions:
+    """Tests for zone extensions to DesignRules."""
+
+    def test_design_rules_has_zone_rules(self):
+        """Test that DesignRules includes zone_rules."""
+        from kicad_tools.router.rules import ZoneRules
+
+        rules = DesignRules()
+        assert hasattr(rules, "zone_rules")
+        assert isinstance(rules.zone_rules, ZoneRules)
+
+    def test_design_rules_zone_costs(self):
+        """Test zone cost parameters in DesignRules."""
+        rules = DesignRules()
+        assert hasattr(rules, "cost_zone_same_net")
+        assert hasattr(rules, "cost_zone_clearance")
+        assert rules.cost_zone_same_net == 0.1  # Low cost for same-net zones
+        assert rules.cost_zone_clearance == 2.0
+
+
+class TestNetClassZoneExtensions:
+    """Tests for zone extensions to NetClassRouting."""
+
+    def test_net_class_has_zone_fields(self):
+        """Test that NetClassRouting has zone-related fields."""
+        nc = NetClassRouting(name="Test")
+        assert hasattr(nc, "zone_priority")
+        assert hasattr(nc, "zone_connection")
+        assert hasattr(nc, "is_pour_net")
+
+    def test_net_class_defaults(self):
+        """Test default zone values for NetClassRouting."""
+        nc = NetClassRouting(name="Test")
+        assert nc.zone_priority == 0
+        assert nc.zone_connection == "thermal"
+        assert nc.is_pour_net is False
+
+    def test_power_net_class_is_pour_net(self):
+        """Test that NET_CLASS_POWER is marked as pour net."""
+        assert NET_CLASS_POWER.is_pour_net is True
+        assert NET_CLASS_POWER.zone_priority == 10
+        assert NET_CLASS_POWER.zone_connection == "solid"
+
+
+class TestZoneManager:
+    """Tests for ZoneManager class."""
+
+    def test_zone_manager_creation(self):
+        """Test ZoneManager creation."""
+        from kicad_tools.router import ZoneManager
+        from kicad_tools.router.grid import RoutingGrid
+
+        rules = DesignRules()
+        grid = RoutingGrid(50, 50, rules)
+        manager = ZoneManager(grid, rules)
+
+        assert manager.grid is grid
+        assert manager.rules is rules
+        assert manager.filled_zones == []
+
+    def test_zone_manager_statistics_empty(self):
+        """Test zone statistics with no zones."""
+        from kicad_tools.router import ZoneManager
+        from kicad_tools.router.grid import RoutingGrid
+
+        rules = DesignRules()
+        grid = RoutingGrid(50, 50, rules)
+        manager = ZoneManager(grid, rules)
+
+        stats = manager.get_zone_statistics()
+        assert stats["zone_count"] == 0
+        assert stats["total_cells"] == 0
+        assert stats["zones"] == []
+
+
+class TestPathfinderZoneAwareness:
+    """Tests for zone-aware routing in the pathfinder."""
+
+    def test_zone_cell_detection(self):
+        """Test detection of zone cells in pathfinder."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules()
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules)
+
+        # No zones initially
+        assert not router._is_zone_cell(5, 5, 0)
+
+        # Mark a cell as zone
+        cell = grid.grid[0][5][5]
+        cell.is_zone = True
+        cell.net = 1
+
+        assert router._is_zone_cell(5, 5, 0)
+        assert router._get_zone_net(5, 5, 0) == 1
+
+    def test_zone_blocking_other_net(self):
+        """Test that other-net zones block routing."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules()
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules)
+
+        # Mark cell as zone for net 1
+        cell = grid.grid[0][5][5]
+        cell.is_zone = True
+        cell.net = 1
+
+        # Net 2 should be blocked by net 1 zone
+        assert router._is_zone_blocked(5, 5, 0, net=2)
+        # Net 1 should NOT be blocked by its own zone
+        assert not router._is_zone_blocked(5, 5, 0, net=1)
+
+    def test_zone_cost_same_net(self):
+        """Test reduced cost for same-net zones."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules()
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules)
+
+        # No zone - cost should be 0
+        cost = router._get_zone_cost(5, 5, 0, net=1)
+        assert cost == 0.0
+
+        # Mark cell as zone for net 1
+        cell = grid.grid[0][5][5]
+        cell.is_zone = True
+        cell.net = 1
+
+        # Same net - should have reduced cost (negative adjustment)
+        cost = router._get_zone_cost(5, 5, 0, net=1)
+        assert cost < 0
+
+    def test_via_zone_blocking(self):
+        """Test via placement blocked by other-net zones."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules()
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules)
+
+        # No zones - via allowed
+        assert router._can_place_via_in_zones(5, 5, net=1)
+
+        # Add zone on layer 0 for net 2
+        cell = grid.grid[0][5][5]
+        cell.is_zone = True
+        cell.net = 2
+
+        # Net 1 via should be blocked (would pierce net 2 zone)
+        assert not router._can_place_via_in_zones(5, 5, net=1)
+        # Net 2 via should be allowed (through own zone)
+        assert router._can_place_via_in_zones(5, 5, net=2)

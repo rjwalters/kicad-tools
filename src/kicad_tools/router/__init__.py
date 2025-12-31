@@ -32,6 +32,18 @@ from .bus import (
     detect_bus_signals,
     group_buses,
 )
+from .diffpair import (
+    DifferentialPair,
+    DifferentialPairConfig,
+    DifferentialPairRules,
+    DifferentialPairType,
+    DifferentialSignal,
+    LengthMismatchWarning,
+    analyze_differential_pairs,
+    detect_differential_pairs,
+    detect_differential_signals,
+    group_differential_pairs,
+)
 from .core import AdaptiveAutorouter, Autorouter, RoutingResult
 from .grid import RoutingGrid
 from .heuristics import (
@@ -53,6 +65,15 @@ from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from .optimizer import OptimizationConfig, OptimizationStats, TraceOptimizer
+from .zones import (
+    ConnectionType,
+    FilledZone,
+    ThermalRelief,
+    ZoneFiller,
+    ZoneManager,
+    fill_zones_by_priority,
+    get_connection_type,
+)
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     NET_CLASS_AUDIO,
@@ -64,6 +85,7 @@ from .rules import (
     NET_CLASS_POWER,
     DesignRules,
     NetClassRouting,
+    ZoneRules,
     create_net_class_map,
 )
 
@@ -80,6 +102,17 @@ __all__ = [
     "analyze_buses",
     "detect_bus_signals",
     "group_buses",
+    # Differential pair routing
+    "DifferentialPair",
+    "DifferentialPairConfig",
+    "DifferentialPairRules",
+    "DifferentialPairType",
+    "DifferentialSignal",
+    "LengthMismatchWarning",
+    "analyze_differential_pairs",
+    "detect_differential_pairs",
+    "detect_differential_signals",
+    "group_differential_pairs",
     # Grid
     "RoutingGrid",
     # Pathfinding
@@ -112,6 +145,7 @@ __all__ = [
     # Rules
     "DesignRules",
     "NetClassRouting",
+    "ZoneRules",
     "create_net_class_map",
     "DEFAULT_NET_CLASS_MAP",
     "NET_CLASS_POWER",
@@ -130,4 +164,12 @@ __all__ = [
     "TraceOptimizer",
     "OptimizationConfig",
     "OptimizationStats",
+    # Zones
+    "ZoneManager",
+    "ZoneFiller",
+    "FilledZone",
+    "ThermalRelief",
+    "ConnectionType",
+    "fill_zones_by_priority",
+    "get_connection_type",
 ]

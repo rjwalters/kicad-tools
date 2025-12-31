@@ -80,6 +80,45 @@ result = router.route_all()
 print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 ```
 
+### LLM-Driven PCB Layout
+
+The reasoning module enables LLMs to make strategic PCB layout decisions while tools handle geometric execution:
+
+```python
+from kicad_tools import PCBReasoningAgent
+
+# Load board
+agent = PCBReasoningAgent.from_pcb("board.kicad_pcb")
+
+# Reasoning loop
+while not agent.is_complete():
+    # Get state as prompt for LLM
+    prompt = agent.get_prompt()
+
+    # Call your LLM (OpenAI, Anthropic, local, etc.)
+    command = call_llm(prompt)
+
+    # Execute and get feedback
+    result, diagnosis = agent.execute(command)
+
+# Save result
+agent.save("board_routed.kicad_pcb")
+```
+
+CLI usage:
+```bash
+# Export state for external LLM
+kct reason board.kicad_pcb --export-state
+
+# Interactive mode
+kct reason board.kicad_pcb --interactive
+
+# Auto-route priority nets
+kct reason board.kicad_pcb --auto-route
+```
+
+See `examples/llm-routing/` for complete examples.
+
 ## CLI Commands
 
 ### Unified CLI (`kct` or `kicad-tools`)
@@ -91,6 +130,8 @@ print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 | `kct bom <schematic>` | Generate bill of materials |
 | `kct erc <schematic>` | Run electrical rules check |
 | `kct drc <pcb>` | Run design rules check |
+| `kct route <pcb>` | Autoroute a PCB |
+| `kct reason <pcb>` | LLM-driven PCB layout reasoning |
 
 All commands support `--format json` for machine-readable output.
 
@@ -122,6 +163,7 @@ All commands support `--format json` for machine-readable output.
 | `manufacturers` | PCB fab profiles (JLCPCB, OSHPark, PCBWay, Seeed) |
 | `operations` | Schematic operations (net tracing, symbol replacement) |
 | `router` | A* PCB autorouter with pluggable heuristics |
+| `reasoning` | LLM-driven PCB layout with chain-of-thought reasoning |
 
 ## Features
 
