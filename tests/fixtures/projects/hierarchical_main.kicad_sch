@@ -1,0 +1,244 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "00000000-0000-0000-0000-000000000001")
+	(paper "A4")
+	(title_block
+		(title "Hierarchical Test Design")
+		(date "2024-12-30")
+		(rev "1.0")
+		(company "KiCad Tools Test")
+		(comment 1 "Main sheet with power and sub-sheets")
+	)
+	(lib_symbols
+		(symbol "power:GND"
+			(symbol "GND_0_1"
+				(polyline
+					(pts (xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27))
+					(stroke (width 0))
+					(fill (type none))
+				)
+			)
+			(symbol "GND_1_1"
+				(pin power_in line
+					(at 0 0 270)
+					(length 0)
+					(name "GND")
+					(number "1")
+				)
+			)
+		)
+		(symbol "power:VCC"
+			(symbol "VCC_0_1"
+				(polyline
+					(pts (xy -0.762 1.27) (xy 0 2.54))
+					(stroke (width 0))
+					(fill (type none))
+				)
+				(polyline
+					(pts (xy 0 0) (xy 0 2.54))
+					(stroke (width 0))
+					(fill (type none))
+				)
+				(polyline
+					(pts (xy 0 2.54) (xy 0.762 1.27))
+					(stroke (width 0))
+					(fill (type none))
+				)
+			)
+			(symbol "VCC_1_1"
+				(pin power_in line
+					(at 0 0 90)
+					(length 0)
+					(name "VCC")
+					(number "1")
+				)
+			)
+		)
+		(symbol "Device:C"
+			(symbol "C_0_1"
+				(polyline
+					(pts (xy -2.032 -0.762) (xy 2.032 -0.762))
+					(stroke (width 0.508))
+					(fill (type none))
+				)
+				(polyline
+					(pts (xy -2.032 0.762) (xy 2.032 0.762))
+					(stroke (width 0.508))
+					(fill (type none))
+				)
+			)
+			(symbol "C_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 2.794)
+					(name "~")
+					(number "1")
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 2.794)
+					(name "~")
+					(number "2")
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VCC")
+		(at 100 40 0)
+		(unit 1)
+		(uuid "vcc-uuid-001")
+		(property "Reference" "#PWR01"
+			(at 100 44 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "VCC"
+			(at 100 36 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1"
+			(uuid "vcc-pin-1")
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 100 80 0)
+		(unit 1)
+		(uuid "gnd-uuid-001")
+		(property "Reference" "#PWR02"
+			(at 100 86 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "GND"
+			(at 100 84 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1"
+			(uuid "gnd-pin-1")
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 100 60 0)
+		(unit 1)
+		(uuid "c1-uuid-001")
+		(property "Reference" "C1"
+			(at 104 58 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "100nF"
+			(at 104 62 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+			(at 100 60 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1"
+			(uuid "c1-pin-1")
+		)
+		(pin "2"
+			(uuid "c1-pin-2")
+		)
+	)
+	(sheet
+		(at 130 40) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-logic-uuid")
+		(property "Sheetname" "Logic"
+			(at 130 39 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "logic_subsheet.kicad_sch"
+			(at 130 71 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(pin "VCC" input
+			(at 130 45 180)
+			(effects (font (size 1.27 1.27)) (justify left))
+			(uuid "sheet-pin-vcc")
+		)
+		(pin "GND" input
+			(at 130 55 180)
+			(effects (font (size 1.27 1.27)) (justify left))
+			(uuid "sheet-pin-gnd")
+		)
+		(pin "OUT" output
+			(at 170 50 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+			(uuid "sheet-pin-out")
+		)
+	)
+	(sheet
+		(at 200 40) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sheet-output-uuid")
+		(property "Sheetname" "Output"
+			(at 200 39 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "output_subsheet.kicad_sch"
+			(at 200 71 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(pin "IN" input
+			(at 200 50 180)
+			(effects (font (size 1.27 1.27)) (justify left))
+			(uuid "sheet-pin-in")
+		)
+		(pin "LED" output
+			(at 240 50 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+			(uuid "sheet-pin-led")
+		)
+	)
+	(wire
+		(pts (xy 100 40) (xy 100 56.19))
+		(stroke (width 0) (type default))
+		(uuid "wire-vcc-c1")
+	)
+	(wire
+		(pts (xy 100 63.81) (xy 100 80))
+		(stroke (width 0) (type default))
+		(uuid "wire-c1-gnd")
+	)
+	(wire
+		(pts (xy 100 45) (xy 130 45))
+		(stroke (width 0) (type default))
+		(uuid "wire-vcc-sheet")
+	)
+	(wire
+		(pts (xy 100 55) (xy 130 55))
+		(stroke (width 0) (type default))
+		(uuid "wire-gnd-sheet")
+	)
+	(wire
+		(pts (xy 170 50) (xy 200 50))
+		(stroke (width 0) (type default))
+		(uuid "wire-logic-output")
+	)
+	(global_label "SIGNAL_OUT"
+		(shape output)
+		(at 240 50 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "global-label-1")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 240 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+	)
+	(junction
+		(at 100 45)
+		(diameter 0)
+		(uuid "junction-vcc")
+	)
+	(junction
+		(at 100 55)
+		(diameter 0)
+		(uuid "junction-gnd")
+	)
+)
