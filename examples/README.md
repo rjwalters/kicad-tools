@@ -10,6 +10,7 @@ This directory contains example projects demonstrating common workflows with kic
 | [02-bom-generation](02-bom-generation/) | Extract Bill of Materials | BOM extraction, grouping, export |
 | [03-drc-checking](03-drc-checking/) | Parse DRC reports, check manufacturer rules | DRC parsing, manufacturer validation |
 | [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
+| [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 
 ## Quick Start
 
@@ -78,6 +79,21 @@ router, _ = load_pcb_for_routing("board.kicad_pcb", rules=rules)
 router.route_all_monte_carlo(num_trials=10)
 ```
 
+### LLM Routing
+
+Integrate LLMs for semantic PCB layout decisions.
+
+```python
+from kicad_tools import PCBReasoningAgent
+
+agent = PCBReasoningAgent.from_pcb("board.kicad_pcb")
+while not agent.is_complete():
+    prompt = agent.get_prompt()
+    command = call_your_llm(prompt)
+    result, diagnosis = agent.execute_dict(command)
+agent.save("board_routed.kicad_pcb")
+```
+
 ## CLI Commands
 
 Most functionality is also available via the command line:
@@ -95,6 +111,10 @@ kct drc design-drc.rpt --mfr jlcpcb
 
 # Manufacturer comparison
 kct mfr compare
+
+# LLM reasoning
+kct reason board.kicad_pcb --analyze
+kct reason board.kicad_pcb --export-state
 ```
 
 ## Sample Files
