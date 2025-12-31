@@ -13,9 +13,7 @@ class TestFootprintsImport:
     def test_import_emits_warning(self):
         """Test that importing footprints emits a FutureWarning."""
         # Clear all footprints-related modules from cache to force reimport
-        modules_to_remove = [
-            key for key in sys.modules if key.startswith("kicad_tools.footprints")
-        ]
+        modules_to_remove = [key for key in sys.modules if key.startswith("kicad_tools.footprints")]
         for mod in modules_to_remove:
             del sys.modules[mod]
 

@@ -13,6 +13,12 @@ Examples:
     # Validate with custom clearance
     kicad-tools validate-footprints board.kicad_pcb --min-pad-gap 0.2
 
+    # Compare footprints against KiCad standard library
+    kicad-tools validate-footprints board.kicad_pcb --compare-standard
+
+    # Compare with custom tolerance
+    kicad-tools validate-footprints board.kicad_pcb --compare-standard --tolerance 0.1
+
     # Fix pad spacing to meet clearance
     kicad-tools fix-footprints board.kicad_pcb --min-pad-gap 0.2
 
@@ -229,6 +235,24 @@ def main_validate(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress progress output (for scripting)",
     )
+    # Standard library comparison options
+    parser.add_argument(
+        "--compare-standard",
+        action="store_true",
+        help="Compare footprints against KiCad standard library",
+    )
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.05,
+        help="Tolerance for standard comparison in mm (default: 0.05)",
+    )
+    parser.add_argument(
+        "--kicad-library-path",
+        type=str,
+        default=None,
+        help="Override path to KiCad footprint libraries",
+    )
 
     args = parser.parse_args(argv)
 
@@ -246,6 +270,18 @@ def main_validate(argv: list[str] | None = None) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Handle standard library comparison mode
+    if args.compare_standard:
+        return _run_standard_comparison(
+            pcb,
+            tolerance=args.tolerance,
+            library_path=args.kicad_library_path,
+            output_format=args.format,
+            errors_only=args.errors_only,
+            quiet=args.quiet,
+        )
+
+    # Normal validation mode
     validator = FootprintValidator(min_pad_gap=args.min_pad_gap)
 
     with spinner("Validating footprints...", quiet=args.quiet):
@@ -263,6 +299,170 @@ def main_validate(argv: list[str] | None = None) -> int:
 
     has_errors = any(i.severity == IssueSeverity.ERROR for i in issues)
     return 1 if has_errors else 0
+
+
+def _run_standard_comparison(
+    pcb: PCB,
+    tolerance: float,
+    library_path: str | None,
+    output_format: str,
+    errors_only: bool,
+    quiet: bool,
+) -> int:
+    """Run standard library comparison mode."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.footprints.standard_comparison import (
+        StandardFootprintComparator,
+    )
+
+    comparator = StandardFootprintComparator(
+        tolerance_mm=tolerance,
+        library_path=library_path,
+    )
+
+    if not comparator.library_found:
+        print(
+            "Warning: KiCad standard footprint library not found.",
+            file=sys.stderr,
+        )
+        print(
+            "Use --kicad-library-path to specify the location, or set KICAD_FOOTPRINT_DIR",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not quiet:
+        print(f"Using KiCad library: {comparator.library_path}")
+
+    with spinner("Comparing footprints against standard library...", quiet=quiet):
+        comparisons = comparator.compare_pcb(pcb)
+
+    # Filter if errors only
+    if errors_only:
+        comparisons = [c for c in comparisons if c.error_count > 0]
+
+    # Output results
+    if output_format == "json":
+        _print_comparison_json(comparisons)
+    elif output_format == "summary":
+        _print_comparison_summary(comparator.summarize(comparisons))
+    else:
+        _print_comparison_text(comparisons, errors_only)
+
+    # Return non-zero if there are errors
+    total_errors = sum(c.error_count for c in comparisons)
+    return 1 if total_errors > 0 else 0
+
+
+def _print_comparison_text(comparisons, errors_only: bool) -> None:
+    """Print comparison results in text format."""
+    from kicad_tools.footprints.standard_comparison import ComparisonSeverity
+
+    print("\nComparing footprints against KiCad standard library...\n")
+
+    matching_count = 0
+    not_found_count = 0
+
+    for comp in comparisons:
+        if not comp.found_standard:
+            not_found_count += 1
+            continue
+
+        if comp.matches_standard:
+            matching_count += 1
+            continue
+
+        # Has issues - print details
+        print(f"{comp.footprint_ref} ({comp.footprint_name}):")
+
+        for pad_comp in comp.pad_comparisons:
+            if errors_only and pad_comp.severity != ComparisonSeverity.ERROR:
+                continue
+
+            severity = pad_comp.severity.value.upper()
+            print(f"  {severity}: {pad_comp.message}")
+
+            if pad_comp.our_value is not None and pad_comp.standard_value is not None:
+                if isinstance(pad_comp.our_value, tuple):
+                    print(f"    Ours: ({pad_comp.our_value[0]:.3f}, {pad_comp.our_value[1]:.3f})")
+                    print(
+                        f"    Standard: "
+                        f"({pad_comp.standard_value[0]:.3f}, {pad_comp.standard_value[1]:.3f})"
+                    )
+                else:
+                    print(f"    Ours: {pad_comp.our_value}")
+                    print(f"    Standard: {pad_comp.standard_value}")
+
+            if pad_comp.delta is not None:
+                if isinstance(pad_comp.delta, tuple):
+                    print(f"    Delta: ({pad_comp.delta[0]:.3f}, {pad_comp.delta[1]:.3f})mm")
+                else:
+                    print(f"    Delta: {pad_comp.delta:.3f}mm")
+
+            if pad_comp.delta_percent is not None:
+                print(f"    Delta: {pad_comp.delta_percent:.1f}%")
+
+        print()
+
+    # Summary
+    total_checked = len(comparisons)
+    with_issues = sum(1 for c in comparisons if c.has_issues and c.found_standard)
+
+    print(f"Summary: {total_checked} footprints checked")
+    print(f"  - {matching_count} matching standard")
+    print(f"  - {with_issues} with warnings/errors")
+    print(f"  - {not_found_count} not found in standard library")
+
+
+def _print_comparison_json(comparisons) -> None:
+    """Print comparison results in JSON format."""
+    data = []
+    for comp in comparisons:
+        item = {
+            "reference": comp.footprint_ref,
+            "footprint": comp.footprint_name,
+            "standard_library": comp.standard_library,
+            "standard_footprint": comp.standard_footprint,
+            "found_standard": comp.found_standard,
+            "matches_standard": comp.matches_standard,
+            "error_count": comp.error_count,
+            "warning_count": comp.warning_count,
+            "issues": [
+                {
+                    "pad": p.pad_number,
+                    "type": p.comparison_type.value,
+                    "severity": p.severity.value,
+                    "message": p.message,
+                    "our_value": p.our_value,
+                    "standard_value": p.standard_value,
+                    "delta": p.delta,
+                    "delta_percent": p.delta_percent,
+                }
+                for p in comp.pad_comparisons
+            ],
+        }
+        data.append(item)
+
+    print(json.dumps(data, indent=2))
+
+
+def _print_comparison_summary(summary: dict) -> None:
+    """Print comparison summary."""
+    print("Footprint Standard Library Comparison Summary")
+    print("=" * 50)
+    print(f"Total footprints checked: {summary['total_checked']}")
+    print(f"Found in standard library: {summary['found_standard']}")
+    print(f"Not found: {summary['not_found']}")
+    print(f"Matching standard: {summary['matching_standard']}")
+    print(f"With issues: {summary['with_issues']}")
+    print()
+    print(f"Total errors: {summary['total_errors']}")
+    print(f"Total warnings: {summary['total_warnings']}")
+
+    if summary["by_footprint_name"]:
+        print("\nIssues by footprint type:")
+        for name, count in sorted(summary["by_footprint_name"].items(), key=lambda x: -x[1]):
+            print(f"  {name}: {count}")
 
 
 def main_fix(argv: list[str] | None = None) -> int:

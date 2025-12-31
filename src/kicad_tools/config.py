@@ -42,6 +42,11 @@ KNOWN_KEYS = {
         "via_diameter",
     },
     "parts": {"cache_dir", "cache_ttl_days"},
+    "footprint_validation": {
+        "kicad_library_path",
+        "tolerance_mm",
+        "library_mappings",
+    },
 }
 
 
@@ -92,6 +97,15 @@ class PartsConfig:
 
 
 @dataclass
+class FootprintValidationConfig:
+    """Footprint validation configuration."""
+
+    kicad_library_path: str | None = None
+    tolerance_mm: float = 0.05
+    library_mappings: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     """Merged configuration from all sources."""
 
@@ -100,6 +114,9 @@ class Config:
     export: ExportConfig = field(default_factory=ExportConfig)
     route: RouteConfig = field(default_factory=RouteConfig)
     parts: PartsConfig = field(default_factory=PartsConfig)
+    footprint_validation: FootprintValidationConfig = field(
+        default_factory=FootprintValidationConfig
+    )
 
     # Track which file each setting came from (for --show)
     _sources: dict = field(default_factory=dict, repr=False)
@@ -306,6 +323,23 @@ def _merge_config(
             config.parts.cache_ttl_days = parts_data["cache_ttl_days"]
             sources["parts.cache_ttl_days"] = source
 
+    # Merge footprint_validation section
+    if "footprint_validation" in data:
+        fpv_data = data["footprint_validation"]
+        _warn_unknown_keys(
+            fpv_data, KNOWN_KEYS["footprint_validation"], "footprint_validation", source
+        )
+
+        if "kicad_library_path" in fpv_data:
+            config.footprint_validation.kicad_library_path = fpv_data["kicad_library_path"]
+            sources["footprint_validation.kicad_library_path"] = source
+        if "tolerance_mm" in fpv_data:
+            config.footprint_validation.tolerance_mm = fpv_data["tolerance_mm"]
+            sources["footprint_validation.tolerance_mm"] = source
+        if "library_mappings" in fpv_data:
+            config.footprint_validation.library_mappings = fpv_data["library_mappings"]
+            sources["footprint_validation.library_mappings"] = source
+
 
 def _warn_unknown_keys(data: dict[str, Any], known: set[str], section: str, source: str) -> None:
     """Warn about unknown keys in a config section."""
@@ -376,6 +410,19 @@ def generate_template() -> str:
 
 # Cache TTL in days
 # cache_ttl_days = 7
+
+[footprint_validation]
+# Path to KiCad standard footprint library (auto-detected if not set)
+# kicad_library_path = "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints"
+
+# Tolerance for dimension comparison in mm
+# tolerance_mm = 0.05
+
+# Custom mappings from footprint names to library directories
+# Useful for non-standard naming conventions
+# [footprint_validation.library_mappings]
+# "CustomCap_0402" = "Capacitor_SMD"
+# "MyResistor_0603" = "Resistor_SMD"
 """
 
 
