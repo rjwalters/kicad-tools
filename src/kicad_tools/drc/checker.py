@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 from .report import DRCReport
 from .violation import DRCViolation, ViolationType
@@ -26,8 +25,8 @@ class ManufacturerCheck:
     message: str
     manufacturer_id: str
     rule_name: str
-    manufacturer_limit: Optional[float] = None  # mm
-    actual_value: Optional[float] = None  # mm
+    manufacturer_limit: float | None = None  # mm
+    actual_value: float | None = None  # mm
 
     @property
     def is_compatible(self) -> bool:
@@ -94,7 +93,7 @@ def _check_violation(
     manufacturer_id: str,
     manufacturer_name: str,
     rules,  # DesignRules from mfr module
-) -> Optional[ManufacturerCheck]:
+) -> ManufacturerCheck | None:
     """Check a single violation against manufacturer rules."""
 
     # Clearance violations

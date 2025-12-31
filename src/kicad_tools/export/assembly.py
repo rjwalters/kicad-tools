@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ValidationError
@@ -31,20 +30,20 @@ class AssemblyConfig:
     # BOM settings
     include_bom: bool = True
     bom_filename: str = "bom_{manufacturer}.csv"
-    bom_config: Optional[BOMExportConfig] = None
+    bom_config: BOMExportConfig | None = None
 
     # CPL/PnP settings
     include_pnp: bool = True
     pnp_filename: str = "cpl_{manufacturer}.csv"
-    pnp_config: Optional[PnPExportConfig] = None
+    pnp_config: PnPExportConfig | None = None
 
     # Gerber settings
     include_gerbers: bool = True
     gerbers_subdir: str = "gerbers"
-    gerber_config: Optional[GerberConfig] = None
+    gerber_config: GerberConfig | None = None
 
     # Filtering
-    exclude_references: List[str] = field(default_factory=list)
+    exclude_references: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -52,10 +51,10 @@ class AssemblyPackageResult:
     """Result of assembly package generation."""
 
     output_dir: Path
-    bom_path: Optional[Path] = None
-    pnp_path: Optional[Path] = None
-    gerber_path: Optional[Path] = None
-    errors: List[str] = field(default_factory=list)
+    bom_path: Path | None = None
+    pnp_path: Path | None = None
+    gerber_path: Path | None = None
+    errors: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -112,9 +111,9 @@ class AssemblyPackage:
     def __init__(
         self,
         pcb_path: str | Path,
-        schematic_path: Optional[str | Path] = None,
+        schematic_path: str | Path | None = None,
         manufacturer: str = "jlcpcb",
-        config: Optional[AssemblyConfig] = None,
+        config: AssemblyConfig | None = None,
     ):
         """
         Initialize assembly package generator.
@@ -152,10 +151,10 @@ class AssemblyPackage:
     def create(
         cls,
         pcb: str | Path,
-        schematic: Optional[str | Path] = None,
+        schematic: str | Path | None = None,
         manufacturer: str = "jlcpcb",
-        output_dir: Optional[str | Path] = None,
-    ) -> "AssemblyPackage":
+        output_dir: str | Path | None = None,
+    ) -> AssemblyPackage:
         """
         Factory method for quick assembly package creation.
 
@@ -174,7 +173,7 @@ class AssemblyPackage:
 
         return cls(pcb, schematic, manufacturer, config)
 
-    def export(self, output_dir: Optional[str | Path] = None) -> AssemblyPackageResult:
+    def export(self, output_dir: str | Path | None = None) -> AssemblyPackageResult:
         """
         Generate complete assembly package.
 
@@ -256,10 +255,7 @@ class AssemblyPackage:
 
         # Filter excluded references
         if self.config.exclude_references:
-            footprints = [
-                fp for fp in footprints
-                if not self._is_excluded(fp.reference)
-            ]
+            footprints = [fp for fp in footprints if not self._is_excluded(fp.reference)]
 
         # Generate CPL
         pnp_config = self.config.pnp_config or PnPExportConfig()
@@ -296,6 +292,7 @@ class AssemblyPackage:
     def _is_excluded(self, reference: str) -> bool:
         """Check if reference matches any exclusion pattern."""
         import fnmatch
+
         for pattern in self.config.exclude_references:
             if fnmatch.fnmatch(reference, pattern):
                 return True
@@ -304,9 +301,9 @@ class AssemblyPackage:
 
 def create_assembly_package(
     pcb: str | Path,
-    schematic: Optional[str | Path] = None,
+    schematic: str | Path | None = None,
     manufacturer: str = "jlcpcb",
-    output_dir: Optional[str | Path] = None,
+    output_dir: str | Path | None = None,
 ) -> AssemblyPackageResult:
     """
     Convenience function to create assembly package.

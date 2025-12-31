@@ -1,13 +1,9 @@
 """Tests for CLI command modules."""
 
 import json
-import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-from io import StringIO
 
 from kicad_tools.cli import bom_cmd, nets, symbols
-from kicad_tools.schema.bom import BOMItem, BOM
+from kicad_tools.schema.bom import BOMItem
 
 
 class TestBomCmdHelpers:
@@ -74,7 +70,13 @@ class TestBomCmdHelpers:
     def test_output_table_grouped(self, capsys):
         """Output grouped BOM table."""
         groups = [
-            {"quantity": 3, "value": "10k", "footprint": "0603", "mpn": "", "references": ["R1", "R2", "R3"]},
+            {
+                "quantity": 3,
+                "value": "10k",
+                "footprint": "0603",
+                "mpn": "",
+                "references": ["R1", "R2", "R3"],
+            },
         ]
         bom_cmd.output_table(groups, grouped=True)
         captured = capsys.readouterr()
@@ -95,7 +97,13 @@ class TestBomCmdHelpers:
     def test_output_csv_grouped(self, capsys):
         """Output CSV grouped."""
         groups = [
-            {"quantity": 2, "value": "10k", "footprint": "0603", "mpn": "MPN1", "references": ["R1", "R2"]},
+            {
+                "quantity": 2,
+                "value": "10k",
+                "footprint": "0603",
+                "mpn": "MPN1",
+                "references": ["R1", "R2"],
+            },
         ]
         bom_cmd.output_csv(groups, grouped=True)
         captured = capsys.readouterr()
@@ -116,7 +124,13 @@ class TestBomCmdHelpers:
     def test_output_json_grouped(self, capsys):
         """Output JSON grouped."""
         groups = [
-            {"quantity": 2, "value": "10k", "footprint": "0603", "mpn": "", "references": ["R1", "R2"]},
+            {
+                "quantity": 2,
+                "value": "10k",
+                "footprint": "0603",
+                "mpn": "",
+                "references": ["R1", "R2"],
+            },
         ]
         bom_cmd.output_json(groups, grouped=True)
         captured = capsys.readouterr()
@@ -197,7 +211,9 @@ class TestNetsHelpers:
 
         net = Net(name="TEST_NET", has_label=True)
         net.wires.append(Wire(start=(0, 0), end=(10, 0), uuid="w1"))
-        net.connections.append(NetConnection(point=(0, 0), type="pin", reference="R1", pin_number="1"))
+        net.connections.append(
+            NetConnection(point=(0, 0), type="pin", reference="R1", pin_number="1")
+        )
 
         nets.output_all_json([net])
         captured = capsys.readouterr()

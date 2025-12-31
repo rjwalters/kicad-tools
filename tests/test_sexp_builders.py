@@ -1,34 +1,30 @@
 """Tests for S-expression builders."""
 
-import pytest
-
 from kicad_tools.sexp.builders import (
-    fmt,
-    xy,
     at,
-    stroke,
-    font,
-    effects,
-    uuid_node,
-    property_node,
     color,
-    pts,
-    wire_node,
+    effects,
+    fmt,
+    font,
+    footprint_at_node,
+    hier_label_node,
     junction_node,
     label_node,
-    hier_label_node,
-    text_node,
-    symbol_property_node,
     pin_uuid_node,
-    symbol_instances_node,
-    title_block,
-    sheet_instances,
+    pts,
     segment_node,
+    sheet_instances,
+    stroke,
+    symbol_instances_node,
+    symbol_property_node,
+    text_node,
+    title_block,
+    uuid_node,
     via_node,
+    wire_node,
+    xy,
     zone_node,
-    footprint_at_node,
 )
-from kicad_tools.sexp.parser import SExp
 
 
 class TestFmtFunction:

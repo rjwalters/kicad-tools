@@ -24,7 +24,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from kicad_tools.footprints.fixer import FootprintFix, FootprintFixer
 from kicad_tools.footprints.validator import FootprintIssue, FootprintValidator
@@ -36,7 +35,7 @@ def validate_footprints(
     min_pad_gap: float = 0.15,
     output_format: str = "text",
     errors_only: bool = False,
-) -> List[FootprintIssue]:
+) -> list[FootprintIssue]:
     """Validate footprints in a PCB and return issues.
 
     Args:
@@ -60,9 +59,9 @@ def validate_footprints(
 
 
 def print_validation_results(
-    issues: List[FootprintIssue],
+    issues: list[FootprintIssue],
     output_format: str = "text",
-    validator: Optional[FootprintValidator] = None,
+    validator: FootprintValidator | None = None,
 ) -> None:
     """Print validation results.
 
@@ -98,9 +97,7 @@ def print_validation_results(
             for issue_type, count in sorted(summary["by_type"].items()):
                 print(f"  {issue_type}: {count}")
             print("\nBy footprint type:")
-            for name, count in sorted(
-                summary["by_footprint_name"].items(), key=lambda x: -x[1]
-            ):
+            for name, count in sorted(summary["by_footprint_name"].items(), key=lambda x: -x[1]):
                 print(f"  {name}: {count} instances")
         return
 
@@ -119,7 +116,7 @@ def fix_footprints(
     pcb: PCB,
     min_pad_gap: float = 0.2,
     dry_run: bool = False,
-) -> List[FootprintFix]:
+) -> list[FootprintFix]:
     """Fix footprint pad spacing issues.
 
     Args:
@@ -136,10 +133,10 @@ def fix_footprints(
 
 
 def print_fix_results(
-    fixes: List[FootprintFix],
+    fixes: list[FootprintFix],
     output_format: str = "text",
     dry_run: bool = False,
-    fixer: Optional[FootprintFixer] = None,
+    fixer: FootprintFixer | None = None,
 ) -> None:
     """Print fix results.
 
@@ -177,9 +174,7 @@ def print_fix_results(
             print(f"Total footprints {action}: {summary['total_footprints_fixed']}")
             print(f"Total pads adjusted: {summary['total_pads_adjusted']}")
             print("\nBy footprint type:")
-            for name, count in sorted(
-                summary["by_footprint_name"].items(), key=lambda x: -x[1]
-            ):
+            for name, count in sorted(summary["by_footprint_name"].items(), key=lambda x: -x[1]):
                 print(f"  {name}: {count} instances")
         return
 
@@ -204,7 +199,7 @@ def print_fix_results(
     print(f"\n{action} {len(fixes)} footprint(s)")
 
 
-def main_validate(argv: Optional[List[str]] = None) -> int:
+def main_validate(argv: list[str] | None = None) -> int:
     """Main entry point for validate-footprints command."""
     parser = argparse.ArgumentParser(
         description="Validate footprints in a KiCad PCB file",
@@ -270,7 +265,7 @@ def main_validate(argv: Optional[List[str]] = None) -> int:
     return 1 if has_errors else 0
 
 
-def main_fix(argv: Optional[List[str]] = None) -> int:
+def main_fix(argv: list[str] | None = None) -> int:
     """Main entry point for fix-footprints command."""
     parser = argparse.ArgumentParser(
         description="Fix footprint pad spacing issues in a KiCad PCB file",

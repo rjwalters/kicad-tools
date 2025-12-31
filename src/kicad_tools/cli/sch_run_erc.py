@@ -31,7 +31,6 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 
 @dataclass
@@ -59,7 +58,7 @@ class ERCReport:
     """ERC report with all violations."""
 
     schematic: str
-    violations: List[ERCViolation]
+    violations: list[ERCViolation]
     error_count: int
     warning_count: int
 
@@ -72,7 +71,7 @@ class ERCReport:
         }
 
 
-def find_kicad_cli() -> Optional[str]:
+def find_kicad_cli() -> str | None:
     """Find the kicad-cli executable."""
     # Try PATH first
     try:
@@ -238,7 +237,7 @@ def run_erc(
 
         # Read and parse output
         if os.path.exists(output_file):
-            with open(output_file, "r") as f:
+            with open(output_file) as f:
                 content = f.read()
 
             if content.strip():
@@ -334,13 +333,15 @@ def main():
         print(output)
 
     # Exit code
-    if args.exit_code:
-        if args.severity == "error" and report.error_count > 0:
-            sys.exit(1)
-        elif args.severity == "warning" and report.warning_count > 0:
-            sys.exit(1)
-        elif args.severity == "all" and (report.error_count > 0 or report.warning_count > 0):
-            sys.exit(1)
+    if args.exit_code and (
+        args.severity == "error"
+        and report.error_count > 0
+        or args.severity == "warning"
+        and report.warning_count > 0
+        or args.severity == "all"
+        and (report.error_count > 0 or report.warning_count > 0)
+    ):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -12,10 +12,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for reason command."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools reason",
@@ -23,7 +22,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Output file path (default: <input>_reasoned.kicad_pcb)",
     )
     parser.add_argument(
@@ -61,7 +61,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Path to DRC report file for violation awareness",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Verbose output",
     )
@@ -79,7 +80,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return 1
 
-    if not pcb_path.suffix == ".kicad_pcb":
+    if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
     # Determine output path
@@ -155,18 +156,12 @@ def _export_state(agent, args) -> int:
                 "rotation": comp.rotation,
                 "layer": comp.layer,
                 "footprint": comp.footprint,
-                "pads": [
-                    {"name": p.name, "x": p.x, "y": p.y, "net": p.net}
-                    for p in comp.pads
-                ],
+                "pads": [{"name": p.name, "x": p.x, "y": p.y, "net": p.net} for p in comp.pads],
             }
             for ref, comp in state.components.items()
         },
         "nets": {
-            "routed": [
-                {"name": n.name, "pad_count": n.pad_count}
-                for n in state.routed_nets
-            ],
+            "routed": [{"name": n.name, "pad_count": n.pad_count} for n in state.routed_nets],
             "unrouted": [
                 {"name": n.name, "pad_count": n.pad_count, "priority": n.priority}
                 for n in state.unrouted_nets
@@ -209,7 +204,7 @@ def _interactive_loop(agent, output_path: Path, args) -> int:
     """Run interactive reasoning loop."""
     print("\n--- Interactive Mode ---")
     print("Enter commands as JSON. Type 'quit' to exit, 'save' to save.")
-    print("Example: {\"command\": \"route_net\", \"net\": \"SCL\"}")
+    print('Example: {"command": "route_net", "net": "SCL"}')
     print()
 
     while not agent.is_complete():

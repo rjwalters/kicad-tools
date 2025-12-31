@@ -12,7 +12,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -50,7 +50,7 @@ class DefaultsConfig:
     """Default options for CLI commands."""
 
     format: str = "table"
-    manufacturer: Optional[str] = None
+    manufacturer: str | None = None
     verbose: bool = False
     quiet: bool = False
 
@@ -105,7 +105,7 @@ class Config:
     _sources: dict = field(default_factory=dict, repr=False)
 
     @classmethod
-    def load(cls, start_dir: Optional[Path] = None) -> "Config":
+    def load(cls, start_dir: Path | None = None) -> "Config":
         """
         Load configuration with precedence: project > user > defaults.
 
@@ -148,7 +148,7 @@ class ConfigError(Exception):
     pass
 
 
-def _find_project_config(start_dir: Path) -> Optional[Path]:
+def _find_project_config(start_dir: Path) -> Path | None:
     """
     Find project config by walking up the directory tree.
 
@@ -182,7 +182,7 @@ def _find_project_config(start_dir: Path) -> Optional[Path]:
     return None
 
 
-def _load_toml_file(path: Path) -> Optional[dict[str, Any]]:
+def _load_toml_file(path: Path) -> dict[str, Any] | None:
     """
     Load a TOML file safely.
 
@@ -379,7 +379,7 @@ def generate_template() -> str:
 """
 
 
-def get_config_paths() -> dict[str, Optional[Path]]:
+def get_config_paths() -> dict[str, Path | None]:
     """
     Get paths to config files that would be loaded.
 

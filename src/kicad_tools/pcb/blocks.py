@@ -33,7 +33,6 @@ Usage:
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 # Import footprint reader for accurate pad positions
 try:
@@ -143,12 +142,12 @@ class Pad:
     name: str
     position: Point
     layer: Layer = Layer.F_CU
-    net: Optional[str] = None
+    net: str | None = None
 
     # Pad geometry (for actual pads, not just ports)
     shape: str = "circle"  # circle, rect, oval
     size: tuple[float, float] = (0.8, 0.8)  # mm
-    drill: Optional[float] = None  # For through-hole
+    drill: float | None = None  # For through-hole
 
 
 @dataclass
@@ -165,10 +164,10 @@ class Port:
     position: Point  # Position relative to block origin
     layer: Layer = Layer.F_CU
     direction: str = "inout"  # in, out, inout, power
-    net: Optional[str] = None  # Net name when connected
+    net: str | None = None  # Net name when connected
 
     # What this port connects to inside the block
-    internal_pad: Optional[str] = None  # e.g., "U1.VDD" or "C12.1"
+    internal_pad: str | None = None  # e.g., "U1.VDD" or "C12.1"
 
 
 @dataclass
@@ -179,7 +178,7 @@ class TraceSegment:
     end: Point
     width: float = 0.25  # mm
     layer: Layer = Layer.F_CU
-    net: Optional[str] = None
+    net: str | None = None
 
 
 @dataclass
@@ -190,7 +189,7 @@ class Via:
     drill: float = 0.3  # mm
     size: float = 0.6  # mm (annular ring outer diameter)
     layers: tuple[Layer, Layer] = (Layer.F_CU, Layer.B_CU)
-    net: Optional[str] = None
+    net: str | None = None
 
 
 @dataclass
@@ -268,7 +267,7 @@ class PCBBlock:
         self.ports: dict[str, Port] = {}
 
         # Computed after components added
-        self._bounding_box: Optional[Rectangle] = None
+        self._bounding_box: Rectangle | None = None
 
     def add_component(
         self,

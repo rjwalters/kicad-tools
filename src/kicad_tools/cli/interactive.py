@@ -6,22 +6,22 @@ file path completion, and command history.
 """
 
 import cmd
+import contextlib
 import os
 import readline
 import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
 
 @dataclass
 class InteractiveSession:
     """Holds state for an interactive session."""
 
-    schematic: Optional[Path] = None
-    pcb: Optional[Path] = None
-    project: Optional[Path] = None
+    schematic: Path | None = None
+    pcb: Path | None = None
+    project: Path | None = None
     output_dir: Path = field(default_factory=lambda: Path("./output"))
 
     def status_summary(self) -> str:
@@ -45,16 +45,14 @@ Type 'help' for available commands, 'quit' to exit.
 """
     prompt = "kicad-tools> "
 
-    def __init__(self, project: Optional[str] = None):
+    def __init__(self, project: str | None = None):
         super().__init__()
         self.session = InteractiveSession()
 
         # Set up readline history
         self.histfile = Path.home() / ".kicad_tools_history"
-        try:
+        with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
             readline.read_history_file(self.histfile)
-        except (FileNotFoundError, PermissionError, OSError):
-            pass
 
         # Configure readline for file path completion
         readline.set_completer_delims(" \t\n;")
@@ -65,10 +63,8 @@ Type 'help' for available commands, 'quit' to exit.
 
     def _save_history(self) -> None:
         """Save command history."""
-        try:
+        with contextlib.suppress(OSError):
             readline.write_history_file(self.histfile)
-        except OSError:
-            pass
 
     def _load_file(self, filepath: str) -> bool:
         """Load a file based on its extension."""
@@ -110,7 +106,7 @@ Type 'help' for available commands, 'quit' to exit.
             print("Supported: .kicad_sch, .kicad_pcb, .kicad_pro")
             return False
 
-    def _complete_path(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def _complete_path(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         """Complete file paths."""
         if not text:
             text = "./"
@@ -162,7 +158,7 @@ Type 'help' for available commands, 'quit' to exit.
             return
         self._load_file(arg.strip())
 
-    def complete_load(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def complete_load(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         """Tab completion for load command."""
         return self._complete_path(text, line, begidx, endidx)
 
@@ -194,10 +190,8 @@ Type 'help' for available commands, 'quit' to exit.
         if arg:
             argv.extend(shlex.split(arg))
 
-        try:
+        with contextlib.suppress(SystemExit):
             symbols_cmd(argv)
-        except SystemExit:
-            pass
 
     def do_bom(self, arg: str) -> None:
         """Generate bill of materials from loaded schematic.
@@ -216,10 +210,8 @@ Type 'help' for available commands, 'quit' to exit.
         if arg:
             argv.extend(shlex.split(arg))
 
-        try:
+        with contextlib.suppress(SystemExit):
             bom_cmd(argv)
-        except SystemExit:
-            pass
 
     def do_nets(self, arg: str) -> None:
         """Trace and analyze nets in loaded schematic.
@@ -238,10 +230,8 @@ Type 'help' for available commands, 'quit' to exit.
         if arg:
             argv.extend(shlex.split(arg))
 
-        try:
+        with contextlib.suppress(SystemExit):
             nets_cmd(argv)
-        except SystemExit:
-            pass
 
     def do_summary(self, arg: str) -> None:
         """Show summary of loaded schematic or PCB.
@@ -258,10 +248,8 @@ Type 'help' for available commands, 'quit' to exit.
                 return
             from kicad_tools.cli.sch_summary import run_summary
 
-            try:
+            with contextlib.suppress(SystemExit):
                 run_summary(self.session.schematic, "text", False)
-            except SystemExit:
-                pass
 
         elif target in ("pcb", "board"):
             if not self.session.pcb:
@@ -269,10 +257,8 @@ Type 'help' for available commands, 'quit' to exit.
                 return
             from kicad_tools.cli.pcb_query import main as pcb_main
 
-            try:
+            with contextlib.suppress(SystemExit):
                 pcb_main([str(self.session.pcb), "summary"])
-            except SystemExit:
-                pass
 
         else:
             print(f"Unknown target: {target}")
@@ -289,12 +275,10 @@ Type 'help' for available commands, 'quit' to exit.
 
         from kicad_tools.cli.erc_cmd import main as erc_cmd
 
-        try:
+        with contextlib.suppress(SystemExit):
             erc_cmd(shlex.split(arg))
-        except SystemExit:
-            pass
 
-    def complete_erc(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def complete_erc(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         """Tab completion for erc command."""
         return self._complete_path(text, line, begidx, endidx)
 
@@ -309,12 +293,10 @@ Type 'help' for available commands, 'quit' to exit.
 
         from kicad_tools.cli.drc_cmd import main as drc_cmd
 
-        try:
+        with contextlib.suppress(SystemExit):
             drc_cmd(shlex.split(arg))
-        except SystemExit:
-            pass
 
-    def complete_drc(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def complete_drc(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         """Tab completion for drc command."""
         return self._complete_path(text, line, begidx, endidx)
 
@@ -332,7 +314,7 @@ Type 'help' for available commands, 'quit' to exit.
         else:
             print(f"Output directory: {self.session.output_dir}")
 
-    def complete_output(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+    def complete_output(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         """Tab completion for output command."""
         return self._complete_path(text, line, begidx, endidx)
 
@@ -384,7 +366,7 @@ Type 'help' for available commands, 'quit' to exit.
         return stop
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Entry point for interactive mode."""
     import argparse
 

@@ -411,9 +411,7 @@ def main():
     errors = [v for v in violations if v.severity == "error"]
     warnings = [v for v in violations if v.severity == "warning"]
 
-    if errors:
-        sys.exit(1)
-    elif warnings and args.strict:
+    if errors or warnings and args.strict:
         sys.exit(1)
     else:
         sys.exit(0)

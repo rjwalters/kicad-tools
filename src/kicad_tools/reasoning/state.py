@@ -9,13 +9,10 @@ This module extracts and represents PCB state in a form that:
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import Optional
 
-from ..sexp import SExp, parse_file
 from ..drc.report import DRCReport
-from ..drc.violation import ViolationType
+from ..sexp import SExp, parse_file
 
 
 @dataclass
@@ -248,18 +245,14 @@ class PCBState:
     # =========================================================================
 
     @classmethod
-    def from_pcb(
-        cls, pcb_path: str | Path, drc_report: Optional[DRCReport] = None
-    ) -> "PCBState":
+    def from_pcb(cls, pcb_path: str | Path, drc_report: DRCReport | None = None) -> "PCBState":
         """Load state from a KiCad PCB file."""
         path = Path(pcb_path)
         doc = parse_file(path)
         return cls._parse_pcb(doc, str(path), drc_report)
 
     @classmethod
-    def _parse_pcb(
-        cls, doc: SExp, source_file: str, drc_report: Optional[DRCReport]
-    ) -> "PCBState":
+    def _parse_pcb(cls, doc: SExp, source_file: str, drc_report: DRCReport | None) -> "PCBState":
         """Parse PCB document into state."""
         # Parse nets
         net_map: dict[int, str] = {}
@@ -274,13 +267,9 @@ class PCBState:
 
                 # Classify net type
                 name_lower = net_name.lower()
-                is_power = any(
-                    p in name_lower for p in ["+", "vcc", "vdd", "3v3", "5v", "12v"]
-                )
+                is_power = any(p in name_lower for p in ["+", "vcc", "vdd", "3v3", "5v", "12v"])
                 is_ground = any(g in name_lower for g in ["gnd", "vss", "ground"])
-                is_clock = any(
-                    c in name_lower for c in ["clk", "clock", "mclk", "bclk", "lrclk"]
-                )
+                is_clock = any(c in name_lower for c in ["clk", "clock", "mclk", "bclk", "lrclk"])
 
                 # Set priority based on type
                 if is_ground:
@@ -383,7 +372,7 @@ class PCBState:
     @classmethod
     def _parse_footprint(
         cls, fp_node: SExp, net_map: dict[int, str], nets: dict[str, NetState]
-    ) -> Optional[ComponentState]:
+    ) -> ComponentState | None:
         """Parse a footprint node."""
         # Get reference
         ref = None
@@ -460,7 +449,7 @@ class PCBState:
         sin_r: float,
         net_map: dict[int, str],
         nets: dict[str, NetState],
-    ) -> Optional[PadState]:
+    ) -> PadState | None:
         """Parse a pad node."""
         atoms = pad_node.get_atoms()
         if len(atoms) < 2:
@@ -531,7 +520,7 @@ class PCBState:
         )
 
     @classmethod
-    def _parse_segment(cls, seg_node: SExp, net_map: dict[int, str]) -> Optional[TraceState]:
+    def _parse_segment(cls, seg_node: SExp, net_map: dict[int, str]) -> TraceState | None:
         """Parse a segment (trace) node."""
         start_node = seg_node.find("start")
         end_node = seg_node.find("end")
@@ -572,7 +561,7 @@ class PCBState:
         )
 
     @classmethod
-    def _parse_via(cls, via_node: SExp, net_map: dict[int, str]) -> Optional[ViaState]:
+    def _parse_via(cls, via_node: SExp, net_map: dict[int, str]) -> ViaState | None:
         """Parse a via node."""
         at_node = via_node.find("at")
         if not at_node:
@@ -614,7 +603,7 @@ class PCBState:
         )
 
     @classmethod
-    def _parse_zone(cls, zone_node: SExp, net_map: dict[int, str]) -> Optional[ZoneState]:
+    def _parse_zone(cls, zone_node: SExp, net_map: dict[int, str]) -> ZoneState | None:
         """Parse a zone node."""
         net_node = zone_node.find("net")
         net_id = int(net_node.get_first_atom()) if net_node else 0
@@ -676,15 +665,15 @@ class PCBState:
     # Query Methods
     # =========================================================================
 
-    def get_component(self, ref: str) -> Optional[ComponentState]:
+    def get_component(self, ref: str) -> ComponentState | None:
         """Get component by reference."""
         return self.components.get(ref)
 
-    def get_net(self, name: str) -> Optional[NetState]:
+    def get_net(self, name: str) -> NetState | None:
         """Get net by name."""
         return self.nets.get(name)
 
-    def get_pad(self, ref: str, pad_num: str) -> Optional[PadState]:
+    def get_pad(self, ref: str, pad_num: str) -> PadState | None:
         """Get a specific pad."""
         comp = self.components.get(ref)
         if comp:
@@ -693,9 +682,7 @@ class PCBState:
                     return pad
         return None
 
-    def components_near(
-        self, x: float, y: float, radius: float = 10.0
-    ) -> list[ComponentState]:
+    def components_near(self, x: float, y: float, radius: float = 10.0) -> list[ComponentState]:
         """Find components within radius of a point."""
         result = []
         for comp in self.components.values():
@@ -704,9 +691,7 @@ class PCBState:
                 result.append(comp)
         return result
 
-    def violations_near(
-        self, x: float, y: float, radius: float = 5.0
-    ) -> list[ViolationState]:
+    def violations_near(self, x: float, y: float, radius: float = 5.0) -> list[ViolationState]:
         """Find violations within radius of a point."""
         result = []
         for v in self.violations:
@@ -822,9 +807,7 @@ class PCBState:
                     by_type[v.type] = []
                 by_type[v.type].append(v)
 
-            for vtype, violations in sorted(
-                by_type.items(), key=lambda x: len(x[1]), reverse=True
-            ):
+            for vtype, violations in sorted(by_type.items(), key=lambda x: len(x[1]), reverse=True):
                 lines.append(f"### {vtype}: {len(violations)}")
                 for v in violations[:5]:
                     nets_str = f" [{', '.join(v.nets)}]" if v.nets else ""

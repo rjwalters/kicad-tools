@@ -18,7 +18,6 @@ Examples:
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
 
 
 class CommandType(Enum):
@@ -65,13 +64,13 @@ class CommandResult:
     details: dict = field(default_factory=dict)
 
     # For routing commands
-    path: Optional[list[tuple[float, float]]] = None
+    path: list[tuple[float, float]] | None = None
     vias_added: int = 0
     trace_length: float = 0.0
 
     # For placement commands
-    new_position: Optional[tuple[float, float]] = None
-    new_rotation: Optional[float] = None
+    new_position: tuple[float, float] | None = None
+    new_rotation: float | None = None
 
     # For violations
     violations_created: int = 0
@@ -128,16 +127,16 @@ class PlaceComponentCommand(Command):
     ref: str  # Component reference
 
     # Position specification (one of these)
-    at: Optional[tuple[float, float]] = None  # Absolute position
-    near: Optional[str] = None  # Near another component
-    region: Optional[str] = None  # In named region
+    at: tuple[float, float] | None = None  # Absolute position
+    near: str | None = None  # Near another component
+    region: str | None = None  # In named region
 
     # Relative positioning
     offset: tuple[float, float] = (0, 0)  # Offset from 'near' or region center
 
     # Orientation
-    rotation: Optional[float] = None  # Absolute rotation
-    face: Optional[str] = None  # "north", "south", "east", "west"
+    rotation: float | None = None  # Absolute rotation
+    face: str | None = None  # "north", "south", "east", "west"
 
     # Constraints
     fixed: bool = False  # Mark as fixed after placement
@@ -215,24 +214,24 @@ class RouteNetCommand(Command):
     avoid_nets: list[str] = field(default_factory=list)  # Nets to stay away from
 
     # Direction preference
-    prefer_direction: Optional[str] = None  # "north", "south", "east", "west"
+    prefer_direction: str | None = None  # "north", "south", "east", "west"
 
     # Layer preference
-    prefer_layer: Optional[str] = None  # "F.Cu", "B.Cu", etc.
+    prefer_layer: str | None = None  # "F.Cu", "B.Cu", etc.
     avoid_layers: list[str] = field(default_factory=list)
 
     # Via constraints
     minimize_vias: bool = True
-    max_vias: Optional[int] = None
+    max_vias: int | None = None
 
     # Special routing modes
     use_plane: bool = False  # For power/ground
-    length_match: Optional[str] = None  # Match length to another net
-    max_length: Optional[float] = None  # Maximum trace length
+    length_match: str | None = None  # Match length to another net
+    max_length: float | None = None  # Maximum trace length
 
     # Trace parameters
-    trace_width: Optional[float] = None  # Override default width
-    clearance: Optional[float] = None  # Override default clearance
+    trace_width: float | None = None  # Override default width
+    clearance: float | None = None  # Override default clearance
 
     @property
     def command_type(self) -> CommandType:
@@ -307,10 +306,10 @@ class DeleteTraceCommand(Command):
     """
 
     # Target specification
-    net: Optional[str] = None  # Delete traces of this net
-    near: Optional[tuple[float, float]] = None  # Near this location
+    net: str | None = None  # Delete traces of this net
+    near: tuple[float, float] | None = None  # Near this location
     radius: float = 2.0  # Search radius in mm
-    layer: Optional[str] = None  # On this layer only
+    layer: str | None = None  # On this layer only
 
     # Delete all traces for net
     delete_all_routing: bool = False
@@ -375,8 +374,8 @@ class AddViaCommand(Command):
     position: tuple[float, float]
     from_layer: str = "F.Cu"
     to_layer: str = "B.Cu"
-    size: Optional[float] = None  # Use default if not specified
-    drill: Optional[float] = None
+    size: float | None = None  # Use default if not specified
+    drill: float | None = None
 
     @property
     def command_type(self) -> CommandType:
@@ -422,8 +421,8 @@ class DefineZoneCommand(Command):
 
     net: str
     layer: str
-    region: Optional[str] = None  # Use named region bounds
-    bounds: Optional[tuple[float, float, float, float]] = None  # Or explicit bounds
+    region: str | None = None  # Use named region bounds
+    bounds: tuple[float, float, float, float] | None = None  # Or explicit bounds
     priority: int = 0
     min_thickness: float = 0.2
 
@@ -489,7 +488,7 @@ def parse_command(data: dict) -> Command:
     raise ValueError(f"Unknown command type: {cmd_type}")
 
 
-def parse_natural_language(text: str) -> Optional[Command]:
+def parse_natural_language(text: str) -> Command | None:
     """Attempt to parse a natural language command.
 
     This is a simple pattern-matching parser. For real use,
@@ -508,7 +507,9 @@ def parse_natural_language(text: str) -> Optional[Command]:
             avoid = []
             if "avoid" in text_lower:
                 # Extract region names after "avoiding"
-                avoid_match = re.search(r"avoid(?:ing)?\s+(.+?)(?:\s+via|\s*$)", text, re.IGNORECASE)
+                avoid_match = re.search(
+                    r"avoid(?:ing)?\s+(.+?)(?:\s+via|\s*$)", text, re.IGNORECASE
+                )
                 if avoid_match:
                     avoid = [r.strip() for r in avoid_match.group(1).split(",")]
 

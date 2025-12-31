@@ -1,32 +1,31 @@
 """Tests for schematic helper modules."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock
 
-from kicad_tools.schematic.grid import (
-    GridSize,
-    DEFAULT_GRID,
-    snap_to_grid,
-    snap_point,
-    is_on_grid,
-    check_grid_alignment,
-)
 from kicad_tools.schematic.exceptions import (
+    LibraryNotFoundError,
     PinNotFoundError,
     SymbolNotFoundError,
-    LibraryNotFoundError,
+)
+from kicad_tools.schematic.grid import (
+    DEFAULT_GRID,
+    GridSize,
+    check_grid_alignment,
+    is_on_grid,
+    snap_point,
+    snap_to_grid,
 )
 from kicad_tools.schematic.helpers import (
-    _string_similarity,
-    _find_similar,
-    _expand_pin_aliases,
-    _group_pins_by_type,
-    _format_pin_list,
     PIN_ALIASES,
+    _expand_pin_aliases,
+    _find_similar,
+    _format_pin_list,
+    _group_pins_by_type,
+    _string_similarity,
 )
+from kicad_tools.schematic.logging import disable_verbose, enable_verbose
 from kicad_tools.schematic.models import Pin
-from kicad_tools.schematic.logging import enable_verbose, disable_verbose
 
 
 class TestGridSize:
@@ -68,7 +67,7 @@ class TestSnapToGrid:
     def test_snap_rounds_down(self):
         """Values below midpoint round down."""
         assert snap_to_grid(1.0) == 1.27  # Closer to 1.27 than 0.0
-        assert snap_to_grid(0.5) == 0.0   # Closer to 0.0 than 1.27
+        assert snap_to_grid(0.5) == 0.0  # Closer to 0.0 than 1.27
 
     def test_snap_negative_values(self):
         """Negative values snap correctly."""
@@ -149,6 +148,7 @@ class TestCheckGridAlignment:
     def test_off_grid_with_warning(self):
         """Off-grid points emit warning when warn=True."""
         import warnings
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             check_grid_alignment((1.0, 1.5), warn=True)
@@ -158,6 +158,7 @@ class TestCheckGridAlignment:
     def test_context_in_warning(self):
         """Context string appears in warning."""
         import warnings
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             check_grid_alignment((1.0, 1.5), context="wire endpoint", warn=True)
@@ -356,21 +357,20 @@ class TestSymbolNotFoundError:
 
     def test_with_suggestions(self):
         """Error includes suggestions."""
-        err = SymbolNotFoundError("LED_0603", "Device.kicad_sym",
-                                  suggestions=["LED", "LED_Small"])
+        err = SymbolNotFoundError("LED_0603", "Device.kicad_sym", suggestions=["LED", "LED_Small"])
         assert "Did you mean" in str(err)
 
     def test_with_available_symbols(self):
         """Error shows available symbols."""
-        err = SymbolNotFoundError("BadSymbol", "Device.kicad_sym",
-                                  available_symbols=["LED", "R", "C"])
+        err = SymbolNotFoundError(
+            "BadSymbol", "Device.kicad_sym", available_symbols=["LED", "R", "C"]
+        )
         assert "Available symbols" in str(err)
 
     def test_limits_shown_symbols(self):
         """Only shows first 10 symbols."""
         symbols = [f"Symbol{i}" for i in range(20)]
-        err = SymbolNotFoundError("BadSymbol", "Device.kicad_sym",
-                                  available_symbols=symbols)
+        err = SymbolNotFoundError("BadSymbol", "Device.kicad_sym", available_symbols=symbols)
         assert "10 more" in str(err)
 
 
@@ -400,15 +400,7 @@ class TestPinClass:
 
     def test_pin_creation(self):
         """Create pin with all fields."""
-        pin = Pin(
-            name="VCC",
-            number="1",
-            x=0.0,
-            y=2.54,
-            angle=90,
-            length=2.54,
-            pin_type="power_in"
-        )
+        pin = Pin(name="VCC", number="1", x=0.0, y=2.54, angle=90, length=2.54, pin_type="power_in")
         assert pin.name == "VCC"
         assert pin.number == "1"
         assert pin.x == 0.0

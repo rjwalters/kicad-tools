@@ -25,7 +25,6 @@ Usage:
 import uuid as uuid_module
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # Import SExp parsing and builders
 from kicad_tools.sexp import SExp, parse_file
@@ -128,7 +127,7 @@ class PCBEditor:
 
     def __init__(self, pcb_path: str):
         self.path = Path(pcb_path)
-        self.doc: Optional[SExp] = None
+        self.doc: SExp | None = None
         self.nets: dict[str, int] = {}
         self.footprints: dict[str, dict] = {}
 
@@ -338,7 +337,7 @@ class PCBEditor:
     def create_ground_pour(
         self,
         layer: str = "In1.Cu",
-        boundary: Optional[list[tuple[float, float]]] = None,
+        boundary: list[tuple[float, float]] | None = None,
         insert: bool = True,
     ) -> Zone:
         """
@@ -434,7 +433,7 @@ def add_via(net_name, pos, drill=0.3, size=0.6):
 
         return issues
 
-    def save(self, output_path: Optional[str] = None):
+    def save(self, output_path: str | None = None):
         """Save modified PCB file."""
         if not self.doc:
             raise ValueError("No PCB document loaded")

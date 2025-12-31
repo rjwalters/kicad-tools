@@ -1,16 +1,24 @@
 """Tests for schematic/symbol_generator module."""
 
 import pytest
-from pathlib import Path
 
 from kicad_tools.schematic.symbol_generator import (
-    PinType, PinStyle, PinSide, PinDef, SymbolDef,
-    detect_pin_type, detect_pin_side, detect_pin_style,
-    parse_json, parse_csv, parse_datasheet_text,
-    generate_symbol_sexp, apply_template, create_pins_from_template,
-    PACKAGE_TEMPLATES, PIN_TYPE_PATTERNS, PIN_SIDE_PATTERNS
+    PACKAGE_TEMPLATES,
+    PinDef,
+    PinSide,
+    PinStyle,
+    PinType,
+    SymbolDef,
+    apply_template,
+    create_pins_from_template,
+    detect_pin_side,
+    detect_pin_style,
+    detect_pin_type,
+    generate_symbol_sexp,
+    parse_csv,
+    parse_datasheet_text,
+    parse_json,
 )
-
 
 # =============================================================================
 # Enum Tests
@@ -31,9 +39,19 @@ class TestPinType:
     def test_all_pin_types_exist(self):
         """Test all expected pin types exist."""
         expected = [
-            "INPUT", "OUTPUT", "BIDIRECTIONAL", "TRI_STATE", "PASSIVE",
-            "FREE", "UNSPECIFIED", "POWER_IN", "POWER_OUT",
-            "OPEN_COLLECTOR", "OPEN_EMITTER", "UNCONNECTED", "NO_CONNECT"
+            "INPUT",
+            "OUTPUT",
+            "BIDIRECTIONAL",
+            "TRI_STATE",
+            "PASSIVE",
+            "FREE",
+            "UNSPECIFIED",
+            "POWER_IN",
+            "POWER_OUT",
+            "OPEN_COLLECTOR",
+            "OPEN_EMITTER",
+            "UNCONNECTED",
+            "NO_CONNECT",
         ]
         for name in expected:
             assert hasattr(PinType, name)
@@ -51,8 +69,15 @@ class TestPinStyle:
     def test_all_pin_styles_exist(self):
         """Test all expected pin styles exist."""
         expected = [
-            "LINE", "INVERTED", "CLOCK", "INVERTED_CLOCK",
-            "INPUT_LOW", "CLOCK_LOW", "OUTPUT_LOW", "EDGE_CLOCK_HIGH", "NON_LOGIC"
+            "LINE",
+            "INVERTED",
+            "CLOCK",
+            "INVERTED_CLOCK",
+            "INPUT_LOW",
+            "CLOCK_LOW",
+            "OUTPUT_LOW",
+            "EDGE_CLOCK_HIGH",
+            "NON_LOGIC",
         ]
         for name in expected:
             assert hasattr(PinStyle, name)
@@ -94,7 +119,7 @@ class TestPinDef:
             pin_type=PinType.INPUT,
             style=PinStyle.CLOCK,
             side=PinSide.LEFT,
-            hidden=True
+            hidden=True,
         )
         assert pin.pin_type == PinType.INPUT
         assert pin.style == PinStyle.CLOCK
@@ -520,7 +545,13 @@ class TestGenerateSymbolSexp:
     def test_generate_with_clock_style(self):
         """Test generating symbol with clock style pin."""
         pins = [
-            PinDef(number="1", name="CLK", pin_type=PinType.INPUT, style=PinStyle.CLOCK, side=PinSide.LEFT),
+            PinDef(
+                number="1",
+                name="CLK",
+                pin_type=PinType.INPUT,
+                style=PinStyle.CLOCK,
+                side=PinSide.LEFT,
+            ),
         ]
         sym = SymbolDef(name="TestIC", pins=pins)
 
@@ -559,13 +590,25 @@ class TestPackageTemplates:
 
     def test_template_exists(self):
         """Test expected templates exist."""
-        expected = ["dip8", "dip14", "dip16", "soic8", "soic14", "soic16", "tssop20", "tssop28", "qfp32", "qfp48", "qfp64"]
+        expected = [
+            "dip8",
+            "dip14",
+            "dip16",
+            "soic8",
+            "soic14",
+            "soic16",
+            "tssop20",
+            "tssop28",
+            "qfp32",
+            "qfp48",
+            "qfp64",
+        ]
         for name in expected:
             assert name in PACKAGE_TEMPLATES
 
     def test_template_structure(self):
         """Test template structure."""
-        for name, template in PACKAGE_TEMPLATES.items():
+        for _name, template in PACKAGE_TEMPLATES.items():
             assert "pins" in template
             assert "layout" in template
             assert template["layout"] in ["dual", "quad"]

@@ -7,7 +7,8 @@ of KiCad elements like symbols and footprints.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, Generic, Iterator, List, Optional, Tuple, TypeVar
+from collections.abc import Callable, Iterator
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 
@@ -35,14 +36,14 @@ class BaseQuery(Generic[T]):
         r1 = query.filter(reference="R1").first()
     """
 
-    def __init__(self, items: List[T]):
+    def __init__(self, items: list[T]):
         """Initialize query with items to filter.
 
         Args:
             items: List of items to query
         """
         self._items = items
-        self._filters: List[Callable[[T], bool]] = []
+        self._filters: list[Callable[[T], bool]] = []
 
     def _make_filter(self, attr: str, value: Any) -> Callable[[T], bool]:
         """Create a filter function for an attribute lookup.
@@ -112,7 +113,7 @@ class BaseQuery(Generic[T]):
 
         return check
 
-    def filter(self, **kwargs: Any) -> "BaseQuery[T]":
+    def filter(self, **kwargs: Any) -> BaseQuery[T]:
         """Filter items by attribute values.
 
         Creates a new query with additional filters applied.
@@ -136,7 +137,7 @@ class BaseQuery(Generic[T]):
 
         return new_query
 
-    def exclude(self, **kwargs: Any) -> "BaseQuery[T]":
+    def exclude(self, **kwargs: Any) -> BaseQuery[T]:
         """Exclude items matching criteria.
 
         Opposite of filter() - removes items that match.
@@ -155,14 +156,16 @@ class BaseQuery(Generic[T]):
 
         for attr, value in kwargs.items():
             include_filter = self._make_filter(attr, value)
+
             # Negate the filter - explicit function to help type inference
             def make_negated(f: Callable[[T], bool]) -> Callable[[T], bool]:
                 return lambda item: not f(item)
+
             new_query._filters.append(make_negated(include_filter))
 
         return new_query
 
-    def all(self) -> List[T]:
+    def all(self) -> list[T]:
         """Execute query and return all matching items.
 
         Returns:
@@ -173,7 +176,7 @@ class BaseQuery(Generic[T]):
             result = [item for item in result if f(item)]
         return result
 
-    def first(self) -> Optional[T]:
+    def first(self) -> T | None:
         """Return first matching item or None.
 
         More efficient than all()[0] as it stops at first match.
@@ -186,7 +189,7 @@ class BaseQuery(Generic[T]):
                 return item
         return None
 
-    def last(self) -> Optional[T]:
+    def last(self) -> T | None:
         """Return last matching item or None.
 
         Returns:
@@ -213,7 +216,7 @@ class BaseQuery(Generic[T]):
         """
         return self.first() is not None
 
-    def values(self, *fields: str) -> List[Dict[str, Any]]:
+    def values(self, *fields: str) -> list[dict[str, Any]]:
         """Return list of dicts with specified fields.
 
         Args:
@@ -222,16 +225,16 @@ class BaseQuery(Generic[T]):
         Returns:
             List of dicts with requested fields
         """
-        result: List[Dict[str, Any]] = []
+        result: list[dict[str, Any]] = []
         for item in self.all():
-            d: Dict[str, Any] = {}
+            d: dict[str, Any] = {}
             for field in fields:
                 if hasattr(item, field):
                     d[field] = getattr(item, field)
             result.append(d)
         return result
 
-    def values_list(self, *fields: str, flat: bool = False) -> List[Any]:
+    def values_list(self, *fields: str, flat: bool = False) -> list[Any]:
         """Return list of tuples with specified fields.
 
         Args:
@@ -241,16 +244,16 @@ class BaseQuery(Generic[T]):
         Returns:
             List of tuples (or flat list if flat=True)
         """
-        result: List[Any] = []
+        result: list[Any] = []
         for item in self.all():
-            values: Tuple[Any, ...] = tuple(getattr(item, field, None) for field in fields)
+            values: tuple[Any, ...] = tuple(getattr(item, field, None) for field in fields)
             if flat and len(fields) == 1:
                 result.append(values[0])
             else:
                 result.append(values)
         return result
 
-    def order_by(self, *fields: str) -> "BaseQuery[T]":
+    def order_by(self, *fields: str) -> BaseQuery[T]:
         """Order results by specified fields.
 
         Prefix field with '-' for descending order.
@@ -264,8 +267,8 @@ class BaseQuery(Generic[T]):
         new_query = self.__class__(self._items)
         new_query._filters = self._filters.copy()
 
-        def sort_key(item: T) -> Tuple[Any, ...]:
-            keys: List[Any] = []
+        def sort_key(item: T) -> tuple[Any, ...]:
+            keys: list[Any] = []
             for field in fields:
                 desc = field.startswith("-")
                 if desc:

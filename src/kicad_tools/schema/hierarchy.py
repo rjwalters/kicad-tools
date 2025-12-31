@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -23,7 +22,7 @@ class SheetPin:
 
     name: str
     direction: str  # "input", "output", "bidirectional", "passive"
-    position: Tuple[float, float]
+    position: tuple[float, float]
     rotation: float
     uuid: str
 
@@ -64,17 +63,17 @@ class SheetInstance:
     name: str  # Display name (from Sheetname property)
     filename: str  # Filename (from Sheetfile property)
     uuid: str
-    position: Tuple[float, float]
-    size: Tuple[float, float]
-    pins: List[SheetPin] = field(default_factory=list)
+    position: tuple[float, float]
+    size: tuple[float, float]
+    pins: list[SheetPin] = field(default_factory=list)
 
     @property
-    def input_pins(self) -> List[SheetPin]:
+    def input_pins(self) -> list[SheetPin]:
         """Get all input pins."""
         return [p for p in self.pins if p.direction == "input"]
 
     @property
-    def output_pins(self) -> List[SheetPin]:
+    def output_pins(self) -> list[SheetPin]:
         """Get all output pins."""
         return [p for p in self.pins if p.direction == "output"]
 
@@ -134,10 +133,10 @@ class HierarchyNode:
     name: str
     path: str  # Full path to schematic file
     uuid: str
-    children: List[HierarchyNode] = field(default_factory=list)
-    sheets: List[SheetInstance] = field(default_factory=list)  # Sheet instances in this schematic
-    hierarchical_labels: List[str] = field(default_factory=list)  # Labels in this sheet
-    parent: Optional[HierarchyNode] = field(default=None, repr=False)
+    children: list[HierarchyNode] = field(default_factory=list)
+    sheets: list[SheetInstance] = field(default_factory=list)  # Sheet instances in this schematic
+    hierarchical_labels: list[str] = field(default_factory=list)  # Labels in this sheet
+    parent: HierarchyNode | None = field(default=None, repr=False)
 
     @property
     def depth(self) -> int:
@@ -163,7 +162,7 @@ class HierarchyNode:
             return f"/{self.name}"
         return f"{parent_path}/{self.name}"
 
-    def find_by_name(self, name: str) -> Optional[HierarchyNode]:
+    def find_by_name(self, name: str) -> HierarchyNode | None:
         """Find a child node by name."""
         for child in self.children:
             if child.name == name:
@@ -173,7 +172,7 @@ class HierarchyNode:
                 return found
         return None
 
-    def find_by_path(self, path: str) -> Optional[HierarchyNode]:
+    def find_by_path(self, path: str) -> HierarchyNode | None:
         """Find a node by hierarchical path (e.g., '/Power/Regulator')."""
         parts = [p for p in path.split("/") if p]
         current = self
@@ -188,7 +187,7 @@ class HierarchyNode:
             current = found
         return current
 
-    def all_nodes(self) -> List[HierarchyNode]:
+    def all_nodes(self) -> list[HierarchyNode]:
         """Get all nodes in the hierarchy (including self)."""
         result = [self]
         for child in self.children:
@@ -209,7 +208,7 @@ class HierarchyBuilder:
             base_path: Directory containing the root schematic
         """
         self.base_path = Path(base_path)
-        self.loaded_files: Dict[str, HierarchyNode] = {}
+        self.loaded_files: dict[str, HierarchyNode] = {}
 
     def build(self, root_schematic: str) -> HierarchyNode:
         """
@@ -230,7 +229,7 @@ class HierarchyBuilder:
         self,
         path: str,
         name: str,
-        parent: Optional[HierarchyNode],
+        parent: HierarchyNode | None,
     ) -> HierarchyNode:
         """Load a schematic and recursively load its children."""
         full_path = Path(path)

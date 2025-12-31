@@ -107,6 +107,15 @@ select = [
 ignore = [
     "E501",   # line too long - handled by formatter
     "SIM108", # ternary operator - sometimes less readable
+    "SIM102", # nested if - sometimes more readable
+    "SIM103", # return negated - sometimes less readable
+    "SIM117", # combine with - sometimes less readable
+    "E402",   # module level import not at top - common in tests
+    "E741",   # ambiguous variable name - sometimes 'l' is fine for layer/line
+    "B904",   # raise from - requires careful refactoring
+    "B007",   # unused loop variable - use _ prefix instead
+    "B023",   # function doesn't bind loop variable - requires refactoring
+    "UP035",  # deprecated typing imports - requires Python 3.9+ for generics
 ]
 
 [tool.ruff.format]

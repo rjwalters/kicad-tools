@@ -10,10 +10,9 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for trace optimization CLI."""
     parser = argparse.ArgumentParser(
         prog="kct optimize-traces",
@@ -33,7 +32,8 @@ Examples:
         help="Input PCB file (.kicad_pcb)",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Output PCB file (default: modify in place)",
     )
     parser.add_argument(
@@ -67,12 +67,14 @@ Examples:
         help="Show optimization results without writing output",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Show detailed per-net statistics",
     )
     parser.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Suppress progress output (for scripting)",
     )
@@ -144,11 +146,15 @@ Examples:
         print("-" * 50)
         print(f"  Nets optimized:  {stats.nets_optimized}")
         print()
-        print(f"  Segments:        {stats.segments_before:>6} -> {stats.segments_after:>6}  "
-              f"({-stats.segment_reduction:+.1f}%)")
+        print(
+            f"  Segments:        {stats.segments_before:>6} -> {stats.segments_after:>6}  "
+            f"({-stats.segment_reduction:+.1f}%)"
+        )
         print(f"  Corners:         {stats.corners_before:>6} -> {stats.corners_after:>6}")
-        print(f"  Total length:    {stats.length_before:>6.1f}mm -> {stats.length_after:>6.1f}mm  "
-              f"({-stats.length_reduction:+.1f}%)")
+        print(
+            f"  Total length:    {stats.length_before:>6.1f}mm -> {stats.length_after:>6.1f}mm  "
+            f"({-stats.length_reduction:+.1f}%)"
+        )
         print()
 
         if args.dry_run:

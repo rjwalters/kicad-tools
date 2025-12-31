@@ -6,11 +6,13 @@ Provides a high-level interface to KiCad schematic files.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 from kicad_tools.sexp import SExp
+
 from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
 from .symbol import SymbolInstance
@@ -28,7 +30,7 @@ class TitleBlock:
     date: str = ""
     rev: str = ""
     company: str = ""
-    comments: Dict[int, str] = field(default_factory=dict)
+    comments: dict[int, str] = field(default_factory=dict)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> TitleBlock:
@@ -61,8 +63,8 @@ class SheetInstance:
     name: str
     filename: str
     uuid: str
-    position: Tuple[float, float] = (0, 0)
-    size: Tuple[float, float] = (50, 25)
+    position: tuple[float, float] = (0, 0)
+    size: tuple[float, float] = (50, 25)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> SheetInstance:
@@ -100,7 +102,7 @@ class Schematic:
     Provides methods for querying and modifying schematic contents.
     """
 
-    def __init__(self, sexp: SExp, path: Optional[Path] = None):
+    def __init__(self, sexp: SExp, path: Path | None = None):
         """
         Initialize from parsed S-expression.
 
@@ -113,12 +115,12 @@ class Schematic:
 
         self._sexp = sexp
         self._path = path
-        self._symbols: Optional[List[SymbolInstance]] = None
-        self._wires: Optional[List[Wire]] = None
-        self._junctions: Optional[List[Junction]] = None
-        self._labels: Optional[List[Label]] = None
-        self._hierarchical_labels: Optional[List[HierarchicalLabel]] = None
-        self._sheets: Optional[List[SheetInstance]] = None
+        self._symbols: list[SymbolInstance] | None = None
+        self._wires: list[Wire] | None = None
+        self._junctions: list[Junction] | None = None
+        self._labels: list[Label] | None = None
+        self._hierarchical_labels: list[HierarchicalLabel] | None = None
+        self._sheets: list[SheetInstance] | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> Schematic:
@@ -127,7 +129,7 @@ class Schematic:
         sexp = load_schematic(path)
         return cls(sexp, path)
 
-    def save(self, path: Optional[str | Path] = None) -> None:
+    def save(self, path: str | Path | None = None) -> None:
         """Save the schematic to file."""
         save_path = Path(path) if path else self._path
         if not save_path:
@@ -140,19 +142,19 @@ class Schematic:
         return self._sexp
 
     @property
-    def path(self) -> Optional[Path]:
+    def path(self) -> Path | None:
         """Path to the source file, if loaded from file."""
         return self._path
 
     @property
-    def version(self) -> Optional[int]:
+    def version(self) -> int | None:
         """Get the schematic version number."""
         if v := self._sexp.find("version"):
             return v.get_int(0)
         return None
 
     @property
-    def generator(self) -> Optional[str]:
+    def generator(self) -> str | None:
         """Get the generator program name."""
         if g := self._sexp.find("generator"):
             return g.get_string(0)
@@ -166,14 +168,14 @@ class Schematic:
         return TitleBlock()
 
     @property
-    def paper(self) -> Optional[str]:
+    def paper(self) -> str | None:
         """Get the paper size."""
         if p := self._sexp.find("paper"):
             return p.get_string(0)
         return None
 
     @property
-    def uuid(self) -> Optional[str]:
+    def uuid(self) -> str | None:
         """Get the schematic UUID."""
         if u := self._sexp.find("uuid"):
             return u.get_string(0)
@@ -182,7 +184,7 @@ class Schematic:
     # Symbol operations
 
     @property
-    def symbols(self) -> "SymbolList":
+    def symbols(self) -> SymbolList:
         """Get all symbol instances in the schematic.
 
         Returns a SymbolList which extends list with query methods:
@@ -200,14 +202,14 @@ class Schematic:
             self._symbols = SymbolList(items)
         return self._symbols
 
-    def get_symbol(self, reference: str) -> Optional[SymbolInstance]:
+    def get_symbol(self, reference: str) -> SymbolInstance | None:
         """Get a symbol by its reference designator (e.g., 'R1', 'U1')."""
         for sym in self.symbols:
             if sym.reference == reference:
                 return sym
         return None
 
-    def find_symbols_by_lib(self, lib_id: str) -> List[SymbolInstance]:
+    def find_symbols_by_lib(self, lib_id: str) -> list[SymbolInstance]:
         """Find all symbols using a specific library symbol."""
         return [s for s in self.symbols if s.lib_id == lib_id]
 
@@ -218,14 +220,14 @@ class Schematic:
     # Wire operations
 
     @property
-    def wires(self) -> List[Wire]:
+    def wires(self) -> list[Wire]:
         """Get all wires in the schematic."""
         if self._wires is None:
             self._wires = [Wire.from_sexp(w) for w in self._sexp.find_all("wire")]
         return self._wires
 
     @property
-    def junctions(self) -> List[Junction]:
+    def junctions(self) -> list[Junction]:
         """Get all junctions in the schematic."""
         if self._junctions is None:
             self._junctions = [Junction.from_sexp(j) for j in self._sexp.find_all("junction")]
@@ -234,14 +236,14 @@ class Schematic:
     # Label operations
 
     @property
-    def labels(self) -> List[Label]:
+    def labels(self) -> list[Label]:
         """Get all local labels."""
         if self._labels is None:
             self._labels = [Label.from_sexp(lbl) for lbl in self._sexp.find_all("label")]
         return self._labels
 
     @property
-    def hierarchical_labels(self) -> List[HierarchicalLabel]:
+    def hierarchical_labels(self) -> list[HierarchicalLabel]:
         """Get all hierarchical labels."""
         if self._hierarchical_labels is None:
             self._hierarchical_labels = [
@@ -251,14 +253,14 @@ class Schematic:
         return self._hierarchical_labels
 
     @property
-    def global_labels(self) -> List[GlobalLabel]:
+    def global_labels(self) -> list[GlobalLabel]:
         """Get all global labels."""
         return [GlobalLabel.from_sexp(lbl) for lbl in self._sexp.find_all("global_label")]
 
     # Sheet operations
 
     @property
-    def sheets(self) -> List[SheetInstance]:
+    def sheets(self) -> list[SheetInstance]:
         """Get all hierarchical sheet references."""
         if self._sheets is None:
             self._sheets = [SheetInstance.from_sexp(s) for s in self._sexp.find_all("sheet")]
@@ -271,11 +273,11 @@ class Schematic:
     # Library symbols
 
     @property
-    def lib_symbols(self) -> Optional[SExp]:
+    def lib_symbols(self) -> SExp | None:
         """Get the embedded library symbols section."""
         return self._sexp.find("lib_symbols")
 
-    def get_lib_symbol(self, lib_id: str) -> Optional[SExp]:
+    def get_lib_symbol(self, lib_id: str) -> SExp | None:
         """Get an embedded library symbol definition by lib_id."""
         if lib_syms := self.lib_symbols:
             for sym in lib_syms.find_all("symbol"):

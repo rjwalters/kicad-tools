@@ -1,17 +1,18 @@
 """Tests for schematic symbol registry."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
+
+import pytest
 
 from kicad_tools.schematic.registry import (
+    LibraryIndex,
     Pin,
     SymbolDef,
-    LibraryIndex,
     SymbolRegistry,
+    _default_symbol_paths,
     get_registry,
     get_symbol,
-    _default_symbol_paths,
 )
 
 
@@ -20,15 +21,7 @@ class TestPin:
 
     def test_pin_creation(self):
         """Create pin with all fields."""
-        pin = Pin(
-            name="VCC",
-            number="1",
-            x=0.0,
-            y=2.54,
-            angle=90,
-            length=2.54,
-            pin_type="power_in"
-        )
+        pin = Pin(name="VCC", number="1", x=0.0, y=2.54, angle=90, length=2.54, pin_type="power_in")
         assert pin.name == "VCC"
         assert pin.number == "1"
         assert pin.pin_type == "power_in"
@@ -52,12 +45,7 @@ class TestSymbolDef:
 
     def test_symbol_def_creation(self):
         """Create symbol definition."""
-        sym = SymbolDef(
-            lib_id="Device:LED",
-            name="LED",
-            raw_sexp="(symbol ...)",
-            pins=[]
-        )
+        sym = SymbolDef(lib_id="Device:LED", name="LED", raw_sexp="(symbol ...)", pins=[])
         assert sym.lib_id == "Device:LED"
         assert sym.name == "LED"
 
@@ -144,14 +132,14 @@ class TestLibraryIndex:
     def test_library_index_from_file(self, tmp_path):
         """Build library index from file."""
         lib_file = tmp_path / "Test.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "LED"
 \t\t(property "Reference" "D")
 \t)
 \t(symbol "R"
 \t\t(property "Reference" "R")
 \t)
-)''')
+)""")
 
         index = LibraryIndex.from_file(lib_file)
         assert index.name == "Test"
@@ -161,14 +149,14 @@ class TestLibraryIndex:
     def test_library_index_skips_unit_symbols(self, tmp_path):
         """Unit symbols (with _N_N suffix) are skipped."""
         lib_file = tmp_path / "Test.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "IC"
 \t\t(property "Reference" "U")
 \t)
 \t(symbol "IC_1_1"
 \t\t(property "Reference" "U")
 \t)
-)''')
+)""")
 
         index = LibraryIndex.from_file(lib_file)
         assert "IC" in index.symbols
@@ -236,14 +224,14 @@ class TestSymbolRegistry:
     def test_list_library_symbols(self, tmp_path):
         """List symbols in a library."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "LED"
 \t\t(property "Reference" "D")
 \t)
 \t(symbol "R"
 \t\t(property "Reference" "R")
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         symbols = registry.list_library("Device")
@@ -277,11 +265,11 @@ class TestSymbolRegistry:
     def test_clear_cache(self, tmp_path):
         """Clear all caches."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "LED"
 \t\t(property "Reference" "D")
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         # Trigger indexing
@@ -294,7 +282,7 @@ class TestSymbolRegistry:
     def test_search_by_pattern(self, tmp_path):
         """Search for symbols by pattern."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "LED"
 \t\t(property "Reference" "D")
 \t)
@@ -304,7 +292,7 @@ class TestSymbolRegistry:
 \t(symbol "R"
 \t\t(property "Reference" "R")
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         results = registry.search("LED")
@@ -314,7 +302,9 @@ class TestSymbolRegistry:
     def test_search_limit(self, tmp_path):
         """Search results limited by limit parameter."""
         lib_file = tmp_path / "Device.kicad_sym"
-        symbols = "\n".join([f'\t(symbol "C{i}"\n\t\t(property "Reference" "C")\n\t)' for i in range(30)])
+        symbols = "\n".join(
+            [f'\t(symbol "C{i}"\n\t\t(property "Reference" "C")\n\t)' for i in range(30)]
+        )
         lib_file.write_text(f"(kicad_symbol_lib\n{symbols}\n)")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
@@ -333,13 +323,13 @@ class TestDefaultSymbolPaths:
         for p in paths:
             assert isinstance(p, Path)
 
-    @patch.dict('os.environ', {'KICAD_SYMBOL_DIR': '/custom/symbols'})
+    @patch.dict("os.environ", {"KICAD_SYMBOL_DIR": "/custom/symbols"})
     def test_env_override(self, tmp_path):
         """KICAD_SYMBOL_DIR environment variable adds path."""
         # Create the custom path for it to be included
-        custom_path = Path('/custom/symbols')
-        with patch.object(Path, 'exists', return_value=True):
-            paths = _default_symbol_paths()
+        Path("/custom/symbols")
+        with patch.object(Path, "exists", return_value=True):
+            _default_symbol_paths()
             # Environment variable path should be first (if exists)
             # Note: in actual usage it would be first only if it exists
 
@@ -351,6 +341,7 @@ class TestGlobalRegistry:
         """get_registry returns singleton."""
         # Reset global
         import kicad_tools.schematic.registry as reg_module
+
         reg_module._global_registry = None
 
         r1 = get_registry()
@@ -362,6 +353,7 @@ class TestGlobalRegistry:
         # This would need actual library files to work fully
         # Just verify it calls through to registry
         import kicad_tools.schematic.registry as reg_module
+
         reg_module._global_registry = None
 
         with pytest.raises((ValueError, FileNotFoundError)):
@@ -395,7 +387,7 @@ class TestSymbolDefEmbeddedSexp:
 
         embedded = sym.get_embedded_sexp()
         # Should have tab indentation
-        assert '\t' in embedded
+        assert "\t" in embedded
 
 
 class TestParsePins:
@@ -404,7 +396,7 @@ class TestParsePins:
     def test_parse_pins_from_sexp(self, tmp_path):
         """Parse pins from symbol definition."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "LED"
 \t\t(pin passive line (at 0 2.54 270) (length 2.54)
 \t\t\t(name "A" (effects (font (size 1.27 1.27))))
@@ -415,7 +407,7 @@ class TestParsePins:
 \t\t\t(number "2" (effects (font (size 1.27 1.27))))
 \t\t)
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         sym = registry.get("Device:LED")
@@ -427,7 +419,7 @@ class TestParsePins:
     def test_parse_pin_types(self, tmp_path):
         """Parse different pin types."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "IC"
 \t\t(pin power_in line (at 0 5.08 270) (length 2.54)
 \t\t\t(name "VCC" (effects (font (size 1.27 1.27))))
@@ -442,7 +434,7 @@ class TestParsePins:
 \t\t\t(number "3" (effects (font (size 1.27 1.27))))
 \t\t)
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         sym = registry.get("Device:IC")
@@ -463,7 +455,7 @@ class TestSymbolInheritance:
     def test_symbol_with_extends(self, tmp_path):
         """Symbol inheriting from another includes parent pins."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "R"
 \t\t(pin passive line (at 0 2.54 270) (length 2.54)
 \t\t\t(name "1" (effects (font (size 1.27 1.27))))
@@ -477,7 +469,7 @@ class TestSymbolInheritance:
 \t(symbol "R_Small"
 \t\t(extends "R")
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         sym = registry.get("Device:R_Small")
@@ -502,14 +494,14 @@ class TestOPLMappings:
     def test_get_with_opl_part(self, tmp_path):
         """Get symbol using OPL part number."""
         lib_file = tmp_path / "Device.kicad_sym"
-        lib_file.write_text('''(kicad_symbol_lib
+        lib_file.write_text("""(kicad_symbol_lib
 \t(symbol "LED"
 \t\t(pin passive line (at 0 0 0) (length 2.54)
 \t\t\t(name "A" (effects (font (size 1.27 1.27))))
 \t\t\t(number "1" (effects (font (size 1.27 1.27))))
 \t\t)
 \t)
-)''')
+)""")
 
         registry = SymbolRegistry(lib_paths=[tmp_path])
         # "LED_0603" maps to "Device:LED"

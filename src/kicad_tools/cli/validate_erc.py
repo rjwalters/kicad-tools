@@ -24,7 +24,6 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # ERC violation types (from KiCad documentation)
 ERC_TYPES = {
@@ -134,7 +133,7 @@ class ERCReport:
         return dict(grouped)
 
 
-def find_kicad_cli() -> Optional[Path]:
+def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable."""
     locations = [
         "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
@@ -250,7 +249,7 @@ def _matches_filter(violation: ERCViolation, filter_type: str) -> bool:
 def print_summary(
     report: ERCReport,
     verbose: bool = False,
-    filter_type: Optional[str] = None,
+    filter_type: str | None = None,
     group_by_sheet: bool = False,
 ):
     """Print ERC summary."""
@@ -360,7 +359,7 @@ def _print_single_violation(v: ERCViolation, verbose: bool, indent: str = "  "):
             print(f"{indent}  Location: {v.location_str}")
 
 
-def print_json_output(report: ERCReport, filter_type: Optional[str] = None):
+def print_json_output(report: ERCReport, filter_type: str | None = None):
     """Print machine-readable JSON output."""
     violations = [v for v in report.violations if not v.excluded]
 
@@ -491,7 +490,7 @@ def main():
         print(f"Error: Schematic not found: {args.schematic}")
         return 1
 
-    if not args.schematic.suffix == ".kicad_sch":
+    if args.schematic.suffix != ".kicad_sch":
         print(f"Error: Not a schematic file: {args.schematic}")
         print("Expected .kicad_sch extension")
         return 1

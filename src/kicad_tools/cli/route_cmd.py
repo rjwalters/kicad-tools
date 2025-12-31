@@ -12,10 +12,9 @@ import argparse
 import math
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
-def show_preview(router, net_map: Dict[str, int], nets_to_route: int, quiet: bool = False) -> str:
+def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> str:
     """Display routing preview with per-net breakdown.
 
     Args:
@@ -31,7 +30,7 @@ def show_preview(router, net_map: Dict[str, int], nets_to_route: int, quiet: boo
     reverse_net = {v: k for k, v in net_map.items()}
 
     # Collect per-net statistics
-    net_stats: Dict[int, dict] = {}
+    net_stats: dict[int, dict] = {}
     for route in router.routes:
         net_id = route.net
         if net_id not in net_stats:
@@ -97,7 +96,7 @@ def show_preview(router, net_map: Dict[str, int], nets_to_route: int, quiet: boo
     print(f"  Segments:     {overall_stats['segments']}")
 
     # Layer usage summary
-    all_layers: Dict[str, int] = {}
+    all_layers: dict[str, int] = {}
     for route in router.routes:
         for seg in route.segments:
             layer_name = seg.layer.kicad_name
@@ -130,7 +129,7 @@ def show_preview(router, net_map: Dict[str, int], nets_to_route: int, quiet: boo
         return "n"
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
@@ -138,7 +137,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Output file path (default: <input>_routed.kicad_pcb)",
     )
     parser.add_argument(
@@ -194,7 +194,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Max iterations for negotiated routing (default: 15)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Verbose output",
     )
@@ -260,7 +261,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return 1
 
-    if not pcb_path.suffix == ".kicad_pcb":
+    if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
     # Determine output path
@@ -484,16 +485,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Summary
     if not quiet:
         print("\n" + "=" * 60)
-        if stats['nets_routed'] == nets_to_route:
+        if stats["nets_routed"] == nets_to_route:
             print("SUCCESS: All nets routed!")
         else:
             print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
             print("  Some nets may require manual routing or a different strategy.")
 
-    if stats['nets_routed'] == nets_to_route:
+    if stats["nets_routed"] == nets_to_route:
         return 0
     else:
-        return 1 if stats['nets_routed'] < nets_to_route else 0
+        return 1 if stats["nets_routed"] < nets_to_route else 0
 
 
 if __name__ == "__main__":

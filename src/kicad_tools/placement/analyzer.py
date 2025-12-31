@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, List, Optional
 
 from .conflict import (
     ComponentInfo,
@@ -58,12 +58,12 @@ class PlacementAnalyzer:
         """
         self.verbose = verbose
         self._components: list[ComponentInfo] = []
-        self._board_edge: Optional[Rectangle] = None
+        self._board_edge: Rectangle | None = None
 
     def find_conflicts(
         self,
         pcb_path: str | Path,
-        rules: Optional[DesignRules] = None,
+        rules: DesignRules | None = None,
     ) -> list[Conflict]:
         """Find all placement conflicts in a PCB.
 
@@ -129,9 +129,7 @@ class PlacementAnalyzer:
                     f"({self._board_edge.max_x:.2f}, {self._board_edge.max_y:.2f})"
                 )
 
-    def _footprint_to_component(
-        self, fp, courtyard_margin: float
-    ) -> ComponentInfo:
+    def _footprint_to_component(self, fp, courtyard_margin: float) -> ComponentInfo:
         """Convert a Footprint to ComponentInfo."""
         position = Point(fp.position[0], fp.position[1])
 
@@ -142,9 +140,7 @@ class PlacementAnalyzer:
         for pad in fp.pads:
             # Calculate absolute pad position (considering rotation)
             rel_x, rel_y = pad.position
-            abs_pos = self._rotate_point(
-                Point(rel_x, rel_y), fp.rotation, position
-            )
+            abs_pos = self._rotate_point(Point(rel_x, rel_y), fp.rotation, position)
 
             pad_info = PadInfo(
                 name=pad.number,
@@ -219,14 +215,11 @@ class PlacementAnalyzer:
 
         # Otherwise, only same layer conflicts
         # Normalize layer names (F.Cu = front, B.Cu = back)
-        return (
-            c1.layer.startswith("F") == c2.layer.startswith("F") or
-            c1.layer.startswith("B") == c2.layer.startswith("B")
-        )
+        return c1.layer.startswith("F") == c2.layer.startswith("F") or c1.layer.startswith(
+            "B"
+        ) == c2.layer.startswith("B")
 
-    def _check_courtyard_overlap(
-        self, c1: ComponentInfo, c2: ComponentInfo
-    ) -> Optional[Conflict]:
+    def _check_courtyard_overlap(self, c1: ComponentInfo, c2: ComponentInfo) -> Conflict | None:
         """Check if courtyards of two components overlap."""
         if not c1.courtyard or not c2.courtyard:
             return None
@@ -243,12 +236,12 @@ class PlacementAnalyzer:
 
         # Location is the center of overlap region
         overlap_x = (
-            max(c1.courtyard.min_x, c2.courtyard.min_x) +
-            min(c1.courtyard.max_x, c2.courtyard.max_x)
+            max(c1.courtyard.min_x, c2.courtyard.min_x)
+            + min(c1.courtyard.max_x, c2.courtyard.max_x)
         ) / 2
         overlap_y = (
-            max(c1.courtyard.min_y, c2.courtyard.min_y) +
-            min(c1.courtyard.max_y, c2.courtyard.max_y)
+            max(c1.courtyard.min_y, c2.courtyard.min_y)
+            + min(c1.courtyard.max_y, c2.courtyard.max_y)
         ) / 2
 
         return Conflict(
@@ -280,8 +273,7 @@ class PlacementAnalyzer:
 
                 if clearance < min_clearance:
                     severity = (
-                        ConflictSeverity.ERROR if clearance <= 0
-                        else ConflictSeverity.WARNING
+                        ConflictSeverity.ERROR if clearance <= 0 else ConflictSeverity.WARNING
                     )
 
                     # Location is midpoint between pads
@@ -341,8 +333,7 @@ class PlacementAnalyzer:
 
                 if edge_dist < min_distance:
                     severity = (
-                        ConflictSeverity.ERROR if edge_dist <= 0
-                        else ConflictSeverity.WARNING
+                        ConflictSeverity.ERROR if edge_dist <= 0 else ConflictSeverity.WARNING
                     )
 
                     mid = Point(
@@ -380,44 +371,49 @@ class PlacementAnalyzer:
             # Left edge
             if cy.min_x < edge.min_x + min_clearance:
                 dist = cy.min_x - edge.min_x
-                violations.append((
-                    "left",
-                    dist,
-                    Point(edge.min_x, (cy.min_y + cy.max_y) / 2),
-                ))
+                violations.append(
+                    (
+                        "left",
+                        dist,
+                        Point(edge.min_x, (cy.min_y + cy.max_y) / 2),
+                    )
+                )
 
             # Right edge
             if cy.max_x > edge.max_x - min_clearance:
                 dist = edge.max_x - cy.max_x
-                violations.append((
-                    "right",
-                    dist,
-                    Point(edge.max_x, (cy.min_y + cy.max_y) / 2),
-                ))
+                violations.append(
+                    (
+                        "right",
+                        dist,
+                        Point(edge.max_x, (cy.min_y + cy.max_y) / 2),
+                    )
+                )
 
             # Top edge
             if cy.min_y < edge.min_y + min_clearance:
                 dist = cy.min_y - edge.min_y
-                violations.append((
-                    "top",
-                    dist,
-                    Point((cy.min_x + cy.max_x) / 2, edge.min_y),
-                ))
+                violations.append(
+                    (
+                        "top",
+                        dist,
+                        Point((cy.min_x + cy.max_x) / 2, edge.min_y),
+                    )
+                )
 
             # Bottom edge
             if cy.max_y > edge.max_y - min_clearance:
                 dist = edge.max_y - cy.max_y
-                violations.append((
-                    "bottom",
-                    dist,
-                    Point((cy.min_x + cy.max_x) / 2, edge.max_y),
-                ))
+                violations.append(
+                    (
+                        "bottom",
+                        dist,
+                        Point((cy.min_x + cy.max_x) / 2, edge.max_y),
+                    )
+                )
 
             for edge_name, dist, loc in violations:
-                severity = (
-                    ConflictSeverity.ERROR if dist < 0
-                    else ConflictSeverity.WARNING
-                )
+                severity = ConflictSeverity.ERROR if dist < 0 else ConflictSeverity.WARNING
 
                 yield Conflict(
                     type=ConflictType.EDGE_CLEARANCE,
@@ -430,7 +426,7 @@ class PlacementAnalyzer:
                     required_clearance=min_clearance,
                 )
 
-    def _extract_board_edge(self, pcb) -> Optional[Rectangle]:
+    def _extract_board_edge(self, pcb) -> Rectangle | None:
         """Extract board outline from Edge.Cuts layer.
 
         Returns bounding box of the board edge.
@@ -453,10 +449,10 @@ class PlacementAnalyzer:
 
         return Rectangle(min(all_x), min(all_y), max(all_x), max(all_y))
 
-    def get_components(self) -> List[ComponentInfo]:
+    def get_components(self) -> list[ComponentInfo]:
         """Get list of analyzed components."""
         return self._components
 
-    def get_board_edge(self) -> Optional[Rectangle]:
+    def get_board_edge(self) -> Rectangle | None:
         """Get board edge bounding box."""
         return self._board_edge

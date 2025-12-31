@@ -19,7 +19,9 @@ KICAD_CLI = shutil.which("kicad-cli")
 @pytest.fixture
 def demo_pcb_path():
     """Path to a demo PCB file."""
-    path = Path(__file__).parent.parent / "demo" / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+    path = (
+        Path(__file__).parent.parent / "demo" / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+    )
     if not path.exists():
         pytest.skip(f"Demo PCB file not found: {path}")
     return path
@@ -28,7 +30,12 @@ def demo_pcb_path():
 @pytest.fixture
 def demo_routed_pcb_path():
     """Path to a demo routed PCB file."""
-    path = Path(__file__).parent.parent / "demo" / "charlieplex_led_grid" / "charlieplex_3x3_routed.kicad_pcb"
+    path = (
+        Path(__file__).parent.parent
+        / "demo"
+        / "charlieplex_led_grid"
+        / "charlieplex_3x3_routed.kicad_pcb"
+    )
     if not path.exists():
         pytest.skip(f"Demo PCB file not found: {path}")
     return path
@@ -90,7 +97,7 @@ class TestSExpRoundTripWithKiCad:
         output = doc.to_string()
 
         # Check indentation uses spaces, not tabs
-        assert '\t' not in output, "Output should use spaces, not tabs"
+        assert "\t" not in output, "Output should use spaces, not tabs"
 
         # Check that known keywords are not quoted
         # These keywords appear in the demo file
@@ -98,7 +105,9 @@ class TestSExpRoundTripWithKiCad:
         assert " user)" in output or " user " in output, "user keyword should not be quoted"
         assert " no)" in output or " no\n" in output, "no keyword should not be quoted"
         assert " none)" in output or " none\n" in output, "none keyword should not be quoted"
-        assert " default)" in output or " default\n" in output, "default keyword should not be quoted"
+        assert " default)" in output or " default\n" in output, (
+            "default keyword should not be quoted"
+        )
 
         # Check that layer names are quoted
         assert '"F.Cu"' in output, "Layer names should be quoted"
@@ -110,10 +119,11 @@ class TestSExpRoundTripWithKiCad:
         output = doc.to_string()
 
         # Should be able to parse the output
-        reparsed = parse_file.__wrapped__(output) if hasattr(parse_file, '__wrapped__') else None
+        reparsed = parse_file.__wrapped__(output) if hasattr(parse_file, "__wrapped__") else None
         if reparsed is None:
             # parse_file expects a path, use parse_string equivalent
             from kicad_tools.sexp.parser import parse_string
+
             reparsed = parse_string(output)
 
         assert reparsed.name == "kicad_pcb"

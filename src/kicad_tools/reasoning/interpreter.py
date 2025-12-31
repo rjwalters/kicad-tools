@@ -11,31 +11,27 @@ It uses the existing kicad-tools infrastructure:
 - DRC for verification
 """
 
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
-from ..pcb.editor import PCBEditor, Point
-from ..router.core import Autorouter
+from ..pcb.editor import PCBEditor
 from ..router.grid import RoutingGrid
+from ..router.layers import Layer, LayerStack
 from ..router.pathfinder import Router
 from ..router.primitives import Pad, Route, Segment
 from ..router.rules import DesignRules
-from ..router.layers import Layer, LayerStack
-
-from .state import PCBState, ComponentState, PadState, TraceState
-from .vocabulary import SpatialRegion, NetType, RoutingPriority
 from .commands import (
+    AddViaCommand,
     Command,
     CommandResult,
     CommandType,
+    DefineZoneCommand,
+    DeleteTraceCommand,
     PlaceComponentCommand,
     RouteNetCommand,
-    DeleteTraceCommand,
-    AddViaCommand,
-    DefineZoneCommand,
 )
+from .state import PadState, PCBState, TraceState
+from .vocabulary import NetType, RoutingPriority, SpatialRegion
 
 
 @dataclass
@@ -45,8 +41,8 @@ class RoutingDiagnostic:
     source_pad: str  # "U1.1"
     target_pad: str  # "U2.3"
     reason: str  # "no_path", "blocked_by_obstacle", "clearance_violation"
-    blocked_at: Optional[tuple[float, float]] = None  # Position where routing was blocked
-    blocking_net: Optional[str] = None  # Net that blocked the path
+    blocked_at: tuple[float, float] | None = None  # Position where routing was blocked
+    blocking_net: str | None = None  # Net that blocked the path
     suggestions: list[str] = field(default_factory=list)
 
 
@@ -59,7 +55,7 @@ class ObstacleGridBuilder:
     - Zones/keepouts as blocked regions
     """
 
-    def __init__(self, state: PCBState, rules: DesignRules, layer_stack: Optional[LayerStack] = None):
+    def __init__(self, state: PCBState, rules: DesignRules, layer_stack: LayerStack | None = None):
         self.state = state
         self.rules = rules
         self.layer_stack = layer_stack or LayerStack.two_layer()
@@ -212,9 +208,9 @@ class CommandInterpreter:
     def __init__(
         self,
         pcb_path: str,
-        state: Optional[PCBState] = None,
-        config: Optional[InterpreterConfig] = None,
-        regions: Optional[list[SpatialRegion]] = None,
+        state: PCBState | None = None,
+        config: InterpreterConfig | None = None,
+        regions: list[SpatialRegion] | None = None,
     ):
         self.pcb_path = Path(pcb_path)
         self.editor = PCBEditor(str(pcb_path))
@@ -234,9 +230,9 @@ class CommandInterpreter:
         self.modifications: list[str] = []
 
         # A* routing infrastructure (lazy initialization)
-        self._routing_grid: Optional[RoutingGrid] = None
-        self._router: Optional[Router] = None
-        self._design_rules: Optional[DesignRules] = None
+        self._routing_grid: RoutingGrid | None = None
+        self._router: Router | None = None
+        self._design_rules: DesignRules | None = None
 
     def _get_design_rules(self) -> DesignRules:
         """Get or create design rules from config."""
@@ -328,9 +324,7 @@ class CommandInterpreter:
         # Resolve rotation
         rotation = cmd.rotation if cmd.rotation is not None else 0
         if cmd.face:
-            rotation = {"north": 0, "east": 90, "south": 180, "west": 270}.get(
-                cmd.face, 0
-            )
+            rotation = {"north": 0, "east": 90, "south": 180, "west": 270}.get(cmd.face, 0)
 
         # Execute placement
         success = self.editor.place_component(cmd.ref, x, y, rotation)
@@ -360,9 +354,7 @@ class CommandInterpreter:
                 message=f"Failed to place {cmd.ref} - component not found",
             )
 
-    def _resolve_position(
-        self, cmd: PlaceComponentCommand
-    ) -> tuple[Optional[float], Optional[float]]:
+    def _resolve_position(self, cmd: PlaceComponentCommand) -> tuple[float | None, float | None]:
         """Resolve a position specification to coordinates."""
         # Explicit position
         if cmd.at:
@@ -427,7 +419,6 @@ class CommandInterpreter:
 
         # Determine trace parameters
         trace_width = cmd.trace_width or self.config.trace_width
-        clearance = cmd.clearance or self.config.clearance
 
         # Adjust based on net type
         net_type = NetType.classify(cmd.net)
@@ -435,7 +426,7 @@ class CommandInterpreter:
         if cmd.trace_width is None:
             trace_width = priority.trace_width
         if cmd.clearance is None:
-            clearance = priority.clearance
+            pass
 
         # Build avoidance polygons from regions (for A* routing, add as keepouts)
         avoid_bounds = []
@@ -488,9 +479,7 @@ class CommandInterpreter:
                 cmd, pads, pad_positions, edges, trace_width, avoid_bounds
             )
 
-        self.modifications.append(
-            f"Routed {cmd.net}: {successful_routes}/{len(edges)} connections"
-        )
+        self.modifications.append(f"Routed {cmd.net}: {successful_routes}/{len(edges)} connections")
 
         # Invalidate routing cache after modifications
         self._invalidate_routing_cache()
@@ -585,7 +574,9 @@ class CommandInterpreter:
                     )
                     if tracks:
                         for t in tracks:
-                            length = ((t.end.x - t.start.x)**2 + (t.end.y - t.start.y)**2)**0.5
+                            length = (
+                                (t.end.x - t.start.x) ** 2 + (t.end.y - t.start.y) ** 2
+                            ) ** 0.5
                             total_length += length
 
                 # Add vias
@@ -635,7 +626,10 @@ class CommandInterpreter:
 
             # Simple direct routing with optional via
             path, via_used = self._find_path(
-                p1[0], p1[1], p2[0], p2[1],
+                p1[0],
+                p1[1],
+                p2[0],
+                p2[1],
                 prefer_layer=cmd.prefer_layer,
                 avoid_bounds=avoid_bounds,
                 prefer_direction=cmd.prefer_direction,
@@ -654,18 +648,20 @@ class CommandInterpreter:
                 if tracks:
                     successful_routes += 1
                     for t in tracks:
-                        length = ((t.end.x - t.start.x)**2 + (t.end.y - t.start.y)**2)**0.5
+                        length = ((t.end.x - t.start.x) ** 2 + (t.end.y - t.start.y) ** 2) ** 0.5
                         total_length += length
 
                     if via_used:
                         vias_added += 1
             else:
-                failed_routes.append(RoutingDiagnostic(
-                    source_pad=f"{p1[2].ref}.{p1[2].number}",
-                    target_pad=f"{p2[2].ref}.{p2[2].number}",
-                    reason="no_path_found",
-                    suggestions=["Try clearing obstructing traces", "Consider layer change"],
-                ))
+                failed_routes.append(
+                    RoutingDiagnostic(
+                        source_pad=f"{p1[2].ref}.{p1[2].number}",
+                        target_pad=f"{p2[2].ref}.{p2[2].number}",
+                        reason="no_path_found",
+                        suggestions=["Try clearing obstructing traces", "Consider layer change"],
+                    )
+                )
 
         return successful_routes, failed_routes, total_length, vias_added
 
@@ -799,12 +795,14 @@ class CommandInterpreter:
 
     def _find_path(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
-        prefer_layer: Optional[str] = None,
-        avoid_bounds: Optional[list[tuple[float, float, float, float]]] = None,
-        prefer_direction: Optional[str] = None,
-    ) -> tuple[Optional[list[tuple[float, float]]], bool]:
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        prefer_layer: str | None = None,
+        avoid_bounds: list[tuple[float, float, float, float]] | None = None,
+        prefer_direction: str | None = None,
+    ) -> tuple[list[tuple[float, float]] | None, bool]:
         """Find a path between two points.
 
         Returns (path, via_used).
@@ -852,14 +850,8 @@ class CommandInterpreter:
             # Try each waypoint
             for wx, wy in waypoints:
                 # Check path start -> waypoint -> end
-                path1_ok = not any(
-                    self._line_crosses_box(x1, y1, wx, wy, b)
-                    for b in avoid_bounds
-                )
-                path2_ok = not any(
-                    self._line_crosses_box(wx, wy, x2, y2, b)
-                    for b in avoid_bounds
-                )
+                path1_ok = not any(self._line_crosses_box(x1, y1, wx, wy, b) for b in avoid_bounds)
+                path2_ok = not any(self._line_crosses_box(wx, wy, x2, y2, b) for b in avoid_bounds)
 
                 if path1_ok and path2_ok:
                     # Build path through waypoint
@@ -874,9 +866,11 @@ class CommandInterpreter:
 
     def _l_route(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
-        prefer_direction: Optional[str] = None,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        prefer_direction: str | None = None,
     ) -> list[tuple[float, float]]:
         """Generate an L-shaped route between two points."""
         # Determine which way to route first
@@ -897,8 +891,10 @@ class CommandInterpreter:
 
     def _line_crosses_box(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
         bounds: tuple[float, float, float, float],
     ) -> bool:
         """Check if a line segment crosses a bounding box."""
@@ -924,9 +920,7 @@ class CommandInterpreter:
         # Simplified: if endpoints straddle box, likely crosses
         return True
 
-    def _simplify_path(
-        self, path: list[tuple[float, float]]
-    ) -> list[tuple[float, float]]:
+    def _simplify_path(self, path: list[tuple[float, float]]) -> list[tuple[float, float]]:
         """Remove redundant points from a path."""
         if len(path) <= 2:
             return path
@@ -962,12 +956,10 @@ class CommandInterpreter:
 
     def _execute_delete(self, cmd: DeleteTraceCommand) -> CommandResult:
         """Execute a delete command."""
-        deleted_count = 0
 
         if cmd.delete_all_routing and cmd.net:
             # Delete all routing for a net
             deleted = self._delete_net_routing(cmd.net)
-            deleted_count = deleted
 
             if deleted > 0:
                 self.modifications.append(f"Deleted all routing for {cmd.net}")
@@ -981,12 +973,12 @@ class CommandInterpreter:
         elif cmd.near:
             # Delete traces near a location
             deleted = self._delete_traces_near(
-                cmd.near[0], cmd.near[1],
+                cmd.near[0],
+                cmd.near[1],
                 radius=cmd.radius,
                 net=cmd.net,
                 layer=cmd.layer,
             )
-            deleted_count = deleted
 
             self.modifications.append(
                 f"Deleted {deleted} traces near ({cmd.near[0]:.1f}, {cmd.near[1]:.1f})"
@@ -1033,10 +1025,11 @@ class CommandInterpreter:
 
     def _delete_traces_near(
         self,
-        x: float, y: float,
+        x: float,
+        y: float,
         radius: float,
-        net: Optional[str] = None,
-        layer: Optional[str] = None,
+        net: str | None = None,
+        layer: str | None = None,
     ) -> int:
         """Delete traces within radius of a point."""
         if not self.editor.doc:
@@ -1086,9 +1079,12 @@ class CommandInterpreter:
 
     def _point_near_segment(
         self,
-        px: float, py: float,
-        x1: float, y1: float,
-        x2: float, y2: float,
+        px: float,
+        py: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
         radius: float,
     ) -> bool:
         """Check if a point is within radius of a line segment."""
@@ -1116,7 +1112,7 @@ class CommandInterpreter:
         size = cmd.size or self.config.via_size
         drill = cmd.drill or self.config.via_drill
 
-        via = self.editor.add_via(
+        self.editor.add_via(
             position=cmd.position,
             net_name=cmd.net,
             size=size,
@@ -1158,16 +1154,14 @@ class CommandInterpreter:
         x1, y1, x2, y2 = bounds
         boundary = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
 
-        zone = self.editor.add_zone(
+        self.editor.add_zone(
             net_name=cmd.net,
             layer=cmd.layer,
             boundary=boundary,
             priority=cmd.priority,
         )
 
-        self.modifications.append(
-            f"Added {cmd.net} zone on {cmd.layer}"
-        )
+        self.modifications.append(f"Added {cmd.net} zone on {cmd.layer}")
 
         return CommandResult(
             success=True,
@@ -1179,7 +1173,7 @@ class CommandInterpreter:
     # Save
     # =========================================================================
 
-    def save(self, output_path: Optional[str] = None):
+    def save(self, output_path: str | None = None):
         """Save the modified PCB."""
         self.editor.save(output_path)
 

@@ -12,7 +12,6 @@ import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from kicad_tools.exceptions import (
     ConfigurationError,
@@ -28,12 +27,12 @@ class GerberConfig:
     """Configuration for Gerber export."""
 
     # Output settings
-    output_dir: Optional[Path] = None
+    output_dir: Path | None = None
     create_zip: bool = True
     zip_name: str = "gerbers.zip"
 
     # Layer selection
-    layers: List[str] = field(default_factory=list)  # Empty = all copper + required
+    layers: list[str] = field(default_factory=list)  # Empty = all copper + required
     include_edge_cuts: bool = True
     include_silkscreen: bool = True
     include_soldermask: bool = True
@@ -58,7 +57,7 @@ class ManufacturerPreset:
 
     name: str
     config: GerberConfig
-    layer_rename: Dict[str, str] = field(default_factory=dict)
+    layer_rename: dict[str, str] = field(default_factory=dict)
 
 
 # Manufacturer presets
@@ -106,14 +105,14 @@ OSHPARK_PRESET = ManufacturerPreset(
     ),
 )
 
-MANUFACTURER_PRESETS: Dict[str, ManufacturerPreset] = {
+MANUFACTURER_PRESETS: dict[str, ManufacturerPreset] = {
     "jlcpcb": JLCPCB_PRESET,
     "pcbway": PCBWAY_PRESET,
     "oshpark": OSHPARK_PRESET,
 }
 
 
-def find_kicad_cli() -> Optional[Path]:
+def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable."""
     # Check PATH first
     cli = shutil.which("kicad-cli")
@@ -185,8 +184,8 @@ class GerberExporter:
 
     def export(
         self,
-        config: Optional[GerberConfig] = None,
-        output_dir: Optional[str | Path] = None,
+        config: GerberConfig | None = None,
+        output_dir: str | Path | None = None,
     ) -> Path:
         """
         Export Gerbers with given configuration.
@@ -223,7 +222,7 @@ class GerberExporter:
     def export_for_manufacturer(
         self,
         manufacturer: str,
-        output_dir: Optional[str | Path] = None,
+        output_dir: str | Path | None = None,
     ) -> Path:
         """
         Export Gerbers using manufacturer preset.
@@ -258,7 +257,8 @@ class GerberExporter:
             "export",
             "gerbers",
             str(self.pcb_path),
-            "--output", str(output_dir) + "/",
+            "--output",
+            str(output_dir) + "/",
         ]
 
         # Add options
@@ -305,8 +305,10 @@ class GerberExporter:
             "export",
             "drill",
             str(self.pcb_path),
-            "--output", str(output_dir) + "/",
-            "--format", config.drill_format,
+            "--output",
+            str(output_dir) + "/",
+            "--format",
+            config.drill_format,
         ]
 
         if config.merge_pth_npth:
@@ -337,7 +339,7 @@ class GerberExporter:
                 suggestions=["Check the KiCad log for details"],
             )
 
-    def _get_default_layers(self, config: GerberConfig) -> List[str]:
+    def _get_default_layers(self, config: GerberConfig) -> list[str]:
         """Get default layers to export based on config."""
         layers = ["F.Cu", "B.Cu"]  # Always include copper
 
@@ -375,7 +377,7 @@ class GerberExporter:
 def export_gerbers(
     pcb_path: str | Path,
     manufacturer: str = "jlcpcb",
-    output_dir: Optional[str | Path] = None,
+    output_dir: str | Path | None = None,
 ) -> Path:
     """
     Convenience function to export Gerbers.

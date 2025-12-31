@@ -1,6 +1,5 @@
 """Tests for the optimization module."""
 
-import math
 import pytest
 
 from kicad_tools.optim import (
@@ -199,11 +198,13 @@ class TestPolygon:
         assert abs(abs(rect.area()) - 12.0) < 1e-10
 
     def test_area_triangle(self):
-        triangle = Polygon(vertices=[
-            Vector2D(0, 0),
-            Vector2D(4, 0),
-            Vector2D(0, 3),
-        ])
+        triangle = Polygon(
+            vertices=[
+                Vector2D(0, 0),
+                Vector2D(4, 0),
+                Vector2D(0, 3),
+            ]
+        )
         # Area of right triangle = 0.5 * 4 * 3 = 6
         assert abs(abs(triangle.area()) - 6.0) < 1e-10
 
@@ -492,7 +493,9 @@ class TestPlacementOptimizer:
         assert keepout.name == "Hole"
 
     def test_add_keepout_circle(self, simple_optimizer):
-        keepout = simple_optimizer.add_keepout_circle(50, 50, 5.0, charge_multiplier=10.0, name="MH1")
+        keepout = simple_optimizer.add_keepout_circle(
+            50, 50, 5.0, charge_multiplier=10.0, name="MH1"
+        )
         assert len(simple_optimizer.keepouts) == 1
         assert keepout.name == "MH1"
 
@@ -588,9 +591,11 @@ class TestPlacementOptimizer:
         optimizer_with_components.components[0].rotation = 47.0
         optimizer_with_components.components[1].rotation = 92.0
         optimizer_with_components.snap_rotations_to_90()
-        assert optimizer_with_components.components[0].rotation == 45.0 or \
-               optimizer_with_components.components[0].rotation == 90.0 or \
-               optimizer_with_components.components[0].rotation == 0.0
+        assert (
+            optimizer_with_components.components[0].rotation == 45.0
+            or optimizer_with_components.components[0].rotation == 90.0
+            or optimizer_with_components.components[0].rotation == 0.0
+        )
         # 47 rounds to 45 * not 90 degree slots - let me check the implementation
         # It snaps to 0, 90, 180, 270 - so 47 should snap to 0
         # Actually: round(47/90) = round(0.52) = 1, so 1*90 = 90

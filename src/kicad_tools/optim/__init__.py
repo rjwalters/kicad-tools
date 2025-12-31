@@ -25,8 +25,12 @@ Example::
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import PCB
 
 __all__ = [
     "PlacementOptimizer",
@@ -48,29 +52,29 @@ class Vector2D:
     x: float = 0.0
     y: float = 0.0
 
-    def __add__(self, other: "Vector2D") -> "Vector2D":
+    def __add__(self, other: Vector2D) -> Vector2D:
         return Vector2D(self.x + other.x, self.y + other.y)
 
-    def __sub__(self, other: "Vector2D") -> "Vector2D":
+    def __sub__(self, other: Vector2D) -> Vector2D:
         return Vector2D(self.x - other.x, self.y - other.y)
 
-    def __mul__(self, scalar: float) -> "Vector2D":
+    def __mul__(self, scalar: float) -> Vector2D:
         return Vector2D(self.x * scalar, self.y * scalar)
 
-    def __rmul__(self, scalar: float) -> "Vector2D":
+    def __rmul__(self, scalar: float) -> Vector2D:
         return self.__mul__(scalar)
 
-    def __truediv__(self, scalar: float) -> "Vector2D":
+    def __truediv__(self, scalar: float) -> Vector2D:
         return Vector2D(self.x / scalar, self.y / scalar)
 
-    def __neg__(self) -> "Vector2D":
+    def __neg__(self) -> Vector2D:
         return Vector2D(-self.x, -self.y)
 
-    def dot(self, other: "Vector2D") -> float:
+    def dot(self, other: Vector2D) -> float:
         """Dot product."""
         return self.x * other.x + self.y * other.y
 
-    def cross(self, other: "Vector2D") -> float:
+    def cross(self, other: Vector2D) -> float:
         """2D cross product (returns scalar z-component)."""
         return self.x * other.y - self.y * other.x
 
@@ -82,14 +86,14 @@ class Vector2D:
         """Squared magnitude (faster, avoids sqrt)."""
         return self.x * self.x + self.y * self.y
 
-    def normalized(self) -> "Vector2D":
+    def normalized(self) -> Vector2D:
         """Unit vector in same direction."""
         mag = self.magnitude()
         if mag < 1e-10:
             return Vector2D(0.0, 0.0)
         return self / mag
 
-    def rotated(self, angle_deg: float) -> "Vector2D":
+    def rotated(self, angle_deg: float) -> Vector2D:
         """Rotate vector by angle in degrees."""
         rad = math.radians(angle_deg)
         cos_a, sin_a = math.cos(rad), math.sin(rad)
@@ -98,7 +102,7 @@ class Vector2D:
             self.x * sin_a + self.y * cos_a,
         )
 
-    def perpendicular(self) -> "Vector2D":
+    def perpendicular(self) -> Vector2D:
         """Return perpendicular vector (90° CCW)."""
         return Vector2D(-self.y, self.x)
 
@@ -112,10 +116,10 @@ class Polygon:
     Vertices should be in counter-clockwise order for outward-facing normals.
     """
 
-    vertices: List[Vector2D] = field(default_factory=list)
+    vertices: list[Vector2D] = field(default_factory=list)
 
     @classmethod
-    def rectangle(cls, x: float, y: float, width: float, height: float) -> "Polygon":
+    def rectangle(cls, x: float, y: float, width: float, height: float) -> Polygon:
         """Create a rectangle centered at (x, y)."""
         hw, hh = width / 2, height / 2
         return cls(
@@ -128,7 +132,7 @@ class Polygon:
         )
 
     @classmethod
-    def circle(cls, x: float, y: float, radius: float, segments: int = 16) -> "Polygon":
+    def circle(cls, x: float, y: float, radius: float, segments: int = 16) -> Polygon:
         """Create a circle approximated as a polygon."""
         vertices = []
         for i in range(segments):
@@ -141,7 +145,7 @@ class Polygon:
     @classmethod
     def from_footprint_bounds(
         cls, x: float, y: float, width: float, height: float, rotation: float = 0.0
-    ) -> "Polygon":
+    ) -> Polygon:
         """Create rotated rectangle for a component footprint."""
         # Create centered rectangle
         hw, hh = width / 2, height / 2
@@ -152,11 +156,9 @@ class Polygon:
             Vector2D(-hw, hh),
         ]
         # Rotate and translate
-        return cls(
-            vertices=[v.rotated(rotation) + Vector2D(x, y) for v in corners]
-        )
+        return cls(vertices=[v.rotated(rotation) + Vector2D(x, y) for v in corners])
 
-    def edges(self) -> Iterator[Tuple[Vector2D, Vector2D]]:
+    def edges(self) -> Iterator[tuple[Vector2D, Vector2D]]:
         """Iterate over edges as (start, end) pairs."""
         n = len(self.vertices)
         for i in range(n):
@@ -203,17 +205,13 @@ class Polygon:
             j = i
         return inside
 
-    def translate(self, delta: Vector2D) -> "Polygon":
+    def translate(self, delta: Vector2D) -> Polygon:
         """Return translated polygon."""
         return Polygon(vertices=[v + delta for v in self.vertices])
 
-    def rotate_around(self, center: Vector2D, angle_deg: float) -> "Polygon":
+    def rotate_around(self, center: Vector2D, angle_deg: float) -> Polygon:
         """Return polygon rotated around a center point."""
-        return Polygon(
-            vertices=[
-                (v - center).rotated(angle_deg) + center for v in self.vertices
-            ]
-        )
+        return Polygon(vertices=[(v - center).rotated(angle_deg) + center for v in self.vertices])
 
 
 @dataclass
@@ -243,7 +241,7 @@ class Component:
     rotation: float = 0.0  # Current rotation (0, 90, 180, 270 when snapping)
     width: float = 1.0
     height: float = 1.0
-    pins: List[Pin] = field(default_factory=list)
+    pins: list[Pin] = field(default_factory=list)
     fixed: bool = False  # If True, component doesn't move
     mass: float = 1.0  # For physics simulation
 
@@ -253,7 +251,7 @@ class Component:
     angular_velocity: float = 0.0  # Angular velocity (deg/step)
 
     # Store original relative pin positions for rotation
-    _pin_offsets: List[Tuple[float, float]] = field(default_factory=list, repr=False)
+    _pin_offsets: list[tuple[float, float]] = field(default_factory=list, repr=False)
 
     def __post_init__(self):
         """Initialize pin offsets from current positions."""
@@ -293,9 +291,7 @@ class Component:
 
     def outline(self) -> Polygon:
         """Get current component outline polygon."""
-        return Polygon.from_footprint_bounds(
-            self.x, self.y, self.width, self.height, self.rotation
-        )
+        return Polygon.from_footprint_bounds(self.x, self.y, self.width, self.height, self.rotation)
 
     def position(self) -> Vector2D:
         """Get position as Vector2D."""
@@ -451,7 +447,7 @@ class PlacementOptimizer:
     def __init__(
         self,
         board_outline: Polygon,
-        config: Optional[PlacementConfig] = None,
+        config: PlacementConfig | None = None,
     ):
         """
         Initialize the optimizer.
@@ -462,18 +458,18 @@ class PlacementOptimizer:
         """
         self.board_outline = board_outline
         self.config = config or PlacementConfig()
-        self.components: List[Component] = []
-        self.springs: List[Spring] = []
-        self.keepouts: List[Keepout] = []
-        self._component_map: Dict[str, Component] = {}
+        self.components: list[Component] = []
+        self.springs: list[Spring] = []
+        self.keepouts: list[Keepout] = []
+        self._component_map: dict[str, Component] = {}
 
     @classmethod
     def from_pcb(
         cls,
-        pcb: "PCB",  # type: ignore[name-defined]
-        config: Optional[PlacementConfig] = None,
-        fixed_refs: Optional[List[str]] = None,
-    ) -> "PlacementOptimizer":
+        pcb: PCB,
+        config: PlacementConfig | None = None,
+        fixed_refs: list[str] | None = None,
+    ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
 
@@ -559,7 +555,7 @@ class PlacementOptimizer:
         return optimizer
 
     @staticmethod
-    def _extract_board_outline(pcb: "PCB") -> Optional[Polygon]:  # type: ignore[name-defined]
+    def _extract_board_outline(pcb: PCB) -> Polygon | None:
         """
         Extract board outline from Edge.Cuts layer.
 
@@ -581,15 +577,17 @@ class PlacementOptimizer:
                         y1 = start.get_float(1) or 0.0
                         x2 = end.get_float(0) or 0.0
                         y2 = end.get_float(1) or 0.0
-                        return Polygon(vertices=[
-                            Vector2D(x1, y1),
-                            Vector2D(x2, y1),
-                            Vector2D(x2, y2),
-                            Vector2D(x1, y2),
-                        ])
+                        return Polygon(
+                            vertices=[
+                                Vector2D(x1, y1),
+                                Vector2D(x2, y1),
+                                Vector2D(x2, y2),
+                                Vector2D(x1, y2),
+                            ]
+                        )
 
         # Look for gr_line elements on Edge.Cuts to build outline
-        edge_lines: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        edge_lines: list[tuple[tuple[float, float], tuple[float, float]]] = []
         for child in sexp.iter_children():
             if child.tag == "gr_line":
                 layer = child.find("layer")
@@ -613,8 +611,8 @@ class PlacementOptimizer:
 
     @staticmethod
     def _chain_lines_to_polygon(
-        lines: List[Tuple[Tuple[float, float], Tuple[float, float]]]
-    ) -> Optional[List[Tuple[float, float]]]:
+        lines: list[tuple[tuple[float, float], tuple[float, float]]],
+    ) -> list[tuple[float, float]] | None:
         """Chain line segments into a closed polygon."""
         if not lines:
             return None
@@ -635,13 +633,19 @@ class PlacementOptimizer:
                     continue
 
                 # Check if this line continues from current_end
-                if abs(start[0] - current_end[0]) < tolerance and abs(start[1] - current_end[1]) < tolerance:
+                if (
+                    abs(start[0] - current_end[0]) < tolerance
+                    and abs(start[1] - current_end[1]) < tolerance
+                ):
                     vertices.append(start)
                     current_end = end
                     used[i] = True
                     found = True
                     break
-                elif abs(end[0] - current_end[0]) < tolerance and abs(end[1] - current_end[1]) < tolerance:
+                elif (
+                    abs(end[0] - current_end[0]) < tolerance
+                    and abs(end[1] - current_end[1]) < tolerance
+                ):
                     vertices.append(end)
                     current_end = start
                     used[i] = True
@@ -652,7 +656,11 @@ class PlacementOptimizer:
                 break
 
         # Check if polygon closes
-        if vertices and abs(vertices[0][0] - current_end[0]) < tolerance and abs(vertices[0][1] - current_end[1]) < tolerance:
+        if (
+            vertices
+            and abs(vertices[0][0] - current_end[0]) < tolerance
+            and abs(vertices[0][1] - current_end[1]) < tolerance
+        ):
             return vertices
 
         # Polygon didn't close, return bounding box
@@ -673,7 +681,7 @@ class PlacementOptimizer:
         self.components.append(comp)
         self._component_map[comp.ref] = comp
 
-    def get_component(self, ref: str) -> Optional[Component]:
+    def get_component(self, ref: str) -> Component | None:
         """Get component by reference."""
         return self._component_map.get(ref)
 
@@ -716,7 +724,7 @@ class PlacementOptimizer:
     def create_springs_from_nets(self):
         """Create springs connecting all pins on the same net."""
         # Group pins by net
-        net_pins: Dict[int, List[Tuple[str, Pin]]] = {}
+        net_pins: dict[int, list[tuple[str, Pin]]] = {}
         for comp in self.components:
             for pin in comp.pins:
                 if pin.net > 0:  # Skip unconnected pins
@@ -820,7 +828,7 @@ class PlacementOptimizer:
         edge2_start: Vector2D,
         edge2_end: Vector2D,
         num_samples: int = 5,
-    ) -> Tuple[Vector2D, float]:
+    ) -> tuple[Vector2D, float]:
         """
         Compute repulsion force and torque between two charged edges.
 
@@ -865,15 +873,19 @@ class PlacementOptimizer:
 
         return total_force, total_torque
 
-    def compute_charge_force(self, point: Vector2D, edge_start: Vector2D, edge_end: Vector2D) -> Vector2D:
+    def compute_charge_force(
+        self, point: Vector2D, edge_start: Vector2D, edge_end: Vector2D
+    ) -> Vector2D:
         """
         Compute repulsion force on a point from a charged line segment.
 
         Convenience wrapper for compute_edge_to_point_force using default charge density.
         """
-        return self.compute_edge_to_point_force(point, edge_start, edge_end, self.config.charge_density)
+        return self.compute_edge_to_point_force(
+            point, edge_start, edge_end, self.config.charge_density
+        )
 
-    def compute_spring_force(self, spring: Spring) -> Tuple[Vector2D, Vector2D]:
+    def compute_spring_force(self, spring: Spring) -> tuple[Vector2D, Vector2D]:
         """
         Compute spring forces between two pins.
 
@@ -952,7 +964,7 @@ class PlacementOptimizer:
 
         return total_force
 
-    def compute_forces_and_torques(self) -> Tuple[Dict[str, Vector2D], Dict[str, float]]:
+    def compute_forces_and_torques(self) -> tuple[dict[str, Vector2D], dict[str, float]]:
         """
         Compute net forces and torques on all components.
 
@@ -962,8 +974,8 @@ class PlacementOptimizer:
         Returns:
             Tuple of (forces dict, torques dict)
         """
-        forces: Dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
-        torques: Dict[str, float] = {comp.ref: 0.0 for comp in self.components}
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+        torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
 
         # 1. Component-component repulsion (edge-to-edge charges)
         for i, comp1 in enumerate(self.components):
@@ -982,8 +994,11 @@ class PlacementOptimizer:
                     for e1_start, e1_end in outline1.edges():
                         for e2_start, e2_end in outline2.edges():
                             force, edge_torque = self.compute_edge_to_edge_force(
-                                e1_start, e1_end, e2_start, e2_end,
-                                num_samples=self.config.edge_samples
+                                e1_start,
+                                e1_end,
+                                e2_start,
+                                e2_end,
+                                num_samples=self.config.edge_samples,
                             )
                             forces[comp1.ref] = forces[comp1.ref] + force
                             # Convert edge torque to component torque
@@ -996,8 +1011,11 @@ class PlacementOptimizer:
                     for e2_start, e2_end in outline2.edges():
                         for e1_start, e1_end in outline1.edges():
                             force, edge_torque = self.compute_edge_to_edge_force(
-                                e2_start, e2_end, e1_start, e1_end,
-                                num_samples=self.config.edge_samples
+                                e2_start,
+                                e2_end,
+                                e1_start,
+                                e1_end,
+                                num_samples=self.config.edge_samples,
                             )
                             forces[comp2.ref] = forces[comp2.ref] + force
                             edge_center = (e2_start + e2_end) * 0.5
@@ -1016,8 +1034,7 @@ class PlacementOptimizer:
             for e_start, e_end in outline.edges():
                 for b_start, b_end in self.board_outline.edges():
                     force, edge_torque = self.compute_edge_to_edge_force(
-                        e_start, e_end, b_start, b_end,
-                        num_samples=self.config.edge_samples
+                        e_start, e_end, b_start, b_end, num_samples=self.config.edge_samples
                     )
                     # Board edges repel to keep components inside
                     if inside:
@@ -1042,15 +1059,16 @@ class PlacementOptimizer:
                 for e_start, e_end in outline.edges():
                     for k_start, k_end in keepout.outline.edges():
                         force, edge_torque = self.compute_edge_to_edge_force(
-                            e_start, e_end, k_start, k_end,
-                            num_samples=self.config.edge_samples
+                            e_start, e_end, k_start, k_end, num_samples=self.config.edge_samples
                         )
                         # Keepouts always repel
                         force = force * keepout.charge_multiplier
                         forces[comp.ref] = forces[comp.ref] + force
                         edge_center = (e_start + e_end) * 0.5
                         r = edge_center - center
-                        torques[comp.ref] += r.cross(force) + edge_torque * keepout.charge_multiplier
+                        torques[comp.ref] += (
+                            r.cross(force) + edge_torque * keepout.charge_multiplier
+                        )
 
         # 4. Spring forces (net connections)
         for spring in self.springs:
@@ -1082,18 +1100,18 @@ class PlacementOptimizer:
 
         return forces, torques
 
-    def compute_forces(self) -> Dict[str, Vector2D]:
+    def compute_forces(self) -> dict[str, Vector2D]:
         """Compute net forces on all components (legacy wrapper)."""
         forces, _ = self.compute_forces_and_torques()
         return forces
 
-    def compute_torques(self) -> Dict[str, float]:
+    def compute_torques(self) -> dict[str, float]:
         """
         Compute torques on all components.
 
         Spring forces applied at pin positions create torque around component center.
         """
-        torques: Dict[str, float] = {comp.ref: 0.0 for comp in self.components}
+        torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
 
         for spring in self.springs:
             comp1 = self._component_map.get(spring.comp1_ref)
@@ -1231,7 +1249,7 @@ class PlacementOptimizer:
         self,
         iterations: int = 1000,
         dt: float = 0.01,
-        callback: Optional[callable] = None,
+        callback: callable | None = None,
     ) -> int:
         """
         Run the optimization simulation.
@@ -1259,7 +1277,10 @@ class PlacementOptimizer:
                     speed = math.sqrt(comp.vx**2 + comp.vy**2)
                     max_velocity = max(max_velocity, speed)
 
-            if energy < self.config.energy_threshold and max_velocity < self.config.velocity_threshold:
+            if (
+                energy < self.config.energy_threshold
+                and max_velocity < self.config.velocity_threshold
+            ):
                 return i + 1
 
         return iterations
@@ -1272,7 +1293,7 @@ class PlacementOptimizer:
         """
         self.snap_rotations(90.0)
 
-    def snap_rotations(self, grid: Optional[float] = None):
+    def snap_rotations(self, grid: float | None = None):
         """
         Snap all component rotations to nearest grid angle.
 
@@ -1292,7 +1313,7 @@ class PlacementOptimizer:
             comp.angular_velocity = 0.0
             comp.update_pin_positions()
 
-    def snap_positions(self, grid: Optional[float] = None):
+    def snap_positions(self, grid: float | None = None):
         """
         Snap all component positions to nearest grid point.
 
@@ -1313,7 +1334,7 @@ class PlacementOptimizer:
             comp.vy = 0.0
             comp.update_pin_positions()
 
-    def snap_to_grid(self, position_grid: Optional[float] = None, rotation_grid: Optional[float] = None):
+    def snap_to_grid(self, position_grid: float | None = None, rotation_grid: float | None = None):
         """
         Snap all components to position and rotation grids.
 
@@ -1324,7 +1345,7 @@ class PlacementOptimizer:
         self.snap_positions(position_grid)
         self.snap_rotations(rotation_grid)
 
-    def write_to_pcb(self, pcb: "PCB") -> int:  # type: ignore[name-defined]
+    def write_to_pcb(self, pcb: PCB) -> int:
         """
         Write optimized component positions back to a PCB object.
 
@@ -1380,9 +1401,7 @@ class PlacementOptimizer:
         ]
 
         for comp in sorted(self.components, key=lambda c: c.ref):
-            lines.append(
-                f"  {comp.ref:8s}: ({comp.x:7.2f}, {comp.y:7.2f}) @ {comp.rotation:6.1f}°"
-            )
+            lines.append(f"  {comp.ref:8s}: ({comp.x:7.2f}, {comp.y:7.2f}) @ {comp.rotation:6.1f}°")
 
         return "\n".join(lines)
 

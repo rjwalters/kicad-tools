@@ -16,12 +16,11 @@ import fnmatch
 import io
 import json
 import sys
-from typing import List
 
 from ..schema.bom import BOMItem, extract_bom
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-bom command."""
     parser = argparse.ArgumentParser(
         prog="kicad-bom",
@@ -104,7 +103,7 @@ def main(argv: List[str] | None = None) -> int:
     return 0
 
 
-def group_items(items: List[BOMItem]) -> List[dict]:
+def group_items(items: list[BOMItem]) -> list[dict]:
     """Group identical items by value and footprint."""
     groups = {}
     for item in items:

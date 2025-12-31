@@ -18,7 +18,6 @@ These concepts allow the LLM to make strategic decisions:
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class SpatialRelation(Enum):
@@ -173,10 +172,7 @@ class NetType(Enum):
             return cls.GROUND
 
         # Power nets
-        if any(
-            p in name
-            for p in ["+", "vcc", "vdd", "3v3", "5v", "12v", "vin", "vout", "pwr"]
-        ):
+        if any(p in name for p in ["+", "vcc", "vdd", "3v3", "5v", "12v", "vin", "vout", "pwr"]):
             return cls.POWER
 
         # Clock nets
@@ -218,9 +214,9 @@ class RoutingPriority:
     clearance: float = 0.2  # mm
     preferred_layers: list[str] = field(default_factory=list)
     avoid_regions: list[str] = field(default_factory=list)  # Region names
-    length_match_group: Optional[str] = None
-    max_length: Optional[float] = None
-    min_length: Optional[float] = None
+    length_match_group: str | None = None
+    max_length: float | None = None
+    min_length: float | None = None
     via_preference: str = "minimize"  # "minimize", "allow", "prefer_layer_change"
 
     @classmethod
@@ -297,7 +293,7 @@ class ComponentGroup:
     description: str
     components: list[str]  # Reference designators
     function: str  # "power", "analog", "digital", "io"
-    preferred_region: Optional[str] = None  # Preferred board region
+    preferred_region: str | None = None  # Preferred board region
     internal_routing_priority: int = 1  # Route within group first
 
     def __contains__(self, ref: str) -> bool:
@@ -385,9 +381,7 @@ def create_hat_regions(width: float = 65.0, height: float = 56.0) -> list[Spatia
 # =============================================================================
 
 
-def describe_position(
-    x: float, y: float, board_width: float, board_height: float
-) -> str:
+def describe_position(x: float, y: float, board_width: float, board_height: float) -> str:
     """Generate a natural language description of a position on the board."""
     # Normalize to 0-1
     nx = x / board_width

@@ -5,7 +5,6 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .violation import ERCViolation, ERCViolationType, Severity
 
@@ -221,7 +220,7 @@ def parse_text_report(content: str, source_file: str = "") -> ERCReport:
         report.source_file = source_match.group(1)
 
     # Parse violations
-    current_violation: Optional[dict] = None
+    current_violation: dict | None = None
 
     for line in lines:
         # Skip header lines

@@ -261,6 +261,7 @@ class TestGerberExporterMethods:
 
         # Verify contents
         import zipfile
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             names = zf.namelist()
             assert "test1.gbr" in names
@@ -279,6 +280,7 @@ class TestGerberExporterMethods:
 
         # Should be a valid zip now
         import zipfile
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             assert "test.gbr" in zf.namelist()
 

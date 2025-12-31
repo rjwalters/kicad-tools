@@ -1,9 +1,10 @@
 """Tests for kicad_tools CLI commands."""
 
 import json
-import pytest
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pytest
 
 
 class TestCLIMain:
@@ -85,7 +86,7 @@ class TestSymbolsCommand:
         result = main(["symbols", str(simple_rc_schematic), "--filter", "R*"])
         assert result == 0
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should only show resistors if any exist
         # The filter should work without error
 
@@ -133,7 +134,7 @@ class TestNetsCommand:
         result = main(["nets", str(simple_rc_schematic), "--stats"])
         assert result == 0
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should show statistics
 
 
@@ -155,9 +156,9 @@ class TestERCCommand:
         from kicad_tools.cli import main
 
         erc_report = fixtures_dir / "sample_erc.json"
-        result = main(["erc", str(erc_report)])
+        main(["erc", str(erc_report)])
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should parse and display ERC violations
 
     def test_erc_json_format(self, fixtures_dir: Path, capsys):
@@ -165,7 +166,7 @@ class TestERCCommand:
         from kicad_tools.cli import main
 
         erc_report = fixtures_dir / "sample_erc.json"
-        result = main(["erc", str(erc_report), "--format", "json"])
+        main(["erc", str(erc_report), "--format", "json"])
 
         captured = capsys.readouterr()
         # Should be valid JSON if there's output
@@ -178,9 +179,9 @@ class TestERCCommand:
         from kicad_tools.cli import main
 
         erc_report = fixtures_dir / "sample_erc.json"
-        result = main(["erc", str(erc_report), "--format", "summary"])
+        main(["erc", str(erc_report), "--format", "summary"])
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should show summary output
 
     def test_erc_errors_only(self, fixtures_dir: Path, capsys):
@@ -188,9 +189,9 @@ class TestERCCommand:
         from kicad_tools.cli import main
 
         erc_report = fixtures_dir / "sample_erc.json"
-        result = main(["erc", str(erc_report), "--errors-only"])
+        main(["erc", str(erc_report), "--errors-only"])
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should filter to only errors
 
 
@@ -212,7 +213,7 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report)])
+        main(["drc", str(drc_report)])
 
         captured = capsys.readouterr()
         # Should display DRC violations
@@ -223,7 +224,7 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report), "--format", "json"])
+        main(["drc", str(drc_report), "--format", "json"])
 
         captured = capsys.readouterr()
         # Should be valid JSON
@@ -238,7 +239,7 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report), "--format", "summary"])
+        main(["drc", str(drc_report), "--format", "summary"])
 
         captured = capsys.readouterr()
         assert "Summary" in captured.out or "TOTAL" in captured.out
@@ -248,9 +249,9 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report), "--errors-only"])
+        main(["drc", str(drc_report), "--errors-only"])
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should filter to only errors (no "WARN" in output)
         # Note: there may still be errors shown
 
@@ -259,9 +260,9 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report), "--type", "clearance"])
+        main(["drc", str(drc_report), "--type", "clearance"])
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should show only clearance violations
 
     def test_drc_manufacturer_check(self, fixtures_dir: Path, capsys):
@@ -269,7 +270,7 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report), "--mfr", "jlcpcb"])
+        main(["drc", str(drc_report), "--mfr", "jlcpcb"])
 
         captured = capsys.readouterr()
         assert "JLCPCB" in captured.out
@@ -280,7 +281,7 @@ class TestDRCCommand:
         from kicad_tools.cli import main
 
         drc_report = fixtures_dir / "sample_drc.rpt"
-        result = main(["drc", str(drc_report), "--mfr", "jlcpcb", "--layers", "4"])
+        main(["drc", str(drc_report), "--mfr", "jlcpcb", "--layers", "4"])
 
         captured = capsys.readouterr()
         assert "Layer count: 4" in captured.out
@@ -341,7 +342,7 @@ class TestBOMCommand:
         result = main(["bom", str(simple_rc_schematic), "--group"])
         assert result == 0
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should group identical components
 
     def test_bom_exclude(self, simple_rc_schematic: Path, capsys):
@@ -351,7 +352,7 @@ class TestBOMCommand:
         result = main(["bom", str(simple_rc_schematic), "--exclude", "TP*"])
         assert result == 0
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should exclude test points if any
 
     def test_bom_sort_by_value(self, simple_rc_schematic: Path, capsys):
@@ -361,7 +362,7 @@ class TestBOMCommand:
         result = main(["bom", str(simple_rc_schematic), "--sort", "value"])
         assert result == 0
 
-        captured = capsys.readouterr()
+        capsys.readouterr()
         # Should sort by value
 
 

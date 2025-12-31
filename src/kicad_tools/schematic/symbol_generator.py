@@ -44,13 +44,13 @@ Example JSON format:
 """
 
 import argparse
+import contextlib
 import csv
 import json
 import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 
 class PinType(Enum):
@@ -102,7 +102,7 @@ class PinDef:
     name: str
     pin_type: PinType = PinType.PASSIVE
     style: PinStyle = PinStyle.LINE
-    side: Optional[PinSide] = None  # Auto-assigned if None
+    side: PinSide | None = None  # Auto-assigned if None
     hidden: bool = False
 
     @classmethod
@@ -247,11 +247,11 @@ def detect_pin_side(name: str, pin_type: PinType) -> PinSide:
         return PinSide.TOP
     elif pin_type == PinType.INPUT:
         return PinSide.LEFT
-    elif pin_type == PinType.OUTPUT:
-        return PinSide.RIGHT
-    elif pin_type == PinType.BIDIRECTIONAL:
-        return PinSide.RIGHT
-    elif pin_type == PinType.NO_CONNECT:
+    elif (
+        pin_type == PinType.OUTPUT
+        or pin_type == PinType.BIDIRECTIONAL
+        or pin_type == PinType.NO_CONNECT
+    ):
         return PinSide.RIGHT
 
     return PinSide.LEFT
@@ -327,19 +327,15 @@ def parse_csv(path: Path, name: str) -> SymbolDef:
 
             side = None
             if "side" in row and row["side"]:
-                try:
+                with contextlib.suppress(ValueError):
                     side = PinSide(row["side"].lower())
-                except ValueError:
-                    pass
             if side is None:
                 side = detect_pin_side(row.get("name", ""), pin_type)
 
             style = PinStyle.LINE
             if "style" in row and row["style"]:
-                try:
+                with contextlib.suppress(ValueError):
                     style = PinStyle(row["style"].lower())
-                except ValueError:
-                    pass
             else:
                 style = detect_pin_style(row.get("name", ""), pin_type)
 
@@ -394,9 +390,11 @@ def parse_datasheet_text(text: str, name: str) -> SymbolDef:
         if type_hint:
             # Try to extract type from description
             type_hint_lower = type_hint.lower()
-            if "power" in type_hint_lower or "supply" in type_hint_lower:
-                pin_type = PinType.POWER_IN
-            elif "ground" in type_hint_lower:
+            if (
+                "power" in type_hint_lower
+                or "supply" in type_hint_lower
+                or "ground" in type_hint_lower
+            ):
                 pin_type = PinType.POWER_IN
             elif "input" in type_hint_lower:
                 pin_type = PinType.INPUT

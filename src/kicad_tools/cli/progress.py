@@ -23,8 +23,9 @@ Usage:
 """
 
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, Optional, TypeVar
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -71,7 +72,7 @@ def create_progress(quiet: bool = False, **kwargs):
 
 def with_progress(
     items: Iterator[T],
-    total: Optional[int] = None,
+    total: int | None = None,
     desc: str = "Processing...",
     quiet: bool = False,
 ) -> Iterator[T]:
@@ -91,9 +92,8 @@ def with_progress(
         return
 
     # Try to get total from the items if not provided
-    if total is None:
-        if hasattr(items, "__len__"):
-            total = len(items)  # type: ignore
+    if total is None and hasattr(items, "__len__"):
+        total = len(items)  # type: ignore
 
     from rich.progress import track
 
@@ -162,7 +162,7 @@ class _NoOpProgress:
     def __exit__(self, *args):
         pass
 
-    def add_task(self, description: str, total: Optional[float] = None, **kwargs) -> int:
+    def add_task(self, description: str, total: float | None = None, **kwargs) -> int:
         return 0
 
     def update(self, task_id: int, **kwargs) -> None:

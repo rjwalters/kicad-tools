@@ -38,14 +38,7 @@ Quick Start::
 __version__ = "0.2.0"
 
 # Core S-expression handling
-from kicad_tools.sexp import SExp
 from kicad_tools.core.sexp_file import load_pcb, load_schematic, save_pcb, save_schematic
-
-# Schema models
-from kicad_tools.schema.schematic import Schematic
-from kicad_tools.schema.symbol import SymbolInstance
-from kicad_tools.schema.pcb import PCB
-from kicad_tools.schema.bom import BOM, BOMItem, extract_bom
 
 # Project
 from kicad_tools.project import Project
@@ -53,18 +46,25 @@ from kicad_tools.project import Project
 # Query API
 from kicad_tools.query import (
     BaseQuery,
-    SymbolQuery,
-    SymbolList,
-    FootprintQuery,
     FootprintList,
+    FootprintQuery,
+    SymbolList,
+    SymbolQuery,
 )
 
 # Reasoning - LLM-driven PCB layout
 from kicad_tools.reasoning import (
+    CommandInterpreter,
     PCBReasoningAgent,
     PCBState,
-    CommandInterpreter,
 )
+from kicad_tools.schema.bom import BOM, BOMItem, extract_bom
+from kicad_tools.schema.pcb import PCB
+
+# Schema models
+from kicad_tools.schema.schematic import Schematic
+from kicad_tools.schema.symbol import SymbolInstance
+from kicad_tools.sexp import SExp
 
 __all__ = [
     # Version

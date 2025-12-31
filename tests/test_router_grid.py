@@ -32,10 +32,7 @@ class TestRoutingGridBasic:
 
     def test_grid_with_origin(self, default_rules):
         """Test grid with custom origin."""
-        grid = RoutingGrid(
-            width=10.0, height=10.0, rules=default_rules,
-            origin_x=5.0, origin_y=5.0
-        )
+        grid = RoutingGrid(width=10.0, height=10.0, rules=default_rules, origin_x=5.0, origin_y=5.0)
         assert grid.origin_x == 5.0
         assert grid.origin_y == 5.0
 
@@ -184,10 +181,7 @@ class TestRoutingGridObstacles:
 
     def test_add_rectangular_obstacle(self, grid):
         """Test adding a rectangular obstacle."""
-        obs = Obstacle(
-            x=5.0, y=5.0, width=1.0, height=1.0,
-            layer=Layer.F_CU, clearance=0.1
-        )
+        obs = Obstacle(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, clearance=0.1)
         grid.add_obstacle(obs)
 
         # Check that cells within obstacle are blocked
@@ -197,10 +191,7 @@ class TestRoutingGridObstacles:
 
     def test_add_pad_smd(self, grid):
         """Test adding an SMD pad as obstacle."""
-        pad = Pad(
-            x=3.0, y=3.0, width=0.5, height=0.5,
-            layer=Layer.F_CU, net=1, net_name="NET1"
-        )
+        pad = Pad(x=3.0, y=3.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="NET1")
         grid.add_pad(pad)
 
         # Pad center should be marked with net
@@ -211,9 +202,15 @@ class TestRoutingGridObstacles:
     def test_add_pad_through_hole(self, grid):
         """Test adding a through-hole pad."""
         pad = Pad(
-            x=3.0, y=3.0, width=1.7, height=1.7,
-            layer=Layer.F_CU, net=1, net_name="NET1",
-            through_hole=True, drill=1.0
+            x=3.0,
+            y=3.0,
+            width=1.7,
+            height=1.7,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
+            through_hole=True,
+            drill=1.0,
         )
         grid.add_pad(pad)
 
@@ -246,10 +243,7 @@ class TestRoutingGridRoutes:
 
     def test_mark_via(self, grid):
         """Test marking a via."""
-        via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=2
-        )
+        via = Via(x=5.0, y=5.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2)
         route = Route(net=2, net_name="NET2", segments=[], vias=[via])
         grid.mark_route(route)
 
@@ -441,7 +435,7 @@ class TestRoutingGridSegmentCells:
         # All cells should be on same layer and y coordinate
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         gy = grid.world_to_grid(1.0, 1.0)[1]
-        for gx, cell_gy, cell_layer in cells:
+        for _gx, cell_gy, cell_layer in cells:
             assert cell_gy == gy
             assert cell_layer == layer_idx
 
@@ -454,7 +448,7 @@ class TestRoutingGridSegmentCells:
         # All cells should be on same layer and x coordinate
         layer_idx = grid.layer_to_index(Layer.F_CU.value)
         gx = grid.world_to_grid(1.0, 1.0)[0]
-        for cell_gx, gy, cell_layer in cells:
+        for cell_gx, _gy, cell_layer in cells:
             assert cell_gx == gx
             assert cell_layer == layer_idx
 
@@ -467,10 +461,7 @@ class TestRoutingGridSegmentCells:
 
     def test_get_via_cells(self, grid):
         """Test getting cells for via."""
-        via = Via(
-            x=5.0, y=5.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        via = Via(x=5.0, y=5.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         cells = grid._get_via_cells(via)
 
         # Should have one cell per layer
