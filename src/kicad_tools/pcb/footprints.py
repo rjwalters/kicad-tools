@@ -16,12 +16,22 @@ Usage::
     # Or use library directly
     lib = FootprintLibrary()
     pads = lib.get_pads("Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm")
+
+    # Load from .pretty directory
+    lib = FootprintLibrary.load("MyProject.pretty")
+    for fp in lib:
+        print(f"{fp.name}: {len(fp.pads)} pads")
 """
+
+from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from kicad_tools.sexp.parser import parse_sexp
 
 
 @dataclass
@@ -34,7 +44,144 @@ class PadInfo:
     width: float = 0
     height: float = 0
     shape: str = "roundrect"
-    layers: tuple = ("F.Cu", "F.Mask", "F.Paste")
+    pad_type: str = "smd"
+    layers: tuple[str, ...] = ("F.Cu", "F.Mask", "F.Paste")
+
+    @property
+    def position(self) -> tuple[float, float]:
+        """Get pad position as (x, y) tuple."""
+        return (self.x, self.y)
+
+    @property
+    def size(self) -> tuple[float, float]:
+        """Get pad size as (width, height) tuple."""
+        return (self.width, self.height)
+
+
+@dataclass
+class Footprint:
+    """A footprint loaded from a .kicad_mod file."""
+
+    name: str
+    description: str = ""
+    tags: str = ""
+    pads: list[PadInfo] = field(default_factory=list)
+    path: Path | None = None
+
+    @classmethod
+    def from_file(cls, filepath: Path) -> Footprint:
+        """Load a footprint from a .kicad_mod file.
+
+        Args:
+            filepath: Path to the .kicad_mod file.
+
+        Returns:
+            Parsed Footprint object.
+
+        Raises:
+            ValueError: If the file is not a valid footprint file.
+        """
+        content = filepath.read_text(encoding="utf-8")
+        sexp = parse_sexp(content)
+
+        if sexp.name not in ("footprint", "module"):
+            raise ValueError(f"Not a footprint file: {filepath}")
+
+        # Get footprint name from first atom child
+        name = sexp.get_string(0) or filepath.stem
+
+        # Get description
+        description = ""
+        descr_node = sexp.find_child("descr")
+        if descr_node:
+            description = descr_node.get_string(0) or ""
+
+        # Get tags
+        tags = ""
+        tags_node = sexp.find_child("tags")
+        if tags_node:
+            tags = tags_node.get_string(0) or ""
+
+        # Parse pads
+        pads = []
+        for pad_node in sexp.find_children("pad"):
+            pad = cls._parse_pad(pad_node)
+            if pad:
+                pads.append(pad)
+
+        return cls(
+            name=name,
+            description=description,
+            tags=tags,
+            pads=pads,
+            path=filepath,
+        )
+
+    @staticmethod
+    def _parse_pad(pad_node) -> PadInfo | None:
+        """Parse a pad s-expression node into PadInfo."""
+        # pad format: (pad "name" type shape (at x y [rot]) (size w h) (layers ...) ...)
+        pad_name = pad_node.get_string(0)
+        if pad_name is None:
+            return None
+
+        # Get pad type (smd, thru_hole, np_thru_hole, connect)
+        pad_type = pad_node.get_string(1) or "smd"
+
+        # Get pad shape (rect, roundrect, oval, circle, custom, trapezoid)
+        shape = pad_node.get_string(2) or "roundrect"
+
+        # Get position from (at x y [rotation])
+        x, y = 0.0, 0.0
+        at_node = pad_node.find_child("at")
+        if at_node:
+            x = at_node.get_float(0) or 0.0
+            y = at_node.get_float(1) or 0.0
+
+        # Get size from (size width height)
+        width, height = 0.0, 0.0
+        size_node = pad_node.find_child("size")
+        if size_node:
+            width = size_node.get_float(0) or 0.0
+            height = size_node.get_float(1) or 0.0
+
+        # Get layers from (layers "F.Cu" "F.Mask" ...)
+        layers: list[str] = []
+        layers_node = pad_node.find_child("layers")
+        if layers_node:
+            for child in layers_node.children:
+                if child.is_atom and isinstance(child.value, str):
+                    layers.append(child.value)
+
+        return PadInfo(
+            name=pad_name,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            shape=shape,
+            pad_type=pad_type,
+            layers=tuple(layers) if layers else ("F.Cu", "F.Mask", "F.Paste"),
+        )
+
+    def get_pad_positions(self) -> dict[str, tuple[float, float]]:
+        """Get pad positions as a dictionary mapping pad name to (x, y)."""
+        return {pad.name: (pad.x, pad.y) for pad in self.pads}
+
+    def get_pad(self, name: str) -> PadInfo | None:
+        """Get a pad by name."""
+        for pad in self.pads:
+            if pad.name == name:
+                return pad
+        return None
+
+    @property
+    def layers(self) -> set[str]:
+        """Get all layers used by pads in this footprint."""
+        result: set[str] = set()
+        for pad in self.pads:
+            result.update(pad.layers)
+        return result
 
 
 # =============================================================================
@@ -202,8 +349,18 @@ class FootprintLibrary:
     """
     Reads footprint pad positions from KiCad libraries.
 
-    Falls back to hardcoded data for known footprints if library
-    files are not available.
+    Can be used in two ways:
+
+    1. Default mode - searches KiCad standard library paths::
+
+        lib = FootprintLibrary()
+        pads = lib.get_pads("Capacitor_SMD:C_0603_1608Metric")
+
+    2. Load from a specific .pretty directory::
+
+        lib = FootprintLibrary.load("MyProject.pretty")
+        for fp in lib:
+            print(f"{fp.name}: {len(fp.pads)} pads")
     """
 
     # Default KiCad library paths
@@ -213,16 +370,109 @@ class FootprintLibrary:
         os.path.expanduser("~/Library/Application Support/kicad/8.0/footprints"),
     ]
 
-    def __init__(self, library_paths: list[str] = None):
+    def __init__(
+        self,
+        library_paths: list[str] | None = None,
+        *,
+        _path: Path | None = None,
+        _footprints: dict[str, Footprint] | None = None,
+    ):
         """
         Initialize footprint library.
 
         Args:
             library_paths: List of paths to search for .pretty directories.
                           If None, uses default KiCad paths.
+
+        Note:
+            For loading a specific .pretty directory, use FootprintLibrary.load() instead.
         """
         self.library_paths = library_paths or self.KICAD_PATHS
-        self._cache: dict[str, dict[str, tuple]] = {}
+        self._cache: dict[str, dict[str, tuple[float, float]]] = {}
+        # For loaded libraries (from .load())
+        self._path = _path
+        self._footprints: dict[str, Footprint] = _footprints or {}
+
+    @classmethod
+    def load(cls, path: str | Path) -> FootprintLibrary:
+        """Load all footprints from a .pretty directory.
+
+        Args:
+            path: Path to the .pretty directory.
+
+        Returns:
+            FootprintLibrary with all footprints from the directory.
+
+        Raises:
+            ValueError: If the path is not a valid .pretty directory.
+
+        Example::
+
+            lib = FootprintLibrary.load("Capacitor_SMD.pretty")
+            for fp in lib:
+                print(f"{fp.name}: {fp.description}")
+
+            # Get specific footprint
+            c0402 = lib.get_footprint("C_0402_1005Metric")
+            if c0402:
+                print(f"Pads: {len(c0402.pads)}")
+        """
+        path = Path(path)
+
+        if not path.exists():
+            raise ValueError(f"Path does not exist: {path}")
+
+        if not path.is_dir():
+            raise ValueError(f"Not a directory: {path}")
+
+        if not path.name.endswith(".pretty"):
+            raise ValueError(f"Not a .pretty directory: {path}")
+
+        footprints: dict[str, Footprint] = {}
+
+        for mod_file in sorted(path.glob("*.kicad_mod")):
+            try:
+                fp = Footprint.from_file(mod_file)
+                footprints[fp.name] = fp
+            except (ValueError, OSError) as e:
+                # Skip files that can't be parsed
+                print(f"Warning: Could not load {mod_file.name}: {e}")
+                continue
+
+        return cls(library_paths=[], _path=path, _footprints=footprints)
+
+    @property
+    def path(self) -> Path | None:
+        """Path to the loaded .pretty directory (if loaded via load())."""
+        return self._path
+
+    @property
+    def footprints(self) -> list[Footprint]:
+        """List of all footprints in this library (for loaded libraries)."""
+        return list(self._footprints.values())
+
+    def get_footprint(self, name: str) -> Footprint | None:
+        """Get a footprint by name.
+
+        Args:
+            name: Footprint name (e.g., "C_0402_1005Metric")
+
+        Returns:
+            Footprint object or None if not found.
+        """
+        return self._footprints.get(name)
+
+    def __len__(self) -> int:
+        """Number of footprints in this library."""
+        return len(self._footprints)
+
+    def __iter__(self) -> Iterator[Footprint]:
+        """Iterate over footprints in this library."""
+        return iter(self._footprints.values())
+
+    def __contains__(self, name: str) -> bool:
+        """Check if a footprint exists in this library."""
+        return name in self._footprints
 
     def _find_footprint_file(self, lib_name: str, fp_name: str) -> Path | None:
         """Find the .kicad_mod file for a footprint."""
