@@ -19,6 +19,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
+    kicad-tools config                 - View/manage configuration
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -478,6 +479,45 @@ def main(argv: Optional[List[str]] = None) -> int:
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
+    # CONFIG subcommand - configuration management
+    config_parser = subparsers.add_parser("config", help="View and manage configuration")
+    config_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show effective configuration with sources",
+    )
+    config_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create template config file",
+    )
+    config_parser.add_argument(
+        "--paths",
+        action="store_true",
+        help="Show config file paths",
+    )
+    config_parser.add_argument(
+        "--user",
+        action="store_true",
+        help="Use user config for --init",
+    )
+    config_parser.add_argument(
+        "config_action",
+        nargs="?",
+        choices=["get", "set"],
+        help="Config action",
+    )
+    config_parser.add_argument(
+        "config_key",
+        nargs="?",
+        help="Config key (e.g., defaults.format)",
+    )
+    config_parser.add_argument(
+        "config_value",
+        nargs="?",
+        help="Value to set",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -609,6 +649,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "fix-footprints":
         return _run_fix_footprints_command(args)
+
+    elif args.command == "config":
+        return _run_config_command(args)
 
     return 0
 
@@ -1009,6 +1052,28 @@ def _run_optimize_command(args) -> int:
     if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return optimize_main(sub_argv)
+
+
+def _run_config_command(args) -> int:
+    """Handle config command."""
+    from .config_cmd import main as config_main
+
+    sub_argv = []
+    if args.show:
+        sub_argv.append("--show")
+    if args.init:
+        sub_argv.append("--init")
+    if args.paths:
+        sub_argv.append("--paths")
+    if args.user:
+        sub_argv.append("--user")
+    if args.config_action:
+        sub_argv.append(args.config_action)
+    if args.config_key:
+        sub_argv.append(args.config_key)
+    if args.config_value:
+        sub_argv.append(args.config_value)
+    return config_main(sub_argv) or 0
 
 
 def symbols_main() -> int:
