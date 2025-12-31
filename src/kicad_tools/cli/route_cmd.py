@@ -124,6 +124,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=float,
         help="Maximum length mismatch for differential pairs in mm (default: auto based on type)",
     )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -165,52 +171,61 @@ def main(argv: Optional[List[str]] = None) -> int:
         via_diameter=args.via_diameter,
     )
 
-    # Print header
-    print("=" * 60)
-    print("KiCad PCB Autorouter")
-    print("=" * 60)
-    print(f"Input:    {pcb_path}")
-    print(f"Output:   {output_path}")
-    print(f"Strategy: {args.strategy}")
-    if skip_nets:
-        print(f"Skip:     {', '.join(skip_nets)}")
-    if args.bus_routing:
-        print(f"Bus:      enabled ({args.bus_mode} mode)")
-    if args.differential_pairs:
-        print("DiffPair: enabled")
+    # Import progress helpers
+    from kicad_tools.cli.progress import spinner
 
-    if args.verbose:
-        print("\nDesign Rules:")
-        print(f"  Grid resolution: {rules.grid_resolution}mm")
-        print(f"  Trace width:     {rules.trace_width}mm")
-        print(f"  Clearance:       {rules.trace_clearance}mm")
-        print(f"  Via drill:       {rules.via_drill}mm")
-        print(f"  Via diameter:    {rules.via_diameter}mm")
+    quiet = args.quiet
+
+    # Print header (unless quiet)
+    if not quiet:
+        print("=" * 60)
+        print("KiCad PCB Autorouter")
+        print("=" * 60)
+        print(f"Input:    {pcb_path}")
+        print(f"Output:   {output_path}")
+        print(f"Strategy: {args.strategy}")
+        if skip_nets:
+            print(f"Skip:     {', '.join(skip_nets)}")
+        if args.bus_routing:
+            print(f"Bus:      enabled ({args.bus_mode} mode)")
+        if args.differential_pairs:
+            print("DiffPair: enabled")
+
+        if args.verbose:
+            print("\nDesign Rules:")
+            print(f"  Grid resolution: {rules.grid_resolution}mm")
+            print(f"  Trace width:     {rules.trace_width}mm")
+            print(f"  Clearance:       {rules.trace_clearance}mm")
+            print(f"  Via drill:       {rules.via_drill}mm")
+            print(f"  Via diameter:    {rules.via_diameter}mm")
 
     # Load PCB
-    print("\n--- Loading PCB ---")
+    if not quiet:
+        print("\n--- Loading PCB ---")
     try:
-        router, net_map = load_pcb_for_routing(
-            str(pcb_path),
-            skip_nets=skip_nets,
-            rules=rules,
-        )
+        with spinner("Loading PCB...", quiet=quiet):
+            router, net_map = load_pcb_for_routing(
+                str(pcb_path),
+                skip_nets=skip_nets,
+                rules=rules,
+            )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
-    print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
-    print(f"  Total nets: {len(net_map)}")
-
     nets_to_route = len([n for n in router.nets if n > 0])
-    print(f"  Nets to route: {nets_to_route}")
 
-    if args.verbose:
-        print("\n  Net breakdown:")
-        for net_name, net_num in sorted(net_map.items(), key=lambda x: x[1]):
-            if net_name and net_name not in skip_nets:
-                pad_count = len(router.nets.get(net_num, []))
-                print(f"    {net_name}: {pad_count} pads")
+    if not quiet:
+        print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+        print(f"  Total nets: {len(net_map)}")
+        print(f"  Nets to route: {nets_to_route}")
+
+        if args.verbose:
+            print("\n  Net breakdown:")
+            for net_name, net_num in sorted(net_map.items(), key=lambda x: x[1]):
+                if net_name and net_name not in skip_nets:
+                    pad_count = len(router.nets.get(net_num, []))
+                    print(f"    {net_name}: {pad_count} pads")
 
     # Configure bus routing if enabled
     bus_config = None
@@ -228,7 +243,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         # Show detected buses
-        if args.verbose:
+        if args.verbose and not quiet:
             analysis = router.get_bus_analysis()
             if analysis["total_groups"] > 0:
                 print(f"\n  Detected {analysis['total_groups']} bus groups:")
@@ -249,7 +264,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         # Show detected differential pairs
-        if args.verbose:
+        if args.verbose and not quiet:
             analysis = router.analyze_differential_pairs()
             if analysis["total_pairs"] > 0:
                 print(f"\n  Detected {analysis['total_pairs']} differential pairs:")
@@ -266,23 +281,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("\n  No differential pairs detected")
 
     # Route
-    print(f"\n--- Routing ({args.strategy}) ---")
+    if not quiet:
+        print(f"\n--- Routing ({args.strategy}) ---")
     try:
-        if args.differential_pairs and args.strategy == "basic":
-            # Use differential pair-aware routing for basic strategy
-            routes, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
-        elif args.bus_routing and args.strategy == "basic":
-            # Use bus-aware routing for basic strategy
-            routes = router.route_all_with_buses(bus_config)
-        elif args.strategy == "basic":
-            routes = router.route_all()
-        elif args.strategy == "negotiated":
-            routes = router.route_all_negotiated(max_iterations=args.iterations)
-        elif args.strategy == "monte-carlo":
-            routes = router.route_all_monte_carlo(
-                num_trials=args.mc_trials,
-                verbose=args.verbose,
-            )
+        with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
+            if args.differential_pairs and args.strategy == "basic":
+                # Use differential pair-aware routing for basic strategy
+                _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+            elif args.bus_routing and args.strategy == "basic":
+                # Use bus-aware routing for basic strategy
+                _ = router.route_all_with_buses(bus_config)
+            elif args.strategy == "basic":
+                _ = router.route_all()
+            elif args.strategy == "negotiated":
+                _ = router.route_all_negotiated(max_iterations=args.iterations)
+            elif args.strategy == "monte-carlo":
+                _ = router.route_all_monte_carlo(
+                    num_trials=args.mc_trials,
+                    verbose=args.verbose and not quiet,
+                )
     except Exception as e:
         print(f"Error during routing: {e}", file=sys.stderr)
         return 1
@@ -290,52 +307,63 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Get statistics
     stats = router.get_statistics()
 
-    print("\n--- Results ---")
-    print(f"  Routes created:  {stats['routes']}")
-    print(f"  Segments:        {stats['segments']}")
-    print(f"  Vias:            {stats['vias']}")
-    print(f"  Total length:    {stats['total_length_mm']:.2f}mm")
-    print(f"  Nets routed:     {stats['nets_routed']}/{nets_to_route}")
+    if not quiet:
+        print("\n--- Results ---")
+        print(f"  Routes created:  {stats['routes']}")
+        print(f"  Segments:        {stats['segments']}")
+        print(f"  Vias:            {stats['vias']}")
+        print(f"  Total length:    {stats['total_length_mm']:.2f}mm")
+        print(f"  Nets routed:     {stats['nets_routed']}/{nets_to_route}")
 
     # Report differential pair length mismatch warnings
-    if diffpair_warnings:
+    if diffpair_warnings and not quiet:
         print(f"\n--- Differential Pair Warnings ({len(diffpair_warnings)}) ---")
         for warning in diffpair_warnings:
             print(f"  {warning}")
 
     # Save output
     if args.dry_run:
-        print("\n--- Dry run - not saving ---")
+        if not quiet:
+            print("\n--- Dry run - not saving ---")
     else:
-        print("\n--- Saving routed PCB ---")
+        if not quiet:
+            print("\n--- Saving routed PCB ---")
 
-        # Read original PCB content
-        original_content = pcb_path.read_text()
+        with spinner("Saving routed PCB...", quiet=quiet):
+            # Read original PCB content
+            original_content = pcb_path.read_text()
 
-        # Get route S-expressions
-        route_sexp = router.to_sexp()
+            # Get route S-expressions
+            route_sexp = router.to_sexp()
 
-        # Insert routes before final closing parenthesis
-        if route_sexp:
-            output_content = original_content.rstrip().rstrip(")")
-            output_content += "\n  ; === AUTOROUTED TRACES ===\n"
-            output_content += f"  {route_sexp}\n"
-            output_content += ")\n"
-        else:
-            output_content = original_content
-            print("  Warning: No routes generated!")
+            # Insert routes before final closing parenthesis
+            if route_sexp:
+                output_content = original_content.rstrip().rstrip(")")
+                output_content += "\n  ; === AUTOROUTED TRACES ===\n"
+                output_content += f"  {route_sexp}\n"
+                output_content += ")\n"
+            else:
+                output_content = original_content
+                if not quiet:
+                    print("  Warning: No routes generated!")
 
-        output_path.write_text(output_content)
-        print(f"  Saved to: {output_path}")
+            output_path.write_text(output_content)
+
+        if not quiet:
+            print(f"  Saved to: {output_path}")
 
     # Summary
-    print("\n" + "=" * 60)
+    if not quiet:
+        print("\n" + "=" * 60)
+        if stats['nets_routed'] == nets_to_route:
+            print("SUCCESS: All nets routed!")
+        else:
+            print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
+            print("  Some nets may require manual routing or a different strategy.")
+
     if stats['nets_routed'] == nets_to_route:
-        print("SUCCESS: All nets routed!")
         return 0
     else:
-        print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
-        print("  Some nets may require manual routing or a different strategy.")
         return 1 if stats['nets_routed'] < nets_to_route else 0
 
 

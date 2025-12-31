@@ -94,6 +94,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Show full stack traces on errors",
         dest="global_verbose",
     )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+        dest="global_quiet",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -285,6 +292,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
+    route_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     # REASON subcommand - LLM-driven PCB layout
     reason_parser = subparsers.add_parser("reason", help="LLM-driven PCB layout reasoning")
@@ -334,6 +344,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     optimize_parser.add_argument("-v", "--verbose", action="store_true")
     optimize_parser.add_argument("--dry-run", action="store_true", help="Show results without writing")
+    optimize_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     # VALIDATE-FOOTPRINTS subcommand
     validate_fp_parser = subparsers.add_parser(
@@ -440,6 +453,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--edge-clearance", type=float, default=0.3, help="Min edge clearance (mm)"
     )
     placement_check.add_argument("-v", "--verbose", action="store_true")
+    placement_check.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     # placement fix
     placement_fix = placement_subparsers.add_parser(
@@ -458,6 +474,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     placement_fix.add_argument("--dry-run", action="store_true")
     placement_fix.add_argument("-v", "--verbose", action="store_true")
+    placement_fix.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     args = parser.parse_args(argv)
 
@@ -605,6 +624,9 @@ def _run_validate_footprints_command(args) -> int:
         sub_argv.extend(["--format", args.format])
     if args.errors_only:
         sub_argv.append("--errors-only")
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
     return main_validate(sub_argv)
 
 
@@ -621,6 +643,9 @@ def _run_fix_footprints_command(args) -> int:
         sub_argv.extend(["--format", args.format])
     if args.dry_run:
         sub_argv.append("--dry-run")
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
     return main_fix(sub_argv)
 
 
@@ -879,6 +904,9 @@ def _run_route_command(args) -> int:
         sub_argv.append("--verbose")
     if args.dry_run:
         sub_argv.append("--dry-run")
+    # Use command-level quiet or global quiet
+    if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
     return route_main(sub_argv)
 
 
@@ -931,6 +959,9 @@ def _run_placement_command(args) -> int:
             sub_argv.extend(["--edge-clearance", str(args.edge_clearance)])
         if args.verbose:
             sub_argv.append("--verbose")
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "fix":
@@ -945,6 +976,9 @@ def _run_placement_command(args) -> int:
             sub_argv.append("--dry-run")
         if args.verbose:
             sub_argv.append("--verbose")
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
         return placement_main(sub_argv) or 0
 
     return 1
@@ -971,6 +1005,9 @@ def _run_optimize_command(args) -> int:
         sub_argv.append("--verbose")
     if args.dry_run:
         sub_argv.append("--dry-run")
+    # Use command-level quiet or global quiet
+    if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
     return optimize_main(sub_argv)
 
 
