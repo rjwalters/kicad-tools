@@ -5,7 +5,7 @@ Provides query interface for PCB footprints.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, cast
 
 from .base import BaseQuery
 
@@ -51,7 +51,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Example:
             r0402 = query.by_name("Resistor_SMD:R_0402_1005Metric").all()
         """
-        return self.filter(name=name)
+        return cast("FootprintQuery", self.filter(name=name))
 
     def by_value(self, value: str) -> "FootprintQuery":
         """Filter by value.
@@ -65,7 +65,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Example:
             caps_100nf = query.by_value("100nF").all()
         """
-        return self.filter(value=value)
+        return cast("FootprintQuery", self.filter(value=value))
 
     def on_layer(self, layer: str) -> "FootprintQuery":
         """Filter by layer.
@@ -79,7 +79,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Example:
             top_side = query.on_layer("F.Cu").all()
         """
-        return self.filter(layer=layer)
+        return cast("FootprintQuery", self.filter(layer=layer))
 
     def on_top(self) -> "FootprintQuery":
         """Filter to footprints on top layer (F.Cu).
@@ -103,7 +103,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Returns:
             Query filtered to SMD footprints
         """
-        return self.filter(attr="smd")
+        return cast("FootprintQuery", self.filter(attr="smd"))
 
     def through_hole(self) -> "FootprintQuery":
         """Filter to through-hole footprints.
@@ -111,7 +111,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Returns:
             Query filtered to through-hole footprints
         """
-        return self.filter(attr="through_hole")
+        return cast("FootprintQuery", self.filter(attr="through_hole"))
 
     def capacitors(self) -> "FootprintQuery":
         """Filter to capacitors (C* references).
@@ -119,7 +119,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Returns:
             Query filtered to capacitors
         """
-        return self.filter(reference__startswith="C")
+        return cast("FootprintQuery", self.filter(reference__startswith="C"))
 
     def resistors(self) -> "FootprintQuery":
         """Filter to resistors (R* references).
@@ -127,7 +127,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Returns:
             Query filtered to resistors
         """
-        return self.filter(reference__startswith="R")
+        return cast("FootprintQuery", self.filter(reference__startswith="R"))
 
     def ics(self) -> "FootprintQuery":
         """Filter to ICs (U* references).
@@ -135,7 +135,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Returns:
             Query filtered to ICs
         """
-        return self.filter(reference__startswith="U")
+        return cast("FootprintQuery", self.filter(reference__startswith="U"))
 
     def connectors(self) -> "FootprintQuery":
         """Filter to connectors (J* references).
@@ -143,7 +143,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Returns:
             Query filtered to connectors
         """
-        return self.filter(reference__startswith="J")
+        return cast("FootprintQuery", self.filter(reference__startswith="J"))
 
     def with_prefix(self, prefix: str) -> "FootprintQuery":
         """Filter by reference prefix.
@@ -157,10 +157,10 @@ class FootprintQuery(BaseQuery["Footprint"]):
         Example:
             transistors = query.with_prefix("Q").all()
         """
-        return self.filter(reference__startswith=prefix)
+        return cast("FootprintQuery", self.filter(reference__startswith=prefix))
 
 
-class FootprintList(list):
+class FootprintList(List["Footprint"]):
     """List subclass with query methods for footprints.
 
     Extends list to provide backward compatibility while adding
@@ -234,7 +234,7 @@ class FootprintList(list):
         """
         return self.query().by_value(value).all()
 
-    def filter(self, **kwargs) -> List["Footprint"]:
+    def filter(self, **kwargs: Any) -> List["Footprint"]:
         """Filter footprints (shortcut, returns list).
 
         For chained filtering, use .query().filter(...).filter(...)
@@ -247,7 +247,7 @@ class FootprintList(list):
         """
         return self.query().filter(**kwargs).all()
 
-    def exclude(self, **kwargs) -> List["Footprint"]:
+    def exclude(self, **kwargs: Any) -> List["Footprint"]:
         """Exclude footprints (shortcut, returns list).
 
         Args:
