@@ -114,7 +114,7 @@ class PlacementFixer:
             return None
 
         # Calculate move vector based on conflict type
-        move_vector = self._calculate_move_vector(conflict, component_to_move)
+        move_vector = self._calculate_move_vector(conflict, component_to_move, analyzer)
         if not move_vector:
             return None
 
@@ -164,70 +164,178 @@ class PlacementFixer:
         self,
         conflict: Conflict,
         component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
     ) -> Point | None:
         """Calculate the move vector to resolve a conflict."""
         if conflict.type == ConflictType.COURTYARD_OVERLAP:
-            return self._calc_courtyard_fix(conflict, component_to_move)
+            return self._calc_courtyard_fix(conflict, component_to_move, analyzer)
         elif conflict.type == ConflictType.PAD_CLEARANCE:
-            return self._calc_pad_clearance_fix(conflict, component_to_move)
+            return self._calc_pad_clearance_fix(conflict, component_to_move, analyzer)
         elif conflict.type == ConflictType.HOLE_TO_HOLE:
-            return self._calc_hole_fix(conflict, component_to_move)
+            return self._calc_hole_fix(conflict, component_to_move, analyzer)
         elif conflict.type == ConflictType.EDGE_CLEARANCE:
             return self._calc_edge_fix(conflict)
         else:
             return None
 
-    def _calc_courtyard_fix(self, conflict: Conflict, component_to_move: str) -> Point | None:
-        """Calculate move to fix courtyard overlap."""
+    def _get_component_position(
+        self,
+        reference: str,
+        analyzer: PlacementAnalyzer | None,
+    ) -> Point | None:
+        """Get the position of a component by reference.
+
+        Args:
+            reference: Component reference designator (e.g., "R1")
+            analyzer: PlacementAnalyzer with component data
+
+        Returns:
+            Component center position, or None if not found
+        """
+        if not analyzer:
+            return None
+        for comp in analyzer.get_components():
+            if comp.reference == reference:
+                return comp.position
+        return None
+
+    def _get_direction_vector(
+        self,
+        from_pos: Point,
+        to_pos: Point,
+    ) -> tuple[float, float] | None:
+        """Calculate unit direction vector from one point to another.
+
+        Args:
+            from_pos: Starting point
+            to_pos: Target point
+
+        Returns:
+            Tuple of (dx, dy) normalized to unit length, or None if points coincide
+        """
+        dx = to_pos.x - from_pos.x
+        dy = to_pos.y - from_pos.y
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist < 1e-6:
+            return None
+
+        return (dx / dist, dy / dist)
+
+    def _calc_courtyard_fix(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate move to fix courtyard overlap.
+
+        Uses 2D displacement when component positions are available,
+        calculating the optimal direction based on component centroids.
+        Falls back to X-only movement when geometry data is unavailable.
+        """
         if not conflict.overlap_amount:
             return None
 
-        # Calculate direction from conflict location to component
-        # and move in that direction by overlap amount + margin
         overlap = conflict.overlap_amount
         margin = 0.1  # Add small margin
+        move_dist = overlap + margin
 
-        # Simple heuristic: move along the axis with less overlap
-        # This assumes the conflict location is at overlap center
-        # Prefer horizontal movement
+        # Determine direction sign based on which component we're moving
+        sign = 1 if component_to_move == conflict.component2 else -1
+
+        # Try to calculate 2D direction using component positions
+        if analyzer:
+            pos1 = self._get_component_position(conflict.component1, analyzer)
+            pos2 = self._get_component_position(conflict.component2, analyzer)
+
+            if pos1 and pos2:
+                # Calculate direction from comp1 to comp2
+                direction = self._get_direction_vector(pos1, pos2)
+                if direction:
+                    dx, dy = direction
+                    # Move along the line connecting centroids
+                    return Point(sign * move_dist * dx, sign * move_dist * dy)
+
+        # Fallback: X-only movement (backward compatible)
         if self.strategy == FixStrategy.SPREAD:
-            move = overlap + margin
-            # Determine direction based on which component we're moving
-            sign = 1 if component_to_move == conflict.component2 else -1
-            return Point(sign * move, 0)
+            return Point(sign * move_dist, 0)
 
-        return Point(overlap + margin, 0)
+        return Point(move_dist, 0)
 
-    def _calc_pad_clearance_fix(self, conflict: Conflict, component_to_move: str) -> Point | None:
-        """Calculate move to fix pad clearance violation."""
+    def _calc_pad_clearance_fix(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate move to fix pad clearance violation.
+
+        Uses 2D displacement when component positions are available,
+        moving away from the conflict location along the vector to component center.
+        Falls back to X-only movement when geometry data is unavailable.
+        """
         if conflict.actual_clearance is None or conflict.required_clearance is None:
             return None
 
         # Gap needed
         gap = conflict.required_clearance - conflict.actual_clearance
         margin = 0.05  # Small margin
+        move_dist = gap + margin
 
-        # Move away from the conflict location
-        move = gap + margin
-
-        # Determine direction - move c2 to the right, c1 to the left
+        # Determine direction sign based on which component we're moving
         sign = 1 if component_to_move == conflict.component2 else -1
 
-        return Point(sign * move, 0)
+        # Try to calculate 2D direction from conflict location to component center
+        if analyzer:
+            comp_pos = self._get_component_position(component_to_move, analyzer)
+            if comp_pos:
+                # Calculate direction from conflict location to component
+                direction = self._get_direction_vector(conflict.location, comp_pos)
+                if direction:
+                    dx, dy = direction
+                    # Move component away from conflict (along the direction to its center)
+                    return Point(move_dist * dx, move_dist * dy)
 
-    def _calc_hole_fix(self, conflict: Conflict, component_to_move: str) -> Point | None:
-        """Calculate move to fix hole-to-hole violation."""
+        # Fallback: X-only movement (backward compatible)
+        return Point(sign * move_dist, 0)
+
+    def _calc_hole_fix(
+        self,
+        conflict: Conflict,
+        component_to_move: str,
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> Point | None:
+        """Calculate move to fix hole-to-hole violation.
+
+        Uses 2D displacement when component positions are available,
+        moving away from the conflict location along the vector to component center.
+        Falls back to X-only movement when geometry data is unavailable.
+        """
         if conflict.actual_clearance is None or conflict.required_clearance is None:
             return None
 
         # Gap needed
         gap = conflict.required_clearance - conflict.actual_clearance
         margin = 0.1  # Margin for holes
+        move_dist = gap + margin
 
-        move = gap + margin
+        # Determine direction sign based on which component we're moving
         sign = 1 if component_to_move == conflict.component2 else -1
 
-        return Point(sign * move, 0)
+        # Try to calculate 2D direction from conflict location to component center
+        if analyzer:
+            comp_pos = self._get_component_position(component_to_move, analyzer)
+            if comp_pos:
+                # Calculate direction from conflict location to component
+                direction = self._get_direction_vector(conflict.location, comp_pos)
+                if direction:
+                    dx, dy = direction
+                    # Move component away from conflict (along the direction to its center)
+                    return Point(move_dist * dx, move_dist * dy)
+
+        # Fallback: X-only movement (backward compatible)
+        return Point(sign * move_dist, 0)
 
     def _calc_edge_fix(self, conflict: Conflict) -> Point | None:
         """Calculate move to fix edge clearance violation."""
