@@ -528,3 +528,278 @@ class TestConfigOptions:
 
         config = OptimizationConfig(compress_staircase=False)
         assert config.compress_staircase is False
+
+
+class TestChainSorting:
+    """Tests for segment chain sorting (issue #105 fix)."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(
+        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
+    ) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name=f"NET{net}",
+        )
+
+    def test_single_chain_detected(self, optimizer):
+        """Test that a single connected chain is detected as one chain."""
+        # Create a simple L-shaped path
+        segments = [
+            self.make_segment(0, 0, 5, 0),  # Horizontal
+            self.make_segment(5, 0, 5, 5),  # Vertical
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 1
+        assert len(chains[0]) == 2
+
+    def test_multiple_chains_detected(self, optimizer):
+        """Test that disconnected segments form separate chains."""
+        # Create two separate paths that don't touch
+        segments = [
+            # Chain 1: L-shape at origin
+            self.make_segment(0, 0, 5, 0),
+            self.make_segment(5, 0, 5, 5),
+            # Chain 2: L-shape 20mm away (not connected)
+            self.make_segment(20, 0, 25, 0),
+            self.make_segment(25, 0, 25, 5),
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 2
+        assert len(chains[0]) == 2
+        assert len(chains[1]) == 2
+
+    def test_chain_segments_sorted_in_order(self, optimizer):
+        """Test that chain segments are sorted in path order."""
+        # Create segments in scrambled order
+        segments = [
+            self.make_segment(5, 0, 5, 5),   # Middle (should be second)
+            self.make_segment(0, 0, 5, 0),   # Start (should be first)
+            self.make_segment(5, 5, 10, 5),  # End (should be third)
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 1
+        sorted_chain = chains[0]
+
+        # Check segments are in path order
+        assert abs(sorted_chain[0].x1 - 0) < 1e-4  # Starts at origin
+        assert abs(sorted_chain[-1].x2 - 10) < 1e-4  # Ends at (10, 5)
+
+        # Check connectivity: each segment's end connects to next segment's start
+        for i in range(len(sorted_chain) - 1):
+            assert abs(sorted_chain[i].x2 - sorted_chain[i + 1].x1) < 1e-4
+            assert abs(sorted_chain[i].y2 - sorted_chain[i + 1].y1) < 1e-4
+
+    def test_reversed_segments_handled(self, optimizer):
+        """Test that segments with reversed direction are handled correctly."""
+        # Create segments where one is "backwards"
+        segments = [
+            self.make_segment(0, 0, 5, 0),   # Forward: (0,0) -> (5,0)
+            self.make_segment(5, 5, 5, 0),   # Backwards: end connects to previous end
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        assert len(chains) == 1
+        sorted_chain = chains[0]
+
+        # After sorting, segments should be connected end-to-start
+        for i in range(len(sorted_chain) - 1):
+            assert abs(sorted_chain[i].x2 - sorted_chain[i + 1].x1) < 1e-4
+            assert abs(sorted_chain[i].y2 - sorted_chain[i + 1].y1) < 1e-4
+
+
+class TestMultiChainOptimization:
+    """Tests for multi-chain optimization safety (issue #105 core fix)."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(
+        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
+    ) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name=f"NET{net}",
+        )
+
+    def test_parallel_chains_not_merged(self, optimizer):
+        """Test that parallel but separate chains are not merged.
+
+        This is the core issue #105 scenario: two parallel traces that
+        should remain separate after optimization.
+        """
+        # Two parallel horizontal traces 5mm apart
+        segments = [
+            # Chain 1: horizontal at y=0
+            self.make_segment(0, 0, 10, 0),
+            # Chain 2: horizontal at y=5 (parallel, not connected)
+            self.make_segment(0, 5, 10, 5),
+        ]
+
+        result = optimizer.optimize_segments(segments)
+
+        # Should still have 2 segments (one per chain)
+        assert len(result) == 2
+
+        # Verify chains weren't merged into something crossing between them
+        # Each segment should be purely horizontal
+        for seg in result:
+            assert abs(seg.y1 - seg.y2) < 1e-4, "Segment should be horizontal"
+
+    def test_disconnected_staircases_optimized_independently(self, optimizer):
+        """Test that two disconnected staircase patterns optimize separately."""
+        segments = []
+
+        # Staircase 1: at y=0
+        x, y = 0, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Staircase 2: 20mm away (not connected)
+        x, y = 20, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Before: 12 segments (6 per staircase)
+        assert len(segments) == 12
+
+        result = optimizer.optimize_segments(segments)
+
+        # After: should be less than 12 (staircases compressed)
+        assert len(result) < 12
+
+        # Verify no segment crosses from chain 1 to chain 2
+        # Chain 1 should have x < 10, Chain 2 should have x > 15
+        for seg in result:
+            if seg.x1 < 10:
+                assert seg.x2 < 15, "Segment from chain 1 should not reach chain 2"
+            if seg.x1 > 15:
+                assert seg.x2 > 10, "Segment from chain 2 should not reach chain 1"
+
+    def test_t_junction_single_chain(self, optimizer):
+        """Test that a T-junction (3 segments meeting at a point) forms one chain."""
+        # T-junction: segments meet at (5, 0)
+        segments = [
+            self.make_segment(0, 0, 5, 0),   # Left arm
+            self.make_segment(5, 0, 10, 0),  # Right arm
+            self.make_segment(5, 0, 5, 5),   # Vertical arm
+        ]
+
+        chains = optimizer._sort_into_chains(segments)
+
+        # All segments are connected, should be one chain
+        assert len(chains) == 1
+        assert len(chains[0]) == 3
+
+    def test_endpoints_preserved_after_optimization(self, optimizer):
+        """Test that chain endpoints are preserved after optimization."""
+        # Create a connected staircase
+        segments = []
+        x, y = 0, 0
+        for i in range(8):
+            if i % 2 == 0:
+                new_x = x + 1
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Record original endpoints
+        original_start = (segments[0].x1, segments[0].y1)
+        original_end = (segments[-1].x2, segments[-1].y2)
+
+        result = optimizer.optimize_segments(segments)
+
+        # Find actual start and end in result
+        all_starts = [(s.x1, s.y1) for s in result]
+        all_ends = [(s.x2, s.y2) for s in result]
+        all_points = set(all_starts + all_ends)
+
+        # Original endpoints should still exist
+        assert any(
+            abs(p[0] - original_start[0]) < 1e-4 and abs(p[1] - original_start[1]) < 1e-4
+            for p in all_points
+        ), "Original start point should be preserved"
+        assert any(
+            abs(p[0] - original_end[0]) < 1e-4 and abs(p[1] - original_end[1]) < 1e-4
+            for p in all_points
+        ), "Original end point should be preserved"
+
+
+class TestSegmentsTouch:
+    """Tests for _segments_touch helper."""
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def make_segment(self, x1, y1, x2, y2):
+        return Segment(
+            x1=x1, y1=y1, x2=x2, y2=y2,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+        )
+
+    def test_end_to_start_connection(self, optimizer):
+        """Test end-to-start connection detected."""
+        s1 = self.make_segment(0, 0, 5, 0)
+        s2 = self.make_segment(5, 0, 10, 0)
+        assert optimizer._segments_touch(s1, s2) is True
+
+    def test_end_to_end_connection(self, optimizer):
+        """Test end-to-end connection detected."""
+        s1 = self.make_segment(0, 0, 5, 0)
+        s2 = self.make_segment(10, 0, 5, 0)  # Ends at same point
+        assert optimizer._segments_touch(s1, s2) is True
+
+    def test_start_to_start_connection(self, optimizer):
+        """Test start-to-start connection detected."""
+        s1 = self.make_segment(5, 0, 10, 0)
+        s2 = self.make_segment(5, 0, 5, 5)  # Starts at same point
+        assert optimizer._segments_touch(s1, s2) is True
+
+    def test_no_connection(self, optimizer):
+        """Test disconnected segments not detected as touching."""
+        s1 = self.make_segment(0, 0, 5, 0)
+        s2 = self.make_segment(10, 0, 15, 0)  # 5mm gap
+        assert optimizer._segments_touch(s1, s2) is False

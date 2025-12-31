@@ -104,13 +104,14 @@ class TraceOptimizer:
         Optimize a list of segments for a single net/layer.
 
         Applies enabled optimizations in order:
-        1. Collinear segment merging
-        2. Zigzag elimination
-        3. Staircase compression
-        4. 45-degree corner conversion
+        1. Sort segments into connected chains (to avoid cross-chain shortcuts)
+        2. Collinear segment merging
+        3. Zigzag elimination
+        4. Staircase compression
+        5. 45-degree corner conversion
 
         Args:
-            segments: List of segments to optimize (should be connected path).
+            segments: List of segments to optimize (may contain multiple chains).
 
         Returns:
             Optimized list of segments.
@@ -118,22 +119,30 @@ class TraceOptimizer:
         if not segments:
             return []
 
-        result = list(segments)
+        # Sort segments into connected chains to prevent cross-chain shortcuts
+        chains = self._sort_into_chains(segments)
 
-        # Apply optimizations in order
-        if self.config.merge_collinear:
-            result = self.merge_collinear(result)
+        # Optimize each chain independently
+        all_optimized: list[Segment] = []
+        for chain in chains:
+            result = list(chain)
 
-        if self.config.eliminate_zigzags:
-            result = self.eliminate_zigzags(result)
+            # Apply optimizations in order
+            if self.config.merge_collinear:
+                result = self.merge_collinear(result)
 
-        if self.config.compress_staircase:
-            result = self.compress_staircase(result)
+            if self.config.eliminate_zigzags:
+                result = self.eliminate_zigzags(result)
 
-        if self.config.convert_45_corners:
-            result = self.convert_corners_45(result)
+            if self.config.compress_staircase:
+                result = self.compress_staircase(result)
 
-        return result
+            if self.config.convert_45_corners:
+                result = self.convert_corners_45(result)
+
+            all_optimized.extend(result)
+
+        return all_optimized
 
     def merge_collinear(self, segments: list[Segment]) -> list[Segment]:
         """
@@ -232,7 +241,7 @@ class TraceOptimizer:
 
         return result
 
-    def compress_staircase(self, segments: List[Segment]) -> List[Segment]:
+    def compress_staircase(self, segments: list[Segment]) -> list[Segment]:
         """
         Compress staircase patterns into optimal diagonal+orthogonal paths.
 
@@ -252,7 +261,7 @@ class TraceOptimizer:
         if len(segments) < self.config.min_staircase_segments:
             return list(segments)
 
-        result: List[Segment] = []
+        result: list[Segment] = []
         i = 0
 
         while i < len(segments):
@@ -276,7 +285,7 @@ class TraceOptimizer:
 
         return result
 
-    def _find_staircase_end(self, segments: List[Segment], start_idx: int) -> int:
+    def _find_staircase_end(self, segments: list[Segment], start_idx: int) -> int:
         """
         Find the end index of a staircase pattern starting at start_idx.
 
@@ -350,10 +359,10 @@ class TraceOptimizer:
 
     def _optimal_path(
         self,
-        start: Tuple[float, float],
-        end: Tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
         template: Segment,
-    ) -> List[Segment]:
+    ) -> list[Segment]:
         """
         Generate an optimal 2-3 segment path from start to end.
 
@@ -390,7 +399,7 @@ class TraceOptimizer:
         mid_x = start[0] + diag_dx
         mid_y = start[1] + diag_dy
 
-        result: List[Segment] = []
+        result: list[Segment] = []
 
         # Create diagonal segment if there's diagonal distance
         if diag_dist > self.config.tolerance:
@@ -537,6 +546,10 @@ class TraceOptimizer:
         """
         Optimize a complete route.
 
+        Segments are grouped by layer and then sorted into connected chains
+        before optimization. This prevents optimization from creating
+        shortcuts between unconnected parts of the route.
+
         Args:
             route: Route to optimize.
 
@@ -550,7 +563,7 @@ class TraceOptimizer:
                 segments_by_layer[seg.layer] = []
             segments_by_layer[seg.layer].append(seg)
 
-        # Optimize each layer's segments
+        # Optimize each layer's segments (chain sorting happens in optimize_segments)
         optimized_segments: list[Segment] = []
         for _layer, segs in segments_by_layer.items():
             optimized = self.optimize_segments(segs)
@@ -631,6 +644,194 @@ class TraceOptimizer:
         """Check if end of s1 connects to start of s2."""
         tol = self.config.tolerance
         return abs(s1.x2 - s2.x1) < tol and abs(s1.y2 - s2.y1) < tol
+
+    def _segments_touch(self, s1: Segment, s2: Segment) -> bool:
+        """Check if two segments share any endpoint (regardless of direction)."""
+        tol = self.config.tolerance
+
+        # Check all four possible endpoint connections
+        # s1.end -> s2.start
+        if abs(s1.x2 - s2.x1) < tol and abs(s1.y2 - s2.y1) < tol:
+            return True
+        # s1.end -> s2.end
+        if abs(s1.x2 - s2.x2) < tol and abs(s1.y2 - s2.y2) < tol:
+            return True
+        # s1.start -> s2.start
+        if abs(s1.x1 - s2.x1) < tol and abs(s1.y1 - s2.y1) < tol:
+            return True
+        # s1.start -> s2.end
+        if abs(s1.x1 - s2.x2) < tol and abs(s1.y1 - s2.y2) < tol:
+            return True
+
+        return False
+
+    def _sort_into_chains(self, segments: list[Segment]) -> list[list[Segment]]:
+        """
+        Sort segments into connected chains.
+
+        Groups segments that form continuous paths. Segments that share
+        endpoints belong to the same chain. This prevents optimization
+        from creating shortcuts between unconnected segments.
+
+        Args:
+            segments: List of segments to sort.
+
+        Returns:
+            List of chains, where each chain is a list of connected segments.
+        """
+        if not segments:
+            return []
+
+        if len(segments) == 1:
+            return [list(segments)]
+
+        # Track which segments have been assigned to a chain
+        remaining = set(range(len(segments)))
+        chains: list[list[Segment]] = []
+
+        while remaining:
+            # Start a new chain with an arbitrary remaining segment
+            start_idx = next(iter(remaining))
+            remaining.remove(start_idx)
+
+            chain_indices = [start_idx]
+
+            # Grow the chain by finding connected segments
+            changed = True
+            while changed:
+                changed = False
+                for idx in list(remaining):
+                    seg = segments[idx]
+                    # Check if this segment connects to any segment in the chain
+                    for chain_idx in chain_indices:
+                        if self._segments_touch(segments[chain_idx], seg):
+                            chain_indices.append(idx)
+                            remaining.remove(idx)
+                            changed = True
+                            break
+
+            # Sort chain segments into path order
+            chain_segments = [segments[i] for i in chain_indices]
+            sorted_chain = self._sort_chain_segments(chain_segments)
+            chains.append(sorted_chain)
+
+        return chains
+
+    def _sort_chain_segments(self, segments: list[Segment]) -> list[Segment]:
+        """
+        Sort segments within a chain into connected path order.
+
+        Arranges segments so that each segment's end connects to the
+        next segment's start, forming a continuous path.
+
+        Args:
+            segments: List of segments belonging to the same chain.
+
+        Returns:
+            Segments sorted in path order.
+        """
+        if len(segments) <= 1:
+            return list(segments)
+
+        tol = self.config.tolerance
+
+        # Build adjacency: for each segment, find what connects to its endpoints
+        # We'll find a segment that has an endpoint not shared with any other segment
+        # (a "tip" of the chain) and traverse from there.
+
+        result: list[Segment] = []
+        remaining = list(segments)
+
+        # Find a starting segment (one with an endpoint that's not shared)
+        def find_chain_tip() -> int:
+            """Find a segment at the tip of the chain (has an unshared endpoint)."""
+            for i, seg in enumerate(remaining):
+                # Check if seg's start point is shared with any other segment
+                start_shared = False
+                end_shared = False
+                for j, other in enumerate(remaining):
+                    if i == j:
+                        continue
+                    # Check if start of seg matches any endpoint of other
+                    if (abs(seg.x1 - other.x1) < tol and abs(seg.y1 - other.y1) < tol) or \
+                       (abs(seg.x1 - other.x2) < tol and abs(seg.y1 - other.y2) < tol):
+                        start_shared = True
+                    # Check if end of seg matches any endpoint of other
+                    if (abs(seg.x2 - other.x1) < tol and abs(seg.y2 - other.y1) < tol) or \
+                       (abs(seg.x2 - other.x2) < tol and abs(seg.y2 - other.y2) < tol):
+                        end_shared = True
+
+                # If start is not shared, this is a good starting point
+                if not start_shared:
+                    return i
+                # If end is not shared but start is, we can use this (will need to traverse)
+                if not end_shared:
+                    return i
+
+            # All endpoints are shared (could be a loop), just pick first
+            return 0
+
+        # Start from a tip
+        start_idx = find_chain_tip()
+        current = remaining.pop(start_idx)
+
+        # Ensure segment is oriented so we're starting from an unshared endpoint
+        # Check if current.start is shared with remaining segments
+        start_shared = any(
+            (abs(current.x1 - other.x1) < tol and abs(current.y1 - other.y1) < tol) or
+            (abs(current.x1 - other.x2) < tol and abs(current.y1 - other.y2) < tol)
+            for other in remaining
+        )
+        if start_shared:
+            # Flip the segment so we start from the unshared end
+            current = Segment(
+                x1=current.x2,
+                y1=current.y2,
+                x2=current.x1,
+                y2=current.y1,
+                width=current.width,
+                layer=current.layer,
+                net=current.net,
+                net_name=current.net_name,
+            )
+
+        result.append(current)
+
+        # Traverse the chain, finding segments that connect to the current end
+        while remaining:
+            found = False
+            for i, seg in enumerate(remaining):
+                # Check if seg's start connects to current's end
+                if abs(current.x2 - seg.x1) < tol and abs(current.y2 - seg.y1) < tol:
+                    current = remaining.pop(i)
+                    result.append(current)
+                    found = True
+                    break
+                # Check if seg's end connects to current's end (need to flip seg)
+                if abs(current.x2 - seg.x2) < tol and abs(current.y2 - seg.y2) < tol:
+                    seg = remaining.pop(i)
+                    current = Segment(
+                        x1=seg.x2,
+                        y1=seg.y2,
+                        x2=seg.x1,
+                        y2=seg.y1,
+                        width=seg.width,
+                        layer=seg.layer,
+                        net=seg.net,
+                        net_name=seg.net_name,
+                    )
+                    result.append(current)
+                    found = True
+                    break
+
+            if not found:
+                # Remaining segments aren't connected to current chain end
+                # This shouldn't happen for a properly connected chain,
+                # but handle gracefully by just appending the rest
+                result.extend(remaining)
+                break
+
+        return result
 
     def _same_direction(self, s1: Segment, s2: Segment) -> bool:
         """Check if two segments have the same direction."""
