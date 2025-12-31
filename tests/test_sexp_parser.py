@@ -565,6 +565,27 @@ class TestRoundTrip:
         assert "none" in serialized
         assert '"none"' not in serialized
 
+    def test_roundtrip_zone_hatch_type_unquoted(self):
+        """Zone hatch type 'edge' should not be quoted (fixes issue #114)."""
+        sexp = """(hatch edge 0.5)"""
+        parsed = parse_string(sexp)
+        serialized = parsed.to_string()
+
+        # 'edge' is a keyword that should not be quoted
+        assert "edge" in serialized
+        assert '"edge"' not in serialized
+        assert serialized.strip() == "(hatch edge 0.5)"
+
+    def test_roundtrip_zone_hatch_all_types_unquoted(self):
+        """All zone hatch types (none, edge, full) should not be quoted."""
+        for hatch_type in ["none", "edge", "full"]:
+            sexp = f"(hatch {hatch_type} 0.5)"
+            parsed = parse_string(sexp)
+            serialized = parsed.to_string()
+
+            assert hatch_type in serialized
+            assert f'"{hatch_type}"' not in serialized
+
     def test_roundtrip_boolean_values_unquoted(self):
         """Boolean values like yes, no are not quoted."""
         sexp = """(legacy_teardrops no)"""
