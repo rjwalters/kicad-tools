@@ -4,9 +4,20 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Standalone Python tools for parsing and manipulating KiCad schematic and PCB files.
+**Tools for AI agents to work with KiCad projects.**
 
-**No running KiCad instance required** - works directly with `.kicad_sch` and `.kicad_pcb` files.
+This project provides standalone Python tools that enable AI agents (LLMs, autonomous coding assistants, etc.) to parse, analyze, and manipulate KiCad schematic and PCB files programmatically. All tools output machine-readable JSON and require no running KiCad instance.
+
+## Why Agent-Focused?
+
+Traditional EDA tools require GUIs and manual interaction. `kicad-tools` bridges the gap by providing:
+
+- **Structured data access** - Parse KiCad files into clean Python objects
+- **Machine-readable output** - All CLI commands support `--format json`
+- **Programmatic modification** - Edit schematics and PCBs without a GUI
+- **LLM reasoning interface** - Purpose-built module for LLM-driven PCB layout decisions
+
+Whether you're building an AI assistant that reviews PCB designs, automating DRC checks in CI, or experimenting with LLM-driven routing, these tools provide the foundation.
 
 ## Installation
 
