@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers import DesignRules, get_profile
 
+from .rules.clearance import ClearanceRule
 from .violations import DRCResults
 
 if TYPE_CHECKING:
@@ -89,13 +90,14 @@ class DRCChecker:
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
 
+        Validates spacing between copper elements on the same layer
+        but different nets against the manufacturer's minimum clearance.
+
         Returns:
             DRCResults containing clearance violations
-
-        Note:
-            This is a stub method. Actual implementation is in issue #93.
         """
-        return DRCResults(rules_checked=0)
+        rule = ClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
 
     def check_dimensions(self) -> DRCResults:
         """Check dimension rules (trace width, via drill, annular ring).
