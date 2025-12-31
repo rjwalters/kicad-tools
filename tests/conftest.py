@@ -415,3 +415,37 @@ def minimal_design_rules(tmp_path: Path) -> Path:
     dru_file = tmp_path / "test.kicad_dru"
     dru_file.write_text(MINIMAL_DESIGN_RULES)
     return dru_file
+
+
+# Minimal KiCad symbol library for testing
+MINIMAL_SYMBOL_LIBRARY = """(kicad_symbol_lib
+  (version "20231120")
+  (generator "test")
+  (symbol "Device:R"
+    (property "Reference" "R" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "R" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "" (at 0 0 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 0 0 0) (effects (hide yes)))
+    (symbol "Device:R_0_1"
+      (pin passive line (at -2.54 0 0) (length 2.54) (name "1") (number "1"))
+      (pin passive line (at 2.54 0 180) (length 2.54) (name "2") (number "2"))
+    )
+  )
+  (symbol "Device:C"
+    (property "Reference" "C" (at 0 0 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "C" (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (symbol "Device:C_0_1"
+      (pin passive line (at -2.54 0 0) (length 2.54) (name "1") (number "1"))
+      (pin passive line (at 2.54 0 180) (length 2.54) (name "2") (number "2"))
+    )
+  )
+)
+"""
+
+
+@pytest.fixture
+def minimal_symbol_library(tmp_path: Path) -> Path:
+    """Create a minimal symbol library file for testing."""
+    lib_file = tmp_path / "test.kicad_sym"
+    lib_file.write_text(MINIMAL_SYMBOL_LIBRARY)
+    return lib_file
