@@ -8,12 +8,17 @@ Board Size Categories:
 - Medium: 100-500 symbols / 50-200 footprints
 - Large: 500-2000 symbols / 200-1000 footprints
 - XLarge: 2000+ symbols / 1000+ footprints
+
+Note: pytest-benchmark is required for benchmarks. Install with: uv run --extra dev pytest
 """
 
 import uuid
 from pathlib import Path
 
 import pytest
+
+# Skip entire module if pytest-benchmark is not installed
+pytest.importorskip("pytest_benchmark", reason="pytest-benchmark not installed")
 
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.schematic import Schematic
