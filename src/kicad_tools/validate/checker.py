@@ -100,13 +100,20 @@ class DRCChecker:
     def check_dimensions(self) -> DRCResults:
         """Check dimension rules (trace width, via drill, annular ring).
 
+        Validates:
+        - Minimum trace width
+        - Minimum via drill diameter
+        - Minimum via outer diameter
+        - Minimum annular ring
+        - Drill-to-drill clearance
+
         Returns:
             DRCResults containing dimension violations
-
-        Note:
-            This is a stub method. Actual implementation is in issue #94.
         """
-        return DRCResults(rules_checked=0)
+        from .rules.dimensions import DimensionRules
+
+        rule = DimensionRules()
+        return rule.check(self.pcb, self.design_rules)
 
     def check_edge_clearances(self) -> DRCResults:
         """Check edge clearance rules (copper-to-board-edge).

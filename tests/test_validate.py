@@ -329,12 +329,15 @@ class TestDRCChecker:
         pcb = PCB.load(pcb_file)
         checker = DRCChecker(pcb, manufacturer="jlcpcb")
 
-        # All stub methods should return empty results
+        # Stub methods (not yet implemented) should return empty results
         assert len(checker.check_clearances()) == 0
-        assert len(checker.check_dimensions()) == 0
         assert len(checker.check_edge_clearances()) == 0
         assert len(checker.check_silkscreen()) == 0
-        assert len(checker.check_all()) == 0
+
+        # check_dimensions is implemented (issue #94), check_all may have violations
+        # We just verify they return DRCResults instances
+        assert isinstance(checker.check_dimensions(), DRCResults)
+        assert isinstance(checker.check_all(), DRCResults)
 
     def test_check_all_aggregates_results(self, fixtures_dir: Path):
         """Test that check_all aggregates results from all checks."""
@@ -381,3 +384,9 @@ class TestModuleImports:
         from kicad_tools.validate.rules import DRCRule
 
         assert DRCRule is not None
+
+    def test_import_dimension_rules(self):
+        """Test importing dimension rules class."""
+        from kicad_tools.validate.rules import DimensionRules
+
+        assert DimensionRules is not None
