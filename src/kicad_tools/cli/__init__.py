@@ -300,8 +300,14 @@ def main(argv: list[str] | None = None) -> int:
     pcb_stackup.add_argument("--format", choices=["text", "json"], default="text")
 
     # LIB subcommand - library tools
-    lib_parser = subparsers.add_parser("lib", help="Symbol library tools")
+    lib_parser = subparsers.add_parser("lib", help="Symbol and footprint library tools")
     lib_subparsers = lib_parser.add_subparsers(dest="lib_command", help="Library commands")
+
+    # lib list (new - list available KiCad libraries)
+    lib_list = lib_subparsers.add_parser("list", help="List available KiCad libraries")
+    lib_list.add_argument("--symbols", action="store_true", help="List only symbol libraries")
+    lib_list.add_argument("--footprints", action="store_true", help="List only footprint libraries")
+    lib_list.add_argument("--format", choices=["table", "json"], default="table")
 
     # lib symbols
     lib_symbols = lib_subparsers.add_parser("symbols", help="List symbols in library")
@@ -321,6 +327,55 @@ def main(argv: list[str] | None = None) -> int:
     lib_footprint.add_argument("file", help="Path to .kicad_mod file")
     lib_footprint.add_argument("--format", choices=["text", "json"], default="text")
     lib_footprint.add_argument("--pads", action="store_true", help="Show pad details")
+
+    # lib symbol-info (new - show symbol details by name)
+    lib_symbol_info = lib_subparsers.add_parser(
+        "symbol-info", help="Show details of a symbol by name"
+    )
+    lib_symbol_info.add_argument("library", help="Library name or path to .kicad_sym file")
+    lib_symbol_info.add_argument("name", help="Symbol name")
+    lib_symbol_info.add_argument("--format", choices=["text", "json"], default="text")
+    lib_symbol_info.add_argument("--pins", action="store_true", help="Show pin details")
+
+    # lib footprint-info (new - show footprint details by name)
+    lib_footprint_info = lib_subparsers.add_parser(
+        "footprint-info", help="Show details of a footprint by name"
+    )
+    lib_footprint_info.add_argument("library", help="Library name or path to .pretty directory")
+    lib_footprint_info.add_argument("name", help="Footprint name")
+    lib_footprint_info.add_argument("--format", choices=["text", "json"], default="text")
+    lib_footprint_info.add_argument("--pads", action="store_true", help="Show pad details")
+
+    # lib create-symbol-lib (placeholder - requires #85)
+    lib_create_sym = lib_subparsers.add_parser(
+        "create-symbol-lib", help="Create new symbol library (not yet implemented)"
+    )
+    lib_create_sym.add_argument("path", help="Path for new .kicad_sym file")
+
+    # lib create-footprint-lib (placeholder - requires #87)
+    lib_create_fp = lib_subparsers.add_parser(
+        "create-footprint-lib", help="Create new footprint library (not yet implemented)"
+    )
+    lib_create_fp.add_argument("path", help="Path for new .pretty directory")
+
+    # lib generate-footprint (placeholder - requires #88)
+    lib_generate = lib_subparsers.add_parser(
+        "generate-footprint", help="Generate parametric footprint (not yet implemented)"
+    )
+    lib_generate.add_argument("library", help="Target library path")
+    lib_generate.add_argument(
+        "type", choices=["soic", "qfp", "qfn", "dfn", "chip", "sot"], help="Footprint type"
+    )
+    lib_generate.add_argument("--pins", type=int, help="Number of pins")
+    lib_generate.add_argument("--pitch", type=float, help="Pin pitch in mm")
+    lib_generate.add_argument("--body-width", type=float, help="Body width in mm")
+    lib_generate.add_argument("--body-size", type=float, help="Body size (square) in mm")
+    lib_generate.add_argument("--prefix", help="Footprint name prefix")
+
+    # lib export
+    lib_export = lib_subparsers.add_parser("export", help="Export library to JSON")
+    lib_export.add_argument("path", help="Path to library file or item")
+    lib_export.add_argument("--format", choices=["json"], default="json")
 
     # MFR subcommand - manufacturer tools
     mfr_parser = subparsers.add_parser("mfr", help="Manufacturer tools")
@@ -1027,10 +1082,30 @@ def _run_lib_command(args) -> int:
     """Handle library subcommands."""
     if not args.lib_command:
         print("Usage: kicad-tools lib <command> [options] <file>")
-        print("Commands: symbols, footprints, footprint")
+        print("Commands: list, symbols, footprints, footprint, symbol-info, footprint-info,")
+        print("          create-symbol-lib, create-footprint-lib, generate-footprint, export")
         return 1
 
-    if args.lib_command == "symbols":
+    # Use the new unified lib module for new commands
+    from .lib import (
+        create_footprint_library,
+        create_symbol_library,
+        export_library,
+        generate_footprint,
+        list_kicad_libraries,
+        show_footprint_info,
+        show_symbol_info,
+    )
+
+    if args.lib_command == "list":
+        lib_type = "all"
+        if getattr(args, "symbols", False) and not getattr(args, "footprints", False):
+            lib_type = "symbols"
+        elif getattr(args, "footprints", False) and not getattr(args, "symbols", False):
+            lib_type = "footprints"
+        return list_kicad_libraries(lib_type, args.format)
+
+    elif args.lib_command == "symbols":
         library_path = Path(args.library)
         if not library_path.exists():
             print(f"Error: File not found: {library_path}", file=sys.stderr)
@@ -1062,6 +1137,42 @@ def _run_lib_command(args) -> int:
             print(f"Error: File not found: {file_path}", file=sys.stderr)
             return 1
         return show_footprint(file_path, args.format, getattr(args, "pads", False))
+
+    elif args.lib_command == "symbol-info":
+        return show_symbol_info(
+            args.library,
+            args.name,
+            args.format,
+            getattr(args, "pins", False),
+        )
+
+    elif args.lib_command == "footprint-info":
+        return show_footprint_info(
+            args.library,
+            args.name,
+            args.format,
+            getattr(args, "pads", False),
+        )
+
+    elif args.lib_command == "create-symbol-lib":
+        return create_symbol_library(args.path)
+
+    elif args.lib_command == "create-footprint-lib":
+        return create_footprint_library(args.path)
+
+    elif args.lib_command == "generate-footprint":
+        return generate_footprint(
+            args.library,
+            args.type,
+            pins=getattr(args, "pins", None),
+            pitch=getattr(args, "pitch", None),
+            body_width=getattr(args, "body_width", None),
+            body_size=getattr(args, "body_size", None),
+            prefix=getattr(args, "prefix", None),
+        )
+
+    elif args.lib_command == "export":
+        return export_library(args.path, args.format)
 
     return 1
 
