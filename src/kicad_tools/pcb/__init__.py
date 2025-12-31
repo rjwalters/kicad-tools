@@ -20,6 +20,7 @@ from .editor import (
     Zone,
 )
 from .footprints import (
+    Footprint,
     FootprintLibrary,
     PadInfo,
     get_footprint_pads,
@@ -36,6 +37,7 @@ __all__ = [
     "SeeedFusion4Layer",
     "AudioLayoutRules",
     # Footprints
+    "Footprint",
     "FootprintLibrary",
     "PadInfo",
     "get_library",
