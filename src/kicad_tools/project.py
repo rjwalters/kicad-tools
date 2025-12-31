@@ -7,15 +7,17 @@ cross-referencing schematics and PCBs.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from .schema.schematic import Schematic
+from .schema.bom import BOM, extract_bom
 from .schema.pcb import PCB
-from .schema.bom import extract_bom, BOM
+from .schema.schematic import Schematic
+
+if TYPE_CHECKING:
+    from .export import AssemblyPackageResult
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +241,7 @@ class Project:
         """
         if self._bom is None or force_reload:
             if self._schematic_path and self._schematic_path.exists():
-                self._bom = extract_bom(self._schematic_path)
+                self._bom = extract_bom(str(self._schematic_path))
         return self._bom
 
     def cross_reference(self) -> CrossReferenceResult:
@@ -261,7 +263,7 @@ class Project:
             return result
 
         # Build reference sets
-        sch_refs: Dict[str, dict] = {}
+        sch_refs: Dict[str, Dict[str, Any]] = {}
         for sym in self.schematic.symbols:
             if sym.reference and not sym.reference.startswith("#"):
                 sch_refs[sym.reference] = {
@@ -270,7 +272,7 @@ class Project:
                     "footprint": getattr(sym, "footprint", ""),
                 }
 
-        pcb_refs: Dict[str, dict] = {}
+        pcb_refs: Dict[str, Dict[str, Any]] = {}
         for fp in self.pcb.footprints:
             if fp.reference and not fp.reference.startswith("#"):
                 pcb_refs[fp.reference] = {

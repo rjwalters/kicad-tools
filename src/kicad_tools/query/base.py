@@ -7,7 +7,7 @@ of KiCad elements like symbols and footprints.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Generic, Iterator, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Generic, Iterator, List, Optional, Tuple, TypeVar
 
 T = TypeVar("T")
 
@@ -75,7 +75,7 @@ class BaseQuery(Generic[T]):
                 return op == "isnull" and value is True
 
             if op == "exact":
-                return item_value == value
+                return bool(item_value == value)
             elif op == "iexact":
                 return str(item_value).lower() == str(value).lower()
             elif op == "contains":
@@ -91,24 +91,24 @@ class BaseQuery(Generic[T]):
             elif op == "iendswith":
                 return str(item_value).lower().endswith(str(value).lower())
             elif op == "in":
-                return item_value in value
+                return bool(item_value in value)
             elif op == "regex":
                 return bool(re.search(value, str(item_value)))
             elif op == "iregex":
                 return bool(re.search(value, str(item_value), re.IGNORECASE))
             elif op == "gt":
-                return item_value > value
+                return bool(item_value > value)
             elif op == "gte":
-                return item_value >= value
+                return bool(item_value >= value)
             elif op == "lt":
-                return item_value < value
+                return bool(item_value < value)
             elif op == "lte":
-                return item_value <= value
+                return bool(item_value <= value)
             elif op == "isnull":
-                return (item_value is None) == value
+                return bool((item_value is None) == value)
             else:
                 # Unknown operator, fall back to exact match
-                return item_value == value
+                return bool(item_value == value)
 
         return check
 
@@ -155,8 +155,10 @@ class BaseQuery(Generic[T]):
 
         for attr, value in kwargs.items():
             include_filter = self._make_filter(attr, value)
-            # Negate the filter
-            new_query._filters.append(lambda item, f=include_filter: not f(item))
+            # Negate the filter - explicit function to help type inference
+            def make_negated(f: Callable[[T], bool]) -> Callable[[T], bool]:
+                return lambda item: not f(item)
+            new_query._filters.append(make_negated(include_filter))
 
         return new_query
 
@@ -211,7 +213,7 @@ class BaseQuery(Generic[T]):
         """
         return self.first() is not None
 
-    def values(self, *fields: str) -> List[dict]:
+    def values(self, *fields: str) -> List[Dict[str, Any]]:
         """Return list of dicts with specified fields.
 
         Args:
@@ -220,16 +222,16 @@ class BaseQuery(Generic[T]):
         Returns:
             List of dicts with requested fields
         """
-        result = []
+        result: List[Dict[str, Any]] = []
         for item in self.all():
-            d = {}
+            d: Dict[str, Any] = {}
             for field in fields:
                 if hasattr(item, field):
                     d[field] = getattr(item, field)
             result.append(d)
         return result
 
-    def values_list(self, *fields: str, flat: bool = False) -> List:
+    def values_list(self, *fields: str, flat: bool = False) -> List[Any]:
         """Return list of tuples with specified fields.
 
         Args:
@@ -239,9 +241,9 @@ class BaseQuery(Generic[T]):
         Returns:
             List of tuples (or flat list if flat=True)
         """
-        result = []
+        result: List[Any] = []
         for item in self.all():
-            values = tuple(getattr(item, field, None) for field in fields)
+            values: Tuple[Any, ...] = tuple(getattr(item, field, None) for field in fields)
             if flat and len(fields) == 1:
                 result.append(values[0])
             else:
@@ -262,13 +264,13 @@ class BaseQuery(Generic[T]):
         new_query = self.__class__(self._items)
         new_query._filters = self._filters.copy()
 
-        def sort_key(item: T) -> tuple:
-            keys = []
+        def sort_key(item: T) -> Tuple[Any, ...]:
+            keys: List[Any] = []
             for field in fields:
                 desc = field.startswith("-")
                 if desc:
                     field = field[1:]
-                val = getattr(item, field, None)
+                val: Any = getattr(item, field, None)
                 # Handle None values
                 if val is None:
                     val = "" if desc else "\xff" * 100

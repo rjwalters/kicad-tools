@@ -5,7 +5,7 @@ Provides query interface for schematic symbol instances.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, cast
 
 from .base import BaseQuery
 
@@ -51,7 +51,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Example:
             resistors = query.by_lib_id("Device:R").all()
         """
-        return self.filter(lib_id=lib_id)
+        return cast("SymbolQuery", self.filter(lib_id=lib_id))
 
     def by_value(self, value: str) -> "SymbolQuery":
         """Filter by value.
@@ -65,7 +65,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Example:
             caps_100nf = query.by_value("100nF").all()
         """
-        return self.filter(value=value)
+        return cast("SymbolQuery", self.filter(value=value))
 
     def by_footprint(self, footprint: str) -> "SymbolQuery":
         """Filter by footprint.
@@ -79,7 +79,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Example:
             smd_0402 = query.by_footprint("Resistor_SMD:R_0402_1005Metric").all()
         """
-        return self.filter(footprint=footprint)
+        return cast("SymbolQuery", self.filter(footprint=footprint))
 
     def capacitors(self) -> "SymbolQuery":
         """Filter to capacitors (C* references).
@@ -87,7 +87,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to capacitors
         """
-        return self.filter(reference__startswith="C")
+        return cast("SymbolQuery", self.filter(reference__startswith="C"))
 
     def resistors(self) -> "SymbolQuery":
         """Filter to resistors (R* references).
@@ -95,7 +95,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to resistors
         """
-        return self.filter(reference__startswith="R")
+        return cast("SymbolQuery", self.filter(reference__startswith="R"))
 
     def inductors(self) -> "SymbolQuery":
         """Filter to inductors (L* references).
@@ -103,7 +103,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to inductors
         """
-        return self.filter(reference__startswith="L")
+        return cast("SymbolQuery", self.filter(reference__startswith="L"))
 
     def ics(self) -> "SymbolQuery":
         """Filter to ICs (U* references).
@@ -111,7 +111,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to ICs
         """
-        return self.filter(reference__startswith="U")
+        return cast("SymbolQuery", self.filter(reference__startswith="U"))
 
     def connectors(self) -> "SymbolQuery":
         """Filter to connectors (J* references).
@@ -119,7 +119,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to connectors
         """
-        return self.filter(reference__startswith="J")
+        return cast("SymbolQuery", self.filter(reference__startswith="J"))
 
     def transistors(self) -> "SymbolQuery":
         """Filter to transistors (Q* references).
@@ -127,7 +127,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to transistors
         """
-        return self.filter(reference__startswith="Q")
+        return cast("SymbolQuery", self.filter(reference__startswith="Q"))
 
     def diodes(self) -> "SymbolQuery":
         """Filter to diodes (D* references).
@@ -135,7 +135,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to diodes
         """
-        return self.filter(reference__startswith="D")
+        return cast("SymbolQuery", self.filter(reference__startswith="D"))
 
     def power_symbols(self) -> "SymbolQuery":
         """Filter to power symbols.
@@ -143,7 +143,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to power symbols (lib_id starts with "power:")
         """
-        return self.filter(lib_id__startswith="power:")
+        return cast("SymbolQuery", self.filter(lib_id__startswith="power:"))
 
     def non_power(self) -> "SymbolQuery":
         """Filter out power symbols.
@@ -151,7 +151,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query excluding power symbols
         """
-        return self.exclude(lib_id__startswith="power:")
+        return cast("SymbolQuery", self.exclude(lib_id__startswith="power:"))
 
     def in_bom(self) -> "SymbolQuery":
         """Filter to components included in BOM.
@@ -159,7 +159,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to in_bom=True and not DNP
         """
-        return self.filter(in_bom=True, dnp=False)
+        return cast("SymbolQuery", self.filter(in_bom=True, dnp=False))
 
     def dnp(self) -> "SymbolQuery":
         """Filter to Do Not Place components.
@@ -167,7 +167,7 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to DNP symbols
         """
-        return self.filter(dnp=True)
+        return cast("SymbolQuery", self.filter(dnp=True))
 
     def on_board(self) -> "SymbolQuery":
         """Filter to components that should be on the PCB.
@@ -175,10 +175,10 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         Returns:
             Query filtered to on_board=True
         """
-        return self.filter(on_board=True)
+        return cast("SymbolQuery", self.filter(on_board=True))
 
 
-class SymbolList(list):
+class SymbolList(List["SymbolInstance"]):
     """List subclass with query methods for symbols.
 
     Extends list to provide backward compatibility while adding
@@ -248,7 +248,7 @@ class SymbolList(list):
         """
         return self.query().by_value(value).all()
 
-    def filter(self, **kwargs) -> List["SymbolInstance"]:
+    def filter(self, **kwargs: Any) -> List["SymbolInstance"]:
         """Filter symbols (shortcut, returns list).
 
         For chained filtering, use .query().filter(...).filter(...)
@@ -261,7 +261,7 @@ class SymbolList(list):
         """
         return self.query().filter(**kwargs).all()
 
-    def exclude(self, **kwargs) -> List["SymbolInstance"]:
+    def exclude(self, **kwargs: Any) -> List["SymbolInstance"]:
         """Exclude symbols (shortcut, returns list).
 
         Args:
