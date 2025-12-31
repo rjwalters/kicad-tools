@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-12-31
+
+### Added
+
+#### Documentation & Examples
+
+- **Comprehensive API documentation** with type hints for mypy --strict compliance
+- **User guide and tutorials** in `docs/` directory
+- **Example projects** demonstrating common workflows:
+  - Schematic analysis
+  - BOM generation
+  - DRC checking
+  - Autorouting
+  - LLM-driven routing
+
+#### CLI Enhancements
+
+- **Progress indicators** for long-running operations with real-time feedback
+- **Configuration file support** (`.kicad-tools.yaml`) for CLI default options
+- **Interactive REPL mode** (`kct repl`) for multi-step workflows
+- **Interactive routing preview** for visualizing routing decisions
+
+#### Router Enhancements
+
+- **Differential pair routing** with length matching support
+- **Bus routing** for grouped signal routing
+- **45° diagonal routing** for shorter, cleaner traces
+- **Zone-aware routing** with flood fill and thermal relief generation
+- **Staircase pattern compression** - optimizes alternating horizontal/diagonal micro-segments into clean paths
+
+#### LLM Integration
+
+- **PCB Reasoning Agent** (`kicad_tools.reasoning`) for LLM-driven layout decisions
+  - State representation suitable for LLM prompts
+  - Command vocabulary for routing actions
+  - Feedback/diagnosis for failed operations
+  - CLI: `kct reason` with `--analyze`, `--export-state`, `--interactive` modes
+
+#### File Format Support
+
+- **`.kicad_mod`** footprint library files
+- **`.kicad_dru`** design rules files
+- **KiCad 7+** net class handling compatibility
+
+#### Footprint Validation
+
+- **Standard library comparison** - validate footprints against KiCad's official library
+  - Auto-detects KiCad library path (macOS, Linux, Windows)
+  - Compares pad positions, sizes, and shapes with configurable tolerance
+  - CLI: `kct footprint compare-standard`
+
+#### Testing & Quality
+
+- **Edge case test coverage** for parser and schema modules
+- **Integration tests** with real KiCad project files
+- **Performance benchmarks** for large board handling
+
+### Changed
+
+- **S-expression parser optimized** for 50%+ performance improvement on large files
+- **README updated** to highlight agent-focused development goal
+- **Custom exception hierarchy** with context and actionable suggestions
+
+### Fixed
+
+- Pad obstacle clearance calculation for PTH routing
+- All linting and formatting issues
+
+### Removed
+
+- Unused numpy dependency (router now uses pure Python)
+- Hardcoded project paths from CLI modules
+- Orphaned CLI modules consolidated into unified CLI
+- Duplicate S-expression implementations
+
 ## [0.2.0] - 2025-12-30
 
 ### Added
@@ -97,5 +172,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python 3.10+
 - numpy >= 1.20
 
+[0.3.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.1.0
