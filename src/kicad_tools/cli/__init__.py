@@ -230,6 +230,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     lib_symbols.add_argument("--format", choices=["table", "json"], default="table")
     lib_symbols.add_argument("--pins", action="store_true", help="Show pin details")
 
+    # lib footprints (list footprints in a .pretty directory)
+    lib_footprints = lib_subparsers.add_parser(
+        "footprints", help="List footprints in a .pretty library directory"
+    )
+    lib_footprints.add_argument("directory", help="Path to .pretty directory")
+    lib_footprints.add_argument("--format", choices=["table", "json"], default="table")
+
+    # lib footprint (show details of a single .kicad_mod file)
+    lib_footprint = lib_subparsers.add_parser(
+        "footprint", help="Show details of a footprint file"
+    )
+    lib_footprint.add_argument("file", help="Path to .kicad_mod file")
+    lib_footprint.add_argument("--format", choices=["text", "json"], default="text")
+    lib_footprint.add_argument("--pads", action="store_true", help="Show pad details")
+
     # MFR subcommand - manufacturer tools
     mfr_parser = subparsers.add_parser("mfr", help="Manufacturer tools")
     mfr_subparsers = mfr_parser.add_subparsers(dest="mfr_command", help="Manufacturer commands")
@@ -271,6 +286,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     mfr_validate.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
     mfr_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count")
     mfr_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+
+    # mfr export-dru
+    mfr_export_dru = mfr_subparsers.add_parser(
+        "export-dru", help="Export manufacturer rules as KiCad DRU file"
+    )
+    mfr_export_dru.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_export_dru.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    mfr_export_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    mfr_export_dru.add_argument("-o", "--output", type=str, help="Output file path")
+
+    # mfr import-dru (parse an existing .kicad_dru file)
+    mfr_import_dru = mfr_subparsers.add_parser(
+        "import-dru", help="Parse and display a KiCad design rules file"
+    )
+    mfr_import_dru.add_argument("file", help="Path to .kicad_dru file")
+    mfr_import_dru.add_argument("--format", choices=["text", "json"], default="text")
 
     # ROUTE subcommand - PCB autorouting
     route_parser = subparsers.add_parser("route", help="Autoroute a PCB")
@@ -764,7 +795,7 @@ def _run_lib_command(args) -> int:
     """Handle library subcommands."""
     if not args.lib_command:
         print("Usage: kicad-tools lib <command> [options] <file>")
-        print("Commands: symbols")
+        print("Commands: symbols, footprints, footprint")
         return 1
 
     if args.lib_command == "symbols":
@@ -782,6 +813,24 @@ def _run_lib_command(args) -> int:
             sub_argv.append("--pins")
         return lib_main(sub_argv) or 0
 
+    elif args.lib_command == "footprints":
+        from .lib_footprints import list_footprints
+
+        directory_path = Path(args.directory)
+        if not directory_path.exists():
+            print(f"Error: Directory not found: {directory_path}", file=sys.stderr)
+            return 1
+        return list_footprints(directory_path, args.format)
+
+    elif args.lib_command == "footprint":
+        from .lib_footprints import show_footprint
+
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            return 1
+        return show_footprint(file_path, args.format, getattr(args, "pads", False))
+
     return 1
 
 
@@ -789,7 +838,7 @@ def _run_mfr_command(args) -> int:
     """Handle manufacturer subcommands."""
     if not args.mfr_command:
         print("Usage: kicad-tools mfr <command> [options]")
-        print("Commands: list, info, rules, compare, apply-rules, validate")
+        print("Commands: list, info, rules, compare, apply-rules, validate, export-dru, import-dru")
         return 1
 
     from .mfr import main as mfr_main
@@ -835,6 +884,25 @@ def _run_mfr_command(args) -> int:
         if args.copper != 1.0:
             sub_argv.extend(["--copper", str(args.copper)])
         return mfr_main(sub_argv) or 0
+
+    elif args.mfr_command == "export-dru":
+        sub_argv = ["export-dru", args.manufacturer]
+        if args.layers != 4:
+            sub_argv.extend(["--layers", str(args.layers)])
+        if args.copper != 1.0:
+            sub_argv.extend(["--copper", str(args.copper)])
+        if args.output:
+            sub_argv.extend(["--output", args.output])
+        return mfr_main(sub_argv) or 0
+
+    elif args.mfr_command == "import-dru":
+        from .mfr_dru import import_dru
+
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            return 1
+        return import_dru(file_path, args.format)
 
     return 1
 
