@@ -1,16 +1,27 @@
 """Tests for PCB modules (blocks, editor)."""
 
 import pytest
-from pathlib import Path
 
 # =============================================================================
 # PCB Blocks Tests
 # =============================================================================
-
 from kicad_tools.pcb.blocks import (
-    Point, Rectangle, Layer, Pad, Port, TraceSegment, Via,
-    ComponentPlacement, PCBBlock, MCUBlock, LDOBlock, OscillatorBlock,
-    LEDBlock, PCBLayout, KiCadPCBExporter, get_footprint_pads, FOOTPRINT_PADS
+    ComponentPlacement,
+    KiCadPCBExporter,
+    Layer,
+    LDOBlock,
+    LEDBlock,
+    MCUBlock,
+    OscillatorBlock,
+    Pad,
+    PCBBlock,
+    PCBLayout,
+    Point,
+    Port,
+    Rectangle,
+    TraceSegment,
+    Via,
+    get_footprint_pads,
 )
 
 
@@ -141,7 +152,7 @@ class TestPad:
             net="VCC",
             shape="rect",
             size=(1.0, 0.5),
-            drill=0.3
+            drill=0.3,
         )
         assert pad.net == "VCC"
         assert pad.shape == "rect"
@@ -159,12 +170,7 @@ class TestPort:
 
     def test_port_with_options(self):
         """Test port with custom options."""
-        port = Port(
-            name="GND",
-            position=Point(0, 0),
-            direction="power",
-            internal_pad="U1.VSS"
-        )
+        port = Port(name="GND", position=Point(0, 0), direction="power", internal_pad="U1.VSS")
         assert port.direction == "power"
         assert port.internal_pad == "U1.VSS"
 
@@ -174,11 +180,7 @@ class TestTraceSegment:
 
     def test_trace_segment_creation(self):
         """Test creating a trace segment."""
-        trace = TraceSegment(
-            start=Point(0, 0),
-            end=Point(10, 0),
-            width=0.25
-        )
+        trace = TraceSegment(start=Point(0, 0), end=Point(10, 0), width=0.25)
         assert trace.start.x == 0
         assert trace.end.x == 10
         assert trace.width == 0.25
@@ -204,7 +206,7 @@ class TestComponentPlacement:
             ref="U1",
             footprint="Package_SO:TSSOP-20",
             position=Point(10, 20),
-            pads={"1": Point(-2, 0), "2": Point(2, 0)}
+            pads={"1": Point(-2, 0), "2": Point(2, 0)},
         )
         assert comp.ref == "U1"
         assert comp.rotation == 0  # Default
@@ -215,7 +217,7 @@ class TestComponentPlacement:
             ref="U1",
             footprint="Package_SO:TSSOP-20",
             position=Point(10, 20),
-            pads={"1": Point(-2, 0), "2": Point(2, 0)}
+            pads={"1": Point(-2, 0), "2": Point(2, 0)},
         )
         pad_pos = comp.pad_position("1")
         assert pad_pos.x == 8  # 10 + (-2)
@@ -224,11 +226,7 @@ class TestComponentPlacement:
     def test_component_pad_position_with_rotation(self):
         """Test pad position with component rotation."""
         comp = ComponentPlacement(
-            ref="U1",
-            footprint="Test",
-            position=Point(10, 20),
-            rotation=90,
-            pads={"1": Point(5, 0)}
+            ref="U1", footprint="Test", position=Point(10, 20), rotation=90, pads={"1": Point(5, 0)}
         )
         pad_pos = comp.pad_position("1")
         # 90 degree rotation of (5, 0) around origin = (0, 5)
@@ -239,10 +237,7 @@ class TestComponentPlacement:
     def test_component_pad_position_not_found(self):
         """Test pad position with invalid pad name."""
         comp = ComponentPlacement(
-            ref="U1",
-            footprint="Test",
-            position=Point(0, 0),
-            pads={"1": Point(0, 0)}
+            ref="U1", footprint="Test", position=Point(0, 0), pads={"1": Point(0, 0)}
         )
         with pytest.raises(KeyError, match="Pad '99'"):
             comp.pad_position("99")
@@ -262,10 +257,7 @@ class TestPCBBlock:
         """Test adding a component to block."""
         block = PCBBlock("test")
         comp = block.add_component(
-            "U1",
-            "Package_SO:TSSOP-20",
-            x=0, y=0,
-            pads={"1": (-1, 0), "2": (1, 0)}
+            "U1", "Package_SO:TSSOP-20", x=0, y=0, pads={"1": (-1, 0), "2": (1, 0)}
         )
         assert "U1" in block.components
         assert comp.ref == "U1"
@@ -631,10 +623,9 @@ class TestKiCadPCBExporter:
 # PCB Editor Tests
 # =============================================================================
 
-from kicad_tools.pcb.editor import (
-    PCBEditor, Point as EditorPoint, Track, Via as EditorVia, Zone,
-    SeeedFusion4Layer, AudioLayoutRules
-)
+from kicad_tools.pcb.editor import AudioLayoutRules, PCBEditor, SeeedFusion4Layer, Track, Zone
+from kicad_tools.pcb.editor import Point as EditorPoint
+from kicad_tools.pcb.editor import Via as EditorVia
 
 
 class TestEditorPoint:
@@ -658,11 +649,7 @@ class TestTrack:
     def test_track_creation(self):
         """Test creating a track."""
         track = Track(
-            net=1,
-            start=EditorPoint(0, 0),
-            end=EditorPoint(10, 0),
-            width=0.2,
-            layer="F.Cu"
+            net=1, start=EditorPoint(0, 0), end=EditorPoint(10, 0), width=0.2, layer="F.Cu"
         )
         assert track.net == 1
         assert track.width == 0.2
@@ -670,11 +657,7 @@ class TestTrack:
     def test_track_to_sexp_node(self):
         """Test track S-expression generation."""
         track = Track(
-            net=1,
-            start=EditorPoint(0, 0),
-            end=EditorPoint(10, 0),
-            width=0.2,
-            layer="F.Cu"
+            net=1, start=EditorPoint(0, 0), end=EditorPoint(10, 0), width=0.2, layer="F.Cu"
         )
         node = track.to_sexp_node()
         assert node is not None
@@ -685,23 +668,13 @@ class TestEditorVia:
 
     def test_via_creation(self):
         """Test creating a via."""
-        via = EditorVia(
-            net=1,
-            position=EditorPoint(5, 5),
-            size=0.6,
-            drill=0.3
-        )
+        via = EditorVia(net=1, position=EditorPoint(5, 5), size=0.6, drill=0.3)
         assert via.size == 0.6
         assert via.drill == 0.3
 
     def test_via_to_sexp_node(self):
         """Test via S-expression generation."""
-        via = EditorVia(
-            net=1,
-            position=EditorPoint(5, 5),
-            size=0.6,
-            drill=0.3
-        )
+        via = EditorVia(net=1, position=EditorPoint(5, 5), size=0.6, drill=0.3)
         node = via.to_sexp_node()
         assert node is not None
 
@@ -715,7 +688,7 @@ class TestZone:
             net=1,
             net_name="GND",
             layer="F.Cu",
-            points=[EditorPoint(0, 0), EditorPoint(10, 0), EditorPoint(10, 10), EditorPoint(0, 10)]
+            points=[EditorPoint(0, 0), EditorPoint(10, 0), EditorPoint(10, 10), EditorPoint(0, 10)],
         )
         assert zone.net == 1
         assert len(zone.points) == 4
@@ -726,7 +699,7 @@ class TestZone:
             net=1,
             net_name="GND",
             layer="F.Cu",
-            points=[EditorPoint(0, 0), EditorPoint(10, 0), EditorPoint(10, 10), EditorPoint(0, 10)]
+            points=[EditorPoint(0, 0), EditorPoint(10, 0), EditorPoint(10, 10), EditorPoint(0, 10)],
         )
         node = zone.to_sexp_node()
         assert node is not None
@@ -812,7 +785,14 @@ class TestPCBEditor:
         editor = PCBEditor(str(minimal_pcb))
         connections = [
             {"net": "GND", "from": (0, 0), "to": (10, 0), "width": 0.2, "layer": "F.Cu"},
-            {"net": "GND", "from": (10, 0), "to": (10, 10), "width": 0.2, "layer": "F.Cu", "via": True},
+            {
+                "net": "GND",
+                "from": (10, 0),
+                "to": (10, 10),
+                "width": 0.2,
+                "layer": "F.Cu",
+                "via": True,
+            },
         ]
         script = editor.generate_routing_script(connections)
         assert "pcbnew" in script

@@ -6,7 +6,7 @@ Provides tools to fix common footprint issues such as pad spacing violations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..schema.pcb import PCB, Footprint  # noqa: F401
@@ -20,8 +20,8 @@ class PadAdjustment:
 
     footprint_ref: str
     pad_number: str
-    old_position: Tuple[float, float]
-    new_position: Tuple[float, float]
+    old_position: tuple[float, float]
+    new_position: tuple[float, float]
     reason: str
 
 
@@ -31,7 +31,7 @@ class FootprintFix:
 
     footprint_ref: str
     footprint_name: str
-    adjustments: List[PadAdjustment]
+    adjustments: list[PadAdjustment]
     old_pad_spacing: float
     new_pad_spacing: float
 
@@ -76,8 +76,8 @@ class FootprintFixer:
         self.validator = FootprintValidator(min_pad_gap=min_pad_gap)
 
     def fix_footprint_pads(
-        self, footprint: "Footprint", dry_run: bool = False
-    ) -> Optional[FootprintFix]:
+        self, footprint: Footprint, dry_run: bool = False
+    ) -> FootprintFix | None:
         """Fix pad spacing issues in a single footprint.
 
         For 2-pad components (resistors, capacitors, etc.), this moves pads
@@ -208,7 +208,7 @@ class FootprintFixer:
             new_pad_spacing=new_spacing,
         )
 
-    def fix_pcb(self, pcb: "PCB", dry_run: bool = False) -> List[FootprintFix]:
+    def fix_pcb(self, pcb: PCB, dry_run: bool = False) -> list[FootprintFix]:
         """Fix all pad spacing issues in a PCB.
 
         Args:
@@ -218,7 +218,7 @@ class FootprintFixer:
         Returns:
             List of fixes applied (or would be applied if dry_run)
         """
-        fixes: List[FootprintFix] = []
+        fixes: list[FootprintFix] = []
 
         for footprint in pcb.footprints:
             fix = self.fix_footprint_pads(footprint, dry_run=dry_run)
@@ -227,9 +227,7 @@ class FootprintFixer:
 
         return fixes
 
-    def group_by_footprint_name(
-        self, fixes: List[FootprintFix]
-    ) -> Dict[str, List[FootprintFix]]:
+    def group_by_footprint_name(self, fixes: list[FootprintFix]) -> dict[str, list[FootprintFix]]:
         """Group fixes by footprint name.
 
         Useful for seeing which footprint types needed fixing.
@@ -240,14 +238,14 @@ class FootprintFixer:
         Returns:
             Dict mapping footprint name to list of fixes
         """
-        grouped: Dict[str, List[FootprintFix]] = {}
+        grouped: dict[str, list[FootprintFix]] = {}
         for fix in fixes:
             if fix.footprint_name not in grouped:
                 grouped[fix.footprint_name] = []
             grouped[fix.footprint_name].append(fix)
         return grouped
 
-    def summarize(self, fixes: List[FootprintFix]) -> dict:
+    def summarize(self, fixes: list[FootprintFix]) -> dict:
         """Generate a summary of fixes.
 
         Args:
@@ -256,7 +254,7 @@ class FootprintFixer:
         Returns:
             Summary dict with counts and groupings
         """
-        by_footprint_name: Dict[str, int] = {}
+        by_footprint_name: dict[str, int] = {}
 
         for fix in fixes:
             name_key = fix.footprint_name

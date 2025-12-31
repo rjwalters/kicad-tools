@@ -9,7 +9,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from kicad_tools.placement import (
     Conflict,
@@ -144,7 +143,7 @@ def cmd_fix(args) -> int:
     return 0 if result.success else 1
 
 
-def output_table(conflicts: List[Conflict], verbose: bool = False):
+def output_table(conflicts: list[Conflict], verbose: bool = False):
     """Output conflicts in table format."""
     if not conflicts:
         print("No placement conflicts found!")
@@ -166,9 +165,7 @@ def output_table(conflicts: List[Conflict], verbose: bool = False):
         )
 
         if verbose and conflict.location:
-            print(
-                f"  Location: ({conflict.location.x:.3f}, {conflict.location.y:.3f}) mm"
-            )
+            print(f"  Location: ({conflict.location.x:.3f}, {conflict.location.y:.3f}) mm")
 
     # Summary
     errors = sum(1 for c in conflicts if c.severity.value == "error")
@@ -177,7 +174,7 @@ def output_table(conflicts: List[Conflict], verbose: bool = False):
     print(f"\nTotal: {len(conflicts)} conflicts ({errors} errors, {warnings} warnings)")
 
 
-def output_summary(conflicts: List[Conflict]):
+def output_summary(conflicts: list[Conflict]):
     """Output conflict summary."""
     if not conflicts:
         print("No placement conflicts found!")
@@ -203,12 +200,12 @@ def output_summary(conflicts: List[Conflict]):
     print(f"\nTotal: {len(conflicts)} conflicts ({errors} errors, {warnings} warnings)")
 
 
-def output_json(conflicts: List[Conflict]):
+def output_json(conflicts: list[Conflict]):
     """Output conflicts as JSON."""
     print(json.dumps([c.to_dict() for c in conflicts], indent=2))
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for placement commands."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools placement",
@@ -251,15 +248,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Courtyard margin around pads in mm (default: 0.25)",
     )
     check_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    check_parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress progress output"
-    )
+    check_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
     # Fix subcommand
     fix_parser = subparsers.add_parser("fix", help="Suggest and apply placement fixes")
     fix_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Output file path (default: modify in place)",
     )
     fix_parser.add_argument(
@@ -302,9 +298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Courtyard margin around pads in mm",
     )
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    fix_parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress progress output"
-    )
+    fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
     args = parser.parse_args(argv)
 

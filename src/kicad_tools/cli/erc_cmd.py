@@ -19,13 +19,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List
 
 from ..erc import ERC_CATEGORIES, ERC_TYPE_DESCRIPTIONS, ERCReport, ERCViolation
 from .runner import find_kicad_cli, run_erc
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-erc command."""
     parser = argparse.ArgumentParser(
         prog="kicad-erc",
@@ -207,7 +206,7 @@ def run_erc_on_schematic(
 
 
 def output_table(
-    violations: List[ERCViolation],
+    violations: list[ERCViolation],
     report: ERCReport,
     verbose: bool = False,
     by_sheet: bool = False,
@@ -284,7 +283,7 @@ def output_table(
 
 
 def _print_violations(
-    violations: List[ERCViolation],
+    violations: list[ERCViolation],
     verbose: bool,
     by_sheet: bool,
 ) -> None:
@@ -320,7 +319,7 @@ def _print_single(v: ERCViolation, verbose: bool, indent: str = "  ") -> None:
             print(f"{indent}    Location: {v.location_str}")
 
 
-def output_json(violations: List[ERCViolation], report: ERCReport) -> None:
+def output_json(violations: list[ERCViolation], report: ERCReport) -> None:
     """Output violations as JSON."""
     data = {
         "source": report.source_file,
@@ -334,7 +333,7 @@ def output_json(violations: List[ERCViolation], report: ERCReport) -> None:
     print(json.dumps(data, indent=2))
 
 
-def output_summary(violations: List[ERCViolation], report: ERCReport) -> None:
+def output_summary(violations: list[ERCViolation], report: ERCReport) -> None:
     """Output violation summary by type."""
     if not violations:
         print("No ERC violations found.")

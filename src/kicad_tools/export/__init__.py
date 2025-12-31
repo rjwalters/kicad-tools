@@ -40,9 +40,9 @@ from .assembly import (
     create_assembly_package,
 )
 from .bom_formats import (
+    BOM_FORMATTERS,
     BOMExportConfig,
     BOMFormatter,
-    BOM_FORMATTERS,
     GenericBOMFormatter,
     JLCPCBBOMFormatter,
     PCBWayBOMFormatter,
@@ -51,19 +51,19 @@ from .bom_formats import (
     get_bom_formatter,
 )
 from .gerber import (
+    MANUFACTURER_PRESETS,
     GerberConfig,
     GerberExporter,
-    MANUFACTURER_PRESETS,
     ManufacturerPreset,
     export_gerbers,
     find_kicad_cli,
 )
 from .pnp import (
+    PNP_FORMATTERS,
     GenericPnPFormatter,
     JLCPCBPnPFormatter,
     PCBWayPnPFormatter,
     PlacementData,
-    PNP_FORMATTERS,
     PnPExportConfig,
     PnPFormatter,
     export_pnp,

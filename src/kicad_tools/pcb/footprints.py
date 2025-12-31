@@ -22,7 +22,6 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -225,7 +224,7 @@ class FootprintLibrary:
         self.library_paths = library_paths or self.KICAD_PATHS
         self._cache: dict[str, dict[str, tuple]] = {}
 
-    def _find_footprint_file(self, lib_name: str, fp_name: str) -> Optional[Path]:
+    def _find_footprint_file(self, lib_name: str, fp_name: str) -> Path | None:
         """Find the .kicad_mod file for a footprint."""
         pretty_dir = f"{lib_name}.pretty"
         mod_file = f"{fp_name}.kicad_mod"
@@ -302,7 +301,7 @@ class FootprintLibrary:
 # Module-level convenience functions
 # =============================================================================
 
-_default_library: Optional[FootprintLibrary] = None
+_default_library: FootprintLibrary | None = None
 
 
 def get_library() -> FootprintLibrary:

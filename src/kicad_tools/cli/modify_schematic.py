@@ -30,7 +30,6 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -45,7 +44,7 @@ def generate_uuid() -> str:
 # Text-based modification functions (preserve original formatting)
 
 
-def find_symbol_text_range(text: str, reference: str) -> Optional[tuple[int, int, dict]]:
+def find_symbol_text_range(text: str, reference: str) -> tuple[int, int, dict] | None:
     """
     Find the text range of a symbol instance by reference.
 
@@ -276,7 +275,7 @@ def find_symbol_indices(sexp: SExp, reference: str) -> list[int]:
     return indices
 
 
-def find_lib_symbol_index(sexp: SExp, lib_id: str) -> Optional[int]:
+def find_lib_symbol_index(sexp: SExp, lib_id: str) -> int | None:
     """Find index of a lib_symbol in lib_symbols section."""
     lib_symbols = sexp.find("lib_symbols")
     if not lib_symbols:

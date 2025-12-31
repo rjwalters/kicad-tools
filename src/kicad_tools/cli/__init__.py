@@ -22,6 +22,18 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
+Schematic subcommands (kct sch <command>):
+    summary      - Quick schematic overview
+    hierarchy    - Show hierarchy tree
+    labels       - List labels
+    validate     - Run validation checks
+    wires        - List wire segments and junctions
+    info         - Show symbol details
+    pins         - Show symbol pin positions
+    connections  - Check pin connections using library positions
+    unconnected  - Find unconnected pins and issues
+    replace      - Replace a symbol's library ID
+
 Examples:
     kct symbols design.kicad_sch --filter "U*"
     kct nets design.kicad_sch --net VCC
@@ -29,6 +41,9 @@ Examples:
     kct drc design-drc.rpt --mfr jlcpcb
     kct bom design.kicad_sch --format csv
     kct sch summary design.kicad_sch
+    kct sch wires design.kicad_sch --stats
+    kct sch info design.kicad_sch U1 --show-pins
+    kct sch replace design.kicad_sch U1 "mylib:NewSymbol" --dry-run
     kct pcb summary board.kicad_pcb
     kct mfr compare
     kct parts lookup C123456
@@ -46,7 +61,6 @@ import argparse
 import sys
 import traceback
 from pathlib import Path
-from typing import List, Optional
 
 from kicad_tools import __version__
 from kicad_tools.exceptions import KiCadToolsError
@@ -83,7 +97,7 @@ def format_error(e: Exception, verbose: bool = False) -> str:
     return f"Error: {type(e).__name__}: {e}"
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools",
@@ -190,6 +204,69 @@ def main(argv: Optional[List[str]] = None) -> int:
     sch_validate.add_argument("--strict", action="store_true", help="Exit with error on warnings")
     sch_validate.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
 
+    # sch wires
+    sch_wires = sch_subparsers.add_parser("wires", help="List wire segments and junctions")
+    sch_wires.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_wires.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    sch_wires.add_argument("--stats", action="store_true", help="Show statistics only")
+    sch_wires.add_argument("--junctions", action="store_true", help="Include junction points")
+
+    # sch info
+    sch_info = sch_subparsers.add_parser("info", help="Show symbol details")
+    sch_info.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_info.add_argument("reference", help="Symbol reference (e.g., U1)")
+    sch_info.add_argument("--format", choices=["text", "json"], default="text")
+    sch_info.add_argument("--show-pins", action="store_true", help="Show pin details")
+    sch_info.add_argument("--show-properties", action="store_true", help="Show all properties")
+
+    # sch pins
+    sch_pins = sch_subparsers.add_parser("pins", help="Show symbol pin positions")
+    sch_pins.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_pins.add_argument("reference", help="Symbol reference (e.g., U1)")
+    sch_pins.add_argument("--lib", required=True, help="Path to symbol library file")
+    sch_pins.add_argument("--format", choices=["table", "json"], default="table")
+
+    # sch connections
+    sch_connections = sch_subparsers.add_parser(
+        "connections", help="Check pin connections using library positions"
+    )
+    sch_connections.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_connections.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_connections.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_connections.add_argument("--format", choices=["table", "json"], default="table")
+    sch_connections.add_argument("--filter", dest="pattern", help="Filter by symbol reference")
+    sch_connections.add_argument(
+        "-v", "--verbose", action="store_true", help="Show all pins, not just unconnected"
+    )
+
+    # sch unconnected
+    sch_unconnected = sch_subparsers.add_parser(
+        "unconnected", help="Find unconnected pins and issues"
+    )
+    sch_unconnected.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_unconnected.add_argument("--format", choices=["table", "json"], default="table")
+    sch_unconnected.add_argument("--filter", dest="pattern", help="Filter by symbol reference")
+    sch_unconnected.add_argument(
+        "--include-power", action="store_true", help="Include power symbols"
+    )
+    sch_unconnected.add_argument(
+        "--include-dnp", action="store_true", help="Include DNP symbols"
+    )
+
+    # sch replace
+    sch_replace = sch_subparsers.add_parser("replace", help="Replace a symbol's library ID")
+    sch_replace.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_replace.add_argument("reference", help="Symbol reference to replace (e.g., U1)")
+    sch_replace.add_argument("new_lib_id", help="New library ID (e.g., 'mylib:NewSymbol')")
+    sch_replace.add_argument("--value", help="New value for the symbol")
+    sch_replace.add_argument("--footprint", help="New footprint")
+    sch_replace.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    sch_replace.add_argument("--backup", action="store_true", help="Create backup before modifying")
+
     # PCB subcommand - PCB tools
     pcb_parser = subparsers.add_parser("pcb", help="PCB query tools")
     pcb_subparsers = pcb_parser.add_subparsers(dest="pcb_command", help="PCB commands")
@@ -242,9 +319,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     lib_footprints.add_argument("--format", choices=["table", "json"], default="table")
 
     # lib footprint (show details of a single .kicad_mod file)
-    lib_footprint = lib_subparsers.add_parser(
-        "footprint", help="Show details of a footprint file"
-    )
+    lib_footprint = lib_subparsers.add_parser("footprint", help="Show details of a footprint file")
     lib_footprint.add_argument("file", help="Path to .kicad_mod file")
     lib_footprint.add_argument("--format", choices=["text", "json"], default="text")
     lib_footprint.add_argument("--pads", action="store_true", help="Show pad details")
@@ -297,7 +372,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     mfr_export_dru.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
     mfr_export_dru.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
-    mfr_export_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
+    mfr_export_dru.add_argument(
+        "-c", "--copper", type=float, default=1.0, help="Copper weight (oz)"
+    )
     mfr_export_dru.add_argument("-o", "--output", type=str, help="Output file path")
 
     # mfr import-dru (parse an existing .kicad_dru file)
@@ -327,9 +404,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
-    route_parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress progress output"
-    )
+    route_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
     # REASON subcommand - LLM-driven PCB layout
     reason_parser = subparsers.add_parser("reason", help="LLM-driven PCB layout reasoning")
@@ -371,14 +446,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
     optimize_parser.add_argument("--net", help="Only optimize traces matching this net pattern")
-    optimize_parser.add_argument("--no-merge", action="store_true", help="Disable collinear merging")
-    optimize_parser.add_argument("--no-zigzag", action="store_true", help="Disable zigzag elimination")
+    optimize_parser.add_argument(
+        "--no-merge", action="store_true", help="Disable collinear merging"
+    )
+    optimize_parser.add_argument(
+        "--no-zigzag", action="store_true", help="Disable zigzag elimination"
+    )
     optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
     optimize_parser.add_argument(
-        "--chamfer-size", type=float, default=0.5, help="45-degree chamfer size in mm (default: 0.5)"
+        "--chamfer-size",
+        type=float,
+        default=0.5,
+        help="45-degree chamfer size in mm (default: 0.5)",
     )
     optimize_parser.add_argument("-v", "--verbose", action="store_true")
-    optimize_parser.add_argument("--dry-run", action="store_true", help="Show results without writing")
+    optimize_parser.add_argument(
+        "--dry-run", action="store_true", help="Show results without writing"
+    )
     optimize_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
@@ -407,9 +491,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # FIX-FOOTPRINTS subcommand
-    fix_fp_parser = subparsers.add_parser(
-        "fix-footprints", help="Fix footprint pad spacing issues"
-    )
+    fix_fp_parser = subparsers.add_parser("fix-footprints", help="Fix footprint pad spacing issues")
     fix_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_fp_parser.add_argument(
         "-o",
@@ -463,9 +545,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # PLACEMENT subcommand - placement conflict detection and resolution
-    placement_parser = subparsers.add_parser(
-        "placement", help="Detect and fix placement conflicts"
-    )
+    placement_parser = subparsers.add_parser("placement", help="Detect and fix placement conflicts")
     placement_subparsers = placement_parser.add_subparsers(
         dest="placement_command", help="Placement commands"
     )
@@ -475,9 +555,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "check", help="Check PCB for placement conflicts"
     )
     placement_check.add_argument("pcb", help="Path to .kicad_pcb file")
-    placement_check.add_argument(
-        "--format", choices=["table", "json", "summary"], default="table"
-    )
+    placement_check.add_argument("--format", choices=["table", "json", "summary"], default="table")
     placement_check.add_argument(
         "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
     )
@@ -493,9 +571,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # placement fix
-    placement_fix = placement_subparsers.add_parser(
-        "fix", help="Suggest and apply placement fixes"
-    )
+    placement_fix = placement_subparsers.add_parser("fix", help="Suggest and apply placement fixes")
     placement_fix.add_argument("pcb", help="Path to .kicad_pcb file")
     placement_fix.add_argument("-o", "--output", help="Output file path")
     placement_fix.add_argument(
@@ -504,9 +580,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="spread",
         help="Fix strategy",
     )
-    placement_fix.add_argument(
-        "--anchor", help="Comma-separated components to keep fixed"
-    )
+    placement_fix.add_argument("--anchor", help="Comma-separated components to keep fixed")
     placement_fix.add_argument("--dry-run", action="store_true")
     placement_fix.add_argument("-v", "--verbose", action="store_true")
     placement_fix.add_argument(
@@ -553,9 +627,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # INTERACTIVE subcommand - REPL mode
-    interactive_parser = subparsers.add_parser(
-        "interactive", help="Launch interactive REPL mode"
-    )
+    interactive_parser = subparsers.add_parser("interactive", help="Launch interactive REPL mode")
     interactive_parser.add_argument(
         "--project",
         help="Auto-load a project on startup",
@@ -742,7 +814,8 @@ def _run_sch_command(args) -> int:
     """Handle schematic subcommands."""
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
-        print("Commands: summary, hierarchy, labels, validate")
+        print("Commands: summary, hierarchy, labels, validate, wires, info, pins,")
+        print("          connections, unconnected, replace")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -788,6 +861,84 @@ def _run_sch_command(args) -> int:
         if args.quiet:
             sub_argv.append("--quiet")
         return validate_main(sub_argv) or 0
+
+    elif args.sch_command == "wires":
+        from .sch_list_wires import main as wires_main
+
+        sub_argv = [str(schematic_path)]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.stats:
+            sub_argv.append("--stats")
+        if args.junctions:
+            sub_argv.append("--junctions")
+        return wires_main(sub_argv) or 0
+
+    elif args.sch_command == "info":
+        from .sch_symbol_info import main as info_main
+
+        sub_argv = [str(schematic_path), args.reference]
+        if args.format == "json":
+            sub_argv.append("--json")
+        if args.show_pins:
+            sub_argv.append("--show-pins")
+        if args.show_properties:
+            sub_argv.append("--show-properties")
+        return info_main(sub_argv) or 0
+
+    elif args.sch_command == "pins":
+        from .sch_pin_positions import main as pins_main
+
+        sub_argv = [str(schematic_path), args.reference, "--lib", args.lib]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        return pins_main(sub_argv) or 0
+
+    elif args.sch_command == "connections":
+        from .sch_check_connections import main as connections_main
+
+        sub_argv = [str(schematic_path)]
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return connections_main(sub_argv) or 0
+
+    elif args.sch_command == "unconnected":
+        from .sch_find_unconnected import main as unconnected_main
+
+        sub_argv = [str(schematic_path)]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.include_power:
+            sub_argv.append("--include-power")
+        if args.include_dnp:
+            sub_argv.append("--include-dnp")
+        return unconnected_main(sub_argv) or 0
+
+    elif args.sch_command == "replace":
+        from .sch_replace_symbol import main as replace_main
+
+        sub_argv = [str(schematic_path), args.reference, args.new_lib_id]
+        if args.value:
+            sub_argv.extend(["--value", args.value])
+        if args.footprint:
+            sub_argv.extend(["--footprint", args.footprint])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return replace_main(sub_argv) or 0
 
     return 1
 

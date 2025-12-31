@@ -10,7 +10,7 @@ import csv
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import ConfigurationError
 
@@ -35,20 +35,20 @@ class BOMFormatter(ABC):
     manufacturer_id: str = ""
     manufacturer_name: str = ""
 
-    def __init__(self, config: Optional[BOMExportConfig] = None):
+    def __init__(self, config: BOMExportConfig | None = None):
         self.config = config or BOMExportConfig()
 
     @abstractmethod
-    def format(self, items: List["BOMItem"]) -> str:
+    def format(self, items: list[BOMItem]) -> str:
         """Format BOM items to manufacturer-specific format."""
         pass
 
     @abstractmethod
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """Get column headers for this format."""
         pass
 
-    def filter_items(self, items: List["BOMItem"]) -> List["BOMItem"]:
+    def filter_items(self, items: list[BOMItem]) -> list[BOMItem]:
         """Filter items based on config."""
         if self.config.include_dnp:
             return items
@@ -61,11 +61,11 @@ class JLCPCBBOMFormatter(BOMFormatter):
     manufacturer_id = "jlcpcb"
     manufacturer_name = "JLCPCB"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """JLCPCB BOM column headers."""
         return ["Comment", "Designator", "Footprint", "LCSC Part #"]
 
-    def format(self, items: List["BOMItem"]) -> str:
+    def format(self, items: list[BOMItem]) -> str:
         """
         Format BOM for JLCPCB.
 
@@ -80,7 +80,9 @@ class JLCPCBBOMFormatter(BOMFormatter):
         if self.config.group_by_value:
             grouped = self._group_items(filtered)
         else:
-            grouped = {(item.value, item.footprint, getattr(item, "lcsc", "")): [item] for item in filtered}
+            grouped = {
+                (item.value, item.footprint, getattr(item, "lcsc", "")): [item] for item in filtered
+            }
 
         output = io.StringIO()
         writer = csv.writer(output)
@@ -93,9 +95,9 @@ class JLCPCBBOMFormatter(BOMFormatter):
 
         return output.getvalue()
 
-    def _group_items(self, items: List["BOMItem"]) -> Dict[tuple, List["BOMItem"]]:
+    def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
         """Group items by value, footprint, and LCSC part."""
-        groups: Dict[tuple, List["BOMItem"]] = {}
+        groups: dict[tuple, list[BOMItem]] = {}
         for item in items:
             lcsc = getattr(item, "lcsc", "")
             key = (item.value, item.footprint, lcsc)
@@ -111,11 +113,19 @@ class PCBWayBOMFormatter(BOMFormatter):
     manufacturer_id = "pcbway"
     manufacturer_name = "PCBWay"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """PCBWay BOM column headers."""
-        return ["Item", "Designator", "Qty", "Manufacturer", "Mfr. Part #", "Description/Value", "Package/Footprint"]
+        return [
+            "Item",
+            "Designator",
+            "Qty",
+            "Manufacturer",
+            "Mfr. Part #",
+            "Description/Value",
+            "Package/Footprint",
+        ]
 
-    def format(self, items: List["BOMItem"]) -> str:
+    def format(self, items: list[BOMItem]) -> str:
         """
         Format BOM for PCBWay.
 
@@ -149,9 +159,9 @@ class PCBWayBOMFormatter(BOMFormatter):
 
         return output.getvalue()
 
-    def _group_items(self, items: List["BOMItem"]) -> Dict[tuple, List["BOMItem"]]:
+    def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
         """Group items by value and footprint."""
-        groups: Dict[tuple, List["BOMItem"]] = {}
+        groups: dict[tuple, list[BOMItem]] = {}
         for item in items:
             key = (item.value, item.footprint)
             if key not in groups:
@@ -166,11 +176,11 @@ class SeeedBOMFormatter(BOMFormatter):
     manufacturer_id = "seeed"
     manufacturer_name = "Seeed Fusion"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """Seeed BOM column headers."""
         return ["Part/Designator", "Manufacturer Part Number/Seeed SKU", "Quantity"]
 
-    def format(self, items: List["BOMItem"]) -> str:
+    def format(self, items: list[BOMItem]) -> str:
         """
         Format BOM for Seeed Fusion.
 
@@ -190,17 +200,19 @@ class SeeedBOMFormatter(BOMFormatter):
         writer = csv.writer(output)
         writer.writerow(self.get_headers())
 
-        for key, group_items in sorted(grouped.items()):
+        for _key, group_items in sorted(grouped.items()):
             designators = ",".join(sorted(item.reference for item in group_items))
-            mpn = getattr(group_items[0], "mfr_part", "") or getattr(group_items[0], "seeed_sku", "")
+            mpn = getattr(group_items[0], "mfr_part", "") or getattr(
+                group_items[0], "seeed_sku", ""
+            )
             qty = len(group_items)
             writer.writerow([designators, mpn, qty])
 
         return output.getvalue()
 
-    def _group_items(self, items: List["BOMItem"]) -> Dict[str, List["BOMItem"]]:
+    def _group_items(self, items: list[BOMItem]) -> dict[str, list[BOMItem]]:
         """Group items by MPN."""
-        groups: Dict[str, List["BOMItem"]] = {}
+        groups: dict[str, list[BOMItem]] = {}
         for item in items:
             mpn = getattr(item, "mfr_part", "") or item.value
             if mpn not in groups:
@@ -215,7 +227,7 @@ class GenericBOMFormatter(BOMFormatter):
     manufacturer_id = "generic"
     manufacturer_name = "Generic"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """Generic BOM column headers."""
         headers = ["Reference", "Value", "Footprint", "Quantity"]
         if self.config.include_lcsc:
@@ -224,7 +236,7 @@ class GenericBOMFormatter(BOMFormatter):
             headers.extend(["Manufacturer", "MPN"])
         return headers
 
-    def format(self, items: List["BOMItem"]) -> str:
+    def format(self, items: list[BOMItem]) -> str:
         """Format BOM with all available fields."""
         filtered = self.filter_items(items)
 
@@ -249,18 +261,20 @@ class GenericBOMFormatter(BOMFormatter):
             if self.config.include_lcsc:
                 row.append(getattr(item, "lcsc", ""))
             if self.config.include_mfr:
-                row.extend([
-                    getattr(item, "manufacturer", ""),
-                    getattr(item, "mfr_part", ""),
-                ])
+                row.extend(
+                    [
+                        getattr(item, "manufacturer", ""),
+                        getattr(item, "mfr_part", ""),
+                    ]
+                )
 
             writer.writerow(row)
 
         return output.getvalue()
 
-    def _group_items(self, items: List["BOMItem"]) -> Dict[tuple, List["BOMItem"]]:
+    def _group_items(self, items: list[BOMItem]) -> dict[tuple, list[BOMItem]]:
         """Group items by value and footprint."""
-        groups: Dict[tuple, List["BOMItem"]] = {}
+        groups: dict[tuple, list[BOMItem]] = {}
         for item in items:
             key = (item.value, item.footprint)
             if key not in groups:
@@ -270,7 +284,7 @@ class GenericBOMFormatter(BOMFormatter):
 
 
 # Registry of available formatters
-BOM_FORMATTERS: Dict[str, Type[BOMFormatter]] = {
+BOM_FORMATTERS: dict[str, type[BOMFormatter]] = {
     "jlcpcb": JLCPCBBOMFormatter,
     "pcbway": PCBWayBOMFormatter,
     "seeed": SeeedBOMFormatter,
@@ -278,7 +292,7 @@ BOM_FORMATTERS: Dict[str, Type[BOMFormatter]] = {
 }
 
 
-def get_bom_formatter(manufacturer: str, config: Optional[BOMExportConfig] = None) -> BOMFormatter:
+def get_bom_formatter(manufacturer: str, config: BOMExportConfig | None = None) -> BOMFormatter:
     """
     Get BOM formatter for a manufacturer.
 
@@ -304,9 +318,9 @@ def get_bom_formatter(manufacturer: str, config: Optional[BOMExportConfig] = Non
 
 
 def export_bom(
-    items: List["BOMItem"],
+    items: list[BOMItem],
     manufacturer: str = "generic",
-    config: Optional[BOMExportConfig] = None,
+    config: BOMExportConfig | None = None,
 ) -> str:
     """
     Export BOM to manufacturer-specific format.

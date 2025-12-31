@@ -25,7 +25,6 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
 
 from kicad_tools.schema import Schematic
 from kicad_tools.schema.hierarchy import build_hierarchy
@@ -46,8 +45,8 @@ class ValidationResult:
     """Complete validation results."""
 
     schematic: str
-    issues: List[ValidationIssue] = field(default_factory=list)
-    checks_run: List[str] = field(default_factory=list)
+    issues: list[ValidationIssue] = field(default_factory=list)
+    checks_run: list[str] = field(default_factory=list)
 
     @property
     def error_count(self) -> int:
@@ -62,7 +61,7 @@ class ValidationResult:
         return self.error_count == 0
 
 
-def run_erc(schematic_path: str) -> List[ValidationIssue]:
+def run_erc(schematic_path: str) -> list[ValidationIssue]:
     """Run KiCad ERC check."""
     issues = []
 
@@ -150,7 +149,7 @@ def run_erc(schematic_path: str) -> List[ValidationIssue]:
     return issues
 
 
-def check_missing_footprints(schematic_path: str) -> List[ValidationIssue]:
+def check_missing_footprints(schematic_path: str) -> list[ValidationIssue]:
     """Check for symbols missing footprints."""
     issues = []
 
@@ -194,7 +193,7 @@ def check_missing_footprints(schematic_path: str) -> List[ValidationIssue]:
     return issues
 
 
-def check_missing_values(schematic_path: str) -> List[ValidationIssue]:
+def check_missing_values(schematic_path: str) -> list[ValidationIssue]:
     """Check for symbols missing values."""
     issues = []
 
@@ -234,7 +233,7 @@ def check_missing_values(schematic_path: str) -> List[ValidationIssue]:
     return issues
 
 
-def check_hierarchy(schematic_path: str) -> List[ValidationIssue]:
+def check_hierarchy(schematic_path: str) -> list[ValidationIssue]:
     """Check hierarchy for issues."""
     issues = []
 
@@ -283,7 +282,7 @@ def check_hierarchy(schematic_path: str) -> List[ValidationIssue]:
     return issues
 
 
-def validate_schematic(schematic_path: str, lib_paths: List[str] = None) -> ValidationResult:
+def validate_schematic(schematic_path: str, lib_paths: list[str] = None) -> ValidationResult:
     """Run all validation checks."""
     result = ValidationResult(schematic=schematic_path)
 

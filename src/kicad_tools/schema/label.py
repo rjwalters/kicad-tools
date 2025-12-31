@@ -7,7 +7,6 @@ Labels assign names to nets and enable connections across the schematic.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 from kicad_tools.sexp import SExp
 
@@ -22,7 +21,7 @@ class Label:
     """
 
     text: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
     rotation: float = 0
     uuid: str = ""
 
@@ -57,7 +56,7 @@ class HierarchicalLabel:
     """
 
     text: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
     rotation: float = 0
     shape: str = "input"  # input, output, bidirectional, tri_state, passive
     uuid: str = ""
@@ -97,7 +96,7 @@ class GlobalLabel:
     """
 
     text: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
     rotation: float = 0
     shape: str = "input"
     uuid: str = ""
@@ -136,13 +135,13 @@ class PowerSymbol:
     """
 
     lib_id: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
     rotation: float = 0
     uuid: str = ""
     value: str = ""  # The net name (GND, +5V, etc.)
 
     @classmethod
-    def from_symbol_sexp(cls, sexp: SExp) -> Optional[PowerSymbol]:
+    def from_symbol_sexp(cls, sexp: SExp) -> PowerSymbol | None:
         """
         Try to parse a power symbol from a symbol S-expression.
 

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.sexp import SExp, parse_sexp, SExpParser, SExpSerializer, serialize_sexp
 from kicad_tools.core.sexp_file import (
     load_pcb,
     load_schematic,
@@ -15,6 +14,7 @@ from kicad_tools.core.sexp_file import (
 )
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 
 class TestSExpBasicParsing:

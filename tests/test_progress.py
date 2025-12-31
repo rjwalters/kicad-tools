@@ -50,8 +50,7 @@ class TestProgressModule:
         from kicad_tools.cli.progress import with_progress
 
         def gen():
-            for i in range(5):
-                yield i
+            yield from range(5)
 
         result = list(with_progress(gen(), total=5, quiet=True))
         assert result == [0, 1, 2, 3, 4]
@@ -104,6 +103,7 @@ class TestQuietFlag:
     def test_route_command_has_quiet_flag(self):
         """Test route command parser has --quiet flag."""
         import subprocess
+
         result = subprocess.run(
             [sys.executable, "-m", "kicad_tools.cli", "route", "--help"],
             capture_output=True,
@@ -114,6 +114,7 @@ class TestQuietFlag:
     def test_validate_footprints_has_quiet_flag(self):
         """Test validate-footprints command has --quiet flag."""
         import subprocess
+
         result = subprocess.run(
             [sys.executable, "-m", "kicad_tools.cli", "validate-footprints", "--help"],
             capture_output=True,
@@ -126,6 +127,7 @@ class TestQuietFlag:
     def test_optimize_traces_has_quiet_flag(self):
         """Test optimize-traces command has --quiet flag."""
         import subprocess
+
         result = subprocess.run(
             [sys.executable, "-m", "kicad_tools.cli", "optimize-traces", "--help"],
             capture_output=True,

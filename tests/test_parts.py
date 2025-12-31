@@ -1,13 +1,11 @@
 """Tests for the parts module."""
 
-import json
-import tempfile
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.parts.cache import PartsCache
 from kicad_tools.parts.models import (
     BOMAvailability,
     PackageType,
@@ -17,7 +15,6 @@ from kicad_tools.parts.models import (
     PartPrice,
     SearchResult,
 )
-from kicad_tools.parts.cache import PartsCache
 
 
 class TestPartPrice:
@@ -397,11 +394,9 @@ class TestPartsCache:
         assert cleared == 1
 
 
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
+import importlib.util
+
+HAS_REQUESTS = importlib.util.find_spec("requests") is not None
 
 
 @pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
@@ -783,7 +778,7 @@ class TestLCSCClientExtended:
             mock_fetch.return_value = Part(lcsc_part="C123", mfr_part="Part")
 
             # Mix of formats
-            results = client.lookup_many(["c123", "456", "C789"])
+            client.lookup_many(["c123", "456", "C789"])
 
             # All should be normalized
             calls = [call[0][0] for call in mock_fetch.call_args_list]
@@ -919,6 +914,7 @@ class TestLCSCClientCheckBOM:
     @pytest.fixture
     def mock_bom_items(self):
         """Create mock BOM items."""
+
         class MockBOMItem:
             def __init__(self, reference, value, footprint, lcsc=""):
                 self.reference = reference
@@ -996,6 +992,7 @@ class TestRequiresRequestsDecorator:
         # Mock requests import to fail
         with patch.dict("sys.modules", {"requests": None}):
             import sys
+
             original = sys.modules.get("requests")
             try:
                 if "requests" in sys.modules:

@@ -1,6 +1,7 @@
 """KiCad core utilities for parsing and generating S-expression files."""
 
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+
 from .sexp_file import (
     load_pcb,
     load_schematic,

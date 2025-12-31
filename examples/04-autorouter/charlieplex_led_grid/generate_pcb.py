@@ -41,7 +41,7 @@ MCU_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 47)  # U1 at bottom center
 
 # Resistor positions (horizontal row above MCU)
 RESISTOR_POSITIONS = [
-    (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 38),   # R1
+    (BOARD_ORIGIN_X + 8, BOARD_ORIGIN_Y + 38),  # R1
     (BOARD_ORIGIN_X + 18, BOARD_ORIGIN_Y + 38),  # R2
     (BOARD_ORIGIN_X + 32, BOARD_ORIGIN_Y + 38),  # R3
     (BOARD_ORIGIN_X + 42, BOARD_ORIGIN_Y + 38),  # R4
@@ -53,7 +53,8 @@ LED_START_X = BOARD_ORIGIN_X + 17
 LED_START_Y = BOARD_ORIGIN_Y + 10
 LED_POSITIONS = [
     (LED_START_X + i * LED_SPACING, LED_START_Y + j * LED_SPACING)
-    for j in range(3) for i in range(3)
+    for j in range(3)
+    for i in range(3)
 ]
 
 # Net definitions
@@ -89,7 +90,7 @@ LED_CONNECTIONS = [
 
 def generate_header() -> str:
     """Generate the PCB file header."""
-    return f"""(kicad_pcb
+    return """(kicad_pcb
   (version 20240108)
   (generator "kicad-tools-demo")
   (generator_version "8.0")
@@ -122,7 +123,7 @@ def generate_header() -> str:
 
 def generate_nets() -> str:
     """Generate net definitions."""
-    lines = ["  (net 0 \"\")"]
+    lines = ['  (net 0 "")']
     for name, num in NETS.items():
         if num > 0:
             lines.append(f'  (net {num} "{name}")')
@@ -177,7 +178,9 @@ def generate_mcu() -> str:
         net_num = NETS.get(net_name, 0)
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         py = -1.5 * pin_pitch + i * pin_pitch
-        pads.append(f"""    (pad "{pin_num}" thru_hole rect (at {-row_spacing:.3f} {py:.3f}) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") {net_str})""")
+        pads.append(
+            f"""    (pad "{pin_num}" thru_hole rect (at {-row_spacing:.3f} {py:.3f}) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") {net_str})"""
+        )
 
     for i in range(4):
         # Right side: pins 5-8 (bottom to top)
@@ -185,7 +188,9 @@ def generate_mcu() -> str:
         net_num = NETS.get(net_name, 0)
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         py = 1.5 * pin_pitch - i * pin_pitch
-        pads.append(f"""    (pad "{pin_num}" thru_hole oval (at {row_spacing:.3f} {py:.3f}) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") {net_str})""")
+        pads.append(
+            f"""    (pad "{pin_num}" thru_hole oval (at {row_spacing:.3f} {py:.3f}) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask") {net_str})"""
+        )
 
     pads_str = "\n".join(pads)
     return f"""  (footprint "Package_DIP:DIP-8_W7.62mm"
@@ -270,7 +275,7 @@ def generate_pcb() -> str:
         parts.append(generate_resistor(ref, pos, in_net, out_net))
 
     # LEDs with charlieplex connections
-    for i, (pos, (anode, cathode)) in enumerate(zip(LED_POSITIONS, LED_CONNECTIONS)):
+    for i, (pos, (anode, cathode)) in enumerate(zip(LED_POSITIONS, LED_CONNECTIONS, strict=False)):
         ref = f"D{i + 1}"
         parts.append(generate_led(ref, pos, anode, cathode))
 
@@ -289,7 +294,7 @@ def main():
 
     print(f"Generated: {output_path}")
     print(f"  Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print(f"  Components: 1 MCU, 4 resistors, 9 LEDs")
+    print("  Components: 1 MCU, 4 resistors, 9 LEDs")
     print(f"  Nets: {len([n for n in NETS.values() if n > 0])} (4 LINE + 4 NODE + VCC + GND)")
 
 

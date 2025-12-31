@@ -7,7 +7,7 @@ and show details of individual .kicad_mod files.
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from kicad_tools.core.sexp_file import load_footprint
 from kicad_tools.sexp import SExp
@@ -42,20 +42,24 @@ def list_footprints(directory: Path, output_format: str = "table") -> int:
             name = _get_footprint_name(sexp)
             pad_count = _count_pads(sexp)
             layer = _get_layer(sexp)
-            footprints.append({
-                "file": mod_file.name,
-                "name": name,
-                "pads": pad_count,
-                "layer": layer,
-            })
+            footprints.append(
+                {
+                    "file": mod_file.name,
+                    "name": name,
+                    "pads": pad_count,
+                    "layer": layer,
+                }
+            )
         except Exception as e:
-            footprints.append({
-                "file": mod_file.name,
-                "name": "(error)",
-                "pads": 0,
-                "layer": "",
-                "error": str(e),
-            })
+            footprints.append(
+                {
+                    "file": mod_file.name,
+                    "name": "(error)",
+                    "pads": 0,
+                    "layer": "",
+                    "error": str(e),
+                }
+            )
 
     if output_format == "json":
         print(json.dumps(footprints, indent=2))
@@ -114,9 +118,9 @@ def _get_layer(sexp: SExp) -> str:
     return "F.Cu"
 
 
-def _extract_footprint_info(sexp: SExp, include_pads: bool = False) -> Dict[str, Any]:
+def _extract_footprint_info(sexp: SExp, include_pads: bool = False) -> dict[str, Any]:
     """Extract detailed footprint information."""
-    info: Dict[str, Any] = {
+    info: dict[str, Any] = {
         "name": _get_footprint_name(sexp),
         "format": "KiCad 6+" if sexp.tag == "footprint" else "KiCad 5",
         "layer": _get_layer(sexp),
@@ -125,7 +129,11 @@ def _extract_footprint_info(sexp: SExp, include_pads: bool = False) -> Dict[str,
     # Get version if present
     version = sexp.find_child("version")
     if version and version.values:
-        info["version"] = int(version.values[0]) if isinstance(version.values[0], (int, float)) else str(version.values[0])
+        info["version"] = (
+            int(version.values[0])
+            if isinstance(version.values[0], (int, float))
+            else str(version.values[0])
+        )
 
     # Get description
     descr = sexp.find_child("descr")
@@ -165,9 +173,9 @@ def _extract_footprint_info(sexp: SExp, include_pads: bool = False) -> Dict[str,
     return info
 
 
-def _extract_pad_info(pad: SExp) -> Dict[str, Any]:
+def _extract_pad_info(pad: SExp) -> dict[str, Any]:
     """Extract information about a single pad."""
-    pad_info: Dict[str, Any] = {}
+    pad_info: dict[str, Any] = {}
 
     # Pad number/name is first value
     if pad.values and isinstance(pad.values[0], str):
@@ -193,7 +201,9 @@ def _extract_pad_info(pad: SExp) -> Dict[str, Any]:
     size = pad.find_child("size")
     if size and size.values:
         pad_info["width"] = float(size.values[0]) if size.values else 0.0
-        pad_info["height"] = float(size.values[1]) if len(size.values) > 1 else pad_info.get("width", 0.0)
+        pad_info["height"] = (
+            float(size.values[1]) if len(size.values) > 1 else pad_info.get("width", 0.0)
+        )
 
     # Drill
     drill = pad.find_child("drill")
@@ -208,9 +218,9 @@ def _extract_pad_info(pad: SExp) -> Dict[str, Any]:
     return pad_info
 
 
-def _extract_model_info(model: SExp) -> Dict[str, Any]:
+def _extract_model_info(model: SExp) -> dict[str, Any]:
     """Extract 3D model information."""
-    model_info: Dict[str, Any] = {}
+    model_info: dict[str, Any] = {}
 
     # Model path is first value
     if model.values and isinstance(model.values[0], str):
@@ -219,7 +229,7 @@ def _extract_model_info(model: SExp) -> Dict[str, Any]:
     return model_info
 
 
-def _print_footprint_table(directory: Path, footprints: List[Dict[str, Any]]) -> None:
+def _print_footprint_table(directory: Path, footprints: list[dict[str, Any]]) -> None:
     """Print footprints in table format."""
     print(f"\nFootprints in {directory.name}:")
     print("=" * 70)
@@ -236,7 +246,7 @@ def _print_footprint_table(directory: Path, footprints: List[Dict[str, Any]]) ->
     print(f"Total: {len(footprints)} footprints")
 
 
-def _print_footprint_info(file_path: Path, info: Dict[str, Any]) -> None:
+def _print_footprint_info(file_path: Path, info: dict[str, Any]) -> None:
     """Print footprint information in text format."""
     print(f"\nFootprint: {info['name']}")
     print("=" * 60)
@@ -277,6 +287,8 @@ def _print_footprint_info(file_path: Path, info: Dict[str, Any]) -> None:
             y = pad.get("y", 0)
             w = pad.get("width", 0)
             h = pad.get("height", 0)
-            print(f"  {name:>4}: {pad_type:<10} {shape:<10} at ({x:>7.3f}, {y:>7.3f}) size {w:.3f}x{h:.3f}")
+            print(
+                f"  {name:>4}: {pad_type:<10} {shape:<10} at ({x:>7.3f}, {y:>7.3f}) size {w:.3f}x{h:.3f}"
+            )
 
     print("")

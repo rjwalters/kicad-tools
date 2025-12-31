@@ -138,6 +138,7 @@ class TestPadGapCalculation:
         gap = _calculate_pad_gap(pad1, pad2)
         # Both axes have 1.5mm gap, diagonal gap is sqrt(1.5^2 + 1.5^2) ≈ 2.12mm
         import math
+
         expected = math.sqrt(1.5**2 + 1.5**2)
         assert gap == pytest.approx(expected, abs=0.01)
 

@@ -64,11 +64,11 @@ class CircuitBlock:
 
     def __init__(self):
         """Initialize base attributes."""
-        self.schematic: "Schematic" = None
+        self.schematic: Schematic = None
         self.x: float = 0
         self.y: float = 0
         self.ports: dict[str, tuple[float, float]] = {}
-        self.components: dict[str, "SymbolInstance"] = {}
+        self.components: dict[str, SymbolInstance] = {}
 
     def port(self, name: str) -> tuple[float, float]:
         """Get a port position by name."""

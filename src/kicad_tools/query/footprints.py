@@ -5,7 +5,7 @@ Provides query interface for PCB footprints.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from .base import BaseQuery
 
@@ -25,7 +25,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         top = query.on_layer("F.Cu").all()
     """
 
-    def by_reference(self, reference: str) -> Optional["Footprint"]:
+    def by_reference(self, reference: str) -> Footprint | None:
         """Get footprint by reference designator.
 
         Args:
@@ -39,7 +39,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return self.filter(reference=reference).first()
 
-    def by_name(self, name: str) -> "FootprintQuery":
+    def by_name(self, name: str) -> FootprintQuery:
         """Filter by footprint name.
 
         Args:
@@ -53,7 +53,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(name=name))
 
-    def by_value(self, value: str) -> "FootprintQuery":
+    def by_value(self, value: str) -> FootprintQuery:
         """Filter by value.
 
         Args:
@@ -67,7 +67,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(value=value))
 
-    def on_layer(self, layer: str) -> "FootprintQuery":
+    def on_layer(self, layer: str) -> FootprintQuery:
         """Filter by layer.
 
         Args:
@@ -81,7 +81,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(layer=layer))
 
-    def on_top(self) -> "FootprintQuery":
+    def on_top(self) -> FootprintQuery:
         """Filter to footprints on top layer (F.Cu).
 
         Returns:
@@ -89,7 +89,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return self.on_layer("F.Cu")
 
-    def on_bottom(self) -> "FootprintQuery":
+    def on_bottom(self) -> FootprintQuery:
         """Filter to footprints on bottom layer (B.Cu).
 
         Returns:
@@ -97,7 +97,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return self.on_layer("B.Cu")
 
-    def smd(self) -> "FootprintQuery":
+    def smd(self) -> FootprintQuery:
         """Filter to SMD footprints.
 
         Returns:
@@ -105,7 +105,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(attr="smd"))
 
-    def through_hole(self) -> "FootprintQuery":
+    def through_hole(self) -> FootprintQuery:
         """Filter to through-hole footprints.
 
         Returns:
@@ -113,7 +113,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(attr="through_hole"))
 
-    def capacitors(self) -> "FootprintQuery":
+    def capacitors(self) -> FootprintQuery:
         """Filter to capacitors (C* references).
 
         Returns:
@@ -121,7 +121,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(reference__startswith="C"))
 
-    def resistors(self) -> "FootprintQuery":
+    def resistors(self) -> FootprintQuery:
         """Filter to resistors (R* references).
 
         Returns:
@@ -129,7 +129,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(reference__startswith="R"))
 
-    def ics(self) -> "FootprintQuery":
+    def ics(self) -> FootprintQuery:
         """Filter to ICs (U* references).
 
         Returns:
@@ -137,7 +137,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(reference__startswith="U"))
 
-    def connectors(self) -> "FootprintQuery":
+    def connectors(self) -> FootprintQuery:
         """Filter to connectors (J* references).
 
         Returns:
@@ -145,7 +145,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         """
         return cast("FootprintQuery", self.filter(reference__startswith="J"))
 
-    def with_prefix(self, prefix: str) -> "FootprintQuery":
+    def with_prefix(self, prefix: str) -> FootprintQuery:
         """Filter by reference prefix.
 
         Args:
@@ -160,7 +160,7 @@ class FootprintQuery(BaseQuery["Footprint"]):
         return cast("FootprintQuery", self.filter(reference__startswith=prefix))
 
 
-class FootprintList(List["Footprint"]):
+class FootprintList(list["Footprint"]):
     """List subclass with query methods for footprints.
 
     Extends list to provide backward compatibility while adding
@@ -201,7 +201,7 @@ class FootprintList(List["Footprint"]):
         """
         return FootprintQuery(list(self))
 
-    def by_reference(self, reference: str) -> Optional["Footprint"]:
+    def by_reference(self, reference: str) -> Footprint | None:
         """Get footprint by reference (shortcut).
 
         Args:
@@ -212,7 +212,7 @@ class FootprintList(List["Footprint"]):
         """
         return self.query().by_reference(reference)
 
-    def by_name(self, name: str) -> List["Footprint"]:
+    def by_name(self, name: str) -> list[Footprint]:
         """Get footprints by name (shortcut).
 
         Args:
@@ -223,7 +223,7 @@ class FootprintList(List["Footprint"]):
         """
         return self.query().by_name(name).all()
 
-    def by_value(self, value: str) -> List["Footprint"]:
+    def by_value(self, value: str) -> list[Footprint]:
         """Get footprints by value (shortcut).
 
         Args:
@@ -234,7 +234,7 @@ class FootprintList(List["Footprint"]):
         """
         return self.query().by_value(value).all()
 
-    def filter(self, **kwargs: Any) -> List["Footprint"]:
+    def filter(self, **kwargs: Any) -> list[Footprint]:
         """Filter footprints (shortcut, returns list).
 
         For chained filtering, use .query().filter(...).filter(...)
@@ -247,7 +247,7 @@ class FootprintList(List["Footprint"]):
         """
         return self.query().filter(**kwargs).all()
 
-    def exclude(self, **kwargs: Any) -> List["Footprint"]:
+    def exclude(self, **kwargs: Any) -> list[Footprint]:
         """Exclude footprints (shortcut, returns list).
 
         Args:
@@ -258,7 +258,7 @@ class FootprintList(List["Footprint"]):
         """
         return self.query().exclude(**kwargs).all()
 
-    def on_layer(self, layer: str) -> List["Footprint"]:
+    def on_layer(self, layer: str) -> list[Footprint]:
         """Get footprints on layer (shortcut).
 
         Args:
@@ -269,39 +269,39 @@ class FootprintList(List["Footprint"]):
         """
         return self.query().on_layer(layer).all()
 
-    def on_top(self) -> List["Footprint"]:
+    def on_top(self) -> list[Footprint]:
         """Get footprints on top layer (shortcut)."""
         return self.query().on_top().all()
 
-    def on_bottom(self) -> List["Footprint"]:
+    def on_bottom(self) -> list[Footprint]:
         """Get footprints on bottom layer (shortcut)."""
         return self.query().on_bottom().all()
 
-    def smd(self) -> List["Footprint"]:
+    def smd(self) -> list[Footprint]:
         """Get all SMD footprints (shortcut)."""
         return self.query().smd().all()
 
-    def through_hole(self) -> List["Footprint"]:
+    def through_hole(self) -> list[Footprint]:
         """Get all through-hole footprints (shortcut)."""
         return self.query().through_hole().all()
 
-    def capacitors(self) -> List["Footprint"]:
+    def capacitors(self) -> list[Footprint]:
         """Get all capacitors (shortcut)."""
         return self.query().capacitors().all()
 
-    def resistors(self) -> List["Footprint"]:
+    def resistors(self) -> list[Footprint]:
         """Get all resistors (shortcut)."""
         return self.query().resistors().all()
 
-    def ics(self) -> List["Footprint"]:
+    def ics(self) -> list[Footprint]:
         """Get all ICs (shortcut)."""
         return self.query().ics().all()
 
-    def connectors(self) -> List["Footprint"]:
+    def connectors(self) -> list[Footprint]:
         """Get all connectors (shortcut)."""
         return self.query().connectors().all()
 
-    def references(self) -> List[str]:
+    def references(self) -> list[str]:
         """Get list of all reference designators.
 
         Returns:

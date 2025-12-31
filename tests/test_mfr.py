@@ -1,14 +1,14 @@
 """Tests for kicad_tools.manufacturers module."""
 
 import pytest
+
 from kicad_tools.manufacturers import (
+    DesignRules,
+    compare_design_rules,
+    find_compatible_manufacturers,
+    get_manufacturer_ids,
     get_profile,
     list_manufacturers,
-    get_manufacturer_ids,
-    find_compatible_manufacturers,
-    compare_design_rules,
-    DesignRules,
-    ManufacturerProfile,
 )
 
 
@@ -205,8 +205,8 @@ class TestProjectFile:
     def test_set_manufacturer_metadata(self):
         """Test setting manufacturer metadata."""
         from kicad_tools.core.project_file import (
-            set_manufacturer_metadata,
             get_manufacturer_metadata,
+            set_manufacturer_metadata,
         )
 
         data = {}
@@ -258,9 +258,10 @@ class TestMfrCLICommands:
 
     def test_apply_rules_dry_run(self, tmp_path):
         """Test apply-rules command with dry-run."""
-        from kicad_tools.cli.mfr import main as mfr_main
-        from pathlib import Path
         import shutil
+        from pathlib import Path
+
+        from kicad_tools.cli.mfr import main as mfr_main
 
         # Copy test file to temp directory
         src_pcb = Path("demo/usb_joystick/usb_joystick.kicad_pcb")
@@ -271,17 +272,16 @@ class TestMfrCLICommands:
         shutil.copy(src_pcb, test_pcb)
 
         # Run apply-rules with dry-run
-        result = mfr_main([
-            "apply-rules", str(test_pcb), "jlcpcb", "--dry-run"
-        ])
+        result = mfr_main(["apply-rules", str(test_pcb), "jlcpcb", "--dry-run"])
 
         # Should return 0 (success) on dry-run
         assert result is None  # main() doesn't return anything on success
 
     def test_validate_command(self, tmp_path):
         """Test validate command."""
-        from kicad_tools.cli.mfr import main as mfr_main
         from pathlib import Path
+
+        from kicad_tools.cli.mfr import main as mfr_main
 
         src_pcb = Path("demo/usb_joystick/usb_joystick_routed.kicad_pcb")
         if not src_pcb.exists():
@@ -297,17 +297,19 @@ class TestMfrCLICommands:
     def test_validate_pcb_design(self):
         """Test PCB design validation function."""
         from kicad_tools.cli.mfr import _validate_pcb_design
-        from kicad_tools.sexp import SExp
         from kicad_tools.manufacturers import get_profile
+        from kicad_tools.sexp import SExp
 
         profile = get_profile("jlcpcb")
         rules = profile.get_design_rules(layers=2)
 
         # Create a simple PCB sexp with a thin trace
-        sexp = SExp.list("kicad_pcb",
-            SExp.list("segment",
-                SExp.list("width", 0.05)  # 0.05mm, below minimum
-            )
+        sexp = SExp.list(
+            "kicad_pcb",
+            SExp.list(
+                "segment",
+                SExp.list("width", 0.05),  # 0.05mm, below minimum
+            ),
         )
 
         violations = _validate_pcb_design(sexp, rules)

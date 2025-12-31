@@ -16,7 +16,6 @@ Differential pairs are detected from common naming conventions:
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
 
 
 class DifferentialPairType(Enum):
@@ -121,7 +120,7 @@ class DifferentialPair:
     positive: DifferentialSignal
     negative: DifferentialSignal
     pair_type: DifferentialPairType = DifferentialPairType.CUSTOM
-    rules: Optional[DifferentialPairRules] = None
+    rules: DifferentialPairRules | None = None
     routed_length_p: float = 0.0
     routed_length_n: float = 0.0
 
@@ -141,7 +140,7 @@ class DifferentialPair:
             return True
         return self.length_delta <= self.rules.max_length_delta
 
-    def get_net_ids(self) -> Tuple[int, int]:
+    def get_net_ids(self) -> tuple[int, int]:
         """Get net IDs as (positive, negative) tuple."""
         return (self.positive.net_id, self.negative.net_id)
 
@@ -170,7 +169,7 @@ _PN_SUFFIX_PATTERN = re.compile(r"^(.+)_([PN]|D[PN])$", re.IGNORECASE)
 _POS_NEG_PATTERN = re.compile(r"^(.+)_(POS|NEG)$", re.IGNORECASE)
 
 
-def parse_differential_signal(net_name: str) -> Optional[Tuple[str, str, str]]:
+def parse_differential_signal(net_name: str) -> tuple[str, str, str] | None:
     """Parse a net name to extract differential pair information.
 
     Args:
@@ -208,8 +207,8 @@ def parse_differential_signal(net_name: str) -> Optional[Tuple[str, str, str]]:
 
 
 def detect_differential_signals(
-    net_names: Dict[int, str],
-) -> List[DifferentialSignal]:
+    net_names: dict[int, str],
+) -> list[DifferentialSignal]:
     """Detect differential pair signals from net names.
 
     Args:
@@ -218,7 +217,7 @@ def detect_differential_signals(
     Returns:
         List of detected DifferentialSignal objects
     """
-    signals: List[DifferentialSignal] = []
+    signals: list[DifferentialSignal] = []
 
     for net_id, net_name in net_names.items():
         parsed = parse_differential_signal(net_name)
@@ -270,8 +269,8 @@ def _detect_pair_type(base_name: str) -> DifferentialPairType:
 
 
 def group_differential_pairs(
-    signals: List[DifferentialSignal],
-) -> List[DifferentialPair]:
+    signals: list[DifferentialSignal],
+) -> list[DifferentialPair]:
     """Group differential signals into pairs.
 
     Args:
@@ -281,7 +280,7 @@ def group_differential_pairs(
         List of DifferentialPair objects (only complete pairs)
     """
     # Group signals by base name
-    by_base_name: Dict[str, Dict[str, DifferentialSignal]] = {}
+    by_base_name: dict[str, dict[str, DifferentialSignal]] = {}
 
     for signal in signals:
         if signal.base_name not in by_base_name:
@@ -289,7 +288,7 @@ def group_differential_pairs(
         by_base_name[signal.base_name][signal.polarity] = signal
 
     # Create pairs where both P and N exist
-    pairs: List[DifferentialPair] = []
+    pairs: list[DifferentialPair] = []
 
     for base_name, polarity_map in sorted(by_base_name.items()):
         if "P" in polarity_map and "N" in polarity_map:
@@ -308,8 +307,8 @@ def group_differential_pairs(
 
 
 def detect_differential_pairs(
-    net_names: Dict[int, str],
-) -> List[DifferentialPair]:
+    net_names: dict[int, str],
+) -> list[DifferentialPair]:
     """Detect and group differential pairs from net names.
 
     This is a convenience function that combines detect_differential_signals
@@ -339,13 +338,11 @@ class DifferentialPairConfig:
 
     enabled: bool = False
     auto_detect: bool = True
-    spacing: Optional[float] = None
-    max_length_delta: Optional[float] = None
+    spacing: float | None = None
+    max_length_delta: float | None = None
     add_serpentines: bool = True
 
-    def get_rules(
-        self, pair_type: DifferentialPairType
-    ) -> DifferentialPairRules:
+    def get_rules(self, pair_type: DifferentialPairType) -> DifferentialPairRules:
         """Get rules with any config overrides applied."""
         base_rules = DifferentialPairRules.for_type(pair_type)
         return DifferentialPairRules(
@@ -381,7 +378,7 @@ class LengthMismatchWarning:
         )
 
 
-def analyze_differential_pairs(net_names: Dict[int, str]) -> Dict[str, any]:
+def analyze_differential_pairs(net_names: dict[int, str]) -> dict[str, any]:
     """Analyze net names to provide a differential pair detection summary.
 
     Args:

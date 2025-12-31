@@ -33,7 +33,6 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 KICAD_SCRIPTS = Path(__file__).resolve().parent
 
@@ -159,7 +158,7 @@ class BOMLine:
         return ""
 
 
-def find_kicad_cli() -> Optional[Path]:
+def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable."""
     # Check common locations on macOS
     locations = [

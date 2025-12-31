@@ -28,6 +28,7 @@ Examples:
 """
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import sys
@@ -113,7 +114,7 @@ def cmd_footprint(pcb: PCB, args):
 
     if not fp:
         print(f"Error: Footprint '{args.reference}' not found", file=sys.stderr)
-        available = sorted(set(f.reference for f in pcb.footprints))[:10]
+        available = sorted({f.reference for f in pcb.footprints})[:10]
         print(f"Available: {', '.join(available)}...", file=sys.stderr)
         sys.exit(1)
 
@@ -217,10 +218,8 @@ def cmd_net(pcb: PCB, args):
 
     if not net:
         # Try by number
-        try:
+        with contextlib.suppress(ValueError):
             net = pcb.get_net(int(args.name))
-        except ValueError:
-            pass
 
     if not net:
         print(f"Error: Net '{args.name}' not found", file=sys.stderr)
@@ -246,7 +245,7 @@ def cmd_net(pcb: PCB, args):
     )
 
     # Get layers used
-    layers = sorted(set(s.layer for s in segments))
+    layers = sorted({s.layer for s in segments})
 
     if args.format == "json":
         print(
@@ -299,7 +298,7 @@ def cmd_traces(pcb: PCB, args):
         lengths = [
             math.sqrt((s.end[0] - s.start[0]) ** 2 + (s.end[1] - s.start[1]) ** 2) for s in segs
         ]
-        widths = set(s.width for s in segs)
+        widths = {s.width for s in segs}
         stats[layer] = {
             "count": len(segs),
             "total_length": sum(lengths),

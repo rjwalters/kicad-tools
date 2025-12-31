@@ -31,7 +31,6 @@ import re
 from dataclasses import dataclass, field
 from difflib import get_close_matches
 from pathlib import Path
-from typing import Optional
 
 
 # Default KiCad library paths (platform-specific)
@@ -181,7 +180,7 @@ class LibraryIndex:
     path: Path
     name: str
     symbols: dict[str, int] = field(default_factory=dict)  # name -> byte offset
-    _content: Optional[str] = field(default=None, repr=False)
+    _content: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_file(cls, path: Path) -> "LibraryIndex":
@@ -222,7 +221,7 @@ class SymbolRegistry:
     - OPL mapping: map Seeed OPL part numbers to symbols
     """
 
-    def __init__(self, lib_paths: Optional[list[Path]] = None):
+    def __init__(self, lib_paths: list[Path] | None = None):
         """
         Initialize registry.
 
@@ -488,7 +487,7 @@ class SymbolRegistry:
                 index = self._get_library_index(lib_name)
                 content = index.get_content()
 
-                for sym_name in index.symbols.keys():
+                for sym_name in index.symbols:
                     # Quick check in content around symbol definition
                     pattern = rf'\(symbol "{re.escape(sym_name)}"[\s\S]*?(?=\n\t\(symbol "|\n\)$)'
                     match = re.search(pattern, content)
@@ -553,7 +552,7 @@ class SymbolRegistry:
 
 
 # Global registry instance (singleton pattern)
-_global_registry: Optional[SymbolRegistry] = None
+_global_registry: SymbolRegistry | None = None
 
 
 def get_registry() -> SymbolRegistry:

@@ -19,14 +19,12 @@ Usage:
     fixer.save("board-fixed.kicad_pcb")
 """
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from ..sexp import SExp, parse_file
 from .report import DRCReport
-from .violation import DRCViolation, Location, ViolationType
+from .violation import ViolationType
 
 
 @dataclass
@@ -88,8 +86,8 @@ class DRCFixer:
         x: float,
         y: float,
         radius: float = 0.5,
-        layer: Optional[str] = None,
-        net_name: Optional[str] = None,
+        layer: str | None = None,
+        net_name: str | None = None,
     ) -> list[TraceInfo]:
         """Find track segments within radius of a point."""
         segments = []
@@ -131,16 +129,20 @@ class DRCFixer:
             width = float(width_node.get_first_atom()) if width_node else 0
             uuid_str = uuid_node.get_first_atom() if uuid_node else ""
 
-            segments.append(TraceInfo(
-                start_x=sx, start_y=sy,
-                end_x=ex, end_y=ey,
-                width=width,
-                layer=seg_layer,
-                net=net_num,
-                net_name=seg_net_name,
-                uuid=uuid_str,
-                node=seg_node,
-            ))
+            segments.append(
+                TraceInfo(
+                    start_x=sx,
+                    start_y=sy,
+                    end_x=ex,
+                    end_y=ey,
+                    width=width,
+                    layer=seg_layer,
+                    net=net_num,
+                    net_name=seg_net_name,
+                    uuid=uuid_str,
+                    node=seg_node,
+                )
+            )
 
         return segments
 
@@ -149,7 +151,7 @@ class DRCFixer:
         x: float,
         y: float,
         radius: float = 0.5,
-        net_name: Optional[str] = None,
+        net_name: str | None = None,
     ) -> list[ViaInfo]:
         """Find vias within radius of a point."""
         vias = []
@@ -179,22 +181,28 @@ class DRCFixer:
             drill_node = via_node.find("drill")
             uuid_node = via_node.find("uuid")
 
-            vias.append(ViaInfo(
-                x=vx, y=vy,
-                size=float(size_node.get_first_atom()) if size_node else 0,
-                drill=float(drill_node.get_first_atom()) if drill_node else 0,
-                net=net_num,
-                uuid=uuid_node.get_first_atom() if uuid_node else "",
-                node=via_node,
-            ))
+            vias.append(
+                ViaInfo(
+                    x=vx,
+                    y=vy,
+                    size=float(size_node.get_first_atom()) if size_node else 0,
+                    drill=float(drill_node.get_first_atom()) if drill_node else 0,
+                    net=net_num,
+                    uuid=uuid_node.get_first_atom() if uuid_node else "",
+                    node=via_node,
+                )
+            )
 
         return vias
 
     def _segment_near_point(
         self,
-        x1: float, y1: float,
-        x2: float, y2: float,
-        px: float, py: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        px: float,
+        py: float,
         radius: float,
     ) -> bool:
         """Check if a line segment passes within radius of a point."""
@@ -255,11 +263,7 @@ class DRCFixer:
             # Skip atoms (non-list nodes)
             if child.is_atom:
                 continue
-            if child.name == "segment":
-                net_node = child.find("net")
-                if net_node and int(net_node.get_first_atom()) == net_num:
-                    to_delete.append(child)
-            elif child.name == "via":
+            if child.name == "segment" or child.name == "via":
                 net_node = child.find("net")
                 if net_node and int(net_node.get_first_atom()) == net_num:
                     to_delete.append(child)
@@ -297,7 +301,8 @@ class DRCFixer:
 
             # Find segments near the violation
             segments = self.find_segments_near(
-                loc.x_mm, loc.y_mm,
+                loc.x_mm,
+                loc.y_mm,
                 radius=1.0,  # 1mm radius
                 layer=loc.layer if loc.layer else None,
             )
@@ -335,7 +340,8 @@ class DRCFixer:
 
             # Find segments near the violation
             segments = self.find_segments_near(
-                loc.x_mm, loc.y_mm,
+                loc.x_mm,
+                loc.y_mm,
                 radius=0.5,
                 layer=loc.layer if loc.layer else None,
             )
@@ -362,7 +368,7 @@ class DRCFixer:
             nets.update(v.nets)
         return nets
 
-    def save(self, output_path: Optional[str] = None):
+    def save(self, output_path: str | None = None):
         """Save the modified PCB."""
         path = Path(output_path) if output_path else self.path
         path.write_text(self.doc.to_string() + "\n")

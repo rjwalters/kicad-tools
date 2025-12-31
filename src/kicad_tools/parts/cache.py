@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator, List, Optional
 
-from .models import Part, PartCategory, PackageType, PartPrice
+from .models import PackageType, Part, PartCategory, PartPrice
 
 
 def get_default_cache_path() -> Path:
@@ -62,7 +62,7 @@ class PartsCache:
 
     def __init__(
         self,
-        db_path: Optional[Path] = None,
+        db_path: Path | None = None,
         ttl_days: int = DEFAULT_TTL_DAYS,
     ):
         """
@@ -164,7 +164,10 @@ class PartsCache:
             "stock": part.stock,
             "min_order": part.min_order,
             "prices": json.dumps(
-                [{"quantity": p.quantity, "unit_price": p.unit_price, "currency": p.currency} for p in part.prices]
+                [
+                    {"quantity": p.quantity, "unit_price": p.unit_price, "currency": p.currency}
+                    for p in part.prices
+                ]
             ),
             "is_basic": 1 if part.is_basic else 0,
             "is_preferred": 1 if part.is_preferred else 0,
@@ -199,7 +202,9 @@ class PartsCache:
             description=row["description"] or "",
             category=PartCategory(row["category"]) if row["category"] else PartCategory.OTHER,
             package=row["package"] or "",
-            package_type=PackageType(row["package_type"]) if row["package_type"] else PackageType.UNKNOWN,
+            package_type=PackageType(row["package_type"])
+            if row["package_type"]
+            else PackageType.UNKNOWN,
             value=row["value"] or "",
             tolerance=row["tolerance"] or "",
             voltage_rating=row["voltage_rating"] or "",
@@ -221,7 +226,7 @@ class PartsCache:
         cached_time = datetime.fromisoformat(cached_at)
         return datetime.now() - cached_time > self.ttl
 
-    def get(self, lcsc_part: str, ignore_expiry: bool = False) -> Optional[Part]:
+    def get(self, lcsc_part: str, ignore_expiry: bool = False) -> Part | None:
         """
         Get a part from cache.
 
@@ -247,7 +252,7 @@ class PartsCache:
 
             return self._row_to_part(row)
 
-    def get_many(self, lcsc_parts: List[str], ignore_expiry: bool = False) -> dict[str, Part]:
+    def get_many(self, lcsc_parts: list[str], ignore_expiry: bool = False) -> dict[str, Part]:
         """
         Get multiple parts from cache.
 
@@ -307,7 +312,7 @@ class PartsCache:
                 row,
             )
 
-    def put_many(self, parts: List[Part]) -> None:
+    def put_many(self, parts: list[Part]) -> None:
         """
         Store multiple parts in cache.
 
@@ -402,18 +407,12 @@ class PartsCache:
             expired = total - valid
 
             # Get oldest and newest
-            oldest = conn.execute(
-                "SELECT MIN(cached_at) FROM parts"
-            ).fetchone()[0]
-            newest = conn.execute(
-                "SELECT MAX(cached_at) FROM parts"
-            ).fetchone()[0]
+            oldest = conn.execute("SELECT MIN(cached_at) FROM parts").fetchone()[0]
+            newest = conn.execute("SELECT MAX(cached_at) FROM parts").fetchone()[0]
 
             # Category breakdown
             categories = {}
-            cursor = conn.execute(
-                "SELECT category, COUNT(*) FROM parts GROUP BY category"
-            )
+            cursor = conn.execute("SELECT category, COUNT(*) FROM parts GROUP BY category")
             for row in cursor:
                 categories[row[0]] = row[1]
 

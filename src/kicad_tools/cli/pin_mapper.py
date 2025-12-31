@@ -25,7 +25,6 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -101,7 +100,7 @@ class PinMapping:
     """Represents a mapping between source and target pins."""
 
     source_pin: Pin
-    target_pin: Optional[Pin]
+    target_pin: Pin | None
     confidence: float  # 0.0 to 1.0
     match_reason: str
 
@@ -312,16 +311,15 @@ def match_pins(
                     used_targets.add(tgt.number)
 
         # Strategy 3: Same pin number (low confidence)
-        if not mapping:
-            if src.number in target_by_number:
-                tgt = target_by_number[src.number]
-                if tgt.number not in used_targets:
-                    # Only if same category
-                    if src.function_category == tgt.function_category:
-                        mapping = PinMapping(
-                            src, tgt, 0.4, f"Same pin number + category ({src.function_category})"
-                        )
-                        used_targets.add(tgt.number)
+        if not mapping and src.number in target_by_number:
+            tgt = target_by_number[src.number]
+            if tgt.number not in used_targets:
+                # Only if same category
+                if src.function_category == tgt.function_category:
+                    mapping = PinMapping(
+                        src, tgt, 0.4, f"Same pin number + category ({src.function_category})"
+                    )
+                    used_targets.add(tgt.number)
 
         # Strategy 4: Function category match (suggestion only)
         if not mapping:
@@ -418,7 +416,7 @@ def print_mapping_report(
         print("SUMMARY BY FUNCTION CATEGORY")
         print(f"{'─' * 70}")
 
-        categories = set(p.function_category for p in result.source_pins)
+        categories = {p.function_category for p in result.source_pins}
         categories.update(p.function_category for p in result.target_pins)
 
         for cat in sorted(categories):

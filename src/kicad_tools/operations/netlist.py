@@ -12,7 +12,6 @@ import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -35,18 +34,18 @@ class NetlistComponent:
     footprint: str
     lib_id: str
     sheet_path: str = ""
-    properties: Dict[str, str] = field(default_factory=dict)
-    pins: List[ComponentPin] = field(default_factory=list)
+    properties: dict[str, str] = field(default_factory=dict)
+    pins: list[ComponentPin] = field(default_factory=list)
 
     @classmethod
-    def from_sexp(cls, sexp: SExp) -> "NetlistComponent":
+    def from_sexp(cls, sexp: SExp) -> NetlistComponent:
         """Parse component from netlist S-expression."""
         ref = ""
         value = ""
         footprint = ""
         lib_id = ""
         sheet_path = ""
-        properties: Dict[str, str] = {}
+        properties: dict[str, str] = {}
 
         if ref_node := sexp.find("ref"):
             ref = ref_node.get_string(0) or ""
@@ -63,9 +62,8 @@ class NetlistComponent:
             elif lib_node.get_string(1):
                 lib_id = lib_node.get_string(1) or ""
 
-        if sheet_node := sexp.find("sheetpath"):
-            if names := sheet_node.find("names"):
-                sheet_path = names.get_string(0) or ""
+        if (sheet_node := sexp.find("sheetpath")) and (names := sheet_node.find("names")):
+            sheet_path = names.get_string(0) or ""
 
         # Parse properties
         for prop in sexp.find_all("property"):
@@ -94,7 +92,7 @@ class NetNode:
     pin_type: str = ""
 
     @classmethod
-    def from_sexp(cls, sexp: SExp) -> "NetNode":
+    def from_sexp(cls, sexp: SExp) -> NetNode:
         """Parse node from netlist S-expression."""
         ref = sexp.get_string(0) or ""
         pin = ""
@@ -124,14 +122,14 @@ class NetlistNet:
 
     code: int
     name: str
-    nodes: List[NetNode] = field(default_factory=list)
+    nodes: list[NetNode] = field(default_factory=list)
 
     @classmethod
-    def from_sexp(cls, sexp: SExp) -> "NetlistNet":
+    def from_sexp(cls, sexp: SExp) -> NetlistNet:
         """Parse net from netlist S-expression."""
         code = 0
         name = ""
-        nodes: List[NetNode] = []
+        nodes: list[NetNode] = []
 
         if code_node := sexp.find("code"):
             code = code_node.get_int(0) or 0
@@ -168,12 +166,12 @@ class Netlist:
     source_file: str = ""
     tool: str = ""
     date: str = ""
-    sheets: List[SheetInfo] = field(default_factory=list)
-    components: List[NetlistComponent] = field(default_factory=list)
-    nets: List[NetlistNet] = field(default_factory=list)
+    sheets: list[SheetInfo] = field(default_factory=list)
+    components: list[NetlistComponent] = field(default_factory=list)
+    nets: list[NetlistNet] = field(default_factory=list)
 
     @classmethod
-    def from_sexp(cls, sexp: SExp) -> "Netlist":
+    def from_sexp(cls, sexp: SExp) -> Netlist:
         """Parse complete netlist from S-expression."""
         netlist = cls()
 
@@ -233,28 +231,28 @@ class Netlist:
         return netlist
 
     @classmethod
-    def load(cls, path: str | Path) -> "Netlist":
+    def load(cls, path: str | Path) -> Netlist:
         """Load and parse a netlist file."""
         path = Path(path)
         text = path.read_text(encoding="utf-8")
         sexp = parse_sexp(text)
         return cls.from_sexp(sexp)
 
-    def get_component(self, reference: str) -> Optional[NetlistComponent]:
+    def get_component(self, reference: str) -> NetlistComponent | None:
         """Get component by reference designator."""
         for comp in self.components:
             if comp.reference == reference:
                 return comp
         return None
 
-    def get_net(self, name: str) -> Optional[NetlistNet]:
+    def get_net(self, name: str) -> NetlistNet | None:
         """Get net by name."""
         for net in self.nets:
             if net.name == name:
                 return net
         return None
 
-    def get_component_nets(self, reference: str) -> List[NetlistNet]:
+    def get_component_nets(self, reference: str) -> list[NetlistNet]:
         """Get all nets connected to a component."""
         result = []
         for net in self.nets:
@@ -264,7 +262,7 @@ class Netlist:
                     break
         return result
 
-    def get_net_by_pin(self, reference: str, pin: str) -> Optional[NetlistNet]:
+    def get_net_by_pin(self, reference: str, pin: str) -> NetlistNet | None:
         """Get the net connected to a specific pin."""
         for net in self.nets:
             for node in net.nodes:
@@ -273,7 +271,7 @@ class Netlist:
         return None
 
     @property
-    def power_nets(self) -> List[NetlistNet]:
+    def power_nets(self) -> list[NetlistNet]:
         """Get power nets (containing power pins)."""
         power_nets = []
         for net in self.nets:
@@ -283,7 +281,7 @@ class Netlist:
                     break
         return power_nets
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             "source": self.source_file,
@@ -333,10 +331,10 @@ class Netlist:
         """Convert to JSON string."""
         return json.dumps(self.to_dict(), indent=indent)
 
-    def summary(self) -> Dict:
+    def summary(self) -> dict:
         """Get netlist summary statistics."""
         # Group components by prefix
-        by_prefix: Dict[str, int] = defaultdict(int)
+        by_prefix: dict[str, int] = defaultdict(int)
         for comp in self.components:
             prefix = "".join(c for c in comp.reference if c.isalpha())
             by_prefix[prefix] += 1
@@ -358,7 +356,7 @@ class Netlist:
         }
 
 
-def find_kicad_cli() -> Optional[Path]:
+def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable."""
     locations = [
         "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
@@ -382,8 +380,8 @@ def find_kicad_cli() -> Optional[Path]:
 
 def export_netlist(
     sch_path: str | Path,
-    output_path: Optional[str | Path] = None,
-    kicad_cli: Optional[str | Path] = None,
+    output_path: str | Path | None = None,
+    kicad_cli: str | Path | None = None,
     format: str = "kicadsexpr",
 ) -> Netlist:
     """

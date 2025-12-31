@@ -24,7 +24,6 @@ Note on net class metadata:
 import math
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from .core import Autorouter
 from .layers import Layer
@@ -34,13 +33,13 @@ from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
 def route_pcb(
     board_width: float,
     board_height: float,
-    components: List[dict],
-    net_map: Dict[str, int],
-    rules: Optional[DesignRules] = None,
+    components: list[dict],
+    net_map: dict[str, int],
+    rules: DesignRules | None = None,
     origin_x: float = 0,
     origin_y: float = 0,
-    skip_nets: Optional[List[str]] = None,
-) -> Tuple[str, dict]:
+    skip_nets: list[str] | None = None,
+) -> tuple[str, dict]:
     """
     Route a PCB given component placements and net assignments.
 
@@ -88,7 +87,7 @@ def route_pcb(
         rot_rad = math.radians(-rotation)
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
-        pads: List[dict] = []
+        pads: list[dict] = []
         for pad in comp.get("pads", []):
             # Rotate pad position around component center
             px, py = pad["x"], pad["y"]
@@ -122,7 +121,7 @@ def route_pcb(
             router.add_component(ref, pads)
 
     # Get all nets that need routing (exclude plane nets)
-    nets_to_route: List[int] = []
+    nets_to_route: list[int] = []
     for net_name, net_num in net_map.items():
         if net_name and net_name not in skip_nets and net_num in router.nets:
             if len(router.nets[net_num]) >= 2:
@@ -142,10 +141,10 @@ def route_pcb(
 
 def load_pcb_for_routing(
     pcb_path: str,
-    skip_nets: Optional[List[str]] = None,
-    netlist: Optional[Dict[str, str]] = None,
-    rules: Optional[DesignRules] = None,
-) -> Tuple[Autorouter, Dict[str, int]]:
+    skip_nets: list[str] | None = None,
+    netlist: dict[str, str] | None = None,
+    rules: DesignRules | None = None,
+) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
@@ -182,14 +181,14 @@ def load_pcb_for_routing(
         origin_y = 75.0
 
     # Parse nets
-    net_map: Dict[str, int] = {}
+    net_map: dict[str, int] = {}
     for match in re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text):
         net_num, net_name = int(match.group(1)), match.group(2)
         if net_num > 0:
             net_map[net_name] = net_num
 
     # Parse footprints and their pads
-    components: List[dict] = []
+    components: list[dict] = []
 
     # Split by footprint for easier parsing
     footprint_sections = re.split(r"(?=\(footprint\s)", pcb_text)
@@ -214,12 +213,12 @@ def load_pcb_for_routing(
         ref = ref_match.group(1)
 
         # Parse pads - match each pad individually
-        pads: List[dict] = []
+        pads: list[dict] = []
         # Find all (pad ...) blocks in the footprint section
         # Use a line-by-line approach for robustness
-        for line in section.split('\n'):
+        for line in section.split("\n"):
             line = line.strip()
-            if not line.startswith('(pad '):
+            if not line.startswith("(pad "):
                 continue
 
             # Extract pad number and type
@@ -322,7 +321,7 @@ def load_pcb_for_routing(
 
 def generate_netclass_setup(
     rules: DesignRules,
-    net_classes: Optional[Dict[str, List[str]]] = None,
+    net_classes: dict[str, list[str]] | None = None,
 ) -> str:
     """
     Generate KiCad 7+ compatible net class setup S-expression.

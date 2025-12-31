@@ -13,7 +13,6 @@ This module provides:
 
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
 
 from .layers import Layer
 
@@ -38,7 +37,7 @@ class Point:
             and self.layer == other.layer
         )
 
-    def grid_key(self, resolution: float) -> Tuple[int, int, int]:
+    def grid_key(self, resolution: float) -> tuple[int, int, int]:
         """Get grid cell key."""
         return (
             round(self.x / resolution),
@@ -75,7 +74,7 @@ class GridCell:
     is_obstacle: bool = False  # True for pads/keepouts (never allow sharing)
     # Zone fields for copper pour support
     is_zone: bool = False  # True if cell is part of a copper pour zone
-    zone_id: Optional[str] = None  # UUID of the zone (for multi-zone layers)
+    zone_id: str | None = None  # UUID of the zone (for multi-zone layers)
 
 
 @dataclass
@@ -86,7 +85,7 @@ class Via:
     y: float
     drill: float
     diameter: float
-    layers: Tuple[Layer, Layer]
+    layers: tuple[Layer, Layer]
     net: int = 0
     net_name: str = ""
 
@@ -135,8 +134,8 @@ class Route:
 
     net: int
     net_name: str
-    segments: List[Segment] = field(default_factory=list)
-    vias: List[Via] = field(default_factory=list)
+    segments: list[Segment] = field(default_factory=list)
+    vias: list[Via] = field(default_factory=list)
 
     def to_sexp(self) -> str:
         """Generate all S-expressions for this route."""

@@ -13,7 +13,6 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 from kicad_tools.config import (
     CONFIG_FILENAMES,
@@ -25,7 +24,7 @@ from kicad_tools.config import (
 )
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for config command."""
     parser = argparse.ArgumentParser(
         prog="kct config",

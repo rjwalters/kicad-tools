@@ -11,7 +11,6 @@ including common package types (0402, 0603, SOT-23, QFN, etc.).
 
 import warnings
 from enum import Enum
-from typing import List, Tuple
 
 __all__ = [
     "PadType",
@@ -72,9 +71,9 @@ class Pad:
         number: str,
         pad_type: PadType,
         shape: PadShape,
-        position: Tuple[float, float],
-        size: Tuple[float, float],
-        layers: List[Layer],
+        position: tuple[float, float],
+        size: tuple[float, float],
+        layers: list[Layer],
         drill: float = 0,
     ):
         self.number = number
@@ -95,9 +94,9 @@ class Footprint:
 
     def __init__(self, name: str):
         self.name = name
-        self.pads: List[Pad] = []
-        self.silkscreen: List[str] = []
-        self.courtyard: List[str] = []
+        self.pads: list[Pad] = []
+        self.silkscreen: list[str] = []
+        self.courtyard: list[str] = []
 
     def add_pad(self, pad: Pad) -> None:
         """Add a pad to the footprint."""

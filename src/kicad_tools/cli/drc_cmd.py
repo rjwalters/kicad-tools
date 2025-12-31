@@ -21,14 +21,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List
 
 from ..drc import DRCReport, DRCViolation, check_manufacturer_rules
 from ..manufacturers import compare_design_rules, get_manufacturer_ids, get_profile
 from .runner import find_kicad_cli, run_drc
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-drc command."""
     parser = argparse.ArgumentParser(
         prog="kicad-drc",
@@ -233,7 +232,7 @@ def run_drc_on_pcb(
 
 
 def output_table(
-    violations: List[DRCViolation],
+    violations: list[DRCViolation],
     report: DRCReport,
     verbose: bool = False,
 ) -> None:
@@ -323,7 +322,7 @@ def _print_single(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
             print(f"{indent}    Nets: {', '.join(v.nets)}")
 
 
-def output_json(violations: List[DRCViolation], report: DRCReport) -> None:
+def output_json(violations: list[DRCViolation], report: DRCReport) -> None:
     """Output violations as JSON."""
     data = {
         "source": report.source_file,
@@ -337,7 +336,7 @@ def output_json(violations: List[DRCViolation], report: DRCReport) -> None:
     print(json.dumps(data, indent=2))
 
 
-def output_summary(violations: List[DRCViolation], report: DRCReport) -> None:
+def output_summary(violations: list[DRCViolation], report: DRCReport) -> None:
     """Output violation summary by type."""
     if not violations:
         print("No DRC violations found.")
