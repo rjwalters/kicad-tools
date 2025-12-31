@@ -22,6 +22,10 @@ from kicad_tools.placement.fixer import FixStrategy
 
 def cmd_check(args) -> int:
     """Check PCB for placement conflicts."""
+    from kicad_tools.cli.progress import spinner
+
+    quiet = getattr(args, "quiet", False)
+
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
@@ -36,10 +40,11 @@ def cmd_check(args) -> int:
     )
 
     # Analyze
-    analyzer = PlacementAnalyzer(verbose=args.verbose)
+    analyzer = PlacementAnalyzer(verbose=args.verbose and not quiet)
 
     try:
-        conflicts = analyzer.find_conflicts(pcb_path, rules)
+        with spinner("Analyzing placement...", quiet=quiet):
+            conflicts = analyzer.find_conflicts(pcb_path, rules)
     except Exception as e:
         print(f"Error analyzing PCB: {e}", file=sys.stderr)
         return 1
@@ -59,6 +64,10 @@ def cmd_check(args) -> int:
 
 def cmd_fix(args) -> int:
     """Suggest and apply fixes for placement conflicts."""
+    from kicad_tools.cli.progress import spinner
+
+    quiet = getattr(args, "quiet", False)
+
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
@@ -73,14 +82,18 @@ def cmd_fix(args) -> int:
     )
 
     # Analyze first
-    analyzer = PlacementAnalyzer(verbose=args.verbose)
-    conflicts = analyzer.find_conflicts(pcb_path, rules)
+    analyzer = PlacementAnalyzer(verbose=args.verbose and not quiet)
+
+    with spinner("Analyzing placement...", quiet=quiet):
+        conflicts = analyzer.find_conflicts(pcb_path, rules)
 
     if not conflicts:
-        print("No placement conflicts found!")
+        if not quiet:
+            print("No placement conflicts found!")
         return 0
 
-    print(f"Found {len(conflicts)} conflicts")
+    if not quiet:
+        print(f"Found {len(conflicts)} conflicts")
 
     # Parse strategy
     strategy = FixStrategy(args.strategy)
@@ -89,36 +102,44 @@ def cmd_fix(args) -> int:
     anchored = set()
     if args.anchor:
         anchored = set(args.anchor.split(","))
-        print(f"Anchored components: {anchored}")
+        if not quiet:
+            print(f"Anchored components: {anchored}")
 
     # Create fixer and suggest fixes
     fixer = PlacementFixer(
         strategy=strategy,
         anchored=anchored,
-        verbose=args.verbose,
+        verbose=args.verbose and not quiet,
     )
 
-    fixes = fixer.suggest_fixes(conflicts, analyzer)
+    with spinner("Generating fix suggestions...", quiet=quiet):
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
 
     if not fixes:
-        print("No fixes could be suggested")
+        if not quiet:
+            print("No fixes could be suggested")
         return 0
 
-    print(f"\nSuggested {len(fixes)} fixes:")
-    print(fixer.preview_fixes(fixes))
+    if not quiet:
+        print(f"\nSuggested {len(fixes)} fixes:")
+        print(fixer.preview_fixes(fixes))
 
     if args.dry_run:
-        print("\n(Dry run - no changes made)")
+        if not quiet:
+            print("\n(Dry run - no changes made)")
         return 0
 
     # Apply fixes
     output_path = args.output or pcb_path
-    result = fixer.apply_fixes(pcb_path, fixes, output_path)
 
-    print(f"\n{result.message}")
+    with spinner("Applying fixes...", quiet=quiet):
+        result = fixer.apply_fixes(pcb_path, fixes, output_path)
 
-    if result.new_conflicts > 0:
-        print(f"Warning: {result.new_conflicts} conflicts remain after fixes")
+    if not quiet:
+        print(f"\n{result.message}")
+
+        if result.new_conflicts > 0:
+            print(f"Warning: {result.new_conflicts} conflicts remain after fixes")
 
     return 0 if result.success else 1
 
@@ -230,6 +251,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Courtyard margin around pads in mm (default: 0.25)",
     )
     check_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    check_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     # Fix subcommand
     fix_parser = subparsers.add_parser("fix", help="Suggest and apply placement fixes")
@@ -278,6 +302,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Courtyard margin around pads in mm",
     )
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    fix_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     args = parser.parse_args(argv)
 

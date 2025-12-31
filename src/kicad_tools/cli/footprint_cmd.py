@@ -228,8 +228,16 @@ def main_validate(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Only show errors, not warnings",
     )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+    )
 
     args = parser.parse_args(argv)
+
+    from kicad_tools.cli.progress import spinner
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
@@ -237,18 +245,21 @@ def main_validate(argv: Optional[List[str]] = None) -> int:
         return 1
 
     try:
-        pcb = PCB.load(str(pcb_path))
+        with spinner("Loading PCB...", quiet=args.quiet):
+            pcb = PCB.load(str(pcb_path))
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
     validator = FootprintValidator(min_pad_gap=args.min_pad_gap)
-    issues = validate_footprints(
-        pcb,
-        min_pad_gap=args.min_pad_gap,
-        output_format=args.format,
-        errors_only=args.errors_only,
-    )
+
+    with spinner("Validating footprints...", quiet=args.quiet):
+        issues = validate_footprints(
+            pcb,
+            min_pad_gap=args.min_pad_gap,
+            output_format=args.format,
+            errors_only=args.errors_only,
+        )
 
     print_validation_results(issues, output_format=args.format, validator=validator)
 
@@ -288,8 +299,16 @@ def main_fix(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Show what would be changed without applying",
     )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+    )
 
     args = parser.parse_args(argv)
+
+    from kicad_tools.cli.progress import spinner
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
@@ -297,17 +316,20 @@ def main_fix(argv: Optional[List[str]] = None) -> int:
         return 1
 
     try:
-        pcb = PCB.load(str(pcb_path))
+        with spinner("Loading PCB...", quiet=args.quiet):
+            pcb = PCB.load(str(pcb_path))
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
     fixer = FootprintFixer(min_pad_gap=args.min_pad_gap)
-    fixes = fix_footprints(
-        pcb,
-        min_pad_gap=args.min_pad_gap,
-        dry_run=args.dry_run,
-    )
+
+    with spinner("Analyzing footprints...", quiet=args.quiet):
+        fixes = fix_footprints(
+            pcb,
+            min_pad_gap=args.min_pad_gap,
+            dry_run=args.dry_run,
+        )
 
     print_fix_results(fixes, output_format=args.format, dry_run=args.dry_run, fixer=fixer)
 
@@ -315,7 +337,8 @@ def main_fix(argv: Optional[List[str]] = None) -> int:
     if fixes and not args.dry_run:
         output_path = args.output or str(pcb_path)
         try:
-            pcb.save(output_path)
+            with spinner("Saving PCB...", quiet=args.quiet):
+                pcb.save(output_path)
             if args.format == "text":
                 print(f"\nSaved to: {output_path}")
         except Exception as e:
