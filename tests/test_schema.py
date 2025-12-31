@@ -1157,3 +1157,207 @@ class TestHierarchyNode:
         assert child1 in all_nodes
         assert child2 in all_nodes
         assert grandchild in all_nodes
+
+
+class TestSymbolCreation:
+    """Tests for symbol creation and editing."""
+
+    def test_create_symbol_in_library(self):
+        """Test creating a new symbol in a library."""
+        lib = SymbolLibrary(path="test.kicad_sym", symbols={})
+        sym = lib.create_symbol("TestPart")
+        assert "TestPart" in lib.symbols
+        assert sym.name == "TestPart"
+        assert sym.units == 1
+        assert len(sym.pins) == 0
+        assert len(sym.properties) == 0
+
+    def test_create_symbol_with_multiple_units(self):
+        """Test creating multi-unit symbol."""
+        lib = SymbolLibrary(path="test.kicad_sym", symbols={})
+        sym = lib.create_symbol("QuadOpAmp", units=4)
+        assert sym.units == 4
+
+    def test_create_symbol_duplicate_name_raises(self):
+        """Test that creating duplicate symbol raises error."""
+        lib = SymbolLibrary(path="test.kicad_sym", symbols={})
+        lib.create_symbol("TestPart")
+        with pytest.raises(ValueError, match="already exists"):
+            lib.create_symbol("TestPart")
+
+    def test_add_pin_to_symbol(self):
+        """Test adding pins to a symbol."""
+        sym = LibrarySymbol(name="Test")
+        pin = sym.add_pin("1", "VCC", "power_in", (0, 5.08), rotation=270)
+        assert len(sym.pins) == 1
+        assert sym.pins[0].number == "1"
+        assert sym.pins[0].name == "VCC"
+        assert sym.pins[0].type == "power_in"
+        assert sym.pins[0].position == (0, 5.08)
+        assert sym.pins[0].rotation == 270
+        assert sym.pins[0].length == 2.54  # default
+        assert pin is sym.pins[0]
+
+    def test_add_pin_with_custom_length(self):
+        """Test adding pin with custom length."""
+        sym = LibrarySymbol(name="Test")
+        sym.add_pin("1", "IN", "input", (-5.08, 0), length=5.08)
+        assert sym.pins[0].length == 5.08
+
+    def test_add_pin_invalid_type_raises(self):
+        """Test that invalid pin type raises error."""
+        sym = LibrarySymbol(name="Test")
+        with pytest.raises(ValueError, match="Invalid pin type"):
+            sym.add_pin("1", "IN", "invalid_type", (0, 0))
+
+    def test_add_pin_all_valid_types(self):
+        """Test that all valid pin types are accepted."""
+        from kicad_tools.schema.library import VALID_PIN_TYPES
+
+        sym = LibrarySymbol(name="Test")
+        for i, pin_type in enumerate(sorted(VALID_PIN_TYPES)):
+            sym.add_pin(str(i + 1), f"PIN{i+1}", pin_type, (0, i * 2.54))
+        assert len(sym.pins) == len(VALID_PIN_TYPES)
+
+    def test_add_property_to_symbol(self):
+        """Test adding properties to a symbol."""
+        sym = LibrarySymbol(name="Test")
+        sym.add_property("Reference", "U")
+        sym.add_property("Value", "TestPart")
+        assert sym.properties["Reference"] == "U"
+        assert sym.properties["Value"] == "TestPart"
+
+    def test_set_property_updates_existing(self):
+        """Test that set_property updates existing property."""
+        sym = LibrarySymbol(name="Test")
+        sym.add_property("Value", "OldValue")
+        sym.set_property("Value", "NewValue")
+        assert sym.properties["Value"] == "NewValue"
+
+    def test_multi_unit_pin_assignment(self):
+        """Test adding pins to specific units."""
+        sym = LibrarySymbol(name="QuadOpAmp", units=4)
+
+        # Add pins for unit 1
+        sym.add_pin("1", "+", "input", (-5.08, 2.54), unit=1)
+        sym.add_pin("2", "-", "input", (-5.08, -2.54), unit=1)
+        sym.add_pin("3", "OUT", "output", (5.08, 0), unit=1)
+
+        # Add pins for unit 2
+        sym.add_pin("5", "+", "input", (-5.08, 2.54), unit=2)
+        sym.add_pin("6", "-", "input", (-5.08, -2.54), unit=2)
+        sym.add_pin("7", "OUT", "output", (5.08, 0), unit=2)
+
+        # Check pins per unit
+        unit1_pins = sym.get_pins_for_unit(1)
+        unit2_pins = sym.get_pins_for_unit(2)
+        assert len(unit1_pins) == 3
+        assert len(unit2_pins) == 3
+        assert all(p.unit == 1 for p in unit1_pins)
+        assert all(p.unit == 2 for p in unit2_pins)
+
+
+class TestSymbolSerialization:
+    """Tests for symbol S-expression serialization."""
+
+    def test_library_pin_to_sexp_node(self):
+        """Test LibraryPin S-expression generation."""
+        pin = LibraryPin(
+            number="1",
+            name="IN",
+            type="input",
+            position=(5.08, 0),
+            rotation=180,
+            length=2.54,
+        )
+        sexp = pin.to_sexp_node()
+        assert sexp.name == "pin"
+        sexp_str = sexp.to_string()
+        assert "input" in sexp_str
+        assert "line" in sexp_str  # default shape
+        assert "5.08" in sexp_str
+        assert "180" in sexp_str
+        assert '"IN"' in sexp_str
+        assert '"1"' in sexp_str
+
+    def test_library_symbol_to_sexp_node(self):
+        """Test LibrarySymbol S-expression generation."""
+        sym = LibrarySymbol(name="TestPart")
+        sym.add_property("Reference", "U")
+        sym.add_property("Value", "TestPart")
+        sym.add_pin("1", "IN", "input", (-5.08, 0), rotation=0)
+        sym.add_pin("2", "OUT", "output", (5.08, 0), rotation=180)
+
+        sexp = sym.to_sexp_node()
+        assert sexp.name == "symbol"
+        sexp_str = sexp.to_string()
+        assert "TestPart" in sexp_str
+        assert "Reference" in sexp_str
+        assert "Value" in sexp_str
+        assert "TestPart_1_1" in sexp_str  # unit symbol
+
+    def test_symbol_library_to_sexp_node(self):
+        """Test SymbolLibrary S-expression generation."""
+        lib = SymbolLibrary(path="test.kicad_sym", symbols={})
+        sym = lib.create_symbol("TestPart")
+        sym.add_property("Reference", "U")
+        sym.add_pin("1", "IN", "input", (-5.08, 0))
+
+        sexp = lib.to_sexp_node()
+        assert sexp.name == "kicad_symbol_lib"
+        sexp_str = sexp.to_string()
+        assert "version" in sexp_str
+        assert "generator" in sexp_str
+        assert "TestPart" in sexp_str
+
+    def test_symbol_library_save_and_load(self, tmp_path):
+        """Test saving and reloading a symbol library."""
+        # Create a library with a symbol
+        lib = SymbolLibrary(path=str(tmp_path / "test.kicad_sym"), symbols={})
+        sym = lib.create_symbol("TestPart")
+        sym.add_property("Reference", "U")
+        sym.add_property("Value", "TestPart")
+        sym.add_property("Footprint", "Package_SO:SOIC-8")
+        sym.add_pin("1", "IN", "input", (-5.08, 0), rotation=0)
+        sym.add_pin("2", "OUT", "output", (5.08, 0), rotation=180)
+
+        # Save
+        save_path = tmp_path / "test.kicad_sym"
+        lib.save(str(save_path))
+        assert save_path.exists()
+
+        # Reload and verify
+        lib2 = SymbolLibrary.load(str(save_path))
+        assert "TestPart" in lib2.symbols
+        sym2 = lib2.symbols["TestPart"]
+        assert sym2.name == "TestPart"
+        assert sym2.properties.get("Reference") == "U"
+        assert sym2.properties.get("Value") == "TestPart"
+        assert len(sym2.pins) == 2
+
+    def test_multi_unit_symbol_serialization(self):
+        """Test that multi-unit symbols serialize correctly."""
+        sym = LibrarySymbol(name="DualOpAmp", units=2)
+
+        # Add pins for unit 1
+        sym.add_pin("1", "+", "input", (-5.08, 2.54), unit=1)
+        sym.add_pin("2", "-", "input", (-5.08, -2.54), unit=1)
+        sym.add_pin("3", "OUT", "output", (5.08, 0), unit=1)
+
+        # Add pins for unit 2
+        sym.add_pin("5", "+", "input", (-5.08, 2.54), unit=2)
+        sym.add_pin("6", "-", "input", (-5.08, -2.54), unit=2)
+        sym.add_pin("7", "OUT", "output", (5.08, 0), unit=2)
+
+        sexp = sym.to_sexp_node()
+        sexp_str = sexp.to_string()
+
+        # Should have two unit symbols
+        assert "DualOpAmp_1_1" in sexp_str
+        assert "DualOpAmp_2_1" in sexp_str
+
+    def test_save_without_path_raises(self):
+        """Test that saving without a path raises error."""
+        lib = SymbolLibrary(path="", symbols={})
+        with pytest.raises(ValueError, match="No path specified"):
+            lib.save()
