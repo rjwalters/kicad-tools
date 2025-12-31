@@ -12,6 +12,21 @@ from pathlib import Path
 
 from kicad_tools.sexp import SExp, parse_sexp
 
+# Valid KiCad pin types
+VALID_PIN_TYPES = frozenset({
+    "input",
+    "output",
+    "bidirectional",
+    "power_in",
+    "power_out",
+    "passive",
+    "unspecified",
+    "tri_state",
+    "open_collector",
+    "open_emitter",
+    "no_connect",
+})
+
 
 @dataclass
 class LibraryPin:
@@ -29,6 +44,8 @@ class LibraryPin:
     position: tuple[float, float]  # Position relative to symbol origin
     rotation: float  # Degrees: 0=right, 90=up, 180=left, 270=down
     length: float
+    unit: int = 1  # Unit number for multi-unit symbols (1-indexed)
+    shape: str = "line"  # Pin shape: line, inverted, clock, etc.
 
     @property
     def connection_offset(self) -> tuple[float, float]:
@@ -79,6 +96,33 @@ class LibraryPin:
             rotation=rot,
             length=length,
         )
+
+    def to_sexp_node(self) -> SExp:
+        """Generate S-expression for this pin.
+
+        Format:
+            (pin <type> <shape>
+              (at <x> <y> <rotation>)
+              (length <length>)
+              (name "<name>" (effects (font (size 1.27 1.27))))
+              (number "<number>" (effects (font (size 1.27 1.27))))
+            )
+        """
+        # Build effects for name and number
+        font_effects = SExp.list(
+            "effects", SExp.list("font", SExp.list("size", 1.27, 1.27))
+        )
+
+        children: list[SExp] = [
+            SExp(value=self.type),
+            SExp(value=self.shape),
+            SExp.list("at", self.position[0], self.position[1], self.rotation),
+            SExp.list("length", self.length),
+            SExp.list("name", self.name, font_effects),
+            SExp.list("number", self.number, font_effects),
+        ]
+
+        return SExp(name="pin", children=children)
 
 
 @dataclass
@@ -198,6 +242,131 @@ class LibrarySymbol:
             pins=pins,
         )
 
+    def add_pin(
+        self,
+        number: str,
+        name: str,
+        pin_type: str,
+        position: tuple[float, float],
+        rotation: float = 0,
+        length: float = 2.54,
+        unit: int = 1,
+        shape: str = "line",
+    ) -> LibraryPin:
+        """Add a pin to the symbol.
+
+        Args:
+            number: Pin number (e.g., "1", "2")
+            name: Pin name (e.g., "VCC", "GND", "IN")
+            pin_type: Pin electrical type (must be in VALID_PIN_TYPES)
+            position: (x, y) position relative to symbol origin
+            rotation: Pin rotation in degrees (0=right, 90=up, 180=left, 270=down)
+            length: Pin length in mm (default 2.54)
+            unit: Unit number for multi-unit symbols (1-indexed, default 1)
+            shape: Pin shape (default "line")
+
+        Returns:
+            The created LibraryPin
+
+        Raises:
+            ValueError: If pin_type is not valid
+        """
+        if pin_type not in VALID_PIN_TYPES:
+            raise ValueError(
+                f"Invalid pin type '{pin_type}'. Must be one of: {sorted(VALID_PIN_TYPES)}"
+            )
+
+        pin = LibraryPin(
+            number=number,
+            name=name,
+            type=pin_type,
+            position=position,
+            rotation=rotation,
+            length=length,
+            unit=unit,
+            shape=shape,
+        )
+        self.pins.append(pin)
+        return pin
+
+    def add_property(self, name: str, value: str) -> None:
+        """Add a property to the symbol.
+
+        Args:
+            name: Property name (e.g., "Reference", "Value", "Footprint")
+            value: Property value
+        """
+        self.properties[name] = value
+
+    def set_property(self, name: str, value: str) -> None:
+        """Set a property value (alias for add_property).
+
+        Args:
+            name: Property name
+            value: Property value
+        """
+        self.properties[name] = value
+
+    def get_pins_for_unit(self, unit: int) -> list[LibraryPin]:
+        """Get all pins belonging to a specific unit.
+
+        Args:
+            unit: Unit number (1-indexed)
+
+        Returns:
+            List of pins for that unit
+        """
+        return [p for p in self.pins if p.unit == unit]
+
+    def to_sexp_node(self) -> SExp:
+        """Generate S-expression for this symbol.
+
+        Format:
+            (symbol "<name>"
+              (property "Reference" "U" (at 0 0 0) (effects ...))
+              (property "Value" "<name>" (at 0 0 0) (effects ...))
+              ...
+              (symbol "<name>_1_1"
+                (pin ...)
+                (pin ...)
+              )
+            )
+        """
+        children: list[SExp] = [SExp(value=self.name)]
+
+        # Add properties with position and effects
+        prop_y_offset = 0.0
+        for prop_name, prop_value in self.properties.items():
+            # Hide non-essential properties
+            hide = prop_name not in ("Reference", "Value")
+            effects_children = [SExp.list("font", SExp.list("size", 1.27, 1.27))]
+            if hide:
+                effects_children.append(SExp.list("hide", "yes"))
+
+            prop_node = SExp.list(
+                "property",
+                prop_name,
+                prop_value,
+                SExp.list("at", 0, prop_y_offset, 0),
+                SExp(name="effects", children=effects_children),
+            )
+            children.append(prop_node)
+            prop_y_offset += 2.54
+
+        # Add unit symbols with their pins
+        for unit_idx in range(1, self.units + 1):
+            unit_name = f"{self.name}_{unit_idx}_1"
+            unit_children: list[SExp] = [SExp(value=unit_name)]
+
+            # Add pins for this unit
+            for pin in self.pins:
+                if pin.unit == unit_idx:
+                    unit_children.append(pin.to_sexp_node())
+
+            children.append(SExp(name="symbol", children=unit_children))
+
+        return SExp(name="symbol", children=children)
+
 
 @dataclass
 class SymbolLibrary:
@@ -232,6 +401,67 @@ class SymbolLibrary:
             symbols[sym.name] = sym
 
         return cls(path=path, symbols=symbols)
+
+    def create_symbol(self, name: str, units: int = 1) -> LibrarySymbol:
+        """Create a new symbol in the library.
+
+        Args:
+            name: Symbol name (e.g., "MyNewPart")
+            units: Number of units for multi-unit symbols (default 1)
+
+        Returns:
+            The created LibrarySymbol
+
+        Raises:
+            ValueError: If a symbol with this name already exists
+        """
+        if name in self.symbols:
+            raise ValueError(f"Symbol '{name}' already exists in library")
+
+        sym = LibrarySymbol(name=name, units=units)
+        self.symbols[name] = sym
+        return sym
+
+    def to_sexp_node(self) -> SExp:
+        """Generate S-expression for the entire library.
+
+        Format:
+            (kicad_symbol_lib
+              (version 20231120)
+              (generator "kicad_tools")
+              (generator_version "1.0")
+              (symbol ...)
+              (symbol ...)
+            )
+        """
+        children: list[SExp] = [
+            SExp.list("version", 20231120),
+            SExp.list("generator", "kicad_tools"),
+            SExp.list("generator_version", "1.0"),
+        ]
+
+        # Add all symbols
+        for sym in self.symbols.values():
+            children.append(sym.to_sexp_node())
+
+        return SExp(name="kicad_symbol_lib", children=children)
+
+    def save(self, path: str | None = None) -> None:
+        """Save the library to a file.
+
+        Args:
+            path: Path to save to. If None, uses the library's current path.
+
+        Raises:
+            ValueError: If no path is specified and library has no path
+        """
+        save_path = path or self.path
+        if not save_path:
+            raise ValueError("No path specified for saving library")
+
+        sexp = self.to_sexp_node()
+        Path(save_path).write_text(sexp.to_string())
+        self.path = save_path
 
 
 class LibraryManager:
