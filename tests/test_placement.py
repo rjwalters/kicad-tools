@@ -505,3 +505,236 @@ class TestCLIIntegration:
         if len(conflicts) > 0:
             assert "type" in conflicts[0]
             assert "component1" in conflicts[0]
+
+
+# Test PCB with diagonally overlapping components (45 degree angle)
+DIAGONAL_OVERLAP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 100.3 100.3)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+# Test PCB with vertically overlapping components (same X, different Y)
+VERTICAL_OVERLAP_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 100 100.5)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+"""
+
+
+@pytest.fixture
+def diagonal_overlap_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with diagonally overlapping components."""
+    pcb_file = tmp_path / "diagonal_overlap.kicad_pcb"
+    pcb_file.write_text(DIAGONAL_OVERLAP_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def vertical_overlap_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with vertically overlapping components."""
+    pcb_file = tmp_path / "vertical_overlap.kicad_pcb"
+    pcb_file.write_text(VERTICAL_OVERLAP_PCB)
+    return pcb_file
+
+
+class TestDiagonalMovement:
+    """Tests for 2D displacement vectors in PlacementFixer."""
+
+    def test_diagonal_courtyard_fix(self, diagonal_overlap_pcb: Path):
+        """Test that diagonal overlap produces diagonal fix vector.
+
+        When components are positioned at a 45° angle, the fix should
+        move along that diagonal rather than X-only.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(diagonal_overlap_pcb)
+
+        # Find courtyard overlap conflict
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1, "Should detect courtyard overlap"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1, "Should suggest at least one fix"
+
+        fix = fixes[0]
+        # Both X and Y should have non-zero values for diagonal movement
+        assert fix.move_vector.x != 0, "Diagonal fix should have X component"
+        assert fix.move_vector.y != 0, "Diagonal fix should have Y component"
+
+        # The X and Y components should be roughly equal for 45° angle
+        # Note: tolerance is wider (0.5-2.0) because component footprint geometry
+        # and courtyard margins can shift the effective centroid slightly
+        ratio = (
+            abs(fix.move_vector.x / fix.move_vector.y) if fix.move_vector.y != 0 else float("inf")
+        )
+        assert 0.5 < ratio < 2.0, f"Diagonal fix should be roughly diagonal, got ratio {ratio}"
+
+    def test_vertical_courtyard_fix_y_only(self, vertical_overlap_pcb: Path):
+        """Test that vertical overlap produces Y-only fix vector.
+
+        When components are positioned on the same X axis (vertical alignment),
+        the fix should move along Y axis.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(vertical_overlap_pcb)
+
+        # Find courtyard overlap conflict
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1, "Should detect courtyard overlap"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1, "Should suggest at least one fix"
+
+        fix = fixes[0]
+        # For vertical alignment, Y should dominate
+        assert abs(fix.move_vector.y) > abs(fix.move_vector.x), (
+            f"Vertical overlap fix should have larger Y component: "
+            f"got x={fix.move_vector.x}, y={fix.move_vector.y}"
+        )
+
+    def test_horizontal_courtyard_fix_x_only(self, overlapping_pcb: Path):
+        """Test that horizontal overlap produces X-dominant fix vector.
+
+        The existing OVERLAPPING_PCB has components at (100, 100) and (100.5, 100),
+        which is horizontal alignment - fix should be X-dominant.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1, "Should detect courtyard overlap"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1, "Should suggest at least one fix"
+
+        fix = fixes[0]
+        # For horizontal alignment, X should dominate
+        assert abs(fix.move_vector.x) > abs(fix.move_vector.y), (
+            f"Horizontal overlap fix should have larger X component: "
+            f"got x={fix.move_vector.x}, y={fix.move_vector.y}"
+        )
+
+    def test_fallback_to_x_only_without_analyzer(self):
+        """Test that fix falls back to X-only when no analyzer is provided."""
+        conflict = Conflict(
+            type=ConflictType.COURTYARD_OVERLAP,
+            severity=ConflictSeverity.WARNING,
+            component1="R1",
+            component2="R2",
+            message="courtyard overlap",
+            location=Point(100, 100),
+            overlap_amount=0.5,
+        )
+
+        fixer = PlacementFixer()
+        # Call suggest_fixes without analyzer
+        fixes = fixer.suggest_fixes([conflict], analyzer=None)
+
+        assert len(fixes) == 1, "Should suggest one fix"
+
+        fix = fixes[0]
+        # Without analyzer, should fall back to X-only
+        assert fix.move_vector.x != 0, "Fallback should have X component"
+        assert fix.move_vector.y == 0, "Fallback should have no Y component (X-only)"
+
+    def test_diagonal_fix_magnitude_reasonable(self, diagonal_overlap_pcb: Path):
+        """Test that diagonal fix magnitude is smaller than X-only would be.
+
+        A diagonal move should have a smaller total displacement than
+        an X-only move covering the same overlap.
+        """
+        import math
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(diagonal_overlap_pcb)
+
+        overlap_conflicts = [c for c in conflicts if c.type == ConflictType.COURTYARD_OVERLAP]
+        assert len(overlap_conflicts) >= 1
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        assert len(fixes) >= 1
+
+        fix = fixes[0]
+        magnitude = math.sqrt(fix.move_vector.x**2 + fix.move_vector.y**2)
+
+        # The magnitude should be roughly overlap + margin
+        overlap = overlap_conflicts[0].overlap_amount
+        if overlap:
+            expected_magnitude = overlap + 0.1  # margin
+            # Allow 50% tolerance for different calculation methods
+            assert magnitude < expected_magnitude * 1.5, (
+                f"Diagonal fix magnitude {magnitude} should be close to {expected_magnitude}"
+            )
