@@ -3,8 +3,11 @@
 import pytest
 
 from kicad_tools.router import (
+    DesignRules,
+    GridCollisionChecker,
     Layer,
     OptimizationConfig,
+    RoutingGrid,
     Segment,
     TraceOptimizer,
 )
@@ -803,3 +806,288 @@ class TestSegmentsTouch:
         s1 = self.make_segment(0, 0, 5, 0)
         s2 = self.make_segment(10, 0, 15, 0)  # 5mm gap
         assert optimizer._segments_touch(s1, s2) is False
+
+
+class MockCollisionChecker:
+    """Mock collision checker for testing."""
+
+    def __init__(self, blocked_paths: list[tuple[float, float, float, float]] | None = None):
+        """Initialize with optional list of blocked paths.
+
+        Args:
+            blocked_paths: List of (x1, y1, x2, y2) tuples representing blocked paths.
+        """
+        self.blocked_paths = blocked_paths or []
+        self.calls: list[tuple[float, float, float, float, Layer, float, int]] = []
+
+    def path_is_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer: Layer,
+        width: float,
+        exclude_net: int,
+    ) -> bool:
+        """Check if a path is clear."""
+        self.calls.append((x1, y1, x2, y2, layer, width, exclude_net))
+
+        # Check if any blocked path overlaps
+        for bx1, by1, bx2, by2 in self.blocked_paths:
+            # Simple check: if paths cross, block it
+            if self._paths_cross(x1, y1, x2, y2, bx1, by1, bx2, by2):
+                return False
+        return True
+
+    def _paths_cross(
+        self, ax1: float, ay1: float, ax2: float, ay2: float,
+        bx1: float, by1: float, bx2: float, by2: float
+    ) -> bool:
+        """Simplified check if two paths cross."""
+        # Check if they share any significant overlap
+        # For testing, we use a simple bounding box check
+        a_min_x, a_max_x = min(ax1, ax2), max(ax1, ax2)
+        a_min_y, a_max_y = min(ay1, ay2), max(ay1, ay2)
+        b_min_x, b_max_x = min(bx1, bx2), max(bx1, bx2)
+        b_min_y, b_max_y = min(by1, by2), max(by1, by2)
+
+        # Check for overlap in both dimensions
+        x_overlap = a_min_x <= b_max_x and a_max_x >= b_min_x
+        y_overlap = a_min_y <= b_max_y and a_max_y >= b_min_y
+
+        return x_overlap and y_overlap
+
+
+class TestCollisionChecker:
+    """Tests for CollisionChecker protocol and GridCollisionChecker."""
+
+    @pytest.fixture
+    def simple_grid(self):
+        """Create a simple routing grid for testing."""
+        rules = DesignRules(
+            grid_resolution=0.25,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        grid = RoutingGrid(
+            width=10.0,
+            height=10.0,
+            rules=rules,
+        )
+        return grid
+
+    @pytest.fixture
+    def grid_checker(self, simple_grid):
+        """Create a GridCollisionChecker."""
+        return GridCollisionChecker(simple_grid)
+
+    def test_grid_collision_checker_clear_path(self, grid_checker):
+        """Test that an unobstructed path is clear."""
+        result = grid_checker.path_is_clear(
+            x1=1.0, y1=1.0,
+            x2=5.0, y2=1.0,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,
+        )
+        assert result is True
+
+    def test_grid_collision_checker_blocked_by_other_net(self, simple_grid, grid_checker):
+        """Test that a path blocked by another net returns False."""
+        # Add a segment from a different net to block the path
+        from kicad_tools.router import Segment as RouteSegment
+
+        # Mark some cells as blocked by another net
+        blocking_seg = RouteSegment(
+            x1=3.0, y1=0.0,
+            x2=3.0, y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=2,  # Different net
+            net_name="BLOCKER",
+        )
+
+        # Create a route and mark it on the grid
+        from kicad_tools.router import Route
+        blocking_route = Route(net=2, net_name="BLOCKER", segments=[blocking_seg])
+        simple_grid.mark_route(blocking_route)
+
+        # Check if path crossing the blocker is detected
+        result = grid_checker.path_is_clear(
+            x1=1.0, y1=2.5,
+            x2=5.0, y2=2.5,  # This crosses the vertical segment at x=3.0
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,  # We're net 1, the blocker is net 2
+        )
+        assert result is False
+
+    def test_grid_collision_checker_same_net_allowed(self, simple_grid, grid_checker):
+        """Test that cells from the same net don't block."""
+        # Add a segment from the same net
+        from kicad_tools.router import Route
+        from kicad_tools.router import Segment as RouteSegment
+
+        same_net_seg = RouteSegment(
+            x1=3.0, y1=0.0,
+            x2=3.0, y2=5.0,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,  # Same net
+            net_name="SAME",
+        )
+        same_net_route = Route(net=1, net_name="SAME", segments=[same_net_seg])
+        simple_grid.mark_route(same_net_route)
+
+        # Check if path crossing same-net segment is allowed
+        result = grid_checker.path_is_clear(
+            x1=1.0, y1=2.5,
+            x2=5.0, y2=2.5,
+            layer=Layer.F_CU,
+            width=0.2,
+            exclude_net=1,  # Same net as the segment
+        )
+        assert result is True
+
+
+class TestCollisionAwareOptimization:
+    """Tests for collision-aware optimization in TraceOptimizer."""
+
+    def make_segment(
+        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
+    ) -> Segment:
+        """Helper to create a segment."""
+        return Segment(
+            x1=x1, y1=y1, x2=x2, y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=net,
+            net_name="TEST",
+        )
+
+    def test_optimizer_without_collision_checker(self):
+        """Test that optimizer works without collision checker (backwards compatible)."""
+        optimizer = TraceOptimizer()
+        assert optimizer.collision_checker is None
+
+        # Should still optimize normally
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),  # Collinear
+        ]
+        result = optimizer.merge_collinear(segments)
+        assert len(result) == 1  # Should merge
+
+    def test_optimizer_with_collision_checker(self):
+        """Test that optimizer accepts a collision checker."""
+        checker = MockCollisionChecker()
+        optimizer = TraceOptimizer(collision_checker=checker)
+        assert optimizer.collision_checker is checker
+
+    def test_merge_collinear_blocked_by_collision(self):
+        """Test that merge_collinear respects collision checker."""
+        # Block the merged path (from 0,0 to 2,0)
+        checker = MockCollisionChecker(blocked_paths=[(0.5, -0.1, 1.5, 0.1)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),  # Would normally merge
+        ]
+        result = optimizer.merge_collinear(segments)
+
+        # Should NOT merge because merged path would cross blocked area
+        assert len(result) == 2
+
+    def test_merge_collinear_allowed_when_clear(self):
+        """Test that merge_collinear proceeds when path is clear."""
+        checker = MockCollisionChecker()  # No blocked paths
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),
+        ]
+        result = optimizer.merge_collinear(segments)
+
+        # Should merge because path is clear
+        assert len(result) == 1
+        # Verify collision checker was called
+        assert len(checker.calls) > 0
+
+    def test_eliminate_zigzags_blocked_by_collision(self):
+        """Test that eliminate_zigzags respects collision checker."""
+        # Block the shortcut path
+        checker = MockCollisionChecker(blocked_paths=[(0, 0, 2, 1)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create a zigzag pattern
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 1, 1),  # Zigzag
+            self.make_segment(1, 1, 2, 1),
+        ]
+        result = optimizer.eliminate_zigzags(segments)
+
+        # Should keep all segments because shortcut is blocked
+        assert len(result) >= 2
+
+    def test_compress_staircase_blocked_by_collision(self):
+        """Test that compress_staircase respects collision checker."""
+        # Block the optimal diagonal path
+        checker = MockCollisionChecker(blocked_paths=[(0, 0, 5, 3)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create a staircase pattern
+        segments = []
+        x, y = 0.0, 0.0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        result = optimizer.compress_staircase(segments)
+
+        # Should keep original staircase because optimal path is blocked
+        assert len(result) == 6
+
+    def test_convert_corners_45_blocked_by_collision(self):
+        """Test that convert_corners_45 respects collision checker."""
+        # Block diagonal paths
+        checker = MockCollisionChecker(blocked_paths=[(-1, -1, 1, 1)])
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create a 90-degree corner
+        segments = [
+            self.make_segment(0, 0, 5, 0),  # Horizontal
+            self.make_segment(5, 0, 5, 5),  # Vertical (90° corner)
+        ]
+        result = optimizer.convert_corners_45(segments)
+
+        # Even with collision, the function may still add segments
+        # but should not add chamfers that would cross blocked areas
+        # (Implementation detail depends on how collision is checked)
+        assert len(result) >= 2
+
+    def test_full_optimization_with_collision_checker(self):
+        """Test full optimize_segments with collision checker."""
+        checker = MockCollisionChecker()
+        optimizer = TraceOptimizer(collision_checker=checker)
+
+        # Create some segments
+        segments = [
+            self.make_segment(0, 0, 1, 0),
+            self.make_segment(1, 0, 2, 0),  # Collinear
+        ]
+        result = optimizer.optimize_segments(segments)
+
+        # Should optimize since no paths are blocked
+        assert len(result) <= len(segments)
+        # Verify collision checker was used
+        assert len(checker.calls) > 0

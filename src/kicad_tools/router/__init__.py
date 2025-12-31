@@ -62,7 +62,13 @@ from .io import (
     route_pcb,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
-from .optimizer import OptimizationConfig, OptimizationStats, TraceOptimizer
+from .optimizer import (
+    CollisionChecker,
+    GridCollisionChecker,
+    OptimizationConfig,
+    OptimizationStats,
+    TraceOptimizer,
+)
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from .rules import (
@@ -164,6 +170,8 @@ __all__ = [
     "TraceOptimizer",
     "OptimizationConfig",
     "OptimizationStats",
+    "CollisionChecker",
+    "GridCollisionChecker",
     # Zones
     "ZoneManager",
     "ZoneFiller",
