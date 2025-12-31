@@ -20,6 +20,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
     kicad-tools config                 - View/manage configuration
+    kicad-tools interactive            - Launch interactive REPL mode
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -37,6 +38,8 @@ Examples:
     kct reason board.kicad_pcb --analyze
     kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
     kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
+    kct interactive
+    kct interactive --project myboard.kicad_pro
 """
 
 import argparse
@@ -549,6 +552,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Value to set",
     )
 
+    # INTERACTIVE subcommand - REPL mode
+    interactive_parser = subparsers.add_parser(
+        "interactive", help="Launch interactive REPL mode"
+    )
+    interactive_parser.add_argument(
+        "--project",
+        help="Auto-load a project on startup",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -683,6 +695,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "config":
         return _run_config_command(args)
+
+    elif args.command == "interactive":
+        return _run_interactive_command(args)
 
     return 0
 
@@ -1142,6 +1157,16 @@ def _run_config_command(args) -> int:
     if args.config_value:
         sub_argv.append(args.config_value)
     return config_main(sub_argv) or 0
+
+
+def _run_interactive_command(args) -> int:
+    """Handle interactive command."""
+    from .interactive import main as interactive_main
+
+    sub_argv = []
+    if args.project:
+        sub_argv.extend(["--project", args.project])
+    return interactive_main(sub_argv)
 
 
 def symbols_main() -> int:
