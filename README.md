@@ -184,22 +184,59 @@ All commands support `--format json` for machine-readable output.
 
 ## Development
 
+This project uses [uv](https://docs.astral.sh/uv/) for fast, reproducible Python environment management.
+
+### Quick Start
+
 ```bash
 # Clone repository
 git clone https://github.com/rjwalters/kicad-tools.git
 cd kicad-tools
 
-# Install with dev dependencies
-pip install -e ".[dev]"
+# Set up development environment (installs all dev dependencies)
+uv sync --extra dev
 
 # Run tests
-pytest tests/ -v
+uv run pytest
 
 # Run linter
-ruff check src/
+uv run ruff check .
 
 # Format code
-ruff format src/
+uv run ruff format .
+```
+
+### Available Commands
+
+If you have `pnpm` installed, you can use these convenience scripts:
+
+| Command | Description |
+|---------|-------------|
+| `pnpm setup` | Set up dev environment (`uv sync --extra dev`) |
+| `pnpm test` | Run tests |
+| `pnpm test:cov` | Run tests with coverage |
+| `pnpm test:benchmark` | Run performance benchmarks |
+| `pnpm lint` | Check code with ruff |
+| `pnpm lint:fix` | Auto-fix lint issues |
+| `pnpm format` | Format code with ruff |
+| `pnpm format:check` | Check formatting |
+| `pnpm typecheck` | Run mypy type checking |
+| `pnpm check:ci` | Run full CI suite (format + lint + tests) |
+
+### Direct uv Commands
+
+```bash
+# Run tests with coverage
+uv run pytest --cov=kicad_tools --cov-report=term-missing
+
+# Run benchmarks
+uv run pytest tests/test_benchmarks.py --benchmark-only
+
+# Type checking
+uv run mypy src/
+
+# Full CI check
+uv run ruff format . --check && uv run ruff check . && uv run pytest
 ```
 
 ## License

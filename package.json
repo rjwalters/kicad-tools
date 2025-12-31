@@ -1,13 +1,20 @@
 {
-  "name": "loom-workspace",
-  "version": "1.0.0",
-  "description": "Loom-managed workspace with AI development orchestration",
+  "name": "kicad-tools",
+  "version": "0.2.0",
+  "description": "Python tools for parsing and manipulating KiCad files",
   "private": true,
   "scripts": {
-    "worktree:return": "./.loom/scripts/worktree-return.sh",
-    "check:ci": "echo 'No CI checks configured. Customize this script for your project.' && exit 0",
-    "check:all": "echo 'No checks configured. Customize this script for your project.' && exit 0",
-    "test": "echo 'No tests configured. Customize this script for your project.' && exit 0",
-    "lint": "echo 'No linter configured. Customize this script for your project.' && exit 0"
+    "setup": "uv sync --extra dev",
+    "test": "uv run pytest",
+    "test:cov": "uv run pytest --cov=kicad_tools --cov-report=term-missing",
+    "test:benchmark": "uv run pytest tests/test_benchmarks.py --benchmark-only",
+    "lint": "uv run ruff check .",
+    "lint:fix": "uv run ruff check . --fix",
+    "format": "uv run ruff format .",
+    "format:check": "uv run ruff format . --check",
+    "typecheck": "uv run mypy src/",
+    "check:ci": "uv run ruff format . --check && uv run ruff check . && uv run pytest",
+    "check:all": "uv run ruff format . --check && uv run ruff check . && uv run mypy src/ && uv run pytest",
+    "worktree:return": "./.loom/scripts/worktree-return.sh"
   }
 }
