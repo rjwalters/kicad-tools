@@ -1,12 +1,20 @@
 """
 Placement and routing optimization module.
 
-Provides physics-based algorithms for:
-- Component placement using force-directed simulation
+Provides algorithms for component placement optimization:
+
+**Physics-based (force-directed):**
 - Charge-based repulsion from board/component outlines
 - Spring-based attraction between net-connected pins
+- Converges to local minima quickly
 
-Example::
+**Evolutionary (genetic algorithm):**
+- Population-based global search
+- Crossover and mutation operators
+- Escapes local minima through exploration
+- Hybrid mode combines evolutionary + physics
+
+Example (physics-based)::
 
     from kicad_tools.optim import PlacementOptimizer
     from kicad_tools.schema.pcb import PCB
@@ -20,6 +28,22 @@ Example::
     # Get optimized placements
     for comp in optimizer.components:
         print(f"{comp.ref}: ({comp.x:.2f}, {comp.y:.2f}) @ {comp.rotation:.1f}°")
+
+Example (evolutionary)::
+
+    from kicad_tools.optim import EvolutionaryPlacementOptimizer
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load("board.kicad_pcb")
+    optimizer = EvolutionaryPlacementOptimizer.from_pcb(pcb)
+
+    # Run evolutionary optimization
+    best = optimizer.optimize(generations=100, population_size=50)
+
+    # Or use hybrid: evolutionary global search + physics refinement
+    physics_opt = optimizer.optimize_hybrid(generations=50)
+    physics_opt.write_to_pcb(pcb)
+    pcb.save("optimized.kicad_pcb")
 """
 
 from __future__ import annotations
@@ -34,6 +58,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "PlacementOptimizer",
+    "EvolutionaryPlacementOptimizer",
     "RoutingOptimizer",
     "FigureOfMerit",
     "Vector2D",
@@ -42,6 +67,8 @@ __all__ = [
     "Spring",
     "Keepout",
     "PlacementConfig",
+    "EvolutionaryConfig",
+    "Individual",
 ]
 
 
@@ -1425,3 +1452,11 @@ class FigureOfMerit:
     """Figure of merit computation for routing/placement quality."""
 
     pass
+
+
+# Import evolutionary optimizer (after PlacementOptimizer is defined)
+from kicad_tools.optim.evolutionary import (
+    EvolutionaryConfig,
+    EvolutionaryPlacementOptimizer,
+    Individual,
+)
