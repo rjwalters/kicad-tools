@@ -3,7 +3,6 @@
 import pytest
 
 from kicad_tools.validate.rules.dimensions import DimensionRules
-from kicad_tools.validate.violations import DRCResults, DRCViolation
 
 
 class MockDesignRules:
