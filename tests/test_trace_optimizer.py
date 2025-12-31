@@ -3,7 +3,6 @@
 import pytest
 
 from kicad_tools.router import (
-    CollisionChecker,
     DesignRules,
     GridCollisionChecker,
     Layer,
@@ -927,7 +926,8 @@ class TestCollisionChecker:
     def test_grid_collision_checker_same_net_allowed(self, simple_grid, grid_checker):
         """Test that cells from the same net don't block."""
         # Add a segment from the same net
-        from kicad_tools.router import Segment as RouteSegment, Route
+        from kicad_tools.router import Route
+        from kicad_tools.router import Segment as RouteSegment
 
         same_net_seg = RouteSegment(
             x1=3.0, y1=0.0,

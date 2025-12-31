@@ -88,7 +88,7 @@ class GridCollisionChecker:
     This reuses the same collision detection logic as the autorouter.
     """
 
-    def __init__(self, grid: "RoutingGrid"):
+    def __init__(self, grid: RoutingGrid):
         """Initialize with a routing grid.
 
         Args:
@@ -746,7 +746,6 @@ class TraceOptimizer:
                 next_seg = segments[i + 1]
 
                 modified_seg = seg
-                chamfer_added = False
 
                 # Handle corner with previous segment
                 if self._is_90_degree_corner(prev_seg, seg) and result:
@@ -767,7 +766,6 @@ class TraceOptimizer:
                         if self._path_is_clear(chamfer_seg):
                             result.append(chamfer_seg)
                             modified_seg = shortened
-                            chamfer_added = True
 
                 # Handle corner with next segment
                 if self._is_90_degree_corner(seg, next_seg):
