@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 # Valid KiCad pin types
 VALID_PIN_TYPES = frozenset({
@@ -378,6 +379,9 @@ class SymbolLibrary:
 
     path: str
     symbols: dict[str, LibrarySymbol] = field(default_factory=dict)
+    version: str = ""
+    generator: str = "kicad_tools"
+    _sexp: SExp | None = field(default=None, repr=False)
 
     def get_symbol(self, name: str) -> LibrarySymbol | None:
         """Get a symbol by name."""
@@ -385,6 +389,61 @@ class SymbolLibrary:
 
     def __len__(self) -> int:
         return len(self.symbols)
+
+    def save(self, path: str | None = None) -> None:
+        """
+        Save the symbol library to a .kicad_sym file.
+
+        Args:
+            path: Path to save to. If None, saves to original path.
+
+        Raises:
+            ValueError: If no path is provided and no original path exists.
+        """
+        save_path = path or self.path
+        if not save_path:
+            raise ValueError("No path specified for save")
+
+        # Generate S-expression
+        sexp = self._to_sexp()
+
+        # Serialize and write
+        content = serialize_sexp(sexp) + "\n"
+        Path(save_path).write_text(content, encoding="utf-8")
+
+    def _to_sexp(self) -> SExp:
+        """Convert library to S-expression for serialization."""
+        if self._sexp is not None:
+            # Round-trip: use original S-expression as base
+            return self._sexp
+
+        # For new/modified libraries, use to_sexp_node() which properly
+        # serializes all symbols
+        return self.to_sexp_node()
+
+    @classmethod
+    def create(cls, path: str, version: str | None = None) -> SymbolLibrary:
+        """
+        Create a new empty symbol library.
+
+        Args:
+            path: Path where the library will be saved.
+            version: Optional version string (defaults to current date YYYYMMDD).
+
+        Returns:
+            A new empty SymbolLibrary instance.
+
+        Example:
+            >>> lib = SymbolLibrary.create("my-symbols.kicad_sym")
+            >>> lib.save()  # Creates the file
+        """
+        return cls(
+            path=path,
+            symbols={},
+            version=version or datetime.now().strftime("%Y%m%d"),
+            generator="kicad_tools",
+            _sexp=None,
+        )
 
     @classmethod
     def load(cls, path: str) -> SymbolLibrary:
@@ -395,12 +454,26 @@ class SymbolLibrary:
         if sexp.tag != "kicad_symbol_lib":
             raise ValueError(f"Not a KiCad symbol library: {path}")
 
+        # Extract version and generator
+        version = ""
+        generator = ""
+        if version_node := sexp.find("version"):
+            version = version_node.get_string(0) or ""
+        if generator_node := sexp.find("generator"):
+            generator = generator_node.get_string(0) or ""
+
         symbols = {}
         for sym_sexp in sexp.find_all("symbol"):
             sym = LibrarySymbol.from_sexp(sym_sexp)
             symbols[sym.name] = sym
 
-        return cls(path=path, symbols=symbols)
+        return cls(
+            path=path,
+            symbols=symbols,
+            version=version,
+            generator=generator,
+            _sexp=sexp,
+        )
 
     def create_symbol(self, name: str, units: int = 1) -> LibrarySymbol:
         """Create a new symbol in the library.
@@ -445,23 +518,6 @@ class SymbolLibrary:
             children.append(sym.to_sexp_node())
 
         return SExp(name="kicad_symbol_lib", children=children)
-
-    def save(self, path: str | None = None) -> None:
-        """Save the library to a file.
-
-        Args:
-            path: Path to save to. If None, uses the library's current path.
-
-        Raises:
-            ValueError: If no path is specified and library has no path
-        """
-        save_path = path or self.path
-        if not save_path:
-            raise ValueError("No path specified for saving library")
-
-        sexp = self.to_sexp_node()
-        Path(save_path).write_text(sexp.to_string())
-        self.path = save_path
 
 
 class LibraryManager:
