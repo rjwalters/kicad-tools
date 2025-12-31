@@ -131,8 +131,13 @@ class TestVia:
     def test_via_creation(self):
         """Test creating a via."""
         via = Via(
-            x=10.0, y=20.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="GND"
+            x=10.0,
+            y=20.0,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="GND",
         )
         assert via.x == 10.0
         assert via.y == 20.0
@@ -142,10 +147,7 @@ class TestVia:
 
     def test_via_to_sexp(self):
         """Test via S-expression generation."""
-        via = Via(
-            x=10.0, y=20.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        via = Via(x=10.0, y=20.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         sexp = via.to_sexp()
         assert "(via" in sexp
         assert "10.0000" in sexp
@@ -161,20 +163,14 @@ class TestSegment:
 
     def test_segment_creation(self):
         """Test creating a segment."""
-        seg = Segment(
-            x1=0, y1=0, x2=10, y2=0, width=0.2,
-            layer=Layer.F_CU, net=1, net_name="VCC"
-        )
+        seg = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1, net_name="VCC")
         assert seg.x1 == 0
         assert seg.x2 == 10
         assert seg.width == 0.2
 
     def test_segment_to_sexp(self):
         """Test segment S-expression generation."""
-        seg = Segment(
-            x1=0, y1=0, x2=10, y2=0, width=0.2,
-            layer=Layer.F_CU, net=1
-        )
+        seg = Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
         sexp = seg.to_sexp()
         assert "(segment" in sexp
         assert "(start" in sexp
@@ -217,8 +213,7 @@ class TestPad:
     def test_pad_creation(self):
         """Test creating a pad."""
         pad = Pad(
-            x=10, y=20, width=1.0, height=1.0,
-            net=1, net_name="VCC", layer=Layer.F_CU, ref="U1"
+            x=10, y=20, width=1.0, height=1.0, net=1, net_name="VCC", layer=Layer.F_CU, ref="U1"
         )
         assert pad.x == 10
         assert pad.y == 20
@@ -228,8 +223,7 @@ class TestPad:
     def test_pad_through_hole(self):
         """Test through-hole pad."""
         pad = Pad(
-            x=0, y=0, width=2.0, height=2.0,
-            net=1, net_name="GND", through_hole=True, drill=1.0
+            x=0, y=0, width=2.0, height=2.0, net=1, net_name="GND", through_hole=True, drill=1.0
         )
         assert pad.through_hole is True
         assert pad.drill == 1.0
@@ -262,11 +256,7 @@ class TestDesignRules:
 
     def test_design_rules_custom(self):
         """Test custom design rules."""
-        rules = DesignRules(
-            trace_width=0.15,
-            trace_clearance=0.15,
-            via_drill=0.25
-        )
+        rules = DesignRules(trace_width=0.15, trace_clearance=0.15, via_drill=0.25)
         assert rules.trace_width == 0.15
         assert rules.via_drill == 0.25
 
@@ -415,10 +405,12 @@ class TestLayerStack:
         """Test layer stack validation."""
         # Non-sequential indices should raise
         with pytest.raises(RoutingError, match="Invalid layer stack"):
-            LayerStack([
-                LayerDefinition("F.Cu", 0, LayerType.SIGNAL),
-                LayerDefinition("B.Cu", 5, LayerType.SIGNAL),  # Gap in indices
-            ])
+            LayerStack(
+                [
+                    LayerDefinition("F.Cu", 0, LayerType.SIGNAL),
+                    LayerDefinition("B.Cu", 5, LayerType.SIGNAL),  # Gap in indices
+                ]
+            )
 
     def test_get_layer(self):
         """Test getting layer by index."""
@@ -487,11 +479,7 @@ class TestViaDefinition:
     def test_via_definition_creation(self):
         """Test creating via definition."""
         via_def = ViaDefinition(
-            via_type=ViaType.THROUGH,
-            drill_mm=0.3,
-            annular_ring_mm=0.15,
-            start_layer=0,
-            end_layer=5
+            via_type=ViaType.THROUGH, drill_mm=0.3, annular_ring_mm=0.15, start_layer=0, end_layer=5
         )
         assert via_def.drill_mm == 0.3
         assert via_def.annular_ring_mm == 0.15
@@ -504,8 +492,7 @@ class TestViaDefinition:
     def test_via_spans_layer(self):
         """Test layer spanning check."""
         via_def = ViaDefinition(
-            ViaType.THROUGH, drill_mm=0.3, annular_ring_mm=0.15,
-            start_layer=0, end_layer=3
+            ViaType.THROUGH, drill_mm=0.3, annular_ring_mm=0.15, start_layer=0, end_layer=3
         )
         assert via_def.spans_layer(0, 4) is True
         assert via_def.spans_layer(2, 4) is True
@@ -514,8 +501,11 @@ class TestViaDefinition:
     def test_via_blocks_layer(self):
         """Test via blocking check."""
         via_def = ViaDefinition(
-            ViaType.THROUGH, drill_mm=0.3, annular_ring_mm=0.15,
-            start_layer=0, end_layer=-1  # -1 = bottom
+            ViaType.THROUGH,
+            drill_mm=0.3,
+            annular_ring_mm=0.15,
+            start_layer=0,
+            end_layer=-1,  # -1 = bottom
         )
         assert via_def.blocks_layer(0, 4) is True
         assert via_def.blocks_layer(3, 4) is True
@@ -571,9 +561,7 @@ class TestViaRules:
     def test_get_best_via_no_match(self):
         """Test when no via spans the layers."""
         rules = ViaRules()
-        rules.through_via = ViaDefinition(
-            ViaType.THROUGH, 0.3, 0.15, start_layer=0, end_layer=1
-        )
+        rules.through_via = ViaDefinition(ViaType.THROUGH, 0.3, 0.15, start_layer=0, end_layer=1)
         best = rules.get_best_via(0, 5, 6)  # Request 0->5 but via only goes 0->1
         assert best is None
 
@@ -585,8 +573,11 @@ class TestHeuristics:
         """Test Manhattan distance heuristic."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            diagonal_routing=False  # Use Manhattan distance
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            diagonal_routing=False,  # Use Manhattan distance
         )
         heuristic = ManhattanHeuristic()
 
@@ -602,9 +593,7 @@ class TestHeuristics:
     def test_direction_bias_heuristic(self):
         """Test direction bias heuristic."""
         rules = DesignRules()
-        context = HeuristicContext(
-            goal_x=10, goal_y=0, goal_layer=0, rules=rules
-        )
+        context = HeuristicContext(goal_x=10, goal_y=0, goal_layer=0, rules=rules)
         heuristic = DirectionBiasHeuristic(turn_penalty_factor=0.5)
 
         # Moving in goal direction
@@ -629,9 +618,12 @@ class TestHeuristics:
             return 0.5  # Constant congestion
 
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
             get_congestion_cost=get_congestion_cost,
-            diagonal_routing=False  # Use Manhattan distance for predictable base
+            diagonal_routing=False,  # Use Manhattan distance for predictable base
         )
         heuristic = CongestionAwareHeuristic()
 
@@ -652,9 +644,12 @@ class TestHeuristics:
             return 1.0
 
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
             get_congestion_cost=get_congestion_cost,
-            diagonal_routing=False  # Use Manhattan distance for predictable base
+            diagonal_routing=False,  # Use Manhattan distance for predictable base
         )
         heuristic = WeightedCongestionHeuristic(num_samples=3, congestion_multiplier=2.0)
 
@@ -671,8 +666,11 @@ class TestHeuristics:
         """Test greedy heuristic."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            diagonal_routing=False  # Use Manhattan distance
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            diagonal_routing=False,  # Use Manhattan distance
         )
         heuristic = GreedyHeuristic(greed_factor=2.0)
 
@@ -695,9 +693,12 @@ class TestHeuristics:
         """Test heuristic with net class cost multiplier."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
             cost_multiplier=0.5,  # Power net priority
-            diagonal_routing=False  # Use Manhattan distance
+            diagonal_routing=False,  # Use Manhattan distance
         )
         heuristic = ManhattanHeuristic()
 
@@ -707,9 +708,7 @@ class TestHeuristics:
     def test_heuristic_layer_change(self):
         """Test heuristic with layer change."""
         rules = DesignRules()
-        context = HeuristicContext(
-            goal_x=0, goal_y=0, goal_layer=1, rules=rules
-        )
+        context = HeuristicContext(goal_x=0, goal_y=0, goal_layer=1, rules=rules)
         heuristic = ManhattanHeuristic()
 
         # At goal position but different layer
@@ -950,8 +949,24 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0)
 
         pads = [
-            {"number": "1", "x": 10.0, "y": 10.0, "width": 0.5, "height": 0.5, "net": 1, "net_name": "VCC"},
-            {"number": "2", "x": 12.0, "y": 10.0, "width": 0.5, "height": 0.5, "net": 2, "net_name": "GND"},
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "VCC",
+            },
+            {
+                "number": "2",
+                "x": 12.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "GND",
+            },
         ]
         router.add_component("U1", pads)
 
@@ -1006,14 +1021,20 @@ class TestAutorouter:
         """Test adding multiple components."""
         router = Autorouter(width=50.0, height=50.0)
 
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1},
-            {"number": "2", "x": 12.0, "y": 10.0, "net": 2},
-        ])
-        router.add_component("R1", [
-            {"number": "1", "x": 20.0, "y": 10.0, "net": 1},
-            {"number": "2", "x": 22.0, "y": 10.0, "net": 3},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1},
+                {"number": "2", "x": 12.0, "y": 10.0, "net": 2},
+            ],
+        )
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 20.0, "y": 10.0, "net": 1},
+                {"number": "2", "x": 22.0, "y": 10.0, "net": 3},
+            ],
+        )
 
         assert len(router.pads) == 4
         assert len(router.nets[1]) == 2  # Two pads on net 1
@@ -1066,9 +1087,12 @@ class TestAutorouter:
     def test_route_net_single_pad(self):
         """Test routing net with only one pad (no route needed)."""
         router = Autorouter(width=50.0, height=50.0)
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
         routes = router.route_net(1)
         assert routes == []
 
@@ -1078,12 +1102,18 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0, rules=rules)
 
         # Add two pads on the same net, reasonably close
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
-        router.add_component("R1", [
-            {"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
 
         routes = router.route_net(1, use_mst=False)
         assert len(routes) >= 1
@@ -1094,15 +1124,24 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0, rules=rules)
 
         # Add three pads on the same net
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
-        router.add_component("U2", [
-            {"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
-        router.add_component("U3", [
-            {"number": "1", "x": 15.0, "y": 20.0, "net": 1, "net_name": "VCC"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+        router.add_component(
+            "U2",
+            [
+                {"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
+        router.add_component(
+            "U3",
+            [
+                {"number": "1", "x": 15.0, "y": 20.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
 
         routes = router.route_net(1, use_mst=True)
         # MST should produce N-1 routes for N pads
@@ -1113,9 +1152,12 @@ class TestAutorouter:
         net_classes = create_net_class_map(power_nets=["VCC"])
         router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
 
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
 
         priority, pad_count = router._get_net_priority(1)
         assert priority == 1  # Power net has highest priority
@@ -1125,9 +1167,12 @@ class TestAutorouter:
         """Test net priority for unknown nets."""
         router = Autorouter(width=50.0, height=50.0)
 
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "UNKNOWN"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "UNKNOWN"},
+            ],
+        )
 
         priority, pad_count = router._get_net_priority(1)
         assert priority == 10  # Default low priority
@@ -1141,9 +1186,12 @@ class TestAutorouter:
     def test_route_all_skips_net_zero(self):
         """Test that route_all skips net 0."""
         router = Autorouter(width=50.0, height=50.0)
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 0},  # No net
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 0},  # No net
+            ],
+        )
         routes = router.route_all()
         assert routes == []
 
@@ -1164,10 +1212,13 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0)
 
         # Add a net so total_nets > 0
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1},
-            {"number": "2", "x": 20.0, "y": 10.0, "net": 1},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1},
+                {"number": "2", "x": 20.0, "y": 10.0, "net": 1},
+            ],
+        )
 
         route = Route(net=1, net_name="test")
         route.segments.append(Segment(10, 10, 20, 10, 0.2, Layer.F_CU, net=1))
@@ -1181,9 +1232,12 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0, rules=rules)
 
         # Add pads
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+            ],
+        )
 
         # Add a fake route
         router.routes.append(Route(net=1, net_name="VCC"))
@@ -1201,16 +1255,22 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
 
         # Add power nets (priority 1) and signal nets (priority 10)
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-            {"number": "2", "x": 12.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-            {"number": "3", "x": 14.0, "y": 10.0, "net": 2, "net_name": "GND"},
-            {"number": "4", "x": 16.0, "y": 10.0, "net": 2, "net_name": "GND"},
-        ])
-        router.add_component("U2", [
-            {"number": "1", "x": 20.0, "y": 10.0, "net": 3, "net_name": "SIG1"},
-            {"number": "2", "x": 22.0, "y": 10.0, "net": 3, "net_name": "SIG1"},
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 12.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "3", "x": 14.0, "y": 10.0, "net": 2, "net_name": "GND"},
+                {"number": "4", "x": 16.0, "y": 10.0, "net": 2, "net_name": "GND"},
+            ],
+        )
+        router.add_component(
+            "U2",
+            [
+                {"number": "1", "x": 20.0, "y": 10.0, "net": 3, "net_name": "SIG1"},
+                {"number": "2", "x": 22.0, "y": 10.0, "net": 3, "net_name": "SIG1"},
+            ],
+        )
 
         net_order = [1, 2, 3]  # VCC, GND, SIG1
         shuffled = router._shuffle_within_tiers(net_order)
@@ -1225,10 +1285,13 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0, rules=rules)
 
         # Add component with two pins on the same net, close together
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-            {"number": "2", "x": 11.0, "y": 10.0, "net": 1, "net_name": "VCC"},  # 1mm apart
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 11.0, "y": 10.0, "net": 1, "net_name": "VCC"},  # 1mm apart
+            ],
+        )
 
         pads = router.nets[1]
         routes, connected = router._create_intra_ic_routes(1, pads)
@@ -1243,10 +1306,13 @@ class TestAutorouter:
         router = Autorouter(width=50.0, height=50.0, rules=rules)
 
         # Add component with two pins on the same net, far apart
-        router.add_component("U1", [
-            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "VCC"},  # 10mm apart
-        ])
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
+                {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "VCC"},  # 10mm apart
+            ],
+        )
 
         pads = router.nets[1]
         routes, connected = router._create_intra_ic_routes(1, pads)
@@ -1308,9 +1374,15 @@ class TestRoutingResult:
         """Test success rate calculation."""
         stack = LayerStack.two_layer()
         result = RoutingResult(
-            routes=[], layer_count=2, layer_stack=stack,
-            nets_requested=10, nets_routed=8, overflow=0,
-            converged=True, iterations_used=1, statistics={},
+            routes=[],
+            layer_count=2,
+            layer_stack=stack,
+            nets_requested=10,
+            nets_routed=8,
+            overflow=0,
+            converged=True,
+            iterations_used=1,
+            statistics={},
         )
 
         assert result.success_rate == 0.8
@@ -1319,9 +1391,15 @@ class TestRoutingResult:
         """Test success rate with zero nets."""
         stack = LayerStack.two_layer()
         result = RoutingResult(
-            routes=[], layer_count=2, layer_stack=stack,
-            nets_requested=0, nets_routed=0, overflow=0,
-            converged=True, iterations_used=1, statistics={},
+            routes=[],
+            layer_count=2,
+            layer_stack=stack,
+            nets_requested=0,
+            nets_routed=0,
+            overflow=0,
+            converged=True,
+            iterations_used=1,
+            statistics={},
         )
 
         assert result.success_rate == 1.0
@@ -1330,9 +1408,15 @@ class TestRoutingResult:
         """Test string representation."""
         stack = LayerStack.two_layer()
         result = RoutingResult(
-            routes=[], layer_count=2, layer_stack=stack,
-            nets_requested=10, nets_routed=10, overflow=0,
-            converged=True, iterations_used=1, statistics={},
+            routes=[],
+            layer_count=2,
+            layer_stack=stack,
+            nets_requested=10,
+            nets_routed=10,
+            overflow=0,
+            converged=True,
+            iterations_used=1,
+            statistics={},
         )
 
         s = str(result)
@@ -1381,8 +1465,7 @@ class TestAStarNode:
     def test_astar_node_via(self):
         """Test node representing a via transition."""
         node = AStarNode(
-            f_score=15.0, g_score=10.0, x=5, y=5, layer=1,
-            parent=None, via_from_parent=True
+            f_score=15.0, g_score=10.0, x=5, y=5, layer=1, parent=None, via_from_parent=True
         )
 
         assert node.via_from_parent is True
@@ -1390,8 +1473,12 @@ class TestAStarNode:
     def test_astar_node_direction(self):
         """Test node direction tracking."""
         node = AStarNode(
-            f_score=10.0, g_score=5.0, x=1, y=0, layer=0,
-            direction=(1, 0)  # Moving right
+            f_score=10.0,
+            g_score=5.0,
+            x=1,
+            y=0,
+            layer=0,
+            direction=(1, 0),  # Moving right
         )
 
         assert node.direction == (1, 0)
@@ -1440,8 +1527,12 @@ class TestRouterPathfinder:
         router = Router(grid, rules)
 
         # Create two pads on the same layer
-        start_pad = Pad(x=10.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
-        end_pad = Pad(x=40.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
+        start_pad = Pad(
+            x=10.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_pad = Pad(
+            x=40.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
 
         # Add pads to grid
         grid.add_pad(start_pad)
@@ -1459,8 +1550,12 @@ class TestRouterPathfinder:
         grid = RoutingGrid(50.0, 50.0, rules)
         router = Router(grid, rules)
 
-        start_pad = Pad(x=10.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
-        end_pad = Pad(x=40.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
+        start_pad = Pad(
+            x=10.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_pad = Pad(
+            x=40.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
 
         grid.add_pad(start_pad)
         grid.add_pad(end_pad)
@@ -1480,8 +1575,12 @@ class TestRouterPathfinder:
         obstacle = Obstacle(x=25.0, y=25.0, width=5.0, height=20.0, layer=Layer.F_CU)
         grid.add_obstacle(obstacle)
 
-        start_pad = Pad(x=10.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
-        end_pad = Pad(x=40.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
+        start_pad = Pad(
+            x=10.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_pad = Pad(
+            x=40.0, y=25.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
 
         grid.add_pad(start_pad)
         grid.add_pad(end_pad)
@@ -1549,8 +1648,12 @@ class TestRouterPathfinder:
         grid = RoutingGrid(50.0, 50.0, rules)
         router = Router(grid, rules)
 
-        start_pad = Pad(x=10.0, y=10.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
-        end_pad = Pad(x=15.0, y=10.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU)
+        start_pad = Pad(
+            x=10.0, y=10.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_pad = Pad(
+            x=15.0, y=10.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
 
         grid.add_pad(start_pad)
         grid.add_pad(end_pad)
@@ -1574,12 +1677,26 @@ class TestRouterPathfinder:
 
         # Through-hole pads can be accessed from any layer
         start_pad = Pad(
-            x=10.0, y=25.0, width=1.0, height=1.0, net=1, net_name="test",
-            layer=Layer.F_CU, through_hole=True, drill=0.8
+            x=10.0,
+            y=25.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="test",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.8,
         )
         end_pad = Pad(
-            x=40.0, y=25.0, width=1.0, height=1.0, net=1, net_name="test",
-            layer=Layer.F_CU, through_hole=True, drill=0.8
+            x=40.0,
+            y=25.0,
+            width=1.0,
+            height=1.0,
+            net=1,
+            net_name="test",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.8,
         )
 
         grid.add_pad(start_pad)
@@ -1602,17 +1719,21 @@ class TestAdaptiveAutorouter:
         """Test creating adaptive autorouter."""
         components = [
             {
-                "ref": "U1", "x": 10.0, "y": 10.0, "rotation": 0,
+                "ref": "U1",
+                "x": 10.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "VCC"},
                     {"number": "2", "x": 2.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "GND"},
-                ]
+                ],
             }
         ]
         net_map = {"VCC": 1, "GND": 2}
 
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=components,
             net_map=net_map,
         )
@@ -1627,7 +1748,8 @@ class TestAdaptiveAutorouter:
         net_map = {}
 
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=components,
             net_map=net_map,
             skip_nets=["GND", "VCC"],
@@ -1642,7 +1764,8 @@ class TestAdaptiveAutorouter:
         net_map = {}
 
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=components,
             net_map=net_map,
             max_layers=4,
@@ -1660,7 +1783,8 @@ class TestAdaptiveAutorouter:
     def test_adaptive_to_sexp_no_route(self):
         """Test to_sexp before routing raises error."""
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=[],
             net_map={},
         )
@@ -1671,7 +1795,8 @@ class TestAdaptiveAutorouter:
     def test_adaptive_get_routes_no_route(self):
         """Test get_routes before routing raises error."""
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=[],
             net_map={},
         )
@@ -1682,7 +1807,8 @@ class TestAdaptiveAutorouter:
     def test_adaptive_layer_count_no_route(self):
         """Test layer_count before routing returns 0."""
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=[],
             net_map={},
         )
@@ -1693,17 +1819,21 @@ class TestAdaptiveAutorouter:
         """Test convergence checking."""
         components = [
             {
-                "ref": "U1", "x": 10.0, "y": 10.0, "rotation": 0,
+                "ref": "U1",
+                "x": 10.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NET1"},
                     {"number": "2", "x": 2.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NET1"},
-                ]
+                ],
             }
         ]
         net_map = {"NET1": 1}
 
         adaptive = AdaptiveAutorouter(
-            width=50.0, height=50.0,
+            width=50.0,
+            height=50.0,
             components=components,
             net_map=net_map,
             verbose=False,
@@ -1733,18 +1863,24 @@ class TestRoutePcb:
         """Test basic route_pcb function."""
         components = [
             {
-                "ref": "U1", "x": 10.0, "y": 10.0, "rotation": 0,
+                "ref": "U1",
+                "x": 10.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "VCC"},
                     {"number": "2", "x": 5.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "GND"},
-                ]
+                ],
             },
             {
-                "ref": "R1", "x": 30.0, "y": 10.0, "rotation": 0,
+                "ref": "R1",
+                "x": 30.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "VCC"},
                     {"number": "2", "x": 2.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "GND"},
-                ]
+                ],
             },
         ]
         net_map = {"VCC": 1, "GND": 2}
@@ -1767,18 +1903,24 @@ class TestRoutePcb:
         """Test route_pcb with rotated components."""
         components = [
             {
-                "ref": "U1", "x": 15.0, "y": 15.0, "rotation": 90,
+                "ref": "U1",
+                "x": 15.0,
+                "y": 15.0,
+                "rotation": 90,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": -2.0, "width": 0.5, "height": 0.5, "net": "SIG"},
                     {"number": "2", "x": 0.0, "y": 2.0, "width": 0.5, "height": 0.5, "net": "SIG"},
-                ]
+                ],
             },
             {
-                "ref": "R1", "x": 35.0, "y": 15.0, "rotation": 0,
+                "ref": "R1",
+                "x": 35.0,
+                "y": 15.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "SIG"},
                     {"number": "2", "x": 2.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "GND"},
-                ]
+                ],
             },
         ]
         net_map = {"SIG": 1, "GND": 2}
@@ -1797,19 +1939,25 @@ class TestRoutePcb:
         """Test route_pcb with skip_nets parameter."""
         components = [
             {
-                "ref": "U1", "x": 10.0, "y": 10.0, "rotation": 0,
+                "ref": "U1",
+                "x": 10.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "VCC"},
                     {"number": "2", "x": 2.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "GND"},
                     {"number": "3", "x": 4.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "SIG"},
-                ]
+                ],
             },
             {
-                "ref": "R1", "x": 30.0, "y": 10.0, "rotation": 0,
+                "ref": "R1",
+                "x": 30.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "VCC"},
                     {"number": "2", "x": 2.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "SIG"},
-                ]
+                ],
             },
         ]
         net_map = {"VCC": 1, "GND": 2, "SIG": 3}
@@ -1829,11 +1977,14 @@ class TestRoutePcb:
         """Test route_pcb with custom origin."""
         components = [
             {
-                "ref": "U1", "x": 110.0, "y": 60.0, "rotation": 0,
+                "ref": "U1",
+                "x": 110.0,
+                "y": 60.0,
+                "rotation": 0,
                 "pads": [
                     {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NET1"},
                     {"number": "2", "x": 5.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NET1"},
-                ]
+                ],
             },
         ]
         net_map = {"NET1": 1}
@@ -1853,11 +2004,28 @@ class TestRoutePcb:
         """Test that route_pcb assigns net numbers for unknown nets."""
         components = [
             {
-                "ref": "U1", "x": 10.0, "y": 10.0, "rotation": 0,
+                "ref": "U1",
+                "x": 10.0,
+                "y": 10.0,
+                "rotation": 0,
                 "pads": [
-                    {"number": "1", "x": 0.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NEW_NET"},
-                    {"number": "2", "x": 5.0, "y": 0.0, "width": 0.5, "height": 0.5, "net": "NEW_NET"},
-                ]
+                    {
+                        "number": "1",
+                        "x": 0.0,
+                        "y": 0.0,
+                        "width": 0.5,
+                        "height": 0.5,
+                        "net": "NEW_NET",
+                    },
+                    {
+                        "number": "2",
+                        "x": 5.0,
+                        "y": 0.0,
+                        "width": 0.5,
+                        "height": 0.5,
+                        "net": "NEW_NET",
+                    },
+                ],
             },
         ]
         net_map = {}  # Empty net map
@@ -1900,10 +2068,7 @@ class TestLoadPcbForRouting:
 
     def test_load_pcb_with_skip_nets(self, routing_test_pcb):
         """Test loading PCB with skip_nets."""
-        router, net_map = load_pcb_for_routing(
-            str(routing_test_pcb),
-            skip_nets=["GND", "+3.3V"]
-        )
+        router, net_map = load_pcb_for_routing(str(routing_test_pcb), skip_nets=["GND", "+3.3V"])
 
         assert router is not None
         # Skipped nets should still be in net_map
@@ -2098,10 +2263,10 @@ class TestMergeRoutesIntoPcb:
 
         result = merge_routes_into_pcb(pcb_content, route_sexp)
 
-        assert 'version 20240108' in result
+        assert "version 20240108" in result
         assert 'generator "test"' in result
         assert 'net 1 "VCC"' in result
-        assert 'Package_SO:SOIC-8' in result
+        assert "Package_SO:SOIC-8" in result
 
     def test_does_not_add_net_settings(self):
         """Test that no net_settings block is added (KiCad 7+ compatibility)."""
@@ -2120,10 +2285,7 @@ class TestKicad7Compatibility:
 
     def test_routed_segments_are_self_contained(self):
         """Test that segments embed trace width, making net class metadata optional."""
-        seg = Segment(
-            x1=0, y1=0, x2=10, y2=0, width=0.25,
-            layer=Layer.F_CU, net=1
-        )
+        seg = Segment(x1=0, y1=0, x2=10, y2=0, width=0.25, layer=Layer.F_CU, net=1)
         sexp = seg.to_sexp()
 
         # Width should be embedded in segment
@@ -2133,10 +2295,7 @@ class TestKicad7Compatibility:
 
     def test_routed_vias_are_self_contained(self):
         """Test that vias embed size and drill, making net class metadata optional."""
-        via = Via(
-            x=10.0, y=20.0, drill=0.3, diameter=0.6,
-            layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        via = Via(x=10.0, y=20.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         sexp = via.to_sexp()
 
         # Size and drill should be embedded
@@ -2194,6 +2353,7 @@ class TestDiagonalRouting:
     def test_diagonal_cost_value(self):
         """Test DIAGONAL_COST is √2."""
         import math
+
         assert abs(DIAGONAL_COST - math.sqrt(2)) < 0.001
 
     def test_router_diagonal_routing_default_enabled(self):
@@ -2230,20 +2390,20 @@ class TestDiagonalRouting:
         router = Router(grid, rules, diagonal_routing=True)
 
         # Extract diagonal moves (where both dx and dy are non-zero)
-        diagonal_moves = [(dx, dy, dl, cost) for dx, dy, dl, cost in router.neighbors_2d
-                         if dx != 0 and dy != 0]
+        diagonal_moves = [
+            (dx, dy, dl, cost) for dx, dy, dl, cost in router.neighbors_2d if dx != 0 and dy != 0
+        ]
 
         assert len(diagonal_moves) == 4
         # All diagonal moves should have cost ≈ 1.414
-        for dx, dy, dl, cost in diagonal_moves:
+        for _dx, _dy, _dl, cost in diagonal_moves:
             assert abs(cost - DIAGONAL_COST) < 0.001
 
     def test_manhattan_heuristic_octile_with_diagonal(self):
         """Test Manhattan heuristic uses octile distance when diagonal enabled."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            diagonal_routing=True
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules, diagonal_routing=True
         )
         heuristic = ManhattanHeuristic()
 
@@ -2256,8 +2416,7 @@ class TestDiagonalRouting:
         """Test Manhattan heuristic uses Manhattan distance when diagonal disabled."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            diagonal_routing=False
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules, diagonal_routing=False
         )
         heuristic = ManhattanHeuristic()
 
@@ -2268,17 +2427,14 @@ class TestDiagonalRouting:
     def test_heuristic_context_diagonal_default(self):
         """Test HeuristicContext defaults to diagonal_routing=True."""
         rules = DesignRules()
-        context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules
-        )
+        context = HeuristicContext(goal_x=10, goal_y=10, goal_layer=0, rules=rules)
         assert context.diagonal_routing is True
 
     def test_congestion_aware_heuristic_with_diagonal(self):
         """Test CongestionAware heuristic uses octile distance."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            diagonal_routing=True
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules, diagonal_routing=True
         )
         heuristic = CongestionAwareHeuristic()
 
@@ -2292,8 +2448,7 @@ class TestDiagonalRouting:
         """Test Greedy heuristic scales octile distance."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            diagonal_routing=True
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules, diagonal_routing=True
         )
         heuristic = GreedyHeuristic(greed_factor=2.0)
 
@@ -2361,10 +2516,12 @@ class TestDiagonalRouting:
         router_diag = Router(grid, rules, diagonal_routing=True)
 
         # Create pads at diagonal positions
-        start_pad = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
-                       net_name="test", layer=Layer.F_CU)
-        end_pad = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1,
-                     net_name="test", layer=Layer.F_CU)
+        start_pad = Pad(
+            x=2.0, y=2.0, width=1.0, height=1.0, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_pad = Pad(
+            x=10.0, y=10.0, width=1.0, height=1.0, net=1, net_name="test", layer=Layer.F_CU
+        )
 
         grid.add_pad(start_pad)
         grid.add_pad(end_pad)
@@ -2388,15 +2545,19 @@ class TestDiagonalRouting:
         router_orth = Router(grid_orth, rules, diagonal_routing=False)
 
         # Create pads at diagonal positions
-        start_diag = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
-                        net_name="test", layer=Layer.F_CU)
-        end_diag = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1,
-                      net_name="test", layer=Layer.F_CU)
+        start_diag = Pad(
+            x=2.0, y=2.0, width=1.0, height=1.0, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_diag = Pad(
+            x=10.0, y=10.0, width=1.0, height=1.0, net=1, net_name="test", layer=Layer.F_CU
+        )
 
-        start_orth = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
-                        net_name="test", layer=Layer.F_CU)
-        end_orth = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1,
-                      net_name="test", layer=Layer.F_CU)
+        start_orth = Pad(
+            x=2.0, y=2.0, width=1.0, height=1.0, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_orth = Pad(
+            x=10.0, y=10.0, width=1.0, height=1.0, net=1, net_name="test", layer=Layer.F_CU
+        )
 
         grid_diag.add_pad(start_diag)
         grid_diag.add_pad(end_diag)
@@ -2415,7 +2576,7 @@ class TestDiagonalRouting:
             for seg in route.segments:
                 dx = seg.x2 - seg.x1
                 dy = seg.y2 - seg.y1
-                length += (dx**2 + dy**2)**0.5
+                length += (dx**2 + dy**2) ** 0.5
             return length
 
         diag_length = total_length(route_diag)

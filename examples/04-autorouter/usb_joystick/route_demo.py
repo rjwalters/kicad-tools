@@ -22,9 +22,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from kicad_tools.router import (
-    load_pcb_for_routing,
     DesignRules,
     create_net_class_map,
+    load_pcb_for_routing,
 )
 
 
@@ -54,18 +54,18 @@ def main():
     # to route between pins. A coarser grid (0.25mm) won't have enough
     # resolution to find paths through the dense QFP pinout.
     rules = DesignRules(
-        grid_resolution=0.1,   # 0.1mm grid (fine for dense QFP routing)
-        trace_width=0.2,       # 0.2mm traces (8mil)
+        grid_resolution=0.1,  # 0.1mm grid (fine for dense QFP routing)
+        trace_width=0.2,  # 0.2mm traces (8mil)
         trace_clearance=0.15,  # 0.15mm clearance (6mil)
-        via_drill=0.3,         # 0.3mm via drill
-        via_diameter=0.6,      # 0.6mm via pad
+        via_drill=0.3,  # 0.3mm via drill
+        via_diameter=0.6,  # 0.6mm via pad
     )
 
     # Configure net classes for proper priority routing
     net_class_map = create_net_class_map(
         power_nets=["VCC", "VBUS", "GND"],
         high_speed_nets=["USB_D+", "USB_D-"],  # USB differential pair
-        clock_nets=["XTAL1", "XTAL2"],         # Crystal oscillator
+        clock_nets=["XTAL1", "XTAL2"],  # Crystal oscillator
     )
 
     # Skip power/ground planes (assume these are routed as pours)
@@ -100,7 +100,7 @@ def main():
 
     # Route all nets using standard routing (DRC-safe, no overlaps)
     print("\n--- Routing (standard mode) ---")
-    routes = router.route_all()
+    router.route_all()
 
     # Get statistics
     stats = router.get_statistics()
@@ -137,14 +137,14 @@ def main():
     # Summary
     print("\n" + "=" * 60)
     total_nets = len([n for n in router.nets if n > 0])
-    if stats['nets_routed'] == total_nets:
+    if stats["nets_routed"] == total_nets:
         print("SUCCESS: All nets routed!")
     else:
         print(f"PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
         print("  Some nets may require manual routing or a different strategy.")
     print("=" * 60)
 
-    return 0 if stats['nets_routed'] == total_nets else 1
+    return 0 if stats["nets_routed"] == total_nets else 1
 
 
 if __name__ == "__main__":

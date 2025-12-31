@@ -1,24 +1,40 @@
 """Tests for operations modules (pinmap, symbol_ops, net_ops, netlist)."""
 
-import pytest
 from pathlib import Path
 
-from kicad_tools.sexp import parse_sexp
-from kicad_tools.schema.schematic import Schematic
-from kicad_tools.schema.wire import Wire
-from kicad_tools.operations.pinmap import (
-    Pin, PinMapping, MappingResult, extract_pins_from_sexp, match_pins
-)
-from kicad_tools.operations.symbol_ops import (
-    find_symbol_by_reference, get_symbol_lib_id, get_symbol_pins,
-    replace_symbol_lib_id, SymbolReplacement
-)
+import pytest
+
 from kicad_tools.operations.net_ops import (
-    points_equal, point_on_wire, NetConnection, Net, NetTracer, trace_nets, find_net
+    Net,
+    NetConnection,
+    NetTracer,
+    find_net,
+    point_on_wire,
+    points_equal,
+    trace_nets,
 )
 from kicad_tools.operations.netlist import (
-    ComponentPin, NetlistComponent, NetNode, NetlistNet, SheetInfo, Netlist
+    Netlist,
+    NetlistComponent,
+    NetlistNet,
+    NetNode,
 )
+from kicad_tools.operations.pinmap import (
+    MappingResult,
+    Pin,
+    PinMapping,
+    extract_pins_from_sexp,
+    match_pins,
+)
+from kicad_tools.operations.symbol_ops import (
+    find_symbol_by_reference,
+    get_symbol_lib_id,
+    get_symbol_pins,
+    replace_symbol_lib_id,
+)
+from kicad_tools.schema.schematic import Schematic
+from kicad_tools.schema.wire import Wire
+from kicad_tools.sexp import parse_sexp
 
 
 class TestPinNormalization:
@@ -353,7 +369,7 @@ class TestSymbolOps:
         test_file = tmp_path / "test.kicad_sch"
         test_file.write_text(minimal_schematic.read_text())
 
-        result = replace_symbol_lib_id(
+        replace_symbol_lib_id(
             str(test_file),
             "R1",
             "NewLib:NewSymbol",
@@ -616,15 +632,27 @@ class TestNetlist:
         """Test getting all nets connected to a component."""
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="GND", nodes=[
-                    NetNode(reference="R1", pin="1"),
-                ]),
-                NetlistNet(code=2, name="VCC", nodes=[
-                    NetNode(reference="R1", pin="2"),
-                ]),
-                NetlistNet(code=3, name="NC", nodes=[
-                    NetNode(reference="R2", pin="1"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="GND",
+                    nodes=[
+                        NetNode(reference="R1", pin="1"),
+                    ],
+                ),
+                NetlistNet(
+                    code=2,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="R1", pin="2"),
+                    ],
+                ),
+                NetlistNet(
+                    code=3,
+                    name="NC",
+                    nodes=[
+                        NetNode(reference="R2", pin="1"),
+                    ],
+                ),
             ],
         )
         nets = netlist.get_component_nets("R1")
@@ -636,12 +664,20 @@ class TestNetlist:
         """Test getting net by pin."""
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="GND", nodes=[
-                    NetNode(reference="R1", pin="1"),
-                ]),
-                NetlistNet(code=2, name="VCC", nodes=[
-                    NetNode(reference="R1", pin="2"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="GND",
+                    nodes=[
+                        NetNode(reference="R1", pin="1"),
+                    ],
+                ),
+                NetlistNet(
+                    code=2,
+                    name="VCC",
+                    nodes=[
+                        NetNode(reference="R1", pin="2"),
+                    ],
+                ),
             ],
         )
         net = netlist.get_net_by_pin("R1", "2")
@@ -652,12 +688,20 @@ class TestNetlist:
         """Test getting power nets."""
         netlist = Netlist(
             nets=[
-                NetlistNet(code=1, name="GND", nodes=[
-                    NetNode(reference="U1", pin="1", pin_type="power_in"),
-                ]),
-                NetlistNet(code=2, name="SIG", nodes=[
-                    NetNode(reference="U1", pin="2", pin_type="output"),
-                ]),
+                NetlistNet(
+                    code=1,
+                    name="GND",
+                    nodes=[
+                        NetNode(reference="U1", pin="1", pin_type="power_in"),
+                    ],
+                ),
+                NetlistNet(
+                    code=2,
+                    name="SIG",
+                    nodes=[
+                        NetNode(reference="U1", pin="2", pin_type="output"),
+                    ],
+                ),
             ],
         )
         power = netlist.power_nets
@@ -671,7 +715,9 @@ class TestNetlist:
             tool="Test",
             date="2024-01-01",
             components=[
-                NetlistComponent(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                NetlistComponent(
+                    reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"
+                ),
             ],
             nets=[
                 NetlistNet(code=1, name="GND"),

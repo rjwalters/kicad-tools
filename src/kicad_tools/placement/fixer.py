@@ -13,7 +13,6 @@ import math
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 from .analyzer import DesignRules, PlacementAnalyzer
 from .conflict import (
@@ -60,7 +59,7 @@ class PlacementFixer:
     def __init__(
         self,
         strategy: FixStrategy = FixStrategy.SPREAD,
-        anchored: Optional[Set[str]] = None,
+        anchored: set[str] | None = None,
         verbose: bool = False,
     ):
         """Initialize fixer.
@@ -76,9 +75,9 @@ class PlacementFixer:
 
     def suggest_fixes(
         self,
-        conflicts: List[Conflict],
-        analyzer: Optional[PlacementAnalyzer] = None,
-    ) -> List[PlacementFix]:
+        conflicts: list[Conflict],
+        analyzer: PlacementAnalyzer | None = None,
+    ) -> list[PlacementFix]:
         """Suggest fixes for a list of conflicts.
 
         Args:
@@ -88,7 +87,7 @@ class PlacementFixer:
         Returns:
             List of suggested fixes
         """
-        fixes: List[PlacementFix] = []
+        fixes: list[PlacementFix] = []
 
         for conflict in conflicts:
             fix = self._suggest_fix_for_conflict(conflict, analyzer)
@@ -106,8 +105,8 @@ class PlacementFixer:
     def _suggest_fix_for_conflict(
         self,
         conflict: Conflict,
-        analyzer: Optional[PlacementAnalyzer],
-    ) -> Optional[PlacementFix]:
+        analyzer: PlacementAnalyzer | None,
+    ) -> PlacementFix | None:
         """Suggest a fix for a single conflict."""
         # Determine which component to move
         component_to_move = self._choose_component_to_move(conflict)
@@ -141,7 +140,7 @@ class PlacementFixer:
             new_position=new_position,
         )
 
-    def _choose_component_to_move(self, conflict: Conflict) -> Optional[str]:
+    def _choose_component_to_move(self, conflict: Conflict) -> str | None:
         """Choose which component to move to resolve conflict."""
         c1, c2 = conflict.component1, conflict.component2
 
@@ -165,7 +164,7 @@ class PlacementFixer:
         self,
         conflict: Conflict,
         component_to_move: str,
-    ) -> Optional[Point]:
+    ) -> Point | None:
         """Calculate the move vector to resolve a conflict."""
         if conflict.type == ConflictType.COURTYARD_OVERLAP:
             return self._calc_courtyard_fix(conflict, component_to_move)
@@ -178,9 +177,7 @@ class PlacementFixer:
         else:
             return None
 
-    def _calc_courtyard_fix(
-        self, conflict: Conflict, component_to_move: str
-    ) -> Optional[Point]:
+    def _calc_courtyard_fix(self, conflict: Conflict, component_to_move: str) -> Point | None:
         """Calculate move to fix courtyard overlap."""
         if not conflict.overlap_amount:
             return None
@@ -201,9 +198,7 @@ class PlacementFixer:
 
         return Point(overlap + margin, 0)
 
-    def _calc_pad_clearance_fix(
-        self, conflict: Conflict, component_to_move: str
-    ) -> Optional[Point]:
+    def _calc_pad_clearance_fix(self, conflict: Conflict, component_to_move: str) -> Point | None:
         """Calculate move to fix pad clearance violation."""
         if conflict.actual_clearance is None or conflict.required_clearance is None:
             return None
@@ -220,9 +215,7 @@ class PlacementFixer:
 
         return Point(sign * move, 0)
 
-    def _calc_hole_fix(
-        self, conflict: Conflict, component_to_move: str
-    ) -> Optional[Point]:
+    def _calc_hole_fix(self, conflict: Conflict, component_to_move: str) -> Point | None:
         """Calculate move to fix hole-to-hole violation."""
         if conflict.actual_clearance is None or conflict.required_clearance is None:
             return None
@@ -236,7 +229,7 @@ class PlacementFixer:
 
         return Point(sign * move, 0)
 
-    def _calc_edge_fix(self, conflict: Conflict) -> Optional[Point]:
+    def _calc_edge_fix(self, conflict: Conflict) -> Point | None:
         """Calculate move to fix edge clearance violation."""
         if conflict.actual_clearance is None or conflict.required_clearance is None:
             return None
@@ -280,10 +273,10 @@ class PlacementFixer:
 
         return min(base, 1.0)
 
-    def _deduplicate_fixes(self, fixes: List[PlacementFix]) -> List[PlacementFix]:
+    def _deduplicate_fixes(self, fixes: list[PlacementFix]) -> list[PlacementFix]:
         """Remove duplicate/conflicting fixes for the same component."""
         # Group by component
-        by_component: Dict[str, List[PlacementFix]] = {}
+        by_component: dict[str, list[PlacementFix]] = {}
         for fix in fixes:
             if fix.component not in by_component:
                 by_component[fix.component] = []
@@ -291,8 +284,8 @@ class PlacementFixer:
 
         # For each component, keep only the highest confidence fix
         # or combine moves if they're compatible
-        result: List[PlacementFix] = []
-        for component, comp_fixes in by_component.items():
+        result: list[PlacementFix] = []
+        for _component, comp_fixes in by_component.items():
             if len(comp_fixes) == 1:
                 result.append(comp_fixes[0])
             else:
@@ -302,7 +295,7 @@ class PlacementFixer:
 
         return result
 
-    def _combine_fixes(self, fixes: List[PlacementFix]) -> PlacementFix:
+    def _combine_fixes(self, fixes: list[PlacementFix]) -> PlacementFix:
         """Combine multiple fixes for the same component."""
         # Sum the move vectors
         total_x = sum(f.move_vector.x for f in fixes)
@@ -323,8 +316,8 @@ class PlacementFixer:
     def apply_fixes(
         self,
         pcb_path: str | Path,
-        fixes: List[PlacementFix],
-        output_path: Optional[str | Path] = None,
+        fixes: list[PlacementFix],
+        output_path: str | Path | None = None,
         dry_run: bool = False,
     ) -> FixResult:
         """Apply fixes to a PCB file.
@@ -423,9 +416,9 @@ class PlacementFixer:
     def verify_fixes(
         self,
         pcb_path: str | Path,
-        fixes: List[PlacementFix],
-        rules: Optional[DesignRules] = None,
-    ) -> List[Conflict]:
+        fixes: list[PlacementFix],
+        rules: DesignRules | None = None,
+    ) -> list[Conflict]:
         """Verify fixes won't create new conflicts.
 
         Applies fixes to a temporary copy and checks for new conflicts.
@@ -444,9 +437,7 @@ class PlacementFixer:
         pcb_path = Path(pcb_path)
 
         # Create temp copy
-        with tempfile.NamedTemporaryFile(
-            suffix=".kicad_pcb", delete=False
-        ) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as tmp:
             tmp_path = Path(tmp.name)
             shutil.copy(pcb_path, tmp_path)
 
@@ -461,9 +452,7 @@ class PlacementFixer:
             # Clean up
             tmp_path.unlink()
 
-    def preview_fixes(
-        self, fixes: List[PlacementFix]
-    ) -> str:
+    def preview_fixes(self, fixes: list[PlacementFix]) -> str:
         """Generate human-readable preview of fixes.
 
         Returns:

@@ -1,11 +1,11 @@
 """DRC report parsing for KiCad text and JSON formats."""
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from .violation import DRCViolation, Location, Severity, ViolationType
 
@@ -15,7 +15,7 @@ class DRCReport:
     """Parsed DRC report from KiCad."""
 
     source_file: str
-    created_at: Optional[datetime]
+    created_at: datetime | None
     pcb_name: str
     violations: list[DRCViolation] = field(default_factory=list)
     footprint_errors: int = 0
@@ -166,7 +166,7 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
         footprint_errors = int(fp_match.group(1))
 
     # Parse violations
-    current_violation: Optional[dict] = None
+    current_violation: dict | None = None
 
     for line in lines:
         # Skip header lines
@@ -250,10 +250,8 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
     pcb_name = data.get("source", "")
     created_at = None
     if "date" in data:
-        try:
+        with contextlib.suppress(ValueError):
             created_at = datetime.fromisoformat(data["date"])
-        except ValueError:
-            pass
 
     violations: list[DRCViolation] = []
 

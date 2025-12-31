@@ -5,11 +5,13 @@ Provides classes for parsing and manipulating KiCad PCB files (.kicad_pcb).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 from kicad_tools.sexp import SExp
+
 from ..core.sexp_file import load_pcb, save_pcb
 
 if TYPE_CHECKING:
@@ -40,16 +42,16 @@ class Pad:
     number: str
     type: str  # smd, thru_hole
     shape: str  # roundrect, rect, circle, oval
-    position: Tuple[float, float]
-    size: Tuple[float, float]
-    layers: List[str]
+    position: tuple[float, float]
+    size: tuple[float, float]
+    layers: list[str]
     net_number: int = 0
     net_name: str = ""
     drill: float = 0.0
     uuid: str = ""
 
     @classmethod
-    def from_sexp(cls, sexp: SExp) -> Optional[Pad]:
+    def from_sexp(cls, sexp: SExp) -> Pad | None:
         """Parse pad from S-expression."""
         pad = cls(
             number=sexp.get_string(0) or "",
@@ -102,11 +104,11 @@ class Footprint:
 
     name: str
     layer: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
     rotation: float
     reference: str
     value: str
-    pads: List[Pad] = field(default_factory=list)
+    pads: list[Pad] = field(default_factory=list)
     uuid: str = ""
     description: str = ""
     tags: str = ""
@@ -182,8 +184,8 @@ class Footprint:
 class Segment:
     """PCB trace segment."""
 
-    start: Tuple[float, float]
-    end: Tuple[float, float]
+    start: tuple[float, float]
+    end: tuple[float, float]
     width: float
     layer: str
     net_number: int
@@ -220,10 +222,10 @@ class Segment:
 class Via:
     """PCB via."""
 
-    position: Tuple[float, float]
+    position: tuple[float, float]
     size: float
     drill: float
-    layers: List[str]
+    layers: list[str]
     net_number: int
     uuid: str = ""
 
@@ -272,9 +274,9 @@ class Zone:
     uuid: str = ""
     name: str = ""
     # Boundary polygon points (x, y) in mm
-    polygon: List[Tuple[float, float]] = field(default_factory=list)
+    polygon: list[tuple[float, float]] = field(default_factory=list)
     # Filled polygon regions after DRC (may differ from boundary due to clearances)
-    filled_polygons: List[List[Tuple[float, float]]] = field(default_factory=list)
+    filled_polygons: list[list[tuple[float, float]]] = field(default_factory=list)
     # Zone fill priority (higher priority fills later, on top of lower priority)
     priority: int = 0
     # Minimum copper thickness in mm
@@ -377,9 +379,9 @@ class Zone:
         return zone
 
     @staticmethod
-    def _parse_polygon_pts(polygon_sexp: SExp) -> List[Tuple[float, float]]:
+    def _parse_polygon_pts(polygon_sexp: SExp) -> list[tuple[float, float]]:
         """Parse polygon points from (pts (xy X Y) ...) structure."""
-        points: List[Tuple[float, float]] = []
+        points: list[tuple[float, float]] = []
 
         if pts := polygon_sexp.find("pts"):
             for xy in pts.find_all("xy"):
@@ -405,7 +407,7 @@ class StackupLayer:
 class Setup:
     """PCB setup/design rules."""
 
-    stackup: List[StackupLayer] = field(default_factory=list)
+    stackup: list[StackupLayer] = field(default_factory=list)
     pad_to_mask_clearance: float = 0.0
     copper_finish: str = ""
 
@@ -426,18 +428,18 @@ class PCB:
     def __init__(self, sexp: SExp):
         """Initialize from parsed S-expression data."""
         self._sexp = sexp
-        self._layers: Dict[int, Layer] = {}
-        self._nets: Dict[int, Net] = {}
-        self._footprints: List[Footprint] = []
-        self._segments: List[Segment] = []
-        self._vias: List[Via] = []
-        self._zones: List[Zone] = []
-        self._setup: Optional[Setup] = None
-        self._title_block: Dict[str, str] = {}
+        self._layers: dict[int, Layer] = {}
+        self._nets: dict[int, Net] = {}
+        self._footprints: list[Footprint] = []
+        self._segments: list[Segment] = []
+        self._vias: list[Via] = []
+        self._zones: list[Zone] = []
+        self._setup: Setup | None = None
+        self._title_block: dict[str, str] = {}
         self._parse()
 
     @classmethod
-    def load(cls, path: str) -> "PCB":
+    def load(cls, path: str) -> PCB:
         """Load PCB from file."""
         sexp = load_pcb(path)
         return cls(sexp)
@@ -500,7 +502,7 @@ class PCB:
 
         self._setup = setup
 
-    def _parse_stackup(self, sexp: SExp) -> List[StackupLayer]:
+    def _parse_stackup(self, sexp: SExp) -> list[StackupLayer]:
         """Parse stackup definition."""
         layers = []
 
@@ -550,25 +552,25 @@ class PCB:
         return self._title_block.get("date", "")
 
     @property
-    def layers(self) -> Dict[int, Layer]:
+    def layers(self) -> dict[int, Layer]:
         """Layer definitions."""
         return self._layers
 
     @property
-    def copper_layers(self) -> List[Layer]:
+    def copper_layers(self) -> list[Layer]:
         """Copper layers only."""
         return [layer for layer in self._layers.values() if layer.type in ("signal", "power")]
 
     @property
-    def nets(self) -> Dict[int, Net]:
+    def nets(self) -> dict[int, Net]:
         """Net definitions."""
         return self._nets
 
-    def get_net(self, number: int) -> Optional[Net]:
+    def get_net(self, number: int) -> Net | None:
         """Get net by number."""
         return self._nets.get(number)
 
-    def get_net_by_name(self, name: str) -> Optional[Net]:
+    def get_net_by_name(self, name: str) -> Net | None:
         """Get net by name."""
         for net in self._nets.values():
             if net.name == name:
@@ -576,7 +578,7 @@ class PCB:
         return None
 
     @property
-    def footprints(self) -> "FootprintList":
+    def footprints(self) -> FootprintList:
         """All footprints.
 
         Returns a FootprintList which extends list with query methods:
@@ -591,7 +593,7 @@ class PCB:
 
         return FootprintList(self._footprints)
 
-    def get_footprint(self, reference: str) -> Optional[Footprint]:
+    def get_footprint(self, reference: str) -> Footprint | None:
         """Get footprint by reference designator."""
         for fp in self._footprints:
             if fp.reference == reference:
@@ -605,7 +607,7 @@ class PCB:
                 yield fp
 
     @property
-    def segments(self) -> List[Segment]:
+    def segments(self) -> list[Segment]:
         """All trace segments."""
         return self._segments
 
@@ -622,7 +624,7 @@ class PCB:
                 yield seg
 
     @property
-    def vias(self) -> List[Via]:
+    def vias(self) -> list[Via]:
         """All vias."""
         return self._vias
 
@@ -633,12 +635,12 @@ class PCB:
                 yield via
 
     @property
-    def zones(self) -> List[Zone]:
+    def zones(self) -> list[Zone]:
         """All zones (copper pours)."""
         return self._zones
 
     @property
-    def setup(self) -> Optional[Setup]:
+    def setup(self) -> Setup | None:
         """Board setup/design rules."""
         return self._setup
 
@@ -664,7 +666,7 @@ class PCB:
         """Number of nets."""
         return len(self._nets)
 
-    def total_trace_length(self, layer: Optional[str] = None) -> float:
+    def total_trace_length(self, layer: str | None = None) -> float:
         """Calculate total trace length in mm."""
         import math
 
@@ -676,7 +678,7 @@ class PCB:
                 total += math.sqrt(dx * dx + dy * dy)
         return total
 
-    def summary(self) -> Dict:
+    def summary(self) -> dict:
         """Get board summary statistics."""
         return {
             "title": self.title,
@@ -697,7 +699,7 @@ class PCB:
         reference: str,
         x: float,
         y: float,
-        rotation: Optional[float] = None,
+        rotation: float | None = None,
     ) -> bool:
         """
         Update a footprint's position in the underlying S-expression.
@@ -717,7 +719,6 @@ class PCB:
             return False
 
         # Update the parsed footprint object
-        old_pos = fp.position
         fp.position = (x, y)
         if rotation is not None:
             fp.rotation = rotation
@@ -761,7 +762,7 @@ class PCB:
 
         return False
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         """
         Save the PCB to a file.
 

@@ -213,10 +213,9 @@ def cmd_delete_traces(sexp: SExp, args) -> bool:
     # Find net number by name
     net_number = None
     for child in sexp.iter_children():
-        if child.tag == "net":
-            if child.get_string(1) == args.net:
-                net_number = child.get_int(0)
-                break
+        if child.tag == "net" and child.get_string(1) == args.net:
+            net_number = child.get_int(0)
+            break
 
     if net_number is None:
         print(f"Error: Net '{args.net}' not found", file=sys.stderr)
@@ -232,10 +231,9 @@ def cmd_delete_traces(sexp: SExp, args) -> bool:
                 if net := child.find_child("net"):
                     if net.get_int(0) == net_number:
                         segments_to_delete.append(i)
-            elif child.tag == "via":
-                if net := child.find_child("net"):
-                    if net.get_int(0) == net_number:
-                        vias_to_delete.append(i)
+            elif child.tag == "via" and (net := child.find_child("net")):
+                if net.get_int(0) == net_number:
+                    vias_to_delete.append(i)
 
     print(f"Deleting traces on net '{args.net}' (#{net_number}):")
     print(f"  Segments: {len(segments_to_delete)}")

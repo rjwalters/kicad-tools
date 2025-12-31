@@ -8,7 +8,6 @@ This module provides:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict
 
 from .layers import Layer
 
@@ -175,7 +174,7 @@ def create_net_class_map(
     high_speed_nets: list[str] | None = None,
     audio_nets: list[str] | None = None,
     debug_nets: list[str] | None = None,
-) -> Dict[str, NetClassRouting]:
+) -> dict[str, NetClassRouting]:
     """Create a net class mapping from net name lists.
 
     Args:
@@ -188,7 +187,7 @@ def create_net_class_map(
     Returns:
         Dict mapping net names to NetClassRouting objects
     """
-    net_class_map: Dict[str, NetClassRouting] = {}
+    net_class_map: dict[str, NetClassRouting] = {}
 
     if power_nets:
         for net in power_nets:
@@ -214,7 +213,7 @@ def create_net_class_map(
 
 
 # Default net class map with common net names
-DEFAULT_NET_CLASS_MAP: Dict[str, NetClassRouting] = create_net_class_map(
+DEFAULT_NET_CLASS_MAP: dict[str, NetClassRouting] = create_net_class_map(
     power_nets=["+5V", "+3.3V", "+3.3VA", "+1.8V", "VCC", "VDD", "GND", "GNDA", "PGND"],
     clock_nets=["CLK", "MCLK", "BCLK", "LRCLK", "SCK"],
     audio_nets=["AUDIO_L", "AUDIO_R", "I2S_DIN", "I2S_DOUT"],

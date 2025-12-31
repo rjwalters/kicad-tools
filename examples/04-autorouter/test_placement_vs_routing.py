@@ -11,23 +11,23 @@ Usage:
     python test_placement_vs_routing.py
 """
 
-import sys
 import random
+import sys
 from pathlib import Path
 
 # Add src to path for development
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from kicad_tools.optim import PlacementOptimizer, PlacementConfig
+from kicad_tools.optim import PlacementOptimizer
+from kicad_tools.router import DesignRules, load_pcb_for_routing
 from kicad_tools.schema.pcb import PCB
-from kicad_tools.router import load_pcb_for_routing, DesignRules
 
 
 def test_placement_optimization(pcb_path: Path, name: str):
     """Test placement optimization on a PCB."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"PLACEMENT OPTIMIZATION: {name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Load PCB
     pcb = PCB.load(str(pcb_path))
@@ -39,17 +39,16 @@ def test_placement_optimization(pcb_path: Path, name: str):
 
     # Initial state
     initial_length = optimizer.total_wire_length()
-    print(f"\n--- Initial Placement ---")
+    print("\n--- Initial Placement ---")
     print(f"Wire length estimate: {initial_length:.2f}mm")
 
     # Store original positions
     original_positions = {
-        comp.ref: (comp.x, comp.y, comp.rotation)
-        for comp in optimizer.components
+        comp.ref: (comp.x, comp.y, comp.rotation) for comp in optimizer.components
     }
 
     # Randomize positions (within board bounds)
-    print(f"\n--- Randomizing Positions ---")
+    print("\n--- Randomizing Positions ---")
     # Get board bounds from outline
     xs = [v.x for v in optimizer.board_outline.vertices]
     ys = [v.y for v in optimizer.board_outline.vertices]
@@ -70,27 +69,29 @@ def test_placement_optimization(pcb_path: Path, name: str):
     print(f"Randomized wire length: {random_length:.2f}mm")
 
     # Run optimization
-    print(f"\n--- Running Physics Optimization (1000 iterations) ---")
+    print("\n--- Running Physics Optimization (1000 iterations) ---")
     optimizer.run(iterations=1000, dt=0.02)
     optimizer.snap_to_grid(position_grid=0.25, rotation_grid=90.0)
 
     optimized_length = optimizer.total_wire_length()
     print(f"Optimized wire length: {optimized_length:.2f}mm")
-    print(f"Improvement from random: {(1 - optimized_length/random_length)*100:.1f}%")
-    print(f"vs Original manual: {(1 - optimized_length/initial_length)*100:+.1f}%")
+    print(f"Improvement from random: {(1 - optimized_length / random_length) * 100:.1f}%")
+    print(f"vs Original manual: {(1 - optimized_length / initial_length) * 100:+.1f}%")
 
     # Show positions
-    print(f"\n--- Component Positions ---")
+    print("\n--- Component Positions ---")
     print(f"{'Component':<10} {'Original':^25} {'Optimized':^25} {'Delta':^10}")
     print("-" * 70)
     for comp in optimizer.components:
         ox, oy, orot = original_positions[comp.ref]
         dx = comp.x - ox
         dy = comp.y - oy
-        delta = (dx*dx + dy*dy) ** 0.5
-        print(f"{comp.ref:<10} ({ox:6.1f}, {oy:6.1f}) @ {orot:3.0f}°  "
-              f"({comp.x:6.1f}, {comp.y:6.1f}) @ {comp.rotation:3.0f}°  "
-              f"{delta:6.1f}mm")
+        delta = (dx * dx + dy * dy) ** 0.5
+        print(
+            f"{comp.ref:<10} ({ox:6.1f}, {oy:6.1f}) @ {orot:3.0f}°  "
+            f"({comp.x:6.1f}, {comp.y:6.1f}) @ {comp.rotation:3.0f}°  "
+            f"{delta:6.1f}mm"
+        )
 
     return {
         "initial_length": initial_length,
@@ -101,9 +102,9 @@ def test_placement_optimization(pcb_path: Path, name: str):
 
 def test_routing_on_placements(pcb_path: Path, name: str, skip_nets: list, rules: DesignRules):
     """Test routing strategies on a PCB."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"ROUTING STRATEGIES: {name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Test basic routing
     print("\n1. Basic Routing...")
@@ -117,8 +118,10 @@ def test_routing_on_placements(pcb_path: Path, name: str, skip_nets: list, rules
         "vias": stats["vias"],
         "length": stats["total_length_mm"],
     }
-    print(f"   Routed: {basic_result['routed']}/{basic_result['total']} nets, "
-          f"{basic_result['vias']} vias, {basic_result['length']:.1f}mm")
+    print(
+        f"   Routed: {basic_result['routed']}/{basic_result['total']} nets, "
+        f"{basic_result['vias']} vias, {basic_result['length']:.1f}mm"
+    )
 
     # Test Monte Carlo (best performer)
     print("\n2. Monte Carlo (5 trials)...")
@@ -131,8 +134,10 @@ def test_routing_on_placements(pcb_path: Path, name: str, skip_nets: list, rules
         "vias": stats["vias"],
         "length": stats["total_length_mm"],
     }
-    print(f"   Routed: {mc_result['routed']}/{mc_result['total']} nets, "
-          f"{mc_result['vias']} vias, {mc_result['length']:.1f}mm")
+    print(
+        f"   Routed: {mc_result['routed']}/{mc_result['total']} nets, "
+        f"{mc_result['vias']} vias, {mc_result['length']:.1f}mm"
+    )
 
     return {"basic": basic_result, "monte_carlo": mc_result}
 
@@ -194,11 +199,13 @@ KEY FINDINGS:
         p = data["placement"]
         r = data["routing"]
         print(f"\n{name.upper()}:")
-        print(f"  Placement:")
+        print("  Placement:")
         print(f"    - Random start wire length: {p['random_length']:.1f}mm")
         print(f"    - Optimized wire length:    {p['optimized_length']:.1f}mm")
-        print(f"    - Improvement:              {(1-p['optimized_length']/p['random_length'])*100:.1f}%")
-        print(f"  Routing (Monte Carlo):")
+        print(
+            f"    - Improvement:              {(1 - p['optimized_length'] / p['random_length']) * 100:.1f}%"
+        )
+        print("  Routing (Monte Carlo):")
         print(f"    - Nets routed: {r['monte_carlo']['routed']}/{r['monte_carlo']['total']}")
         print(f"    - Vias: {r['monte_carlo']['vias']}")
         print(f"    - Trace length: {r['monte_carlo']['length']:.1f}mm")

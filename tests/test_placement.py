@@ -499,6 +499,7 @@ class TestCLIIntegration:
         captured = capsys.readouterr()
 
         import json
+
         conflicts = json.loads(captured.out)
         assert isinstance(conflicts, list)
         if len(conflicts) > 0:

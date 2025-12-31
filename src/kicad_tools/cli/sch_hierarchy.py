@@ -34,7 +34,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List
 
 from kicad_tools.schema.hierarchy import HierarchyNode, build_hierarchy
 
@@ -142,7 +141,7 @@ def cmd_list(root: HierarchyNode, args):
 def cmd_labels(root: HierarchyNode, args):
     """Show hierarchical label connections."""
     # Collect all hierarchical labels and sheet pins
-    connections: Dict[str, List[dict]] = {}
+    connections: dict[str, list[dict]] = {}
 
     for node in root.all_nodes():
         # Labels in this sheet

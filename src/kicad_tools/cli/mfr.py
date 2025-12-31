@@ -21,7 +21,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Tuple
 
 from kicad_tools.manufacturers import (
     compare_design_rules,
@@ -332,8 +331,12 @@ def cmd_apply_rules(args):
     print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
 
     print("\nDesign Rules to Apply:")
-    print(f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
-    print(f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
+    print(
+        f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
+    )
+    print(
+        f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
+    )
     print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
     print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
     print(f"  Min annular ring:  {rules.min_annular_ring_mm:.3f} mm")
@@ -392,7 +395,9 @@ def cmd_apply_rules(args):
         zones_updated = _update_zone_clearances(sexp, rules.min_clearance_mm)
 
         if zones_updated > 0:
-            print(f"\nUpdated {zones_updated} zone(s) with clearance: {rules.min_clearance_mm:.4f} mm")
+            print(
+                f"\nUpdated {zones_updated} zone(s) with clearance: {rules.min_clearance_mm:.4f} mm"
+            )
         else:
             print("\nNo zones found to update.")
 
@@ -481,8 +486,12 @@ def cmd_validate(args):
     print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
 
     print("\nDesign Rules:")
-    print(f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)")
-    print(f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)")
+    print(
+        f"  Min clearance:     {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
+    )
+    print(
+        f"  Min trace width:   {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
+    )
     print(f"  Min via diameter:  {rules.min_via_diameter_mm:.3f} mm")
     print(f"  Min via drill:     {rules.min_via_drill_mm:.3f} mm")
 
@@ -505,7 +514,7 @@ def cmd_validate(args):
         print(f"\n{'=' * 60}")
 
 
-def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
+def _validate_pcb_design(sexp, rules) -> list[tuple[str, str]]:
     """Validate PCB design against manufacturer rules.
 
     Args:
@@ -526,10 +535,12 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
             if width:
                 trace_width = width.get_float(0) or 0.0
                 if trace_width < rules.min_trace_width_mm:
-                    violations.append((
-                        "TRACE_WIDTH",
-                        f"Trace width {trace_width:.4f}mm < min {rules.min_trace_width_mm:.4f}mm"
-                    ))
+                    violations.append(
+                        (
+                            "TRACE_WIDTH",
+                            f"Trace width {trace_width:.4f}mm < min {rules.min_trace_width_mm:.4f}mm",
+                        )
+                    )
 
     # Check via diameters and drills
     for child in sexp.values:
@@ -540,18 +551,22 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
             if size:
                 via_diameter = size.get_float(0) or 0.0
                 if via_diameter < rules.min_via_diameter_mm:
-                    violations.append((
-                        "VIA_DIAMETER",
-                        f"Via diameter {via_diameter:.3f}mm < min {rules.min_via_diameter_mm:.3f}mm"
-                    ))
+                    violations.append(
+                        (
+                            "VIA_DIAMETER",
+                            f"Via diameter {via_diameter:.3f}mm < min {rules.min_via_diameter_mm:.3f}mm",
+                        )
+                    )
 
             if drill:
                 via_drill = drill.get_float(0) or 0.0
                 if via_drill < rules.min_via_drill_mm:
-                    violations.append((
-                        "VIA_DRILL",
-                        f"Via drill {via_drill:.3f}mm < min {rules.min_via_drill_mm:.3f}mm"
-                    ))
+                    violations.append(
+                        (
+                            "VIA_DRILL",
+                            f"Via drill {via_drill:.3f}mm < min {rules.min_via_drill_mm:.3f}mm",
+                        )
+                    )
 
     # Check zone clearances
     for child in sexp.values:
@@ -564,10 +579,12 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
                     if zone_clearance < rules.min_clearance_mm:
                         net = child.find_child("net_name")
                         net_name = net.get_string(0) if net else "unknown"
-                        violations.append((
-                            "ZONE_CLEARANCE",
-                            f"Zone '{net_name}' clearance {zone_clearance:.4f}mm < min {rules.min_clearance_mm:.4f}mm"
-                        ))
+                        violations.append(
+                            (
+                                "ZONE_CLEARANCE",
+                                f"Zone '{net_name}' clearance {zone_clearance:.4f}mm < min {rules.min_clearance_mm:.4f}mm",
+                            )
+                        )
 
     # Check pad drill sizes in footprints
     for child in sexp.values:
@@ -583,10 +600,12 @@ def _validate_pcb_design(sexp, rules) -> List[Tuple[str, str]]:
                 if drill:
                     drill_size = drill.get_float(0) or 0.0
                     if drill_size > 0 and drill_size < rules.min_hole_diameter_mm:
-                        violations.append((
-                            "HOLE_SIZE",
-                            f"{ref or 'Unknown'}: Hole {drill_size:.3f}mm < min {rules.min_hole_diameter_mm:.3f}mm"
-                        ))
+                        violations.append(
+                            (
+                                "HOLE_SIZE",
+                                f"{ref or 'Unknown'}: Hole {drill_size:.3f}mm < min {rules.min_hole_diameter_mm:.3f}mm",
+                            )
+                        )
 
     return violations
 

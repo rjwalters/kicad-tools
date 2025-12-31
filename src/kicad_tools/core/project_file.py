@@ -7,10 +7,10 @@ design settings, and library references.
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any
 
 
-def load_project(path: Union[str, Path]) -> Dict[str, Any]:
+def load_project(path: str | Path) -> dict[str, Any]:
     """
     Load a KiCad project file.
 
@@ -37,7 +37,7 @@ def load_project(path: Union[str, Path]) -> Dict[str, Any]:
     return data
 
 
-def save_project(data: Dict[str, Any], path: Union[str, Path]) -> None:
+def save_project(data: dict[str, Any], path: str | Path) -> None:
     """
     Save a KiCad project file.
 
@@ -50,7 +50,7 @@ def save_project(data: Dict[str, Any], path: Union[str, Path]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def get_design_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+def get_design_settings(data: dict[str, Any]) -> dict[str, Any]:
     """
     Get design settings from project data.
 
@@ -67,7 +67,7 @@ def get_design_settings(data: Dict[str, Any]) -> Dict[str, Any]:
     return data["board"]["design_settings"]
 
 
-def get_rule_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
+def get_rule_defaults(data: dict[str, Any]) -> dict[str, Any]:
     """
     Get rule defaults from project data.
 
@@ -86,7 +86,7 @@ def get_rule_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def apply_manufacturer_rules(
-    data: Dict[str, Any],
+    data: dict[str, Any],
     min_clearance_mm: float,
     min_track_width_mm: float,
     min_via_diameter_mm: float,
@@ -94,7 +94,7 @@ def apply_manufacturer_rules(
     min_annular_ring_mm: float,
     min_hole_diameter_mm: float = 0.3,
     min_copper_to_edge_mm: float = 0.3,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Apply manufacturer design rules to project data.
 
@@ -148,11 +148,11 @@ def apply_manufacturer_rules(
 
 
 def set_manufacturer_metadata(
-    data: Dict[str, Any],
+    data: dict[str, Any],
     manufacturer_id: str,
     layers: int = 2,
     copper_oz: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Set manufacturer metadata in project.
 
@@ -175,7 +175,7 @@ def set_manufacturer_metadata(
     return data
 
 
-def get_manufacturer_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
+def get_manufacturer_metadata(data: dict[str, Any]) -> dict[str, Any]:
     """
     Get manufacturer metadata from project.
 

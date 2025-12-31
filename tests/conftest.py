@@ -1,7 +1,8 @@
 """Pytest fixtures for kicad-tools tests."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 @pytest.fixture
@@ -14,6 +15,7 @@ def fixtures_dir() -> Path:
 def simple_rc_schematic(fixtures_dir: Path) -> Path:
     """Return the path to the simple RC circuit schematic."""
     return fixtures_dir / "simple_rc.kicad_sch"
+
 
 # Minimal KiCad schematic for testing
 MINIMAL_SCHEMATIC = """(kicad_sch
@@ -323,3 +325,93 @@ def zone_test_pcb(tmp_path: Path) -> Path:
     pcb_file = tmp_path / "zone_test.kicad_pcb"
     pcb_file.write_text(ZONE_TEST_PCB)
     return pcb_file
+
+
+# Minimal KiCad footprint (KiCad 6+ format)
+MINIMAL_FOOTPRINT = """(footprint "R_0402_1005Metric"
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (layer "F.Cu")
+  (descr "Resistor SMD 0402 (1005 Metric)")
+  (tags "resistor 0402")
+  (property "Reference" "REF**" (at 0 -1.1 0) (layer "F.SilkS") (uuid "ref-uuid"))
+  (property "Value" "R_0402_1005Metric" (at 0 1.1 0) (layer "F.Fab") (uuid "val-uuid"))
+  (fp_line (start -0.153641 -0.38) (end 0.153641 -0.38) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (fp_line (start -0.153641 0.38) (end 0.153641 0.38) (stroke (width 0.12) (type solid)) (layer "F.SilkS"))
+  (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (model "${KICAD8_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.wrl"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0))
+  )
+)
+"""
+
+# Minimal KiCad footprint (KiCad 5 format with "module" tag)
+MINIMAL_FOOTPRINT_KICAD5 = """(module "R_0402_1005Metric"
+  (layer "F.Cu")
+  (descr "Resistor SMD 0402 (1005 Metric)")
+  (tags "resistor 0402")
+  (fp_text reference "REF**" (at 0 -1.1) (layer "F.SilkS"))
+  (fp_text value "R_0402_1005Metric" (at 0 1.1) (layer "F.Fab"))
+  (pad 1 smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  (pad 2 smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+)
+"""
+
+# Minimal KiCad design rules file
+MINIMAL_DESIGN_RULES = """(version 1)
+(rule "Trace Width"
+  (constraint track_width (min 0.127mm)))
+(rule "Clearance"
+  (constraint clearance (min 0.127mm)))
+(rule "Via Drill"
+  (constraint hole_size (min 0.3mm)))
+(rule "Via Diameter"
+  (constraint via_diameter (min 0.6mm)))
+(rule "Annular Ring"
+  (constraint annular_width (min 0.15mm)))
+(rule "Copper to Edge"
+  (constraint edge_clearance (min 0.3mm)))
+"""
+
+
+@pytest.fixture
+def minimal_footprint(tmp_path: Path) -> Path:
+    """Create a minimal footprint file for testing (KiCad 6+ format)."""
+    mod_file = tmp_path / "R_0402_1005Metric.kicad_mod"
+    mod_file.write_text(MINIMAL_FOOTPRINT)
+    return mod_file
+
+
+@pytest.fixture
+def minimal_footprint_kicad5(tmp_path: Path) -> Path:
+    """Create a minimal footprint file for testing (KiCad 5 format)."""
+    mod_file = tmp_path / "R_0402_1005Metric_v5.kicad_mod"
+    mod_file.write_text(MINIMAL_FOOTPRINT_KICAD5)
+    return mod_file
+
+
+@pytest.fixture
+def footprint_library_dir(tmp_path: Path) -> Path:
+    """Create a .pretty directory with multiple footprints for testing."""
+    pretty_dir = tmp_path / "TestLib.pretty"
+    pretty_dir.mkdir()
+
+    # Add a couple of footprints
+    (pretty_dir / "R_0402_1005Metric.kicad_mod").write_text(MINIMAL_FOOTPRINT)
+    (pretty_dir / "C_0402_1005Metric.kicad_mod").write_text(
+        MINIMAL_FOOTPRINT.replace("R_0402", "C_0402").replace("Resistor", "Capacitor")
+    )
+
+    return pretty_dir
+
+
+@pytest.fixture
+def minimal_design_rules(tmp_path: Path) -> Path:
+    """Create a minimal design rules file for testing."""
+    dru_file = tmp_path / "test.kicad_dru"
+    dru_file.write_text(MINIMAL_DESIGN_RULES)
+    return dru_file

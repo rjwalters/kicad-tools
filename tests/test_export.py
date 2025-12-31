@@ -4,7 +4,6 @@ import csv
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
 import pytest
 
@@ -70,7 +69,7 @@ class TestJLCPCBBOMFormatter:
     """Tests for JLCPCB BOM formatter."""
 
     @pytest.fixture
-    def items(self) -> List[MockBOMItem]:
+    def items(self) -> list[MockBOMItem]:
         return [
             MockBOMItem("R1", "10k", "0402", lcsc="C123456"),
             MockBOMItem("R2", "10k", "0402", lcsc="C123456"),
@@ -132,7 +131,7 @@ class TestPCBWayBOMFormatter:
     """Tests for PCBWay BOM formatter."""
 
     @pytest.fixture
-    def items(self) -> List[MockBOMItem]:
+    def items(self) -> list[MockBOMItem]:
         return [
             MockBOMItem("R1", "10k", "0402", manufacturer="Yageo", mfr_part="RC0402"),
             MockBOMItem("R2", "10k", "0402", manufacturer="Yageo", mfr_part="RC0402"),
@@ -241,7 +240,7 @@ class TestJLCPCBPnPFormatter:
     """Tests for JLCPCB pick-and-place formatter."""
 
     @pytest.fixture
-    def placements(self) -> List[PlacementData]:
+    def placements(self) -> list[PlacementData]:
         return [
             PlacementData("R1", "10k", "0402", 10.0, 20.0, 0.0, "F.Cu"),
             PlacementData("U1", "STM32", "LQFP48", 50.0, 50.0, 45.0, "F.Cu"),
@@ -370,7 +369,9 @@ class TestExtractPlacements:
     def test_excludes_pos_excluded(self):
         footprints = [
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
-            MockFootprint("MH1", "MountHole", "MH_3mm", (0.0, 0.0), 0.0, "F.Cu", exclude_from_pos_files=True),
+            MockFootprint(
+                "MH1", "MountHole", "MH_3mm", (0.0, 0.0), 0.0, "F.Cu", exclude_from_pos_files=True
+            ),
         ]
 
         placements = extract_placements(footprints)

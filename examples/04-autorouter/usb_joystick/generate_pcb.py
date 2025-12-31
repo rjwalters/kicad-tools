@@ -66,7 +66,7 @@ NETS = {
 
 def generate_header() -> str:
     """Generate the PCB file header."""
-    return f"""(kicad_pcb
+    return """(kicad_pcb
   (version 20240108)
   (generator "kicad-tools-demo")
   (generator_version "8.0")
@@ -99,7 +99,7 @@ def generate_header() -> str:
 
 def generate_nets() -> str:
     """Generate net definitions."""
-    lines = ["  (net 0 \"\")"]
+    lines = ['  (net 0 "")']
     for name, num in NETS.items():
         if num > 0:
             lines.append(f'  (net {num} "{name}")')
@@ -128,7 +128,6 @@ def generate_mcu() -> str:
     # TQFP-32 7x7mm, 0.8mm pitch
     # 8 pins per side
     pitch = 0.8
-    body_half = 3.5  # Distance from center to pin row
     pad_offset = 4.5  # Distance from center to pad center
 
     # Pin assignments (simplified ATmega32U4-like)
@@ -191,7 +190,9 @@ def generate_mcu() -> str:
         net_name, net_num = pin_nets[pin]
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         py = pin_offset(i)  # Bottom to top: -2.8 to 2.8
-        pads.append(f'    (pad "{pin}" smd rect (at {-pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+        pads.append(
+            f'    (pad "{pin}" smd rect (at {-pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+        )
 
     # Bottom (pins 9-16, left to right)
     for i in range(8):
@@ -199,7 +200,9 @@ def generate_mcu() -> str:
         net_name, net_num = pin_nets[pin]
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         px = pin_offset(i)  # Left to right: -2.8 to 2.8
-        pads.append(f'    (pad "{pin}" smd rect (at {px:.3f} {pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+        pads.append(
+            f'    (pad "{pin}" smd rect (at {px:.3f} {pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+        )
 
     # Right side (pins 17-24, bottom to top)
     for i in range(8):
@@ -207,7 +210,9 @@ def generate_mcu() -> str:
         net_name, net_num = pin_nets[pin]
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         py = pin_offset(i)  # Bottom to top: -2.8 to 2.8
-        pads.append(f'    (pad "{pin}" smd rect (at {pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+        pads.append(
+            f'    (pad "{pin}" smd rect (at {pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+        )
 
     # Top (pins 25-32, right to left)
     for i in range(8):
@@ -215,7 +220,9 @@ def generate_mcu() -> str:
         net_name, net_num = pin_nets[pin]
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         px = -pin_offset(i)  # Right to left: 2.8 to -2.8
-        pads.append(f'    (pad "{pin}" smd rect (at {px:.3f} {-pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+        pads.append(
+            f'    (pad "{pin}" smd rect (at {px:.3f} {-pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+        )
 
     pads_str = "\n".join(pads)
 
@@ -236,7 +243,7 @@ def generate_mcu() -> str:
 def generate_usb_connector() -> str:
     """Generate USB Type-C connector footprint."""
     x = BOARD_ORIGIN_X + 40  # Center of board
-    y = BOARD_ORIGIN_Y + 8   # Near top edge
+    y = BOARD_ORIGIN_Y + 8  # Near top edge
 
     # Simplified USB-C with main pins
     # A side and B side pins are mirrored
@@ -267,11 +274,17 @@ def generate_usb_connector() -> str:
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
         # A-side at y=0, B-side at y=1.0 (wider spacing for routing)
         py = 0 if pin.startswith("A") else 1.0
-        pads.append(f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.3 1.0) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+        pads.append(
+            f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.3 1.0) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+        )
 
     # Shield/mounting tabs
-    pads.append(f'    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))')
-    pads.append(f'    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))')
+    pads.append(
+        '    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+    )
+    pads.append(
+        '    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+    )
 
     pads_str = "\n".join(pads)
 
@@ -307,7 +320,9 @@ def generate_joystick() -> str:
     pads = []
     for pin, px, py, net_name in pins:
         net_num = NETS[net_name]
-        pads.append(f'    (pad "{pin}" thru_hole circle (at {px} {py}) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net {net_num} "{net_name}"))')
+        pads.append(
+            f'    (pad "{pin}" thru_hole circle (at {px} {py}) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net {net_num} "{net_name}"))'
+        )
 
     pads_str = "\n".join(pads)
 
@@ -436,13 +451,13 @@ def main():
 
     print(f"Generated: {output_path}")
     print(f"  Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print(f"  Components:")
-    print(f"    - 1 MCU (32-pin QFP)")
-    print(f"    - 1 USB-C connector")
-    print(f"    - 1 Analog joystick module")
-    print(f"    - 4 Tactile buttons")
-    print(f"    - 1 Crystal oscillator")
-    print(f"    - 4 Decoupling capacitors")
+    print("  Components:")
+    print("    - 1 MCU (32-pin QFP)")
+    print("    - 1 USB-C connector")
+    print("    - 1 Analog joystick module")
+    print("    - 4 Tactile buttons")
+    print("    - 1 Crystal oscillator")
+    print("    - 4 Decoupling capacitors")
     print(f"  Nets: {len([n for n in NETS.values() if n > 0])}")
 
 

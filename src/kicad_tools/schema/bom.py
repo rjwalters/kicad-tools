@@ -7,7 +7,6 @@ Extracts component information from schematics for manufacturing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 from .hierarchy import build_hierarchy
 from .schematic import Schematic
@@ -30,7 +29,7 @@ class BOMItem:
     in_bom: bool = True
 
     # Additional properties from schematic
-    properties: Dict[str, str] = field(default_factory=dict)
+    properties: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_power_symbol(self) -> bool:
@@ -49,7 +48,7 @@ class BOMGroup:
 
     value: str
     footprint: str
-    items: List[BOMItem] = field(default_factory=list)
+    items: list[BOMItem] = field(default_factory=list)
 
     @property
     def quantity(self) -> int:
@@ -96,7 +95,7 @@ class BOMGroup:
 class BOM:
     """Complete Bill of Materials."""
 
-    items: List[BOMItem] = field(default_factory=list)
+    items: list[BOMItem] = field(default_factory=list)
     source: str = ""  # Source schematic path
 
     @property
@@ -111,7 +110,7 @@ class BOM:
     def dnp_count(self) -> int:
         return len([i for i in self.items if i.dnp])
 
-    def grouped(self, by: str = "value+footprint") -> List[BOMGroup]:
+    def grouped(self, by: str = "value+footprint") -> list[BOMGroup]:
         """
         Group items by specified criteria.
 
@@ -121,7 +120,7 @@ class BOM:
         Returns:
             List of BOMGroup
         """
-        groups: Dict[str, BOMGroup] = {}
+        groups: dict[str, BOMGroup] = {}
 
         for item in self.items:
             # Skip virtual components
@@ -159,7 +158,7 @@ class BOM:
     def filter(
         self,
         include_dnp: bool = False,
-        reference_pattern: Optional[str] = None,
+        reference_pattern: str | None = None,
     ) -> BOM:
         """
         Return a filtered BOM.
@@ -192,7 +191,7 @@ class BOM:
         return BOM(items=filtered, source=self.source)
 
 
-def extract_bom_from_schematic(schematic: Schematic) -> List[BOMItem]:
+def extract_bom_from_schematic(schematic: Schematic) -> list[BOMItem]:
     """Extract BOM items from a single schematic."""
     items = []
 

@@ -9,12 +9,127 @@ Provides command-line access to the autorouter:
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> str:
+    """Display routing preview with per-net breakdown.
+
+    Args:
+        router: The Autorouter instance with completed routes
+        net_map: Mapping of net names to net IDs
+        nets_to_route: Total number of nets expected to be routed
+        quiet: If True, skip interactive prompt and return 'n'
+
+    Returns:
+        User response: 'y' (apply), 'n' (reject), or 'e' (edit - future)
+    """
+    # Build reverse mapping: net_id -> net_name
+    reverse_net = {v: k for k, v in net_map.items()}
+
+    # Collect per-net statistics
+    net_stats: dict[int, dict] = {}
+    for route in router.routes:
+        net_id = route.net
+        if net_id not in net_stats:
+            net_stats[net_id] = {
+                "net_name": route.net_name or reverse_net.get(net_id, f"Net {net_id}"),
+                "segments": 0,
+                "vias": 0,
+                "length": 0.0,
+                "layers": set(),
+            }
+        stats = net_stats[net_id]
+        stats["segments"] += len(route.segments)
+        stats["vias"] += len(route.vias)
+        for seg in route.segments:
+            dx = seg.x2 - seg.x1
+            dy = seg.y2 - seg.y1
+            stats["length"] += math.sqrt(dx * dx + dy * dy)
+            stats["layers"].add(seg.layer.kicad_name)
+
+    # Identify unrouted nets
+    routed_net_ids = set(net_stats.keys())
+    all_net_ids = {v for k, v in net_map.items() if v > 0}
+    unrouted_ids = all_net_ids - routed_net_ids
+
+    # Print header
+    print("\n" + "=" * 60)
+    print("ROUTING PREVIEW")
+    print("=" * 60)
+
+    # Print per-net breakdown
+    for net_id in sorted(net_stats.keys()):
+        stats = net_stats[net_id]
+        net_name = stats["net_name"]
+        layers = " -> ".join(sorted(stats["layers"]))
+        via_info = f", {stats['vias']} via(s)" if stats["vias"] > 0 else ""
+
+        print(f"\nNet: {net_name}")
+        print(f"  Layers:   {layers}")
+        print(f"  Length:   {stats['length']:.2f}mm")
+        print(f"  Segments: {stats['segments']}{via_info}")
+        print("  Status:   \u2713 Routed")
+
+    # Show unrouted nets
+    if unrouted_ids:
+        print("\n" + "-" * 40)
+        for net_id in sorted(unrouted_ids):
+            net_name = reverse_net.get(net_id, f"Net {net_id}")
+            if net_name:  # Skip empty net names
+                print(f"\nNet: {net_name}")
+                print("  Status:   \u2717 No path found")
+
+    # Summary statistics
+    overall_stats = router.get_statistics()
+    nets_routed = overall_stats["nets_routed"]
+    success_rate = (nets_routed / nets_to_route * 100) if nets_to_route > 0 else 0
+
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"  Nets routed:  {nets_routed}/{nets_to_route} ({success_rate:.0f}%)")
+    print(f"  Total length: {overall_stats['total_length_mm']:.2f}mm")
+    print(f"  Total vias:   {overall_stats['vias']}")
+    print(f"  Segments:     {overall_stats['segments']}")
+
+    # Layer usage summary
+    all_layers: dict[str, int] = {}
+    for route in router.routes:
+        for seg in route.segments:
+            layer_name = seg.layer.kicad_name
+            all_layers[layer_name] = all_layers.get(layer_name, 0) + 1
+
+    if all_layers:
+        print("\n  Layer usage:")
+        for layer_name, count in sorted(all_layers.items()):
+            print(f"    {layer_name}: {count} segments")
+
+    print("=" * 60)
+
+    # Interactive prompt (unless quiet mode)
+    if quiet:
+        return "n"
+
+    print("\nApply routes? [y/N/e(dit)]:", end=" ")
+    try:
+        response = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return "n"
+
+    if response in ("y", "yes"):
+        return "y"
+    elif response in ("e", "edit"):
+        print("  (Edit mode not yet implemented - treating as reject)")
+        return "n"
+    else:
+        return "n"
+
+
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools route",
@@ -22,7 +137,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Output file path (default: <input>_routed.kicad_pcb)",
     )
     parser.add_argument(
@@ -78,9 +194,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Max iterations for negotiated routing (default: 15)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Verbose output",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show routing preview with per-net details before saving (interactive)",
     )
     parser.add_argument(
         "--dry-run",
@@ -139,7 +261,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return 1
 
-    if not pcb_path.suffix == ".kicad_pcb":
+    if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
     # Determine output path
@@ -321,6 +443,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         for warning in diffpair_warnings:
             print(f"  {warning}")
 
+    # Show preview if requested
+    if args.preview:
+        response = show_preview(router, net_map, nets_to_route, quiet=quiet)
+        if response != "y":
+            if not quiet:
+                print("\nRouting cancelled. No changes saved.")
+            return 0
+
     # Save output
     if args.dry_run:
         if not quiet:
@@ -355,16 +485,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Summary
     if not quiet:
         print("\n" + "=" * 60)
-        if stats['nets_routed'] == nets_to_route:
+        if stats["nets_routed"] == nets_to_route:
             print("SUCCESS: All nets routed!")
         else:
             print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
             print("  Some nets may require manual routing or a different strategy.")
 
-    if stats['nets_routed'] == nets_to_route:
+    if stats["nets_routed"] == nets_to_route:
         return 0
     else:
-        return 1 if stats['nets_routed'] < nets_to_route else 0
+        return 1 if stats["nets_routed"] < nets_to_route else 0
 
 
 if __name__ == "__main__":

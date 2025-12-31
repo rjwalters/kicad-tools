@@ -16,9 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from kicad_tools.router import (
-    load_pcb_for_routing,
     DesignRules,
-    AdaptiveAutorouter,
+    load_pcb_for_routing,
 )
 
 
@@ -27,7 +26,7 @@ def test_basic_routing(pcb_path: str, skip_nets: list, rules: DesignRules):
     router, net_map = load_pcb_for_routing(str(pcb_path), skip_nets=skip_nets, rules=rules)
 
     total_nets = len([n for n in router.nets if n > 0])
-    routes = router.route_all()
+    router.route_all()
     stats = router.get_statistics()
 
     return {
@@ -45,7 +44,7 @@ def test_negotiated_routing(pcb_path: str, skip_nets: list, rules: DesignRules):
     router, net_map = load_pcb_for_routing(str(pcb_path), skip_nets=skip_nets, rules=rules)
 
     total_nets = len([n for n in router.nets if n > 0])
-    routes = router.route_all_negotiated(max_iterations=5)
+    router.route_all_negotiated(max_iterations=5)
     stats = router.get_statistics()
 
     return {
@@ -63,7 +62,7 @@ def test_monte_carlo_routing(pcb_path: str, skip_nets: list, rules: DesignRules,
     router, net_map = load_pcb_for_routing(str(pcb_path), skip_nets=skip_nets, rules=rules)
 
     total_nets = len([n for n in router.nets if n > 0])
-    routes = router.route_all_monte_carlo(num_trials=trials, verbose=False)
+    router.route_all_monte_carlo(num_trials=trials, verbose=False)
     stats = router.get_statistics()
 
     return {
@@ -78,14 +77,14 @@ def test_monte_carlo_routing(pcb_path: str, skip_nets: list, rules: DesignRules,
 
 def test_demo(name: str, pcb_path: Path, skip_nets: list, rules: DesignRules):
     """Test all routing strategies on a demo PCB."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Testing: {name}")
     print(f"PCB: {pcb_path.name}")
     print(f"Skip nets: {skip_nets}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if not pcb_path.exists():
-        print(f"  ERROR: PCB file not found!")
+        print("  ERROR: PCB file not found!")
         return
 
     results = []
@@ -127,18 +126,20 @@ def test_demo(name: str, pcb_path: Path, skip_nets: list, rules: DesignRules):
         print(f"   ERROR: {e}")
 
     # Summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"{'Method':<30} {'Routed':<10} {'Segments':<10} {'Vias':<8} {'Length':<10}")
     print("-" * 68)
     for r in results:
         routed_str = f"{r['routed']}/{r['total_nets']}"
-        print(f"{r['method']:<30} {routed_str:<10} {r['segments']:<10} {r['vias']:<8} {r['length_mm']:.1f}mm")
+        print(
+            f"{r['method']:<30} {routed_str:<10} {r['segments']:<10} {r['vias']:<8} {r['length_mm']:.1f}mm"
+        )
 
     # Find best result
     if results:
-        best = max(results, key=lambda x: (x['routed'], -x['vias']))
+        best = max(results, key=lambda x: (x["routed"], -x["vias"]))
         print(f"\nBest strategy: {best['method']} ({best['routed']}/{best['total_nets']} nets)")
 
     return results

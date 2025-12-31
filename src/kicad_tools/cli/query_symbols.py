@@ -20,7 +20,6 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -197,14 +196,14 @@ class Symbol:
         """Get output pins."""
         return [p for p in self.pins if p.pin_type == "output"]
 
-    def get_pin_by_number(self, number: str) -> Optional[SymbolPin]:
+    def get_pin_by_number(self, number: str) -> SymbolPin | None:
         """Get pin by pin number."""
         for pin in self.pins:
             if pin.number == number:
                 return pin
         return None
 
-    def get_pin_by_name(self, name: str) -> Optional[SymbolPin]:
+    def get_pin_by_name(self, name: str) -> SymbolPin | None:
         """Get pin by name (case-insensitive partial match)."""
         name_lower = name.lower()
         for pin in self.pins:
@@ -254,7 +253,7 @@ class SymbolLibrary:
             symbols=symbols,
         )
 
-    def get_symbol(self, name: str) -> Optional[Symbol]:
+    def get_symbol(self, name: str) -> Symbol | None:
         """Get symbol by exact name."""
         for sym in self.symbols:
             if sym.name == name:
@@ -445,7 +444,7 @@ def compare_symbols(sym1: Symbol, sym2: Symbol):
                 print(f"  #{pin.number}: {name}")
 
 
-def print_json_output(libs: list[SymbolLibrary], symbol_filter: Optional[str] = None):
+def print_json_output(libs: list[SymbolLibrary], symbol_filter: str | None = None):
     """Print libraries/symbols as JSON."""
     output = []
 

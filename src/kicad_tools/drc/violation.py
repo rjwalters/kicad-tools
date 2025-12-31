@@ -168,8 +168,8 @@ class DRCViolation:
     nets: list[str] = field(default_factory=list)
 
     # Extracted numeric values (when available)
-    required_value_mm: Optional[float] = None
-    actual_value_mm: Optional[float] = None
+    required_value_mm: float | None = None
+    actual_value_mm: float | None = None
 
     @property
     def is_error(self) -> bool:
@@ -187,7 +187,7 @@ class DRCViolation:
         return self.type in (ViolationType.UNCONNECTED_ITEMS, ViolationType.SHORTING_ITEMS)
 
     @property
-    def primary_location(self) -> Optional[Location]:
+    def primary_location(self) -> Location | None:
         """Get the first location if available."""
         return self.locations[0] if self.locations else None
 

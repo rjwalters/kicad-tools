@@ -1,14 +1,14 @@
 """Tests for the query module."""
 
-import pytest
 from dataclasses import dataclass
-from typing import Optional
+
+import pytest
 
 from kicad_tools.query.base import BaseQuery
-from kicad_tools.query.symbols import SymbolList, SymbolQuery
 from kicad_tools.query.footprints import FootprintList, FootprintQuery
-from kicad_tools.schema.schematic import Schematic
+from kicad_tools.query.symbols import SymbolList, SymbolQuery
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.schema.schematic import Schematic
 
 
 # Test data class for BaseQuery tests

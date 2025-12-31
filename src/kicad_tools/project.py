@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 from .schema.bom import BOM, extract_bom
 from .schema.pcb import PCB
@@ -39,7 +39,7 @@ class OrphanedFootprint:
     reference: str
     value: str
     footprint_name: str
-    position: Tuple[float, float]
+    position: tuple[float, float]
 
 
 @dataclass
@@ -51,7 +51,7 @@ class MismatchedComponent:
     pcb_value: str
     schematic_footprint: str
     pcb_footprint: str
-    mismatches: List[str] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -59,20 +59,16 @@ class CrossReferenceResult:
     """Result of cross-referencing schematic and PCB."""
 
     matched: int = 0
-    unplaced: List[UnplacedSymbol] = field(default_factory=list)
-    orphaned: List[OrphanedFootprint] = field(default_factory=list)
-    mismatched: List[MismatchedComponent] = field(default_factory=list)
+    unplaced: list[UnplacedSymbol] = field(default_factory=list)
+    orphaned: list[OrphanedFootprint] = field(default_factory=list)
+    mismatched: list[MismatchedComponent] = field(default_factory=list)
 
     @property
     def is_clean(self) -> bool:
         """Check if cross-reference is clean (no issues)."""
-        return (
-            len(self.unplaced) == 0
-            and len(self.orphaned) == 0
-            and len(self.mismatched) == 0
-        )
+        return len(self.unplaced) == 0 and len(self.orphaned) == 0 and len(self.mismatched) == 0
 
-    def summary(self) -> Dict[str, int]:
+    def summary(self) -> dict[str, int]:
         """Get summary counts."""
         return {
             "matched": self.matched,
@@ -117,9 +113,9 @@ class Project:
 
     def __init__(
         self,
-        schematic: Optional[str | Path] = None,
-        pcb: Optional[str | Path] = None,
-        project_file: Optional[str | Path] = None,
+        schematic: str | Path | None = None,
+        pcb: str | Path | None = None,
+        project_file: str | Path | None = None,
     ):
         """
         Initialize project.
@@ -134,12 +130,12 @@ class Project:
         self._pcb_path = Path(pcb) if pcb else None
 
         # Lazy-loaded instances
-        self._schematic: Optional[Schematic] = None
-        self._pcb: Optional[PCB] = None
-        self._bom: Optional[BOM] = None
+        self._schematic: Schematic | None = None
+        self._pcb: PCB | None = None
+        self._bom: BOM | None = None
 
     @classmethod
-    def load(cls, project_path: str | Path) -> "Project":
+    def load(cls, project_path: str | Path) -> Project:
         """
         Load a KiCad project from .kicad_pro file.
 
@@ -171,7 +167,7 @@ class Project:
         )
 
     @classmethod
-    def from_pcb(cls, pcb_path: str | Path) -> "Project":
+    def from_pcb(cls, pcb_path: str | Path) -> Project:
         """
         Create project from PCB file, finding related schematic.
 
@@ -203,7 +199,7 @@ class Project:
         return "unnamed"
 
     @property
-    def directory(self) -> Optional[Path]:
+    def directory(self) -> Path | None:
         """Get project directory."""
         if self.project_file:
             return self.project_file.parent
@@ -214,7 +210,7 @@ class Project:
         return None
 
     @property
-    def schematic(self) -> Optional[Schematic]:
+    def schematic(self) -> Schematic | None:
         """Get loaded schematic (lazy loaded)."""
         if self._schematic is None and self._schematic_path:
             if self._schematic_path.exists():
@@ -222,14 +218,13 @@ class Project:
         return self._schematic
 
     @property
-    def pcb(self) -> Optional[PCB]:
+    def pcb(self) -> PCB | None:
         """Get loaded PCB (lazy loaded)."""
-        if self._pcb is None and self._pcb_path:
-            if self._pcb_path.exists():
-                self._pcb = PCB.load(str(self._pcb_path))
+        if self._pcb is None and self._pcb_path and self._pcb_path.exists():
+            self._pcb = PCB.load(str(self._pcb_path))
         return self._pcb
 
-    def get_bom(self, force_reload: bool = False) -> Optional[BOM]:
+    def get_bom(self, force_reload: bool = False) -> BOM | None:
         """
         Get bill of materials from schematic.
 
@@ -263,7 +258,7 @@ class Project:
             return result
 
         # Build reference sets
-        sch_refs: Dict[str, Dict[str, Any]] = {}
+        sch_refs: dict[str, dict[str, Any]] = {}
         for sym in self.schematic.symbols:
             if sym.reference and not sym.reference.startswith("#"):
                 sch_refs[sym.reference] = {
@@ -272,7 +267,7 @@ class Project:
                     "footprint": getattr(sym, "footprint", ""),
                 }
 
-        pcb_refs: Dict[str, Dict[str, Any]] = {}
+        pcb_refs: dict[str, dict[str, Any]] = {}
         for fp in self.pcb.footprints:
             if fp.reference and not fp.reference.startswith("#"):
                 pcb_refs[fp.reference] = {
@@ -311,38 +306,44 @@ class Project:
                     mismatches.append("footprint")
 
             if mismatches:
-                result.mismatched.append(MismatchedComponent(
-                    reference=ref,
-                    schematic_value=sch_data["value"],
-                    pcb_value=pcb_data["value"],
-                    schematic_footprint=sch_data.get("footprint", ""),
-                    pcb_footprint=pcb_data["footprint"],
-                    mismatches=mismatches,
-                ))
+                result.mismatched.append(
+                    MismatchedComponent(
+                        reference=ref,
+                        schematic_value=sch_data["value"],
+                        pcb_value=pcb_data["value"],
+                        schematic_footprint=sch_data.get("footprint", ""),
+                        pcb_footprint=pcb_data["footprint"],
+                        mismatches=mismatches,
+                    )
+                )
 
         # Record unplaced symbols
         for ref in unplaced_refs:
             sch_data = sch_refs[ref]
-            result.unplaced.append(UnplacedSymbol(
-                reference=ref,
-                value=sch_data["value"],
-                lib_id=sch_data["lib_id"],
-                footprint_name=sch_data.get("footprint", ""),
-            ))
+            result.unplaced.append(
+                UnplacedSymbol(
+                    reference=ref,
+                    value=sch_data["value"],
+                    lib_id=sch_data["lib_id"],
+                    footprint_name=sch_data.get("footprint", ""),
+                )
+            )
 
         # Record orphaned footprints
         for ref in orphaned_refs:
             pcb_data = pcb_refs[ref]
-            result.orphaned.append(OrphanedFootprint(
-                reference=ref,
-                value=pcb_data["value"],
-                footprint_name=pcb_data["footprint"],
-                position=pcb_data["position"],
-            ))
+            result.orphaned.append(
+                OrphanedFootprint(
+                    reference=ref,
+                    value=pcb_data["value"],
+                    footprint_name=pcb_data["footprint"],
+                    position=pcb_data["position"],
+                )
+            )
 
         return result
 
-    def find_unplaced_symbols(self) -> List[UnplacedSymbol]:
+    def find_unplaced_symbols(self) -> list[UnplacedSymbol]:
         """
         Find symbols in schematic that aren't on PCB.
 
@@ -351,7 +352,7 @@ class Project:
         """
         return self.cross_reference().unplaced
 
-    def find_orphaned_footprints(self) -> List[OrphanedFootprint]:
+    def find_orphaned_footprints(self) -> list[OrphanedFootprint]:
         """
         Find footprints on PCB that aren't in schematic.
 
@@ -364,7 +365,7 @@ class Project:
         self,
         output_dir: str | Path,
         manufacturer: str = "jlcpcb",
-    ) -> "AssemblyPackageResult":
+    ) -> AssemblyPackageResult:
         """
         Export complete assembly package.
 

@@ -22,8 +22,6 @@ Usage:
         print(f"{mfr.name}: {mfr.website}")
 """
 
-from typing import Optional
-
 from .base import (
     AssemblyCapabilities,
     DesignRules,
@@ -122,7 +120,7 @@ def get_manufacturer_ids() -> list[str]:
 def compare_design_rules(
     layers: int = 4,
     copper_oz: float = 1.0,
-    manufacturers: Optional[list[str]] = None,
+    manufacturers: list[str] | None = None,
 ) -> dict[str, DesignRules]:
     """
     Compare design rules across manufacturers.

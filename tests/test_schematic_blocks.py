@@ -1,20 +1,21 @@
 """Tests for schematic circuit blocks."""
 
+from unittest.mock import Mock
+
 import pytest
-from unittest.mock import Mock, MagicMock, patch
 
 from kicad_tools.schematic.blocks import (
-    Port,
     CircuitBlock,
-    LEDIndicator,
+    DebugHeader,
     DecouplingCaps,
     LDOBlock,
+    LEDIndicator,
     OscillatorBlock,
-    DebugHeader,
-    create_power_led,
-    create_status_led,
+    Port,
     create_3v3_ldo,
     create_mclk_oscillator,
+    create_power_led,
+    create_status_led,
 )
 
 
@@ -80,15 +81,14 @@ class TestLEDIndicatorMocked:
         sch = Mock()
         # Mock add_symbol to return symbol with pin_position method
         mock_led = Mock()
-        mock_led.pin_position.side_effect = lambda name: {
-            "A": (100, 95),
-            "K": (100, 105)
-        }.get(name, (0, 0))
+        mock_led.pin_position.side_effect = lambda name: {"A": (100, 95), "K": (100, 105)}.get(
+            name, (0, 0)
+        )
 
         mock_resistor = Mock()
         mock_resistor.pin_position.side_effect = lambda name: {
             "1": (100, 110),
-            "2": (100, 120)
+            "2": (100, 120),
         }.get(name, (0, 0))
 
         def mock_add_symbol(symbol, x, y, ref, *args, **kwargs):
@@ -116,7 +116,7 @@ class TestLEDIndicatorMocked:
 
     def test_led_indicator_adds_wire(self, mock_schematic):
         """LED indicator wires LED to resistor."""
-        led = LEDIndicator(mock_schematic, x=100, y=100, ref_prefix="D1")
+        LEDIndicator(mock_schematic, x=100, y=100, ref_prefix="D1")
         # Verify add_wire was called
         assert mock_schematic.add_wire.called
 
@@ -148,10 +148,9 @@ class TestDecouplingCapsMocked:
 
         def create_mock_cap(symbol, x, y, ref, *args, **kwargs):
             cap = Mock()
-            cap.pin_position.side_effect = lambda name: {
-                "1": (x, y - 5),
-                "2": (x, y + 5)
-            }.get(name, (0, 0))
+            cap.pin_position.side_effect = lambda name: {"1": (x, y - 5), "2": (x, y + 5)}.get(
+                name, (0, 0)
+            )
             return cap
 
         sch.add_symbol = Mock(side_effect=create_mock_cap)
@@ -161,12 +160,7 @@ class TestDecouplingCapsMocked:
 
     def test_decoupling_caps_creation(self, mock_schematic):
         """Create decoupling capacitor bank."""
-        caps = DecouplingCaps(
-            mock_schematic,
-            x=100, y=100,
-            values=["10uF", "100nF"],
-            ref_start=1
-        )
+        caps = DecouplingCaps(mock_schematic, x=100, y=100, values=["10uF", "100nF"], ref_start=1)
 
         assert len(caps.caps) == 2
         assert "VCC" in caps.ports
@@ -177,10 +171,7 @@ class TestDecouplingCapsMocked:
     def test_decoupling_caps_components(self, mock_schematic):
         """Components dict has all caps."""
         caps = DecouplingCaps(
-            mock_schematic,
-            x=100, y=100,
-            values=["10uF", "100nF", "10nF"],
-            ref_start=1
+            mock_schematic, x=100, y=100, values=["10uF", "100nF", "10nF"], ref_start=1
         )
 
         assert "C1" in caps.components
@@ -189,12 +180,7 @@ class TestDecouplingCapsMocked:
 
     def test_decoupling_caps_connect_to_rails(self, mock_schematic):
         """Connect caps to rails."""
-        caps = DecouplingCaps(
-            mock_schematic,
-            x=100, y=100,
-            values=["10uF", "100nF"],
-            ref_start=1
-        )
+        caps = DecouplingCaps(mock_schematic, x=100, y=100, values=["10uF", "100nF"], ref_start=1)
         caps.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
 
         # Should wire each cap
@@ -217,14 +203,13 @@ class TestLDOBlockMocked:
                     "VIN": (x - 10, y),
                     "VOUT": (x + 10, y),
                     "GND": (x, y + 10),
-                    "EN": (x - 5, y + 5)
+                    "EN": (x - 5, y + 5),
                 }.get(name, (0, 0))
             else:
                 # Capacitor pins
-                comp.pin_position.side_effect = lambda name: {
-                    "1": (x, y - 5),
-                    "2": (x, y + 5)
-                }.get(name, (0, 0))
+                comp.pin_position.side_effect = lambda name: {"1": (x, y - 5), "2": (x, y + 5)}.get(
+                    name, (0, 0)
+                )
             return comp
 
         sch.add_symbol = Mock(side_effect=create_mock_component)
@@ -236,12 +221,7 @@ class TestLDOBlockMocked:
 
     def test_ldo_block_creation(self, mock_schematic):
         """Create LDO block."""
-        ldo = LDOBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="U1",
-            value="3.3V"
-        )
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", value="3.3V")
 
         assert ldo.schematic == mock_schematic
         assert "VIN" in ldo.ports
@@ -251,12 +231,7 @@ class TestLDOBlockMocked:
 
     def test_ldo_block_components(self, mock_schematic):
         """LDO block has all components."""
-        ldo = LDOBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="U1",
-            output_caps=["10uF", "100nF"]
-        )
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", output_caps=["10uF", "100nF"])
 
         assert "LDO" in ldo.components
         assert "C_IN" in ldo.components
@@ -265,12 +240,7 @@ class TestLDOBlockMocked:
 
     def test_ldo_en_tied_to_vin(self, mock_schematic):
         """EN pin tied to VIN when requested."""
-        ldo = LDOBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="U1",
-            en_tied_to_vin=True
-        )
+        LDOBlock(mock_schematic, x=100, y=100, ref="U1", en_tied_to_vin=True)
 
         # Should add wire connecting EN to VIN level
         assert mock_schematic.add_wire.called
@@ -278,11 +248,7 @@ class TestLDOBlockMocked:
     def test_ldo_connect_to_rails(self, mock_schematic):
         """Connect LDO to power rails."""
         ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1")
-        ldo.connect_to_rails(
-            vin_rail_y=50,
-            vout_rail_y=60,
-            gnd_rail_y=150
-        )
+        ldo.connect_to_rails(vin_rail_y=50, vout_rail_y=60, gnd_rail_y=150)
 
         # Should wire LDO pins to rails
         assert mock_schematic.wire_to_rail.called
@@ -290,12 +256,7 @@ class TestLDOBlockMocked:
     def test_ldo_extend_vout_rail(self, mock_schematic):
         """Extend VOUT rail when requested."""
         ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1")
-        ldo.connect_to_rails(
-            vin_rail_y=50,
-            vout_rail_y=60,
-            gnd_rail_y=150,
-            extend_vout_rail_to=200
-        )
+        ldo.connect_to_rails(vin_rail_y=50, vout_rail_y=60, gnd_rail_y=150, extend_vout_rail_to=200)
 
         # Should add rail extension
         assert mock_schematic.add_rail.called
@@ -316,13 +277,12 @@ class TestOscillatorBlockMocked:
                     "Vdd": (x, y - 5),
                     "GND": (x, y + 5),
                     "OUT": (x + 10, y),
-                    "EN": (x - 10, y)
+                    "EN": (x - 10, y),
                 }.get(name, (0, 0))
             else:
-                comp.pin_position.side_effect = lambda name: {
-                    "1": (x, y - 5),
-                    "2": (x, y + 5)
-                }.get(name, (0, 0))
+                comp.pin_position.side_effect = lambda name: {"1": (x, y - 5), "2": (x, y + 5)}.get(
+                    name, (0, 0)
+                )
             return comp
 
         sch.add_symbol = Mock(side_effect=create_mock_component)
@@ -333,12 +293,7 @@ class TestOscillatorBlockMocked:
 
     def test_oscillator_block_creation(self, mock_schematic):
         """Create oscillator block."""
-        osc = OscillatorBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="Y1",
-            value="24.576MHz"
-        )
+        osc = OscillatorBlock(mock_schematic, x=100, y=100, ref="Y1", value="24.576MHz")
 
         assert "VCC" in osc.ports
         assert "GND" in osc.ports
@@ -347,11 +302,7 @@ class TestOscillatorBlockMocked:
 
     def test_oscillator_block_components(self, mock_schematic):
         """Oscillator block has osc and cap."""
-        osc = OscillatorBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="Y1"
-        )
+        osc = OscillatorBlock(mock_schematic, x=100, y=100, ref="Y1")
 
         assert "OSC" in osc.components
         assert "C" in osc.components
@@ -366,12 +317,7 @@ class TestOscillatorBlockMocked:
 
     def test_oscillator_ties_en_to_vcc(self, mock_schematic):
         """EN tied to VCC when en_tied_to_vcc=True."""
-        osc = OscillatorBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="Y1",
-            en_tied_to_vcc=True
-        )
+        osc = OscillatorBlock(mock_schematic, x=100, y=100, ref="Y1", en_tied_to_vcc=True)
         osc.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
 
         # Should add wire for EN to VCC rail
@@ -392,7 +338,7 @@ class TestDebugHeaderMocked:
                 "1": (x - 10, y - 7.5),
                 "2": (x - 10, y - 2.5),
                 "3": (x - 10, y + 2.5),
-                "4": (x - 10, y + 7.5)
+                "4": (x - 10, y + 7.5),
             }.get(name, (0, 0))
             return header
 
@@ -401,12 +347,7 @@ class TestDebugHeaderMocked:
 
     def test_debug_header_creation(self, mock_schematic):
         """Create debug header."""
-        header = DebugHeader(
-            mock_schematic,
-            x=100, y=100,
-            ref="J1",
-            value="SWD"
-        )
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1", value="SWD")
 
         assert "VCC" in header.ports
         assert "SWDIO" in header.ports
@@ -514,11 +455,7 @@ class TestBlockIntegration:
     def test_ldo_with_caps(self, mock_schematic):
         """LDO creates input and output caps."""
         ldo = LDOBlock(
-            mock_schematic,
-            x=100, y=100,
-            ref="U1",
-            input_cap="10uF",
-            output_caps=["10uF", "100nF"]
+            mock_schematic, x=100, y=100, ref="U1", input_cap="10uF", output_caps=["10uF", "100nF"]
         )
 
         # Should have 3 capacitors total

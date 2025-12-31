@@ -7,7 +7,6 @@ Represents a component instance placed in a schematic.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 from kicad_tools.sexp import SExp
 
@@ -18,7 +17,7 @@ class SymbolPin:
 
     number: str
     uuid: str
-    name: Optional[str] = None
+    name: str | None = None
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> SymbolPin:
@@ -36,7 +35,7 @@ class SymbolProperty:
 
     name: str
     value: str
-    position: Tuple[float, float] = (0, 0)
+    position: tuple[float, float] = (0, 0)
     rotation: float = 0
     visible: bool = True
 
@@ -54,9 +53,8 @@ class SymbolProperty:
 
         # Check visibility in effects
         visible = True
-        if effects := sexp.find("effects"):
-            if effects.find("hide"):
-                visible = False
+        if (effects := sexp.find("effects")) and effects.find("hide"):
+            visible = False
 
         return cls(name=name, value=value, position=pos, rotation=rot, visible=visible)
 
@@ -72,16 +70,16 @@ class SymbolInstance:
 
     lib_id: str
     uuid: str
-    position: Tuple[float, float] = (0, 0)
+    position: tuple[float, float] = (0, 0)
     rotation: float = 0
     mirror: str = ""  # "", "x", "y"
     unit: int = 1
     in_bom: bool = True
     on_board: bool = True
     dnp: bool = False
-    properties: Dict[str, SymbolProperty] = field(default_factory=dict)
-    pins: List[SymbolPin] = field(default_factory=list)
-    _sexp: Optional[SExp] = field(default=None, repr=False)
+    properties: dict[str, SymbolProperty] = field(default_factory=dict)
+    pins: list[SymbolPin] = field(default_factory=list)
+    _sexp: SExp | None = field(default=None, repr=False)
 
     @property
     def reference(self) -> str:
@@ -180,7 +178,7 @@ class SymbolInstance:
             _sexp=sexp,
         )
 
-    def get_property(self, name: str) -> Optional[str]:
+    def get_property(self, name: str) -> str | None:
         """Get a property value by name."""
         if name in self.properties:
             return self.properties[name].value

@@ -135,9 +135,9 @@ def find_pins(symbol: SymbolInstance, pattern: str) -> list[Pin]:
     matches = []
     for pin in symbol.symbol_def.pins:
         # Match against name or number
-        if fnmatch.fnmatch(pin.name.lower(), pattern.lower()):
-            matches.append(pin)
-        elif fnmatch.fnmatch(pin.number.lower(), pattern.lower()):
+        if fnmatch.fnmatch(pin.name.lower(), pattern.lower()) or fnmatch.fnmatch(
+            pin.number.lower(), pattern.lower()
+        ):
             matches.append(pin)
 
     return matches

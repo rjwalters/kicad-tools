@@ -18,8 +18,8 @@ Usage:
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
 
 from .rules import DesignRules
 
@@ -66,11 +66,11 @@ class HeuristicContext:
 
     # Congestion lookup function: (gx, gy, layer) -> float
     # Returns congestion level [0, 1] for the cell's region
-    get_congestion: Optional[Callable[[int, int, int], float]] = None
+    get_congestion: Callable[[int, int, int], float] | None = None
 
     # Congestion cost function: (gx, gy, layer) -> float
     # Returns additional cost based on congestion at location
-    get_congestion_cost: Optional[Callable[[int, int, int], float]] = None
+    get_congestion_cost: Callable[[int, int, int], float] | None = None
 
 
 class Heuristic(ABC):
@@ -94,7 +94,7 @@ class Heuristic(ABC):
         x: int,
         y: int,
         layer: int,
-        direction: Tuple[int, int],
+        direction: tuple[int, int],
         context: HeuristicContext,
     ) -> float:
         """Estimate cost from (x, y, layer) to goal.
@@ -131,7 +131,7 @@ class ManhattanHeuristic(Heuristic):
         x: int,
         y: int,
         layer: int,
-        direction: Tuple[int, int],
+        direction: tuple[int, int],
         context: HeuristicContext,
     ) -> float:
         dx = x - context.goal_x
@@ -177,7 +177,7 @@ class DirectionBiasHeuristic(Heuristic):
         x: int,
         y: int,
         layer: int,
-        direction: Tuple[int, int],
+        direction: tuple[int, int],
         context: HeuristicContext,
     ) -> float:
         dx = x - context.goal_x
@@ -247,7 +247,7 @@ class CongestionAwareHeuristic(Heuristic):
         x: int,
         y: int,
         layer: int,
-        direction: Tuple[int, int],
+        direction: tuple[int, int],
         context: HeuristicContext,
     ) -> float:
         dx = x - context.goal_x
@@ -320,7 +320,7 @@ class WeightedCongestionHeuristic(Heuristic):
         x: int,
         y: int,
         layer: int,
-        direction: Tuple[int, int],
+        direction: tuple[int, int],
         context: HeuristicContext,
     ) -> float:
         dx = x - context.goal_x
@@ -377,7 +377,7 @@ class GreedyHeuristic(Heuristic):
         x: int,
         y: int,
         layer: int,
-        direction: Tuple[int, int],
+        direction: tuple[int, int],
         context: HeuristicContext,
     ) -> float:
         dx = x - context.goal_x

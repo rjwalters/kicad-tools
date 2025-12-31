@@ -7,6 +7,11 @@ A robust parser for KiCad schematic and PCB files that supports:
 - XPath-like queries for finding elements
 - Proper handling of strings, numbers, and nested structures
 
+Performance optimizations in this module:
+- Uses __slots__ on SExp for reduced memory and faster attribute access
+- Optimized Parser with minimal function call overhead
+- Pre-compiled character sets for fast whitespace/delimiter detection
+
 Usage:
     from kicad_sexp import SExp, parse_file, parse_string
 
@@ -26,12 +31,11 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator, Optional, Union
+from typing import Any
 
 
-@dataclass
 class SExp:
     """
     S-expression node representing a KiCad element.
@@ -49,19 +53,27 @@ class SExp:
 
         123.45
         → SExp(name=None, value=123.45)
+
+    Uses __slots__ for memory efficiency and faster attribute access.
     """
 
-    name: Optional[str] = None
-    children: list[SExp] = field(default_factory=list)
-    value: Optional[Union[str, int, float]] = None
+    __slots__ = ("name", "children", "value", "_inline", "_original_str")
 
-    # For preserving formatting
-    _inline: bool = False  # Render on single line
-    _original_str: Optional[str] = None  # Original string representation for round-trip
-
-    def __post_init__(self):
-        if self.name is not None and self.value is not None:
+    def __init__(
+        self,
+        name: str | None = None,
+        children: list[SExp] | None = None,
+        value: str | int | float | None = None,
+        _inline: bool = False,
+        _original_str: str | None = None,
+    ):
+        if name is not None and value is not None:
             raise ValueError("SExp cannot have both name and value")
+        self.name = name
+        self.children = children if children is not None else []
+        self.value = value
+        self._inline = _inline
+        self._original_str = _original_str
 
     @property
     def is_atom(self) -> bool:
@@ -73,7 +85,7 @@ class SExp:
         """True if this is a list node."""
         return self.name is not None or bool(self.children)
 
-    def __getitem__(self, key: Union[str, int, tuple]) -> SExp:
+    def __getitem__(self, key: str | int | tuple) -> SExp:
         """
         Access children by name or index.
 
@@ -116,14 +128,14 @@ class SExp:
         node_desc = f"'{self.name}'" if self.name else "root"
         raise KeyError(f"No child named '{key}' in {node_desc}. {available}")
 
-    def get(self, key: str, default: Any = None) -> Optional[SExp]:
+    def get(self, key: str, default: Any = None) -> SExp | None:
         """Get child by name, returning default if not found."""
         try:
             return self[key]
         except KeyError:
             return default
 
-    def find(self, name: str, **attrs) -> Optional[SExp]:
+    def find(self, name: str, **attrs) -> SExp | None:
         """
         Find first descendant matching name and attributes.
 
@@ -160,10 +172,7 @@ class SExp:
         child = node.get(attr)
         if child is None:
             # Check if it's stored as a direct child value
-            for c in node.children:
-                if c.is_atom and c.value == value:
-                    return True
-            return False
+            return any(c.is_atom and c.value == value for c in node.children)
 
         # Check child's first atom value
         if child.children and child.children[0].is_atom:
@@ -189,18 +198,18 @@ class SExp:
         except ValueError:
             return False
 
-    def get_atoms(self) -> list[Union[str, int, float]]:
+    def get_atoms(self) -> list[str | int | float]:
         """Get all atom values from direct children."""
         return [c.value for c in self.children if c.is_atom]
 
-    def get_first_atom(self) -> Optional[Union[str, int, float]]:
+    def get_first_atom(self) -> str | int | float | None:
         """Get the first atom value from children."""
         for c in self.children:
             if c.is_atom:
                 return c.value
         return None
 
-    def set_atom(self, index: int, value: Union[str, int, float]):
+    def set_atom(self, index: int, value: str | int | float):
         """Set the atom value at given index."""
         atom_idx = 0
         for i, c in enumerate(self.children):
@@ -289,7 +298,7 @@ class SExp:
         # Track if we've started putting things on new lines
         started_new_lines = False
 
-        for i, child in enumerate(self.children):
+        for _i, child in enumerate(self.children):
             if child.is_atom:
                 if indent == 0 or started_new_lines:
                     # Already on new lines, continue that way
@@ -383,7 +392,6 @@ class SExp:
             "fp_circle",
             # Common nested structures
             "stroke",
-            "fill",
         }
         if self.name in never_inline:
             return False
@@ -561,7 +569,6 @@ class SExp:
             # fp_text types
             "reference",
             "value",
-            "user",
             # Zone connection types
             "thermal_reliefs",
             "full",
@@ -581,7 +588,6 @@ class SExp:
             "italic",
             "bold",
             # Module/footprint attributes
-            "smd",
             "through_hole",
             "virtual",
             "exclude_from_pos_files",
@@ -623,7 +629,7 @@ class SExp:
     # =========================================================================
 
     @property
-    def tag(self) -> Optional[str]:
+    def tag(self) -> str | None:
         """Alias for 'name' - provides backward compatibility with core/sexp.py."""
         return self.name
 
@@ -644,7 +650,7 @@ class SExp:
                 result.append(child)
         return result
 
-    def get_value(self, index: int = 0) -> Optional[Union[str, int, float, "SExp"]]:
+    def get_value(self, index: int = 0) -> str | int | float | SExp | None:
         """Get a value by index (0 = first value after tag).
 
         For atoms, returns the primitive value. For non-atoms, returns the SExp.
@@ -657,12 +663,12 @@ class SExp:
             return child
         return None
 
-    def get_string(self, index: int = 0) -> Optional[str]:
+    def get_string(self, index: int = 0) -> str | None:
         """Get a string value by index."""
         val = self.get_value(index)
         return str(val) if val is not None else None
 
-    def get_int(self, index: int = 0) -> Optional[int]:
+    def get_int(self, index: int = 0) -> int | None:
         """Get an integer value by index."""
         val = self.get_value(index)
         if isinstance(val, int):
@@ -674,7 +680,7 @@ class SExp:
                 return None
         return None
 
-    def get_float(self, index: int = 0) -> Optional[float]:
+    def get_float(self, index: int = 0) -> float | None:
         """Get a float value by index."""
         val = self.get_value(index)
         if isinstance(val, (int, float)):
@@ -686,7 +692,7 @@ class SExp:
                 return None
         return None
 
-    def iter_children(self) -> Iterator["SExp"]:
+    def iter_children(self) -> Iterator[SExp]:
         """Iterate over child SExp nodes (skipping atoms)."""
         for child in self.children:
             if not child.is_atom:
@@ -696,7 +702,7 @@ class SExp:
         """Check if any direct child has the given tag/name."""
         return self.find_child(tag) is not None
 
-    def find_child(self, tag: str) -> Optional["SExp"]:
+    def find_child(self, tag: str) -> SExp | None:
         """Find the first direct child with the given tag/name.
 
         Unlike find(), this only searches direct children, not descendants.
@@ -707,7 +713,7 @@ class SExp:
                 return child
         return None
 
-    def find_children(self, tag: str) -> list["SExp"]:
+    def find_children(self, tag: str) -> list[SExp]:
         """Find all direct children with the given tag/name.
 
         Unlike find_all(), this only searches direct children, not descendants.
@@ -715,7 +721,7 @@ class SExp:
         """
         return [child for child in self.children if child.name == tag]
 
-    def add(self, value: Union["SExp", str, int, float]) -> "SExp":
+    def add(self, value: SExp | str | int | float) -> SExp:
         """Add a value and return self for chaining.
 
         Provides backward compatibility with core/sexp.py's add() method.
@@ -726,7 +732,7 @@ class SExp:
             self.children.append(SExp(value=value))
         return self
 
-    def set_value(self, index: int, value: Union[str, int, float]) -> None:
+    def set_value(self, index: int, value: str | int | float) -> None:
         """Set a value at the given index.
 
         Provides backward compatibility with core/sexp.py's set_value() method.
@@ -748,12 +754,12 @@ class SExp:
 
     # Convenience constructors
     @classmethod
-    def atom(cls, value: Union[str, int, float]) -> SExp:
+    def atom(cls, value: str | int | float) -> SExp:
         """Create an atom node."""
         return cls(value=value)
 
     @classmethod
-    def list(cls, name: str, *children: Union[SExp, str, int, float]) -> SExp:
+    def list(cls, name: str, *children: SExp | str | int | float) -> SExp:
         """Create a list node."""
         node = cls(name=name)
         for child in children:
@@ -764,8 +770,23 @@ class SExp:
         return node
 
 
+# Pre-compiled character sets for faster parsing
+_WHITESPACE = frozenset(" \t\n\r")
+_ATOM_TERMINATORS = frozenset(" \t\n\r()")
+_COMMENT_CHARS = frozenset("#;")
+_ESCAPE_MAP = {"n": "\n", "t": "\t", "r": "\r"}
+
+
 class Parser:
-    """S-expression parser for KiCad files."""
+    """S-expression parser for KiCad files.
+
+    Optimized for performance with:
+    - Pre-compiled character sets for O(1) membership tests
+    - Reduced function call overhead in hot paths
+    - Efficient string building for quoted strings
+    """
+
+    __slots__ = ("text", "pos", "length")
 
     def __init__(self, text: str):
         self.text = text
@@ -783,143 +804,213 @@ class Parser:
 
     def _parse_expr(self) -> SExp:
         """Parse a single S-expression."""
-        self._skip_whitespace()
+        # Inline whitespace skip for hot path
+        text = self.text
+        length = self.length
+        pos = self.pos
+        while pos < length and text[pos] in _WHITESPACE:
+            pos += 1
+        # Skip comments
+        while pos < length and text[pos] in _COMMENT_CHARS:
+            while pos < length and text[pos] != "\n":
+                pos += 1
+            while pos < length and text[pos] in _WHITESPACE:
+                pos += 1
+        self.pos = pos
 
-        if self.pos >= self.length:
+        if pos >= length:
             raise ParseError("Unexpected end of input")
 
-        char = self.text[self.pos]
+        char = text[pos]
 
         if char == "(":
             return self._parse_list()
         elif char == '"':
-            return SExp(value=self._parse_string())
+            return self._parse_string_node()
         else:
             return self._parse_atom()
 
     def _parse_list(self) -> SExp:
         """Parse a list (name children...)."""
-        assert self.text[self.pos] == "("
-        self.pos += 1
+        text = self.text
+        length = self.length
+        self.pos += 1  # Skip opening paren
+        pos = self.pos
 
-        self._skip_whitespace()
+        # Inline whitespace skip
+        while pos < length and text[pos] in _WHITESPACE:
+            pos += 1
+        while pos < length and text[pos] in _COMMENT_CHARS:
+            while pos < length and text[pos] != "\n":
+                pos += 1
+            while pos < length and text[pos] in _WHITESPACE:
+                pos += 1
+        self.pos = pos
 
-        if self.pos >= self.length:
+        if pos >= length:
             raise ParseError("Unexpected end of input in list")
 
-        if self.text[self.pos] == ")":
-            self.pos += 1
+        char = text[pos]
+        if char == ")":
+            self.pos = pos + 1
             return SExp()  # Empty list
 
-        # First element could be name or value
-        first = self._parse_expr()
-
-        # If first is a simple unquoted atom, treat it as the list name
-        # This includes integers (like layer numbers: (0 "F.Cu" signal))
-        if first.is_atom:
-            if isinstance(first.value, str) and SExp._is_valid_name(first.value):
-                # Valid identifier string - use as name
-                node = SExp(name=first.value)
-            elif isinstance(first.value, (int, float)):
-                # Numeric atom - convert to string and use as name
-                # This handles KiCad layer definitions like (0 "F.Cu" signal)
-                node = SExp(name=str(first.value))
+        # Optimization: Try to parse first element as simple name directly
+        # This avoids creating an intermediate SExp for the common case
+        if char != "(" and char != '"':
+            # Likely an unquoted atom - parse directly as potential name
+            start = pos
+            while pos < length and text[pos] not in _ATOM_TERMINATORS:
+                pos += 1
+            self.pos = pos
+            if pos > start:
+                token = text[start:pos]
+                # Check if it's a valid name (most common case)
+                if token and not token[0].isdigit() and token[0] != "-":
+                    # Valid name - create node directly with name
+                    node = SExp(name=token)
+                else:
+                    # Try as number
+                    first_char = token[0]
+                    if first_char.isdigit() or (first_char == "-" and len(token) > 1):
+                        # Numeric - use as name (for layer definitions like (0 "F.Cu"))
+                        node = SExp(name=token)
+                    else:
+                        # Something else - make anonymous list with this as first child
+                        node = SExp(children=[SExp(value=token)])
             else:
-                # Quoted string or other atom - make anonymous list
-                node = SExp()
-                node.children.append(first)
+                raise ParseError(f"Expected atom at position {pos}")
         else:
-            # First is a nested list - anonymous list with first as child
-            node = SExp()
-            node.children.append(first)
+            # First element is quoted string or nested list
+            first = self._parse_expr()
+            first_value = first.value
+            if first.name is None and not first.children:  # is_atom
+                if isinstance(first_value, (int, float)):
+                    node = SExp(name=str(first_value))
+                else:
+                    node = SExp(children=[first])
+            else:
+                node = SExp(children=[first])
 
-        # Parse remaining children
+        # Parse remaining children - use local variables for speed
+        children = node.children
         while True:
-            self._skip_whitespace()
+            # Inline whitespace skip
+            pos = self.pos
+            while pos < length and text[pos] in _WHITESPACE:
+                pos += 1
+            while pos < length and text[pos] in _COMMENT_CHARS:
+                while pos < length and text[pos] != "\n":
+                    pos += 1
+                while pos < length and text[pos] in _WHITESPACE:
+                    pos += 1
+            self.pos = pos
 
-            if self.pos >= self.length:
+            if pos >= length:
                 raise ParseError("Unexpected end of input, expected ')'")
 
-            if self.text[self.pos] == ")":
-                self.pos += 1
+            if text[pos] == ")":
+                self.pos = pos + 1
                 break
 
-            node.children.append(self._parse_expr())
+            children.append(self._parse_expr())
 
         return node
 
+    def _parse_string_node(self) -> SExp:
+        """Parse a quoted string and return as SExp node."""
+        return SExp(value=self._parse_string())
+
     def _parse_string(self) -> str:
         """Parse a quoted string."""
-        assert self.text[self.pos] == '"'
-        self.pos += 1
+        text = self.text
+        length = self.length
+        pos = self.pos + 1  # Skip opening quote
 
-        result = []
-        while self.pos < self.length:
-            char = self.text[self.pos]
-
+        # Fast path: find if there are any escape sequences or end quote
+        # Most strings don't have escapes, so we can optimize for that case
+        start = pos
+        while pos < length:
+            char = text[pos]
             if char == '"':
-                self.pos += 1
+                # No escapes found - fast path
+                self.pos = pos + 1
+                return text[start:pos]
+            elif char == "\\":
+                # Has escapes - use slower path
+                break
+            pos += 1
+
+        # Slow path with escape handling
+        result = [text[start:pos]] if pos > start else []
+        while pos < length:
+            char = text[pos]
+            if char == '"':
+                self.pos = pos + 1
                 return "".join(result)
             elif char == "\\":
-                self.pos += 1
-                if self.pos >= self.length:
+                pos += 1
+                if pos >= length:
                     raise ParseError("Unexpected end of input in escape sequence")
-                escaped = self.text[self.pos]
-                if escaped == "n":
-                    result.append("\n")
-                elif escaped == "t":
-                    result.append("\t")
-                elif escaped == "r":
-                    result.append("\r")
-                else:
-                    result.append(escaped)
+                escaped = text[pos]
+                result.append(_ESCAPE_MAP.get(escaped, escaped))
             else:
                 result.append(char)
-
-            self.pos += 1
+            pos += 1
 
         raise ParseError("Unterminated string")
 
     def _parse_atom(self) -> SExp:
         """Parse an unquoted atom (symbol or number)."""
+        text = self.text
+        length = self.length
         start = self.pos
+        pos = start
 
-        while self.pos < self.length:
-            char = self.text[self.pos]
-            if char in " \t\n\r()":
-                break
-            self.pos += 1
+        # Use local variable and frozenset for faster iteration
+        while pos < length and text[pos] not in _ATOM_TERMINATORS:
+            pos += 1
 
-        if self.pos == start:
-            raise ParseError(f"Expected atom at position {self.pos}")
+        self.pos = pos
 
-        token = self.text[start : self.pos]
+        if pos == start:
+            raise ParseError(f"Expected atom at position {pos}")
+
+        token = text[start:pos]
 
         # Try to parse as number, but preserve original string for round-trip
-        try:
-            if "." in token or "e" in token.lower():
-                node = SExp(value=float(token))
-                node._original_str = token  # Preserve for round-trip
+        # Check for likely number patterns first to avoid exception overhead
+        first_char = token[0]
+        if first_char.isdigit() or (first_char == "-" and len(token) > 1):
+            try:
+                if "." in token or "e" in token or "E" in token:
+                    node = SExp(value=float(token))
+                else:
+                    node = SExp(value=int(token))
+                node._original_str = token
                 return node
-            node = SExp(value=int(token))
-            node._original_str = token  # Preserve for round-trip
-            return node
-        except ValueError:
-            return SExp(value=token)
+            except ValueError:
+                pass
+        return SExp(value=token)
 
     def _skip_whitespace(self):
         """Skip whitespace and comments."""
-        while self.pos < self.length:
-            char = self.text[self.pos]
+        text = self.text
+        length = self.length
+        pos = self.pos
 
-            if char in " \t\n\r":
-                self.pos += 1
-            elif char in "#;":
-                # Skip to end of line (supports both # and ; style comments)
-                while self.pos < self.length and self.text[self.pos] != "\n":
-                    self.pos += 1
+        while pos < length:
+            char = text[pos]
+            if char in _WHITESPACE:
+                pos += 1
+            elif char in _COMMENT_CHARS:
+                # Skip to end of line
+                while pos < length and text[pos] != "\n":
+                    pos += 1
             else:
                 break
+
+        self.pos = pos
 
 
 class ParseError(ValueError):
@@ -996,7 +1087,7 @@ class Document:
         doc.save()  # or doc.save("new_file.kicad_sch")
     """
 
-    def __init__(self, root: SExp, path: Optional[Path] = None):
+    def __init__(self, root: SExp, path: Path | None = None):
         self.root = root
         self.path = Path(path) if path else None
 
@@ -1007,14 +1098,14 @@ class Document:
         root = parse_file(path)
         return cls(root, path)
 
-    def save(self, path: Optional[str | Path] = None):
+    def save(self, path: str | Path | None = None):
         """Save document to file."""
         save_path = Path(path) if path else self.path
         if save_path is None:
             raise ValueError("No path specified for save")
         save_path.write_text(self.root.to_string(), encoding="utf-8")
 
-    def find(self, name: str, **attrs) -> Optional[SExp]:
+    def find(self, name: str, **attrs) -> SExp | None:
         """Find first element matching name and attributes."""
         return self.root.find(name, **attrs)
 

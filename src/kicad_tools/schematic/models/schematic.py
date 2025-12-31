@@ -8,7 +8,6 @@ import uuid
 import warnings
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
@@ -817,7 +816,7 @@ class Schematic:
         # Wire all pins to the common bus line
         bus_x = first_pin_x + x_offset
 
-        for i, (pin_pos, pin_name) in enumerate(zip(pin_positions, pin_names)):
+        for i, (pin_pos, _pin_name) in enumerate(zip(pin_positions, pin_names, strict=False)):
             # Horizontal wire from pin to bus
             self.add_wire(pin_pos, (bus_x, pin_pos[1]))
 
@@ -1133,7 +1132,7 @@ class Schematic:
 
         return results
 
-    def find_label(self, name: str) -> Optional[Label]:
+    def find_label(self, name: str) -> Label | None:
         """Find a label by exact name."""
         for label in self.labels:
             if label.text == name:
@@ -1148,7 +1147,7 @@ class Schematic:
             return list(self.labels)
         return [lbl for lbl in self.labels if fnmatch.fnmatch(lbl.text, pattern)]
 
-    def find_hier_label(self, name: str) -> Optional[HierarchicalLabel]:
+    def find_hier_label(self, name: str) -> HierarchicalLabel | None:
         """Find a hierarchical label by exact name."""
         for hl in self.hier_labels:
             if hl.text == name:
@@ -1163,7 +1162,7 @@ class Schematic:
             return list(self.hier_labels)
         return [hl for hl in self.hier_labels if fnmatch.fnmatch(hl.text, pattern)]
 
-    def find_symbol(self, reference: str) -> Optional[SymbolInstance]:
+    def find_symbol(self, reference: str) -> SymbolInstance | None:
         """Find a symbol by reference designator."""
         for sym in self.symbols:
             if sym.reference == reference:
@@ -1526,7 +1525,7 @@ class Schematic:
             # Check if it lies on another wire segment (T-junction)
             on_wire = False
             for seg_start, seg_end in wire_segments:
-                if endpoint == seg_start or endpoint == seg_end:
+                if endpoint in (seg_start, seg_end):
                     continue
                 if self._point_on_segment(endpoint, seg_start, seg_end):
                     on_wire = True
@@ -1606,8 +1605,8 @@ class Schematic:
             "hier_label_count": len(self.hier_labels),
             "power_symbol_count": len(self.power_symbols),
             "references": sorted([s.reference for s in self.symbols]),
-            "power_nets": sorted(set(p.lib_id.split(":")[1] for p in self.power_symbols)),
-            "net_labels": sorted(set(lbl.text for lbl in self.labels)),
+            "power_nets": sorted({p.lib_id.split(":")[1] for p in self.power_symbols}),
+            "net_labels": sorted({lbl.text for lbl in self.labels}),
         }
 
     def find_symbols_by_value(self, value: str) -> list[SymbolInstance]:

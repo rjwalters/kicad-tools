@@ -19,6 +19,8 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
+    kicad-tools config                 - View/manage configuration
+    kicad-tools interactive            - Launch interactive REPL mode
 
 Schematic subcommands (kct sch <command>):
     summary      - Quick schematic overview
@@ -51,13 +53,14 @@ Examples:
     kct reason board.kicad_pcb --analyze
     kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
     kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
+    kct interactive
+    kct interactive --project myboard.kicad_pro
 """
 
 import argparse
 import sys
 import traceback
 from pathlib import Path
-from typing import List, Optional
 
 from kicad_tools import __version__
 from kicad_tools.exceptions import KiCadToolsError
@@ -94,7 +97,7 @@ def format_error(e: Exception, verbose: bool = False) -> str:
     return f"Error: {type(e).__name__}: {e}"
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-tools CLI."""
     parser = argparse.ArgumentParser(
         prog="kicad-tools",
@@ -308,6 +311,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     lib_symbols.add_argument("--format", choices=["table", "json"], default="table")
     lib_symbols.add_argument("--pins", action="store_true", help="Show pin details")
 
+    # lib footprints (list footprints in a .pretty directory)
+    lib_footprints = lib_subparsers.add_parser(
+        "footprints", help="List footprints in a .pretty library directory"
+    )
+    lib_footprints.add_argument("directory", help="Path to .pretty directory")
+    lib_footprints.add_argument("--format", choices=["table", "json"], default="table")
+
+    # lib footprint (show details of a single .kicad_mod file)
+    lib_footprint = lib_subparsers.add_parser("footprint", help="Show details of a footprint file")
+    lib_footprint.add_argument("file", help="Path to .kicad_mod file")
+    lib_footprint.add_argument("--format", choices=["text", "json"], default="text")
+    lib_footprint.add_argument("--pads", action="store_true", help="Show pad details")
+
     # MFR subcommand - manufacturer tools
     mfr_parser = subparsers.add_parser("mfr", help="Manufacturer tools")
     mfr_subparsers = mfr_parser.add_subparsers(dest="mfr_command", help="Manufacturer commands")
@@ -350,6 +366,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     mfr_validate.add_argument("-l", "--layers", type=int, default=2, help="Layer count")
     mfr_validate.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
 
+    # mfr export-dru
+    mfr_export_dru = mfr_subparsers.add_parser(
+        "export-dru", help="Export manufacturer rules as KiCad DRU file"
+    )
+    mfr_export_dru.add_argument("manufacturer", help="Manufacturer ID (jlcpcb, seeed, etc.)")
+    mfr_export_dru.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    mfr_export_dru.add_argument(
+        "-c", "--copper", type=float, default=1.0, help="Copper weight (oz)"
+    )
+    mfr_export_dru.add_argument("-o", "--output", type=str, help="Output file path")
+
+    # mfr import-dru (parse an existing .kicad_dru file)
+    mfr_import_dru = mfr_subparsers.add_parser(
+        "import-dru", help="Parse and display a KiCad design rules file"
+    )
+    mfr_import_dru.add_argument("file", help="Path to .kicad_dru file")
+    mfr_import_dru.add_argument("--format", choices=["text", "json"], default="text")
+
     # ROUTE subcommand - PCB autorouting
     route_parser = subparsers.add_parser("route", help="Autoroute a PCB")
     route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -370,9 +404,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     route_parser.add_argument("--iterations", type=int, default=15, help="Max iterations")
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
-    route_parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress progress output"
-    )
+    route_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
     # REASON subcommand - LLM-driven PCB layout
     reason_parser = subparsers.add_parser("reason", help="LLM-driven PCB layout reasoning")
@@ -414,14 +446,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     optimize_parser.add_argument("-o", "--output", help="Output file (default: modify in place)")
     optimize_parser.add_argument("--net", help="Only optimize traces matching this net pattern")
-    optimize_parser.add_argument("--no-merge", action="store_true", help="Disable collinear merging")
-    optimize_parser.add_argument("--no-zigzag", action="store_true", help="Disable zigzag elimination")
+    optimize_parser.add_argument(
+        "--no-merge", action="store_true", help="Disable collinear merging"
+    )
+    optimize_parser.add_argument(
+        "--no-zigzag", action="store_true", help="Disable zigzag elimination"
+    )
     optimize_parser.add_argument("--no-45", action="store_true", help="Disable 45-degree corners")
     optimize_parser.add_argument(
-        "--chamfer-size", type=float, default=0.5, help="45-degree chamfer size in mm (default: 0.5)"
+        "--chamfer-size",
+        type=float,
+        default=0.5,
+        help="45-degree chamfer size in mm (default: 0.5)",
     )
     optimize_parser.add_argument("-v", "--verbose", action="store_true")
-    optimize_parser.add_argument("--dry-run", action="store_true", help="Show results without writing")
+    optimize_parser.add_argument(
+        "--dry-run", action="store_true", help="Show results without writing"
+    )
     optimize_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
@@ -450,9 +491,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # FIX-FOOTPRINTS subcommand
-    fix_fp_parser = subparsers.add_parser(
-        "fix-footprints", help="Fix footprint pad spacing issues"
-    )
+    fix_fp_parser = subparsers.add_parser("fix-footprints", help="Fix footprint pad spacing issues")
     fix_fp_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     fix_fp_parser.add_argument(
         "-o",
@@ -506,9 +545,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # PLACEMENT subcommand - placement conflict detection and resolution
-    placement_parser = subparsers.add_parser(
-        "placement", help="Detect and fix placement conflicts"
-    )
+    placement_parser = subparsers.add_parser("placement", help="Detect and fix placement conflicts")
     placement_subparsers = placement_parser.add_subparsers(
         dest="placement_command", help="Placement commands"
     )
@@ -518,9 +555,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "check", help="Check PCB for placement conflicts"
     )
     placement_check.add_argument("pcb", help="Path to .kicad_pcb file")
-    placement_check.add_argument(
-        "--format", choices=["table", "json", "summary"], default="table"
-    )
+    placement_check.add_argument("--format", choices=["table", "json", "summary"], default="table")
     placement_check.add_argument(
         "--pad-clearance", type=float, default=0.1, help="Min pad clearance (mm)"
     )
@@ -536,9 +571,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     # placement fix
-    placement_fix = placement_subparsers.add_parser(
-        "fix", help="Suggest and apply placement fixes"
-    )
+    placement_fix = placement_subparsers.add_parser("fix", help="Suggest and apply placement fixes")
     placement_fix.add_argument("pcb", help="Path to .kicad_pcb file")
     placement_fix.add_argument("-o", "--output", help="Output file path")
     placement_fix.add_argument(
@@ -547,13 +580,57 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="spread",
         help="Fix strategy",
     )
-    placement_fix.add_argument(
-        "--anchor", help="Comma-separated components to keep fixed"
-    )
+    placement_fix.add_argument("--anchor", help="Comma-separated components to keep fixed")
     placement_fix.add_argument("--dry-run", action="store_true")
     placement_fix.add_argument("-v", "--verbose", action="store_true")
     placement_fix.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # CONFIG subcommand - configuration management
+    config_parser = subparsers.add_parser("config", help="View and manage configuration")
+    config_parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Show effective configuration with sources",
+    )
+    config_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create template config file",
+    )
+    config_parser.add_argument(
+        "--paths",
+        action="store_true",
+        help="Show config file paths",
+    )
+    config_parser.add_argument(
+        "--user",
+        action="store_true",
+        help="Use user config for --init",
+    )
+    config_parser.add_argument(
+        "config_action",
+        nargs="?",
+        choices=["get", "set"],
+        help="Config action",
+    )
+    config_parser.add_argument(
+        "config_key",
+        nargs="?",
+        help="Config key (e.g., defaults.format)",
+    )
+    config_parser.add_argument(
+        "config_value",
+        nargs="?",
+        help="Value to set",
+    )
+
+    # INTERACTIVE subcommand - REPL mode
+    interactive_parser = subparsers.add_parser("interactive", help="Launch interactive REPL mode")
+    interactive_parser.add_argument(
+        "--project",
+        help="Auto-load a project on startup",
     )
 
     args = parser.parse_args(argv)
@@ -687,6 +764,12 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "fix-footprints":
         return _run_fix_footprints_command(args)
+
+    elif args.command == "config":
+        return _run_config_command(args)
+
+    elif args.command == "interactive":
+        return _run_interactive_command(args)
 
     return 0
 
@@ -921,7 +1004,7 @@ def _run_lib_command(args) -> int:
     """Handle library subcommands."""
     if not args.lib_command:
         print("Usage: kicad-tools lib <command> [options] <file>")
-        print("Commands: symbols")
+        print("Commands: symbols, footprints, footprint")
         return 1
 
     if args.lib_command == "symbols":
@@ -939,6 +1022,24 @@ def _run_lib_command(args) -> int:
             sub_argv.append("--pins")
         return lib_main(sub_argv) or 0
 
+    elif args.lib_command == "footprints":
+        from .lib_footprints import list_footprints
+
+        directory_path = Path(args.directory)
+        if not directory_path.exists():
+            print(f"Error: Directory not found: {directory_path}", file=sys.stderr)
+            return 1
+        return list_footprints(directory_path, args.format)
+
+    elif args.lib_command == "footprint":
+        from .lib_footprints import show_footprint
+
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            return 1
+        return show_footprint(file_path, args.format, getattr(args, "pads", False))
+
     return 1
 
 
@@ -946,7 +1047,7 @@ def _run_mfr_command(args) -> int:
     """Handle manufacturer subcommands."""
     if not args.mfr_command:
         print("Usage: kicad-tools mfr <command> [options]")
-        print("Commands: list, info, rules, compare, apply-rules, validate")
+        print("Commands: list, info, rules, compare, apply-rules, validate, export-dru, import-dru")
         return 1
 
     from .mfr import main as mfr_main
@@ -992,6 +1093,25 @@ def _run_mfr_command(args) -> int:
         if args.copper != 1.0:
             sub_argv.extend(["--copper", str(args.copper)])
         return mfr_main(sub_argv) or 0
+
+    elif args.mfr_command == "export-dru":
+        sub_argv = ["export-dru", args.manufacturer]
+        if args.layers != 4:
+            sub_argv.extend(["--layers", str(args.layers)])
+        if args.copper != 1.0:
+            sub_argv.extend(["--copper", str(args.copper)])
+        if args.output:
+            sub_argv.extend(["--output", args.output])
+        return mfr_main(sub_argv) or 0
+
+    elif args.mfr_command == "import-dru":
+        from .mfr_dru import import_dru
+
+        file_path = Path(args.file)
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}", file=sys.stderr)
+            return 1
+        return import_dru(file_path, args.format)
 
     return 1
 
@@ -1166,6 +1286,38 @@ def _run_optimize_command(args) -> int:
     if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return optimize_main(sub_argv)
+
+
+def _run_config_command(args) -> int:
+    """Handle config command."""
+    from .config_cmd import main as config_main
+
+    sub_argv = []
+    if args.show:
+        sub_argv.append("--show")
+    if args.init:
+        sub_argv.append("--init")
+    if args.paths:
+        sub_argv.append("--paths")
+    if args.user:
+        sub_argv.append("--user")
+    if args.config_action:
+        sub_argv.append(args.config_action)
+    if args.config_key:
+        sub_argv.append(args.config_key)
+    if args.config_value:
+        sub_argv.append(args.config_value)
+    return config_main(sub_argv) or 0
+
+
+def _run_interactive_command(args) -> int:
+    """Handle interactive command."""
+    from .interactive import main as interactive_main
+
+    sub_argv = []
+    if args.project:
+        sub_argv.extend(["--project", args.project])
+    return interactive_main(sub_argv)
 
 
 def symbols_main() -> int:

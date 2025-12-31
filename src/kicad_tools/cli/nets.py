@@ -13,13 +13,12 @@ Examples:
 import argparse
 import json
 import sys
-from typing import List
 
 from ..operations.net_ops import Net, find_net, trace_nets
 from ..schema.schematic import Schematic
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """Main entry point for kicad-nets command."""
     parser = argparse.ArgumentParser(
         prog="kicad-nets",
@@ -140,7 +139,7 @@ def output_net_json(net: Net) -> None:
     print(json.dumps(data, indent=2))
 
 
-def output_all_table(nets: List[Net]) -> None:
+def output_all_table(nets: list[Net]) -> None:
     """Output all nets as a table."""
     if not nets:
         print("No nets found.")
@@ -174,7 +173,7 @@ def output_all_table(nets: List[Net]) -> None:
     print(f"\nTotal: {len(nets)} nets")
 
 
-def output_all_json(nets: List[Net]) -> None:
+def output_all_json(nets: list[Net]) -> None:
     """Output all nets as JSON."""
     data = []
     for net in nets:
@@ -190,7 +189,7 @@ def output_all_json(nets: List[Net]) -> None:
     print(json.dumps(data, indent=2))
 
 
-def output_stats(nets: List[Net]) -> None:
+def output_stats(nets: list[Net]) -> None:
     """Output net statistics."""
     if not nets:
         print("No nets found.")

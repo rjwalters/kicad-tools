@@ -1,15 +1,15 @@
 """Tests for kicad_tools.drc module."""
 
-import pytest
 from pathlib import Path
-from datetime import datetime
+
+import pytest
+
 from kicad_tools.drc import (
-    DRCReport,
-    DRCViolation,
-    ViolationType,
-    Severity,
-    check_manufacturer_rules,
     CheckResult,
+    DRCReport,
+    Severity,
+    ViolationType,
+    check_manufacturer_rules,
 )
 
 
@@ -229,7 +229,7 @@ class TestDRCReportJSON:
         """Test parsing JSON format report."""
         from kicad_tools.drc import parse_json_report
 
-        json_content = '''{
+        json_content = """{
             "source": "test.kicad_pcb",
             "date": "2025-01-15T12:00:00",
             "violations": [
@@ -245,7 +245,7 @@ class TestDRCReportJSON:
                 }
             ],
             "footprint_errors": 0
-        }'''
+        }"""
 
         report = parse_json_report(json_content, "test.json")
         assert report.violation_count == 1
@@ -291,8 +291,14 @@ class TestViolationTypeFromString:
 
     def test_edge_clearance(self):
         """Test copper edge clearance detection."""
-        assert ViolationType.from_string("copper_edge_clearance") == ViolationType.COPPER_EDGE_CLEARANCE
-        assert ViolationType.from_string("edge clearance violation") == ViolationType.COPPER_EDGE_CLEARANCE
+        assert (
+            ViolationType.from_string("copper_edge_clearance")
+            == ViolationType.COPPER_EDGE_CLEARANCE
+        )
+        assert (
+            ViolationType.from_string("edge clearance violation")
+            == ViolationType.COPPER_EDGE_CLEARANCE
+        )
 
     def test_courtyard(self):
         """Test courtyard overlap detection."""
@@ -307,14 +313,24 @@ class TestViolationTypeFromString:
     def test_via_types(self):
         """Test via-related violations."""
         assert ViolationType.from_string("via_annular_width") == ViolationType.VIA_ANNULAR_WIDTH
-        assert ViolationType.from_string("Via annular ring too small") == ViolationType.VIA_ANNULAR_WIDTH
-        assert ViolationType.from_string("Via hole larger than pad") == ViolationType.VIA_HOLE_LARGER_THAN_PAD
+        assert (
+            ViolationType.from_string("Via annular ring too small")
+            == ViolationType.VIA_ANNULAR_WIDTH
+        )
+        assert (
+            ViolationType.from_string("Via hole larger than pad")
+            == ViolationType.VIA_HOLE_LARGER_THAN_PAD
+        )
         assert ViolationType.from_string("Micro via hole") == ViolationType.MICRO_VIA_HOLE_TOO_SMALL
 
     def test_drill_hole(self):
         """Test drill hole detection."""
-        assert ViolationType.from_string("drill_hole_too_small") == ViolationType.DRILL_HOLE_TOO_SMALL
-        assert ViolationType.from_string("Drill size too small") == ViolationType.DRILL_HOLE_TOO_SMALL
+        assert (
+            ViolationType.from_string("drill_hole_too_small") == ViolationType.DRILL_HOLE_TOO_SMALL
+        )
+        assert (
+            ViolationType.from_string("Drill size too small") == ViolationType.DRILL_HOLE_TOO_SMALL
+        )
 
     def test_silk_types(self):
         """Test silkscreen violations."""
@@ -332,16 +348,23 @@ class TestViolationTypeFromString:
         """Test footprint-related violations."""
         assert ViolationType.from_string("footprint") == ViolationType.FOOTPRINT
         assert ViolationType.from_string("duplicate_footprint") == ViolationType.DUPLICATE_FOOTPRINT
-        assert ViolationType.from_string("Duplicate footprint found") == ViolationType.DUPLICATE_FOOTPRINT
+        assert (
+            ViolationType.from_string("Duplicate footprint found")
+            == ViolationType.DUPLICATE_FOOTPRINT
+        )
         assert ViolationType.from_string("extra_footprint") == ViolationType.EXTRA_FOOTPRINT
-        assert ViolationType.from_string("Extra footprint on board") == ViolationType.EXTRA_FOOTPRINT
+        assert (
+            ViolationType.from_string("Extra footprint on board") == ViolationType.EXTRA_FOOTPRINT
+        )
         assert ViolationType.from_string("missing_footprint") == ViolationType.MISSING_FOOTPRINT
         assert ViolationType.from_string("Missing footprint") == ViolationType.MISSING_FOOTPRINT
 
     def test_outline(self):
         """Test outline detection."""
         assert ViolationType.from_string("malformed_outline") == ViolationType.MALFORMED_OUTLINE
-        assert ViolationType.from_string("Board outline malformed") == ViolationType.MALFORMED_OUTLINE
+        assert (
+            ViolationType.from_string("Board outline malformed") == ViolationType.MALFORMED_OUTLINE
+        )
 
 
 class TestLocationParsing:
@@ -397,7 +420,7 @@ class TestDRCViolationProperties:
 
     def test_primary_location_exists(self):
         """Test primary_location when locations exist."""
-        from kicad_tools.drc.violation import DRCViolation, Location, ViolationType, Severity
+        from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
         v = DRCViolation(
             type=ViolationType.CLEARANCE,
@@ -411,7 +434,7 @@ class TestDRCViolationProperties:
 
     def test_primary_location_empty(self):
         """Test primary_location when no locations."""
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
         v = DRCViolation(
             type=ViolationType.CLEARANCE,
@@ -423,7 +446,7 @@ class TestDRCViolationProperties:
 
     def test_violation_str(self):
         """Test DRCViolation string representation."""
-        from kicad_tools.drc.violation import DRCViolation, Location, ViolationType, Severity
+        from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
         v = DRCViolation(
             type=ViolationType.CLEARANCE,
@@ -452,8 +475,10 @@ class TestTraceInfo:
 
         node = parse_sexp("(segment)")
         info = TraceInfo(
-            start_x=10.0, start_y=20.0,
-            end_x=30.0, end_y=20.0,
+            start_x=10.0,
+            start_y=20.0,
+            end_x=30.0,
+            end_y=20.0,
             width=0.25,
             layer="F.Cu",
             net=1,
@@ -482,7 +507,8 @@ class TestViaInfo:
 
         node = parse_sexp("(via)")
         info = ViaInfo(
-            x=50.0, y=50.0,
+            x=50.0,
+            y=50.0,
             size=0.8,
             drill=0.4,
             net=2,
@@ -796,8 +822,8 @@ class TestDRCFixerGetAffectedNets:
     @pytest.fixture
     def mock_report(self):
         """Create a mock DRC report."""
-        from kicad_tools.drc.violation import DRCViolation, Location, ViolationType, Severity
         from kicad_tools.drc.report import DRCReport
+        from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
 
         violations = [
             DRCViolation(
@@ -871,16 +897,44 @@ class TestCheckerSummarize:
 
     def test_summarize_checks(self):
         """Test summarizing manufacturer checks."""
-        from kicad_tools.drc.checker import ManufacturerCheck, CheckResult, summarize_checks
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.checker import CheckResult, ManufacturerCheck, summarize_checks
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
-        v1 = DRCViolation(type=ViolationType.CLEARANCE, type_str="clearance", severity=Severity.ERROR, message="Test")
-        v2 = DRCViolation(type=ViolationType.TRACK_WIDTH, type_str="track_width", severity=Severity.ERROR, message="Test")
+        v1 = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
+        v2 = DRCViolation(
+            type=ViolationType.TRACK_WIDTH,
+            type_str="track_width",
+            severity=Severity.ERROR,
+            message="Test",
+        )
 
         checks = [
-            ManufacturerCheck(violation=v1, result=CheckResult.PASS, message="OK", manufacturer_id="jlcpcb", rule_name="min_clearance"),
-            ManufacturerCheck(violation=v1, result=CheckResult.FAIL, message="Bad", manufacturer_id="jlcpcb", rule_name="min_clearance"),
-            ManufacturerCheck(violation=v2, result=CheckResult.WARNING, message="Warn", manufacturer_id="jlcpcb", rule_name="min_trace_width"),
+            ManufacturerCheck(
+                violation=v1,
+                result=CheckResult.PASS,
+                message="OK",
+                manufacturer_id="jlcpcb",
+                rule_name="min_clearance",
+            ),
+            ManufacturerCheck(
+                violation=v1,
+                result=CheckResult.FAIL,
+                message="Bad",
+                manufacturer_id="jlcpcb",
+                rule_name="min_clearance",
+            ),
+            ManufacturerCheck(
+                violation=v2,
+                result=CheckResult.WARNING,
+                message="Warn",
+                manufacturer_id="jlcpcb",
+                rule_name="min_trace_width",
+            ),
         ]
 
         summary = summarize_checks(checks)
@@ -900,40 +954,78 @@ class TestManufacturerCheckProperties:
 
     def test_is_compatible_pass(self):
         """Test is_compatible for PASS result."""
-        from kicad_tools.drc.checker import ManufacturerCheck, CheckResult
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.checker import CheckResult, ManufacturerCheck
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
-        v = DRCViolation(type=ViolationType.CLEARANCE, type_str="clearance", severity=Severity.ERROR, message="Test")
-        check = ManufacturerCheck(violation=v, result=CheckResult.PASS, message="OK", manufacturer_id="jlcpcb", rule_name="test")
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
+        check = ManufacturerCheck(
+            violation=v,
+            result=CheckResult.PASS,
+            message="OK",
+            manufacturer_id="jlcpcb",
+            rule_name="test",
+        )
 
         assert check.is_compatible is True
 
     def test_is_compatible_warning(self):
         """Test is_compatible for WARNING result."""
-        from kicad_tools.drc.checker import ManufacturerCheck, CheckResult
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.checker import CheckResult, ManufacturerCheck
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
-        v = DRCViolation(type=ViolationType.CLEARANCE, type_str="clearance", severity=Severity.ERROR, message="Test")
-        check = ManufacturerCheck(violation=v, result=CheckResult.WARNING, message="Warn", manufacturer_id="jlcpcb", rule_name="test")
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
+        check = ManufacturerCheck(
+            violation=v,
+            result=CheckResult.WARNING,
+            message="Warn",
+            manufacturer_id="jlcpcb",
+            rule_name="test",
+        )
 
         assert check.is_compatible is True
 
     def test_is_compatible_fail(self):
         """Test is_compatible for FAIL result."""
-        from kicad_tools.drc.checker import ManufacturerCheck, CheckResult
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.checker import CheckResult, ManufacturerCheck
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
-        v = DRCViolation(type=ViolationType.CLEARANCE, type_str="clearance", severity=Severity.ERROR, message="Test")
-        check = ManufacturerCheck(violation=v, result=CheckResult.FAIL, message="Bad", manufacturer_id="jlcpcb", rule_name="test")
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
+        check = ManufacturerCheck(
+            violation=v,
+            result=CheckResult.FAIL,
+            message="Bad",
+            manufacturer_id="jlcpcb",
+            rule_name="test",
+        )
 
         assert check.is_compatible is False
 
     def test_str_with_values(self):
         """Test string representation with values."""
-        from kicad_tools.drc.checker import ManufacturerCheck, CheckResult
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.checker import CheckResult, ManufacturerCheck
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
-        v = DRCViolation(type=ViolationType.CLEARANCE, type_str="clearance", severity=Severity.ERROR, message="Test")
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
         check = ManufacturerCheck(
             violation=v,
             result=CheckResult.FAIL,
@@ -951,10 +1043,15 @@ class TestManufacturerCheckProperties:
 
     def test_str_without_values(self):
         """Test string representation without values."""
-        from kicad_tools.drc.checker import ManufacturerCheck, CheckResult
-        from kicad_tools.drc.violation import DRCViolation, ViolationType, Severity
+        from kicad_tools.drc.checker import CheckResult, ManufacturerCheck
+        from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 
-        v = DRCViolation(type=ViolationType.CLEARANCE, type_str="clearance", severity=Severity.ERROR, message="Test")
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Test",
+        )
         check = ManufacturerCheck(
             violation=v,
             result=CheckResult.WARNING,

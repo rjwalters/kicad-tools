@@ -21,7 +21,6 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -72,9 +71,8 @@ class Component:
             elif lib_node.get_string(1):  # (libsource (lib X) (part Y))
                 lib_id = lib_node.get_string(1) or ""
 
-        if sheet_node := sexp.find("sheetpath"):
-            if names := sheet_node.find("names"):
-                sheet_path = names.get_string(0) or ""
+        if (sheet_node := sexp.find("sheetpath")) and (names := sheet_node.find("names")):
+            sheet_path = names.get_string(0) or ""
 
         # Parse properties
         if sexp.find("property"):
@@ -242,14 +240,14 @@ class Netlist:
 
         return netlist
 
-    def get_component(self, reference: str) -> Optional[Component]:
+    def get_component(self, reference: str) -> Component | None:
         """Get component by reference designator."""
         for comp in self.components:
             if comp.reference == reference:
                 return comp
         return None
 
-    def get_net(self, name: str) -> Optional[Net]:
+    def get_net(self, name: str) -> Net | None:
         """Get net by name."""
         for net in self.nets:
             if net.name == name:
@@ -266,7 +264,7 @@ class Netlist:
                     break
         return result
 
-    def get_net_by_pin(self, reference: str, pin: str) -> Optional[Net]:
+    def get_net_by_pin(self, reference: str, pin: str) -> Net | None:
         """Get the net connected to a specific pin."""
         for net in self.nets:
             for node in net.nodes:
@@ -286,7 +284,7 @@ class Netlist:
         return power_nets
 
 
-def find_kicad_cli() -> Optional[Path]:
+def find_kicad_cli() -> Path | None:
     """Find kicad-cli executable."""
     locations = [
         "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
@@ -409,7 +407,7 @@ def print_summary(netlist: Netlist):
     print(f"\n{'=' * 60}")
 
 
-def print_components(netlist: Netlist, filter_ref: Optional[str] = None):
+def print_components(netlist: Netlist, filter_ref: str | None = None):
     """Print component list."""
     components = netlist.components
 
@@ -444,7 +442,7 @@ def print_components(netlist: Netlist, filter_ref: Optional[str] = None):
                 print(f"    ... and {len(nets) - 10} more")
 
 
-def print_nets(netlist: Netlist, filter_name: Optional[str] = None):
+def print_nets(netlist: Netlist, filter_name: str | None = None):
     """Print net list."""
     nets = netlist.nets
 

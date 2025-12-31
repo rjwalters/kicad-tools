@@ -23,12 +23,11 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from .layers import Layer
-from .primitives import Route, Segment, Via
+from .primitives import Route, Segment
 
 
 @dataclass
@@ -84,7 +83,7 @@ class OptimizationStats:
 class TraceOptimizer:
     """Optimizer for PCB trace cleanup and simplification."""
 
-    def __init__(self, config: Optional[OptimizationConfig] = None):
+    def __init__(self, config: OptimizationConfig | None = None):
         """
         Initialize the trace optimizer.
 
@@ -93,7 +92,7 @@ class TraceOptimizer:
         """
         self.config = config or OptimizationConfig()
 
-    def optimize_segments(self, segments: List[Segment]) -> List[Segment]:
+    def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """
         Optimize a list of segments for a single net/layer.
 
@@ -125,7 +124,7 @@ class TraceOptimizer:
 
         return result
 
-    def merge_collinear(self, segments: List[Segment]) -> List[Segment]:
+    def merge_collinear(self, segments: list[Segment]) -> list[Segment]:
         """
         Merge adjacent collinear segments.
 
@@ -143,15 +142,17 @@ class TraceOptimizer:
         if len(segments) < 2:
             return list(segments)
 
-        result: List[Segment] = []
+        result: list[Segment] = []
         current = segments[0]
 
         for next_seg in segments[1:]:
             # Check if segments can be merged
-            if (self._is_connected(current, next_seg) and
-                self._same_direction(current, next_seg) and
-                current.layer == next_seg.layer and
-                current.net == next_seg.net):
+            if (
+                self._is_connected(current, next_seg)
+                and self._same_direction(current, next_seg)
+                and current.layer == next_seg.layer
+                and current.net == next_seg.net
+            ):
                 # Extend current segment to include next
                 current = Segment(
                     x1=current.x1,
@@ -171,7 +172,7 @@ class TraceOptimizer:
         result.append(current)
         return result
 
-    def eliminate_zigzags(self, segments: List[Segment]) -> List[Segment]:
+    def eliminate_zigzags(self, segments: list[Segment]) -> list[Segment]:
         """
         Remove unnecessary zigzag patterns.
 
@@ -187,7 +188,7 @@ class TraceOptimizer:
         if len(segments) < 3:
             return list(segments)
 
-        result: List[Segment] = [segments[0]]
+        result: list[Segment] = [segments[0]]
         i = 1
 
         while i < len(segments) - 1:
@@ -220,7 +221,7 @@ class TraceOptimizer:
 
         return result
 
-    def convert_corners_45(self, segments: List[Segment]) -> List[Segment]:
+    def convert_corners_45(self, segments: list[Segment]) -> list[Segment]:
         """
         Convert 90-degree corners to 45-degree chamfers.
 
@@ -235,7 +236,7 @@ class TraceOptimizer:
         if len(segments) < 2:
             return list(segments)
 
-        result: List[Segment] = []
+        result: list[Segment] = []
         chamfer = self.config.corner_chamfer_size
 
         for i, seg in enumerate(segments):
@@ -326,15 +327,15 @@ class TraceOptimizer:
             New Route with optimized segments.
         """
         # Group segments by layer for optimization
-        segments_by_layer: Dict[Layer, List[Segment]] = {}
+        segments_by_layer: dict[Layer, list[Segment]] = {}
         for seg in route.segments:
             if seg.layer not in segments_by_layer:
                 segments_by_layer[seg.layer] = []
             segments_by_layer[seg.layer].append(seg)
 
         # Optimize each layer's segments
-        optimized_segments: List[Segment] = []
-        for layer, segs in segments_by_layer.items():
+        optimized_segments: list[Segment] = []
+        for _layer, segs in segments_by_layer.items():
             optimized = self.optimize_segments(segs)
             optimized_segments.extend(optimized)
 
@@ -348,8 +349,8 @@ class TraceOptimizer:
     def optimize_pcb(
         self,
         pcb_path: str,
-        output_path: Optional[str] = None,
-        net_filter: Optional[str] = None,
+        output_path: str | None = None,
+        net_filter: str | None = None,
         dry_run: bool = False,
     ) -> OptimizationStats:
         """
@@ -373,7 +374,8 @@ class TraceOptimizer:
         # Filter nets if requested
         if net_filter:
             segments_by_net = {
-                net: segs for net, segs in segments_by_net.items()
+                net: segs
+                for net, segs in segments_by_net.items()
                 if net_filter.lower() in net.lower()
             }
 
@@ -384,7 +386,7 @@ class TraceOptimizer:
             stats.length_before += self._total_length(segs)
 
         # Optimize each net
-        optimized_segments: Dict[str, List[Segment]] = {}
+        optimized_segments: dict[str, list[Segment]] = {}
         for net, segs in segments_by_net.items():
             optimized = self.optimize_segments(segs)
             optimized_segments[net] = optimized
@@ -411,7 +413,7 @@ class TraceOptimizer:
     def _is_connected(self, s1: Segment, s2: Segment) -> bool:
         """Check if end of s1 connects to start of s2."""
         tol = self.config.tolerance
-        return (abs(s1.x2 - s2.x1) < tol and abs(s1.y2 - s2.y1) < tol)
+        return abs(s1.x2 - s2.x1) < tol and abs(s1.y2 - s2.y1) < tol
 
     def _same_direction(self, s1: Segment, s2: Segment) -> bool:
         """Check if two segments have the same direction."""
@@ -440,14 +442,11 @@ class TraceOptimizer:
         """Check if s2 is a zigzag (backtrack) between s1 and s3."""
         # Calculate angles
         angle12 = self._angle_between(s1, s2)
-        angle23 = self._angle_between(s2, s3)
+        self._angle_between(s2, s3)
 
         # Zigzag: s2 goes roughly opposite to s1, then s3 continues roughly same as s1
         # This means angle12 is close to 180 degrees
-        if abs(angle12 - 180) < 30:
-            return True
-
-        return False
+        return abs(angle12 - 180) < 30
 
     def _angle_between(self, s1: Segment, s2: Segment) -> float:
         """Calculate angle between two segments in degrees (0-180)."""
@@ -472,7 +471,7 @@ class TraceOptimizer:
         angle = self._angle_between(s1, s2)
         return 80 < angle < 100  # Allow some tolerance
 
-    def _shorten_segment_end(self, seg: Segment, amount: float) -> Optional[Segment]:
+    def _shorten_segment_end(self, seg: Segment, amount: float) -> Segment | None:
         """Shorten a segment from its end by the given amount."""
         dx = seg.x2 - seg.x1
         dy = seg.y2 - seg.y1
@@ -487,15 +486,17 @@ class TraceOptimizer:
         new_y2 = seg.y1 + dy * ratio
 
         return Segment(
-            x1=seg.x1, y1=seg.y1,
-            x2=new_x2, y2=new_y2,
+            x1=seg.x1,
+            y1=seg.y1,
+            x2=new_x2,
+            y2=new_y2,
             width=seg.width,
             layer=seg.layer,
             net=seg.net,
             net_name=seg.net_name,
         )
 
-    def _shorten_segment_start(self, seg: Segment, amount: float) -> Optional[Segment]:
+    def _shorten_segment_start(self, seg: Segment, amount: float) -> Segment | None:
         """Shorten a segment from its start by the given amount."""
         dx = seg.x2 - seg.x1
         dy = seg.y2 - seg.y1
@@ -510,15 +511,17 @@ class TraceOptimizer:
         new_y1 = seg.y1 + dy * ratio
 
         return Segment(
-            x1=new_x1, y1=new_y1,
-            x2=seg.x2, y2=seg.y2,
+            x1=new_x1,
+            y1=new_y1,
+            x2=seg.x2,
+            y2=seg.y2,
             width=seg.width,
             layer=seg.layer,
             net=seg.net,
             net_name=seg.net_name,
         )
 
-    def _count_corners(self, segments: List[Segment]) -> int:
+    def _count_corners(self, segments: list[Segment]) -> int:
         """Count number of corners (direction changes) in a segment list."""
         if len(segments) < 2:
             return 0
@@ -529,7 +532,7 @@ class TraceOptimizer:
                 corners += 1
         return corners
 
-    def _total_length(self, segments: List[Segment]) -> float:
+    def _total_length(self, segments: list[Segment]) -> float:
         """Calculate total length of segments."""
         total = 0.0
         for seg in segments:
@@ -538,9 +541,9 @@ class TraceOptimizer:
             total += math.sqrt(dx * dx + dy * dy)
         return total
 
-    def _parse_net_names(self, pcb_text: str) -> Dict[int, str]:
+    def _parse_net_names(self, pcb_text: str) -> dict[int, str]:
         """Parse net ID to name mapping from PCB file."""
-        net_names: Dict[int, str] = {}
+        net_names: dict[int, str] = {}
 
         # Match net declarations: (net N "name")
         pattern = re.compile(r'\(net\s+(\d+)\s+"([^"]*)"\)')
@@ -552,9 +555,9 @@ class TraceOptimizer:
 
         return net_names
 
-    def _parse_segments(self, pcb_text: str) -> Dict[str, List[Segment]]:
+    def _parse_segments(self, pcb_text: str) -> dict[str, list[Segment]]:
         """Parse segments from PCB file text, grouped by net name."""
-        segments_by_net: Dict[str, List[Segment]] = {}
+        segments_by_net: dict[str, list[Segment]] = {}
 
         # First, build net ID to name mapping
         net_names = self._parse_net_names(pcb_text)
@@ -569,13 +572,13 @@ class TraceOptimizer:
         #     ...
         # )
         pattern = re.compile(
-            r'\(segment\s+'
-            r'\(start\s+([\d.-]+)\s+([\d.-]+)\)\s*'
-            r'\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*'
-            r'\(width\s+([\d.]+)\)\s*'
+            r"\(segment\s+"
+            r"\(start\s+([\d.-]+)\s+([\d.-]+)\)\s*"
+            r"\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*"
+            r"\(width\s+([\d.]+)\)\s*"
             r'\(layer\s+"([^"]+)"\)\s*'
-            r'\(net\s+(\d+)\)',
-            re.DOTALL
+            r"\(net\s+(\d+)\)",
+            re.DOTALL,
         )
 
         for match in pattern.finditer(pcb_text):
@@ -596,9 +599,14 @@ class TraceOptimizer:
                     break
 
             seg = Segment(
-                x1=x1, y1=y1, x2=x2, y2=y2,
-                width=width, layer=layer,
-                net=net, net_name=net_name,
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                width=width,
+                layer=layer,
+                net=net,
+                net_name=net_name,
             )
 
             if net_name not in segments_by_net:
@@ -610,8 +618,8 @@ class TraceOptimizer:
     def _replace_segments(
         self,
         pcb_text: str,
-        original: Dict[str, List[Segment]],
-        optimized: Dict[str, List[Segment]],
+        original: dict[str, list[Segment]],
+        optimized: dict[str, list[Segment]],
     ) -> str:
         """Replace original segments with optimized ones in PCB text."""
         result = pcb_text
@@ -632,10 +640,9 @@ class TraceOptimizer:
         # )
         for net_id in net_ids_to_remove:
             pattern = re.compile(
-                r'\(segment\s+[^)]*\(net\s+' + str(net_id) + r'\)[^)]*\)\s*',
-                re.DOTALL
+                r"\(segment\s+[^)]*\(net\s+" + str(net_id) + r"\)[^)]*\)\s*", re.DOTALL
             )
-            result = pattern.sub('', result)
+            result = pattern.sub("", result)
 
         # Add optimized segments before the closing parenthesis
         new_segments_sexp = []
@@ -645,7 +652,7 @@ class TraceOptimizer:
 
         if new_segments_sexp:
             # Find the last ) and insert before it
-            insert_pos = result.rfind(')')
+            insert_pos = result.rfind(")")
             if insert_pos > 0:
                 indent = "  "
                 new_content = "\n" + indent + f"\n{indent}".join(new_segments_sexp) + "\n"

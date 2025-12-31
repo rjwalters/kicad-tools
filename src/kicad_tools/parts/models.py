@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
 
 
 class PartCategory(Enum):
@@ -79,12 +78,12 @@ class Part:
     temperature_range: str = ""  # e.g., "-40°C to +85°C"
 
     # Additional specs stored as dict
-    specs: Dict[str, str] = field(default_factory=dict)
+    specs: dict[str, str] = field(default_factory=dict)
 
     # Stock and pricing
     stock: int = 0
     min_order: int = 1
-    prices: List[PartPrice] = field(default_factory=list)
+    prices: list[PartPrice] = field(default_factory=list)
 
     # JLCPCB assembly info
     is_basic: bool = False  # JLCPCB basic part (no extra fee)
@@ -95,7 +94,7 @@ class Part:
     product_url: str = ""
 
     # Cache metadata
-    fetched_at: Optional[datetime] = None
+    fetched_at: datetime | None = None
 
     @property
     def in_stock(self) -> bool:
@@ -108,13 +107,13 @@ class Part:
         return self.package_type == PackageType.SMD
 
     @property
-    def best_price(self) -> Optional[float]:
+    def best_price(self) -> float | None:
         """Get lowest unit price available."""
         if not self.prices:
             return None
         return min(p.unit_price for p in self.prices)
 
-    def price_at_quantity(self, qty: int) -> Optional[float]:
+    def price_at_quantity(self, qty: int) -> float | None:
         """Get unit price for a specific quantity."""
         if not self.prices:
             return None
@@ -143,7 +142,7 @@ class PartAvailability:
     lcsc_part: str  # LCSC part number from schematic/BOM
 
     # Match result
-    part: Optional[Part] = None  # Matched part if found
+    part: Part | None = None  # Matched part if found
     matched: bool = False
     in_stock: bool = False
     error: str = ""  # Error message if lookup failed
@@ -176,7 +175,7 @@ class SearchResult:
     """Result from a parts search."""
 
     query: str
-    parts: List[Part] = field(default_factory=list)
+    parts: list[Part] = field(default_factory=list)
     total_count: int = 0
     page: int = 1
     page_size: int = 20
@@ -201,8 +200,8 @@ class BOMAvailability:
     Aggregates availability checks for all BOM items.
     """
 
-    items: List[PartAvailability] = field(default_factory=list)
-    checked_at: Optional[datetime] = None
+    items: list[PartAvailability] = field(default_factory=list)
+    checked_at: datetime | None = None
 
     @property
     def all_available(self) -> bool:
@@ -210,17 +209,17 @@ class BOMAvailability:
         return all(item.sufficient_stock for item in self.items)
 
     @property
-    def missing_parts(self) -> List[PartAvailability]:
+    def missing_parts(self) -> list[PartAvailability]:
         """Get items that couldn't be found."""
         return [item for item in self.items if not item.matched]
 
     @property
-    def out_of_stock(self) -> List[PartAvailability]:
+    def out_of_stock(self) -> list[PartAvailability]:
         """Get items that are out of stock."""
         return [item for item in self.items if item.matched and not item.in_stock]
 
     @property
-    def low_stock(self) -> List[PartAvailability]:
+    def low_stock(self) -> list[PartAvailability]:
         """Get items with insufficient stock."""
         return [
             item
@@ -229,11 +228,11 @@ class BOMAvailability:
         ]
 
     @property
-    def available(self) -> List[PartAvailability]:
+    def available(self) -> list[PartAvailability]:
         """Get items with sufficient stock."""
         return [item for item in self.items if item.sufficient_stock]
 
-    def summary(self) -> Dict[str, int]:
+    def summary(self) -> dict[str, int]:
         """Get summary counts."""
         return {
             "total": len(self.items),

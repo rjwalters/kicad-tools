@@ -50,9 +50,11 @@ def read_bom(bom_path: Path) -> list[dict]:
             column_map = {}
             for field in reader.fieldnames:
                 normalized = field.lower().strip()
-                if "part" in normalized and "number" in normalized:
-                    column_map[field] = "mpn"
-                elif normalized in ("mpn", "mfr_pn", "mfr part", "manufacturer part"):
+                if (
+                    "part" in normalized
+                    and "number" in normalized
+                    or normalized in ("mpn", "mfr_pn", "mfr part", "manufacturer part")
+                ):
                     column_map[field] = "mpn"
                 elif normalized in ("value", "comment"):
                     column_map[field] = "value"

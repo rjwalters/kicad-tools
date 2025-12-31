@@ -10,7 +10,7 @@ import csv
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import ConfigurationError
 
@@ -59,16 +59,16 @@ class PnPFormatter(ABC):
     manufacturer_id: str = ""
     manufacturer_name: str = ""
 
-    def __init__(self, config: Optional[PnPExportConfig] = None):
+    def __init__(self, config: PnPExportConfig | None = None):
         self.config = config or PnPExportConfig()
 
     @abstractmethod
-    def format(self, placements: List[PlacementData]) -> str:
+    def format(self, placements: list[PlacementData]) -> str:
         """Format placement data to manufacturer-specific format."""
         pass
 
     @abstractmethod
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """Get column headers for this format."""
         pass
 
@@ -94,7 +94,7 @@ class PnPFormatter(ABC):
             layer=placement.layer,
         )
 
-    def filter_placements(self, placements: List[PlacementData]) -> List[PlacementData]:
+    def filter_placements(self, placements: list[PlacementData]) -> list[PlacementData]:
         """Filter placements based on config."""
         result = placements
 
@@ -112,11 +112,11 @@ class JLCPCBPnPFormatter(PnPFormatter):
     manufacturer_id = "jlcpcb"
     manufacturer_name = "JLCPCB"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """JLCPCB CPL column headers."""
         return ["Designator", "Val", "Package", "Mid X", "Mid Y", "Rotation", "Layer"]
 
-    def format(self, placements: List[PlacementData]) -> str:
+    def format(self, placements: list[PlacementData]) -> str:
         """
         Format CPL for JLCPCB.
 
@@ -138,15 +138,17 @@ class JLCPCBPnPFormatter(PnPFormatter):
         for placement in sorted(filtered, key=lambda p: p.reference):
             transformed = self.apply_transforms(placement)
             layer = "top" if transformed.layer == "F.Cu" else "bottom"
-            writer.writerow([
-                transformed.reference,
-                transformed.value,
-                transformed.footprint,
-                f"{transformed.x:.4f}mm",
-                f"{transformed.y:.4f}mm",
-                f"{transformed.rotation:.1f}",
-                layer,
-            ])
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.value,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}mm",
+                    f"{transformed.y:.4f}mm",
+                    f"{transformed.rotation:.1f}",
+                    layer,
+                ]
+            )
 
         return output.getvalue()
 
@@ -157,11 +159,23 @@ class PCBWayPnPFormatter(PnPFormatter):
     manufacturer_id = "pcbway"
     manufacturer_name = "PCBWay"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """PCBWay CPL column headers."""
-        return ["Designator", "Footprint", "Mid X", "Mid Y", "Ref X", "Ref Y", "Pad X", "Pad Y", "Layer", "Rotation", "Comment"]
+        return [
+            "Designator",
+            "Footprint",
+            "Mid X",
+            "Mid Y",
+            "Ref X",
+            "Ref Y",
+            "Pad X",
+            "Pad Y",
+            "Layer",
+            "Rotation",
+            "Comment",
+        ]
 
-    def format(self, placements: List[PlacementData]) -> str:
+    def format(self, placements: list[PlacementData]) -> str:
         """
         Format CPL for PCBWay.
 
@@ -176,19 +190,21 @@ class PCBWayPnPFormatter(PnPFormatter):
         for placement in sorted(filtered, key=lambda p: p.reference):
             transformed = self.apply_transforms(placement)
             layer = "T" if transformed.layer == "F.Cu" else "B"
-            writer.writerow([
-                transformed.reference,
-                transformed.footprint,
-                f"{transformed.x:.4f}",
-                f"{transformed.y:.4f}",
-                f"{transformed.x:.4f}",  # Ref X same as Mid X
-                f"{transformed.y:.4f}",  # Ref Y same as Mid Y
-                f"{transformed.x:.4f}",  # Pad X
-                f"{transformed.y:.4f}",  # Pad Y
-                layer,
-                f"{transformed.rotation:.1f}",
-                transformed.value,
-            ])
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}",
+                    f"{transformed.y:.4f}",
+                    f"{transformed.x:.4f}",  # Ref X same as Mid X
+                    f"{transformed.y:.4f}",  # Ref Y same as Mid Y
+                    f"{transformed.x:.4f}",  # Pad X
+                    f"{transformed.y:.4f}",  # Pad Y
+                    layer,
+                    f"{transformed.rotation:.1f}",
+                    transformed.value,
+                ]
+            )
 
         return output.getvalue()
 
@@ -199,11 +215,11 @@ class GenericPnPFormatter(PnPFormatter):
     manufacturer_id = "generic"
     manufacturer_name = "Generic"
 
-    def get_headers(self) -> List[str]:
+    def get_headers(self) -> list[str]:
         """Generic CPL column headers."""
         return ["Ref", "Val", "Package", "PosX", "PosY", "Rot", "Side"]
 
-    def format(self, placements: List[PlacementData]) -> str:
+    def format(self, placements: list[PlacementData]) -> str:
         """Format CPL in generic CSV format."""
         filtered = self.filter_placements(placements)
 
@@ -214,28 +230,30 @@ class GenericPnPFormatter(PnPFormatter):
         for placement in sorted(filtered, key=lambda p: p.reference):
             transformed = self.apply_transforms(placement)
             side = "top" if transformed.layer == "F.Cu" else "bottom"
-            writer.writerow([
-                transformed.reference,
-                transformed.value,
-                transformed.footprint,
-                f"{transformed.x:.4f}",
-                f"{transformed.y:.4f}",
-                f"{transformed.rotation:.1f}",
-                side,
-            ])
+            writer.writerow(
+                [
+                    transformed.reference,
+                    transformed.value,
+                    transformed.footprint,
+                    f"{transformed.x:.4f}",
+                    f"{transformed.y:.4f}",
+                    f"{transformed.rotation:.1f}",
+                    side,
+                ]
+            )
 
         return output.getvalue()
 
 
 # Registry of available formatters
-PNP_FORMATTERS: Dict[str, Type[PnPFormatter]] = {
+PNP_FORMATTERS: dict[str, type[PnPFormatter]] = {
     "jlcpcb": JLCPCBPnPFormatter,
     "pcbway": PCBWayPnPFormatter,
     "generic": GenericPnPFormatter,
 }
 
 
-def get_pnp_formatter(manufacturer: str, config: Optional[PnPExportConfig] = None) -> PnPFormatter:
+def get_pnp_formatter(manufacturer: str, config: PnPExportConfig | None = None) -> PnPFormatter:
     """
     Get pick-and-place formatter for a manufacturer.
 
@@ -260,7 +278,7 @@ def get_pnp_formatter(manufacturer: str, config: Optional[PnPExportConfig] = Non
     return formatter_class(config)
 
 
-def extract_placements(footprints: List["Footprint"]) -> List[PlacementData]:
+def extract_placements(footprints: list[Footprint]) -> list[PlacementData]:
     """
     Extract placement data from PCB footprints.
 
@@ -277,23 +295,25 @@ def extract_placements(footprints: List["Footprint"]) -> List[PlacementData]:
             continue
 
         x, y = fp.position
-        placements.append(PlacementData(
-            reference=fp.reference,
-            value=fp.value,
-            footprint=fp.name,
-            x=x,
-            y=y,
-            rotation=fp.rotation,
-            layer=fp.layer,
-        ))
+        placements.append(
+            PlacementData(
+                reference=fp.reference,
+                value=fp.value,
+                footprint=fp.name,
+                x=x,
+                y=y,
+                rotation=fp.rotation,
+                layer=fp.layer,
+            )
+        )
 
     return placements
 
 
 def export_pnp(
-    footprints: List["Footprint"],
+    footprints: list[Footprint],
     manufacturer: str = "generic",
-    config: Optional[PnPExportConfig] = None,
+    config: PnPExportConfig | None = None,
 ) -> str:
     """
     Export pick-and-place file.

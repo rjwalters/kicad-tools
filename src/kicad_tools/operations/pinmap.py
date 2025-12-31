@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from kicad_tools.sexp import SExp, parse_sexp
 
@@ -22,7 +21,7 @@ class Pin:
     number: str
     name: str
     pin_type: str
-    position: Tuple[float, float] = (0.0, 0.0)
+    position: tuple[float, float] = (0.0, 0.0)
     orientation: int = 0
 
     @property
@@ -89,7 +88,7 @@ class PinMapping:
     """Represents a mapping between source and target pins."""
 
     source_pin: Pin
-    target_pin: Optional[Pin]
+    target_pin: Pin | None
     confidence: float  # 0.0 to 1.0
     match_reason: str
 
@@ -104,10 +103,10 @@ class MappingResult:
 
     source_name: str
     target_name: str
-    source_pins: List[Pin]
-    target_pins: List[Pin]
-    mappings: List[PinMapping] = field(default_factory=list)
-    unmatched_target: List[Pin] = field(default_factory=list)
+    source_pins: list[Pin]
+    target_pins: list[Pin]
+    mappings: list[PinMapping] = field(default_factory=list)
+    unmatched_target: list[Pin] = field(default_factory=list)
 
     @property
     def matched_count(self) -> int:
@@ -123,7 +122,7 @@ class MappingResult:
             return 0.0
         return (self.matched_count / len(self.mappings)) * 100
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             "source": self.source_name,
@@ -150,14 +149,14 @@ class MappingResult:
         }
 
 
-def extract_pins_from_sexp(symbol: SExp, recursive: bool = True) -> List[Pin]:
+def extract_pins_from_sexp(symbol: SExp, recursive: bool = True) -> list[Pin]:
     """Extract pins from a symbol S-expression.
 
     Args:
         symbol: The symbol S-expression node
         recursive: If True, also search nested sub-symbols (unit variants)
     """
-    pins: List[Pin] = []
+    pins: list[Pin] = []
     seen_numbers: set = set()
 
     # Map KiCad pin type to readable string
@@ -222,7 +221,7 @@ def extract_pins_from_sexp(symbol: SExp, recursive: bool = True) -> List[Pin]:
     return sorted(pins, key=lambda p: (int(p.number) if p.number.isdigit() else 999, p.number))
 
 
-def load_symbol_from_file(path: str | Path) -> Tuple[str, List[Pin]]:
+def load_symbol_from_file(path: str | Path) -> tuple[str, list[Pin]]:
     """Load a symbol from a .kicad_sym file."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")
@@ -253,7 +252,7 @@ def load_symbol_from_file(path: str | Path) -> Tuple[str, List[Pin]]:
     return name, pins
 
 
-def load_symbol_from_schematic(sch_path: str | Path, lib_id: str) -> Tuple[str, List[Pin]]:
+def load_symbol_from_schematic(sch_path: str | Path, lib_id: str) -> tuple[str, list[Pin]]:
     """Load an embedded symbol from a schematic's lib_symbols section."""
     path = Path(sch_path)
     text = path.read_text(encoding="utf-8")
@@ -277,19 +276,19 @@ def load_symbol_from_schematic(sch_path: str | Path, lib_id: str) -> Tuple[str, 
 
 
 def match_pins(
-    source_pins: List[Pin], target_pins: List[Pin]
-) -> Tuple[List[PinMapping], List[Pin]]:
+    source_pins: list[Pin], target_pins: list[Pin]
+) -> tuple[list[PinMapping], list[Pin]]:
     """
     Match source pins to target pins using multiple strategies.
 
     Returns (mappings, unmatched_target_pins)
     """
-    mappings: List[PinMapping] = []
+    mappings: list[PinMapping] = []
     used_targets: set = set()
 
     # Build lookup structures for target pins
     target_by_name = {p.name: p for p in target_pins}
-    target_by_normalized: Dict[str, List[Pin]] = {}
+    target_by_normalized: dict[str, list[Pin]] = {}
     for p in target_pins:
         norm = p.normalized_name
         if norm not in target_by_normalized:
@@ -297,7 +296,7 @@ def match_pins(
         target_by_normalized[norm].append(p)
 
     target_by_number = {p.number: p for p in target_pins}
-    target_by_category: Dict[str, List[Pin]] = {}
+    target_by_category: dict[str, list[Pin]] = {}
     for p in target_pins:
         cat = p.function_category
         if cat not in target_by_category:
@@ -305,7 +304,7 @@ def match_pins(
         target_by_category[cat].append(p)
 
     for src in source_pins:
-        mapping: Optional[PinMapping] = None
+        mapping: PinMapping | None = None
 
         # Strategy 1: Exact name match (highest confidence)
         if src.name in target_by_name and src.name not in used_targets:
@@ -329,19 +328,18 @@ def match_pins(
                     used_targets.add(tgt.number)
 
         # Strategy 3: Same pin number (low confidence)
-        if not mapping:
-            if src.number in target_by_number:
-                tgt = target_by_number[src.number]
-                if tgt.number not in used_targets:
-                    # Only if same category
-                    if src.function_category == tgt.function_category:
-                        mapping = PinMapping(
-                            src,
-                            tgt,
-                            0.4,
-                            f"Same pin number + category ({src.function_category})",
-                        )
-                        used_targets.add(tgt.number)
+        if not mapping and src.number in target_by_number:
+            tgt = target_by_number[src.number]
+            if tgt.number not in used_targets:
+                # Only if same category
+                if src.function_category == tgt.function_category:
+                    mapping = PinMapping(
+                        src,
+                        tgt,
+                        0.4,
+                        f"Same pin number + category ({src.function_category})",
+                    )
+                    used_targets.add(tgt.number)
 
         # Strategy 4: Function category match (suggestion only)
         if not mapping:

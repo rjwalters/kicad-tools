@@ -1,6 +1,5 @@
 """Tests for the project module."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,15 +93,11 @@ class TestCrossReferenceResult:
         assert result.is_clean is True
 
     def test_is_clean_with_unplaced(self):
-        result = CrossReferenceResult(
-            unplaced=[UnplacedSymbol("U1", "value", "lib", "fp")]
-        )
+        result = CrossReferenceResult(unplaced=[UnplacedSymbol("U1", "value", "lib", "fp")])
         assert result.is_clean is False
 
     def test_is_clean_with_orphaned(self):
-        result = CrossReferenceResult(
-            orphaned=[OrphanedFootprint("R1", "10k", "fp", (0, 0))]
-        )
+        result = CrossReferenceResult(orphaned=[OrphanedFootprint("R1", "10k", "fp", (0, 0))])
         assert result.is_clean is False
 
     def test_is_clean_with_mismatched(self):

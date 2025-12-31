@@ -13,7 +13,6 @@ This module provides:
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
 
 from kicad_tools.exceptions import RoutingError
 
@@ -80,7 +79,7 @@ class LayerDefinition:
 class LayerStack:
     """Complete PCB layer stackup configuration."""
 
-    layers: List[LayerDefinition]
+    layers: list[LayerDefinition]
     name: str = "Custom"
     description: str = ""
 
@@ -99,28 +98,28 @@ class LayerStack:
         return len(self.layers)
 
     @property
-    def signal_layers(self) -> List[LayerDefinition]:
+    def signal_layers(self) -> list[LayerDefinition]:
         """Get all routable signal layers."""
         return [layer for layer in self.layers if layer.is_routable]
 
     @property
-    def plane_layers(self) -> List[LayerDefinition]:
+    def plane_layers(self) -> list[LayerDefinition]:
         """Get all plane layers."""
         return [layer for layer in self.layers if layer.layer_type == LayerType.PLANE]
 
     @property
-    def outer_layers(self) -> List[LayerDefinition]:
+    def outer_layers(self) -> list[LayerDefinition]:
         """Get outer (component) layers."""
         return [layer for layer in self.layers if layer.is_outer]
 
-    def get_layer(self, index: int) -> Optional[LayerDefinition]:
+    def get_layer(self, index: int) -> LayerDefinition | None:
         """Get layer by index."""
         for layer in self.layers:
             if layer.index == index:
                 return layer
         return None
 
-    def get_layer_by_name(self, name: str) -> Optional[LayerDefinition]:
+    def get_layer_by_name(self, name: str) -> LayerDefinition | None:
         """Get layer by KiCad name."""
         for layer in self.layers:
             if layer.name == name:
@@ -156,7 +155,7 @@ class LayerStack:
             context={"layer_name": layer_def.name},
         )
 
-    def get_routable_indices(self) -> List[int]:
+    def get_routable_indices(self) -> list[int]:
         """Get grid indices of all routable layers."""
         return [layer.index for layer in self.layers if layer.is_routable]
 
@@ -307,11 +306,11 @@ class ViaRules:
     )
 
     # Optional via types (used if allow_* is True)
-    blind_via: Optional[ViaDefinition] = None
-    buried_via: Optional[ViaDefinition] = None
-    micro_via: Optional[ViaDefinition] = None
+    blind_via: ViaDefinition | None = None
+    buried_via: ViaDefinition | None = None
+    micro_via: ViaDefinition | None = None
 
-    def get_available_vias(self, num_layers: int) -> List[ViaDefinition]:
+    def get_available_vias(self, num_layers: int) -> list[ViaDefinition]:
         """Get list of available via types for this stackup."""
         vias = [self.through_via]
 
@@ -324,9 +323,7 @@ class ViaRules:
 
         return vias
 
-    def get_best_via(
-        self, from_layer: int, to_layer: int, num_layers: int
-    ) -> Optional[ViaDefinition]:
+    def get_best_via(self, from_layer: int, to_layer: int, num_layers: int) -> ViaDefinition | None:
         """Get the lowest-cost via that can connect two layers."""
         candidates = []
 

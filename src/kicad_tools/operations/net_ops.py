@@ -7,7 +7,6 @@ Provides functions to trace electrical connections and analyze nets.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
 
 from ..schema.schematic import Schematic
 from ..schema.wire import Wire
@@ -17,13 +16,13 @@ POINT_TOLERANCE = 0.1
 
 
 def points_equal(
-    p1: Tuple[float, float], p2: Tuple[float, float], tol: float = POINT_TOLERANCE
+    p1: tuple[float, float], p2: tuple[float, float], tol: float = POINT_TOLERANCE
 ) -> bool:
     """Check if two points are equal within tolerance."""
     return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
 
 
-def point_on_wire(point: Tuple[float, float], wire: Wire, tol: float = POINT_TOLERANCE) -> bool:
+def point_on_wire(point: tuple[float, float], wire: Wire, tol: float = POINT_TOLERANCE) -> bool:
     """Check if a point lies on a wire segment."""
     return wire.contains_point(point, tol)
 
@@ -32,7 +31,7 @@ def point_on_wire(point: Tuple[float, float], wire: Wire, tol: float = POINT_TOL
 class NetConnection:
     """A connection point on a net."""
 
-    point: Tuple[float, float]
+    point: tuple[float, float]
     type: str  # "pin", "wire_end", "junction", "label"
     reference: str = ""  # Symbol reference or label text
     pin_number: str = ""  # Pin number if type is "pin"
@@ -44,8 +43,8 @@ class Net:
     """A traced net with all its connections."""
 
     name: str  # Net name from label, or auto-generated
-    connections: List[NetConnection] = field(default_factory=list)
-    wires: List[Wire] = field(default_factory=list)
+    connections: list[NetConnection] = field(default_factory=list)
+    wires: list[Wire] = field(default_factory=list)
     has_label: bool = False
 
     @property
@@ -54,7 +53,7 @@ class Net:
         return sum(1 for c in self.connections if c.type == "pin")
 
     @property
-    def symbol_refs(self) -> Set[str]:
+    def symbol_refs(self) -> set[str]:
         """Set of symbol references connected to this net."""
         return {c.reference for c in self.connections if c.type == "pin" and c.reference}
 
@@ -77,7 +76,7 @@ class NetTracer:
 
     def _build_pin_map(self) -> None:
         """Build a map of positions to symbol pins."""
-        self.pin_positions: Dict[Tuple[float, float], List[NetConnection]] = {}
+        self.pin_positions: dict[tuple[float, float], list[NetConnection]] = {}
 
         for sym in self.sch.symbols:
             # Get symbol position
@@ -102,7 +101,7 @@ class NetTracer:
 
     def _build_wire_graph(self) -> None:
         """Build a graph of wire connections."""
-        self.wire_endpoints: Dict[Tuple[float, float], List[Wire]] = {}
+        self.wire_endpoints: dict[tuple[float, float], list[Wire]] = {}
 
         for wire in self.sch.wires:
             for point in [wire.start, wire.end]:
@@ -111,7 +110,7 @@ class NetTracer:
                     self.wire_endpoints[key] = []
                 self.wire_endpoints[key].append(wire)
 
-    def get_label_at(self, point: Tuple[float, float]) -> Optional[str]:
+    def get_label_at(self, point: tuple[float, float]) -> str | None:
         """Get a label at or near a point."""
         for lbl in self.sch.labels:
             if points_equal(lbl.position, point):
@@ -129,8 +128,8 @@ class NetTracer:
 
     def trace_from_point(
         self,
-        start: Tuple[float, float],
-        visited_wires: Optional[Set[str]] = None,
+        start: tuple[float, float],
+        visited_wires: set[str] | None = None,
     ) -> Net:
         """
         Trace a net starting from a point.
@@ -142,7 +141,7 @@ class NetTracer:
 
         net = Net(name="")
         points_to_visit = [start]
-        visited_points: Set[Tuple[float, float]] = set()
+        visited_points: set[tuple[float, float]] = set()
 
         while points_to_visit:
             point = points_to_visit.pop()
@@ -198,10 +197,10 @@ class NetTracer:
 
         return net
 
-    def trace_all_nets(self) -> List[Net]:
+    def trace_all_nets(self) -> list[Net]:
         """Trace all nets in the schematic."""
         nets = []
-        visited_wires: Set[str] = set()
+        visited_wires: set[str] = set()
 
         # Start from each wire that hasn't been visited
         for wire in self.sch.wires:
@@ -229,7 +228,7 @@ class NetTracer:
 
         return nets
 
-    def find_net_by_label(self, label_text: str) -> Optional[Net]:
+    def find_net_by_label(self, label_text: str) -> Net | None:
         """Find a net by its label text."""
         # Find the label position
         label_pos = None
@@ -255,13 +254,13 @@ class NetTracer:
         return None
 
 
-def trace_nets(schematic: Schematic) -> List[Net]:
+def trace_nets(schematic: Schematic) -> list[Net]:
     """Convenience function to trace all nets in a schematic."""
     tracer = NetTracer(schematic)
     return tracer.trace_all_nets()
 
 
-def find_net(schematic: Schematic, label: str) -> Optional[Net]:
+def find_net(schematic: Schematic, label: str) -> Net | None:
     """Convenience function to find a net by label."""
     tracer = NetTracer(schematic)
     return tracer.find_net_by_label(label)

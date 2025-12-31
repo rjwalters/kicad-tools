@@ -1,7 +1,8 @@
 """Tests for PCB parsing and editing."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from kicad_tools import load_pcb
 from kicad_tools.schema import PCB
@@ -77,7 +78,7 @@ class TestPCBEditor:
 
     def test_track_creation(self):
         """Test Track dataclass."""
-        from kicad_tools.pcb.editor import Track, Point
+        from kicad_tools.pcb.editor import Point, Track
 
         track = Track(
             net=1,
@@ -94,7 +95,7 @@ class TestPCBEditor:
 
     def test_track_to_sexp(self):
         """Test Track S-expression generation."""
-        from kicad_tools.pcb.editor import Track, Point
+        from kicad_tools.pcb.editor import Point, Track
 
         track = Track(
             net=1,
@@ -110,7 +111,7 @@ class TestPCBEditor:
 
     def test_via_creation(self):
         """Test Via dataclass."""
-        from kicad_tools.pcb.editor import Via, Point
+        from kicad_tools.pcb.editor import Point, Via
 
         via = Via(
             net=1,
@@ -126,7 +127,7 @@ class TestPCBEditor:
 
     def test_via_to_sexp(self):
         """Test Via S-expression generation."""
-        from kicad_tools.pcb.editor import Via, Point
+        from kicad_tools.pcb.editor import Point, Via
 
         via = Via(
             net=1,
@@ -140,7 +141,7 @@ class TestPCBEditor:
 
     def test_zone_creation(self):
         """Test Zone dataclass."""
-        from kicad_tools.pcb.editor import Zone, Point
+        from kicad_tools.pcb.editor import Point, Zone
 
         zone = Zone(
             net=1,
@@ -154,7 +155,7 @@ class TestPCBEditor:
 
     def test_zone_to_sexp(self):
         """Test Zone S-expression generation."""
-        from kicad_tools.pcb.editor import Zone, Point
+        from kicad_tools.pcb.editor import Point, Zone
 
         zone = Zone(
             net=1,
@@ -314,7 +315,7 @@ class TestFootprintLibrary:
         """Test COMMON_FOOTPRINTS data is valid."""
         from kicad_tools.pcb.footprints import COMMON_FOOTPRINTS
 
-        for name, pads in COMMON_FOOTPRINTS.items():
+        for _name, pads in COMMON_FOOTPRINTS.items():
             assert isinstance(pads, dict)
             for pad_name, pos in pads.items():
                 assert isinstance(pad_name, str)
@@ -324,7 +325,7 @@ class TestFootprintLibrary:
 
     def test_footprint_aliases_valid(self):
         """Test FOOTPRINT_ALIASES resolve to valid footprints."""
-        from kicad_tools.pcb.footprints import FOOTPRINT_ALIASES, COMMON_FOOTPRINTS
+        from kicad_tools.pcb.footprints import COMMON_FOOTPRINTS, FOOTPRINT_ALIASES
 
         for alias, full_name in FOOTPRINT_ALIASES.items():
             assert full_name in COMMON_FOOTPRINTS, f"Alias {alias} -> {full_name} not found"

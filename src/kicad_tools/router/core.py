@@ -14,7 +14,6 @@ For PCB file I/O, see the io module:
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
 
 from .bus import (
     BusGroup,
@@ -48,9 +47,9 @@ class Autorouter:
         height: float,
         origin_x: float = 0,
         origin_y: float = 0,
-        rules: Optional[DesignRules] = None,
-        net_class_map: Optional[Dict[str, NetClassRouting]] = None,
-        layer_stack: Optional[LayerStack] = None,
+        rules: DesignRules | None = None,
+        net_class_map: dict[str, NetClassRouting] | None = None,
+        layer_stack: LayerStack | None = None,
     ):
         self.rules = rules or DesignRules()
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
@@ -63,12 +62,12 @@ class Autorouter:
         # Zone management
         self.zone_manager = ZoneManager(self.grid, self.rules)
 
-        self.pads: Dict[Tuple[str, str], Pad] = {}  # (ref, pin) -> Pad
-        self.nets: Dict[int, List[Tuple[str, str]]] = {}  # net -> [(ref, pin), ...]
-        self.net_names: Dict[int, str] = {}  # net_id -> net_name
-        self.routes: List[Route] = []
+        self.pads: dict[tuple[str, str], Pad] = {}  # (ref, pin) -> Pad
+        self.nets: dict[int, list[tuple[str, str]]] = {}  # net -> [(ref, pin), ...]
+        self.net_names: dict[int, str] = {}  # net_id -> net_name
+        self.routes: list[Route] = []
 
-    def add_component(self, ref: str, pads: List[dict]):
+    def add_component(self, ref: str, pads: list[dict]):
         """Add a component's pads.
 
         Args:
@@ -114,7 +113,7 @@ class Autorouter:
     # ZONE (COPPER POUR) SUPPORT
     # =========================================================================
 
-    def add_zones(self, zones: List) -> None:
+    def add_zones(self, zones: list) -> None:
         """Add zones (copper pours) to the router.
 
         Fills zones onto the routing grid with thermal reliefs for same-net pads.
@@ -154,8 +153,8 @@ class Autorouter:
         return self.zone_manager.get_zone_statistics()
 
     def _create_intra_ic_routes(
-        self, net: int, pads: List[Tuple[str, str]]
-    ) -> Tuple[List[Route], Set[int]]:
+        self, net: int, pads: list[tuple[str, str]]
+    ) -> tuple[list[Route], set[int]]:
         """Create direct routes for same-IC pins on the same net.
 
         For pins on the same IC that share a net (e.g., U10 pins 1,3,4 on SYNC_L),
@@ -169,12 +168,12 @@ class Autorouter:
         Returns:
             Tuple of (routes created, set of pad indices that were connected)
         """
-        routes: List[Route] = []
-        connected_indices: Set[int] = set()
+        routes: list[Route] = []
+        connected_indices: set[int] = set()
 
         # Group pads by component reference
-        by_ref: Dict[str, List[int]] = {}
-        for i, (ref, pin) in enumerate(pads):
+        by_ref: dict[str, list[int]] = {}
+        for i, (ref, _pin) in enumerate(pads):
             if ref not in by_ref:
                 by_ref[ref] = []
             by_ref[ref].append(i)
@@ -191,7 +190,7 @@ class Autorouter:
             # Connect all pads on this component with short stubs
             # Use chain topology: pad0 -> pad1 -> pad2 -> ...
             # Sort by position to get sensible ordering
-            sorted_pairs = sorted(zip(indices, pad_objs), key=lambda p: (p[1].x, p[1].y))
+            sorted_pairs = sorted(zip(indices, pad_objs, strict=False), key=lambda p: (p[1].x, p[1].y))
 
             for j in range(len(sorted_pairs) - 1):
                 idx1, pad1 = sorted_pairs[j]
@@ -229,7 +228,7 @@ class Autorouter:
 
         return routes, connected_indices
 
-    def route_net(self, net: int, use_mst: bool = True) -> List[Route]:
+    def route_net(self, net: int, use_mst: bool = True) -> list[Route]:
         """Route all connections for a net.
 
         Args:
@@ -244,7 +243,7 @@ class Autorouter:
         if len(pads) < 2:
             return []
 
-        routes: List[Route] = []
+        routes: list[Route] = []
 
         # First, handle intra-IC connections (same component, same net pins)
         # These are short stubs that bypass normal routing
@@ -258,7 +257,7 @@ class Autorouter:
         # Build the reduced pad list for MST: use one representative pad per connected group
         if connected_indices:
             # Group connected pads by their component reference
-            ref_to_indices: Dict[str, List[int]] = {}
+            ref_to_indices: dict[str, list[int]] = {}
             for i in connected_indices:
                 ref = pads[i][0]
                 if ref not in ref_to_indices:
@@ -266,7 +265,7 @@ class Autorouter:
                 ref_to_indices[ref].append(i)
 
             # Create reduced pads list: one representative per connected group + unconnected pads
-            reduced_pad_indices: List[int] = []
+            reduced_pad_indices: list[int] = []
             for ref, indices in ref_to_indices.items():
                 # Use first pad from each intra-IC group as representative
                 reduced_pad_indices.append(indices[0])
@@ -294,14 +293,14 @@ class Autorouter:
             n = len(pad_objs)
 
             # Prim's algorithm for MST
-            connected: Set[int] = {0}  # Start with first pad
+            connected: set[int] = {0}  # Start with first pad
             unconnected = set(range(1, n))
-            mst_edges: List[Tuple[int, int]] = []
+            mst_edges: list[tuple[int, int]] = []
 
             while unconnected:
                 # Find shortest edge from connected to unconnected
                 best_dist = float("inf")
-                best_edge: Optional[Tuple[int, int]] = None
+                best_edge: tuple[int, int] | None = None
 
                 for i in connected:
                     for j in unconnected:
@@ -356,7 +355,7 @@ class Autorouter:
 
         return routes
 
-    def _get_net_priority(self, net_id: int) -> Tuple[int, int]:
+    def _get_net_priority(self, net_id: int) -> tuple[int, int]:
         """Get routing priority for a net (lower = higher priority).
 
         Returns (priority, pad_count) for sorting.
@@ -372,7 +371,7 @@ class Autorouter:
         pad_count = len(self.nets.get(net_id, []))
         return (priority, pad_count)
 
-    def route_all(self, net_order: Optional[List[int]] = None) -> List[Route]:
+    def route_all(self, net_order: list[int] | None = None) -> list[Route]:
         """Route all nets in priority order.
 
         Args:
@@ -384,7 +383,7 @@ class Autorouter:
             # Higher priority nets (power, clock) route first to get best paths
             net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
 
-        all_routes: List[Route] = []
+        all_routes: list[Route] = []
         for net in net_order:
             if net == 0:
                 continue  # Skip "no net"
@@ -405,7 +404,7 @@ class Autorouter:
         initial_present_factor: float = 0.5,
         present_factor_increment: float = 0.5,
         history_increment: float = 1.0,
-    ) -> List[Route]:
+    ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
         This algorithm:
@@ -434,7 +433,7 @@ class Autorouter:
         net_order = [n for n in net_order if n != 0]  # Skip "no net"
 
         # Track routes per net for rip-up
-        net_routes: Dict[int, List[Route]] = {}
+        net_routes: dict[int, list[Route]] = {}
 
         # Initial routing pass with sharing allowed
         print("\n--- Iteration 0: Initial routing with sharing ---")
@@ -466,8 +465,8 @@ class Autorouter:
             self.grid.update_history_costs(history_increment)
 
             # Find nets with routes through overused cells
-            overused_set = set((x, y, layer) for x, y, layer, _ in overused)
-            nets_to_reroute: List[int] = []
+            overused_set = {(x, y, layer) for x, y, layer, _ in overused}
+            nets_to_reroute: list[int] = []
 
             for net, routes in net_routes.items():
                 needs_reroute = False
@@ -535,7 +534,7 @@ class Autorouter:
 
         return list(self.routes)
 
-    def _route_net_negotiated(self, net: int, present_cost_factor: float) -> List[Route]:
+    def _route_net_negotiated(self, net: int, present_cost_factor: float) -> list[Route]:
         """Route a single net in negotiated mode.
 
         Similar to route_net but uses negotiated routing with sharing allowed.
@@ -547,7 +546,7 @@ class Autorouter:
         if len(pads) < 2:
             return []
 
-        routes: List[Route] = []
+        routes: list[Route] = []
 
         # Handle intra-IC connections first (these don't use negotiated mode)
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
@@ -557,14 +556,14 @@ class Autorouter:
 
         # Build reduced pad list
         if connected_indices:
-            ref_to_indices: Dict[str, List[int]] = {}
+            ref_to_indices: dict[str, list[int]] = {}
             for i in connected_indices:
                 ref = pads[i][0]
                 if ref not in ref_to_indices:
                     ref_to_indices[ref] = []
                 ref_to_indices[ref].append(i)
 
-            reduced_pad_indices: List[int] = []
+            reduced_pad_indices: list[int] = []
             for ref, indices in ref_to_indices.items():
                 reduced_pad_indices.append(indices[0])
             for i in range(len(pads)):
@@ -584,13 +583,13 @@ class Autorouter:
             n = len(pad_objs)
 
             # Prim's algorithm for MST
-            connected: Set[int] = {0}
+            connected: set[int] = {0}
             unconnected = set(range(1, n))
-            mst_edges: List[Tuple[int, int]] = []
+            mst_edges: list[tuple[int, int]] = []
 
             while unconnected:
                 best_dist = float("inf")
-                best_edge: Optional[Tuple[int, int]] = None
+                best_edge: tuple[int, int] | None = None
 
                 for i in connected:
                     for j in unconnected:
@@ -671,14 +670,14 @@ class Autorouter:
         # Clear routes
         self.routes = []
 
-    def _shuffle_within_tiers(self, net_order: List[int]) -> List[int]:
+    def _shuffle_within_tiers(self, net_order: list[int]) -> list[int]:
         """Shuffle nets but keep priority ordering.
 
         Nets within the same priority tier are shuffled randomly,
         but the tier ordering is preserved.
         """
         # Group by priority tier
-        tiers: Dict[int, List[int]] = {}
+        tiers: dict[int, list[int]] = {}
         for net in net_order:
             priority, _ = self._get_net_priority(net)
             if priority not in tiers:
@@ -686,7 +685,7 @@ class Autorouter:
             tiers[priority].append(net)
 
         # Shuffle within each tier and reassemble
-        result: List[int] = []
+        result: list[int] = []
         for priority in sorted(tiers.keys()):
             tier_nets = tiers[priority].copy()
             random.shuffle(tier_nets)
@@ -694,7 +693,7 @@ class Autorouter:
 
         return result
 
-    def _evaluate_solution(self, routes: List[Route]) -> float:
+    def _evaluate_solution(self, routes: list[Route]) -> float:
         """Score a routing solution (higher = better).
 
         Scoring prioritizes:
@@ -705,8 +704,8 @@ class Autorouter:
         if not routes:
             return 0.0
 
-        total_nets = len([n for n in self.nets.keys() if n != 0])
-        routed_nets = len(set(r.net for r in routes))
+        total_nets = len([n for n in self.nets if n != 0])
+        routed_nets = len({r.net for r in routes})
         completion_rate = routed_nets / total_nets if total_nets > 0 else 0
 
         total_vias = sum(len(r.vias) for r in routes)
@@ -722,9 +721,9 @@ class Autorouter:
         self,
         num_trials: int = 10,
         use_negotiated: bool = False,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         verbose: bool = True,
-    ) -> List[Route]:
+    ) -> list[Route]:
         """Route using Monte Carlo multi-start with randomized net orderings.
 
         Tries multiple random net orderings within priority tiers,
@@ -752,7 +751,7 @@ class Autorouter:
         base_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         base_order = [n for n in base_order if n != 0]
 
-        best_routes: Optional[List[Route]] = None
+        best_routes: list[Route] | None = None
         best_score = float("-inf")
         best_trial = -1
 
@@ -778,7 +777,7 @@ class Autorouter:
 
             # Score this solution
             score = self._evaluate_solution(routes)
-            routed = len(set(r.net for r in routes))
+            routed = len({r.net for r in routes})
             total = len(base_order)
 
             if verbose:
@@ -803,7 +802,7 @@ class Autorouter:
 
     def route_all_advanced(
         self, monte_carlo_trials: int = 0, use_negotiated: bool = False
-    ) -> List[Route]:
+    ) -> list[Route]:
         """Unified entry point for advanced routing strategies.
 
         Args:
@@ -847,7 +846,7 @@ class Autorouter:
             "segments": total_segments,
             "vias": total_vias,
             "total_length_mm": total_length,
-            "nets_routed": len(set(r.net for r in self.routes)),
+            "nets_routed": len({r.net for r in self.routes}),
             "max_congestion": congestion_stats["max_congestion"],
             "avg_congestion": congestion_stats["avg_congestion"],
             "congested_regions": congestion_stats["congested_regions"],
@@ -857,7 +856,7 @@ class Autorouter:
     # BUS ROUTING SUPPORT
     # =========================================================================
 
-    def detect_buses(self, min_bus_width: int = 2) -> List[BusGroup]:
+    def detect_buses(self, min_bus_width: int = 2) -> list[BusGroup]:
         """Detect bus signals from net names.
 
         Args:
@@ -881,8 +880,8 @@ class Autorouter:
         self,
         bus_group: BusGroup,
         mode: BusRoutingMode = BusRoutingMode.PARALLEL,
-        spacing: Optional[float] = None,
-    ) -> List[Route]:
+        spacing: float | None = None,
+    ) -> list[Route]:
         """Route all signals in a bus group together.
 
         Routes bus signals maintaining parallel alignment and consistent spacing.
@@ -903,7 +902,7 @@ class Autorouter:
         if spacing is None:
             spacing = self.rules.trace_width + self.rules.trace_clearance
 
-        routes: List[Route] = []
+        routes: list[Route] = []
         print(f"\n  Routing bus {bus_group} ({mode.value} mode, spacing={spacing}mm)")
 
         # Get net IDs in bit order
@@ -923,9 +922,7 @@ class Autorouter:
 
         return routes
 
-    def _route_bus_parallel(
-        self, net_ids: List[int], bus_name: str, spacing: float
-    ) -> List[Route]:
+    def _route_bus_parallel(self, net_ids: list[int], bus_name: str, spacing: float) -> list[Route]:
         """Route bus signals in parallel with consistent spacing.
 
         Args:
@@ -936,7 +933,7 @@ class Autorouter:
         Returns:
             List of routes for all bus signals
         """
-        routes: List[Route] = []
+        routes: list[Route] = []
 
         # Route the first (LSB) signal normally - it sets the path
         if not net_ids:
@@ -970,7 +967,7 @@ class Autorouter:
 
         return routes
 
-    def _route_bus_stacked(self, net_ids: List[int], bus_name: str) -> List[Route]:
+    def _route_bus_stacked(self, net_ids: list[int], bus_name: str) -> list[Route]:
         """Route bus signals on alternating layers.
 
         Args:
@@ -980,7 +977,7 @@ class Autorouter:
         Returns:
             List of routes for all bus signals
         """
-        routes: List[Route] = []
+        routes: list[Route] = []
 
         # For stacked mode, we route each signal normally
         # The router will naturally use different layers as congestion increases
@@ -993,9 +990,9 @@ class Autorouter:
 
     def route_all_with_buses(
         self,
-        bus_config: Optional[BusRoutingConfig] = None,
-        net_order: Optional[List[int]] = None,
-    ) -> List[Route]:
+        bus_config: BusRoutingConfig | None = None,
+        net_order: list[int] | None = None,
+    ) -> list[Route]:
         """Route all nets with bus-aware routing.
 
         When bus routing is enabled, detected bus signals are routed together
@@ -1016,7 +1013,7 @@ class Autorouter:
 
         # Detect buses
         bus_groups = self.detect_buses(bus_config.min_bus_width)
-        bus_net_ids: Set[int] = set()
+        bus_net_ids: set[int] = set()
 
         if bus_groups:
             print(f"  Detected {len(bus_groups)} bus groups:")
@@ -1028,29 +1025,25 @@ class Autorouter:
             return self.route_all(net_order)
 
         # Calculate spacing
-        spacing = bus_config.get_spacing(
-            self.rules.trace_width, self.rules.trace_clearance
-        )
+        spacing = bus_config.get_spacing(self.rules.trace_width, self.rules.trace_clearance)
 
         # Route bus groups first
         print("\n--- Routing bus signals ---")
-        all_routes: List[Route] = []
+        all_routes: list[Route] = []
 
         for group in bus_groups:
             bus_routes = self.route_bus_group(group, bus_config.mode, spacing)
             all_routes.extend(bus_routes)
 
         # Route remaining non-bus nets
-        non_bus_nets = [n for n in self.nets.keys() if n not in bus_net_ids and n != 0]
+        non_bus_nets = [n for n in self.nets if n not in bus_net_ids and n != 0]
         if non_bus_nets:
             print(f"\n--- Routing {len(non_bus_nets)} non-bus nets ---")
             if net_order:
                 # Filter net_order to only include non-bus nets
                 non_bus_order = [n for n in net_order if n in non_bus_nets]
             else:
-                non_bus_order = sorted(
-                    non_bus_nets, key=lambda n: self._get_net_priority(n)
-                )
+                non_bus_order = sorted(non_bus_nets, key=lambda n: self._get_net_priority(n))
 
             for net in non_bus_order:
                 routes = self.route_net(net)
@@ -1072,7 +1065,7 @@ class Autorouter:
     # DIFFERENTIAL PAIR ROUTING
     # =========================================================================
 
-    def detect_differential_pairs(self) -> List[DifferentialPair]:
+    def detect_differential_pairs(self) -> list[DifferentialPair]:
         """Detect differential pairs from net names.
 
         Returns:
@@ -1080,7 +1073,7 @@ class Autorouter:
         """
         return detect_differential_pairs(self.net_names)
 
-    def analyze_differential_pairs(self) -> Dict[str, any]:
+    def analyze_differential_pairs(self) -> dict[str, any]:
         """Analyze net names for differential pairs.
 
         Returns:
@@ -1091,8 +1084,8 @@ class Autorouter:
     def route_differential_pair(
         self,
         pair: DifferentialPair,
-        spacing: Optional[float] = None,
-    ) -> Tuple[List[Route], Optional[LengthMismatchWarning]]:
+        spacing: float | None = None,
+    ) -> tuple[list[Route], LengthMismatchWarning | None]:
         """Route a differential pair together.
 
         Routes both P and N signals, attempting to maintain consistent spacing
@@ -1112,7 +1105,7 @@ class Autorouter:
         if spacing is None:
             spacing = pair.rules.spacing
 
-        routes: List[Route] = []
+        routes: list[Route] = []
         print(f"\n  Routing differential pair {pair}")
         print(f"    Type: {pair.pair_type.value}")
         print(f"    Spacing: {spacing}mm, Max delta: {pair.rules.max_length_delta}mm")
@@ -1156,7 +1149,7 @@ class Autorouter:
 
         return routes, warning
 
-    def _calculate_route_length(self, routes: List[Route]) -> float:
+    def _calculate_route_length(self, routes: list[Route]) -> float:
         """Calculate total length of all segments in routes.
 
         Args:
@@ -1176,9 +1169,9 @@ class Autorouter:
 
     def route_all_with_diffpairs(
         self,
-        diffpair_config: Optional[DifferentialPairConfig] = None,
-        net_order: Optional[List[int]] = None,
-    ) -> Tuple[List[Route], List[LengthMismatchWarning]]:
+        diffpair_config: DifferentialPairConfig | None = None,
+        net_order: list[int] | None = None,
+    ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing.
 
         When differential pair routing is enabled, detected pairs are routed
@@ -1201,7 +1194,7 @@ class Autorouter:
 
         # Detect differential pairs
         diff_pairs = self.detect_differential_pairs()
-        diff_net_ids: Set[int] = set()
+        diff_net_ids: set[int] = set()
 
         if diff_pairs:
             print(f"  Detected {len(diff_pairs)} differential pairs:")
@@ -1221,30 +1214,24 @@ class Autorouter:
 
         # Route differential pairs first
         print("\n--- Routing differential pairs ---")
-        all_routes: List[Route] = []
-        warnings: List[LengthMismatchWarning] = []
+        all_routes: list[Route] = []
+        warnings: list[LengthMismatchWarning] = []
 
         for pair in diff_pairs:
-            pair_routes, warning = self.route_differential_pair(
-                pair, diffpair_config.spacing
-            )
+            pair_routes, warning = self.route_differential_pair(pair, diffpair_config.spacing)
             all_routes.extend(pair_routes)
             if warning:
                 warnings.append(warning)
 
         # Route remaining non-differential nets
-        non_diff_nets = [
-            n for n in self.nets.keys() if n not in diff_net_ids and n != 0
-        ]
+        non_diff_nets = [n for n in self.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:
             print(f"\n--- Routing {len(non_diff_nets)} non-differential nets ---")
             if net_order:
                 # Filter net_order to only include non-diff nets
                 non_diff_order = [n for n in net_order if n in non_diff_nets]
             else:
-                non_diff_order = sorted(
-                    non_diff_nets, key=lambda n: self._get_net_priority(n)
-                )
+                non_diff_order = sorted(non_diff_nets, key=lambda n: self._get_net_priority(n))
 
             for net in non_diff_order:
                 routes = self.route_net(net)
@@ -1276,7 +1263,7 @@ class Autorouter:
 class RoutingResult:
     """Result of a routing attempt with convergence metrics."""
 
-    routes: List[Route]
+    routes: list[Route]
     layer_count: int
     layer_stack: LayerStack
     nets_requested: int
@@ -1332,12 +1319,12 @@ class AdaptiveAutorouter:
         self,
         width: float,
         height: float,
-        components: List[dict],
-        net_map: Dict[str, int],
-        rules: Optional[DesignRules] = None,
+        components: list[dict],
+        net_map: dict[str, int],
+        rules: DesignRules | None = None,
         origin_x: float = 0,
         origin_y: float = 0,
-        skip_nets: Optional[List[str]] = None,
+        skip_nets: list[str] | None = None,
         max_layers: int = 6,
         verbose: bool = True,
     ):
@@ -1365,8 +1352,8 @@ class AdaptiveAutorouter:
         self.verbose = verbose
 
         # Result after routing
-        self.result: Optional[RoutingResult] = None
-        self._autorouter: Optional[Autorouter] = None
+        self.result: RoutingResult | None = None
+        self._autorouter: Autorouter | None = None
 
     def _create_autorouter(self, layer_stack: LayerStack) -> Autorouter:
         """Create an Autorouter instance with the given layer stack."""
@@ -1407,7 +1394,7 @@ class AdaptiveAutorouter:
         rot_rad = math.radians(-rotation)  # KiCad uses clockwise
         cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
 
-        pads: List[dict] = []
+        pads: list[dict] = []
         for pad in comp.get("pads", []):
             # Rotate pad position around component center
             px, py = pad["x"], pad["y"]
@@ -1449,8 +1436,8 @@ class AdaptiveAutorouter:
         1. All nets routed (nets_routed == nets_requested)
         2. No overflow (no resource conflicts)
         """
-        nets_requested = len([n for n in router.nets.keys() if n != 0])
-        nets_routed = len(set(r.net for r in router.routes if r.net != 0))
+        nets_requested = len([n for n in router.nets if n != 0])
+        nets_routed = len({r.net for r in router.routes if r.net != 0})
 
         return nets_routed >= nets_requested and overflow == 0
 
@@ -1477,7 +1464,7 @@ class AdaptiveAutorouter:
             router = self._create_autorouter(stack)
 
             # Count nets to route
-            nets_requested = len([n for n in router.nets.keys() if n != 0])
+            nets_requested = len([n for n in router.nets if n != 0])
 
             if self.verbose:
                 print(f"  Nets to route: {nets_requested}")
@@ -1494,7 +1481,7 @@ class AdaptiveAutorouter:
                 iterations = 1
 
             # Check convergence
-            nets_routed = len(set(r.net for r in routes if r.net != 0))
+            nets_routed = len({r.net for r in routes if r.net != 0})
             converged = self._check_convergence(router, overflow)
 
             # Build result
@@ -1547,7 +1534,7 @@ class AdaptiveAutorouter:
             raise ValueError("No routing result. Call route() first.")
         return self._autorouter.to_sexp()
 
-    def get_routes(self) -> List[Route]:
+    def get_routes(self) -> list[Route]:
         """Get the list of routes."""
         if self.result is None:
             raise ValueError("No routing result. Call route() first.")
