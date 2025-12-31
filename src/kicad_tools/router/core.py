@@ -190,7 +190,9 @@ class Autorouter:
             # Connect all pads on this component with short stubs
             # Use chain topology: pad0 -> pad1 -> pad2 -> ...
             # Sort by position to get sensible ordering
-            sorted_pairs = sorted(zip(indices, pad_objs, strict=False), key=lambda p: (p[1].x, p[1].y))
+            sorted_pairs = sorted(
+                zip(indices, pad_objs, strict=False), key=lambda p: (p[1].x, p[1].y)
+            )
 
             for j in range(len(sorted_pairs) - 1):
                 idx1, pad1 = sorted_pairs[j]

@@ -253,9 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     sch_unconnected.add_argument(
         "--include-power", action="store_true", help="Include power symbols"
     )
-    sch_unconnected.add_argument(
-        "--include-dnp", action="store_true", help="Include DNP symbols"
-    )
+    sch_unconnected.add_argument("--include-dnp", action="store_true", help="Include DNP symbols")
 
     # sch replace
     sch_replace = sch_subparsers.add_parser("replace", help="Replace a symbol's library ID")
@@ -488,6 +486,24 @@ def main(argv: list[str] | None = None) -> int:
         "--errors-only",
         action="store_true",
         help="Only show errors, not warnings",
+    )
+    # Standard library comparison options
+    validate_fp_parser.add_argument(
+        "--compare-standard",
+        action="store_true",
+        help="Compare footprints against KiCad standard library",
+    )
+    validate_fp_parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.05,
+        help="Tolerance for standard comparison in mm (default: 0.05)",
+    )
+    validate_fp_parser.add_argument(
+        "--kicad-library-path",
+        type=str,
+        default=None,
+        help="Override path to KiCad footprint libraries",
     )
 
     # FIX-FOOTPRINTS subcommand
@@ -785,6 +801,13 @@ def _run_validate_footprints_command(args) -> int:
         sub_argv.extend(["--format", args.format])
     if args.errors_only:
         sub_argv.append("--errors-only")
+    # Standard comparison options
+    if getattr(args, "compare_standard", False):
+        sub_argv.append("--compare-standard")
+    if getattr(args, "tolerance", 0.05) != 0.05:
+        sub_argv.extend(["--tolerance", str(args.tolerance)])
+    if getattr(args, "kicad_library_path", None):
+        sub_argv.extend(["--kicad-library-path", args.kicad_library_path])
     # Use global quiet flag
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")

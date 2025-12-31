@@ -32,6 +32,12 @@ class IssueType(Enum):
     MISSING_COURTYARD = "missing_courtyard"
     SILKSCREEN_OVERLAP = "silkscreen_overlap"
     MISSING_LAYER = "missing_layer"
+    # Standard comparison issue types
+    PAD_POSITION_MISMATCH = "pad_position_mismatch"
+    PAD_SIZE_MISMATCH = "pad_size_mismatch"
+    PAD_SHAPE_MISMATCH = "pad_shape_mismatch"
+    PAD_COUNT_MISMATCH = "pad_count_mismatch"
+    STANDARD_NOT_FOUND = "standard_not_found"
 
 
 @dataclass
