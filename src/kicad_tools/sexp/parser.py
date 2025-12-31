@@ -575,6 +575,8 @@ class SExp:
             # Zone fill modes
             "hatch",
             "hatched",
+            # Zone hatch types
+            "edge",
             # Via types
             "blind",
             "micro",
