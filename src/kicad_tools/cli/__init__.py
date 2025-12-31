@@ -20,6 +20,18 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
 
+Schematic subcommands (kct sch <command>):
+    summary      - Quick schematic overview
+    hierarchy    - Show hierarchy tree
+    labels       - List labels
+    validate     - Run validation checks
+    wires        - List wire segments and junctions
+    info         - Show symbol details
+    pins         - Show symbol pin positions
+    connections  - Check pin connections using library positions
+    unconnected  - Find unconnected pins and issues
+    replace      - Replace a symbol's library ID
+
 Examples:
     kct symbols design.kicad_sch --filter "U*"
     kct nets design.kicad_sch --net VCC
@@ -27,6 +39,9 @@ Examples:
     kct drc design-drc.rpt --mfr jlcpcb
     kct bom design.kicad_sch --format csv
     kct sch summary design.kicad_sch
+    kct sch wires design.kicad_sch --stats
+    kct sch info design.kicad_sch U1 --show-pins
+    kct sch replace design.kicad_sch U1 "mylib:NewSymbol" --dry-run
     kct pcb summary board.kicad_pcb
     kct mfr compare
     kct parts lookup C123456
@@ -185,6 +200,69 @@ def main(argv: Optional[List[str]] = None) -> int:
     sch_validate.add_argument("--format", choices=["text", "json"], default="text")
     sch_validate.add_argument("--strict", action="store_true", help="Exit with error on warnings")
     sch_validate.add_argument("-q", "--quiet", action="store_true", help="Only show errors")
+
+    # sch wires
+    sch_wires = sch_subparsers.add_parser("wires", help="List wire segments and junctions")
+    sch_wires.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_wires.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    sch_wires.add_argument("--stats", action="store_true", help="Show statistics only")
+    sch_wires.add_argument("--junctions", action="store_true", help="Include junction points")
+
+    # sch info
+    sch_info = sch_subparsers.add_parser("info", help="Show symbol details")
+    sch_info.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_info.add_argument("reference", help="Symbol reference (e.g., U1)")
+    sch_info.add_argument("--format", choices=["text", "json"], default="text")
+    sch_info.add_argument("--show-pins", action="store_true", help="Show pin details")
+    sch_info.add_argument("--show-properties", action="store_true", help="Show all properties")
+
+    # sch pins
+    sch_pins = sch_subparsers.add_parser("pins", help="Show symbol pin positions")
+    sch_pins.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_pins.add_argument("reference", help="Symbol reference (e.g., U1)")
+    sch_pins.add_argument("--lib", required=True, help="Path to symbol library file")
+    sch_pins.add_argument("--format", choices=["table", "json"], default="table")
+
+    # sch connections
+    sch_connections = sch_subparsers.add_parser(
+        "connections", help="Check pin connections using library positions"
+    )
+    sch_connections.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_connections.add_argument(
+        "--lib-path", action="append", dest="lib_paths", help="Library search path"
+    )
+    sch_connections.add_argument(
+        "--lib", action="append", dest="libs", help="Specific library file"
+    )
+    sch_connections.add_argument("--format", choices=["table", "json"], default="table")
+    sch_connections.add_argument("--filter", dest="pattern", help="Filter by symbol reference")
+    sch_connections.add_argument(
+        "-v", "--verbose", action="store_true", help="Show all pins, not just unconnected"
+    )
+
+    # sch unconnected
+    sch_unconnected = sch_subparsers.add_parser(
+        "unconnected", help="Find unconnected pins and issues"
+    )
+    sch_unconnected.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_unconnected.add_argument("--format", choices=["table", "json"], default="table")
+    sch_unconnected.add_argument("--filter", dest="pattern", help="Filter by symbol reference")
+    sch_unconnected.add_argument(
+        "--include-power", action="store_true", help="Include power symbols"
+    )
+    sch_unconnected.add_argument(
+        "--include-dnp", action="store_true", help="Include DNP symbols"
+    )
+
+    # sch replace
+    sch_replace = sch_subparsers.add_parser("replace", help="Replace a symbol's library ID")
+    sch_replace.add_argument("schematic", help="Path to .kicad_sch file")
+    sch_replace.add_argument("reference", help="Symbol reference to replace (e.g., U1)")
+    sch_replace.add_argument("new_lib_id", help="New library ID (e.g., 'mylib:NewSymbol')")
+    sch_replace.add_argument("--value", help="New value for the symbol")
+    sch_replace.add_argument("--footprint", help="New footprint")
+    sch_replace.add_argument("--dry-run", action="store_true", help="Show changes without applying")
+    sch_replace.add_argument("--backup", action="store_true", help="Create backup before modifying")
 
     # PCB subcommand - PCB tools
     pcb_parser = subparsers.add_parser("pcb", help="PCB query tools")
@@ -653,7 +731,8 @@ def _run_sch_command(args) -> int:
     """Handle schematic subcommands."""
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
-        print("Commands: summary, hierarchy, labels, validate")
+        print("Commands: summary, hierarchy, labels, validate, wires, info, pins,")
+        print("          connections, unconnected, replace")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -699,6 +778,84 @@ def _run_sch_command(args) -> int:
         if args.quiet:
             sub_argv.append("--quiet")
         return validate_main(sub_argv) or 0
+
+    elif args.sch_command == "wires":
+        from .sch_list_wires import main as wires_main
+
+        sub_argv = [str(schematic_path)]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.stats:
+            sub_argv.append("--stats")
+        if args.junctions:
+            sub_argv.append("--junctions")
+        return wires_main(sub_argv) or 0
+
+    elif args.sch_command == "info":
+        from .sch_symbol_info import main as info_main
+
+        sub_argv = [str(schematic_path), args.reference]
+        if args.format == "json":
+            sub_argv.append("--json")
+        if args.show_pins:
+            sub_argv.append("--show-pins")
+        if args.show_properties:
+            sub_argv.append("--show-properties")
+        return info_main(sub_argv) or 0
+
+    elif args.sch_command == "pins":
+        from .sch_pin_positions import main as pins_main
+
+        sub_argv = [str(schematic_path), args.reference, "--lib", args.lib]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        return pins_main(sub_argv) or 0
+
+    elif args.sch_command == "connections":
+        from .sch_check_connections import main as connections_main
+
+        sub_argv = [str(schematic_path)]
+        if args.lib_paths:
+            for path in args.lib_paths:
+                sub_argv.extend(["--lib-path", path])
+        if args.libs:
+            for lib in args.libs:
+                sub_argv.extend(["--lib", lib])
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return connections_main(sub_argv) or 0
+
+    elif args.sch_command == "unconnected":
+        from .sch_find_unconnected import main as unconnected_main
+
+        sub_argv = [str(schematic_path)]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.pattern:
+            sub_argv.extend(["--filter", args.pattern])
+        if args.include_power:
+            sub_argv.append("--include-power")
+        if args.include_dnp:
+            sub_argv.append("--include-dnp")
+        return unconnected_main(sub_argv) or 0
+
+    elif args.sch_command == "replace":
+        from .sch_replace_symbol import main as replace_main
+
+        sub_argv = [str(schematic_path), args.reference, args.new_lib_id]
+        if args.value:
+            sub_argv.extend(["--value", args.value])
+        if args.footprint:
+            sub_argv.extend(["--footprint", args.footprint])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.backup:
+            sub_argv.append("--backup")
+        return replace_main(sub_argv) or 0
 
     return 1
 
