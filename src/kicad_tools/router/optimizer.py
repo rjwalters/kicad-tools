@@ -4,6 +4,7 @@ Trace optimizer for post-routing cleanup.
 Provides algorithms to optimize routed traces:
 - Collinear segment merging (combine same-direction segments)
 - Zigzag elimination (remove unnecessary back-and-forth)
+- Staircase compression (compress alternating horizontal/diagonal patterns)
 - 45-degree corner conversion (smooth 90-degree turns)
 
 Example::
@@ -42,6 +43,12 @@ class OptimizationConfig:
 
     convert_45_corners: bool = True
     """Convert 90-degree corners to 45-degree chamfers."""
+
+    compress_staircase: bool = True
+    """Compress staircase patterns (alternating horizontal/diagonal) into optimal paths."""
+
+    min_staircase_segments: int = 3
+    """Minimum number of segments to consider as a staircase pattern."""
 
     min_segment_length: float = 0.05
     """Minimum segment length to keep (mm). Shorter segments may be merged."""
@@ -99,7 +106,8 @@ class TraceOptimizer:
         Applies enabled optimizations in order:
         1. Collinear segment merging
         2. Zigzag elimination
-        3. 45-degree corner conversion
+        3. Staircase compression
+        4. 45-degree corner conversion
 
         Args:
             segments: List of segments to optimize (should be connected path).
@@ -118,6 +126,9 @@ class TraceOptimizer:
 
         if self.config.eliminate_zigzags:
             result = self.eliminate_zigzags(result)
+
+        if self.config.compress_staircase:
+            result = self.compress_staircase(result)
 
         if self.config.convert_45_corners:
             result = self.convert_corners_45(result)
@@ -218,6 +229,212 @@ class TraceOptimizer:
         # Add the last segment
         if segments:
             result.append(segments[-1])
+
+        return result
+
+    def compress_staircase(self, segments: List[Segment]) -> List[Segment]:
+        """
+        Compress staircase patterns into optimal diagonal+orthogonal paths.
+
+        Identifies runs of segments alternating between two directions
+        (e.g., horizontal and 45° diagonal) and replaces them with an
+        optimal 2-3 segment path.
+
+        Args:
+            segments: List of segments to process.
+
+        Returns:
+            List with staircase patterns compressed.
+        """
+        if not self.config.compress_staircase:
+            return list(segments)
+
+        if len(segments) < self.config.min_staircase_segments:
+            return list(segments)
+
+        result: List[Segment] = []
+        i = 0
+
+        while i < len(segments):
+            # Look for staircase pattern starting at i
+            staircase_end = self._find_staircase_end(segments, i)
+
+            if staircase_end - i >= self.config.min_staircase_segments:
+                # Found a staircase of sufficient length
+                start_point = (segments[i].x1, segments[i].y1)
+                end_point = (segments[staircase_end - 1].x2, segments[staircase_end - 1].y2)
+
+                # Generate optimal replacement path
+                template = segments[i]
+                replacement = self._optimal_path(start_point, end_point, template)
+                result.extend(replacement)
+                i = staircase_end
+            else:
+                # Not a staircase or too short, keep the segment
+                result.append(segments[i])
+                i += 1
+
+        return result
+
+    def _find_staircase_end(self, segments: List[Segment], start_idx: int) -> int:
+        """
+        Find the end index of a staircase pattern starting at start_idx.
+
+        A staircase is a run of segments alternating between two directions
+        that are approximately 45° apart (e.g., 0° and 45°, or 180° and 135°).
+
+        Args:
+            segments: List of all segments.
+            start_idx: Index to start looking from.
+
+        Returns:
+            End index (exclusive) of the staircase pattern.
+        """
+        if start_idx >= len(segments) - 1:
+            return start_idx + 1
+
+        # Get the two alternating directions
+        dir1 = self._segment_direction(segments[start_idx])
+        dir2 = self._segment_direction(segments[start_idx + 1])
+
+        # Check if they form a valid staircase pair (approximately 45° apart)
+        angle_diff = abs(dir1 - dir2)
+        # Handle wraparound (e.g., 350° and 10° are 20° apart, not 340°)
+        if angle_diff > 180:
+            angle_diff = 360 - angle_diff
+
+        # Valid staircase: directions should be ~45° apart (allow ±15° tolerance)
+        if not (30 <= angle_diff <= 60):
+            return start_idx + 1
+
+        # Find how far the alternating pattern continues
+        i = start_idx + 2
+        while i < len(segments):
+            dir_i = self._segment_direction(segments[i])
+            # Expect alternating pattern: dir1, dir2, dir1, dir2, ...
+            expected = dir1 if (i - start_idx) % 2 == 0 else dir2
+
+            # Check if direction matches expected (with tolerance)
+            diff = abs(dir_i - expected)
+            if diff > 180:
+                diff = 360 - diff
+            if diff > 15:  # Tolerance for direction matching
+                break
+            i += 1
+
+        return i
+
+    def _segment_direction(self, seg: Segment) -> float:
+        """
+        Calculate the direction of a segment in degrees (0-360).
+
+        0° is positive X (right), 90° is positive Y (up),
+        180° is negative X (left), 270° is negative Y (down).
+
+        Args:
+            seg: The segment to analyze.
+
+        Returns:
+            Direction in degrees (0-360).
+        """
+        dx = seg.x2 - seg.x1
+        dy = seg.y2 - seg.y1
+
+        if abs(dx) < self.config.tolerance and abs(dy) < self.config.tolerance:
+            return 0.0  # Zero-length segment
+
+        angle = math.degrees(math.atan2(dy, dx))
+        if angle < 0:
+            angle += 360
+        return angle
+
+    def _optimal_path(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        template: Segment,
+    ) -> List[Segment]:
+        """
+        Generate an optimal 2-3 segment path from start to end.
+
+        Uses 45° diagonal routing to minimize segment count while
+        maintaining connectivity.
+
+        Args:
+            start: Starting point (x, y).
+            end: Ending point (x, y).
+            template: Template segment for properties (width, layer, net, net_name).
+
+        Returns:
+            List of 1-3 segments forming the optimal path.
+        """
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+
+        # Handle degenerate cases
+        if abs(dx) < self.config.tolerance and abs(dy) < self.config.tolerance:
+            return []  # Start and end are the same point
+
+        # Calculate the diagonal and remaining orthogonal distances
+        abs_dx = abs(dx)
+        abs_dy = abs(dy)
+
+        # The diagonal distance covers the smaller of |dx| and |dy|
+        diag_dist = min(abs_dx, abs_dy)
+
+        # Determine diagonal direction based on signs of dx and dy
+        diag_dx = math.copysign(diag_dist, dx)
+        diag_dy = math.copysign(diag_dist, dy)
+
+        # Calculate intermediate point after diagonal segment
+        mid_x = start[0] + diag_dx
+        mid_y = start[1] + diag_dy
+
+        result: List[Segment] = []
+
+        # Create diagonal segment if there's diagonal distance
+        if diag_dist > self.config.tolerance:
+            diag_seg = Segment(
+                x1=start[0],
+                y1=start[1],
+                x2=mid_x,
+                y2=mid_y,
+                width=template.width,
+                layer=template.layer,
+                net=template.net,
+                net_name=template.net_name,
+            )
+            result.append(diag_seg)
+
+        # Create orthogonal segment for remaining distance
+        remaining_dx = end[0] - mid_x
+        remaining_dy = end[1] - mid_y
+
+        if abs(remaining_dx) > self.config.tolerance or abs(remaining_dy) > self.config.tolerance:
+            ortho_seg = Segment(
+                x1=mid_x,
+                y1=mid_y,
+                x2=end[0],
+                y2=end[1],
+                width=template.width,
+                layer=template.layer,
+                net=template.net,
+                net_name=template.net_name,
+            )
+            result.append(ortho_seg)
+
+        # If we couldn't create any segments, create a direct connection
+        if not result:
+            result.append(Segment(
+                x1=start[0],
+                y1=start[1],
+                x2=end[0],
+                y2=end[1],
+                width=template.width,
+                layer=template.layer,
+                net=template.net,
+                net_name=template.net_name,
+            ))
 
         return result
 
