@@ -5,12 +5,14 @@ import pytest
 from kicad_tools.exceptions import RoutingError
 from kicad_tools.router.heuristics import (
     DEFAULT_HEURISTIC,
+    DIAGONAL_COST,
     CongestionAwareHeuristic,
     DirectionBiasHeuristic,
     GreedyHeuristic,
     HeuristicContext,
     ManhattanHeuristic,
     WeightedCongestionHeuristic,
+    octile_distance,
 )
 from kicad_tools.router.layers import (
     Layer,
@@ -583,7 +585,8 @@ class TestHeuristics:
         """Test Manhattan distance heuristic."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            diagonal_routing=False  # Use Manhattan distance
         )
         heuristic = ManhattanHeuristic()
 
@@ -627,12 +630,13 @@ class TestHeuristics:
 
         context = HeuristicContext(
             goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            get_congestion_cost=get_congestion_cost
+            get_congestion_cost=get_congestion_cost,
+            diagonal_routing=False  # Use Manhattan distance for predictable base
         )
         heuristic = CongestionAwareHeuristic()
 
         estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
-        # Should include congestion cost
+        # Should include congestion cost (base Manhattan = 20)
         assert estimate > 20.0
 
     def test_congestion_aware_heuristic_name(self):
@@ -649,7 +653,8 @@ class TestHeuristics:
 
         context = HeuristicContext(
             goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            get_congestion_cost=get_congestion_cost
+            get_congestion_cost=get_congestion_cost,
+            diagonal_routing=False  # Use Manhattan distance for predictable base
         )
         heuristic = WeightedCongestionHeuristic(num_samples=3, congestion_multiplier=2.0)
 
@@ -666,7 +671,8 @@ class TestHeuristics:
         """Test greedy heuristic."""
         rules = DesignRules()
         context = HeuristicContext(
-            goal_x=10, goal_y=10, goal_layer=0, rules=rules
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            diagonal_routing=False  # Use Manhattan distance
         )
         heuristic = GreedyHeuristic(greed_factor=2.0)
 
@@ -690,7 +696,8 @@ class TestHeuristics:
         rules = DesignRules()
         context = HeuristicContext(
             goal_x=10, goal_y=10, goal_layer=0, rules=rules,
-            cost_multiplier=0.5  # Power net priority
+            cost_multiplier=0.5,  # Power net priority
+            diagonal_routing=False  # Use Manhattan distance
         )
         heuristic = ManhattanHeuristic()
 
@@ -2151,6 +2158,272 @@ class TestKicad7Compatibility:
         # Should contain segments and vias with embedded parameters
         assert "(segment" in sexp
         assert "(via" in sexp
+
+
+class TestDiagonalRouting:
+    """Tests for diagonal (45°) routing support (Issue #59)."""
+
+    def test_octile_distance_straight(self):
+        """Test octile distance for orthogonal movement."""
+        # Pure horizontal: 10 units
+        assert octile_distance(10, 0) == 10.0
+        # Pure vertical: 10 units
+        assert octile_distance(0, 10) == 10.0
+
+    def test_octile_distance_diagonal(self):
+        """Test octile distance for pure diagonal movement."""
+        # Pure diagonal: √2 * 10 ≈ 14.14
+        distance = octile_distance(10, 10)
+        expected = 10 * DIAGONAL_COST  # 10 diagonal moves
+        assert abs(distance - expected) < 0.001
+
+    def test_octile_distance_mixed(self):
+        """Test octile distance for mixed movement."""
+        # 10 horizontal, 5 vertical = 5 diagonal + 5 straight
+        # = 5 * √2 + 5 = 5 * 1.414 + 5 ≈ 12.07
+        distance = octile_distance(10, 5)
+        expected = max(10, 5) + (DIAGONAL_COST - 1) * min(10, 5)
+        assert abs(distance - expected) < 0.001
+
+    def test_octile_distance_negative(self):
+        """Test octile distance handles negative values."""
+        assert octile_distance(-10, 0) == 10.0
+        assert octile_distance(0, -10) == 10.0
+        assert octile_distance(-10, -10) == octile_distance(10, 10)
+
+    def test_diagonal_cost_value(self):
+        """Test DIAGONAL_COST is √2."""
+        import math
+        assert abs(DIAGONAL_COST - math.sqrt(2)) < 0.001
+
+    def test_router_diagonal_routing_default_enabled(self):
+        """Test that diagonal routing is enabled by default."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(50.0, 50.0, rules)
+        router = Router(grid, rules)
+
+        # Should have 8 neighbors (4 orthogonal + 4 diagonal)
+        assert len(router.neighbors_2d) == 8
+
+    def test_router_diagonal_routing_disabled(self):
+        """Test that diagonal routing can be disabled."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(50.0, 50.0, rules)
+        router = Router(grid, rules, diagonal_routing=False)
+
+        # Should only have 4 orthogonal neighbors
+        assert len(router.neighbors_2d) == 4
+
+    def test_router_diagonal_neighbors(self):
+        """Test diagonal neighbor directions and costs."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(50.0, 50.0, rules)
+        router = Router(grid, rules, diagonal_routing=True)
+
+        # Extract diagonal moves (where both dx and dy are non-zero)
+        diagonal_moves = [(dx, dy, dl, cost) for dx, dy, dl, cost in router.neighbors_2d
+                         if dx != 0 and dy != 0]
+
+        assert len(diagonal_moves) == 4
+        # All diagonal moves should have cost ≈ 1.414
+        for dx, dy, dl, cost in diagonal_moves:
+            assert abs(cost - DIAGONAL_COST) < 0.001
+
+    def test_manhattan_heuristic_octile_with_diagonal(self):
+        """Test Manhattan heuristic uses octile distance when diagonal enabled."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            diagonal_routing=True
+        )
+        heuristic = ManhattanHeuristic()
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        # With diagonal routing: octile distance = 10 * √2 ≈ 14.14
+        expected = 10 * DIAGONAL_COST * rules.cost_straight
+        assert abs(estimate - expected) < 0.01
+
+    def test_manhattan_heuristic_manhattan_without_diagonal(self):
+        """Test Manhattan heuristic uses Manhattan distance when diagonal disabled."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            diagonal_routing=False
+        )
+        heuristic = ManhattanHeuristic()
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        # Without diagonal: Manhattan distance = 20
+        assert estimate == 20.0
+
+    def test_heuristic_context_diagonal_default(self):
+        """Test HeuristicContext defaults to diagonal_routing=True."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules
+        )
+        assert context.diagonal_routing is True
+
+    def test_congestion_aware_heuristic_with_diagonal(self):
+        """Test CongestionAware heuristic uses octile distance."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            diagonal_routing=True
+        )
+        heuristic = CongestionAwareHeuristic()
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        # Base cost should use octile distance
+        expected_base = 10 * DIAGONAL_COST * rules.cost_straight
+        # Estimate should be at least the base octile distance
+        assert estimate >= expected_base - 0.01
+
+    def test_greedy_heuristic_with_diagonal(self):
+        """Test Greedy heuristic scales octile distance."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10, goal_y=10, goal_layer=0, rules=rules,
+            diagonal_routing=True
+        )
+        heuristic = GreedyHeuristic(greed_factor=2.0)
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        # Should be 2x octile distance
+        expected = 2.0 * 10 * DIAGONAL_COST * rules.cost_straight
+        assert abs(estimate - expected) < 0.01
+
+    def test_router_diagonal_corner_blocking_basic(self):
+        """Test diagonal corner clearance checking."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=1.0)
+        grid = RoutingGrid(10.0, 10.0, rules)
+        router = Router(grid, rules, diagonal_routing=True)
+
+        # Block a cell that would be in the corner of a diagonal move
+        layer = 0
+        grid.grid[layer][1][0].blocked = True  # Block cell at (0, 1)
+
+        # Check diagonal move from (0, 0) to (1, 1)
+        # Adjacent cells are (0, 1) and (1, 0) - (0, 1) is blocked
+        is_blocked = router._is_diagonal_corner_blocked(0, 0, 1, 1, layer, net=1)
+        assert is_blocked is True
+
+    def test_router_diagonal_corner_clear(self):
+        """Test diagonal move allowed when corners are clear."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=1.0)
+        grid = RoutingGrid(10.0, 10.0, rules)
+        router = Router(grid, rules, diagonal_routing=True)
+
+        layer = 0
+        # Don't block any cells
+
+        # Check diagonal move from (2, 2) to (3, 3)
+        # Adjacent cells are (2, 3) and (3, 2) - both should be clear
+        is_blocked = router._is_diagonal_corner_blocked(2, 2, 1, 1, layer, net=1)
+        assert is_blocked is False
+
+    def test_router_orthogonal_not_checked(self):
+        """Test orthogonal moves skip corner checking."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=1.0)
+        grid = RoutingGrid(10.0, 10.0, rules)
+        router = Router(grid, rules, diagonal_routing=True)
+
+        layer = 0
+        # Orthogonal moves (dx=0 or dy=0) should always return False
+        assert router._is_diagonal_corner_blocked(0, 0, 1, 0, layer, net=1) is False
+        assert router._is_diagonal_corner_blocked(0, 0, 0, 1, layer, net=1) is False
+
+    def test_router_route_uses_diagonal(self):
+        """Test that routes can use diagonal moves for shorter paths."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=1.0)
+        grid = RoutingGrid(20.0, 20.0, rules)
+        router_diag = Router(grid, rules, diagonal_routing=True)
+
+        # Create pads at diagonal positions
+        start_pad = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
+                       net_name="test", layer=Layer.F_CU)
+        end_pad = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1,
+                     net_name="test", layer=Layer.F_CU)
+
+        grid.add_pad(start_pad)
+        grid.add_pad(end_pad)
+
+        route = router_diag.route(start_pad, end_pad)
+        assert route is not None
+        assert len(route.segments) > 0
+
+    def test_router_diagonal_vs_orthogonal_path_length(self):
+        """Test diagonal routing produces shorter paths than orthogonal."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(grid_resolution=1.0)
+
+        # Create two separate grids for fair comparison
+        grid_diag = RoutingGrid(20.0, 20.0, rules)
+        grid_orth = RoutingGrid(20.0, 20.0, rules)
+
+        router_diag = Router(grid_diag, rules, diagonal_routing=True)
+        router_orth = Router(grid_orth, rules, diagonal_routing=False)
+
+        # Create pads at diagonal positions
+        start_diag = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
+                        net_name="test", layer=Layer.F_CU)
+        end_diag = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1,
+                      net_name="test", layer=Layer.F_CU)
+
+        start_orth = Pad(x=2.0, y=2.0, width=1.0, height=1.0, net=1,
+                        net_name="test", layer=Layer.F_CU)
+        end_orth = Pad(x=10.0, y=10.0, width=1.0, height=1.0, net=1,
+                      net_name="test", layer=Layer.F_CU)
+
+        grid_diag.add_pad(start_diag)
+        grid_diag.add_pad(end_diag)
+        grid_orth.add_pad(start_orth)
+        grid_orth.add_pad(end_orth)
+
+        route_diag = router_diag.route(start_diag, end_diag)
+        route_orth = router_orth.route(start_orth, end_orth)
+
+        assert route_diag is not None
+        assert route_orth is not None
+
+        # Calculate total path length
+        def total_length(route):
+            length = 0.0
+            for seg in route.segments:
+                dx = seg.x2 - seg.x1
+                dy = seg.y2 - seg.y1
+                length += (dx**2 + dy**2)**0.5
+            return length
+
+        diag_length = total_length(route_diag)
+        orth_length = total_length(route_orth)
+
+        # Diagonal path should be shorter or equal (never longer)
+        # Note: May be equal if path is already orthogonal
+        assert diag_length <= orth_length + 0.01
 
 
 # =============================================================================

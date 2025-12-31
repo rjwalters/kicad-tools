@@ -16,11 +16,30 @@ Usage:
     router = Router(grid, rules, heuristic=CongestionAwareHeuristic())
 """
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
 from .rules import DesignRules
+
+# Cost multiplier for diagonal moves (√2 ≈ 1.414)
+DIAGONAL_COST = math.sqrt(2)
+
+
+def octile_distance(dx: int, dy: int) -> float:
+    """Calculate octile distance for 8-directional movement.
+
+    Octile distance is the optimal distance when diagonal moves are allowed
+    and cost √2 times an orthogonal move.
+
+    Formula: max(dx, dy) + (√2 - 1) * min(dx, dy)
+
+    This represents taking diagonal moves as much as possible (min(dx,dy) times)
+    and then straight moves for the remainder.
+    """
+    dx_abs, dy_abs = abs(dx), abs(dy)
+    return max(dx_abs, dy_abs) + (DIAGONAL_COST - 1) * min(dx_abs, dy_abs)
 
 
 @dataclass
@@ -41,6 +60,9 @@ class HeuristicContext:
 
     # Net class cost multiplier (lower = prefer this net)
     cost_multiplier: float = 1.0
+
+    # Whether diagonal routing is enabled (affects distance calculation)
+    diagonal_routing: bool = True
 
     # Congestion lookup function: (gx, gy, layer) -> float
     # Returns congestion level [0, 1] for the cell's region
@@ -91,12 +113,13 @@ class Heuristic(ABC):
 
 
 class ManhattanHeuristic(Heuristic):
-    """Simple Manhattan distance heuristic.
+    """Simple distance-based heuristic.
 
     This is the baseline admissible heuristic - purely geometric,
     ignores congestion and direction. Fast but may explore more nodes.
 
-    Cost = |dx| + |dy| + layer_change_cost
+    When diagonal_routing is disabled: Manhattan distance (|dx| + |dy|)
+    When diagonal_routing is enabled: Octile distance (optimal for 8-direction)
     """
 
     @property
@@ -111,19 +134,27 @@ class ManhattanHeuristic(Heuristic):
         direction: Tuple[int, int],
         context: HeuristicContext,
     ) -> float:
-        dx = abs(x - context.goal_x)
-        dy = abs(y - context.goal_y)
+        dx = x - context.goal_x
+        dy = y - context.goal_y
         dl = abs(layer - context.goal_layer) * context.rules.cost_via
 
-        base_cost = (dx + dy) * context.rules.cost_straight + dl
+        # Use octile distance for diagonal routing, Manhattan otherwise
+        if context.diagonal_routing:
+            distance = octile_distance(dx, dy)
+        else:
+            distance = abs(dx) + abs(dy)
+
+        base_cost = distance * context.rules.cost_straight + dl
         return base_cost * context.cost_multiplier
 
 
 class DirectionBiasHeuristic(Heuristic):
-    """Manhattan with direction alignment penalty.
+    """Distance-based heuristic with direction alignment penalty.
 
     Adds a penalty when current direction doesn't align with goal direction.
     This encourages straighter paths with fewer turns.
+
+    Uses octile distance when diagonal routing is enabled.
 
     Good for: Clean routing with minimal bends
     Trade-off: May miss shortcuts that require direction changes
@@ -149,15 +180,21 @@ class DirectionBiasHeuristic(Heuristic):
         direction: Tuple[int, int],
         context: HeuristicContext,
     ) -> float:
-        dx = abs(x - context.goal_x)
-        dy = abs(y - context.goal_y)
+        dx = x - context.goal_x
+        dy = y - context.goal_y
         dl = abs(layer - context.goal_layer) * context.rules.cost_via
 
-        base_cost = (dx + dy) * context.rules.cost_straight + dl
+        # Use octile distance for diagonal routing, Manhattan otherwise
+        if context.diagonal_routing:
+            distance = octile_distance(dx, dy)
+        else:
+            distance = abs(dx) + abs(dy)
+
+        base_cost = distance * context.rules.cost_straight + dl
 
         # Direction alignment penalty
         direction_cost = 0.0
-        if direction != (0, 0) and (dx + dy > 0):
+        if direction != (0, 0) and distance > 0:
             pdx, pdy = direction
             # Calculate ideal direction to goal
             goal_dx = context.goal_x - x
@@ -178,6 +215,8 @@ class CongestionAwareHeuristic(Heuristic):
     This is the default heuristic that was previously hardcoded.
     It samples congestion at current position and midpoint to goal,
     adding penalties for congested areas.
+
+    Uses octile distance when diagonal routing is enabled.
 
     Good for: Avoiding routing hotspots, spreading routes evenly
     Trade-off: Slightly more computation per node
@@ -211,15 +250,21 @@ class CongestionAwareHeuristic(Heuristic):
         direction: Tuple[int, int],
         context: HeuristicContext,
     ) -> float:
-        dx = abs(x - context.goal_x)
-        dy = abs(y - context.goal_y)
+        dx = x - context.goal_x
+        dy = y - context.goal_y
         dl = abs(layer - context.goal_layer) * context.rules.cost_via
 
-        base_cost = (dx + dy) * context.rules.cost_straight + dl
+        # Use octile distance for diagonal routing, Manhattan otherwise
+        if context.diagonal_routing:
+            distance = octile_distance(dx, dy)
+        else:
+            distance = abs(dx) + abs(dy)
+
+        base_cost = distance * context.rules.cost_straight + dl
 
         # Congestion estimate
         congestion_cost = 0.0
-        if dx + dy > 0 and context.get_congestion_cost is not None:
+        if distance > 0 and context.get_congestion_cost is not None:
             # Sample at current position
             congestion_cost += context.get_congestion_cost(x, y, layer) * self.congestion_weight
             # Sample at midpoint
@@ -231,7 +276,7 @@ class CongestionAwareHeuristic(Heuristic):
 
         # Direction alignment penalty
         direction_cost = 0.0
-        if direction != (0, 0) and (dx + dy > 0):
+        if direction != (0, 0) and distance > 0:
             pdx, pdy = direction
             goal_dx = context.goal_x - x
             goal_dy = context.goal_y - y
@@ -250,6 +295,8 @@ class WeightedCongestionHeuristic(Heuristic):
     Uses stronger congestion penalties and samples more points along
     the estimated path. Better at avoiding congested areas but may
     produce longer routes.
+
+    Uses octile distance when diagonal routing is enabled.
 
     Good for: Very congested boards, spreading routes
     Trade-off: Longer routes, more via usage
@@ -276,15 +323,21 @@ class WeightedCongestionHeuristic(Heuristic):
         direction: Tuple[int, int],
         context: HeuristicContext,
     ) -> float:
-        dx = abs(x - context.goal_x)
-        dy = abs(y - context.goal_y)
+        dx = x - context.goal_x
+        dy = y - context.goal_y
         dl = abs(layer - context.goal_layer) * context.rules.cost_via
 
-        base_cost = (dx + dy) * context.rules.cost_straight + dl
+        # Use octile distance for diagonal routing, Manhattan otherwise
+        if context.diagonal_routing:
+            distance = octile_distance(dx, dy)
+        else:
+            distance = abs(dx) + abs(dy)
+
+        base_cost = distance * context.rules.cost_straight + dl
 
         # Sample congestion at multiple points
         congestion_cost = 0.0
-        if dx + dy > 0 and context.get_congestion_cost is not None:
+        if distance > 0 and context.get_congestion_cost is not None:
             for i in range(self.num_samples):
                 t = i / max(1, self.num_samples - 1)
                 sample_x = int(x + t * (context.goal_x - x))
@@ -301,6 +354,8 @@ class GreedyHeuristic(Heuristic):
     Multiplies the base heuristic by a factor > 1, making A* behave
     more like greedy best-first search. Finds paths faster but they
     may not be optimal.
+
+    Uses octile distance when diagonal routing is enabled.
 
     Good for: Fast routing when optimality isn't critical
     Trade-off: Suboptimal paths, more vias
@@ -325,11 +380,17 @@ class GreedyHeuristic(Heuristic):
         direction: Tuple[int, int],
         context: HeuristicContext,
     ) -> float:
-        dx = abs(x - context.goal_x)
-        dy = abs(y - context.goal_y)
+        dx = x - context.goal_x
+        dy = y - context.goal_y
         dl = abs(layer - context.goal_layer) * context.rules.cost_via
 
-        base_cost = (dx + dy) * context.rules.cost_straight + dl
+        # Use octile distance for diagonal routing, Manhattan otherwise
+        if context.diagonal_routing:
+            distance = octile_distance(dx, dy)
+        else:
+            distance = abs(dx) + abs(dy)
+
+        base_cost = distance * context.rules.cost_straight + dl
 
         # Apply greed factor to encourage faster exploration toward goal
         return base_cost * self.greed_factor * context.cost_multiplier
