@@ -58,27 +58,32 @@ Result: PASS (with warnings)
 Validate your design against a specific manufacturer's capabilities:
 
 ```bash
-kct drc board.kicad_pcb --mfr jlcpcb
+# Check against 2-layer rules (default for most hobbyist boards)
+kct check board.kicad_pcb --mfr jlcpcb --layers 2
+
+# Check against 4-layer rules
+kct check board.kicad_pcb --mfr jlcpcb --layers 4
+
+# Check with 2oz copper weight (requires wider traces)
+kct check board.kicad_pcb --mfr jlcpcb --layers 2 --copper 2.0
 ```
 
 Output:
 ```
-DRC Report for board.kicad_pcb
-==============================
+============================================================
+PURE PYTHON DRC CHECK
+============================================================
+File: board.kicad_pcb
 Manufacturer: JLCPCB
-Design Rules: 4-layer, 1oz copper
+Layers: 2
+Rules checked: 12
 
-Checking against JLCPCB limits:
-  Min trace width: 0.127mm (your min: 0.2mm) ✓
-  Min clearance: 0.127mm (your min: 0.15mm) ✓
-  Min via drill: 0.3mm (your min: 0.4mm) ✓
-  Min via annular ring: 0.13mm (your min: 0.15mm) ✓
+Results:
+  Errors:     0
+  Warnings:   2
 
-KiCad DRC:
-  Errors: 0
-  Warnings: 2
-
-Result: PASS
+============================================================
+DRC PASSED - No violations found
 ```
 
 ## CLI: Compare Manufacturer Rules
@@ -86,24 +91,34 @@ Result: PASS
 See how different fabs compare:
 
 ```bash
-kct drc --compare
+# Compare 2-layer rules (most common)
+kct mfr compare --layers 2
+
+# Compare 4-layer rules
+kct mfr compare --layers 4
 ```
 
-Output:
+Output for 2-layer:
 ```
-Manufacturer Design Rules Comparison (4-layer, 1oz)
-====================================================
+======================================================================
+MANUFACTURER COMPARISON - 2-LAYER 1.0oz
+======================================================================
+Constraint                      JLCPCB      OSHPARK       PCBWAY       SEEED
+----------------------------------------------------------------------
+Trace width (mil)                  5.0         6.0          5.0         6.0
+Clearance (mil)                    5.0         6.0          5.0         6.0
+Via drill (mm)                    0.30        0.25         0.20        0.30
+Via diameter (mm)                 0.60        0.51         0.40        0.60
+Annular ring (mm)                 0.15        0.13         0.10        0.15
+Copper-to-edge (mm)               0.30        0.38         0.25        0.50
+----------------------------------------------------------------------
+Assembly                           Yes          No          Yes         Yes
+Parts Library                     LCSC        None       Global   Seeed OPL
 
-                    JLCPCB   PCBWay   OSHPark   Seeed
-Min Trace (mm)      0.127    0.102    0.152     0.152
-Min Clearance (mm)  0.127    0.102    0.152     0.152
-Min Via Drill (mm)  0.300    0.200    0.254     0.300
-Min Annular (mm)    0.130    0.100    0.127     0.127
-Min Hole (mm)       0.300    0.200    0.254     0.300
-
-Assembly Service    Yes      Yes      No        Yes
-Parts Library       LCSC     Global   -         OPL
+======================================================================
 ```
+
+Note: 2-layer boards typically have slightly relaxed via constraints compared to 4-layer, but may have stricter trace width requirements when using 2oz copper.
 
 ## Python API: Get Manufacturer Rules
 
@@ -113,14 +128,26 @@ from kicad_tools.manufacturers import get_profile, list_manufacturers
 # Get JLCPCB profile
 jlc = get_profile("jlcpcb")
 
-# Get design rules for 4-layer board
-rules = jlc.get_design_rules(layers=4, copper_oz=1.0)
+# Get design rules for 2-layer board (most common for hobbyist projects)
+rules_2l = jlc.get_design_rules(layers=2, copper_oz=1.0)
 
-print(f"JLCPCB 4-layer rules:")
-print(f"  Min trace width: {rules.min_trace_width_mm}mm")
-print(f"  Min clearance: {rules.min_clearance_mm}mm")
-print(f"  Min via drill: {rules.min_via_drill_mm}mm")
-print(f"  Min via annular ring: {rules.min_via_annular_ring_mm}mm")
+print(f"JLCPCB 2-layer 1oz rules:")
+print(f"  Min trace width: {rules_2l.min_trace_width_mm}mm")  # 0.127mm (5 mil)
+print(f"  Min clearance: {rules_2l.min_clearance_mm}mm")
+print(f"  Min via drill: {rules_2l.min_via_drill_mm}mm")
+
+# Get design rules for 4-layer board
+rules_4l = jlc.get_design_rules(layers=4, copper_oz=1.0)
+
+print(f"\nJLCPCB 4-layer rules:")
+print(f"  Min trace width: {rules_4l.min_trace_width_mm}mm")  # 0.1016mm (4 mil)
+print(f"  Min clearance: {rules_4l.min_clearance_mm}mm")
+print(f"  Min via drill: {rules_4l.min_via_drill_mm}mm")
+
+# 2oz copper has wider minimum trace requirements
+rules_2oz = jlc.get_design_rules(layers=2, copper_oz=2.0)
+print(f"\nJLCPCB 2-layer 2oz rules:")
+print(f"  Min trace width: {rules_2oz.min_trace_width_mm}mm")  # 0.2032mm (8 mil)
 ```
 
 ## Python API: Compare All Manufacturers
@@ -252,27 +279,33 @@ from kicad_tools import PCB
 from kicad_tools.manufacturers import get_profile, find_compatible_manufacturers
 from kicad_tools.drc import DRCReport, check_manufacturer_rules
 
-def validate_for_manufacturing(pcb_path: str, manufacturer: str = "jlcpcb"):
+def validate_for_manufacturing(
+    pcb_path: str,
+    manufacturer: str = "jlcpcb",
+    layers: int = 2,
+    copper_oz: float = 1.0,
+):
     """Run comprehensive manufacturing validation."""
 
     print(f"Validating: {pcb_path}")
     print(f"Target manufacturer: {manufacturer.upper()}")
+    print(f"Configuration: {layers}-layer, {copper_oz}oz copper")
     print("=" * 50)
 
     # Load PCB
     pcb = PCB.load(pcb_path)
 
-    # Get manufacturer profile
+    # Get manufacturer profile with layer-specific rules
     mfr = get_profile(manufacturer)
-    rules = mfr.get_design_rules(layers=4)
+    rules = mfr.get_design_rules(layers=layers, copper_oz=copper_oz)
 
-    print(f"\n{mfr.name} Design Rules:")
-    print(f"  Min trace: {rules.min_trace_width_mm}mm")
+    print(f"\n{mfr.name} {layers}-layer {copper_oz}oz Design Rules:")
+    print(f"  Min trace: {rules.min_trace_width_mm}mm ({rules.min_trace_width_mil:.1f} mil)")
     print(f"  Min clearance: {rules.min_clearance_mm}mm")
     print(f"  Min via drill: {rules.min_via_drill_mm}mm")
 
     # Check against rules
-    result = check_manufacturer_rules(pcb, manufacturer)
+    result = check_manufacturer_rules(pcb, manufacturer, layers=layers)
 
     print(f"\nDesign Check:")
     if result.passed:
@@ -282,13 +315,13 @@ def validate_for_manufacturing(pcb_path: str, manufacturer: str = "jlcpcb"):
         for v in result.violations:
             print(f"    - {v}")
 
-    # Find all compatible manufacturers
-    print("\nCompatible Manufacturers:")
+    # Find all compatible manufacturers for 2-layer boards
+    print(f"\nCompatible Manufacturers ({layers}-layer):")
     compatible = find_compatible_manufacturers(
         trace_width_mm=0.15,
         clearance_mm=0.15,
         via_drill_mm=0.3,
-        layers=4,
+        layers=layers,
         needs_assembly=True,
     )
 
@@ -302,7 +335,8 @@ if __name__ == "__main__":
     import sys
     pcb_file = sys.argv[1] if len(sys.argv) > 1 else "board.kicad_pcb"
     mfr = sys.argv[2] if len(sys.argv) > 2 else "jlcpcb"
-    validate_for_manufacturing(pcb_file, mfr)
+    layers = int(sys.argv[3]) if len(sys.argv) > 3 else 2  # Default to 2-layer
+    validate_for_manufacturing(pcb_file, mfr, layers=layers)
 ```
 
 ## Next Steps

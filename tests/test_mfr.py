@@ -317,3 +317,151 @@ class TestMfrCLICommands:
         # Should find the trace width violation
         assert len(violations) > 0
         assert any("TRACE_WIDTH" in v[0] for v in violations)
+
+
+class TestTwoLayerRules:
+    """Tests for 2-layer design rules across all manufacturers."""
+
+    def test_jlcpcb_2layer_1oz_rules(self):
+        """Test JLCPCB 2-layer 1oz design rules."""
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.127)  # 5 mil
+        assert rules.min_clearance_mm == pytest.approx(0.127)
+        assert rules.min_via_drill_mm == pytest.approx(0.3)
+        assert rules.min_via_diameter_mm == pytest.approx(0.6)
+        assert rules.min_annular_ring_mm == pytest.approx(0.15)
+        assert rules.inner_copper_oz == 0.0  # No inner layers
+
+    def test_jlcpcb_2layer_2oz_rules(self):
+        """Test JLCPCB 2-layer 2oz design rules."""
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=2.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.2032)  # 8 mil for 2oz
+        assert rules.min_clearance_mm == pytest.approx(0.2032)
+        assert rules.outer_copper_oz == 2.0
+
+    def test_seeed_2layer_1oz_rules(self):
+        """Test Seeed 2-layer 1oz design rules."""
+        profile = get_profile("seeed")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.1524)  # 6 mil
+        assert rules.min_clearance_mm == pytest.approx(0.1524)
+        assert rules.min_via_drill_mm == pytest.approx(0.3)
+        assert rules.min_copper_to_edge_mm == pytest.approx(0.5)
+
+    def test_pcbway_2layer_1oz_rules(self):
+        """Test PCBWay 2-layer 1oz design rules."""
+        profile = get_profile("pcbway")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.127)  # 5 mil
+        assert rules.min_clearance_mm == pytest.approx(0.127)
+        assert rules.min_via_drill_mm == pytest.approx(0.2)  # Smaller than JLCPCB
+        assert rules.min_via_diameter_mm == pytest.approx(0.4)
+
+    def test_oshpark_2layer_rules(self):
+        """Test OSHPark 2-layer standard design rules."""
+        profile = get_profile("oshpark")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.1524)  # 6 mil
+        assert rules.min_clearance_mm == pytest.approx(0.1524)
+        assert rules.min_via_drill_mm == pytest.approx(0.254)  # 10 mil
+        assert rules.min_via_diameter_mm == pytest.approx(0.508)  # 20 mil
+
+    def test_all_manufacturers_have_2layer_rules(self):
+        """Test that all manufacturers have 2-layer rules defined."""
+        for profile in list_manufacturers():
+            if 2 in profile.supported_layers:
+                rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+                assert rules is not None
+                assert rules.min_trace_width_mm > 0
+                assert rules.min_clearance_mm > 0
+                assert rules.inner_copper_oz == 0.0  # 2-layer has no inner layers
+
+
+class TestDRUFiles:
+    """Tests for .kicad_dru rule files."""
+
+    def test_jlcpcb_2layer_1oz_dru_exists(self):
+        """Test that JLCPCB 2-layer 1oz .kicad_dru file exists."""
+        from pathlib import Path
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_file = rules_dir / "jlcpcb-2layer-1oz.kicad_dru"
+        assert dru_file.exists(), f"Missing: {dru_file}"
+
+    def test_jlcpcb_2layer_2oz_dru_exists(self):
+        """Test that JLCPCB 2-layer 2oz .kicad_dru file exists."""
+        from pathlib import Path
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_file = rules_dir / "jlcpcb-2layer-2oz.kicad_dru"
+        assert dru_file.exists(), f"Missing: {dru_file}"
+
+    def test_seeed_2layer_1oz_dru_exists(self):
+        """Test that Seeed 2-layer 1oz .kicad_dru file exists."""
+        from pathlib import Path
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_file = rules_dir / "seeed-2layer-1oz.kicad_dru"
+        assert dru_file.exists(), f"Missing: {dru_file}"
+
+    def test_pcbway_2layer_1oz_dru_exists(self):
+        """Test that PCBWay 2-layer 1oz .kicad_dru file exists."""
+        from pathlib import Path
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_file = rules_dir / "pcbway-2layer-1oz.kicad_dru"
+        assert dru_file.exists(), f"Missing: {dru_file}"
+
+    def test_oshpark_2layer_dru_exists(self):
+        """Test that OSHPark 2-layer .kicad_dru file exists."""
+        from pathlib import Path
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_file = rules_dir / "oshpark-2layer.kicad_dru"
+        assert dru_file.exists(), f"Missing: {dru_file}"
+
+    def test_all_2layer_dru_files_valid(self):
+        """Test that all 2-layer .kicad_dru files are valid."""
+        from pathlib import Path
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        two_layer_files = list(rules_dir.glob("*-2layer*.kicad_dru"))
+
+        assert len(two_layer_files) >= 5, "Expected at least 5 2-layer DRU files"
+
+        for dru_file in two_layer_files:
+            content = dru_file.read_text()
+            # Check basic structure
+            assert "(version 1)" in content, f"{dru_file.name}: Missing version"
+            assert "(rule" in content, f"{dru_file.name}: Missing rules"
+            assert "track_width" in content, f"{dru_file.name}: Missing track_width"
+            assert "clearance" in content, f"{dru_file.name}: Missing clearance"
+            assert "hole_size" in content, f"{dru_file.name}: Missing hole_size"
+
+    def test_dru_file_values_match_python_rules(self):
+        """Test that .kicad_dru values match Python profile values."""
+        import re
+        from pathlib import Path
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2, copper_oz=1.0)
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_file = rules_dir / "jlcpcb-2layer-1oz.kicad_dru"
+        content = dru_file.read_text()
+
+        # Extract track_width value from DRU file
+        match = re.search(r"track_width \(min ([\d.]+)mm\)", content)
+        assert match, "Could not find track_width in DRU file"
+        dru_trace_width = float(match.group(1))
+
+        assert dru_trace_width == pytest.approx(rules.min_trace_width_mm), (
+            f"Track width mismatch: DRU={dru_trace_width}, Python={rules.min_trace_width_mm}"
+        )
