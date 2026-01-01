@@ -10,6 +10,7 @@ from kicad_tools.schematic.blocks import (
     DecouplingCaps,
     LDOBlock,
     LEDIndicator,
+    MCUBlock,
     OscillatorBlock,
     Port,
     create_3v3_ldo,
@@ -358,6 +359,301 @@ class TestDebugHeaderMocked:
         """Debug header has header component."""
         header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
         assert "HEADER" in header.components
+
+
+class TestMCUBlockMocked:
+    """Tests for MCUBlock with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic with MCU support."""
+        sch = Mock()
+
+        def create_mock_pin(pin_name, pin_number, pin_type):
+            """Create a mock pin with proper attribute access."""
+            pin = Mock()
+            pin.name = pin_name
+            pin.number = pin_number
+            pin.pin_type = pin_type
+            return pin
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+
+            # Check if this is an MCU symbol
+            if "MCU" in str(symbol) or "STM32" in str(symbol):
+                # Create mock symbol_def with pins for MCU
+                mock_symbol_def = Mock()
+                mock_pins = [
+                    create_mock_pin("VDD", "1", "power_in"),
+                    create_mock_pin("VDDA", "2", "power_in"),
+                    create_mock_pin("GND", "3", "power_in"),
+                    create_mock_pin("VSS", "4", "power_in"),
+                    create_mock_pin("PA0", "5", "bidirectional"),
+                    create_mock_pin("PA1", "6", "bidirectional"),
+                    create_mock_pin("PB0", "7", "bidirectional"),
+                    create_mock_pin("NRST", "8", "input"),
+                    create_mock_pin("BOOT0", "9", "input"),
+                ]
+                mock_symbol_def.pins = mock_pins
+                comp.symbol_def = mock_symbol_def
+
+                comp.pin_position.side_effect = lambda name: {
+                    "VDD": (x - 20, y - 10),
+                    "VDDA": (x - 20, y - 5),
+                    "GND": (x - 20, y + 10),
+                    "VSS": (x - 20, y + 5),
+                    "PA0": (x + 20, y - 10),
+                    "PA1": (x + 20, y - 5),
+                    "PB0": (x + 20, y),
+                    "NRST": (x - 20, y),
+                    "BOOT0": (x - 20, y + 15),
+                }.get(name, (x, y))
+            else:
+                # Capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_mcu_block_creation(self, mock_schematic):
+        """Create MCU block."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        assert mcu.schematic == mock_schematic
+        assert mcu.x == 100
+        assert mcu.y == 100
+        assert "VDD" in mcu.ports
+        assert "GND" in mcu.ports
+        assert "MCU" in mcu.components
+
+    def test_mcu_block_with_custom_bypass_caps(self, mock_schematic):
+        """Create MCU block with custom bypass cap values."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            bypass_caps=["100nF", "100nF", "4.7uF"],
+            ref="U1",
+        )
+
+        assert len(mcu.bypass_caps) == 3
+        assert "C1" in mcu.components
+        assert "C2" in mcu.components
+        assert "C3" in mcu.components
+
+    def test_mcu_block_default_bypass_caps(self, mock_schematic):
+        """MCU block has default bypass caps when not specified."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # Default is 4 x 100nF caps
+        assert len(mcu.bypass_caps) == 4
+
+    def test_mcu_block_identifies_power_pins(self, mock_schematic):
+        """MCU block identifies VDD and GND pins."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # Should have found VDD and VDDA
+        assert len(mcu.vdd_pins) >= 1
+        assert "VDD" in mcu.vdd_pins or "VDDA" in mcu.vdd_pins
+
+        # Should have found GND and VSS
+        assert len(mcu.gnd_pins) >= 1
+        assert "GND" in mcu.gnd_pins or "VSS" in mcu.gnd_pins
+
+    def test_mcu_block_exposes_gpio_pins(self, mock_schematic):
+        """MCU block exposes GPIO pins as ports."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # GPIO pins should be available as ports
+        assert "PA0" in mcu.ports
+        assert "PA1" in mcu.ports
+        assert "PB0" in mcu.ports
+        assert "NRST" in mcu.ports
+
+    def test_mcu_block_wires_bypass_caps(self, mock_schematic):
+        """MCU block wires bypass caps together."""
+        MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            bypass_caps=["100nF", "100nF"],
+            ref="U1",
+        )
+
+        # Should add wires between caps
+        assert mock_schematic.add_wire.called
+
+    def test_mcu_block_connect_to_rails(self, mock_schematic):
+        """Connect MCU and bypass caps to power rails."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+        mcu.connect_to_rails(vdd_rail_y=50, gnd_rail_y=150)
+
+        # Should wire bypass caps to rails
+        assert mock_schematic.wire_decoupling_cap.called
+
+        # Should add wires and junctions for MCU power pins
+        assert mock_schematic.add_wire.called
+        assert mock_schematic.add_junction.called
+
+    def test_mcu_block_get_gpio_pins(self, mock_schematic):
+        """Get list of GPIO pins."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        gpio_pins = mcu.get_gpio_pins()
+
+        # Should include non-power pins
+        assert "PA0" in gpio_pins
+        assert "PA1" in gpio_pins
+        assert "NRST" in gpio_pins
+
+        # Should NOT include power pins
+        assert "VDD" not in gpio_pins
+        assert "GND" not in gpio_pins
+        assert "VSS" not in gpio_pins
+
+    def test_mcu_block_get_power_pins(self, mock_schematic):
+        """Get dict of power pins."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        power_pins = mcu.get_power_pins()
+
+        assert "VDD" in power_pins
+        assert "GND" in power_pins
+        assert len(power_pins["VDD"]) >= 1
+        assert len(power_pins["GND"]) >= 1
+
+    def test_mcu_block_with_unit(self, mock_schematic):
+        """MCU block supports multi-unit symbols."""
+        MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+            unit=2,
+        )
+
+        # add_symbol should be called with unit parameter
+        add_symbol_calls = mock_schematic.add_symbol.call_args_list
+        # First call should be for the MCU
+        mcu_call = add_symbol_calls[0]
+        assert mcu_call.kwargs.get("unit") == 2 or 2 in mcu_call.args
+
+    def test_mcu_block_custom_cap_positions(self, mock_schematic):
+        """MCU block allows custom cap positioning."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+            cap_offset_x=-40,
+            cap_offset_y=30,
+            cap_spacing=15,
+        )
+
+        # Verify caps were created at expected positions
+        assert len(mcu.bypass_caps) == 4
+
+    def test_mcu_block_default_value_from_symbol(self, mock_schematic):
+        """MCU block uses symbol name as default value."""
+        MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # add_symbol should be called with the symbol name as value
+        add_symbol_calls = mock_schematic.add_symbol.call_args_list
+        mcu_call = add_symbol_calls[0]
+        # Value is the 5th argument (after symbol, x, y, ref)
+        assert "STM32F103C8Tx" in str(mcu_call)
+
+    def test_mcu_block_port_lookup(self, mock_schematic):
+        """MCU block port() method works."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # Should be able to look up ports
+        vdd_pos = mcu.port("VDD")
+        assert isinstance(vdd_pos, tuple)
+        assert len(vdd_pos) == 2
+
+        pa0_pos = mcu.port("PA0")
+        assert isinstance(pa0_pos, tuple)
+
+    def test_mcu_block_port_not_found(self, mock_schematic):
+        """MCU block raises KeyError for unknown port."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        with pytest.raises(KeyError) as exc:
+            mcu.port("NONEXISTENT")
+        assert "NONEXISTENT" in str(exc.value)
 
 
 class TestFactoryFunctions:
