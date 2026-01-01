@@ -16,6 +16,8 @@ from kicad_tools.datasheet.models import (
     DatasheetResult,
     DatasheetSearchResult,
 )
+from kicad_tools.datasheet.images import ExtractedImage, classify_image
+from kicad_tools.datasheet.tables import ExtractedTable
 
 
 class TestDatasheetResult:
@@ -387,8 +389,8 @@ class TestLCSCDatasheetSource:
 
         source = LCSCDatasheetSource()
 
-        # Mock the LCSCClient
-        with patch("kicad_tools.datasheet.sources.lcsc.LCSCClient") as MockClient:
+        # Mock the LCSCClient (imported inside the search method)
+        with patch("kicad_tools.parts.lcsc.LCSCClient") as MockClient:
             mock_client = MagicMock()
             MockClient.return_value = mock_client
 
@@ -428,7 +430,8 @@ class TestLCSCDatasheetSource:
 
         source = LCSCDatasheetSource()
 
-        with patch("kicad_tools.datasheet.sources.lcsc.LCSCClient") as MockClient:
+        # Mock the LCSCClient (imported inside the search method)
+        with patch("kicad_tools.parts.lcsc.LCSCClient") as MockClient:
             mock_client = MagicMock()
             MockClient.return_value = mock_client
 
@@ -789,15 +792,259 @@ class TestDatasheetManager:
         assert "ttl_days" in stats
 
 
+# ============================================================================
+# PDF Parsing Tests
+# ============================================================================
+
+
+class TestExtractedImage:
+    """Tests for ExtractedImage dataclass."""
+
+    @pytest.fixture
+    def sample_image(self):
+        return ExtractedImage(
+            page=1,
+            index=0,
+            width=800,
+            height=600,
+            format="png",
+            data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 100,
+            caption="Figure 1: Block diagram",
+            classification="block_diagram",
+        )
+
+    def test_suggested_filename(self, sample_image):
+        assert sample_image.suggested_filename == "page_1_img_0_block_diagram.png"
+
+    def test_suggested_filename_no_classification(self):
+        img = ExtractedImage(
+            page=2,
+            index=3,
+            width=100,
+            height=100,
+            format="jpg",
+            data=b"test",
+        )
+        assert img.suggested_filename == "page_2_img_3.jpg"
+
+    def test_size_kb(self, sample_image):
+        # 8 bytes header + 100 bytes padding = 108 bytes
+        assert sample_image.size_kb == pytest.approx(108 / 1024, rel=1e-2)
+
+    def test_save(self, sample_image, tmp_path):
+        output_path = tmp_path / "images" / "test.png"
+        sample_image.save(output_path)
+
+        assert output_path.exists()
+        assert output_path.read_bytes() == sample_image.data
+
+    def test_repr(self, sample_image):
+        repr_str = repr(sample_image)
+        assert "page=1" in repr_str
+        assert "800x600" in repr_str
+        assert "png" in repr_str
+
+
+class TestClassifyImage:
+    """Tests for image classification function."""
+
+    def test_pinout_by_caption(self):
+        assert classify_image(800, 600, "Figure 5: Pin Configuration") == "pinout"
+        assert classify_image(800, 600, "pinout diagram") == "pinout"
+        assert classify_image(800, 600, "Pin Assignment Table") == "pinout"
+
+    def test_package_by_caption(self):
+        assert classify_image(400, 400, "Package Dimensions") == "package"
+        assert classify_image(400, 400, "Mechanical Drawing") == "package"
+
+    def test_block_diagram_by_caption(self):
+        assert classify_image(1000, 500, "Block Diagram Overview") == "block_diagram"
+        assert classify_image(1000, 500, "Functional Diagram") == "block_diagram"
+
+    def test_schematic_by_caption(self):
+        assert classify_image(800, 600, "Application Circuit") == "schematic"
+        assert classify_image(800, 600, "Typical Application") == "schematic"
+
+    def test_graph_by_caption(self):
+        assert classify_image(600, 400, "Characteristic Curve") == "graph"
+        assert classify_image(600, 400, "Plot of voltage vs current") == "graph"
+
+    def test_timing_by_caption(self):
+        assert classify_image(1200, 300, "Timing Diagram") == "timing"
+        assert classify_image(1200, 300, "Waveform example") == "timing"
+
+    def test_timing_by_aspect_ratio(self):
+        # Wide images without caption classified as timing
+        assert classify_image(1500, 400, None) == "timing"
+
+    def test_unknown_no_caption(self):
+        # Square image without caption - can't classify
+        assert classify_image(500, 500, None) is None
+
+
+class TestExtractedTable:
+    """Tests for ExtractedTable dataclass."""
+
+    @pytest.fixture
+    def sample_table(self):
+        return ExtractedTable(
+            page=5,
+            headers=["Pin", "Name", "Function"],
+            rows=[
+                ["1", "VCC", "Power supply"],
+                ["2", "GND", "Ground"],
+                ["3", "IN", "Input signal"],
+            ],
+        )
+
+    def test_cols(self, sample_table):
+        assert sample_table.cols == 3
+
+    def test_cols_no_headers(self):
+        table = ExtractedTable(
+            page=1,
+            headers=[],
+            rows=[["a", "b", "c"], ["d", "e", "f"]],
+        )
+        assert table.cols == 3
+
+    def test_cols_empty(self):
+        table = ExtractedTable(page=1, headers=[], rows=[])
+        assert table.cols == 0
+
+    def test_row_count(self, sample_table):
+        assert sample_table.row_count == 3
+
+    def test_to_markdown(self, sample_table):
+        md = sample_table.to_markdown()
+        assert "| Pin | Name | Function |" in md
+        assert "| --- | --- | --- |" in md
+        assert "| 1 | VCC | Power supply |" in md
+
+    def test_to_markdown_no_headers(self):
+        table = ExtractedTable(
+            page=1,
+            headers=[],
+            rows=[["a", "b"], ["c", "d"]],
+        )
+        md = table.to_markdown()
+        assert "| a | b |" in md
+        assert "| c | d |" in md
+
+    def test_to_csv(self, sample_table):
+        csv_content = sample_table.to_csv()
+        assert "Pin,Name,Function" in csv_content
+        assert "1,VCC,Power supply" in csv_content
+
+    def test_to_dict(self, sample_table):
+        d = sample_table.to_dict()
+        assert d["page"] == 5
+        assert d["headers"] == ["Pin", "Name", "Function"]
+        assert len(d["rows"]) == 3
+
+    def test_to_json(self, sample_table):
+        import json
+
+        j = sample_table.to_json()
+        data = json.loads(j)
+        assert data["page"] == 5
+        assert len(data["rows"]) == 3
+
+    def test_to_dataframe_import_error(self, sample_table):
+        with patch.dict("sys.modules", {"pandas": None}):
+            # Simulate pandas not being installed
+            with pytest.raises(ImportError, match="pandas is required"):
+                sample_table.to_dataframe()
+
+    def test_repr(self, sample_table):
+        repr_str = repr(sample_table)
+        assert "page=5" in repr_str
+        assert "3 rows" in repr_str
+        assert "3 cols" in repr_str
+
+
+class TestDatasheetParser:
+    """Tests for DatasheetParser class."""
+
+    def test_file_not_found(self):
+        from kicad_tools.datasheet import DatasheetParser
+
+        with pytest.raises(FileNotFoundError, match="PDF file not found"):
+            DatasheetParser("/nonexistent/file.pdf")
+
+    def test_not_pdf_file(self, tmp_path):
+        from kicad_tools.datasheet import DatasheetParser
+
+        # Create a non-PDF file
+        txt_file = tmp_path / "test.txt"
+        txt_file.write_text("not a pdf")
+
+        with pytest.raises(ValueError, match="Expected a PDF file"):
+            DatasheetParser(txt_file)
+
+    def test_init_with_valid_pdf_path(self, tmp_path):
+        from kicad_tools.datasheet import DatasheetParser
+
+        # Create a fake PDF file (won't pass validation but tests init)
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4")
+
+        parser = DatasheetParser(pdf_file)
+        assert parser.path == pdf_file
+
+    def test_repr(self, tmp_path):
+        from kicad_tools.datasheet import DatasheetParser
+
+        pdf_file = tmp_path / "test.pdf"
+        pdf_file.write_bytes(b"%PDF-1.4")
+
+        # Mock page_count since we don't have a real PDF
+        with patch.object(DatasheetParser, "page_count", 10):
+            parser = DatasheetParser(pdf_file)
+            repr_str = repr(parser)
+            assert "test.pdf" in repr_str
+
+
+class TestDatasheetParserDependencies:
+    """Tests for dependency checking."""
+
+    def test_markitdown_import_error(self, tmp_path):
+        from kicad_tools.datasheet.parser import _check_markitdown
+
+        with patch.dict("sys.modules", {"markitdown": None}):
+            with pytest.raises(ImportError, match="markitdown is required"):
+                _check_markitdown()
+
+    def test_pymupdf_import_error(self, tmp_path):
+        from kicad_tools.datasheet.parser import _check_pymupdf
+
+        with patch.dict("sys.modules", {"fitz": None}):
+            with pytest.raises(ImportError, match="PyMuPDF is required"):
+                _check_pymupdf()
+
+    def test_pdfplumber_import_error(self, tmp_path):
+        from kicad_tools.datasheet.parser import _check_pdfplumber
+
+        with patch.dict("sys.modules", {"pdfplumber": None}):
+            with pytest.raises(ImportError, match="pdfplumber is required"):
+                _check_pdfplumber()
+
+
+# ============================================================================
+# CLI Tests
+# ============================================================================
+
+
 class TestDatasheetCLI:
     """Tests for datasheet CLI commands."""
 
+    # Search/download CLI tests
     def test_search_command_text_format(self, capsys):
         """Test search command with text output."""
         from kicad_tools.cli.datasheet_cmd import main
         from kicad_tools.datasheet.models import DatasheetResult, DatasheetSearchResult
 
-        with patch("kicad_tools.datasheet.DatasheetManager") as MockManager:
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
             mock_manager = MagicMock()
             MockManager.return_value = mock_manager
             mock_manager.search.return_value = DatasheetSearchResult(
@@ -825,7 +1072,7 @@ class TestDatasheetCLI:
         from kicad_tools.cli.datasheet_cmd import main
         from kicad_tools.datasheet.models import DatasheetSearchResult
 
-        with patch("kicad_tools.datasheet.DatasheetManager") as MockManager:
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
             mock_manager = MagicMock()
             MockManager.return_value = mock_manager
             mock_manager.search.return_value = DatasheetSearchResult(
@@ -843,7 +1090,7 @@ class TestDatasheetCLI:
         """Test list command with no cached datasheets."""
         from kicad_tools.cli.datasheet_cmd import main
 
-        with patch("kicad_tools.datasheet.DatasheetManager") as MockManager:
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
             mock_manager = MagicMock()
             MockManager.return_value = mock_manager
             mock_manager.list_cached.return_value = []
@@ -858,7 +1105,7 @@ class TestDatasheetCLI:
         """Test cache stats command."""
         from kicad_tools.cli.datasheet_cmd import main
 
-        with patch("kicad_tools.datasheet.DatasheetManager") as MockManager:
+        with patch("kicad_tools.datasheet.manager.DatasheetManager") as MockManager:
             mock_manager = MagicMock()
             MockManager.return_value = mock_manager
             mock_manager.cache_stats.return_value = {
@@ -877,3 +1124,82 @@ class TestDatasheetCLI:
             captured = capsys.readouterr()
             assert "10" in captured.out
             assert "50.5" in captured.out or "50.50" in captured.out
+
+    # PDF parsing CLI tests
+    def test_parse_pages_single(self):
+        from kicad_tools.cli.datasheet_cmd import _parse_pages
+
+        assert _parse_pages("5") == [5]
+
+    def test_parse_pages_range(self):
+        from kicad_tools.cli.datasheet_cmd import _parse_pages
+
+        assert _parse_pages("1-5") == [1, 2, 3, 4, 5]
+
+    def test_parse_pages_mixed(self):
+        from kicad_tools.cli.datasheet_cmd import _parse_pages
+
+        assert _parse_pages("1,3,5-7,10") == [1, 3, 5, 6, 7, 10]
+
+    def test_parse_pages_none(self):
+        from kicad_tools.cli.datasheet_cmd import _parse_pages
+
+        assert _parse_pages(None) is None
+
+    def test_parse_pages_duplicates(self):
+        from kicad_tools.cli.datasheet_cmd import _parse_pages
+
+        # Duplicates should be removed
+        assert _parse_pages("1,1,2,2,3") == [1, 2, 3]
+
+    def test_main_no_action(self):
+        from kicad_tools.cli.datasheet_cmd import main
+
+        # No action should print help and return 0
+        result = main([])
+        assert result == 0
+
+    def test_convert_file_not_found(self):
+        from kicad_tools.cli.datasheet_cmd import main
+
+        result = main(["convert", "/nonexistent/file.pdf"])
+        assert result == 1
+
+
+class TestModuleExports:
+    """Tests for module exports."""
+
+    def test_datasheet_module_exports(self):
+        from kicad_tools import datasheet
+
+        # Search/download exports
+        assert hasattr(datasheet, "DatasheetManager")
+        assert hasattr(datasheet, "Datasheet")
+        assert hasattr(datasheet, "DatasheetResult")
+        assert hasattr(datasheet, "DatasheetSearchResult")
+        assert hasattr(datasheet, "DatasheetCache")
+
+        # PDF parsing exports
+        assert hasattr(datasheet, "DatasheetParser")
+        assert hasattr(datasheet, "ParsedDatasheet")
+        assert hasattr(datasheet, "ExtractedImage")
+        assert hasattr(datasheet, "ExtractedTable")
+        assert hasattr(datasheet, "classify_image")
+
+    def test_datasheet_init_exports(self):
+        from kicad_tools.datasheet import (
+            DatasheetManager,
+            DatasheetParser,
+            ExtractedImage,
+            ExtractedTable,
+            ParsedDatasheet,
+            classify_image,
+        )
+
+        # All exports should be importable
+        assert DatasheetManager is not None
+        assert DatasheetParser is not None
+        assert ParsedDatasheet is not None
+        assert ExtractedImage is not None
+        assert ExtractedTable is not None
+        assert classify_image is not None
