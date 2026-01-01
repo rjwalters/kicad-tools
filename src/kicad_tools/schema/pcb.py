@@ -393,6 +393,90 @@ class Zone:
 
 
 @dataclass
+class GraphicLine:
+    """PCB graphic line element (gr_line).
+
+    Used for board outlines on Edge.Cuts layer and other graphic elements.
+    """
+
+    start: tuple[float, float]
+    end: tuple[float, float]
+    layer: str
+    width: float = 0.1
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> GraphicLine:
+        """Parse graphic line from S-expression."""
+        line = cls(
+            start=(0.0, 0.0),
+            end=(0.0, 0.0),
+            layer="",
+        )
+
+        if start := sexp.find("start"):
+            line.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            line.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+        if layer := sexp.find("layer"):
+            line.layer = layer.get_string(0) or ""
+        if width := sexp.find("width"):
+            line.width = width.get_float(0) or 0.1
+        if stroke := sexp.find("stroke"):
+            # KiCad 8+ uses stroke instead of width
+            if stroke_width := stroke.find("width"):
+                line.width = stroke_width.get_float(0) or 0.1
+        if uuid := sexp.find("uuid"):
+            line.uuid = uuid.get_string(0) or ""
+
+        return line
+
+
+@dataclass
+class GraphicArc:
+    """PCB graphic arc element (gr_arc).
+
+    Used for curved board outlines on Edge.Cuts layer.
+    """
+
+    start: tuple[float, float]
+    mid: tuple[float, float]
+    end: tuple[float, float]
+    layer: str
+    width: float = 0.1
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> GraphicArc:
+        """Parse graphic arc from S-expression."""
+        arc = cls(
+            start=(0.0, 0.0),
+            mid=(0.0, 0.0),
+            end=(0.0, 0.0),
+            layer="",
+        )
+
+        if start := sexp.find("start"):
+            arc.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if mid := sexp.find("mid"):
+            arc.mid = (mid.get_float(0) or 0.0, mid.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            arc.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+        if layer := sexp.find("layer"):
+            arc.layer = layer.get_string(0) or ""
+        if width := sexp.find("width"):
+            arc.width = width.get_float(0) or 0.1
+        if stroke := sexp.find("stroke"):
+            # KiCad 8+ uses stroke instead of width
+            if stroke_width := stroke.find("width"):
+                arc.width = stroke_width.get_float(0) or 0.1
+        if uuid := sexp.find("uuid"):
+            arc.uuid = uuid.get_string(0) or ""
+
+        return arc
+
+
+@dataclass
 class StackupLayer:
     """Stackup layer definition."""
 
@@ -434,6 +518,8 @@ class PCB:
         self._segments: list[Segment] = []
         self._vias: list[Via] = []
         self._zones: list[Zone] = []
+        self._graphic_lines: list[GraphicLine] = []
+        self._graphic_arcs: list[GraphicArc] = []
         self._setup: Setup | None = None
         self._title_block: dict[str, str] = {}
         self._parse()
@@ -465,6 +551,12 @@ class PCB:
             elif tag == "zone":
                 zone = Zone.from_sexp(child)
                 self._zones.append(zone)
+            elif tag == "gr_line":
+                line = GraphicLine.from_sexp(child)
+                self._graphic_lines.append(line)
+            elif tag == "gr_arc":
+                arc = GraphicArc.from_sexp(child)
+                self._graphic_arcs.append(arc)
             elif tag == "setup":
                 self._parse_setup(child)
             elif tag == "title_block":
@@ -638,6 +730,113 @@ class PCB:
     def zones(self) -> list[Zone]:
         """All zones (copper pours)."""
         return self._zones
+
+    @property
+    def graphic_lines(self) -> list[GraphicLine]:
+        """All graphic lines."""
+        return self._graphic_lines
+
+    @property
+    def graphic_arcs(self) -> list[GraphicArc]:
+        """All graphic arcs."""
+        return self._graphic_arcs
+
+    def get_board_outline(self) -> list[tuple[float, float]]:
+        """Extract board outline polygon from Edge.Cuts layer.
+
+        Returns an ordered list of (x, y) points forming the board outline.
+        Only includes line segments on the Edge.Cuts layer.
+        Arc segments are approximated by their start and end points.
+
+        Returns:
+            List of (x, y) coordinate tuples in mm. Empty list if no outline found.
+        """
+        # Collect all Edge.Cuts segments
+        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
+        edge_arcs = [arc for arc in self._graphic_arcs if arc.layer == "Edge.Cuts"]
+
+        if not edge_lines and not edge_arcs:
+            return []
+
+        # Build a list of all line segments (including arc endpoints)
+        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+        for line in edge_lines:
+            segments.append((line.start, line.end))
+
+        for arc in edge_arcs:
+            # For arcs, include start->mid and mid->end as approximation
+            segments.append((arc.start, arc.mid))
+            segments.append((arc.mid, arc.end))
+
+        if not segments:
+            return []
+
+        # Build ordered polygon by connecting segments
+        # Start with the first segment
+        polygon: list[tuple[float, float]] = [segments[0][0], segments[0][1]]
+        used = {0}
+
+        # Keep finding the next connected segment
+        while len(used) < len(segments):
+            current_end = polygon[-1]
+            found = False
+
+            for i, (start, end) in enumerate(segments):
+                if i in used:
+                    continue
+
+                # Check if this segment connects to current end
+                if self._points_close(current_end, start):
+                    polygon.append(end)
+                    used.add(i)
+                    found = True
+                    break
+                elif self._points_close(current_end, end):
+                    polygon.append(start)
+                    used.add(i)
+                    found = True
+                    break
+
+            if not found:
+                # No more connected segments found
+                break
+
+        return polygon
+
+    @staticmethod
+    def _points_close(
+        p1: tuple[float, float], p2: tuple[float, float], tolerance: float = 0.001
+    ) -> bool:
+        """Check if two points are within tolerance distance."""
+        dx = p1[0] - p2[0]
+        dy = p1[1] - p2[1]
+        return (dx * dx + dy * dy) < (tolerance * tolerance)
+
+    def get_board_outline_segments(
+        self,
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Get board outline as a list of line segments.
+
+        Returns all Edge.Cuts graphic elements as line segments.
+        More useful for distance calculations than the polygon.
+
+        Returns:
+            List of ((x1, y1), (x2, y2)) tuples representing line segments.
+        """
+        segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+        for line in self._graphic_lines:
+            if line.layer == "Edge.Cuts":
+                segments.append((line.start, line.end))
+
+        for arc in self._graphic_arcs:
+            if arc.layer == "Edge.Cuts":
+                # Approximate arc with two segments through midpoint
+                segments.append((arc.start, arc.mid))
+                segments.append((arc.mid, arc.end))
+
+        return segments
 
     @property
     def setup(self) -> Setup | None:

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
+from .rules.edge import EdgeClearanceRule
 from .violations import DRCResults
 
 if TYPE_CHECKING:
@@ -120,13 +121,15 @@ class DRCChecker:
     def check_edge_clearances(self) -> DRCResults:
         """Check edge clearance rules (copper-to-board-edge).
 
+        Validates that all copper elements (traces, pads, zones) and holes
+        (vias, through-hole pads) maintain minimum clearance from the board
+        edge as specified by manufacturer design rules.
+
         Returns:
             DRCResults containing edge clearance violations
-
-        Note:
-            This is a stub method. Actual implementation is in issue #95.
         """
-        return DRCResults(rules_checked=0)
+        rule = EdgeClearanceRule()
+        return rule.check(self.pcb, self.design_rules)
 
     def check_silkscreen(self) -> DRCResults:
         """Check silkscreen rules (line width, text height, over-pad).

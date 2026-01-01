@@ -397,6 +397,12 @@ class TestModuleImports:
 
         assert ClearanceRule is not None
 
+    def test_import_edge_clearance_rule(self):
+        """Test importing EdgeClearanceRule."""
+        from kicad_tools.validate.rules import EdgeClearanceRule
+
+        assert EdgeClearanceRule is not None
+
 
 # PCB with clearance violations for testing
 CLEARANCE_VIOLATION_PCB = """(kicad_pcb
@@ -499,6 +505,49 @@ DIFFERENT_LAYER_PCB = """(kicad_pcb
   (net 2 "NET2")
   (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg1"))
   (segment (start 100 100) (end 110 100) (width 0.2) (layer "B.Cu") (net 2) (uuid "seg2"))
+)
+"""
+
+# PCB with edge cuts for testing edge clearance
+EDGE_CLEARANCE_TEST_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 0) (end 50 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+  (segment (start 0.1 25) (end 10 25) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-close"))
+  (segment (start 25 25) (end 35 25) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-ok"))
+  (via (at 0.2 30) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-close"))
+  (via (at 25 30) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ok"))
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "fp-close")
+    (at 1 40)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "fp-ok")
+    (at 25 40)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
 )
 """
 
@@ -764,3 +813,266 @@ class TestClearanceRuleDistanceCalculations:
         assert elem.layer == "*"  # Vias span layers
         assert elem.net_number == 1
         assert elem.geometry == (100.0, 100.0, 0.8, 0.8)
+
+
+class TestGraphicLineParsing:
+    """Tests for GraphicLine parsing."""
+
+    def test_parse_graphic_lines(self, tmp_path: Path):
+        """Test that graphic lines are parsed from PCB."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+
+        assert len(pcb.graphic_lines) == 4
+        assert all(line.layer == "Edge.Cuts" for line in pcb.graphic_lines)
+
+    def test_graphic_line_properties(self, tmp_path: Path):
+        """Test graphic line properties are parsed correctly."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        line = pcb.graphic_lines[0]
+
+        assert line.start == (0.0, 0.0)
+        assert line.end == (50.0, 0.0)
+        assert line.layer == "Edge.Cuts"
+        assert line.width == pytest.approx(0.1)
+
+
+class TestBoardOutline:
+    """Tests for board outline extraction."""
+
+    def test_get_board_outline(self, tmp_path: Path):
+        """Test extracting board outline from Edge.Cuts."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        # Should have 5 points (closed rectangle: 4 corners + return to start)
+        assert len(outline) >= 4
+
+    def test_get_board_outline_segments(self, tmp_path: Path):
+        """Test getting board outline as segments."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        segments = pcb.get_board_outline_segments()
+
+        # Should have 4 segments for the rectangle
+        assert len(segments) == 4
+        for seg_start, seg_end in segments:
+            assert isinstance(seg_start, tuple)
+            assert isinstance(seg_end, tuple)
+            assert len(seg_start) == 2
+            assert len(seg_end) == 2
+
+    def test_empty_board_outline(self, tmp_path: Path):
+        """Test empty outline when no Edge.Cuts graphics."""
+        from kicad_tools.schema.pcb import PCB
+
+        # PCB without Edge.Cuts
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+        )"""
+        pcb_file = tmp_path / "no_edge.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        assert outline == []
+
+
+class TestEdgeClearanceRule:
+    """Tests for EdgeClearanceRule."""
+
+    def test_edge_clearance_rule_properties(self):
+        """Test EdgeClearanceRule class properties."""
+        from kicad_tools.validate.rules.edge import EdgeClearanceRule
+
+        rule = EdgeClearanceRule()
+        assert rule.rule_id == "edge_clearance"
+        assert rule.name == "Edge Clearance"
+
+    def test_trace_too_close_to_edge(self, tmp_path: Path):
+        """Test that traces too close to edge are detected."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        # Should find violations for elements too close to edge
+        trace_violations = [v for v in results if "edge_clearance_trace" in v.rule_id]
+        assert len(trace_violations) > 0
+
+    def test_via_too_close_to_edge(self, tmp_path: Path):
+        """Test that vias too close to edge are detected."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        # Should find violations for via too close to edge
+        via_violations = [v for v in results if "edge_clearance_via" in v.rule_id]
+        assert len(via_violations) > 0
+
+    def test_pad_too_close_to_edge(self, tmp_path: Path):
+        """Test that pads too close to edge are detected."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        # Should find violations for pad too close to edge
+        pad_violations = [v for v in results if "edge_clearance_pad" in v.rule_id]
+        assert len(pad_violations) > 0
+
+    def test_no_violations_for_centered_elements(self, tmp_path: Path):
+        """Test that centered elements don't trigger violations."""
+        # PCB with elements well within clearance limits
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (net 1 "GND")
+          (gr_line (start 0 0) (end 100 0) (layer "Edge.Cuts") (width 0.1))
+          (gr_line (start 100 0) (end 100 100) (layer "Edge.Cuts") (width 0.1))
+          (gr_line (start 100 100) (end 0 100) (layer "Edge.Cuts") (width 0.1))
+          (gr_line (start 0 100) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+          (segment (start 50 50) (end 60 50) (width 0.2) (layer "F.Cu") (net 1))
+          (via (at 55 55) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))
+        )"""
+
+        pcb_file = tmp_path / "centered.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        # Elements at center should not trigger violations
+        assert len(results.errors) == 0
+
+    def test_no_violations_without_edge_cuts(self, tmp_path: Path):
+        """Test that no violations are reported when there's no board outline."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (net 1 "GND")
+          (segment (start 0 0) (end 10 0) (width 0.2) (layer "F.Cu") (net 1))
+        )"""
+
+        pcb_file = tmp_path / "no_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        # No outline = no edge clearance checks
+        assert len(results) == 0
+
+    def test_violation_includes_location_and_values(self, tmp_path: Path):
+        """Test that violations include location and clearance values."""
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(EDGE_CLEARANCE_TEST_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_edge_clearances()
+
+        # Get first violation
+        if results.errors:
+            v = results.errors[0]
+            assert v.location is not None
+            assert v.actual_value is not None
+            assert v.required_value is not None
+            assert v.actual_value < v.required_value
+
+
+class TestPointToSegmentDistance:
+    """Tests for point-to-segment distance calculation."""
+
+    def test_point_on_segment(self):
+        """Test distance is 0 for point on segment."""
+        from kicad_tools.validate.rules.edge import EdgeClearanceRule
+
+        rule = EdgeClearanceRule()
+        dist = rule._point_to_segment_distance((5, 0), (0, 0), (10, 0))
+        assert dist == pytest.approx(0.0)
+
+    def test_point_perpendicular_to_segment(self):
+        """Test distance for point perpendicular to segment."""
+        from kicad_tools.validate.rules.edge import EdgeClearanceRule
+
+        rule = EdgeClearanceRule()
+        dist = rule._point_to_segment_distance((5, 3), (0, 0), (10, 0))
+        assert dist == pytest.approx(3.0)
+
+    def test_point_closest_to_start(self):
+        """Test distance when closest point is segment start."""
+        from kicad_tools.validate.rules.edge import EdgeClearanceRule
+
+        rule = EdgeClearanceRule()
+        dist = rule._point_to_segment_distance((-3, 4), (0, 0), (10, 0))
+        assert dist == pytest.approx(5.0)  # 3-4-5 triangle
+
+    def test_point_closest_to_end(self):
+        """Test distance when closest point is segment end."""
+        from kicad_tools.validate.rules.edge import EdgeClearanceRule
+
+        rule = EdgeClearanceRule()
+        dist = rule._point_to_segment_distance((13, 4), (0, 0), (10, 0))
+        assert dist == pytest.approx(5.0)  # 3-4-5 triangle
+
+    def test_zero_length_segment(self):
+        """Test distance to zero-length segment (point)."""
+        from kicad_tools.validate.rules.edge import EdgeClearanceRule
+
+        rule = EdgeClearanceRule()
+        dist = rule._point_to_segment_distance((3, 4), (0, 0), (0, 0))
+        assert dist == pytest.approx(5.0)  # 3-4-5 triangle
