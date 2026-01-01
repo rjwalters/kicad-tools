@@ -5,6 +5,8 @@ from unittest.mock import Mock
 import pytest
 
 from kicad_tools.schematic.blocks import (
+    BarrelJackInput,
+    BatteryInput,
     CircuitBlock,
     CrystalOscillator,
     DebugHeader,
@@ -14,10 +16,17 @@ from kicad_tools.schematic.blocks import (
     MCUBlock,
     OscillatorBlock,
     Port,
+    USBPowerInput,
     create_3v3_ldo,
+    create_12v_barrel_jack,
+    create_jtag_header,
+    create_lipo_battery,
     create_mclk_oscillator,
     create_power_led,
     create_status_led,
+    create_swd_header,
+    create_tag_connect_header,
+    create_usb_power,
 )
 
 
@@ -445,35 +454,196 @@ class TestDebugHeaderMocked:
 
     @pytest.fixture
     def mock_schematic(self):
-        """Create mock schematic."""
+        """Create mock schematic with support for all header types."""
         sch = Mock()
 
-        def create_mock_header(symbol, x, y, ref, *args, **kwargs):
-            header = Mock()
-            header.pin_position.side_effect = lambda name: {
-                "1": (x - 10, y - 7.5),
-                "2": (x - 10, y - 2.5),
-                "3": (x - 10, y + 2.5),
-                "4": (x - 10, y + 7.5),
-            }.get(name, (0, 0))
-            return header
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            # Generate pin positions based on symbol type
+            if "Conn" in symbol or "Connector" in symbol:
+                # Header pins
+                def header_pin_pos(name):
+                    try:
+                        pin_num = int(name)
+                        return (x - 10, y + (pin_num - 1) * 2.54)
+                    except ValueError:
+                        return (x, y)
 
-        sch.add_symbol = Mock(side_effect=create_mock_header)
+                comp.pin_position = Mock(side_effect=header_pin_pos)
+            else:
+                # Resistor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
         return sch
 
-    def test_debug_header_creation(self, mock_schematic):
-        """Create debug header."""
-        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1", value="SWD")
+    def test_debug_header_swd_10pin(self, mock_schematic):
+        """Create 10-pin SWD debug header (default)."""
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
 
+        assert header.interface == "swd"
+        assert header.pins == 10
+        assert "VCC" in header.ports
+        assert "SWDIO" in header.ports
+        assert "SWCLK" in header.ports
+        assert "GND" in header.ports
+        assert "SWO" in header.ports
+        assert "NRST" in header.ports
+        assert "HEADER" in header.components
+
+    def test_debug_header_swd_6pin(self, mock_schematic):
+        """Create 6-pin SWD debug header."""
+        header = DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=6, ref="J1")
+
+        assert header.interface == "swd"
+        assert header.pins == 6
+        assert "VCC" in header.ports
+        assert "SWDIO" in header.ports
+        assert "SWCLK" in header.ports
+        assert "GND" in header.ports
+        assert "NRST" in header.ports
+        # 6-pin doesn't have SWO
+        assert "SWO" not in header.ports
+
+    def test_debug_header_jtag(self, mock_schematic):
+        """Create 20-pin JTAG debug header."""
+        header = DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=20, ref="J1")
+
+        assert header.interface == "jtag"
+        assert header.pins == 20
+        assert "VCC" in header.ports
+        assert "GND" in header.ports
+        assert "TDI" in header.ports
+        assert "TDO" in header.ports
+        assert "TMS" in header.ports
+        assert "TCK" in header.ports
+        assert "TRST" in header.ports
+        assert "NRST" in header.ports
+        assert "RTCK" in header.ports
+
+    def test_debug_header_tag_connect_10pin(self, mock_schematic):
+        """Create 10-pin Tag-Connect debug header."""
+        header = DebugHeader(
+            mock_schematic, x=100, y=100, interface="tag-connect", pins=10, ref="J1"
+        )
+
+        assert header.interface == "tag-connect"
+        assert header.pins == 10
         assert "VCC" in header.ports
         assert "SWDIO" in header.ports
         assert "SWCLK" in header.ports
         assert "GND" in header.ports
 
-    def test_debug_header_components(self, mock_schematic):
-        """Debug header has header component."""
+    def test_debug_header_tag_connect_6pin(self, mock_schematic):
+        """Create 6-pin Tag-Connect debug header."""
+        header = DebugHeader(
+            mock_schematic, x=100, y=100, interface="tag-connect", pins=6, ref="J1"
+        )
+
+        assert header.interface == "tag-connect"
+        assert header.pins == 6
+
+    def test_debug_header_with_series_resistors(self, mock_schematic):
+        """Create debug header with series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=10,
+            series_resistors=True,
+            ref="J1",
+        )
+
+        assert header.series_resistors is True
+        # Should have resistors for protected signals
+        assert len(header.resistors) > 0
+        # Components should include resistors
+        assert any("R_" in k for k in header.components.keys())
+        # Wires should be added to connect resistors to header
+        assert mock_schematic.add_wire.called
+
+    def test_debug_header_without_series_resistors(self, mock_schematic):
+        """Create debug header without series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=10,
+            series_resistors=False,
+            ref="J1",
+        )
+
+        assert header.series_resistors is False
+        assert len(header.resistors) == 0
+
+    def test_debug_header_invalid_interface(self, mock_schematic):
+        """Invalid interface raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="invalid", ref="J1")
+        assert "Invalid interface" in str(exc.value)
+
+    def test_debug_header_invalid_pins_for_swd(self, mock_schematic):
+        """Invalid pin count for SWD raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=20, ref="J1")
+        assert "Invalid pin count" in str(exc.value)
+
+    def test_debug_header_invalid_pins_for_jtag(self, mock_schematic):
+        """Invalid pin count for JTAG raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=10, ref="J1")
+        assert "Invalid pin count" in str(exc.value)
+
+    def test_debug_header_connect_to_rails(self, mock_schematic):
+        """Connect debug header to power rails."""
         header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
-        assert "HEADER" in header.components
+        header.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VCC and GND
+        assert mock_schematic.add_wire.called
+        # Should add junctions by default
+        assert mock_schematic.add_junction.called
+
+    def test_debug_header_connect_no_junctions(self, mock_schematic):
+        """Connect debug header without junctions."""
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
+        mock_schematic.add_junction.reset_mock()
+        header.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        # Should not add junctions
+        assert not mock_schematic.add_junction.called
+
+    def test_debug_header_value_labels(self, mock_schematic):
+        """Debug header value labels match interface type."""
+        # Create headers of different types to verify they initialize correctly
+        DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=10)
+        DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=20)
+        DebugHeader(mock_schematic, x=100, y=100, interface="tag-connect", pins=10)
+
+        # Verify add_symbol was called for each header
+        assert mock_schematic.add_symbol.call_count >= 3
+
+    def test_debug_header_custom_resistor_value(self, mock_schematic):
+        """Custom resistor value for series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            series_resistors=True,
+            resistor_value="22R",
+            ref="J1",
+        )
+
+        # Verify resistors were created
+        assert len(header.resistors) > 0
 
 
 class TestMCUBlockMocked:
@@ -781,7 +951,19 @@ class TestFactoryFunctions:
 
         def create_mock_component(symbol, x, y, ref, *args, **kwargs):
             comp = Mock()
-            comp.pin_position.return_value = (x, y)
+            # Handle different component types
+            if "Conn" in symbol or "Connector" in symbol:
+                # Header with numbered pins
+                def header_pin_pos(name):
+                    try:
+                        pin_num = int(name)
+                        return (x - 10, y + (pin_num - 1) * 2.54)
+                    except ValueError:
+                        return (x, y)
+
+                comp.pin_position = Mock(side_effect=header_pin_pos)
+            else:
+                comp.pin_position.return_value = (x, y)
             return comp
 
         sch.add_symbol = Mock(side_effect=create_mock_component)
@@ -807,6 +989,59 @@ class TestFactoryFunctions:
         """Create MCLK oscillator."""
         osc = create_mclk_oscillator(mock_schematic, x=100, y=100, ref="Y1")
         assert isinstance(osc, OscillatorBlock)
+
+    def test_create_swd_header(self, mock_schematic):
+        """Create SWD debug header."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "swd"
+        assert header.pins == 10  # default
+
+    def test_create_swd_header_6pin(self, mock_schematic):
+        """Create 6-pin SWD debug header."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1", pins=6)
+        assert isinstance(header, DebugHeader)
+        assert header.pins == 6
+
+    def test_create_swd_header_with_protection(self, mock_schematic):
+        """Create SWD debug header with protection resistors."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1", with_protection=True)
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
+
+    def test_create_jtag_header(self, mock_schematic):
+        """Create JTAG debug header."""
+        header = create_jtag_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "jtag"
+        assert header.pins == 20
+
+    def test_create_jtag_header_with_protection(self, mock_schematic):
+        """Create JTAG debug header with protection resistors."""
+        header = create_jtag_header(mock_schematic, x=100, y=100, ref="J1", with_protection=True)
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
+
+    def test_create_tag_connect_header(self, mock_schematic):
+        """Create Tag-Connect debug header."""
+        header = create_tag_connect_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "tag-connect"
+        assert header.pins == 10  # default
+
+    def test_create_tag_connect_header_6pin(self, mock_schematic):
+        """Create 6-pin Tag-Connect debug header."""
+        header = create_tag_connect_header(mock_schematic, x=100, y=100, ref="J1", pins=6)
+        assert isinstance(header, DebugHeader)
+        assert header.pins == 6
+
+    def test_create_tag_connect_header_with_protection(self, mock_schematic):
+        """Create Tag-Connect debug header with protection resistors."""
+        header = create_tag_connect_header(
+            mock_schematic, x=100, y=100, ref="J1", with_protection=True
+        )
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
 
 
 class TestBlockIntegration:
@@ -881,3 +1116,324 @@ class TestBlockIntegration:
         vcc_pos = led.ports["VCC"]
         assert isinstance(vcc_pos, tuple)
         assert len(vcc_pos) == 2
+
+
+class TestBarrelJackInputMocked:
+    """Tests for BarrelJackInput with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "Barrel" in str(symbol):
+                # Barrel jack pins
+                comp.pin_position.side_effect = lambda name: {
+                    "Tip": (x - 10, y),
+                    "Sleeve": (x - 10, y + 10),
+                    "Switch": (x - 10, y + 5),
+                }.get(name, (0, 0))
+            elif "PMOS" in str(symbol) or "Q_PMOS" in str(symbol):
+                # P-FET pins
+                comp.pin_position.side_effect = lambda name: {
+                    "G": (x, y + 5),
+                    "S": (x - 5, y),
+                    "D": (x + 5, y),
+                }.get(name, (0, 0))
+            elif "Schottky" in str(symbol):
+                # Diode pins
+                comp.pin_position.side_effect = lambda name: {
+                    "A": (x - 5, y),
+                    "K": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_barrel_jack_creation_pfet(self, mock_schematic):
+        """Create barrel jack with P-FET protection."""
+        jack = BarrelJackInput(
+            mock_schematic, x=100, y=100, voltage="12V", protection="pfet"
+        )
+
+        assert jack.schematic == mock_schematic
+        assert jack.x == 100
+        assert jack.y == 100
+        assert "VIN" in jack.ports
+        assert "VOUT" in jack.ports
+        assert "GND" in jack.ports
+        assert "JACK" in jack.components
+        assert "Q" in jack.components
+        assert "C_FILT" in jack.components
+
+    def test_barrel_jack_creation_diode(self, mock_schematic):
+        """Create barrel jack with diode protection."""
+        jack = BarrelJackInput(
+            mock_schematic, x=100, y=100, voltage="9V", protection="diode"
+        )
+
+        assert "JACK" in jack.components
+        assert "D" in jack.components
+        assert "C_FILT" in jack.components
+        assert "Q" not in jack.components
+
+    def test_barrel_jack_creation_no_protection(self, mock_schematic):
+        """Create barrel jack without protection."""
+        jack = BarrelJackInput(
+            mock_schematic, x=100, y=100, voltage="5V", protection="none"
+        )
+
+        assert "JACK" in jack.components
+        assert "C_FILT" in jack.components
+        assert "Q" not in jack.components
+        assert "D" not in jack.components
+
+    def test_barrel_jack_adds_wires(self, mock_schematic):
+        """Barrel jack wires components together."""
+        BarrelJackInput(mock_schematic, x=100, y=100, protection="pfet")
+        # Should add wires for: jack to pfet, gate to gnd, pfet to cap
+        assert mock_schematic.add_wire.call_count >= 3
+
+    def test_barrel_jack_connect_to_rails(self, mock_schematic):
+        """Connect barrel jack to ground rail."""
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, protection="pfet")
+        jack.connect_to_rails(gnd_rail_y=150)
+
+        # Should add wires for cap negative and jack sleeve to GND rail
+        wire_count = mock_schematic.add_wire.call_count
+        jack.connect_to_rails(gnd_rail_y=150)
+        assert mock_schematic.add_wire.call_count > wire_count
+
+    def test_barrel_jack_connect_with_junctions(self, mock_schematic):
+        """Connect barrel jack adds junctions when requested."""
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, protection="pfet")
+        jack.connect_to_rails(gnd_rail_y=150, add_junctions=True)
+
+        assert mock_schematic.add_junction.called
+
+
+class TestUSBPowerInputMocked:
+    """Tests for USBPowerInput with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "Polyfuse" in str(symbol) or "Fuse" in str(symbol):
+                # Fuse pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_usb_power_creation_fuse(self, mock_schematic):
+        """Create USB power input with fuse protection."""
+        usb = USBPowerInput(
+            mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF"
+        )
+
+        assert usb.schematic == mock_schematic
+        assert "VBUS_IN" in usb.ports
+        assert "V5" in usb.ports
+        assert "GND" in usb.ports
+        assert "F" in usb.components
+        assert "C_FILT" in usb.components
+
+    def test_usb_power_creation_polyfuse(self, mock_schematic):
+        """Create USB power input with polyfuse protection."""
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="polyfuse")
+
+        assert "F" in usb.components
+        assert "C_FILT" in usb.components
+
+    def test_usb_power_creation_no_protection(self, mock_schematic):
+        """Create USB power input without protection."""
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="none")
+
+        assert "F" not in usb.components
+        assert "C_FILT" in usb.components
+
+    def test_usb_power_adds_wires(self, mock_schematic):
+        """USB power wires components together."""
+        USBPowerInput(mock_schematic, x=100, y=100, protection="fuse")
+        # Should add wires for: input to fuse, fuse to cap
+        assert mock_schematic.add_wire.call_count >= 2
+
+    def test_usb_power_connect_to_rails(self, mock_schematic):
+        """Connect USB power to ground rail."""
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="fuse")
+        usb.connect_to_rails(gnd_rail_y=150)
+
+        # Should add wire for cap negative to GND rail
+        assert mock_schematic.add_wire.call_count >= 3
+
+    def test_usb_power_connect_with_junctions(self, mock_schematic):
+        """Connect USB power adds junctions when requested."""
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="fuse")
+        usb.connect_to_rails(gnd_rail_y=150, add_junctions=True)
+
+        assert mock_schematic.add_junction.called
+
+
+class TestBatteryInputMocked:
+    """Tests for BatteryInput with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "Conn" in str(symbol):
+                # Connector pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 10, y - 2.5),
+                    "2": (x - 10, y + 2.5),
+                }.get(name, (0, 0))
+            elif "PMOS" in str(symbol) or "Q_PMOS" in str(symbol):
+                # P-FET pins
+                comp.pin_position.side_effect = lambda name: {
+                    "G": (x, y + 5),
+                    "S": (x - 5, y),
+                    "D": (x + 5, y),
+                }.get(name, (0, 0))
+            elif "Schottky" in str(symbol):
+                # Diode pins
+                comp.pin_position.side_effect = lambda name: {
+                    "A": (x - 5, y),
+                    "K": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_battery_input_creation_pfet(self, mock_schematic):
+        """Create battery input with P-FET protection."""
+        batt = BatteryInput(
+            mock_schematic,
+            x=100,
+            y=100,
+            voltage="3.7V",
+            connector="JST-PH",
+            protection="pfet",
+        )
+
+        assert batt.schematic == mock_schematic
+        assert batt.voltage == "3.7V"
+        assert batt.connector_type == "JST-PH"
+        assert "VBAT_IN" in batt.ports
+        assert "VBAT" in batt.ports
+        assert "GND" in batt.ports
+        assert "CONN" in batt.components
+        assert "Q" in batt.components
+        assert "C_FILT" in batt.components
+
+    def test_battery_input_creation_diode(self, mock_schematic):
+        """Create battery input with diode protection."""
+        batt = BatteryInput(
+            mock_schematic, x=100, y=100, voltage="7.4V", protection="diode"
+        )
+
+        assert "CONN" in batt.components
+        assert "D" in batt.components
+        assert "C_FILT" in batt.components
+        assert "Q" not in batt.components
+
+    def test_battery_input_creation_no_protection(self, mock_schematic):
+        """Create battery input without protection."""
+        batt = BatteryInput(mock_schematic, x=100, y=100, protection="none")
+
+        assert "CONN" in batt.components
+        assert "C_FILT" in batt.components
+        assert "Q" not in batt.components
+        assert "D" not in batt.components
+
+    def test_battery_input_adds_wires(self, mock_schematic):
+        """Battery input wires components together."""
+        BatteryInput(mock_schematic, x=100, y=100, protection="pfet")
+        # Should add wires for: conn to pfet, gate to gnd, pfet to cap
+        assert mock_schematic.add_wire.call_count >= 3
+
+    def test_battery_input_connect_to_rails(self, mock_schematic):
+        """Connect battery input to ground rail."""
+        batt = BatteryInput(mock_schematic, x=100, y=100, protection="pfet")
+        batt.connect_to_rails(gnd_rail_y=150)
+
+        # Should add wires for cap negative and connector negative to GND rail
+        assert mock_schematic.add_wire.call_count >= 5
+
+    def test_battery_input_connect_with_junctions(self, mock_schematic):
+        """Connect battery input adds junctions when requested."""
+        batt = BatteryInput(mock_schematic, x=100, y=100, protection="pfet")
+        batt.connect_to_rails(gnd_rail_y=150, add_junctions=True)
+
+        assert mock_schematic.add_junction.called
+
+
+class TestPowerInputFactoryFunctions:
+    """Tests for power input factory functions."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.return_value = (x, y)
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        return sch
+
+    def test_create_12v_barrel_jack(self, mock_schematic):
+        """Create 12V barrel jack."""
+        jack = create_12v_barrel_jack(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(jack, BarrelJackInput)
+
+    def test_create_usb_power(self, mock_schematic):
+        """Create USB power input."""
+        usb = create_usb_power(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(usb, USBPowerInput)
+
+    def test_create_lipo_battery(self, mock_schematic):
+        """Create LiPo battery input."""
+        batt = create_lipo_battery(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(batt, BatteryInput)

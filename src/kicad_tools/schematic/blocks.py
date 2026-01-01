@@ -27,10 +27,10 @@ Usage:
     led.connect_to_rails(RAIL_3V3, RAIL_GND)
 """
 
-import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import contextlib
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic, SymbolInstance
 
@@ -528,6 +528,7 @@ class OscillatorBlock(CircuitBlock):
         sch.add_junction(gnd_pos[0], gnd_rail_y)
 
 
+
 class CrystalOscillator(CircuitBlock):
     """
     Crystal oscillator with load capacitors.
@@ -705,29 +706,110 @@ class CrystalOscillator(CircuitBlock):
 
 class DebugHeader(CircuitBlock):
     """
-    SWD debug header for ARM Cortex-M microcontrollers.
+    Debug header for ARM Cortex-M microcontrollers (SWD, JTAG, Tag-Connect).
 
-    Schematic:
-        VCC ──── [1] ┐
-        SWDIO ── [2] │ Header
-        SWCLK ── [3] │
-        GND ──── [4] ┘
+    Supports standard debug interfaces with optional series resistors for protection.
 
-    Ports:
-        - VCC: Power (pin 1)
-        - SWDIO: Debug data (pin 2)
-        - SWCLK: Debug clock (pin 3)
-        - GND: Ground (pin 4)
+    Example:
+        # ARM SWD header (standard 10-pin Cortex Debug)
+        swd = DebugHeader(
+            sch,
+            x=250, y=50,
+            interface="swd",
+            pins=10,
+            series_resistors=True,
+            ref="J1",
+        )
+
+        # Wire to MCU
+        sch.add_wire(swd.port("SWDIO"), mcu.port("SWDIO"))
+        sch.add_wire(swd.port("SWCLK"), mcu.port("SWCLK"))
+        sch.add_wire(swd.port("NRST"), mcu.port("NRST"))
+
+    Interfaces:
+        - swd (6-pin): VCC, GND, SWDIO, SWCLK, NRST, SWO (optional)
+        - swd (10-pin): ARM Cortex Debug 10-pin (includes key pin)
+        - jtag (20-pin): Standard 20-pin ARM JTAG
+        - tag-connect (6/10-pin): Tag-Connect pogo-pin interface
+
+    Ports (SWD):
+        - VCC: Target VCC sense
+        - GND: Ground
+        - SWDIO: Debug data (bidirectional)
+        - SWCLK: Debug clock
+        - NRST: Reset (active low)
+        - SWO: Trace output (10-pin only)
+
+    Ports (JTAG):
+        - VCC, GND: Power
+        - TDI, TDO, TMS, TCK: JTAG signals
+        - TRST, NRST: Reset signals
     """
+
+    # Standard pinouts for each interface type
+    # Based on ARM Cortex Debug Connector specifications
+    SWD_6PIN_PINOUT = {
+        "1": "VCC",
+        "2": "SWDIO",
+        "3": "GND",
+        "4": "SWCLK",
+        "5": "GND",
+        "6": "NRST",
+    }
+
+    SWD_10PIN_PINOUT = {
+        "1": "VCC",
+        "2": "SWDIO",
+        "3": "GND",
+        "4": "SWCLK",
+        "5": "GND",
+        "6": "SWO",
+        "7": "KEY",  # No connect / key pin
+        "8": "NC",
+        "9": "GND",
+        "10": "NRST",
+    }
+
+    JTAG_20PIN_PINOUT = {
+        "1": "VCC",
+        "2": "VCC",
+        "3": "TRST",
+        "4": "GND",
+        "5": "TDI",
+        "6": "GND",
+        "7": "TMS",
+        "8": "GND",
+        "9": "TCK",
+        "10": "GND",
+        "11": "RTCK",
+        "12": "GND",
+        "13": "TDO",
+        "14": "GND",
+        "15": "NRST",
+        "16": "GND",
+        "17": "NC",
+        "18": "GND",
+        "19": "NC",
+        "20": "GND",
+    }
+
+    # Tag-Connect uses same pinout as SWD
+    TAG_CONNECT_6PIN_PINOUT = SWD_6PIN_PINOUT
+    TAG_CONNECT_10PIN_PINOUT = SWD_10PIN_PINOUT
 
     def __init__(
         self,
         sch: "Schematic",
         x: float,
         y: float,
+        interface: str = "swd",
+        pins: int = 10,
+        series_resistors: bool = False,
+        resistor_value: str = "10R",
         ref: str = "J1",
-        value: str = "SWD",
-        header_symbol: str = "Connector_Generic:Conn_01x04",
+        resistor_ref_start: int = 1,
+        header_symbol: str | None = None,
+        resistor_symbol: str = "Device:R",
     ):
         """
         Create a debug header block.
@@ -736,28 +818,188 @@ class DebugHeader(CircuitBlock):
             sch: Schematic to add to
             x: X coordinate of header
             y: Y coordinate of header center
+            interface: Debug interface type: "swd", "jtag", or "tag-connect"
+            pins: Number of pins (6 or 10 for SWD/Tag-Connect, 20 for JTAG)
+            series_resistors: If True, add series resistors for protection
+            resistor_value: Value for series resistors (default 10R)
             ref: Header reference designator
-            value: Header value label
-            header_symbol: KiCad symbol for 4-pin header
+            resistor_ref_start: Starting reference number for resistors
+            header_symbol: KiCad symbol for header (auto-selected if None)
+            resistor_symbol: KiCad symbol for resistors
         """
         super().__init__()
         self.schematic = sch
         self.x = x
         self.y = y
+        self.interface = interface.lower()
+        self.pins = pins
+        self.series_resistors = series_resistors
+
+        # Validate interface and pin count
+        self._validate_config()
+
+        # Get pinout for this configuration
+        self.pinout = self._get_pinout()
+
+        # Determine header symbol if not specified
+        if header_symbol is None:
+            header_symbol = self._get_default_symbol()
 
         # Place header
+        value = self._get_value_label()
         self.header = sch.add_symbol(header_symbol, x, y, ref, value)
-
         self.components = {"HEADER": self.header}
 
-        # Get pin positions (assuming standard 1x4 header)
-        # Pins are typically at 2.54mm spacing
-        self.ports = {
-            "VCC": self.header.pin_position("1"),
-            "SWDIO": self.header.pin_position("2"),
-            "SWCLK": self.header.pin_position("3"),
-            "GND": self.header.pin_position("4"),
+        # Get signals that need resistors (data lines, not power/ground)
+        protected_signals = self._get_protected_signals()
+
+        # Place series resistors if requested
+        self.resistors: dict[str, SymbolInstance] = {}
+        if series_resistors:
+            resistor_offset = 15  # mm to the left of header
+            r_idx = 0
+
+            for pin_num, signal in self.pinout.items():
+                if signal in protected_signals:
+                    r_ref = f"R{resistor_ref_start + r_idx}"
+                    # Calculate resistor position
+                    pin_pos = self.header.pin_position(pin_num)
+                    r_x = pin_pos[0] - resistor_offset
+                    r_y = pin_pos[1]
+
+                    resistor = sch.add_symbol(
+                        resistor_symbol, r_x, r_y, r_ref, resistor_value
+                    )
+                    self.resistors[signal] = resistor
+                    self.components[f"R_{signal}"] = resistor
+                    r_idx += 1
+
+                    # Wire resistor pin 2 to header pin
+                    r_pin2 = resistor.pin_position("2")
+                    sch.add_wire(r_pin2, pin_pos)
+
+        # Build ports dictionary
+        self.ports = self._build_ports()
+
+    def _validate_config(self) -> None:
+        """Validate interface and pin count combination."""
+        valid_configs = {
+            "swd": [6, 10],
+            "jtag": [20],
+            "tag-connect": [6, 10],
         }
+
+        if self.interface not in valid_configs:
+            raise ValueError(
+                f"Invalid interface '{self.interface}'. "
+                f"Valid options: {list(valid_configs.keys())}"
+            )
+
+        if self.pins not in valid_configs[self.interface]:
+            raise ValueError(
+                f"Invalid pin count {self.pins} for interface '{self.interface}'. "
+                f"Valid options: {valid_configs[self.interface]}"
+            )
+
+    def _get_pinout(self) -> dict[str, str]:
+        """Get pinout dictionary for current configuration."""
+        if self.interface == "swd":
+            return self.SWD_6PIN_PINOUT if self.pins == 6 else self.SWD_10PIN_PINOUT
+        elif self.interface == "tag-connect":
+            return (
+                self.TAG_CONNECT_6PIN_PINOUT
+                if self.pins == 6
+                else self.TAG_CONNECT_10PIN_PINOUT
+            )
+        else:  # jtag
+            return self.JTAG_20PIN_PINOUT
+
+    def _get_default_symbol(self) -> str:
+        """Get default KiCad symbol for current configuration."""
+        if self.interface == "tag-connect":
+            # Tag-Connect uses specific footprints but generic symbols
+            return f"Connector_Generic:Conn_01x{self.pins:02d}"
+        elif self.interface == "jtag":
+            return "Connector_Generic:Conn_02x10_Odd_Even"
+        else:  # swd
+            if self.pins == 10:
+                return "Connector_Generic:Conn_02x05_Odd_Even"
+            else:
+                return f"Connector_Generic:Conn_01x{self.pins:02d}"
+
+    def _get_value_label(self) -> str:
+        """Get value label for header."""
+        if self.interface == "tag-connect":
+            return f"Tag-Connect-{self.pins}"
+        elif self.interface == "jtag":
+            return "JTAG"
+        else:
+            return f"SWD-{self.pins}"
+
+    def _get_protected_signals(self) -> set[str]:
+        """Get set of signals that should have series resistors."""
+        # Data lines that benefit from protection
+        # Exclude power, ground, and no-connect pins
+        swd_signals = {"SWDIO", "SWCLK", "SWO", "NRST"}
+        jtag_signals = {"TDI", "TDO", "TMS", "TCK", "TRST", "NRST", "RTCK"}
+
+        if self.interface in ("swd", "tag-connect"):
+            return swd_signals
+        else:
+            return jtag_signals
+
+    def _build_ports(self) -> dict[str, tuple[float, float]]:
+        """Build ports dictionary from pinout."""
+        ports = {}
+        protected_signals = self._get_protected_signals()
+
+        for pin_num, signal in self.pinout.items():
+            # Skip NC and KEY pins
+            if signal in ("NC", "KEY"):
+                continue
+
+            # For GND/VCC, use first occurrence only (avoid duplicates)
+            if signal in ("GND", "VCC") and signal in ports:
+                continue
+
+            # Get position - either from resistor (if protected) or header
+            if self.series_resistors and signal in protected_signals:
+                # Port is at resistor pin 1 (external side)
+                resistor = self.resistors.get(signal)
+                if resistor:
+                    ports[signal] = resistor.pin_position("1")
+            else:
+                # Port is at header pin
+                ports[signal] = self.header.pin_position(pin_num)
+
+        return ports
+
+    def connect_to_rails(
+        self, vcc_rail_y: float, gnd_rail_y: float, add_junctions: bool = True
+    ) -> None:
+        """
+        Connect VCC and GND to power rails.
+
+        Args:
+            vcc_rail_y: Y coordinate of VCC rail
+            gnd_rail_y: Y coordinate of GND rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        # Connect VCC
+        if "VCC" in self.ports:
+            vcc_pos = self.ports["VCC"]
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+            if add_junctions:
+                sch.add_junction(vcc_pos[0], vcc_rail_y)
+
+        # Connect GND
+        if "GND" in self.ports:
+            gnd_pos = self.ports["GND"]
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+            if add_junctions:
+                sch.add_junction(gnd_pos[0], gnd_rail_y)
 
 
 class MCUBlock(CircuitBlock):
@@ -1099,4 +1341,584 @@ def create_mclk_oscillator(
         value=frequency,
         decoupling_cap="100nF",
         cap_ref=cap_ref,
+    )
+
+
+class BarrelJackInput(CircuitBlock):
+    """
+    Barrel jack power input with optional reverse polarity protection.
+
+    Schematic (with P-FET protection):
+        VIN ──┬── [Q] ──┬── [C_filt] ──┬── VOUT
+              │    │    │              │
+              └────┴────┼──────────────┘
+                       GND
+
+    Schematic (with diode protection):
+        VIN ──── [D] ──┬── [C_filt] ──┬── VOUT
+                       │              │
+                      GND ────────────┘
+
+    Ports:
+        - VIN: Raw input from barrel jack
+        - VOUT: Protected output
+        - GND: Ground
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        voltage: str = "12V",
+        protection: str = "pfet",  # "pfet", "diode", or "none"
+        filter_cap: str = "100uF",
+        ref_prefix: str = "J1",
+        jack_symbol: str = "Connector:Barrel_Jack_Switch",
+        pfet_symbol: str = "Device:Q_PMOS_GSD",
+        diode_symbol: str = "Device:D_Schottky",
+        cap_symbol: str = "Device:CP",
+    ):
+        """
+        Create a barrel jack power input block.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of barrel jack
+            y: Y coordinate of barrel jack
+            voltage: Input voltage label (e.g., "12V", "9V")
+            protection: Protection type - "pfet", "diode", or "none"
+            filter_cap: Filter capacitor value
+            ref_prefix: Reference designator prefix for jack
+            jack_symbol: KiCad symbol for barrel jack
+            pfet_symbol: KiCad symbol for P-channel MOSFET
+            diode_symbol: KiCad symbol for Schottky diode
+            cap_symbol: KiCad symbol for polarized capacitor
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+        self.protection = protection
+
+        # Component spacing
+        protection_offset = 20  # Distance to protection device
+        cap_offset = 40  # Distance to filter cap
+
+        # Parse reference prefix
+        j_ref = ref_prefix if ref_prefix[-1].isdigit() else f"{ref_prefix}1"
+        base_num = int(j_ref[-1]) if j_ref[-1].isdigit() else 1
+
+        # Place barrel jack
+        self.jack = sch.add_symbol(jack_symbol, x, y, j_ref, voltage)
+        self.components = {"JACK": self.jack}
+
+        # Get jack pin positions
+        jack_tip = self.jack.pin_position("Tip")  # Positive
+        jack_sleeve = self.jack.pin_position("Sleeve")  # Ground
+
+        # Define VIN port at jack tip
+        self.ports = {"VIN": jack_tip, "GND": jack_sleeve}
+
+        # Add protection device
+        if protection == "pfet":
+            q_ref = f"Q{base_num}"
+            q_x = x + protection_offset
+            self.pfet = sch.add_symbol(pfet_symbol, q_x, y, q_ref, "Si2301")
+            self.components["Q"] = self.pfet
+
+            # Wire jack tip to PFET source
+            pfet_source = self.pfet.pin_position("S")
+            pfet_gate = self.pfet.pin_position("G")
+            pfet_drain = self.pfet.pin_position("D")
+
+            sch.add_wire(jack_tip, pfet_source)
+
+            # Gate tied to ground for always-on reverse protection
+            sch.add_wire(pfet_gate, (pfet_gate[0], jack_sleeve[1]))
+
+            # Output comes from drain
+            output_pos = pfet_drain
+
+        elif protection == "diode":
+            d_ref = f"D{base_num}"
+            d_x = x + protection_offset
+            self.diode = sch.add_symbol(diode_symbol, d_x, y, d_ref, "SS34")
+            self.components["D"] = self.diode
+
+            # Wire jack tip to diode anode
+            diode_anode = self.diode.pin_position("A")
+            diode_cathode = self.diode.pin_position("K")
+
+            sch.add_wire(jack_tip, diode_anode)
+
+            # Output comes from cathode
+            output_pos = diode_cathode
+
+        else:  # no protection
+            output_pos = jack_tip
+
+        # Place filter capacitor
+        c_ref = f"C{base_num}"
+        c_x = x + cap_offset
+        self.filter_cap = sch.add_symbol(cap_symbol, c_x, y + 10, c_ref, filter_cap)
+        self.components["C_FILT"] = self.filter_cap
+
+        # Wire protection output to cap
+        cap_pos = self.filter_cap.pin_position("1")
+        cap_neg = self.filter_cap.pin_position("2")
+
+        if protection != "none":
+            sch.add_wire(output_pos, cap_pos)
+
+        # Define output port at cap positive
+        self.ports["VOUT"] = cap_pos
+
+        # Store positions for rail connections
+        self._output_y = cap_pos[1]
+        self._gnd_y = cap_neg[1]
+
+    def connect_to_rails(
+        self,
+        gnd_rail_y: float,
+        add_junctions: bool = True,
+    ):
+        """
+        Connect filter cap ground to ground rail.
+
+        Args:
+            gnd_rail_y: Y coordinate of ground rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        # Connect cap negative to GND rail
+        cap_neg = self.filter_cap.pin_position("2")
+        sch.add_wire(cap_neg, (cap_neg[0], gnd_rail_y))
+
+        # Connect jack sleeve to GND rail
+        jack_sleeve = self.jack.pin_position("Sleeve")
+        sch.add_wire(jack_sleeve, (jack_sleeve[0], gnd_rail_y))
+
+        if add_junctions:
+            sch.add_junction(cap_neg[0], gnd_rail_y)
+            sch.add_junction(jack_sleeve[0], gnd_rail_y)
+
+
+class USBPowerInput(CircuitBlock):
+    """
+    USB power input with optional fuse protection.
+
+    Schematic (with fuse):
+        VBUS_IN ──── [F] ──┬── [C_filt] ──┬── V5
+                           │              │
+                          GND ────────────┘
+
+    Ports:
+        - VBUS_IN: Raw VBUS from USB connector
+        - V5: Protected 5V output
+        - GND: Ground
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        protection: str = "fuse",  # "fuse", "polyfuse", or "none"
+        filter_cap: str = "10uF",
+        fuse_rating: str = "500mA",
+        ref_prefix: str = "J1",
+        fuse_symbol: str = "Device:Polyfuse",
+        cap_symbol: str = "Device:C",
+    ):
+        """
+        Create a USB power input block.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate (where VBUS enters)
+            y: Y coordinate
+            protection: Protection type - "fuse", "polyfuse", or "none"
+            filter_cap: Filter capacitor value
+            fuse_rating: Fuse/polyfuse current rating
+            ref_prefix: Reference designator prefix
+            fuse_symbol: KiCad symbol for fuse/polyfuse
+            cap_symbol: KiCad symbol for capacitor
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+        self.protection = protection
+
+        # Component spacing
+        fuse_offset = 15  # Distance to fuse
+        cap_offset = 35  # Distance to filter cap
+
+        # Parse reference prefix for numbering
+        base_num = 1
+        if ref_prefix[-1].isdigit():
+            base_num = int(ref_prefix[-1])
+
+        self.components = {}
+
+        # Input position (representing VBUS from USB connector)
+        input_pos = (x, y)
+        self.ports = {"VBUS_IN": input_pos}
+
+        # Add fuse protection
+        if protection in ("fuse", "polyfuse"):
+            f_ref = f"F{base_num}"
+            f_x = x + fuse_offset
+            self.fuse = sch.add_symbol(fuse_symbol, f_x, y, f_ref, fuse_rating)
+            self.components["F"] = self.fuse
+
+            # Wire input to fuse
+            fuse_in = self.fuse.pin_position("1")
+            fuse_out = self.fuse.pin_position("2")
+            sch.add_wire(input_pos, fuse_in)
+
+            # Output comes from fuse
+            output_pos = fuse_out
+        else:
+            output_pos = input_pos
+
+        # Place filter capacitor
+        c_ref = f"C{base_num}"
+        c_x = x + cap_offset
+        self.filter_cap = sch.add_symbol(cap_symbol, c_x, y + 10, c_ref, filter_cap)
+        self.components["C_FILT"] = self.filter_cap
+
+        # Wire fuse output to cap
+        cap_pos = self.filter_cap.pin_position("1")
+        cap_neg = self.filter_cap.pin_position("2")
+
+        sch.add_wire(output_pos, cap_pos)
+
+        # Define ports
+        self.ports["V5"] = cap_pos
+        self.ports["GND"] = cap_neg
+
+    def connect_to_rails(
+        self,
+        gnd_rail_y: float,
+        add_junctions: bool = True,
+    ):
+        """
+        Connect filter cap ground to ground rail.
+
+        Args:
+            gnd_rail_y: Y coordinate of ground rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        # Connect cap negative to GND rail
+        cap_neg = self.filter_cap.pin_position("2")
+        sch.add_wire(cap_neg, (cap_neg[0], gnd_rail_y))
+
+        if add_junctions:
+            sch.add_junction(cap_neg[0], gnd_rail_y)
+
+
+class BatteryInput(CircuitBlock):
+    """
+    Battery input with optional reverse polarity protection.
+
+    Schematic (with P-FET protection):
+        VBAT_IN ──┬── [Q] ──┬── [C_filt] ──┬── VBAT
+                  │    │    │              │
+                  └────┴────┼──────────────┘
+                           GND
+
+    Ports:
+        - VBAT_IN: Raw battery input
+        - VBAT: Protected battery output
+        - GND: Ground
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        voltage: str = "3.7V",
+        connector: str = "JST-PH",
+        protection: str = "pfet",  # "pfet", "diode", or "none"
+        filter_cap: str = "10uF",
+        ref_prefix: str = "J1",
+        connector_symbol: str = "Connector_Generic:Conn_01x02",
+        pfet_symbol: str = "Device:Q_PMOS_GSD",
+        diode_symbol: str = "Device:D_Schottky",
+        cap_symbol: str = "Device:C",
+    ):
+        """
+        Create a battery input block.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of connector
+            y: Y coordinate of connector
+            voltage: Battery voltage label (e.g., "3.7V", "7.4V")
+            connector: Connector type label (e.g., "JST-PH", "JST-XH")
+            protection: Protection type - "pfet", "diode", or "none"
+            filter_cap: Filter capacitor value
+            ref_prefix: Reference designator prefix
+            connector_symbol: KiCad symbol for battery connector
+            pfet_symbol: KiCad symbol for P-channel MOSFET
+            diode_symbol: KiCad symbol for Schottky diode
+            cap_symbol: KiCad symbol for capacitor
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+        self.protection = protection
+        self.voltage = voltage
+        self.connector_type = connector
+
+        # Component spacing
+        protection_offset = 20
+        cap_offset = 40
+
+        # Parse reference prefix
+        j_ref = ref_prefix if ref_prefix[-1].isdigit() else f"{ref_prefix}1"
+        base_num = int(j_ref[-1]) if j_ref[-1].isdigit() else 1
+
+        # Place battery connector
+        value = f"{connector} {voltage}"
+        self.connector = sch.add_symbol(connector_symbol, x, y, j_ref, value)
+        self.components = {"CONN": self.connector}
+
+        # Get connector pin positions
+        conn_pos = self.connector.pin_position("1")  # Positive
+        conn_neg = self.connector.pin_position("2")  # Ground
+
+        # Define input port
+        self.ports = {"VBAT_IN": conn_pos, "GND": conn_neg}
+
+        # Add protection device
+        if protection == "pfet":
+            q_ref = f"Q{base_num}"
+            q_x = x + protection_offset
+            self.pfet = sch.add_symbol(pfet_symbol, q_x, y, q_ref, "Si2301")
+            self.components["Q"] = self.pfet
+
+            # Wire connector positive to PFET source
+            pfet_source = self.pfet.pin_position("S")
+            pfet_gate = self.pfet.pin_position("G")
+            pfet_drain = self.pfet.pin_position("D")
+
+            sch.add_wire(conn_pos, pfet_source)
+
+            # Gate tied to ground for always-on reverse protection
+            sch.add_wire(pfet_gate, (pfet_gate[0], conn_neg[1]))
+
+            # Output from drain
+            output_pos = pfet_drain
+
+        elif protection == "diode":
+            d_ref = f"D{base_num}"
+            d_x = x + protection_offset
+            self.diode = sch.add_symbol(diode_symbol, d_x, y, d_ref, "SS34")
+            self.components["D"] = self.diode
+
+            # Wire connector positive to diode anode
+            diode_anode = self.diode.pin_position("A")
+            diode_cathode = self.diode.pin_position("K")
+
+            sch.add_wire(conn_pos, diode_anode)
+
+            # Output from cathode
+            output_pos = diode_cathode
+
+        else:  # no protection
+            output_pos = conn_pos
+
+        # Place filter capacitor
+        c_ref = f"C{base_num}"
+        c_x = x + cap_offset
+        self.filter_cap = sch.add_symbol(cap_symbol, c_x, y + 10, c_ref, filter_cap)
+        self.components["C_FILT"] = self.filter_cap
+
+        # Wire protection output to cap
+        cap_pos = self.filter_cap.pin_position("1")
+
+        if protection != "none":
+            sch.add_wire(output_pos, cap_pos)
+
+        # Define output port
+        self.ports["VBAT"] = cap_pos
+
+    def connect_to_rails(
+        self,
+        gnd_rail_y: float,
+        add_junctions: bool = True,
+    ):
+        """
+        Connect filter cap and connector ground to ground rail.
+
+        Args:
+            gnd_rail_y: Y coordinate of ground rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        # Connect cap negative to GND rail
+        cap_neg = self.filter_cap.pin_position("2")
+        sch.add_wire(cap_neg, (cap_neg[0], gnd_rail_y))
+
+        # Connect connector ground to GND rail
+        conn_neg = self.connector.pin_position("2")
+        sch.add_wire(conn_neg, (conn_neg[0], gnd_rail_y))
+
+        if add_junctions:
+            sch.add_junction(cap_neg[0], gnd_rail_y)
+            sch.add_junction(conn_neg[0], gnd_rail_y)
+
+
+# Factory functions for power inputs
+
+
+def create_12v_barrel_jack(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    protection: str = "pfet",
+) -> BarrelJackInput:
+    """Create a 12V barrel jack input with reverse polarity protection."""
+    return BarrelJackInput(
+        sch,
+        x,
+        y,
+        voltage="12V",
+        protection=protection,
+        filter_cap="100uF",
+        ref_prefix=ref,
+    )
+
+
+def create_usb_power(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+) -> USBPowerInput:
+    """Create a USB power input with polyfuse protection."""
+    return USBPowerInput(
+        sch,
+        x,
+        y,
+        protection="polyfuse",
+        filter_cap="10uF",
+        fuse_rating="500mA",
+        ref_prefix=ref,
+    )
+
+
+def create_lipo_battery(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+) -> BatteryInput:
+    """Create a 3.7V LiPo battery input with JST-PH connector."""
+    return BatteryInput(
+        sch,
+        x,
+        y,
+        voltage="3.7V",
+        connector="JST-PH",
+        protection="pfet",
+        filter_cap="10uF",
+        ref_prefix=ref,
+    )
+
+def create_swd_header(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    pins: int = 10,
+    with_protection: bool = False,
+) -> DebugHeader:
+    """
+    Create an ARM SWD debug header.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Header reference designator
+        pins: 6 for minimal SWD, 10 for ARM Cortex Debug
+        with_protection: Add 10R series resistors
+    """
+    return DebugHeader(
+        sch,
+        x,
+        y,
+        interface="swd",
+        pins=pins,
+        series_resistors=with_protection,
+        ref=ref,
+    )
+
+
+def create_jtag_header(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    with_protection: bool = False,
+) -> DebugHeader:
+    """
+    Create a standard 20-pin ARM JTAG debug header.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Header reference designator
+        with_protection: Add 10R series resistors
+    """
+    return DebugHeader(
+        sch,
+        x,
+        y,
+        interface="jtag",
+        pins=20,
+        series_resistors=with_protection,
+        ref=ref,
+    )
+
+
+def create_tag_connect_header(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    pins: int = 10,
+    with_protection: bool = False,
+) -> DebugHeader:
+    """
+    Create a Tag-Connect debug header (pogo-pin interface).
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Header reference designator
+        pins: 6 or 10 pins
+        with_protection: Add 10R series resistors
+    """
+    return DebugHeader(
+        sch,
+        x,
+        y,
+        interface="tag-connect",
+        pins=pins,
+        series_resistors=with_protection,
+        ref=ref,
     )

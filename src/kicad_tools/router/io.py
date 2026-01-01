@@ -223,7 +223,7 @@ def load_pcb_for_routing(
 
             # Extract pad number and type
             # Handle both quoted ("A1") and unquoted (1) pad numbers
-            # KiCad uses unquoted for numeric pads, quoted for alphanumeric (BGA)
+            # KiCad uses unquoted numbers for numeric pads, quoted for alphanumeric (BGA)
             pad_start = re.match(r'\(pad\s+(?:"([^"]+)"|(\S+))\s+(\w+)', line)
             if not pad_start:
                 continue
