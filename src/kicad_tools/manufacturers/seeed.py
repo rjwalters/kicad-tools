@@ -88,6 +88,24 @@ SEEED_4LAYER_2OZ = DesignRules(
     inner_copper_oz=1.0,
 )
 
+SEEED_6LAYER_1OZ = DesignRules(
+    min_trace_width_mm=0.127,  # 5 mil
+    min_clearance_mm=0.127,  # 5 mil
+    min_via_drill_mm=0.25,
+    min_via_diameter_mm=0.5,
+    min_annular_ring_mm=0.125,
+    min_hole_diameter_mm=0.25,
+    max_hole_diameter_mm=6.3,
+    min_copper_to_edge_mm=0.5,
+    min_hole_to_edge_mm=0.5,
+    min_silkscreen_width_mm=0.15,
+    min_silkscreen_height_mm=0.8,
+    min_solder_mask_dam_mm=0.1,
+    board_thickness_mm=1.6,
+    outer_copper_oz=1.0,
+    inner_copper_oz=0.5,
+)
+
 # Seeed Fusion Assembly Capabilities
 SEEED_ASSEMBLY = AssemblyCapabilities(
     min_component_pitch_mm=0.4,
@@ -173,6 +191,7 @@ SEEED_PROFILE = ManufacturerProfile(
         "2layer_2oz": SEEED_2LAYER_2OZ,
         "4layer_1oz": SEEED_4LAYER_1OZ,
         "4layer_2oz": SEEED_4LAYER_2OZ,
+        "6layer_1oz": SEEED_6LAYER_1OZ,
     },
     assembly=SEEED_ASSEMBLY,
     parts_library=SEEED_OPL,

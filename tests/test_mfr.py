@@ -75,6 +75,33 @@ class TestDesignRules:
         assert rules.min_trace_width_mm == pytest.approx(0.1016)  # 4 mil
         assert rules.min_via_drill_mm == pytest.approx(0.2)
 
+    def test_jlcpcb_6layer_rules(self):
+        """Test JLCPCB 6-layer design rules."""
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=6, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.0889)  # 3.5 mil
+        assert rules.min_clearance_mm == pytest.approx(0.0889)
+        assert rules.min_via_drill_mm == pytest.approx(0.2)
+
+    def test_pcbway_6layer_rules(self):
+        """Test PCBWay 6-layer design rules."""
+        profile = get_profile("pcbway")
+        rules = profile.get_design_rules(layers=6, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.0889)  # 3.5 mil
+        assert rules.min_clearance_mm == pytest.approx(0.0889)
+        assert rules.min_via_drill_mm == pytest.approx(0.15)
+
+    def test_seeed_6layer_rules(self):
+        """Test Seeed 6-layer design rules."""
+        profile = get_profile("seeed")
+        rules = profile.get_design_rules(layers=6, copper_oz=1.0)
+
+        assert rules.min_trace_width_mm == pytest.approx(0.127)  # 5 mil
+        assert rules.min_clearance_mm == pytest.approx(0.127)
+        assert rules.min_via_drill_mm == pytest.approx(0.25)
+
     def test_rules_to_dict(self):
         """Test converting rules to dictionary."""
         profile = get_profile("jlcpcb")
@@ -251,6 +278,67 @@ class TestProjectFile:
         loaded = load_project(project_file)
         assert loaded["board"]["design_settings"]["rules"]["min_clearance"] == 0.1016
         assert loaded["meta"]["manufacturer"] == "jlcpcb"
+
+
+class TestDRUFiles:
+    """Tests for .kicad_dru design rules files."""
+
+    def test_jlcpcb_6layer_dru_exists(self):
+        """Test that JLCPCB 6-layer DRU file exists."""
+        from pathlib import Path
+
+        dru_path = (
+            Path(__file__).parent.parent
+            / "src/kicad_tools/manufacturers/rules/jlcpcb-6layer-1oz.kicad_dru"
+        )
+        assert dru_path.exists(), f"DRU file not found: {dru_path}"
+
+    def test_pcbway_6layer_dru_exists(self):
+        """Test that PCBWay 6-layer DRU file exists."""
+        from pathlib import Path
+
+        dru_path = (
+            Path(__file__).parent.parent
+            / "src/kicad_tools/manufacturers/rules/pcbway-6layer-1oz.kicad_dru"
+        )
+        assert dru_path.exists(), f"DRU file not found: {dru_path}"
+
+    def test_seeed_6layer_dru_exists(self):
+        """Test that Seeed 6-layer DRU file exists."""
+        from pathlib import Path
+
+        dru_path = (
+            Path(__file__).parent.parent
+            / "src/kicad_tools/manufacturers/rules/seeed-6layer-1oz.kicad_dru"
+        )
+        assert dru_path.exists(), f"DRU file not found: {dru_path}"
+
+    def test_all_6layer_dru_files_valid(self):
+        """Test that all 6-layer DRU files are valid KiCad format."""
+        from pathlib import Path
+
+        from kicad_tools.core.sexp_file import load_design_rules
+
+        rules_dir = Path(__file__).parent.parent / "src/kicad_tools/manufacturers/rules"
+        dru_files = [
+            "jlcpcb-6layer-1oz.kicad_dru",
+            "pcbway-6layer-1oz.kicad_dru",
+            "seeed-6layer-1oz.kicad_dru",
+        ]
+
+        for dru_file in dru_files:
+            dru_path = rules_dir / dru_file
+            sexp = load_design_rules(dru_path)
+            assert sexp.tag == "design_rules", f"{dru_file} is not valid design rules"
+
+            # Check version
+            version = sexp.find_child("version")
+            assert version is not None, f"{dru_file} missing version"
+            assert version.values[0] == 1, f"{dru_file} has wrong version"
+
+            # Check for 8 rules (standard set)
+            rules = sexp.find_children("rule")
+            assert len(rules) == 8, f"{dru_file} should have 8 rules, has {len(rules)}"
 
 
 class TestMfrCLICommands:
