@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-12-31
+
+### Added
+
+#### Library Management
+
+- **Symbol Library Tools** (`kicad_tools.library`)
+  - Create and save KiCad symbol libraries programmatically
+  - Symbol creation with pin and property editing
+  - Round-trip editing preserves existing content
+
+- **Footprint Library Tools** (`kicad_tools.library`)
+  - `FootprintLibrary` class for loading `.pretty` directories
+  - Footprint creation and save support
+  - Parametric footprint generators for common package types:
+    - SOIC (8, 14, 16 pins)
+    - QFP (32, 44, 48, 64, 100 pins)
+    - QFN (16, 24, 32, 48 pins)
+    - DFN (6, 8, 10, 12 pins)
+    - BGA (grid-based ball patterns)
+    - Chip resistors/capacitors (0402, 0603, 0805, 1206)
+    - SOT variants (SOT-23, SOT-223, SOT-89)
+    - Through-hole (DIP, SIP, pin headers)
+  - CLI: `kct footprint generate <type>` for parametric generation
+
+#### Pure Python DRC (no kicad-cli required)
+
+- **DRCChecker** (`kicad_tools.validate`) - standalone design rule checking
+  - Clearance checks: trace-to-trace, trace-to-pad, pad-to-pad, via-to-trace
+  - Dimension checks: trace width, via drill, annular ring
+  - Edge clearance checks: copper-to-board-edge minimum
+  - Silkscreen checks: line width, text height, over-pad detection
+  - Manufacturer rule presets for JLCPCB, PCBWay, OSHPark, Seeed
+  - Support for 2-layer, 4-layer, and 6-layer configurations
+  - CLI: `kct check board.kicad_pcb --mfr jlcpcb`
+
+#### Datasheet Tools
+
+- **Datasheet Infrastructure** (`kicad_tools.datasheet`)
+  - Datasheet search across multiple sources
+  - PDF download with local caching
+  - PDF to markdown conversion using MarkItDown
+  - Image extraction from PDF datasheets
+  - Pin table extraction from datasheets
+  - Package dimension extraction and footprint matching
+  - Symbol generation from datasheet pin tables
+  - End-to-end part import workflow
+  - CLI: `kct datasheet search/download/convert/extract-images/extract-tables`
+
+#### CLI Enhancements
+
+- **Netlist analysis commands**: `kct netlist analyze/list/show/check/compare/export`
+- **Footprint generation**: `kct footprint generate --list` shows available types
+
+### Changed
+
+- Manufacturer rule presets expanded to support 2, 4, and 6-layer configurations
+- DRC checking can now run without kicad-cli installed
+
+### Fixed
+
+- Test suite compatibility with pure Python DRC checker
+
 ## [0.3.0] - 2025-12-31
 
 ### Added
@@ -172,6 +235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python 3.10+
 - numpy >= 1.20
 
+[0.4.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.4.0
 [0.3.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.1.0
