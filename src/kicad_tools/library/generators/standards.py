@@ -236,6 +236,126 @@ CHIP_SIZES = {
     },
 }
 
+# BGA (Ball Grid Array) - common sizes
+BGA_STANDARDS = {
+    # Package name: specs
+    "BGA-256_17x17_0.8mm": {
+        "rows": 16,
+        "cols": 16,
+        "pitch": 0.8,
+        "ball_diameter": 0.4,
+        "body_size": 17.0,
+    },
+    "BGA-324_18x18_0.8mm": {
+        "rows": 18,
+        "cols": 18,
+        "pitch": 0.8,
+        "ball_diameter": 0.4,
+        "body_size": 19.0,
+    },
+    "BGA-484_22x22_1.0mm": {
+        "rows": 22,
+        "cols": 22,
+        "pitch": 1.0,
+        "ball_diameter": 0.5,
+        "body_size": 23.0,
+    },
+    "BGA-100_10x10_0.8mm": {
+        "rows": 10,
+        "cols": 10,
+        "pitch": 0.8,
+        "ball_diameter": 0.4,
+        "body_size": 12.0,
+    },
+    "BGA-144_12x12_0.8mm": {
+        "rows": 12,
+        "cols": 12,
+        "pitch": 0.8,
+        "ball_diameter": 0.4,
+        "body_size": 14.0,
+    },
+    # Fine-pitch BGA (FBGA)
+    "FBGA-256_17x17_0.5mm": {
+        "rows": 16,
+        "cols": 16,
+        "pitch": 0.5,
+        "ball_diameter": 0.25,
+        "body_size": 14.0,
+    },
+}
+
+# DFN (Dual Flat No-lead) - common sizes
+DFN_STANDARDS = {
+    # Package name: specs (for create_dfn_standard)
+    "DFN-8_3x3_0.5mm": {
+        "pins": 8,
+        "pitch": 0.5,
+        "body_width": 3.0,
+        "body_length": 3.0,
+        "pad_width": 0.8,
+        "pad_height": 0.3,
+        "exposed_pad": (1.5, 2.0),
+    },
+    "DFN-6_2x2_0.65mm": {
+        "pins": 6,
+        "pitch": 0.65,
+        "body_width": 2.0,
+        "body_length": 2.0,
+        "pad_width": 0.7,
+        "pad_height": 0.35,
+        "exposed_pad": (0.9, 1.2),
+    },
+    "DFN-8_2x3_0.5mm": {
+        "pins": 8,
+        "pitch": 0.5,
+        "body_width": 2.0,
+        "body_length": 3.0,
+        "pad_width": 0.7,
+        "pad_height": 0.3,
+        "exposed_pad": (0.9, 1.7),
+    },
+    "DFN-10_3x3_0.5mm": {
+        "pins": 10,
+        "pitch": 0.5,
+        "body_width": 3.0,
+        "body_length": 3.0,
+        "pad_width": 0.8,
+        "pad_height": 0.25,
+        "exposed_pad": (1.5, 2.0),
+    },
+    "DFN-12_4x4_0.5mm": {
+        "pins": 12,
+        "pitch": 0.5,
+        "body_width": 4.0,
+        "body_length": 4.0,
+        "pad_width": 0.8,
+        "pad_height": 0.25,
+        "exposed_pad": (2.4, 2.8),
+    },
+    "DFN-16_5x5_0.5mm": {
+        "pins": 16,
+        "pitch": 0.5,
+        "body_width": 5.0,
+        "body_length": 5.0,
+        "pad_width": 0.8,
+        "pad_height": 0.25,
+        "exposed_pad": (3.2, 3.6),
+    },
+    # Keyed by tuple for lookup in create_dfn
+    (8, 3.0, 3.0): {
+        "pitch": 0.5,
+        "pad_width": 0.8,
+        "pad_height": 0.3,
+        "exposed_pad": (1.5, 2.0),
+    },
+    (6, 2.0, 2.0): {
+        "pitch": 0.65,
+        "pad_width": 0.7,
+        "pad_height": 0.35,
+        "exposed_pad": (0.9, 1.2),
+    },
+}
+
 # DIP (Dual In-line Package) standards
 DIP_STANDARDS = {
     # Narrow DIP (0.3" = 7.62mm row spacing)

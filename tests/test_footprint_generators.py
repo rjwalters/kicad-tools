@@ -15,7 +15,11 @@ import pytest
 
 from kicad_tools.library import (
     Footprint,
+    create_bga,
+    create_bga_standard,
     create_chip,
+    create_dfn,
+    create_dfn_standard,
     create_dip,
     create_pin_header,
     create_qfn,
@@ -248,6 +252,281 @@ class TestQFNGenerator:
 
 
 # =============================================================================
+# BGA Generator Tests
+# =============================================================================
+
+
+class TestBGAGenerator:
+    """Tests for BGA footprint generator."""
+
+    def test_create_bga_basic(self):
+        """Test creating BGA with specified rows/cols/pitch."""
+        fp = create_bga(rows=10, cols=10, pitch=0.8)
+
+        assert "BGA-100" in fp.name
+        assert len(fp.pads) == 100
+        assert fp.attr == "smd"
+
+    def test_bga_pin_naming(self):
+        """Test BGA uses A1, A2, B1, B2... naming convention."""
+        fp = create_bga(rows=3, cols=3, pitch=1.0)
+
+        # Check first row has A prefix
+        a1 = [p for p in fp.pads if p.name == "A1"]
+        a2 = [p for p in fp.pads if p.name == "A2"]
+        a3 = [p for p in fp.pads if p.name == "A3"]
+        assert len(a1) == 1
+        assert len(a2) == 1
+        assert len(a3) == 1
+
+        # Check second row has B prefix
+        b1 = [p for p in fp.pads if p.name == "B1"]
+        assert len(b1) == 1
+
+        # Check third row has C prefix
+        c1 = [p for p in fp.pads if p.name == "C1"]
+        assert len(c1) == 1
+
+    def test_bga_skips_i_and_o(self):
+        """Test BGA skips I and O in row naming (avoid confusion with 1 and 0)."""
+        # Create a BGA with enough rows to reach I and O
+        fp = create_bga(rows=12, cols=2, pitch=1.0)
+
+        # Row 9 should be J (skipping I)
+        j1 = [p for p in fp.pads if p.name == "J1"]
+        assert len(j1) == 1
+
+        # Should not have any I or O prefixes
+        i_pads = [p for p in fp.pads if p.name.startswith("I")]
+        o_pads = [p for p in fp.pads if p.name.startswith("O")]
+        assert len(i_pads) == 0
+        assert len(o_pads) == 0
+
+    def test_bga_depopulated_balls(self):
+        """Test BGA with depopulated (missing) balls."""
+        fp = create_bga(rows=3, cols=3, pitch=1.0, depopulated=["A1", "C3"])
+
+        # Should have 9 - 2 = 7 pads
+        assert len(fp.pads) == 7
+
+        # A1 and C3 should not exist
+        a1 = [p for p in fp.pads if p.name == "A1"]
+        c3 = [p for p in fp.pads if p.name == "C3"]
+        assert len(a1) == 0
+        assert len(c3) == 0
+
+    def test_bga_thermal_pad(self):
+        """Test BGA with center thermal/ground pad."""
+        fp = create_bga(rows=4, cols=4, pitch=1.0, thermal_pad=2.0)
+
+        # 16 balls + 1 thermal pad = 17 pads
+        assert len(fp.pads) == 17
+        assert "_EP" in fp.name
+
+        # Thermal pad should be at center with size 2.0
+        ep = [p for p in fp.pads if p.name == "17"][0]
+        assert ep.x == 0
+        assert ep.y == 0
+        assert ep.width == 2.0
+        assert ep.height == 2.0
+
+    def test_bga_pad_positions(self):
+        """Test BGA ball positions match pitch and count."""
+        fp = create_bga(rows=4, cols=4, pitch=1.0)
+
+        # Get all pads
+        pads = {p.name: p for p in fp.pads}
+
+        # Check pitch between adjacent balls in same row
+        a1 = pads["A1"]
+        a2 = pads["A2"]
+        assert abs(a2.x - a1.x - 1.0) < 0.01
+
+        # Check pitch between adjacent balls in same column
+        b1 = pads["B1"]
+        assert abs(b1.y - a1.y - 1.0) < 0.01
+
+    def test_bga_ipc7351_naming(self):
+        """Test BGA auto-generated name format."""
+        fp = create_bga(rows=10, cols=10, pitch=0.8, body_size=12.0)
+
+        assert "BGA-100" in fp.name
+        assert "12.0x12.0mm" in fp.name
+        assert "P0.8mm" in fp.name
+
+    def test_bga_invalid_params(self):
+        """Test BGA error handling for invalid parameters."""
+        with pytest.raises(ValueError, match="at least 1 row"):
+            create_bga(rows=0, cols=5, pitch=0.8)
+
+        with pytest.raises(ValueError, match="at least 1 column"):
+            create_bga(rows=5, cols=0, pitch=0.8)
+
+        with pytest.raises(ValueError, match="Pitch must be positive"):
+            create_bga(rows=5, cols=5, pitch=-0.8)
+
+    def test_bga_standard_packages(self):
+        """Test creating BGA from standard package presets."""
+        fp = create_bga_standard("BGA-256_17x17_0.8mm")
+
+        assert fp.name == "BGA-256_17x17_0.8mm"
+        assert len(fp.pads) == 256
+
+    def test_bga_standard_invalid(self):
+        """Test error for unknown standard package."""
+        with pytest.raises(ValueError, match="Unknown BGA package"):
+            create_bga_standard("BGA-INVALID")
+
+    def test_bga_save_kicad_mod(self):
+        """Test BGA produces valid .kicad_mod file."""
+        fp = create_bga(rows=4, cols=4, pitch=1.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "BGA-16.kicad_mod"
+            fp.save(path)
+
+            assert path.exists()
+            content = path.read_text()
+            assert "(footprint" in content
+            assert "(pad" in content
+
+    def test_bga_custom_name(self):
+        """Test BGA with custom name."""
+        fp = create_bga(rows=4, cols=4, pitch=1.0, name="MyCustomBGA")
+
+        assert fp.name == "MyCustomBGA"
+
+
+# =============================================================================
+# DFN Generator Tests
+# =============================================================================
+
+
+class TestDFNGenerator:
+    """Tests for DFN footprint generator."""
+
+    def test_create_dfn_basic(self):
+        """Test creating DFN with pins/pitch/body size."""
+        fp = create_dfn(pins=8, pitch=0.5, body_width=3.0, body_length=3.0)
+
+        assert "DFN-8" in fp.name
+        assert len(fp.pads) == 8
+        assert fp.attr == "smd"
+
+    def test_dfn_exposed_pad_tuple(self):
+        """Test DFN with exposed thermal pad (tuple size)."""
+        fp = create_dfn(pins=8, body_width=3.0, body_length=3.0, exposed_pad=(1.5, 2.0))
+
+        # 8 pins + 1 exposed pad = 9 pads
+        assert len(fp.pads) == 9
+        assert "_EP" in fp.name
+
+        # Exposed pad should be at center
+        ep = [p for p in fp.pads if p.name == "9"][0]
+        assert ep.x == 0
+        assert ep.y == 0
+        assert ep.width == 1.5
+        assert ep.height == 2.0
+
+    def test_dfn_exposed_pad_float(self):
+        """Test DFN with exposed thermal pad (square, float size)."""
+        fp = create_dfn(pins=6, body_width=2.0, body_length=2.0, exposed_pad=1.0)
+
+        # 6 pins + 1 exposed pad = 7 pads
+        assert len(fp.pads) == 7
+
+        ep = [p for p in fp.pads if p.name == "7"][0]
+        assert ep.width == 1.0
+        assert ep.height == 1.0
+
+    def test_dfn_exposed_pad_auto(self):
+        """Test DFN with auto-calculated exposed pad."""
+        fp = create_dfn(pins=8, body_width=3.0, body_length=3.0, exposed_pad=True)
+
+        # Should have exposed pad
+        assert len(fp.pads) == 9
+        assert "_EP" in fp.name
+
+    def test_dfn_no_exposed_pad(self):
+        """Test DFN without exposed pad."""
+        fp = create_dfn(pins=8, body_width=3.0, body_length=3.0, exposed_pad=None)
+
+        assert len(fp.pads) == 8
+        assert "_EP" not in fp.name
+
+    def test_dfn_wettable_flanks(self):
+        """Test DFN with wettable flanks option."""
+        fp_normal = create_dfn(pins=8, body_width=3.0, body_length=3.0, wettable_flanks=False)
+        fp_wf = create_dfn(pins=8, body_width=3.0, body_length=3.0, wettable_flanks=True)
+
+        # Wettable flank pads should be larger
+        normal_pad = fp_normal.pads[0]
+        wf_pad = fp_wf.pads[0]
+
+        assert wf_pad.width > normal_pad.width
+        assert "_WF" in fp_wf.name
+
+    def test_dfn_pad_positions(self):
+        """Test DFN pads are on correct sides (top and bottom)."""
+        fp = create_dfn(pins=8, pitch=0.5, body_width=3.0, body_length=3.0)
+
+        # 4 pads on bottom (positive y), 4 on top (negative y)
+        bottom_pads = [p for p in fp.pads if p.y > 0]
+        top_pads = [p for p in fp.pads if p.y < 0]
+
+        assert len(bottom_pads) == 4
+        assert len(top_pads) == 4
+
+    def test_dfn_ipc7351_naming(self):
+        """Test DFN auto-generated name format."""
+        fp = create_dfn(pins=8, pitch=0.5, body_width=3.0, body_length=3.0)
+
+        assert "DFN-8" in fp.name
+        assert "3.0x3.0mm" in fp.name
+        assert "P0.5mm" in fp.name
+
+    def test_dfn_invalid_pins(self):
+        """Test DFN error handling for odd pin count."""
+        with pytest.raises(ValueError, match="even number"):
+            create_dfn(pins=7, body_width=3.0, body_length=3.0)
+
+        with pytest.raises(ValueError, match="at least 2 pins"):
+            create_dfn(pins=1, body_width=3.0, body_length=3.0)
+
+    def test_dfn_standard_packages(self):
+        """Test creating DFN from standard package presets."""
+        fp = create_dfn_standard("DFN-8_3x3_0.5mm")
+
+        assert fp.name == "DFN-8_3x3_0.5mm"
+        # 8 pins + exposed pad
+        assert len(fp.pads) == 9
+
+    def test_dfn_standard_invalid(self):
+        """Test error for unknown standard package."""
+        with pytest.raises(ValueError, match="Unknown DFN package"):
+            create_dfn_standard("DFN-INVALID")
+
+    def test_dfn_save_kicad_mod(self):
+        """Test DFN produces valid .kicad_mod file."""
+        fp = create_dfn(pins=8, body_width=3.0, body_length=3.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "DFN-8.kicad_mod"
+            fp.save(path)
+
+            assert path.exists()
+            content = path.read_text()
+            assert "(footprint" in content
+            assert "(pad" in content
+
+    def test_dfn_custom_name(self):
+        """Test DFN with custom name."""
+        fp = create_dfn(pins=8, body_width=3.0, body_length=3.0, name="MyCustomDFN")
+
+        assert fp.name == "MyCustomDFN"
+
+
+# =============================================================================
 # SOT Generator Tests
 # =============================================================================
 
@@ -472,6 +751,8 @@ class TestIntegration:
             create_chip("0603"),
             create_dip(pins=8),
             create_pin_header(pins=6, rows=1),
+            create_bga(rows=4, cols=4, pitch=1.0),
+            create_dfn(pins=8, body_width=3.0, body_length=3.0),
         ]
 
         for fp in footprints:
@@ -499,6 +780,17 @@ class TestIntegration:
         qfn = create_qfn(pins=16, body_size=3.0, exposed_pad=1.5)
         assert "QFN-16" in qfn.name
         assert "EP" in qfn.name
+
+        # BGA
+        bga = create_bga(rows=10, cols=10, pitch=0.8, body_size=12.0)
+        assert "BGA-100" in bga.name
+        assert "P0.8mm" in bga.name
+
+        # DFN
+        dfn = create_dfn(pins=8, pitch=0.5, body_width=3.0, body_length=3.0, exposed_pad=(1.5, 2.0))
+        assert "DFN-8" in dfn.name
+        assert "P0.5mm" in dfn.name
+        assert "EP" in dfn.name
 
 
 # =============================================================================

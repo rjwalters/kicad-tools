@@ -18,7 +18,11 @@ Usage:
 
 from .footprint import Footprint, GraphicArc, GraphicCircle, GraphicLine, GraphicRect, Pad
 from .generators import (
+    create_bga,
+    create_bga_standard,
     create_chip,
+    create_dfn,
+    create_dfn_standard,
     create_dip,
     create_pin_header,
     create_qfn,
@@ -43,4 +47,8 @@ __all__ = [
     "create_chip",
     "create_dip",
     "create_pin_header",
+    "create_bga",
+    "create_bga_standard",
+    "create_dfn",
+    "create_dfn_standard",
 ]
