@@ -82,8 +82,17 @@ from .models import Datasheet, DatasheetResult, DatasheetSearchResult
 from .package import PackageInfo, parse_package_name
 from .parser import DatasheetParser, ParsedDatasheet
 from .pin_inference import infer_pin_type
+
+# Symbol generation
+from .pin_layout import LayoutStyle, PinLayoutEngine, PinPosition, SymbolLayout
 from .pins import ExtractedPin, PinTable
 from .sources import DatasheetSource, LCSCDatasheetSource, OctopartDatasheetSource
+from .symbol_generator import (
+    GeneratedPin,
+    GeneratedSymbol,
+    SymbolGenerator,
+    create_symbol_from_datasheet,
+)
 from .tables import ExtractedTable
 
 __all__ = [
@@ -122,4 +131,13 @@ __all__ = [
     "DatasheetDownloadError",
     "DatasheetSearchError",
     "DatasheetCacheError",
+    # Symbol generation
+    "SymbolGenerator",
+    "GeneratedSymbol",
+    "GeneratedPin",
+    "PinLayoutEngine",
+    "LayoutStyle",
+    "PinPosition",
+    "SymbolLayout",
+    "create_symbol_from_datasheet",
 ]

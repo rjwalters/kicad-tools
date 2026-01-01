@@ -2,17 +2,18 @@
 CLI commands for datasheet search, download, and PDF parsing.
 
 Provides commands:
-    kct datasheet search <part>         - Search for datasheets
-    kct datasheet download <part>       - Download a datasheet
-    kct datasheet list                  - List cached datasheets
-    kct datasheet cache                 - Cache management
-    kct datasheet convert <pdf>         - Convert PDF to markdown
-    kct datasheet extract-images <pdf>  - Extract images from PDF
-    kct datasheet extract-tables <pdf>  - Extract tables from PDF
-    kct datasheet extract-pins <pdf>    - Extract pin definitions from PDF
-    kct datasheet extract-package <pdf> - Extract package information from PDF
+    kct datasheet search <part>           - Search for datasheets
+    kct datasheet download <part>         - Download a datasheet
+    kct datasheet list                    - List cached datasheets
+    kct datasheet cache                   - Cache management
+    kct datasheet convert <pdf>           - Convert PDF to markdown
+    kct datasheet extract-images <pdf>    - Extract images from PDF
+    kct datasheet extract-tables <pdf>    - Extract tables from PDF
+    kct datasheet extract-pins <pdf>      - Extract pin definitions from PDF
+    kct datasheet extract-package <pdf>   - Extract package information from PDF
     kct datasheet suggest-footprint <pdf> - Suggest matching footprints
-    kct datasheet info <pdf>            - Show PDF information
+    kct datasheet generate-symbol <pdf>   - Generate KiCad symbol from PDF
+    kct datasheet info <pdf>              - Show PDF information
 """
 
 from __future__ import annotations
@@ -168,6 +169,63 @@ def main(argv: list[str] | None = None) -> int:
         help="List available packages instead of extracting pins",
     )
 
+    # generate-symbol subcommand
+    gen_parser = subparsers.add_parser(
+        "generate-symbol", help="Generate KiCad symbol from PDF datasheet"
+    )
+    gen_parser.add_argument("pdf", help="Path to PDF file")
+    gen_parser.add_argument(
+        "--name",
+        required=True,
+        help="Symbol name (e.g., 'STM32F103C8T6')",
+    )
+    gen_parser.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        help="Output symbol library file (.kicad_sym)",
+    )
+    gen_parser.add_argument(
+        "--package",
+        help="Package name to filter pins (e.g., 'LQFP48')",
+    )
+    gen_parser.add_argument(
+        "--layout",
+        choices=["functional", "physical", "simple"],
+        default="functional",
+        help="Pin layout style (default: functional)",
+    )
+    gen_parser.add_argument(
+        "--pages",
+        help="Page range to search for pins (e.g., '1-10' or '1,2,5')",
+    )
+    gen_parser.add_argument(
+        "--footprint",
+        help="KiCad footprint reference (e.g., 'Package_QFP:LQFP-48')",
+    )
+    gen_parser.add_argument(
+        "--manufacturer",
+        help="Component manufacturer",
+    )
+    gen_parser.add_argument(
+        "--datasheet-url",
+        help="URL to the component datasheet",
+    )
+    gen_parser.add_argument(
+        "--description",
+        help="Component description",
+    )
+    gen_parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append to existing library instead of creating new",
+    )
+    gen_parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for confirmation of pin types (not yet implemented)",
+    )
+
     # info subcommand
     info_parser = subparsers.add_parser("info", help="Show PDF information")
     info_parser.add_argument("pdf", help="Path to PDF file")
@@ -238,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
             return _extract_tables(args)
         elif args.command == "extract-pins":
             return _extract_pins(args)
+        elif args.command == "generate-symbol":
+            return _generate_symbol(args)
         elif args.command == "info":
             return _info(args)
         elif args.command == "extract-package":
@@ -657,6 +717,95 @@ def _extract_pins(args) -> int:
             if pin_table.package:
                 print(f"# Package: {pin_table.package}")
             print(f"# Confidence: {pin_table.confidence:.2f}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _generate_symbol(args) -> int:
+    """Handle generate-symbol command."""
+    try:
+        from ..datasheet.parser import DatasheetParser
+        from ..datasheet.symbol_generator import SymbolGenerator
+        from ..schema.library import SymbolLibrary
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[datasheet]", file=sys.stderr)
+        return 1
+
+    pdf_path = Path(args.pdf)
+    if not pdf_path.exists():
+        print(f"Error: File not found: {pdf_path}", file=sys.stderr)
+        return 1
+
+    output_path = Path(args.output)
+    if not output_path.suffix:
+        output_path = output_path.with_suffix(".kicad_sym")
+
+    try:
+        # Parse the PDF and extract pins
+        parser = DatasheetParser(pdf_path)
+        pages = _parse_pages(args.pages)
+
+        print(f"Extracting pins from {pdf_path.name}...")
+        pin_table = parser.extract_pins(pages=pages, package=args.package)
+
+        if not pin_table.pins:
+            print("Error: No pins found in datasheet", file=sys.stderr)
+            print("Try specifying --pages to narrow the search", file=sys.stderr)
+            return 1
+
+        print(f"Found {len(pin_table)} pins")
+        if pin_table.package:
+            print(f"Package: {pin_table.package}")
+
+        # Load or create library
+        if args.append and output_path.exists():
+            print(f"Loading existing library: {output_path}")
+            library = SymbolLibrary.load(str(output_path))
+        else:
+            print(f"Creating new library: {output_path}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            library = SymbolLibrary.create(str(output_path))
+
+        # Generate symbol
+        print(f"Generating symbol with {args.layout} layout...")
+        generator = SymbolGenerator()
+
+        generated = generator.generate(
+            name=args.name,
+            pins=pin_table,
+            layout=args.layout,
+            datasheet_url=args.datasheet_url or "",
+            manufacturer=args.manufacturer or "",
+            description=args.description or "",
+            footprint=args.footprint or "",
+        )
+
+        # Add to library
+        lib_symbol = generator.add_to_library(library, generated)
+
+        # Save
+        library.save()
+
+        print("\nSymbol generated successfully!")
+        print(f"  Name: {args.name}")
+        print(f"  Pins: {len(lib_symbol.pins)}")
+        print(f"  Units: {generated.units}")
+        print(f"  Confidence: {generated.generation_confidence:.1%}")
+        print(f"  Output: {output_path}")
+
+        # Show pin type summary
+        pin_types: dict[str, int] = {}
+        for pin in lib_symbol.pins:
+            pin_types[pin.type] = pin_types.get(pin.type, 0) + 1
+
+        print("\nPin types:")
+        for ptype, count in sorted(pin_types.items()):
+            print(f"  {ptype}: {count}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
