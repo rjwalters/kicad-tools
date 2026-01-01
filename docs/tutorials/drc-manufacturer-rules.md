@@ -24,12 +24,12 @@ For full DRC functionality, you'll also need KiCad 8+ installed (for `kicad-cli`
 
 kicad-tools includes profiles for these PCB fabs:
 
-| Manufacturer | ID | Features |
-|--------------|-----|----------|
-| JLCPCB | `jlcpcb` | Low cost, LCSC parts, assembly service |
-| PCBWay | `pcbway` | Flexible options, global shipping |
-| OSHPark | `oshpark` | US-based, purple boards, per-sq-inch pricing |
-| Seeed Fusion | `seeed` | OPL parts library, assembly service |
+| Manufacturer | ID | Layers | Features |
+|--------------|-----|--------|----------|
+| JLCPCB | `jlcpcb` | 2, 4, 6 | Low cost, LCSC parts, assembly service |
+| PCBWay | `pcbway` | 2, 4, 6 | Flexible options, global shipping |
+| OSHPark | `oshpark` | 2, 4 | US-based, purple boards, per-sq-inch pricing |
+| Seeed Fusion | `seeed` | 2, 4, 6 | OPL parts library, assembly service |
 
 ## CLI: Basic DRC
 
