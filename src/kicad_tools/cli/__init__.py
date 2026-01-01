@@ -8,6 +8,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools erc <report>           - Parse ERC report
     kicad-tools drc <report>           - Parse DRC report
     kicad-tools bom <schematic>        - Generate bill of materials
+    kicad-tools check <pcb>            - Pure Python DRC (no kicad-cli)
     kicad-tools sch <command> <file>   - Schematic analysis tools
     kicad-tools pcb <command> <file>   - PCB query tools
     kicad-tools lib <command> <file>   - Symbol library tools
@@ -171,6 +172,33 @@ def main(argv: list[str] | None = None) -> int:
     bom_parser.add_argument(
         "--sort", choices=["reference", "value", "footprint"], default="reference"
     )
+
+    # CHECK subcommand - pure Python DRC
+    check_parser = subparsers.add_parser("check", help="Pure Python DRC (no kicad-cli)")
+    check_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    check_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    check_parser.add_argument("--errors-only", action="store_true")
+    check_parser.add_argument("--strict", action="store_true", help="Exit with code 2 on warnings")
+    check_parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
+    check_parser.add_argument("--copper", "-c", type=float, default=1.0, help="Copper weight (oz)")
+    check_parser.add_argument(
+        "--only",
+        dest="only_checks",
+        help="Run only specific checks (comma-separated: clearance, dimensions, edge, silkscreen)",
+    )
+    check_parser.add_argument(
+        "--skip",
+        dest="skip_checks",
+        help="Skip specific checks (comma-separated)",
+    )
+    check_parser.add_argument("-v", "--verbose", action="store_true")
 
     # SCH subcommand - schematic tools
     sch_parser = subparsers.add_parser("sch", help="Schematic analysis tools")
@@ -803,6 +831,9 @@ def _dispatch_command(args) -> int:
             sub_argv.extend(["--sort", args.sort])
         return bom_cmd(sub_argv)
 
+    elif args.command == "check":
+        return _run_check_command(args)
+
     elif args.command == "sch":
         return _run_sch_command(args)
 
@@ -886,6 +917,32 @@ def _run_fix_footprints_command(args) -> int:
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return main_fix(sub_argv)
+
+
+def _run_check_command(args) -> int:
+    """Handle check command (pure Python DRC)."""
+    from .check_cmd import main as check_main
+
+    sub_argv = [args.pcb]
+    if args.format != "table":
+        sub_argv.extend(["--format", args.format])
+    if args.errors_only:
+        sub_argv.append("--errors-only")
+    if args.strict:
+        sub_argv.append("--strict")
+    if args.mfr != "jlcpcb":
+        sub_argv.extend(["--mfr", args.mfr])
+    if args.layers != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if args.copper != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if args.only_checks:
+        sub_argv.extend(["--only", args.only_checks])
+    if args.skip_checks:
+        sub_argv.extend(["--skip", args.skip_checks])
+    if args.verbose:
+        sub_argv.append("--verbose")
+    return check_main(sub_argv)
 
 
 def _run_sch_command(args) -> int:
