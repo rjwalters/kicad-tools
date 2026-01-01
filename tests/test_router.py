@@ -2153,6 +2153,112 @@ class TestLoadPcbForRouting:
         assert router.grid.width == 65.0
         assert router.grid.height == 56.0
 
+    def test_load_pcb_unquoted_pad_numbers(self, tmp_path):
+        """Test parsing pads with unquoted numeric pad numbers (Issue #173).
+
+        KiCad uses unquoted numbers for numeric pads (e.g., '(pad 1 smd ...)')
+        but quoted strings for alphanumeric pads like BGA (e.g., '(pad "A1" smd ...)').
+        The parser must handle both formats.
+        """
+        # PCB with unquoted pad numbers (common in real KiCad files)
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "GND")
+  (gr_rect (start 100 100) (end 150 140)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+    (pad 1 smd rect (at 0 0) (size 0.6 1.0) (layers "F.Cu") (net 1 "NET1"))
+    (pad 2 smd rect (at 0.65 0) (size 0.6 1.0) (layers "F.Cu") (net 2 "GND"))
+    (pad 3 smd rect (at 1.3 0) (size 0.6 1.0) (layers "F.Cu") (net 1 "NET1"))
+  )
+)
+"""
+        pcb_file = tmp_path / "unquoted_pads.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(str(pcb_file))
+
+        # Should have parsed all 3 pads
+        assert len(router.pads) == 3
+
+        # Verify pad numbers were extracted correctly (keys are (ref, pin) tuples)
+        pad_keys = set(router.pads.keys())
+        assert ("U1", "1") in pad_keys
+        assert ("U1", "2") in pad_keys
+        assert ("U1", "3") in pad_keys
+
+        # Verify nets were assigned
+        assert "NET1" in net_map
+        assert "GND" in net_map
+
+    def test_load_pcb_mixed_pad_formats(self, tmp_path):
+        """Test parsing pads with both quoted and unquoted pad numbers.
+
+        Real PCBs may have both numeric pads (unquoted) and BGA-style pads (quoted).
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "GND")
+  (gr_rect (start 100 100) (end 150 140)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "BGA"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "A1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+    (pad "A2" smd rect (at 0.8 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
+    (pad "B1" smd rect (at 0 0.8) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+  )
+  (footprint "SOIC"
+    (layer "F.Cu")
+    (at 130 120)
+    (fp_text reference "U2" (at 0 0) (layer "F.SilkS"))
+    (pad 1 smd rect (at 0 0) (size 0.6 1.0) (layers "F.Cu") (net 1 "NET1"))
+    (pad 2 smd rect (at 0.65 0) (size 0.6 1.0) (layers "F.Cu") (net 2 "GND"))
+  )
+)
+"""
+        pcb_file = tmp_path / "mixed_pads.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(str(pcb_file))
+
+        # Should have parsed all 5 pads (3 BGA + 2 SOIC)
+        assert len(router.pads) == 5
+
+        # Verify both pad formats were extracted (keys are (ref, pin) tuples)
+        pad_keys = set(router.pads.keys())
+        # BGA pads (quoted)
+        assert ("U1", "A1") in pad_keys
+        assert ("U1", "A2") in pad_keys
+        assert ("U1", "B1") in pad_keys
+        # SOIC pads (unquoted)
+        assert ("U2", "1") in pad_keys
+        assert ("U2", "2") in pad_keys
+
 
 # =============================================================================
 # Net Class Setup and PCB Merge Tests (Issue #45 - KiCad 7+ Compatibility)

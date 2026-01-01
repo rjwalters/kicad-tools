@@ -222,11 +222,13 @@ def load_pcb_for_routing(
                 continue
 
             # Extract pad number and type
-            pad_start = re.match(r'\(pad\s+"([^"]+)"\s+(\w+)', line)
+            # Handle both quoted ("A1") and unquoted (1) pad numbers
+            # KiCad uses unquoted numbers for numeric pads, quoted for alphanumeric (BGA)
+            pad_start = re.match(r'\(pad\s+(?:"([^"]+)"|(\S+))\s+(\w+)', line)
             if not pad_start:
                 continue
-            pad_num = pad_start.group(1)
-            pad_type = pad_start.group(2)  # smd or thru_hole
+            pad_num = pad_start.group(1) or pad_start.group(2)
+            pad_type = pad_start.group(3)  # smd or thru_hole
 
             # Extract at position
             at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", line)
