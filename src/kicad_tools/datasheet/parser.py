@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
 from .images import ExtractedImage, classify_image
+from .pin_inference import (
+    apply_type_overrides,
+    identify_column_type,
+    infer_pin_type,
+    is_pin_table,
+)
+from .pins import ExtractedPin, PinTable
 from .tables import ExtractedTable
 
 if TYPE_CHECKING:
@@ -389,6 +396,248 @@ class DatasheetParser:
                     )
 
         return tables
+
+    def extract_pins(
+        self,
+        pages: Iterable[int] | None = None,
+        package: str | None = None,
+        type_overrides: dict[str, str] | None = None,
+        as_dict: bool = False,
+    ) -> PinTable | list[dict[str, Any]]:
+        """
+        Extract pin definitions from the datasheet.
+
+        Searches for pin tables in the PDF and extracts pin information
+        including automatic type inference based on pin names.
+
+        Args:
+            pages: Optional page numbers to search (1-indexed).
+                   If None, searches all pages.
+            package: Optional package name to filter results (e.g., "LQFP48").
+                     If None, returns pins from the first/default pin table.
+            type_overrides: Optional dictionary mapping pin numbers to KiCad types
+                           to override automatic inference.
+            as_dict: If True, return list of dictionaries instead of PinTable.
+
+        Returns:
+            PinTable object containing extracted pins, or list of dicts if as_dict=True.
+
+        Example:
+            >>> parser = DatasheetParser("STM32F103.pdf")
+            >>> pins = parser.extract_pins()
+            >>> for pin in pins:
+            ...     print(f"Pin {pin.number}: {pin.name} ({pin.type})")
+        """
+        tables = self.extract_tables(pages)
+
+        # Find pin tables
+        pin_tables: list[tuple[ExtractedTable, float]] = []
+        for table in tables:
+            is_pin, confidence = is_pin_table(table.headers)
+            if is_pin:
+                pin_tables.append((table, confidence))
+
+        if not pin_tables:
+            # No pin tables found
+            result = PinTable(
+                pins=[],
+                package=package,
+                source_pages=[],
+                extraction_method="table",
+                confidence=0.0,
+            )
+            return [p.to_dict() for p in result.pins] if as_dict else result
+
+        # Sort by confidence and use the best one
+        pin_tables.sort(key=lambda x: x[1], reverse=True)
+        best_table, table_confidence = pin_tables[0]
+
+        # Extract pins from the table
+        pins = self._extract_pins_from_table(best_table)
+
+        # Apply type overrides if provided
+        if type_overrides:
+            apply_type_overrides(pins, type_overrides)
+
+        result = PinTable(
+            pins=pins,
+            package=package,
+            source_pages=[best_table.page],
+            extraction_method="table",
+            confidence=table_confidence,
+        )
+
+        return [p.to_dict() for p in result.pins] if as_dict else result
+
+    def _extract_pins_from_table(
+        self,
+        table: ExtractedTable,
+    ) -> list[ExtractedPin]:
+        """
+        Extract pin information from a single table.
+
+        Args:
+            table: ExtractedTable containing pin definitions
+
+        Returns:
+            List of ExtractedPin objects
+        """
+        # Identify column indices
+        column_map: dict[str, int] = {}
+        for idx, header in enumerate(table.headers):
+            col_type = identify_column_type(header)
+            if col_type and col_type not in column_map:
+                column_map[col_type] = idx
+
+        # We need at least number and name columns
+        if "number" not in column_map or "name" not in column_map:
+            return []
+
+        pins: list[ExtractedPin] = []
+
+        for row in table.rows:
+            if not row:
+                continue
+
+            # Extract pin number
+            num_idx = column_map["number"]
+            if num_idx >= len(row):
+                continue
+            pin_number = str(row[num_idx]).strip()
+            if not pin_number:
+                continue
+
+            # Extract pin name
+            name_idx = column_map["name"]
+            if name_idx >= len(row):
+                continue
+            pin_name = str(row[name_idx]).strip()
+            if not pin_name:
+                continue
+
+            # Extract optional fields
+            electrical_type = None
+            if "type" in column_map:
+                type_idx = column_map["type"]
+                if type_idx < len(row):
+                    electrical_type = str(row[type_idx]).strip() or None
+
+            description = ""
+            if "description" in column_map:
+                desc_idx = column_map["description"]
+                if desc_idx < len(row):
+                    description = str(row[desc_idx]).strip()
+
+            alt_functions: list[str] = []
+            if "alt_functions" in column_map:
+                alt_idx = column_map["alt_functions"]
+                if alt_idx < len(row):
+                    alt_str = str(row[alt_idx]).strip()
+                    if alt_str:
+                        # Split by common delimiters
+                        alt_functions = [
+                            f.strip()
+                            for f in alt_str.replace("/", ",").replace(";", ",").split(",")
+                            if f.strip()
+                        ]
+
+            # Infer pin type
+            type_match = infer_pin_type(
+                name=pin_name,
+                electrical_type=electrical_type,
+                description=description,
+            )
+
+            pins.append(
+                ExtractedPin(
+                    number=pin_number,
+                    name=pin_name,
+                    type=type_match.pin_type,
+                    type_confidence=type_match.confidence,
+                    type_source="inferred" if not electrical_type else "datasheet",
+                    description=description,
+                    alt_functions=alt_functions,
+                    electrical_type=electrical_type,
+                    source_page=table.page,
+                )
+            )
+
+        return pins
+
+    def list_packages(
+        self,
+        pages: Iterable[int] | None = None,
+    ) -> list[str]:
+        """
+        List available packages mentioned in the datasheet.
+
+        Searches for common package naming patterns (LQFP, BGA, QFN, etc.)
+        in table headers and content.
+
+        Args:
+            pages: Optional page numbers to search (1-indexed).
+                   If None, searches all pages.
+
+        Returns:
+            List of package names found (e.g., ["LQFP48", "LQFP64", "BGA100"])
+        """
+        import re
+
+        tables = self.extract_tables(pages)
+        packages: set[str] = set()
+
+        # Common package patterns
+        package_pattern = re.compile(
+            r"\b(LQFP|QFP|TQFP|BGA|WLCSP|QFN|DFN|SOIC|SOP|SSOP|TSSOP|"
+            r"MSOP|DIP|PDIP|PLCC|LGA|WSON|SON|SOT|TO-?\d+|"
+            r"TSOP|PQFP|CQFP|CERDIP|CERQUAD)[\s-]?\d+",
+            re.IGNORECASE,
+        )
+
+        for table in tables:
+            # Check headers
+            for header in table.headers:
+                matches = package_pattern.findall(header)
+                packages.update(m.upper() for m in matches)
+
+            # Check first few rows
+            for row in table.rows[:5]:
+                for cell in row:
+                    matches = package_pattern.findall(str(cell))
+                    packages.update(m.upper() for m in matches)
+
+        return sorted(packages)
+
+    def extract_pins_dataframe(
+        self,
+        pages: Iterable[int] | None = None,
+        package: str | None = None,
+    ) -> Any:
+        """
+        Extract pins and return as a pandas DataFrame.
+
+        This is a convenience method for users who prefer working with pandas.
+
+        Args:
+            pages: Optional page numbers to search (1-indexed).
+            package: Optional package name to filter results.
+
+        Returns:
+            pandas DataFrame with pin data
+
+        Raises:
+            ImportError: If pandas is not installed
+        """
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "pandas is required for DataFrame conversion. Install with: pip install pandas"
+            ) from e
+
+        pin_table = self.extract_pins(pages=pages, package=package)
+        data = [p.to_dict() for p in pin_table.pins]
+        return pd.DataFrame(data)
 
     def parse_all(
         self,

@@ -9,6 +9,7 @@ Provides commands:
     kct datasheet convert <pdf>     - Convert PDF to markdown
     kct datasheet extract-images <pdf> - Extract images from PDF
     kct datasheet extract-tables <pdf> - Extract tables from PDF
+    kct datasheet extract-pins <pdf> - Extract pin definitions from PDF
     kct datasheet info <pdf>        - Show PDF information
 """
 
@@ -137,6 +138,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Output format for tables (default: markdown)",
     )
 
+    # extract-pins subcommand
+    pins_parser = subparsers.add_parser("extract-pins", help="Extract pin definitions from PDF")
+    pins_parser.add_argument("pdf", help="Path to PDF file")
+    pins_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: stdout)",
+    )
+    pins_parser.add_argument(
+        "--pages",
+        help="Page range to search (e.g., '1-10' or '1,2,5')",
+    )
+    pins_parser.add_argument(
+        "--package",
+        help="Package name to filter (e.g., 'LQFP48')",
+    )
+    pins_parser.add_argument(
+        "--format",
+        choices=["json", "csv", "table"],
+        default="json",
+        help="Output format (default: json)",
+    )
+    pins_parser.add_argument(
+        "--list-packages",
+        action="store_true",
+        help="List available packages instead of extracting pins",
+    )
+
     # info subcommand
     info_parser = subparsers.add_parser("info", help="Show PDF information")
     info_parser.add_argument("pdf", help="Path to PDF file")
@@ -163,11 +192,16 @@ def main(argv: list[str] | None = None) -> int:
             return _extract_images(args)
         elif args.command == "extract-tables":
             return _extract_tables(args)
+        elif args.command == "extract-pins":
+            return _extract_pins(args)
         elif args.command == "info":
             return _info(args)
     except ImportError as e:
         print(f"Error: {e}", file=sys.stderr)
-        print("Install with: pip install kicad-tools[parts] or kicad-tools[datasheet]", file=sys.stderr)
+        print(
+            "Install with: pip install kicad-tools[parts] or kicad-tools[datasheet]",
+            file=sys.stderr,
+        )
         return 1
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -505,6 +539,76 @@ def _extract_tables(args) -> int:
                         print(table.to_csv())
                     else:
                         print(table.to_markdown())
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _extract_pins(args) -> int:
+    """Handle extract-pins command."""
+    try:
+        from ..datasheet.parser import DatasheetParser
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[datasheet]", file=sys.stderr)
+        return 1
+
+    pdf_path = Path(args.pdf)
+    if not pdf_path.exists():
+        print(f"Error: File not found: {pdf_path}", file=sys.stderr)
+        return 1
+
+    try:
+        parser = DatasheetParser(pdf_path)
+        pages = _parse_pages(args.pages)
+
+        # List packages mode
+        if args.list_packages:
+            packages = parser.list_packages(pages)
+            if args.format == "json":
+                print(json.dumps({"packages": packages}, indent=2))
+            else:
+                if packages:
+                    print("Available packages:")
+                    for pkg in packages:
+                        print(f"  {pkg}")
+                else:
+                    print("No packages found in document")
+            return 0
+
+        # Extract pins
+        pin_table = parser.extract_pins(pages=pages, package=args.package)
+
+        if not pin_table.pins:
+            print("No pin tables found in document", file=sys.stderr)
+            return 0
+
+        # Format output
+        if args.format == "json":
+            content = pin_table.to_json()
+        elif args.format == "csv":
+            content = pin_table.to_csv()
+        else:  # table format
+            content = pin_table.to_markdown()
+
+        # Output
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content)
+            print(f"Extracted {len(pin_table)} pins to: {output_path}")
+        else:
+            print(content)
+
+        # Print summary for table/csv formats
+        if args.format != "json" and not args.output:
+            print(f"\n# Extracted {len(pin_table)} pins")
+            if pin_table.package:
+                print(f"# Package: {pin_table.package}")
+            print(f"# Confidence: {pin_table.confidence:.2f}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

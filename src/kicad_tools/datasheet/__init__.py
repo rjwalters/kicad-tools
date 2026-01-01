@@ -73,13 +73,15 @@ from .exceptions import (
     DatasheetError,
     DatasheetSearchError,
 )
-from .manager import DatasheetManager
-from .models import Datasheet, DatasheetResult, DatasheetSearchResult
-from .sources import DatasheetSource, LCSCDatasheetSource, OctopartDatasheetSource
 
 # PDF parsing functionality
 from .images import ExtractedImage, classify_image
+from .manager import DatasheetManager
+from .models import Datasheet, DatasheetResult, DatasheetSearchResult
 from .parser import DatasheetParser, ParsedDatasheet
+from .pin_inference import infer_pin_type
+from .pins import ExtractedPin, PinTable
+from .sources import DatasheetSource, LCSCDatasheetSource, OctopartDatasheetSource
 from .tables import ExtractedTable
 
 __all__ = [
@@ -95,6 +97,10 @@ __all__ = [
     "ExtractedImage",
     "ExtractedTable",
     "classify_image",
+    # Pin extraction
+    "ExtractedPin",
+    "PinTable",
+    "infer_pin_type",
     # Cache
     "DatasheetCache",
     "get_default_cache_path",
