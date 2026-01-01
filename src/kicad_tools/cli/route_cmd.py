@@ -252,6 +252,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Suppress progress output (for scripting)",
     )
+    parser.add_argument(
+        "--power-nets",
+        help=(
+            "Generate copper zones for power nets: 'NET1:LAYER1,NET2:LAYER2,...' "
+            "(e.g., 'GND:B.Cu,+3.3V:F.Cu')"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -451,6 +458,42 @@ def main(argv: list[str] | None = None) -> int:
                 print("\nRouting cancelled. No changes saved.")
             return 0
 
+    # Generate power zones if requested
+    zone_sexp = ""
+    if args.power_nets:
+        from kicad_tools.zones import ZoneGenerator, parse_power_nets
+
+        try:
+            power_nets = parse_power_nets(args.power_nets)
+        except ValueError as e:
+            print(f"Error parsing power-nets: {e}", file=sys.stderr)
+            return 1
+
+        if power_nets and not quiet:
+            print("\n--- Generating copper zones ---")
+            print(f"  Power nets: {', '.join(f'{n}:{l}' for n, l in power_nets)}")
+
+        if power_nets:
+            try:
+                gen = ZoneGenerator.from_pcb(str(pcb_path))
+                for net_name, layer in power_nets:
+                    # GND gets higher priority (fills last, on top)
+                    priority = 1 if net_name.upper() in ("GND", "GNDA", "GNDD") else 0
+                    try:
+                        gen.add_zone(
+                            net=net_name,
+                            layer=layer,
+                            priority=priority,
+                        )
+                        if not quiet:
+                            print(f"    Added zone: {net_name} on {layer} (priority {priority})")
+                    except ValueError as e:
+                        print(f"  Warning: Could not add zone for {net_name}: {e}")
+
+                zone_sexp = gen.generate_sexp()
+            except Exception as e:
+                print(f"  Warning: Zone generation failed: {e}")
+
     # Save output
     if args.dry_run:
         if not quiet:
@@ -466,11 +509,15 @@ def main(argv: list[str] | None = None) -> int:
             # Get route S-expressions
             route_sexp = router.to_sexp()
 
-            # Insert routes before final closing parenthesis
-            if route_sexp:
+            # Insert routes and zones before final closing parenthesis
+            if route_sexp or zone_sexp:
                 output_content = original_content.rstrip().rstrip(")")
-                output_content += "\n  ; === AUTOROUTED TRACES ===\n"
-                output_content += f"  {route_sexp}\n"
+                if zone_sexp:
+                    output_content += "\n  ; === COPPER ZONES ===\n"
+                    output_content += f"  {zone_sexp}\n"
+                if route_sexp:
+                    output_content += "\n  ; === AUTOROUTED TRACES ===\n"
+                    output_content += f"  {route_sexp}\n"
                 output_content += ")\n"
             else:
                 output_content = original_content

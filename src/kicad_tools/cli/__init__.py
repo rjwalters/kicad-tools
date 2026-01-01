@@ -18,6 +18,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
     kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools zones <command>        - Add copper pour zones
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
@@ -548,6 +549,44 @@ def main(argv: list[str] | None = None) -> int:
     mfr_import_dru.add_argument("file", help="Path to .kicad_dru file")
     mfr_import_dru.add_argument("--format", choices=["text", "json"], default="text")
 
+    # ZONES subcommand - copper zone generation
+    zones_parser = subparsers.add_parser("zones", help="Add copper pour zones to PCB")
+    zones_subparsers = zones_parser.add_subparsers(dest="zones_command", help="Zone commands")
+
+    # zones add
+    zones_add = zones_subparsers.add_parser("add", help="Add a copper zone")
+    zones_add.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_add.add_argument("-o", "--output", help="Output file path")
+    zones_add.add_argument("--net", required=True, help="Net name (e.g., GND, +3.3V)")
+    zones_add.add_argument("--layer", required=True, help="Copper layer (e.g., B.Cu, F.Cu)")
+    zones_add.add_argument("--priority", type=int, default=0, help="Zone fill priority")
+    zones_add.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
+    zones_add.add_argument("--thermal-gap", type=float, default=0.3, help="Thermal gap in mm")
+    zones_add.add_argument(
+        "--thermal-bridge", type=float, default=0.4, help="Thermal bridge width in mm"
+    )
+    zones_add.add_argument("--min-thickness", type=float, default=0.25, help="Min thickness in mm")
+    zones_add.add_argument("-v", "--verbose", action="store_true")
+    zones_add.add_argument("--dry-run", action="store_true")
+
+    # zones list
+    zones_list = zones_subparsers.add_parser("list", help="List existing zones")
+    zones_list.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_list.add_argument("--format", choices=["text", "json"], default="text")
+
+    # zones batch
+    zones_batch = zones_subparsers.add_parser("batch", help="Add multiple zones from spec")
+    zones_batch.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_batch.add_argument("-o", "--output", help="Output file path")
+    zones_batch.add_argument(
+        "--power-nets",
+        required=True,
+        help="Power nets spec: 'NET:LAYER,...' (e.g., 'GND:B.Cu,+3.3V:F.Cu')",
+    )
+    zones_batch.add_argument("--clearance", type=float, default=0.3, help="Clearance in mm")
+    zones_batch.add_argument("-v", "--verbose", action="store_true")
+    zones_batch.add_argument("--dry-run", action="store_true")
+
     # ROUTE subcommand - PCB autorouting
     route_parser = subparsers.add_parser("route", help="Autoroute a PCB")
     route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -569,6 +608,10 @@ def main(argv: list[str] | None = None) -> int:
     route_parser.add_argument("-v", "--verbose", action="store_true")
     route_parser.add_argument("--dry-run", action="store_true", help="Don't write output")
     route_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    route_parser.add_argument(
+        "--power-nets",
+        help="Generate zones: 'NET:LAYER,...' (e.g., 'GND:B.Cu,+3.3V:F.Cu')",
+    )
 
     # REASON subcommand - LLM-driven PCB layout
     reason_parser = subparsers.add_parser("reason", help="LLM-driven PCB layout reasoning")
@@ -1090,6 +1133,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "datasheet":
         return _run_datasheet_command(args)
+
+    elif args.command == "zones":
+        return _run_zones_command(args)
 
     elif args.command == "route":
         return _run_route_command(args)
@@ -1681,6 +1727,65 @@ def _run_datasheet_command(args) -> int:
     return 1
 
 
+def _run_zones_command(args) -> int:
+    """Handle zones command."""
+    if not args.zones_command:
+        print("Usage: kicad-tools zones <command> [options] <file>")
+        print("Commands: add, list, batch")
+        return 1
+
+    from .zones_cmd import main as zones_main
+
+    if args.zones_command == "add":
+        sub_argv = ["add", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        sub_argv.extend(["--net", args.net])
+        sub_argv.extend(["--layer", args.layer])
+        if args.priority != 0:
+            sub_argv.extend(["--priority", str(args.priority)])
+        if args.clearance != 0.3:
+            sub_argv.extend(["--clearance", str(args.clearance)])
+        if getattr(args, "thermal_gap", 0.3) != 0.3:
+            sub_argv.extend(["--thermal-gap", str(args.thermal_gap)])
+        if getattr(args, "thermal_bridge", 0.4) != 0.4:
+            sub_argv.extend(["--thermal-bridge", str(args.thermal_bridge)])
+        if getattr(args, "min_thickness", 0.25) != 0.25:
+            sub_argv.extend(["--min-thickness", str(args.min_thickness)])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        # Use global quiet flag
+        if getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return zones_main(sub_argv) or 0
+
+    elif args.zones_command == "list":
+        sub_argv = ["list", args.pcb]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return zones_main(sub_argv) or 0
+
+    elif args.zones_command == "batch":
+        sub_argv = ["batch", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        sub_argv.extend(["--power-nets", args.power_nets])
+        if args.clearance != 0.3:
+            sub_argv.extend(["--clearance", str(args.clearance)])
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        # Use global quiet flag
+        if getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return zones_main(sub_argv) or 0
+
+    return 1
+
+
 def _run_route_command(args) -> int:
     """Handle route command."""
     from .route_cmd import main as route_main
@@ -1713,6 +1818,8 @@ def _run_route_command(args) -> int:
     # Use command-level quiet or global quiet
     if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
+    if getattr(args, "power_nets", None):
+        sub_argv.extend(["--power-nets", args.power_nets])
     return route_main(sub_argv)
 
 
