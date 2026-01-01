@@ -220,7 +220,9 @@ class TestViaDimensionChecks:
         results = rule.check(pcb, rules)
 
         via_violations = [v for v in results.violations if v.rule_id.startswith("dimension_via")]
-        annular_violations = [v for v in results.violations if v.rule_id == "dimension_annular_ring"]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
         assert len(via_violations) == 0
         assert len(annular_violations) == 0
 
@@ -255,7 +257,9 @@ class TestViaDimensionChecks:
 
         results = rule.check(pcb, rules)
 
-        diameter_violations = [v for v in results.violations if v.rule_id == "dimension_via_diameter"]
+        diameter_violations = [
+            v for v in results.violations if v.rule_id == "dimension_via_diameter"
+        ]
         assert len(diameter_violations) == 1
         assert diameter_violations[0].actual_value == pytest.approx(0.5)
         assert diameter_violations[0].required_value == pytest.approx(0.6)
@@ -274,7 +278,9 @@ class TestViaDimensionChecks:
 
         results = rule.check(pcb, rules)
 
-        annular_violations = [v for v in results.violations if v.rule_id == "dimension_annular_ring"]
+        annular_violations = [
+            v for v in results.violations if v.rule_id == "dimension_annular_ring"
+        ]
         assert len(annular_violations) == 1
         assert annular_violations[0].actual_value == pytest.approx(0.1)
         assert annular_violations[0].required_value == pytest.approx(0.15)
@@ -298,7 +304,9 @@ class TestDrillClearanceCheck:
 
         results = rule.check(pcb, rules)
 
-        clearance_violations = [v for v in results.violations if v.rule_id == "dimension_drill_clearance"]
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
         assert len(clearance_violations) == 0
 
     def test_drills_too_close(self):
@@ -318,7 +326,9 @@ class TestDrillClearanceCheck:
 
         results = rule.check(pcb, rules)
 
-        clearance_violations = [v for v in results.violations if v.rule_id == "dimension_drill_clearance"]
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
         assert len(clearance_violations) == 1
         assert clearance_violations[0].actual_value == pytest.approx(0.1)
         assert "NET1" in clearance_violations[0].items
@@ -356,7 +366,9 @@ class TestDrillClearanceCheck:
 
         results = rule.check(pcb, rules)
 
-        clearance_violations = [v for v in results.violations if v.rule_id == "dimension_drill_clearance"]
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
         assert len(clearance_violations) == 1
 
     def test_smd_pads_not_checked(self):
@@ -388,7 +400,9 @@ class TestDrillClearanceCheck:
 
         results = rule.check(pcb, rules)
 
-        clearance_violations = [v for v in results.violations if v.rule_id == "dimension_drill_clearance"]
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
         assert len(clearance_violations) == 0
 
 
@@ -503,7 +517,9 @@ class TestViolationLocation:
 
         results = rule.check(pcb, rules)
 
-        clearance_violations = [v for v in results.violations if v.rule_id == "dimension_drill_clearance"]
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
         assert len(clearance_violations) == 1
         # Midpoint of (0,0) and (0.4, 0) is (0.2, 0)
         assert clearance_violations[0].location == pytest.approx((0.2, 0.0))

@@ -124,6 +124,7 @@ ignore = [
     "SIM102", # nested if - sometimes more readable
     "SIM103", # return negated - sometimes less readable
     "SIM117", # combine with - sometimes less readable
+    "SIM118", # key in dict.keys() - sometimes explicit is clearer
     "E402",   # module level import not at top - common in tests
     "E741",   # ambiguous variable name - sometimes 'l' is fine for layer/line
     "B904",   # raise from - requires careful refactoring

@@ -647,7 +647,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # DATASHEET subcommand - datasheet search, download, and PDF parsing
-    datasheet_parser = subparsers.add_parser("datasheet", help="Datasheet search, download, and PDF parsing")
+    datasheet_parser = subparsers.add_parser(
+        "datasheet", help="Datasheet search, download, and PDF parsing"
+    )
     datasheet_subparsers = datasheet_parser.add_subparsers(
         dest="datasheet_command", help="Datasheet commands"
     )
@@ -1418,7 +1420,9 @@ def _run_datasheet_command(args) -> int:
     """Handle datasheet subcommands."""
     if not args.datasheet_command:
         print("Usage: kicad-tools datasheet <command> [options]")
-        print("Commands: search, download, list, cache, convert, extract-images, extract-tables, info")
+        print(
+            "Commands: search, download, list, cache, convert, extract-images, extract-tables, info"
+        )
         return 1
 
     from .datasheet_cmd import main as datasheet_main
