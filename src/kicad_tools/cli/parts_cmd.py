@@ -4,6 +4,7 @@ CLI commands for parts lookup and management.
 Usage:
     kct parts lookup C123456              - Look up LCSC part
     kct parts search "100nF 0402"         - Search for parts
+    kct parts import STM32F103C8T6 --library myproject.kicad_sym
     kct parts cache stats                 - Show cache statistics
     kct parts cache clear                 - Clear the cache
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +40,42 @@ def main(argv: list[str] | None = None) -> int:
     search_parser.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     search_parser.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
 
+    # import subcommand
+    import_parser = subparsers.add_parser("import", help="Import part from datasheet to library")
+    import_parser.add_argument(
+        "parts", nargs="+", help="Part number(s) to import (e.g., STM32F103C8T6)"
+    )
+    import_parser.add_argument(
+        "--library", "-l", required=True, help="Output symbol library (.kicad_sym)"
+    )
+    import_parser.add_argument(
+        "--symbol-lib",
+        dest="symbol_library",
+        help="Symbol library (alias for --library)",
+    )
+    import_parser.add_argument(
+        "--footprint-lib", help="Project footprint library (.pretty directory)"
+    )
+    import_parser.add_argument("--package", "-p", help="Specific package variant (e.g., LQFP48)")
+    import_parser.add_argument(
+        "--layout",
+        choices=["functional", "physical", "simple"],
+        default="functional",
+        help="Pin layout style (default: functional)",
+    )
+    import_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what would be imported without making changes",
+    )
+    import_parser.add_argument(
+        "--interactive", "-i", action="store_true", help="Interactive mode with prompts"
+    )
+    import_parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing symbols"
+    )
+    import_parser.add_argument("--format", choices=["text", "json"], default="text")
+
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
     cache_subparsers = cache_parser.add_subparsers(dest="cache_action", help="Cache commands")
@@ -56,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         return _lookup(args)
     elif args.action == "search":
         return _search(args)
+    elif args.action == "import":
+        return _import(args)
     elif args.action == "cache":
         return _cache(args)
 
@@ -221,6 +261,141 @@ def _cache(args) -> int:
         print(f"Cleared {count} expired entries")
 
     return 0
+
+
+def _import(args) -> int:
+    """Handle parts import command."""
+    try:
+        from ..parts import ImportOptions, LayoutStyle, PartImporter
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts,datasheet]", file=sys.stderr)
+        return 1
+
+    # Determine symbol library path
+    symbol_lib = Path(args.symbol_library or args.library)
+
+    # Create import options
+    layout_map = {
+        "functional": LayoutStyle.FUNCTIONAL,
+        "physical": LayoutStyle.PHYSICAL,
+        "simple": LayoutStyle.SIMPLE,
+    }
+    options = ImportOptions(
+        package=args.package,
+        layout=layout_map.get(args.layout, LayoutStyle.FUNCTIONAL),
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+    )
+
+    # Create importer
+    importer = PartImporter(
+        symbol_library=symbol_lib,
+        footprint_library=Path(args.footprint_lib) if args.footprint_lib else None,
+    )
+
+    # Track results for summary
+    success_count = 0
+    failure_count = 0
+    all_results = []
+
+    def progress_callback(current: int, total: int, part_number: str):
+        if args.format == "text":
+            print(f"[{current}/{total}] Importing {part_number}...")
+
+    try:
+        # Import parts
+        if len(args.parts) == 1:
+            # Single part - show detailed progress
+            def stage_callback(stage, msg):
+                if args.format == "text":
+                    print(f"  {stage.value}: {msg}")
+
+            result = importer.import_part(args.parts[0], options, progress_callback=stage_callback)
+            all_results.append(result)
+        else:
+            # Multiple parts
+            all_results = importer.import_parts(
+                args.parts, options, progress_callback=progress_callback
+            )
+
+        # Count results
+        for result in all_results:
+            if result.success:
+                success_count += 1
+            else:
+                failure_count += 1
+
+        # Output results
+        if args.format == "json":
+            data = {
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "results": [
+                    {
+                        "part_number": r.part_number,
+                        "success": r.success,
+                        "message": r.message,
+                        "symbol_name": r.symbol_name,
+                        "footprint_match": r.footprint_match,
+                        "footprint_confidence": r.footprint_confidence,
+                        "pin_count": r.pin_count,
+                        "error_stage": r.error_stage.value if r.error_stage else None,
+                        "error_details": r.error_details,
+                        "warnings": r.warnings,
+                    }
+                    for r in all_results
+                ],
+            }
+            print(json.dumps(data, indent=2))
+        else:
+            # Text format
+            print()
+            if args.dry_run:
+                print("DRY RUN - No changes were made")
+                print()
+
+            for result in all_results:
+                status = "✓" if result.success else "✗"
+                print(f"{status} {result.part_number}: {result.message}")
+
+                if result.success:
+                    if result.symbol_name:
+                        print(f"    Symbol: {result.symbol_name}")
+                    if result.footprint_match:
+                        conf = (
+                            f"{result.footprint_confidence:.0%}"
+                            if result.footprint_confidence
+                            else "?"
+                        )
+                        print(f"    Footprint: {result.footprint_match} ({conf} match)")
+                    if result.pin_count:
+                        print(f"    Pins: {result.pin_count}")
+                    if result.datasheet_path:
+                        print(f"    Datasheet: {result.datasheet_path}")
+
+                if result.warnings:
+                    for warning in result.warnings:
+                        print(f"    ⚠ {warning}")
+
+                if result.error_details:
+                    print(f"    Error: {result.error_details}")
+
+            # Summary
+            print()
+            if len(args.parts) > 1:
+                print(f"Summary: {success_count} succeeded, {failure_count} failed")
+
+            if not args.dry_run and success_count > 0:
+                print(f"Library updated: {symbol_lib}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        importer.close()
+
+    return 0 if failure_count == 0 else 1
 
 
 if __name__ == "__main__":
