@@ -1076,3 +1076,446 @@ class TestPointToSegmentDistance:
         rule = EdgeClearanceRule()
         dist = rule._point_to_segment_distance((3, 4), (0, 0), (0, 0))
         assert dist == pytest.approx(5.0)  # 3-4-5 triangle
+
+    def test_import_silkscreen_rules(self):
+        """Test importing silkscreen rule functions."""
+        from kicad_tools.validate.rules import (
+            check_all_silkscreen,
+            check_silkscreen_line_width,
+            check_silkscreen_over_pads,
+            check_silkscreen_text_height,
+        )
+
+        assert check_all_silkscreen is not None
+        assert check_silkscreen_line_width is not None
+        assert check_silkscreen_over_pads is not None
+        assert check_silkscreen_text_height is not None
+
+
+class TestSilkscreenRules:
+    """Tests for silkscreen validation rules."""
+
+    def test_silkscreen_text_height_violation(self):
+        """Test detection of silkscreen text below minimum height."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintText
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_text_height
+
+        # Create a minimal PCB with a footprint that has small text
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        # Manually add a footprint with text smaller than minimum
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="reference",
+                    text="U1",
+                    position=(0.0, -2.0),
+                    layer="F.SilkS",  # Silkscreen layer
+                    font_size=(0.5, 0.5),  # Below minimum of 0.8mm
+                    font_thickness=0.1,
+                ),
+            ],
+            graphics=[],
+        )
+        pcb._footprints.append(fp)
+
+        # Get design rules
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        # Check silkscreen text height
+        results = check_silkscreen_text_height(pcb, rules)
+
+        # Should have one violation
+        assert len(results) == 1
+        assert results.violations[0].rule_id == "silkscreen_text_height"
+        assert results.violations[0].severity == "warning"
+        assert results.violations[0].actual_value == pytest.approx(0.5)
+        assert results.violations[0].required_value == pytest.approx(0.8)
+
+    def test_silkscreen_text_height_no_violation(self):
+        """Test no violation for silkscreen text at/above minimum height."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintText
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_text_height
+
+        # Create PCB with footprint that has adequate text height
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="reference",
+                    text="U1",
+                    position=(0.0, -2.0),
+                    layer="F.SilkS",
+                    font_size=(1.0, 1.0),  # Above minimum of 0.8mm
+                    font_thickness=0.15,
+                ),
+            ],
+            graphics=[],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_silkscreen_text_height(pcb, rules)
+
+        # Should have no violations
+        assert len(results) == 0
+        assert results.passed is True
+
+    def test_silkscreen_line_width_violation(self):
+        """Test detection of silkscreen line below minimum width."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintGraphic
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_line_width
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[],
+            graphics=[
+                FootprintGraphic(
+                    graphic_type="line",
+                    layer="F.SilkS",
+                    stroke_width=0.10,  # Below minimum of 0.15mm
+                    start=(0.0, 0.0),
+                    end=(5.0, 0.0),
+                ),
+            ],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_silkscreen_line_width(pcb, rules)
+
+        assert len(results) == 1
+        assert results.violations[0].rule_id == "silkscreen_line_width"
+        assert results.violations[0].actual_value == pytest.approx(0.10)
+        assert results.violations[0].required_value == pytest.approx(0.15)
+
+    def test_silkscreen_line_width_no_violation(self):
+        """Test no violation for silkscreen line at/above minimum width."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintGraphic
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_line_width
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[],
+            graphics=[
+                FootprintGraphic(
+                    graphic_type="line",
+                    layer="F.SilkS",
+                    stroke_width=0.15,  # At minimum of 0.15mm
+                    start=(0.0, 0.0),
+                    end=(5.0, 0.0),
+                ),
+            ],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_silkscreen_line_width(pcb, rules)
+
+        assert len(results) == 0
+        assert results.passed is True
+
+    def test_silkscreen_hidden_text_ignored(self):
+        """Test that hidden silkscreen text is not checked."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintText
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_text_height
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="reference",
+                    text="U1",
+                    position=(0.0, -2.0),
+                    layer="F.SilkS",
+                    font_size=(0.5, 0.5),  # Below minimum but hidden
+                    font_thickness=0.1,
+                    hidden=True,
+                ),
+            ],
+            graphics=[],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_silkscreen_text_height(pcb, rules)
+
+        # Hidden text should be ignored
+        assert len(results) == 0
+
+    def test_silkscreen_non_silkscreen_layer_ignored(self):
+        """Test that text on non-silkscreen layers is not checked."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintText
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_text_height
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="value",
+                    text="TEST",
+                    position=(0.0, 2.0),
+                    layer="F.Fab",  # Not a silkscreen layer
+                    font_size=(0.5, 0.5),  # Small but on Fab layer
+                    font_thickness=0.1,
+                ),
+            ],
+            graphics=[],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_silkscreen_text_height(pcb, rules)
+
+        # Text on F.Fab should be ignored
+        assert len(results) == 0
+
+    def test_check_all_silkscreen(self):
+        """Test that check_all_silkscreen combines all checks."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import (
+            PCB,
+            Footprint,
+            FootprintGraphic,
+            FootprintText,
+        )
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_all_silkscreen
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        # Add footprint with both text and line violations
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="reference",
+                    text="U1",
+                    position=(0.0, -2.0),
+                    layer="F.SilkS",
+                    font_size=(0.5, 0.5),  # Violation
+                    font_thickness=0.1,
+                ),
+            ],
+            graphics=[
+                FootprintGraphic(
+                    graphic_type="line",
+                    layer="F.SilkS",
+                    stroke_width=0.10,  # Violation
+                    start=(0.0, 0.0),
+                    end=(5.0, 0.0),
+                ),
+            ],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_all_silkscreen(pcb, rules)
+
+        # Should have 2 violations (text + line)
+        assert len(results) == 2
+        assert results.rules_checked == 3  # 3 rule types checked
+
+        # Check that both rule types are represented
+        rule_ids = {v.rule_id for v in results.violations}
+        assert "silkscreen_text_height" in rule_ids
+        assert "silkscreen_line_width" in rule_ids
+
+    def test_drc_checker_silkscreen_integration(self):
+        """Test DRCChecker.check_silkscreen integration."""
+        from kicad_tools.schema.pcb import (
+            PCB,
+            Footprint,
+            FootprintText,
+        )
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate import DRCChecker
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="F.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="reference",
+                    text="U1",
+                    position=(0.0, -2.0),
+                    layer="F.SilkS",
+                    font_size=(0.5, 0.5),  # Violation
+                    font_thickness=0.1,
+                ),
+            ],
+            graphics=[],
+        )
+        pcb._footprints.append(fp)
+
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=4)
+        results = checker.check_silkscreen()
+
+        assert len(results) >= 1
+        assert any(v.rule_id == "silkscreen_text_height" for v in results.violations)
+
+    def test_silkscreen_back_layer(self):
+        """Test silkscreen checks on back silkscreen layer."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.schema.pcb import PCB, Footprint, FootprintText
+        from kicad_tools.sexp import SExp
+        from kicad_tools.validate.rules.silkscreen import check_silkscreen_text_height
+
+        sexp = SExp(name="kicad_pcb")
+        pcb = PCB(sexp)
+
+        fp = Footprint(
+            name="TestFP",
+            layer="B.Cu",
+            position=(10.0, 20.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+            pads=[],
+            texts=[
+                FootprintText(
+                    text_type="reference",
+                    text="U1",
+                    position=(0.0, -2.0),
+                    layer="B.SilkS",  # Back silkscreen
+                    font_size=(0.5, 0.5),  # Below minimum
+                    font_thickness=0.1,
+                ),
+            ],
+            graphics=[],
+        )
+        pcb._footprints.append(fp)
+
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=4)
+
+        results = check_silkscreen_text_height(pcb, rules)
+
+        assert len(results) == 1
+        assert results.violations[0].layer == "B.SilkS"
+
+    def test_real_pcb_silkscreen(self):
+        """Test silkscreen checks on a real PCB file with fp_text elements."""
+        from pathlib import Path
+
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate import DRCChecker
+
+        # Use the example PCB that has fp_text elements
+        pcb_file = (
+            Path(__file__).parent.parent
+            / "examples"
+            / "04-autorouter"
+            / "usb_joystick"
+            / "usb_joystick.kicad_pcb"
+        )
+
+        if not pcb_file.exists():
+            pytest.skip("Example PCB file not available")
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+
+        # Run silkscreen checks
+        results = checker.check_silkscreen()
+
+        # The PCB has text with 0.5mm height (C1-C4) which is below 0.8mm minimum
+        # Should detect violations
+        text_violations = [v for v in results.violations if v.rule_id == "silkscreen_text_height"]
+        assert len(text_violations) > 0
+
+        # Check that rules_checked is correct (3 silkscreen rules)
+        assert results.rules_checked == 3

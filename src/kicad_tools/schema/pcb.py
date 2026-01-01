@@ -99,6 +99,236 @@ class Pad:
 
 
 @dataclass
+class FootprintText:
+    """Text element within a footprint (fp_text).
+
+    Used for reference designators, values, and user text on footprints.
+    Contains font information for silkscreen validation.
+    """
+
+    text_type: str  # reference, value, user
+    text: str
+    position: tuple[float, float]
+    layer: str
+    font_size: tuple[float, float]  # (width, height) in mm
+    font_thickness: float  # stroke thickness in mm
+    uuid: str = ""
+    hidden: bool = False
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> FootprintText:
+        """Parse footprint text from S-expression."""
+        text_type = sexp.get_string(0) or ""
+        text = sexp.get_string(1) or ""
+
+        fp_text = cls(
+            text_type=text_type,
+            text=text,
+            position=(0.0, 0.0),
+            layer="",
+            font_size=(1.0, 1.0),
+            font_thickness=0.15,
+        )
+
+        # Position
+        if at := sexp.find("at"):
+            x = at.get_float(0) or 0.0
+            y = at.get_float(1) or 0.0
+            fp_text.position = (x, y)
+
+        # Layer
+        if layer := sexp.find("layer"):
+            fp_text.layer = layer.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            fp_text.uuid = uuid.get_string(0) or ""
+
+        # Effects (font size and thickness)
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
+                fp_text.hidden = True
+            if font := effects.find("font"):
+                if size := font.find("size"):
+                    w = size.get_float(0) or 1.0
+                    h = size.get_float(1) or w
+                    fp_text.font_size = (w, h)
+                if thickness := font.find("thickness"):
+                    fp_text.font_thickness = thickness.get_float(0) or 0.15
+
+        return fp_text
+
+    @property
+    def font_height(self) -> float:
+        """Font height in mm (used for minimum text height checks)."""
+        return self.font_size[1]
+
+
+@dataclass
+class FootprintGraphic:
+    """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc).
+
+    Used for silkscreen outlines and markings on footprints.
+    """
+
+    graphic_type: str  # line, rect, circle, arc
+    layer: str
+    stroke_width: float  # in mm
+    start: tuple[float, float] = (0.0, 0.0)
+    end: tuple[float, float] = (0.0, 0.0)
+    center: tuple[float, float] | None = None
+    radius: float | None = None
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp, graphic_type: str) -> FootprintGraphic:
+        """Parse footprint graphic from S-expression."""
+        graphic = cls(
+            graphic_type=graphic_type,
+            layer="",
+            stroke_width=0.0,
+        )
+
+        # Layer
+        if layer := sexp.find("layer"):
+            graphic.layer = layer.get_string(0) or ""
+
+        # Stroke width
+        if stroke := sexp.find("stroke"):
+            if width := stroke.find("width"):
+                graphic.stroke_width = width.get_float(0) or 0.0
+
+        # Start/end points (for line, rect)
+        if start := sexp.find("start"):
+            graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        # Center/radius (for circle)
+        if center := sexp.find("center"):
+            graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            # For circles, end is a point on the circumference
+            pass
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            graphic.uuid = uuid.get_string(0) or ""
+
+        return graphic
+
+
+@dataclass
+class GraphicText:
+    """Board-level text element (gr_text).
+
+    Used for board markings, labels, and silkscreen text not tied to footprints.
+    """
+
+    text: str
+    position: tuple[float, float]
+    layer: str
+    font_size: tuple[float, float]  # (width, height) in mm
+    font_thickness: float  # stroke thickness in mm
+    uuid: str = ""
+    hidden: bool = False
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> GraphicText:
+        """Parse graphic text from S-expression."""
+        text = sexp.get_string(0) or ""
+
+        gr_text = cls(
+            text=text,
+            position=(0.0, 0.0),
+            layer="",
+            font_size=(1.0, 1.0),
+            font_thickness=0.15,
+        )
+
+        # Position
+        if at := sexp.find("at"):
+            gr_text.position = (at.get_float(0) or 0.0, at.get_float(1) or 0.0)
+
+        # Layer
+        if layer := sexp.find("layer"):
+            gr_text.layer = layer.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            gr_text.uuid = uuid.get_string(0) or ""
+
+        # Effects (font size and thickness)
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
+                gr_text.hidden = True
+            if font := effects.find("font"):
+                if size := font.find("size"):
+                    w = size.get_float(0) or 1.0
+                    h = size.get_float(1) or w
+                    gr_text.font_size = (w, h)
+                if thickness := font.find("thickness"):
+                    gr_text.font_thickness = thickness.get_float(0) or 0.15
+
+        return gr_text
+
+    @property
+    def font_height(self) -> float:
+        """Font height in mm (used for minimum text height checks)."""
+        return self.font_size[1]
+
+
+@dataclass
+class BoardGraphic:
+    """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc).
+
+    Used for board outlines, silkscreen graphics, and other board-level drawings.
+    """
+
+    graphic_type: str  # line, rect, circle, arc
+    layer: str
+    stroke_width: float  # in mm
+    start: tuple[float, float] = (0.0, 0.0)
+    end: tuple[float, float] = (0.0, 0.0)
+    center: tuple[float, float] | None = None
+    uuid: str = ""
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
+        """Parse board graphic from S-expression."""
+        graphic = cls(
+            graphic_type=graphic_type,
+            layer="",
+            stroke_width=0.0,
+        )
+
+        # Layer
+        if layer := sexp.find("layer"):
+            graphic.layer = layer.get_string(0) or ""
+
+        # Stroke width
+        if stroke := sexp.find("stroke"):
+            if width := stroke.find("width"):
+                graphic.stroke_width = width.get_float(0) or 0.0
+
+        # Start/end points
+        if start := sexp.find("start"):
+            graphic.start = (start.get_float(0) or 0.0, start.get_float(1) or 0.0)
+        if end := sexp.find("end"):
+            graphic.end = (end.get_float(0) or 0.0, end.get_float(1) or 0.0)
+
+        # Center (for circle/arc)
+        if center := sexp.find("center"):
+            graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            graphic.uuid = uuid.get_string(0) or ""
+
+        return graphic
+
+
+@dataclass
 class Footprint:
     """PCB component footprint."""
 
@@ -109,6 +339,8 @@ class Footprint:
     reference: str
     value: str
     pads: list[Pad] = field(default_factory=list)
+    texts: list[FootprintText] = field(default_factory=list)
+    graphics: list[FootprintGraphic] = field(default_factory=list)
     uuid: str = ""
     description: str = ""
     tags: str = ""
@@ -127,6 +359,8 @@ class Footprint:
             reference="",
             value="",
             pads=[],
+            texts=[],
+            graphics=[],
         )
 
         # Layer
@@ -154,13 +388,14 @@ class Footprint:
             fp.attr = attr.get_string(0) or ""
 
         # Reference and value from fp_text (KiCad 7 format)
-        for fp_text in sexp.find_all("fp_text"):
-            text_type = fp_text.get_string(0)
-            text_value = fp_text.get_string(1) or ""
-            if text_type == "reference":
-                fp.reference = text_value
-            elif text_type == "value":
-                fp.value = text_value
+        for fp_text_sexp in sexp.find_all("fp_text"):
+            fp_text = FootprintText.from_sexp(fp_text_sexp)
+            fp.texts.append(fp_text)
+            # Also set reference/value for convenience
+            if fp_text.text_type == "reference":
+                fp.reference = fp_text.text
+            elif fp_text.text_type == "value":
+                fp.value = fp_text.text
 
         # Reference and value from property (KiCad 8+ format)
         for prop in sexp.find_all("property"):
@@ -176,6 +411,12 @@ class Footprint:
             pad = Pad.from_sexp(pad_sexp)
             if pad:
                 fp.pads.append(pad)
+
+        # Graphics (fp_line, fp_rect, fp_circle, fp_arc)
+        for graphic_type in ("line", "rect", "circle", "arc"):
+            for graphic_sexp in sexp.find_all(f"fp_{graphic_type}"):
+                graphic = FootprintGraphic.from_sexp(graphic_sexp, graphic_type)
+                fp.graphics.append(graphic)
 
         return fp
 
@@ -520,6 +761,8 @@ class PCB:
         self._zones: list[Zone] = []
         self._graphic_lines: list[GraphicLine] = []
         self._graphic_arcs: list[GraphicArc] = []
+        self._texts: list[GraphicText] = []
+        self._graphics: list[BoardGraphic] = []
         self._setup: Setup | None = None
         self._title_block: dict[str, str] = {}
         self._parse()
@@ -561,6 +804,13 @@ class PCB:
                 self._parse_setup(child)
             elif tag == "title_block":
                 self._parse_title_block(child)
+            elif tag == "gr_text":
+                text = GraphicText.from_sexp(child)
+                self._texts.append(text)
+            elif tag in ("gr_line", "gr_rect", "gr_circle", "gr_arc"):
+                graphic_type = tag[3:]  # Remove "gr_" prefix
+                graphic = BoardGraphic.from_sexp(child, graphic_type)
+                self._graphics.append(graphic)
 
     def _parse_layers(self, sexp: SExp):
         """Parse layer definitions."""
@@ -740,6 +990,28 @@ class PCB:
     def graphic_arcs(self) -> list[GraphicArc]:
         """All graphic arcs."""
         return self._graphic_arcs
+
+    @property
+    def texts(self) -> list[GraphicText]:
+        """All board-level text elements (gr_text)."""
+        return self._texts
+
+    def texts_on_layer(self, layer: str) -> Iterator[GraphicText]:
+        """Get text elements on a specific layer."""
+        for text in self._texts:
+            if text.layer == layer:
+                yield text
+
+    @property
+    def graphics(self) -> list[BoardGraphic]:
+        """All board-level graphic elements (gr_line, gr_rect, etc.)."""
+        return self._graphics
+
+    def graphics_on_layer(self, layer: str) -> Iterator[BoardGraphic]:
+        """Get graphic elements on a specific layer."""
+        for graphic in self._graphics:
+            if graphic.layer == layer:
+                yield graphic
 
     def get_board_outline(self) -> list[tuple[float, float]]:
         """Extract board outline polygon from Edge.Cuts layer.

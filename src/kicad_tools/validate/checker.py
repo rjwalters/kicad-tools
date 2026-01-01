@@ -12,6 +12,7 @@ from kicad_tools.manufacturers import DesignRules, get_profile
 
 from .rules.clearance import ClearanceRule
 from .rules.edge import EdgeClearanceRule
+from .rules.silkscreen import check_all_silkscreen
 from .violations import DRCResults
 
 if TYPE_CHECKING:
@@ -134,13 +135,15 @@ class DRCChecker:
     def check_silkscreen(self) -> DRCResults:
         """Check silkscreen rules (line width, text height, over-pad).
 
+        Validates:
+        - Minimum silkscreen line width
+        - Minimum silkscreen text height
+        - Silkscreen elements overlapping exposed pads
+
         Returns:
             DRCResults containing silkscreen violations
-
-        Note:
-            This is a stub method. Actual implementation is in issue #96.
         """
-        return DRCResults(rules_checked=0)
+        return check_all_silkscreen(self.pcb, self.design_rules)
 
     def __repr__(self) -> str:
         return (

@@ -8,5 +8,20 @@ from .base import DRCRule
 from .clearance import ClearanceRule
 from .dimensions import DimensionRules
 from .edge import EdgeClearanceRule
+from .silkscreen import (
+    check_all_silkscreen,
+    check_silkscreen_line_width,
+    check_silkscreen_over_pads,
+    check_silkscreen_text_height,
+)
 
-__all__ = ["DRCRule", "ClearanceRule", "DimensionRules", "EdgeClearanceRule"]
+__all__ = [
+    "DRCRule",
+    "ClearanceRule",
+    "DimensionRules",
+    "EdgeClearanceRule",
+    "check_all_silkscreen",
+    "check_silkscreen_line_width",
+    "check_silkscreen_over_pads",
+    "check_silkscreen_text_height",
+]
