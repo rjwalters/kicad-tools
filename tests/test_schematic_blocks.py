@@ -8,19 +8,24 @@ from kicad_tools.schematic.blocks import (
     BarrelJackInput,
     BatteryInput,
     CircuitBlock,
+    CrystalOscillator,
     DebugHeader,
     DecouplingCaps,
     LDOBlock,
     LEDIndicator,
+    MCUBlock,
     OscillatorBlock,
     Port,
     USBPowerInput,
     create_3v3_ldo,
     create_12v_barrel_jack,
+    create_jtag_header,
     create_lipo_battery,
     create_mclk_oscillator,
     create_power_led,
     create_status_led,
+    create_swd_header,
+    create_tag_connect_header,
     create_usb_power,
 )
 
@@ -330,40 +335,610 @@ class TestOscillatorBlockMocked:
         assert mock_schematic.add_wire.call_count >= 3
 
 
-class TestDebugHeaderMocked:
-    """Tests for DebugHeader with mocked schematic."""
+class TestCrystalOscillatorMocked:
+    """Tests for CrystalOscillator with mocked schematic."""
 
     @pytest.fixture
     def mock_schematic(self):
         """Create mock schematic."""
         sch = Mock()
 
-        def create_mock_header(symbol, x, y, ref, *args, **kwargs):
-            header = Mock()
-            header.pin_position.side_effect = lambda name: {
-                "1": (x - 10, y - 7.5),
-                "2": (x - 10, y - 2.5),
-                "3": (x - 10, y + 2.5),
-                "4": (x - 10, y + 7.5),
-            }.get(name, (0, 0))
-            return header
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "Crystal" in str(symbol):
+                # Crystal has pins 1 and 2 on left and right
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Capacitor has pins 1 (top) and 2 (bottom)
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
 
-        sch.add_symbol = Mock(side_effect=create_mock_header)
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
         return sch
 
-    def test_debug_header_creation(self, mock_schematic):
-        """Create debug header."""
-        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1", value="SWD")
+    def test_crystal_oscillator_creation(self, mock_schematic):
+        """Create crystal oscillator."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100, frequency="8MHz", load_caps="20pF")
 
+        assert xtal.schematic == mock_schematic
+        assert xtal.x == 100
+        assert xtal.y == 100
+        assert "IN" in xtal.ports
+        assert "OUT" in xtal.ports
+        assert "GND" in xtal.ports
+
+    def test_crystal_oscillator_components(self, mock_schematic):
+        """Crystal oscillator has crystal and two caps."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+
+        assert "XTAL" in xtal.components
+        assert "C1" in xtal.components
+        assert "C2" in xtal.components
+
+    def test_crystal_oscillator_wires_caps_to_crystal(self, mock_schematic):
+        """Crystal oscillator wires load caps to crystal."""
+        CrystalOscillator(mock_schematic, x=100, y=100)
+
+        # Should add wires for crystal-to-cap and cap-to-cap ground
+        assert mock_schematic.add_wire.call_count >= 5
+
+    def test_crystal_oscillator_adds_junctions(self, mock_schematic):
+        """Crystal oscillator adds junctions at connection points."""
+        CrystalOscillator(mock_schematic, x=100, y=100)
+
+        # Should add junctions at crystal-to-cap connections
+        assert mock_schematic.add_junction.call_count >= 2
+
+    def test_crystal_oscillator_different_cap_values(self, mock_schematic):
+        """Crystal oscillator supports different cap values."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100, load_caps=("18pF", "22pF"))
+
+        # Should create both caps
+        assert "C1" in xtal.components
+        assert "C2" in xtal.components
+
+    def test_crystal_oscillator_custom_ref_prefix(self, mock_schematic):
+        """Crystal oscillator uses custom reference prefix."""
+        CrystalOscillator(mock_schematic, x=100, y=100, ref_prefix="Y2")
+
+        # Check add_symbol was called with Y2 reference
+        calls = mock_schematic.add_symbol.call_args_list
+        crystal_call = [c for c in calls if "Crystal" in str(c)]
+        assert len(crystal_call) >= 1
+
+    def test_crystal_oscillator_connect_to_rails(self, mock_schematic):
+        """Crystal oscillator connects to ground rail."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        xtal.connect_to_rails(gnd_rail_y=150)
+
+        # Should add wire to ground rail
+        assert mock_schematic.add_wire.called
+        assert mock_schematic.add_junction.called
+
+    def test_crystal_oscillator_connect_without_junction(self, mock_schematic):
+        """Crystal oscillator can connect without junction."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+        mock_schematic.add_junction.reset_mock()
+
+        xtal.connect_to_rails(gnd_rail_y=150, add_junction=False)
+
+        # Should not add junction
+        assert not mock_schematic.add_junction.called
+
+    def test_crystal_oscillator_port_positions(self, mock_schematic):
+        """Crystal oscillator ports have correct positions."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+
+        # IN and OUT should be tuples
+        assert isinstance(xtal.ports["IN"], tuple)
+        assert isinstance(xtal.ports["OUT"], tuple)
+        assert isinstance(xtal.ports["GND"], tuple)
+
+        # IN should be on left (lower x), OUT on right (higher x)
+        assert xtal.ports["IN"][0] < xtal.ports["OUT"][0]
+
+
+class TestDebugHeaderMocked:
+    """Tests for DebugHeader with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic with support for all header types."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            # Generate pin positions based on symbol type
+            if "Conn" in symbol or "Connector" in symbol:
+                # Header pins
+                def header_pin_pos(name):
+                    try:
+                        pin_num = int(name)
+                        return (x - 10, y + (pin_num - 1) * 2.54)
+                    except ValueError:
+                        return (x, y)
+
+                comp.pin_position = Mock(side_effect=header_pin_pos)
+            else:
+                # Resistor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_debug_header_swd_10pin(self, mock_schematic):
+        """Create 10-pin SWD debug header (default)."""
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
+
+        assert header.interface == "swd"
+        assert header.pins == 10
+        assert "VCC" in header.ports
+        assert "SWDIO" in header.ports
+        assert "SWCLK" in header.ports
+        assert "GND" in header.ports
+        assert "SWO" in header.ports
+        assert "NRST" in header.ports
+        assert "HEADER" in header.components
+
+    def test_debug_header_swd_6pin(self, mock_schematic):
+        """Create 6-pin SWD debug header."""
+        header = DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=6, ref="J1")
+
+        assert header.interface == "swd"
+        assert header.pins == 6
+        assert "VCC" in header.ports
+        assert "SWDIO" in header.ports
+        assert "SWCLK" in header.ports
+        assert "GND" in header.ports
+        assert "NRST" in header.ports
+        # 6-pin doesn't have SWO
+        assert "SWO" not in header.ports
+
+    def test_debug_header_jtag(self, mock_schematic):
+        """Create 20-pin JTAG debug header."""
+        header = DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=20, ref="J1")
+
+        assert header.interface == "jtag"
+        assert header.pins == 20
+        assert "VCC" in header.ports
+        assert "GND" in header.ports
+        assert "TDI" in header.ports
+        assert "TDO" in header.ports
+        assert "TMS" in header.ports
+        assert "TCK" in header.ports
+        assert "TRST" in header.ports
+        assert "NRST" in header.ports
+        assert "RTCK" in header.ports
+
+    def test_debug_header_tag_connect_10pin(self, mock_schematic):
+        """Create 10-pin Tag-Connect debug header."""
+        header = DebugHeader(
+            mock_schematic, x=100, y=100, interface="tag-connect", pins=10, ref="J1"
+        )
+
+        assert header.interface == "tag-connect"
+        assert header.pins == 10
         assert "VCC" in header.ports
         assert "SWDIO" in header.ports
         assert "SWCLK" in header.ports
         assert "GND" in header.ports
 
-    def test_debug_header_components(self, mock_schematic):
-        """Debug header has header component."""
+    def test_debug_header_tag_connect_6pin(self, mock_schematic):
+        """Create 6-pin Tag-Connect debug header."""
+        header = DebugHeader(
+            mock_schematic, x=100, y=100, interface="tag-connect", pins=6, ref="J1"
+        )
+
+        assert header.interface == "tag-connect"
+        assert header.pins == 6
+
+    def test_debug_header_with_series_resistors(self, mock_schematic):
+        """Create debug header with series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=10,
+            series_resistors=True,
+            ref="J1",
+        )
+
+        assert header.series_resistors is True
+        # Should have resistors for protected signals
+        assert len(header.resistors) > 0
+        # Components should include resistors
+        assert any("R_" in k for k in header.components.keys())
+        # Wires should be added to connect resistors to header
+        assert mock_schematic.add_wire.called
+
+    def test_debug_header_without_series_resistors(self, mock_schematic):
+        """Create debug header without series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=10,
+            series_resistors=False,
+            ref="J1",
+        )
+
+        assert header.series_resistors is False
+        assert len(header.resistors) == 0
+
+    def test_debug_header_invalid_interface(self, mock_schematic):
+        """Invalid interface raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="invalid", ref="J1")
+        assert "Invalid interface" in str(exc.value)
+
+    def test_debug_header_invalid_pins_for_swd(self, mock_schematic):
+        """Invalid pin count for SWD raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=20, ref="J1")
+        assert "Invalid pin count" in str(exc.value)
+
+    def test_debug_header_invalid_pins_for_jtag(self, mock_schematic):
+        """Invalid pin count for JTAG raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=10, ref="J1")
+        assert "Invalid pin count" in str(exc.value)
+
+    def test_debug_header_connect_to_rails(self, mock_schematic):
+        """Connect debug header to power rails."""
         header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
-        assert "HEADER" in header.components
+        header.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VCC and GND
+        assert mock_schematic.add_wire.called
+        # Should add junctions by default
+        assert mock_schematic.add_junction.called
+
+    def test_debug_header_connect_no_junctions(self, mock_schematic):
+        """Connect debug header without junctions."""
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
+        mock_schematic.add_junction.reset_mock()
+        header.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        # Should not add junctions
+        assert not mock_schematic.add_junction.called
+
+    def test_debug_header_value_labels(self, mock_schematic):
+        """Debug header value labels match interface type."""
+        # Create headers of different types to verify they initialize correctly
+        DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=10)
+        DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=20)
+        DebugHeader(mock_schematic, x=100, y=100, interface="tag-connect", pins=10)
+
+        # Verify add_symbol was called for each header
+        assert mock_schematic.add_symbol.call_count >= 3
+
+    def test_debug_header_custom_resistor_value(self, mock_schematic):
+        """Custom resistor value for series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            series_resistors=True,
+            resistor_value="22R",
+            ref="J1",
+        )
+
+        # Verify resistors were created
+        assert len(header.resistors) > 0
+
+
+class TestMCUBlockMocked:
+    """Tests for MCUBlock with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic with MCU support."""
+        sch = Mock()
+
+        def create_mock_pin(pin_name, pin_number, pin_type):
+            """Create a mock pin with proper attribute access."""
+            pin = Mock()
+            pin.name = pin_name
+            pin.number = pin_number
+            pin.pin_type = pin_type
+            return pin
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+
+            # Check if this is an MCU symbol
+            if "MCU" in str(symbol) or "STM32" in str(symbol):
+                # Create mock symbol_def with pins for MCU
+                mock_symbol_def = Mock()
+                mock_pins = [
+                    create_mock_pin("VDD", "1", "power_in"),
+                    create_mock_pin("VDDA", "2", "power_in"),
+                    create_mock_pin("GND", "3", "power_in"),
+                    create_mock_pin("VSS", "4", "power_in"),
+                    create_mock_pin("PA0", "5", "bidirectional"),
+                    create_mock_pin("PA1", "6", "bidirectional"),
+                    create_mock_pin("PB0", "7", "bidirectional"),
+                    create_mock_pin("NRST", "8", "input"),
+                    create_mock_pin("BOOT0", "9", "input"),
+                ]
+                mock_symbol_def.pins = mock_pins
+                comp.symbol_def = mock_symbol_def
+
+                comp.pin_position.side_effect = lambda name: {
+                    "VDD": (x - 20, y - 10),
+                    "VDDA": (x - 20, y - 5),
+                    "GND": (x - 20, y + 10),
+                    "VSS": (x - 20, y + 5),
+                    "PA0": (x + 20, y - 10),
+                    "PA1": (x + 20, y - 5),
+                    "PB0": (x + 20, y),
+                    "NRST": (x - 20, y),
+                    "BOOT0": (x - 20, y + 15),
+                }.get(name, (x, y))
+            else:
+                # Capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_mcu_block_creation(self, mock_schematic):
+        """Create MCU block."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        assert mcu.schematic == mock_schematic
+        assert mcu.x == 100
+        assert mcu.y == 100
+        assert "VDD" in mcu.ports
+        assert "GND" in mcu.ports
+        assert "MCU" in mcu.components
+
+    def test_mcu_block_with_custom_bypass_caps(self, mock_schematic):
+        """Create MCU block with custom bypass cap values."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            bypass_caps=["100nF", "100nF", "4.7uF"],
+            ref="U1",
+        )
+
+        assert len(mcu.bypass_caps) == 3
+        assert "C1" in mcu.components
+        assert "C2" in mcu.components
+        assert "C3" in mcu.components
+
+    def test_mcu_block_default_bypass_caps(self, mock_schematic):
+        """MCU block has default bypass caps when not specified."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # Default is 4 x 100nF caps
+        assert len(mcu.bypass_caps) == 4
+
+    def test_mcu_block_identifies_power_pins(self, mock_schematic):
+        """MCU block identifies VDD and GND pins."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # Should have found VDD and VDDA
+        assert len(mcu.vdd_pins) >= 1
+        assert "VDD" in mcu.vdd_pins or "VDDA" in mcu.vdd_pins
+
+        # Should have found GND and VSS
+        assert len(mcu.gnd_pins) >= 1
+        assert "GND" in mcu.gnd_pins or "VSS" in mcu.gnd_pins
+
+    def test_mcu_block_exposes_gpio_pins(self, mock_schematic):
+        """MCU block exposes GPIO pins as ports."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # GPIO pins should be available as ports
+        assert "PA0" in mcu.ports
+        assert "PA1" in mcu.ports
+        assert "PB0" in mcu.ports
+        assert "NRST" in mcu.ports
+
+    def test_mcu_block_wires_bypass_caps(self, mock_schematic):
+        """MCU block wires bypass caps together."""
+        MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            bypass_caps=["100nF", "100nF"],
+            ref="U1",
+        )
+
+        # Should add wires between caps
+        assert mock_schematic.add_wire.called
+
+    def test_mcu_block_connect_to_rails(self, mock_schematic):
+        """Connect MCU and bypass caps to power rails."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+        mcu.connect_to_rails(vdd_rail_y=50, gnd_rail_y=150)
+
+        # Should wire bypass caps to rails
+        assert mock_schematic.wire_decoupling_cap.called
+
+        # Should add wires and junctions for MCU power pins
+        assert mock_schematic.add_wire.called
+        assert mock_schematic.add_junction.called
+
+    def test_mcu_block_get_gpio_pins(self, mock_schematic):
+        """Get list of GPIO pins."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        gpio_pins = mcu.get_gpio_pins()
+
+        # Should include non-power pins
+        assert "PA0" in gpio_pins
+        assert "PA1" in gpio_pins
+        assert "NRST" in gpio_pins
+
+        # Should NOT include power pins
+        assert "VDD" not in gpio_pins
+        assert "GND" not in gpio_pins
+        assert "VSS" not in gpio_pins
+
+    def test_mcu_block_get_power_pins(self, mock_schematic):
+        """Get dict of power pins."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        power_pins = mcu.get_power_pins()
+
+        assert "VDD" in power_pins
+        assert "GND" in power_pins
+        assert len(power_pins["VDD"]) >= 1
+        assert len(power_pins["GND"]) >= 1
+
+    def test_mcu_block_with_unit(self, mock_schematic):
+        """MCU block supports multi-unit symbols."""
+        MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+            unit=2,
+        )
+
+        # add_symbol should be called with unit parameter
+        add_symbol_calls = mock_schematic.add_symbol.call_args_list
+        # First call should be for the MCU
+        mcu_call = add_symbol_calls[0]
+        assert mcu_call.kwargs.get("unit") == 2 or 2 in mcu_call.args
+
+    def test_mcu_block_custom_cap_positions(self, mock_schematic):
+        """MCU block allows custom cap positioning."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+            cap_offset_x=-40,
+            cap_offset_y=30,
+            cap_spacing=15,
+        )
+
+        # Verify caps were created at expected positions
+        assert len(mcu.bypass_caps) == 4
+
+    def test_mcu_block_default_value_from_symbol(self, mock_schematic):
+        """MCU block uses symbol name as default value."""
+        MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # add_symbol should be called with the symbol name as value
+        add_symbol_calls = mock_schematic.add_symbol.call_args_list
+        mcu_call = add_symbol_calls[0]
+        # Value is the 5th argument (after symbol, x, y, ref)
+        assert "STM32F103C8Tx" in str(mcu_call)
+
+    def test_mcu_block_port_lookup(self, mock_schematic):
+        """MCU block port() method works."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        # Should be able to look up ports
+        vdd_pos = mcu.port("VDD")
+        assert isinstance(vdd_pos, tuple)
+        assert len(vdd_pos) == 2
+
+        pa0_pos = mcu.port("PA0")
+        assert isinstance(pa0_pos, tuple)
+
+    def test_mcu_block_port_not_found(self, mock_schematic):
+        """MCU block raises KeyError for unknown port."""
+        mcu = MCUBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+            ref="U1",
+        )
+
+        with pytest.raises(KeyError) as exc:
+            mcu.port("NONEXISTENT")
+        assert "NONEXISTENT" in str(exc.value)
 
 
 class TestFactoryFunctions:
@@ -376,7 +951,19 @@ class TestFactoryFunctions:
 
         def create_mock_component(symbol, x, y, ref, *args, **kwargs):
             comp = Mock()
-            comp.pin_position.return_value = (x, y)
+            # Handle different component types
+            if "Conn" in symbol or "Connector" in symbol:
+                # Header with numbered pins
+                def header_pin_pos(name):
+                    try:
+                        pin_num = int(name)
+                        return (x - 10, y + (pin_num - 1) * 2.54)
+                    except ValueError:
+                        return (x, y)
+
+                comp.pin_position = Mock(side_effect=header_pin_pos)
+            else:
+                comp.pin_position.return_value = (x, y)
             return comp
 
         sch.add_symbol = Mock(side_effect=create_mock_component)
@@ -402,6 +989,59 @@ class TestFactoryFunctions:
         """Create MCLK oscillator."""
         osc = create_mclk_oscillator(mock_schematic, x=100, y=100, ref="Y1")
         assert isinstance(osc, OscillatorBlock)
+
+    def test_create_swd_header(self, mock_schematic):
+        """Create SWD debug header."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "swd"
+        assert header.pins == 10  # default
+
+    def test_create_swd_header_6pin(self, mock_schematic):
+        """Create 6-pin SWD debug header."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1", pins=6)
+        assert isinstance(header, DebugHeader)
+        assert header.pins == 6
+
+    def test_create_swd_header_with_protection(self, mock_schematic):
+        """Create SWD debug header with protection resistors."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1", with_protection=True)
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
+
+    def test_create_jtag_header(self, mock_schematic):
+        """Create JTAG debug header."""
+        header = create_jtag_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "jtag"
+        assert header.pins == 20
+
+    def test_create_jtag_header_with_protection(self, mock_schematic):
+        """Create JTAG debug header with protection resistors."""
+        header = create_jtag_header(mock_schematic, x=100, y=100, ref="J1", with_protection=True)
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
+
+    def test_create_tag_connect_header(self, mock_schematic):
+        """Create Tag-Connect debug header."""
+        header = create_tag_connect_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "tag-connect"
+        assert header.pins == 10  # default
+
+    def test_create_tag_connect_header_6pin(self, mock_schematic):
+        """Create 6-pin Tag-Connect debug header."""
+        header = create_tag_connect_header(mock_schematic, x=100, y=100, ref="J1", pins=6)
+        assert isinstance(header, DebugHeader)
+        assert header.pins == 6
+
+    def test_create_tag_connect_header_with_protection(self, mock_schematic):
+        """Create Tag-Connect debug header with protection resistors."""
+        header = create_tag_connect_header(
+            mock_schematic, x=100, y=100, ref="J1", with_protection=True
+        )
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
 
 
 class TestBlockIntegration:

@@ -715,3 +715,231 @@ class TestProjectCrossReferenceDetailed:
 
         # Power symbols should be ignored, so no unplaced symbols
         assert len(result.unplaced) == 0
+
+
+class TestProjectCreate:
+    """Tests for Project.create() class method."""
+
+    def test_create_new_project(self, tmp_path):
+        """Test creating a new project with all files."""
+        project = Project.create("my_board", directory=tmp_path)
+
+        # Check all files were created
+        assert (tmp_path / "my_board.kicad_pro").exists()
+        assert (tmp_path / "my_board.kicad_sch").exists()
+        assert (tmp_path / "my_board.kicad_pcb").exists()
+
+        # Check project properties
+        assert project.name == "my_board"
+        assert project.project_file == tmp_path / "my_board.kicad_pro"
+
+    def test_create_with_custom_board_size(self, tmp_path):
+        """Test creating a project with custom board dimensions."""
+        Project.create(
+            "custom_board",
+            directory=tmp_path,
+            board_width=50.0,
+            board_height=30.0,
+        )
+
+        # Check PCB file contains the board outline
+        pcb_content = (tmp_path / "custom_board.kicad_pcb").read_text()
+        assert "(end 50" in pcb_content or "(end 50.0" in pcb_content
+        assert "30)" in pcb_content or "30.0)" in pcb_content
+
+    def test_create_in_nonexistent_directory(self, tmp_path):
+        """Test that create makes the directory if it doesn't exist."""
+        new_dir = tmp_path / "new" / "nested" / "dir"
+        Project.create("test", directory=new_dir)
+
+        assert new_dir.exists()
+        assert (new_dir / "test.kicad_pro").exists()
+
+    def test_create_schematic_is_loadable(self, tmp_path):
+        """Test that created schematic can be loaded."""
+        project = Project.create("loadable", directory=tmp_path)
+
+        # Should be able to load schematic
+        sch = project.schematic
+        assert sch is not None
+
+    def test_create_pcb_is_loadable(self, tmp_path):
+        """Test that created PCB can be loaded."""
+        project = Project.create("loadable", directory=tmp_path)
+
+        # Should be able to load PCB
+        pcb = project.pcb
+        assert pcb is not None
+
+    def test_create_project_file_is_json(self, tmp_path):
+        """Test that project file is valid JSON."""
+        import json
+
+        Project.create("json_test", directory=tmp_path)
+
+        pro_content = (tmp_path / "json_test.kicad_pro").read_text()
+        data = json.loads(pro_content)
+
+        assert "meta" in data
+        assert "project" in data
+
+
+class TestProjectSave:
+    """Tests for Project.save() method."""
+
+    def test_save_modified_schematic(self, minimal_schematic):
+        """Test saving a modified schematic."""
+        project = Project(schematic=minimal_schematic)
+
+        # Access schematic to load it
+        _ = project.schematic
+
+        # Save should not raise
+        project.save()
+
+    def test_save_modified_pcb(self, minimal_pcb):
+        """Test saving a modified PCB."""
+        project = Project(pcb=minimal_pcb)
+
+        # Access PCB to load it
+        _ = project.pcb
+
+        # Save should not raise
+        project.save()
+
+    def test_save_when_not_loaded(self):
+        """Test save does nothing when schematic/PCB not loaded."""
+        project = Project()
+        # Should not raise
+        project.save()
+
+
+class TestProjectRoute:
+    """Tests for Project.route() method."""
+
+    def test_route_requires_pcb(self):
+        """Test route raises error when no PCB path."""
+        project = Project()
+
+        with pytest.raises(ValueError) as excinfo:
+            project.route()
+
+        assert "PCB path required" in str(excinfo.value)
+
+    def test_route_calls_router(self, tmp_path):
+        """Test that route delegates to the router module."""
+        # Create a minimal PCB with some components
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (generator_version "8.0")
+          (general (thickness 1.6))
+          (paper "A4")
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (gr_rect (start 0 0) (end 50 50)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+          )
+        )
+        """
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        project = Project(pcb=pcb_path)
+
+        # Route should return a result
+        result = project.route()
+
+        # Should have routing statistics
+        assert hasattr(result, "routed_nets")
+        assert hasattr(result, "total_nets")
+
+
+class TestProjectCheckDRC:
+    """Tests for Project.check_drc() method."""
+
+    def test_check_drc_missing_report(self, tmp_path):
+        """Test check_drc raises error when no DRC report found."""
+        project = Project(project_file=tmp_path / "test.kicad_pro")
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            project.check_drc()
+
+        assert "No DRC report found" in str(excinfo.value)
+
+    def test_check_drc_with_provided_report(self, tmp_path):
+        """Test check_drc with explicitly provided report path."""
+        # Create minimal DRC report
+        report_content = """** Drc report for test.kicad_pcb **
+
+** Found 0 DRC violations **
+** Found 0 unconnected pads **
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_path = tmp_path / "test-drc.rpt"
+        report_path.write_text(report_content)
+
+        pro_path = tmp_path / "test.kicad_pro"
+        pro_path.write_text("{}")
+
+        project = Project(project_file=pro_path)
+        checks = project.check_drc(report_path=report_path)
+
+        # Should return a list (empty for clean report)
+        assert isinstance(checks, list)
+
+    def test_check_drc_finds_report_automatically(self, tmp_path):
+        """Test check_drc finds report in project directory."""
+        # Create project files
+        pro_path = tmp_path / "board.kicad_pro"
+        pro_path.write_text("{}")
+
+        # Create DRC report with expected naming
+        report_content = """** Drc report for board.kicad_pcb **
+
+** Found 0 DRC violations **
+** Found 0 unconnected pads **
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        (tmp_path / "board-drc.rpt").write_text(report_content)
+
+        project = Project.load(pro_path)
+        checks = project.check_drc()
+
+        assert isinstance(checks, list)
+
+
+class TestProjectExportGerbers:
+    """Tests for Project.export_gerbers() method."""
+
+    def test_export_gerbers_requires_pcb(self):
+        """Test export_gerbers raises error when no PCB path."""
+        project = Project()
+
+        with pytest.raises(ValueError) as excinfo:
+            project.export_gerbers("output/")
+
+        assert "PCB path required" in str(excinfo.value)
+
+    def test_export_gerbers_calls_exporter(self, minimal_pcb, tmp_path):
+        """Test that export_gerbers delegates to the export module."""
+        project = Project(pcb=minimal_pcb)
+        output_dir = tmp_path / "gerbers"
+
+        with patch("kicad_tools.export.export_gerbers") as mock_export:
+            mock_export.return_value = []
+            project.export_gerbers(output_dir, manufacturer="jlcpcb")
+
+            mock_export.assert_called_once_with(
+                pcb_path=str(minimal_pcb),
+                output_dir=str(output_dir),
+                manufacturer="jlcpcb",
+            )

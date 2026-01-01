@@ -3,11 +3,37 @@ KiCad project handling.
 
 Provides a unified interface to work with complete KiCad projects,
 cross-referencing schematics and PCBs.
+
+Example::
+
+    from kicad_tools import Project
+
+    # Create new project
+    project = Project.create("my_board", directory="./projects/")
+    # Creates: my_board.kicad_pro, my_board.kicad_sch, my_board.kicad_pcb
+
+    # Load existing project
+    project = Project.load("my_board.kicad_pro")
+
+    # Access schematic and PCB
+    sch = project.schematic
+    pcb = project.pcb
+
+    # High-level operations
+    project.route(skip_nets=["GND", "+3.3V"])
+    results = project.check_drc(manufacturer="jlcpcb", layers=4)
+    project.export_gerbers("manufacturing/")
+    project.export_assembly("manufacturing/", manufacturer="jlcpcb")
+
+    # Save all files
+    project.save()
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,7 +43,28 @@ from .schema.pcb import PCB
 from .schema.schematic import Schematic
 
 if TYPE_CHECKING:
+    from .drc.checker import ManufacturerCheck
     from .export import AssemblyPackageResult
+    from .validate.netlist import SyncResult
+
+
+@dataclass
+class RoutingResult:
+    """Result of a routing operation."""
+
+    routed_nets: int
+    total_nets: int
+    total_segments: int
+    total_vias: int
+    total_length_mm: float
+
+    @property
+    def success_rate(self) -> float:
+        """Fraction of nets successfully routed."""
+        if self.total_nets == 0:
+            return 1.0
+        return self.routed_nets / self.total_nets
+
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +210,150 @@ class Project:
         return cls(
             schematic=schematic_path if schematic_path.exists() else None,
             pcb=pcb_path if pcb_path.exists() else None,
+            project_file=project_path,
+        )
+
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        directory: str | Path = ".",
+        board_width: float = 100.0,
+        board_height: float = 80.0,
+    ) -> Project:
+        """
+        Create a new KiCad project with empty schematic and PCB.
+
+        Args:
+            name: Project name (used for file names)
+            directory: Directory to create project in
+            board_width: Initial board width in mm (default: 100mm)
+            board_height: Initial board height in mm (default: 80mm)
+
+        Returns:
+            Project instance with all files created
+
+        Example::
+
+            project = Project.create("my_board", directory="./projects/")
+            # Creates: my_board.kicad_pro, my_board.kicad_sch, my_board.kicad_pcb
+        """
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+        project_path = directory / f"{name}.kicad_pro"
+        schematic_path = directory / f"{name}.kicad_sch"
+        pcb_path = directory / f"{name}.kicad_pcb"
+
+        # Generate UUIDs for the files
+        project_uuid = str(uuid.uuid4())
+        schematic_uuid = str(uuid.uuid4())
+        pcb_uuid = str(uuid.uuid4())
+
+        # Create minimal .kicad_pro file (JSON format)
+        project_data = {
+            "meta": {
+                "filename": f"{name}.kicad_pro",
+                "version": 1,
+            },
+            "project": {
+                "uuid": project_uuid,
+            },
+        }
+        project_path.write_text(json.dumps(project_data, indent=2))
+
+        # Create minimal .kicad_sch file (S-expression format)
+        schematic_content = f'''(kicad_sch (version 20231120) (generator "kicad_tools") (generator_version "0.2.0")
+
+  (uuid "{schematic_uuid}")
+
+  (paper "A4")
+
+  (lib_symbols
+  )
+
+  (symbol_instances
+  )
+)
+'''
+        schematic_path.write_text(schematic_content)
+
+        # Create minimal .kicad_pcb file (S-expression format)
+        pcb_content = f'''(kicad_pcb (version 20231014) (generator "kicad_tools") (generator_version "0.2.0")
+
+  (general
+    (thickness 1.6)
+  )
+
+  (paper "A4")
+
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user "B.Adhesive")
+    (33 "F.Adhes" user "F.Adhesive")
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (40 "Dwgs.User" user "User.Drawings")
+    (41 "Cmts.User" user "User.Comments")
+    (42 "Eco1.User" user "User.Eco1")
+    (43 "Eco2.User" user "User.Eco2")
+    (44 "Edge.Cuts" user)
+    (45 "Margin" user)
+    (46 "B.CrtYd" user "B.Courtyard")
+    (47 "F.CrtYd" user "F.Courtyard")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+    (50 "User.1" user)
+    (51 "User.2" user)
+    (52 "User.3" user)
+    (53 "User.4" user)
+    (54 "User.5" user)
+    (55 "User.6" user)
+    (56 "User.7" user)
+    (57 "User.8" user)
+    (58 "User.9" user)
+  )
+
+  (setup
+    (stackup
+      (layer "F.SilkS" (type "Top Silk Screen"))
+      (layer "F.Paste" (type "Top Solder Paste"))
+      (layer "F.Mask" (type "Top Solder Mask") (thickness 0.01))
+      (layer "F.Cu" (type "copper") (thickness 0.035))
+      (layer "dielectric 1" (type "core") (thickness 1.51) (material "FR4") (epsilon_r 4.5) (loss_tangent 0.02))
+      (layer "B.Cu" (type "copper") (thickness 0.035))
+      (layer "B.Mask" (type "Bottom Solder Mask") (thickness 0.01))
+      (layer "B.Paste" (type "Bottom Solder Paste"))
+      (layer "B.SilkS" (type "Bottom Silk Screen"))
+      (copper_finish "None")
+    )
+    (pad_to_mask_clearance 0)
+  )
+
+  (net 0 "")
+
+  (uuid "{pcb_uuid}")
+
+  (gr_rect (start 0 0) (end {board_width} {board_height})
+    (stroke (width 0.15) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "{str(uuid.uuid4())}")
+  )
+)
+'''
+        pcb_path.write_text(pcb_content)
+
+        logger.info(f"Created KiCad project: {project_path}")
+
+        return cls(
+            schematic=schematic_path,
+            pcb=pcb_path,
             project_file=project_path,
         )
 
@@ -361,6 +552,38 @@ class Project:
         """
         return self.cross_reference().orphaned
 
+    def check_sync(self) -> SyncResult:
+        """
+        Check if schematic and PCB netlists are in sync.
+
+        Validates that:
+        - All schematic symbols have footprints on PCB
+        - No orphaned footprints exist on PCB
+        - Net names match between schematic and PCB
+        - Pin-to-pad mappings are consistent
+
+        Returns:
+            SyncResult with all issues found
+
+        Example::
+
+            project = Project.load("my_board.kicad_pro")
+            result = project.check_sync()
+
+            if not result.in_sync:
+                for issue in result.issues:
+                    print(f"{issue.severity}: {issue.message}")
+                    print(f"  Fix: {issue.suggestion}")
+        """
+        from .validate.netlist import NetlistValidator, SyncResult
+
+        if not self.schematic or not self.pcb:
+            logger.warning("Cannot check sync: missing schematic or PCB")
+            return SyncResult()
+
+        validator = NetlistValidator(self.schematic, self.pcb)
+        return validator.validate()
+
     def export_assembly(
         self,
         output_dir: str | Path,
@@ -387,6 +610,211 @@ class Project:
             manufacturer=manufacturer,
             output_dir=output_dir,
         )
+
+    def export_gerbers(
+        self,
+        output_dir: str | Path,
+        manufacturer: str = "generic",
+    ) -> list[Path]:
+        """
+        Export Gerber files for manufacturing.
+
+        Args:
+            output_dir: Output directory for Gerber files
+            manufacturer: Manufacturer ID for preset settings
+                          (jlcpcb, pcbway, oshpark, seeed, generic)
+
+        Returns:
+            List of generated Gerber file paths
+
+        Raises:
+            ValueError: If no PCB file available
+            RuntimeError: If KiCad CLI is not found
+
+        Example::
+
+            project = Project.load("my_board.kicad_pro")
+            files = project.export_gerbers("gerbers/", manufacturer="jlcpcb")
+        """
+        from .export import export_gerbers
+
+        if not self._pcb_path:
+            raise ValueError("PCB path required for Gerber export")
+
+        return export_gerbers(
+            pcb_path=str(self._pcb_path),
+            output_dir=str(output_dir),
+            manufacturer=manufacturer,
+        )
+
+    def route(
+        self,
+        skip_nets: list[str] | None = None,
+        rules: Any | None = None,
+    ) -> RoutingResult:
+        """
+        Route the PCB using the autorouter.
+
+        Args:
+            skip_nets: Net names to skip (e.g., ["GND", "+3.3V"] for plane nets)
+            rules: DesignRules for routing (optional, uses defaults if not provided)
+
+        Returns:
+            RoutingResult with routing statistics
+
+        Raises:
+            ValueError: If no PCB file available
+
+        Example::
+
+            project = Project.load("my_board.kicad_pro")
+            result = project.route(skip_nets=["GND", "+3.3V"])
+            print(f"Routed {result.routed_nets}/{result.total_nets} nets")
+        """
+        from .router import load_pcb_for_routing, merge_routes_into_pcb
+
+        if not self._pcb_path:
+            raise ValueError("PCB path required for routing")
+
+        # Load PCB for routing
+        router, net_map = load_pcb_for_routing(
+            str(self._pcb_path),
+            skip_nets=skip_nets,
+            rules=rules,
+        )
+
+        # Get all nets that need routing
+        nets_to_route: list[int] = []
+        skip_nets = skip_nets or []
+        for net_name, net_num in net_map.items():
+            if net_name and net_name not in skip_nets and net_num in router.nets:
+                if len(router.nets[net_num]) >= 2:
+                    nets_to_route.append(net_num)
+
+        total_nets = len(nets_to_route)
+
+        # Route all nets
+        routes = router.route_all(nets_to_route)
+
+        # Get routing statistics
+        stats = router.get_statistics()
+
+        # Merge routes into PCB if any routes were created
+        if routes:
+            route_sexp = router.to_sexp()
+            pcb_content = self._pcb_path.read_text()
+            merged_content = merge_routes_into_pcb(pcb_content, route_sexp)
+            self._pcb_path.write_text(merged_content)
+
+            # Invalidate cached PCB since file was modified
+            self._pcb = None
+
+        # Create result object
+        result = RoutingResult(
+            routed_nets=stats.get("nets_routed", 0),
+            total_nets=total_nets,
+            total_segments=stats.get("segments", 0),
+            total_vias=stats.get("vias", 0),
+            total_length_mm=stats.get("total_length_mm", 0.0),
+        )
+
+        logger.info(
+            f"Routed {result.routed_nets}/{result.total_nets} nets, "
+            f"{result.total_segments} segments, {result.total_vias} vias"
+        )
+
+        return result
+
+    def check_drc(
+        self,
+        manufacturer: str = "jlcpcb",
+        layers: int = 2,
+        copper_oz: float = 1.0,
+        report_path: str | Path | None = None,
+    ) -> list[ManufacturerCheck]:
+        """
+        Check design rules against manufacturer specifications.
+
+        This method requires a DRC report from KiCad. If report_path is not
+        provided, it will look for a .rpt file in the project directory.
+
+        Args:
+            manufacturer: Manufacturer ID (jlcpcb, pcbway, oshpark, etc.)
+            layers: Layer count for rules lookup
+            copper_oz: Copper weight in oz
+            report_path: Path to KiCad DRC report file (.rpt)
+
+        Returns:
+            List of ManufacturerCheck results
+
+        Raises:
+            FileNotFoundError: If no DRC report found
+
+        Example::
+
+            project = Project.load("my_board.kicad_pro")
+            checks = project.check_drc(manufacturer="jlcpcb", layers=4)
+            for check in checks:
+                if not check.is_compatible:
+                    print(f"FAIL: {check}")
+        """
+        from .drc import DRCReport, check_manufacturer_rules
+
+        # Find or use provided DRC report
+        if report_path:
+            report_file = Path(report_path)
+        else:
+            # Look for DRC report in project directory
+            if not self.directory:
+                raise FileNotFoundError("No project directory available")
+
+            # Try common DRC report names
+            report_file = None
+            for pattern in [f"{self.name}-drc.rpt", f"{self.name}_drc.rpt", "drc.rpt"]:
+                candidate = self.directory / pattern
+                if candidate.exists():
+                    report_file = candidate
+                    break
+
+            if not report_file:
+                raise FileNotFoundError(
+                    f"No DRC report found in {self.directory}. "
+                    "Run DRC in KiCad and save the report first."
+                )
+
+        # Load and check the report
+        report = DRCReport.load(str(report_file))
+        checks = check_manufacturer_rules(
+            report=report,
+            manufacturer_id=manufacturer,
+            layers=layers,
+            copper_oz=copper_oz,
+        )
+
+        logger.info(f"DRC check: {len(checks)} violations checked against {manufacturer} rules")
+
+        return checks
+
+    def save(self) -> None:
+        """
+        Save all modified project files.
+
+        Saves schematic and PCB if they have been loaded and modified.
+        The project file (.kicad_pro) is not modified by this library.
+
+        Example::
+
+            project = Project.load("my_board.kicad_pro")
+            # ... make modifications ...
+            project.save()  # Saves schematic and PCB
+        """
+        if self._schematic is not None and self._schematic_path:
+            self._schematic.save(self._schematic_path)
+            logger.info(f"Saved schematic: {self._schematic_path}")
+
+        if self._pcb is not None and self._pcb_path:
+            self._pcb.save(self._pcb_path)
+            logger.info(f"Saved PCB: {self._pcb_path}")
 
     def __repr__(self) -> str:
         parts = [f"Project({self.name!r}"]

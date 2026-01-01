@@ -82,9 +82,7 @@ class TestSchListSymbols:
         """Test verbose output."""
         from kicad_tools.cli.sch_list_symbols import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--verbose"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-list-symbols", str(simple_rc_schematic), "--verbose"])
         main()
 
         captured = capsys.readouterr()
@@ -306,9 +304,7 @@ class TestSchSummary:
         """Test verbose output."""
         from kicad_tools.cli.sch_summary import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-summary", str(simple_rc_schematic), "--verbose"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-summary", str(simple_rc_schematic), "--verbose"])
         main()
 
         captured = capsys.readouterr()
@@ -556,9 +552,7 @@ class TestSchSymbolInfo:
         """Test handling of missing symbol."""
         from kicad_tools.cli.sch_symbol_info import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["sch-symbol-info", str(minimal_schematic), "NONEXISTENT"]
-        )
+        monkeypatch.setattr("sys.argv", ["sch-symbol-info", str(minimal_schematic), "NONEXISTENT"])
         with pytest.raises(SystemExit) as exc_info:
             main()
 

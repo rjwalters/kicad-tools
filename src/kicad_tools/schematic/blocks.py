@@ -30,6 +30,7 @@ Usage:
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import contextlib
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic, SymbolInstance
 
@@ -527,21 +528,50 @@ class OscillatorBlock(CircuitBlock):
         sch.add_junction(gnd_pos[0], gnd_rail_y)
 
 
-class DebugHeader(CircuitBlock):
+
+class CrystalOscillator(CircuitBlock):
     """
-    SWD debug header for ARM Cortex-M microcontrollers.
+    Crystal oscillator with load capacitors.
+
+    Places a passive crystal with two load capacitors for connection to an MCU
+    oscillator input. The load capacitors are pre-wired to the crystal and ground.
 
     Schematic:
-        VCC ──── [1] ┐
-        SWDIO ── [2] │ Header
-        SWCLK ── [3] │
-        GND ──── [4] ┘
+             ┌─────┐
+      IN ────┤     ├──── OUT
+             │ Y1  │
+             └──┬──┘
+                │
+        ┌───────┼───────┐
+        │       │       │
+       ─┴─     ─┴─     ─┴─
+       C1      GND     C2
+       ─┬─             ─┬─
+        │               │
+        └───────┬───────┘
+                │
+               GND
 
     Ports:
-        - VCC: Power (pin 1)
-        - SWDIO: Debug data (pin 2)
-        - SWCLK: Debug clock (pin 3)
-        - GND: Ground (pin 4)
+        - IN: Crystal input (connect to MCU OSC_IN)
+        - OUT: Crystal output (connect to MCU OSC_OUT)
+        - GND: Ground reference
+
+    Example:
+        from kicad_tools.schematic.blocks import CrystalOscillator
+
+        # Create crystal oscillator
+        xtal = CrystalOscillator(
+            sch,
+            x=200, y=80,
+            frequency="8MHz",
+            load_caps="20pF",
+            ref_prefix="Y",
+        )
+
+        # Wire to MCU
+        sch.add_wire(xtal.port("IN"), mcu.port("OSC_IN"))
+        sch.add_wire(xtal.port("OUT"), mcu.port("OSC_OUT"))
     """
 
     def __init__(
@@ -549,9 +579,237 @@ class DebugHeader(CircuitBlock):
         sch: "Schematic",
         x: float,
         y: float,
+        frequency: str = "8MHz",
+        load_caps: str | tuple[str, str] = "20pF",
+        ref_prefix: str = "Y",
+        cap_ref_start: int = 1,
+        crystal_symbol: str = "Device:Crystal",
+        cap_symbol: str = "Device:C",
+    ):
+        """
+        Create a crystal oscillator with load capacitors.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of crystal center
+            y: Y coordinate of crystal center
+            frequency: Frequency value for crystal label (e.g., "8MHz", "16MHz")
+            load_caps: Load capacitor value(s). Either a single string for both
+                caps (e.g., "20pF") or a tuple for different values
+                (e.g., ("18pF", "22pF"))
+            ref_prefix: Reference designator prefix for crystal (e.g., "Y" or "Y1")
+            cap_ref_start: Starting reference number for capacitors
+            crystal_symbol: KiCad symbol for crystal
+            cap_symbol: KiCad symbol for capacitors
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+
+        # Parse reference prefix
+        if ref_prefix[-1].isdigit():
+            y_ref = ref_prefix
+        else:
+            y_ref = f"{ref_prefix}1"
+
+        # Parse load cap values
+        if isinstance(load_caps, str):
+            cap1_value = load_caps
+            cap2_value = load_caps
+        else:
+            cap1_value, cap2_value = load_caps
+
+        # Component spacing
+        cap_y_offset = 15  # mm below crystal
+        cap_x_spacing = 15  # mm between caps (crystal is centered)
+
+        # Place crystal
+        self.crystal = sch.add_symbol(crystal_symbol, x, y, y_ref, frequency)
+
+        # Place load capacitors below crystal
+        c1_x = x - cap_x_spacing / 2
+        c2_x = x + cap_x_spacing / 2
+        cap_y = y + cap_y_offset
+
+        c1_ref = f"C{cap_ref_start}"
+        c2_ref = f"C{cap_ref_start + 1}"
+
+        self.cap1 = sch.add_symbol(cap_symbol, c1_x, cap_y, c1_ref, cap1_value)
+        self.cap2 = sch.add_symbol(cap_symbol, c2_x, cap_y, c2_ref, cap2_value)
+
+        self.components = {
+            "XTAL": self.crystal,
+            "C1": self.cap1,
+            "C2": self.cap2,
+        }
+
+        # Get crystal pin positions
+        # Standard crystal symbols have pins 1 and 2
+        xtal_pin1 = self.crystal.pin_position("1")
+        xtal_pin2 = self.crystal.pin_position("2")
+
+        # Get capacitor pin positions
+        c1_pin1 = self.cap1.pin_position("1")  # Top of cap
+        c1_pin2 = self.cap1.pin_position("2")  # Bottom of cap
+        c2_pin1 = self.cap2.pin_position("1")  # Top of cap
+        c2_pin2 = self.cap2.pin_position("2")  # Bottom of cap
+
+        # Wire crystal pin 1 to C1 top
+        sch.add_wire(xtal_pin1, (c1_pin1[0], xtal_pin1[1]))  # Horizontal from xtal
+        sch.add_wire((c1_pin1[0], xtal_pin1[1]), c1_pin1)  # Vertical down to cap
+
+        # Wire crystal pin 2 to C2 top
+        sch.add_wire(xtal_pin2, (c2_pin1[0], xtal_pin2[1]))  # Horizontal from xtal
+        sch.add_wire((c2_pin1[0], xtal_pin2[1]), c2_pin1)  # Vertical down to cap
+
+        # Wire cap bottoms together (ground bus)
+        sch.add_wire(c1_pin2, c2_pin2)
+
+        # Add junctions at crystal-to-cap connection points
+        sch.add_junction(c1_pin1[0], xtal_pin1[1])
+        sch.add_junction(c2_pin1[0], xtal_pin2[1])
+
+        # Define ports
+        # IN/OUT are at the crystal pins (before junction points)
+        # GND is at the midpoint of the capacitor ground bus
+        gnd_x = (c1_pin2[0] + c2_pin2[0]) / 2
+        gnd_y = c1_pin2[1]
+
+        self.ports = {
+            "IN": xtal_pin1,
+            "OUT": xtal_pin2,
+            "GND": (gnd_x, gnd_y),
+        }
+
+        # Store internal positions for connect_to_rails
+        self._c1_gnd = c1_pin2
+        self._c2_gnd = c2_pin2
+
+    def connect_to_rails(self, gnd_rail_y: float, add_junction: bool = True):
+        """
+        Connect the oscillator ground to a ground rail.
+
+        Args:
+            gnd_rail_y: Y coordinate of ground rail
+            add_junction: Whether to add a junction marker at the rail connection
+        """
+        sch = self.schematic
+        gnd_pos = self.ports["GND"]
+
+        # Connect ground bus to GND rail
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+
+        if add_junction:
+            sch.add_junction(gnd_pos[0], gnd_rail_y)
+
+
+class DebugHeader(CircuitBlock):
+    """
+    Debug header for ARM Cortex-M microcontrollers (SWD, JTAG, Tag-Connect).
+
+    Supports standard debug interfaces with optional series resistors for protection.
+
+    Example:
+        # ARM SWD header (standard 10-pin Cortex Debug)
+        swd = DebugHeader(
+            sch,
+            x=250, y=50,
+            interface="swd",
+            pins=10,
+            series_resistors=True,
+            ref="J1",
+        )
+
+        # Wire to MCU
+        sch.add_wire(swd.port("SWDIO"), mcu.port("SWDIO"))
+        sch.add_wire(swd.port("SWCLK"), mcu.port("SWCLK"))
+        sch.add_wire(swd.port("NRST"), mcu.port("NRST"))
+
+    Interfaces:
+        - swd (6-pin): VCC, GND, SWDIO, SWCLK, NRST, SWO (optional)
+        - swd (10-pin): ARM Cortex Debug 10-pin (includes key pin)
+        - jtag (20-pin): Standard 20-pin ARM JTAG
+        - tag-connect (6/10-pin): Tag-Connect pogo-pin interface
+
+    Ports (SWD):
+        - VCC: Target VCC sense
+        - GND: Ground
+        - SWDIO: Debug data (bidirectional)
+        - SWCLK: Debug clock
+        - NRST: Reset (active low)
+        - SWO: Trace output (10-pin only)
+
+    Ports (JTAG):
+        - VCC, GND: Power
+        - TDI, TDO, TMS, TCK: JTAG signals
+        - TRST, NRST: Reset signals
+    """
+
+    # Standard pinouts for each interface type
+    # Based on ARM Cortex Debug Connector specifications
+    SWD_6PIN_PINOUT = {
+        "1": "VCC",
+        "2": "SWDIO",
+        "3": "GND",
+        "4": "SWCLK",
+        "5": "GND",
+        "6": "NRST",
+    }
+
+    SWD_10PIN_PINOUT = {
+        "1": "VCC",
+        "2": "SWDIO",
+        "3": "GND",
+        "4": "SWCLK",
+        "5": "GND",
+        "6": "SWO",
+        "7": "KEY",  # No connect / key pin
+        "8": "NC",
+        "9": "GND",
+        "10": "NRST",
+    }
+
+    JTAG_20PIN_PINOUT = {
+        "1": "VCC",
+        "2": "VCC",
+        "3": "TRST",
+        "4": "GND",
+        "5": "TDI",
+        "6": "GND",
+        "7": "TMS",
+        "8": "GND",
+        "9": "TCK",
+        "10": "GND",
+        "11": "RTCK",
+        "12": "GND",
+        "13": "TDO",
+        "14": "GND",
+        "15": "NRST",
+        "16": "GND",
+        "17": "NC",
+        "18": "GND",
+        "19": "NC",
+        "20": "GND",
+    }
+
+    # Tag-Connect uses same pinout as SWD
+    TAG_CONNECT_6PIN_PINOUT = SWD_6PIN_PINOUT
+    TAG_CONNECT_10PIN_PINOUT = SWD_10PIN_PINOUT
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        interface: str = "swd",
+        pins: int = 10,
+        series_resistors: bool = False,
+        resistor_value: str = "10R",
         ref: str = "J1",
-        value: str = "SWD",
-        header_symbol: str = "Connector_Generic:Conn_01x04",
+        resistor_ref_start: int = 1,
+        header_symbol: str | None = None,
+        resistor_symbol: str = "Device:R",
     ):
         """
         Create a debug header block.
@@ -560,27 +818,465 @@ class DebugHeader(CircuitBlock):
             sch: Schematic to add to
             x: X coordinate of header
             y: Y coordinate of header center
+            interface: Debug interface type: "swd", "jtag", or "tag-connect"
+            pins: Number of pins (6 or 10 for SWD/Tag-Connect, 20 for JTAG)
+            series_resistors: If True, add series resistors for protection
+            resistor_value: Value for series resistors (default 10R)
             ref: Header reference designator
-            value: Header value label
-            header_symbol: KiCad symbol for 4-pin header
+            resistor_ref_start: Starting reference number for resistors
+            header_symbol: KiCad symbol for header (auto-selected if None)
+            resistor_symbol: KiCad symbol for resistors
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+        self.interface = interface.lower()
+        self.pins = pins
+        self.series_resistors = series_resistors
+
+        # Validate interface and pin count
+        self._validate_config()
+
+        # Get pinout for this configuration
+        self.pinout = self._get_pinout()
+
+        # Determine header symbol if not specified
+        if header_symbol is None:
+            header_symbol = self._get_default_symbol()
+
+        # Place header
+        value = self._get_value_label()
+        self.header = sch.add_symbol(header_symbol, x, y, ref, value)
+        self.components = {"HEADER": self.header}
+
+        # Get signals that need resistors (data lines, not power/ground)
+        protected_signals = self._get_protected_signals()
+
+        # Place series resistors if requested
+        self.resistors: dict[str, SymbolInstance] = {}
+        if series_resistors:
+            resistor_offset = 15  # mm to the left of header
+            r_idx = 0
+
+            for pin_num, signal in self.pinout.items():
+                if signal in protected_signals:
+                    r_ref = f"R{resistor_ref_start + r_idx}"
+                    # Calculate resistor position
+                    pin_pos = self.header.pin_position(pin_num)
+                    r_x = pin_pos[0] - resistor_offset
+                    r_y = pin_pos[1]
+
+                    resistor = sch.add_symbol(
+                        resistor_symbol, r_x, r_y, r_ref, resistor_value
+                    )
+                    self.resistors[signal] = resistor
+                    self.components[f"R_{signal}"] = resistor
+                    r_idx += 1
+
+                    # Wire resistor pin 2 to header pin
+                    r_pin2 = resistor.pin_position("2")
+                    sch.add_wire(r_pin2, pin_pos)
+
+        # Build ports dictionary
+        self.ports = self._build_ports()
+
+    def _validate_config(self) -> None:
+        """Validate interface and pin count combination."""
+        valid_configs = {
+            "swd": [6, 10],
+            "jtag": [20],
+            "tag-connect": [6, 10],
+        }
+
+        if self.interface not in valid_configs:
+            raise ValueError(
+                f"Invalid interface '{self.interface}'. "
+                f"Valid options: {list(valid_configs.keys())}"
+            )
+
+        if self.pins not in valid_configs[self.interface]:
+            raise ValueError(
+                f"Invalid pin count {self.pins} for interface '{self.interface}'. "
+                f"Valid options: {valid_configs[self.interface]}"
+            )
+
+    def _get_pinout(self) -> dict[str, str]:
+        """Get pinout dictionary for current configuration."""
+        if self.interface == "swd":
+            return self.SWD_6PIN_PINOUT if self.pins == 6 else self.SWD_10PIN_PINOUT
+        elif self.interface == "tag-connect":
+            return (
+                self.TAG_CONNECT_6PIN_PINOUT
+                if self.pins == 6
+                else self.TAG_CONNECT_10PIN_PINOUT
+            )
+        else:  # jtag
+            return self.JTAG_20PIN_PINOUT
+
+    def _get_default_symbol(self) -> str:
+        """Get default KiCad symbol for current configuration."""
+        if self.interface == "tag-connect":
+            # Tag-Connect uses specific footprints but generic symbols
+            return f"Connector_Generic:Conn_01x{self.pins:02d}"
+        elif self.interface == "jtag":
+            return "Connector_Generic:Conn_02x10_Odd_Even"
+        else:  # swd
+            if self.pins == 10:
+                return "Connector_Generic:Conn_02x05_Odd_Even"
+            else:
+                return f"Connector_Generic:Conn_01x{self.pins:02d}"
+
+    def _get_value_label(self) -> str:
+        """Get value label for header."""
+        if self.interface == "tag-connect":
+            return f"Tag-Connect-{self.pins}"
+        elif self.interface == "jtag":
+            return "JTAG"
+        else:
+            return f"SWD-{self.pins}"
+
+    def _get_protected_signals(self) -> set[str]:
+        """Get set of signals that should have series resistors."""
+        # Data lines that benefit from protection
+        # Exclude power, ground, and no-connect pins
+        swd_signals = {"SWDIO", "SWCLK", "SWO", "NRST"}
+        jtag_signals = {"TDI", "TDO", "TMS", "TCK", "TRST", "NRST", "RTCK"}
+
+        if self.interface in ("swd", "tag-connect"):
+            return swd_signals
+        else:
+            return jtag_signals
+
+    def _build_ports(self) -> dict[str, tuple[float, float]]:
+        """Build ports dictionary from pinout."""
+        ports = {}
+        protected_signals = self._get_protected_signals()
+
+        for pin_num, signal in self.pinout.items():
+            # Skip NC and KEY pins
+            if signal in ("NC", "KEY"):
+                continue
+
+            # For GND/VCC, use first occurrence only (avoid duplicates)
+            if signal in ("GND", "VCC") and signal in ports:
+                continue
+
+            # Get position - either from resistor (if protected) or header
+            if self.series_resistors and signal in protected_signals:
+                # Port is at resistor pin 1 (external side)
+                resistor = self.resistors.get(signal)
+                if resistor:
+                    ports[signal] = resistor.pin_position("1")
+            else:
+                # Port is at header pin
+                ports[signal] = self.header.pin_position(pin_num)
+
+        return ports
+
+    def connect_to_rails(
+        self, vcc_rail_y: float, gnd_rail_y: float, add_junctions: bool = True
+    ) -> None:
+        """
+        Connect VCC and GND to power rails.
+
+        Args:
+            vcc_rail_y: Y coordinate of VCC rail
+            gnd_rail_y: Y coordinate of GND rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        # Connect VCC
+        if "VCC" in self.ports:
+            vcc_pos = self.ports["VCC"]
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+            if add_junctions:
+                sch.add_junction(vcc_pos[0], vcc_rail_y)
+
+        # Connect GND
+        if "GND" in self.ports:
+            gnd_pos = self.ports["GND"]
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+            if add_junctions:
+                sch.add_junction(gnd_pos[0], gnd_rail_y)
+
+
+class MCUBlock(CircuitBlock):
+    """
+    MCU with bypass capacitors on power pins.
+
+    Places an MCU symbol with properly positioned bypass capacitors,
+    pre-wired power connections, and exposed GPIO ports.
+
+    Schematic:
+        VDD ──┬──[C1]──┬──[C2]──┬──...──┬── MCU ── GPIO pins
+              │        │        │       │
+        GND ──┴────────┴────────┴───────┴─────────
+
+    Ports:
+        - VDD: Power input (after bypass caps)
+        - GND: Ground
+        - All MCU GPIO/signal pins by name (e.g., PA0, PB1, NRST, etc.)
+
+    Example:
+        >>> from kicad_tools.schematic.blocks import MCUBlock
+        >>> # Create MCU block with bypass caps
+        >>> mcu = MCUBlock(
+        ...     sch,
+        ...     mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+        ...     x=150, y=100,
+        ...     bypass_caps=["100nF", "100nF", "100nF", "4.7uF"],
+        ...     ref="U1",
+        ... )
+        >>> # Access ports
+        >>> mcu.port("VDD")      # Power input
+        >>> mcu.port("GND")      # Ground
+        >>> mcu.port("PA0")      # GPIO port
+        >>> mcu.port("NRST")     # Reset pin
+        >>> # Wire to other blocks
+        >>> sch.add_wire(ldo.port("VOUT"), mcu.port("VDD"))
+    """
+
+    # Pin name patterns that indicate VDD (power input)
+    VDD_PATTERNS = (
+        "VDD",
+        "VDDA",
+        "VDDIO",
+        "VCC",
+        "VCCA",
+        "AVDD",
+        "DVDD",
+        "VBAT",
+    )
+
+    # Pin name patterns that indicate GND (ground)
+    GND_PATTERNS = ("GND", "GNDA", "VSS", "VSSA", "AGND", "DGND", "AVSS", "DVSS")
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        mcu_symbol: str,
+        ref: str = "U1",
+        value: str = "",
+        bypass_caps: list[str] | None = None,
+        cap_ref_start: int = 1,
+        cap_ref_prefix: str = "C",
+        cap_spacing: float = 10,
+        cap_offset_x: float = -30,
+        cap_offset_y: float = 20,
+        cap_symbol: str = "Device:C",
+        unit: int = 1,
+    ):
+        """
+        Create an MCU block with bypass capacitors.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of MCU center
+            y: Y coordinate of MCU center
+            mcu_symbol: KiCad symbol for MCU (e.g., "MCU_ST_STM32F1:STM32F103C8Tx")
+            ref: MCU reference designator
+            value: MCU value label (defaults to symbol name if empty)
+            bypass_caps: List of bypass capacitor values (e.g., ["100nF", "100nF", "4.7uF"]).
+                If None, uses default ["100nF", "100nF", "100nF", "100nF"]
+            cap_ref_start: Starting reference number for capacitors
+            cap_ref_prefix: Reference designator prefix for capacitors
+            cap_spacing: Horizontal spacing between capacitors (mm)
+            cap_offset_x: X offset of first capacitor relative to MCU
+            cap_offset_y: Y offset of capacitors relative to MCU
+            cap_symbol: KiCad symbol for bypass capacitors
+            unit: Symbol unit number (for multi-unit symbols)
         """
         super().__init__()
         self.schematic = sch
         self.x = x
         self.y = y
 
-        # Place header
-        self.header = sch.add_symbol(header_symbol, x, y, ref, value)
+        # Default bypass caps if not specified
+        if bypass_caps is None:
+            bypass_caps = ["100nF", "100nF", "100nF", "100nF"]
 
-        self.components = {"HEADER": self.header}
+        # Default value to symbol name if not provided
+        if not value:
+            value = mcu_symbol.split(":")[-1] if ":" in mcu_symbol else mcu_symbol
 
-        # Get pin positions (assuming standard 1x4 header)
-        # Pins are typically at 2.54mm spacing
-        self.ports = {
-            "VCC": self.header.pin_position("1"),
-            "SWDIO": self.header.pin_position("2"),
-            "SWCLK": self.header.pin_position("3"),
-            "GND": self.header.pin_position("4"),
+        # Place MCU
+        self.mcu = sch.add_symbol(mcu_symbol, x, y, ref, value, unit=unit)
+        self.components = {"MCU": self.mcu}
+
+        # Identify power pins from MCU symbol
+        self.vdd_pins: list[str] = []
+        self.gnd_pins: list[str] = []
+        self._identify_power_pins()
+
+        # Place bypass capacitors
+        self.bypass_caps: list = []
+        cap_x = x + cap_offset_x
+        cap_y = y + cap_offset_y
+
+        for i, cap_value in enumerate(bypass_caps):
+            cap_ref = f"{cap_ref_prefix}{cap_ref_start + i}"
+            cap = sch.add_symbol(
+                cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value
+            )
+            self.bypass_caps.append(cap)
+            self.components[f"C{i + 1}"] = cap
+
+        # Wire bypass caps internally (all caps share VDD and GND rails)
+        self._wire_bypass_caps()
+
+        # Build ports dict with all MCU pins
+        self.ports = {}
+        self._build_ports()
+
+    def _identify_power_pins(self):
+        """Identify VDD and GND pins from the MCU symbol."""
+        # Access pin information from the symbol definition
+        if hasattr(self.mcu, "symbol_def") and hasattr(self.mcu.symbol_def, "pins"):
+            for pin in self.mcu.symbol_def.pins:
+                pin_name_upper = pin.name.upper()
+
+                # Check for VDD patterns
+                for pattern in self.VDD_PATTERNS:
+                    if pin_name_upper.startswith(pattern) or pin_name_upper == pattern:
+                        self.vdd_pins.append(pin.name)
+                        break
+
+                # Check for GND patterns
+                for pattern in self.GND_PATTERNS:
+                    if pin_name_upper.startswith(pattern) or pin_name_upper == pattern:
+                        self.gnd_pins.append(pin.name)
+                        break
+
+        # Also check by pin type if available
+        if hasattr(self.mcu, "symbol_def") and hasattr(self.mcu.symbol_def, "pins"):
+            for pin in self.mcu.symbol_def.pins:
+                if pin.pin_type == "power_in":
+                    pin_name_upper = pin.name.upper()
+                    # Additional check by type for pins we might have missed
+                    if any(p in pin_name_upper for p in ("VDD", "VCC", "V+")):
+                        if pin.name not in self.vdd_pins:
+                            self.vdd_pins.append(pin.name)
+                    elif any(p in pin_name_upper for p in ("GND", "VSS", "V-")):
+                        if pin.name not in self.gnd_pins:
+                            self.gnd_pins.append(pin.name)
+
+    def _wire_bypass_caps(self):
+        """Wire bypass capacitors to form a decoupling bank."""
+        if not self.bypass_caps:
+            return
+
+        sch = self.schematic
+
+        # Get first cap's pin positions for reference
+        first_cap = self.bypass_caps[0]
+        vdd_y = first_cap.pin_position("1")[1]
+        gnd_y = first_cap.pin_position("2")[1]
+
+        # Wire each cap to the VDD/GND bus
+        for i, cap in enumerate(self.bypass_caps):
+            cap_vdd = cap.pin_position("1")
+            cap_gnd = cap.pin_position("2")
+
+            # Connect to horizontal bus if not the first cap
+            if i > 0:
+                prev_cap = self.bypass_caps[i - 1]
+                prev_vdd = prev_cap.pin_position("1")
+                prev_gnd = prev_cap.pin_position("2")
+
+                # Horizontal wire on VDD bus
+                sch.add_wire(prev_vdd, (cap_vdd[0], vdd_y))
+                sch.add_wire((cap_vdd[0], vdd_y), cap_vdd)
+
+                # Horizontal wire on GND bus
+                sch.add_wire(prev_gnd, (cap_gnd[0], gnd_y))
+                sch.add_wire((cap_gnd[0], gnd_y), cap_gnd)
+
+    def _build_ports(self):
+        """Build ports dict exposing all MCU pins."""
+        # Add VDD port (use first VDD pin position, or first cap's VDD)
+        if self.vdd_pins:
+            self.ports["VDD"] = self.mcu.pin_position(self.vdd_pins[0])
+        elif self.bypass_caps:
+            self.ports["VDD"] = self.bypass_caps[0].pin_position("1")
+
+        # Add GND port (use first GND pin position, or first cap's GND)
+        if self.gnd_pins:
+            self.ports["GND"] = self.mcu.pin_position(self.gnd_pins[0])
+        elif self.bypass_caps:
+            self.ports["GND"] = self.bypass_caps[0].pin_position("2")
+
+        # Expose all MCU pins as ports
+        if hasattr(self.mcu, "symbol_def") and hasattr(self.mcu.symbol_def, "pins"):
+            for pin in self.mcu.symbol_def.pins:
+                if pin.name and pin.name not in self.ports:
+                    with contextlib.suppress(Exception):
+                        self.ports[pin.name] = self.mcu.pin_position(pin.name)
+
+    def connect_to_rails(
+        self,
+        vdd_rail_y: float,
+        gnd_rail_y: float,
+        wire_all_power_pins: bool = True,
+    ):
+        """
+        Connect MCU and bypass caps to power rails.
+
+        Args:
+            vdd_rail_y: Y coordinate of VDD power rail
+            gnd_rail_y: Y coordinate of GND power rail
+            wire_all_power_pins: If True, wire all VDD/GND pins to rails.
+                If False, only wire the first VDD/GND pin.
+        """
+        sch = self.schematic
+
+        # Wire bypass caps to rails
+        for cap in self.bypass_caps:
+            sch.wire_decoupling_cap(cap, vdd_rail_y, gnd_rail_y)
+
+        # Wire MCU power pins to rails
+        vdd_pins_to_wire = self.vdd_pins if wire_all_power_pins else self.vdd_pins[:1]
+        gnd_pins_to_wire = self.gnd_pins if wire_all_power_pins else self.gnd_pins[:1]
+
+        for pin_name in vdd_pins_to_wire:
+            try:
+                pin_pos = self.mcu.pin_position(pin_name)
+                sch.add_wire(pin_pos, (pin_pos[0], vdd_rail_y))
+                sch.add_junction(pin_pos[0], vdd_rail_y)
+            except Exception:
+                pass
+
+        for pin_name in gnd_pins_to_wire:
+            try:
+                pin_pos = self.mcu.pin_position(pin_name)
+                sch.add_wire(pin_pos, (pin_pos[0], gnd_rail_y))
+                sch.add_junction(pin_pos[0], gnd_rail_y)
+            except Exception:
+                pass
+
+    def get_gpio_pins(self) -> list[str]:
+        """Get list of GPIO pin names (non-power pins)."""
+        gpio_pins = []
+        if hasattr(self.mcu, "symbol_def") and hasattr(self.mcu.symbol_def, "pins"):
+            for pin in self.mcu.symbol_def.pins:
+                if pin.name:
+                    pin_upper = pin.name.upper()
+                    is_power = any(
+                        pin_upper.startswith(p)
+                        for p in self.VDD_PATTERNS + self.GND_PATTERNS
+                    )
+                    if not is_power:
+                        gpio_pins.append(pin.name)
+        return gpio_pins
+
+    def get_power_pins(self) -> dict[str, list[str]]:
+        """Get dict of power pin names grouped by type."""
+        return {
+            "VDD": self.vdd_pins.copy(),
+            "GND": self.gnd_pins.copy(),
         }
 
 
@@ -1138,4 +1834,91 @@ def create_lipo_battery(
         protection="pfet",
         filter_cap="10uF",
         ref_prefix=ref,
+    )
+
+def create_swd_header(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    pins: int = 10,
+    with_protection: bool = False,
+) -> DebugHeader:
+    """
+    Create an ARM SWD debug header.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Header reference designator
+        pins: 6 for minimal SWD, 10 for ARM Cortex Debug
+        with_protection: Add 10R series resistors
+    """
+    return DebugHeader(
+        sch,
+        x,
+        y,
+        interface="swd",
+        pins=pins,
+        series_resistors=with_protection,
+        ref=ref,
+    )
+
+
+def create_jtag_header(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    with_protection: bool = False,
+) -> DebugHeader:
+    """
+    Create a standard 20-pin ARM JTAG debug header.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Header reference designator
+        with_protection: Add 10R series resistors
+    """
+    return DebugHeader(
+        sch,
+        x,
+        y,
+        interface="jtag",
+        pins=20,
+        series_resistors=with_protection,
+        ref=ref,
+    )
+
+
+def create_tag_connect_header(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "J1",
+    pins: int = 10,
+    with_protection: bool = False,
+) -> DebugHeader:
+    """
+    Create a Tag-Connect debug header (pogo-pin interface).
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Header reference designator
+        pins: 6 or 10 pins
+        with_protection: Add 10R series resistors
+    """
+    return DebugHeader(
+        sch,
+        x,
+        y,
+        interface="tag-connect",
+        pins=pins,
+        series_resistors=with_protection,
+        ref=ref,
     )
