@@ -129,7 +129,9 @@ def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: boo
         return "n"
 
 
-def show_failure_diagnostics(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> None:
+def show_failure_diagnostics(
+    router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False
+) -> None:
     """Show detailed diagnostics for failed routes.
 
     Args:
@@ -173,10 +175,11 @@ def show_failure_diagnostics(router, net_map: dict[str, int], nets_to_route: int
         if len(pads) >= 2:
             # Calculate distance
             import math
+
             total_dist = 0.0
             for i, p1 in enumerate(pads):
-                for p2 in pads[i+1:]:
-                    dist = math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
+                for p2 in pads[i + 1 :]:
+                    dist = math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2)
                     total_dist = max(total_dist, dist)
 
             print(f"  Pads: {len(pads)}")
@@ -510,6 +513,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Warning: Analysis failed: {e}", file=sys.stderr)
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
 
     # Configure bus routing if enabled

@@ -202,8 +202,13 @@ def cmd_optimize(args) -> int:
                 if args.verbose and iteration % 100 == 0:
                     print(f"  Iteration {iteration}: energy={energy:.4f}")
 
-            with spinner(f"Running force-directed optimization ({args.iterations} iterations)...", quiet=quiet):
-                iterations_run = optimizer.run(iterations=args.iterations, callback=callback if args.verbose else None)
+            with spinner(
+                f"Running force-directed optimization ({args.iterations} iterations)...",
+                quiet=quiet,
+            ):
+                iterations_run = optimizer.run(
+                    iterations=args.iterations, callback=callback if args.verbose else None
+                )
 
             # Snap to grid
             if args.grid > 0:
@@ -223,7 +228,9 @@ def cmd_optimize(args) -> int:
             )
 
             with spinner("Creating evolutionary optimizer from PCB...", quiet=quiet):
-                optimizer = EvolutionaryPlacementOptimizer.from_pcb(pcb, config=config, fixed_refs=fixed_refs)
+                optimizer = EvolutionaryPlacementOptimizer.from_pcb(
+                    pcb, config=config, fixed_refs=fixed_refs
+                )
 
             if not quiet:
                 print(f"Optimizing {len(optimizer.components)} components...")
@@ -234,7 +241,10 @@ def cmd_optimize(args) -> int:
                 if args.verbose:
                     print(f"  Generation {gen}: fitness={best.fitness:.2f}")
 
-            with spinner(f"Running evolutionary optimization ({args.generations} generations)...", quiet=quiet):
+            with spinner(
+                f"Running evolutionary optimization ({args.generations} generations)...",
+                quiet=quiet,
+            ):
                 best = optimizer.optimize(
                     generations=args.generations,
                     population_size=args.population,
@@ -259,7 +269,9 @@ def cmd_optimize(args) -> int:
             )
 
             with spinner("Creating hybrid optimizer from PCB...", quiet=quiet):
-                evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(pcb, config=config, fixed_refs=fixed_refs)
+                evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
+                    pcb, config=config, fixed_refs=fixed_refs
+                )
 
             if not quiet:
                 print(f"Optimizing {len(evo_optimizer.components)} components...")
@@ -291,6 +303,7 @@ def cmd_optimize(args) -> int:
         print(f"Error during optimization: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 
@@ -527,7 +540,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Preview optimization without saving",
     )
     optimize_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    optimize_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    optimize_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
     args = parser.parse_args(argv)
 

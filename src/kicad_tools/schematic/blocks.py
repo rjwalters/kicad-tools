@@ -528,7 +528,6 @@ class OscillatorBlock(CircuitBlock):
         sch.add_junction(gnd_pos[0], gnd_rail_y)
 
 
-
 class CrystalOscillator(CircuitBlock):
     """
     Crystal oscillator with load capacitors.
@@ -867,9 +866,7 @@ class DebugHeader(CircuitBlock):
                     r_x = pin_pos[0] - resistor_offset
                     r_y = pin_pos[1]
 
-                    resistor = sch.add_symbol(
-                        resistor_symbol, r_x, r_y, r_ref, resistor_value
-                    )
+                    resistor = sch.add_symbol(resistor_symbol, r_x, r_y, r_ref, resistor_value)
                     self.resistors[signal] = resistor
                     self.components[f"R_{signal}"] = resistor
                     r_idx += 1
@@ -891,8 +888,7 @@ class DebugHeader(CircuitBlock):
 
         if self.interface not in valid_configs:
             raise ValueError(
-                f"Invalid interface '{self.interface}'. "
-                f"Valid options: {list(valid_configs.keys())}"
+                f"Invalid interface '{self.interface}'. Valid options: {list(valid_configs.keys())}"
             )
 
         if self.pins not in valid_configs[self.interface]:
@@ -906,11 +902,7 @@ class DebugHeader(CircuitBlock):
         if self.interface == "swd":
             return self.SWD_6PIN_PINOUT if self.pins == 6 else self.SWD_10PIN_PINOUT
         elif self.interface == "tag-connect":
-            return (
-                self.TAG_CONNECT_6PIN_PINOUT
-                if self.pins == 6
-                else self.TAG_CONNECT_10PIN_PINOUT
-            )
+            return self.TAG_CONNECT_6PIN_PINOUT if self.pins == 6 else self.TAG_CONNECT_10PIN_PINOUT
         else:  # jtag
             return self.JTAG_20PIN_PINOUT
 
@@ -1119,9 +1111,7 @@ class MCUBlock(CircuitBlock):
 
         for i, cap_value in enumerate(bypass_caps):
             cap_ref = f"{cap_ref_prefix}{cap_ref_start + i}"
-            cap = sch.add_symbol(
-                cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value
-            )
+            cap = sch.add_symbol(cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value)
             self.bypass_caps.append(cap)
             self.components[f"C{i + 1}"] = cap
 
@@ -1265,8 +1255,7 @@ class MCUBlock(CircuitBlock):
                 if pin.name:
                     pin_upper = pin.name.upper()
                     is_power = any(
-                        pin_upper.startswith(p)
-                        for p in self.VDD_PATTERNS + self.GND_PATTERNS
+                        pin_upper.startswith(p) for p in self.VDD_PATTERNS + self.GND_PATTERNS
                     )
                     if not is_power:
                         gpio_pins.append(pin.name)
@@ -1983,9 +1972,7 @@ class USBConnector(CircuitBlock):
         tvs_offset_x = 20  # Distance to TVS diodes from connector
 
         # Place connector
-        self.connector = sch.add_symbol(
-            connector_symbol, x, y, j_ref, self.connector_type.upper()
-        )
+        self.connector = sch.add_symbol(connector_symbol, x, y, j_ref, self.connector_type.upper())
         self.components = {"CONN": self.connector}
 
         # Get connector pin positions
@@ -2008,9 +1995,7 @@ class USBConnector(CircuitBlock):
             tvs_x = x + tvs_offset_x
             tvs_y = (conn_pins["D+"][1] + conn_pins["D-"][1]) / 2
 
-            self.esd_tvs = sch.add_symbol(
-                esd_tvs_symbol, tvs_x, tvs_y, tvs_ref, esd_tvs_value
-            )
+            self.esd_tvs = sch.add_symbol(esd_tvs_symbol, tvs_x, tvs_y, tvs_ref, esd_tvs_value)
             self.tvs_diodes["ESD"] = self.esd_tvs
             self.components["TVS_ESD"] = self.esd_tvs
             tvs_idx += 1
@@ -2203,6 +2188,7 @@ def create_usb_micro_b(
         vbus_protection=with_vbus_protection,
         ref_prefix=ref,
     )
+
 
 def create_swd_header(
     sch: "Schematic",
