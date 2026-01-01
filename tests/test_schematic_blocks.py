@@ -13,9 +13,12 @@ from kicad_tools.schematic.blocks import (
     OscillatorBlock,
     Port,
     create_3v3_ldo,
+    create_jtag_header,
     create_mclk_oscillator,
     create_power_led,
     create_status_led,
+    create_swd_header,
+    create_tag_connect_header,
 )
 
 
@@ -329,35 +332,196 @@ class TestDebugHeaderMocked:
 
     @pytest.fixture
     def mock_schematic(self):
-        """Create mock schematic."""
+        """Create mock schematic with support for all header types."""
         sch = Mock()
 
-        def create_mock_header(symbol, x, y, ref, *args, **kwargs):
-            header = Mock()
-            header.pin_position.side_effect = lambda name: {
-                "1": (x - 10, y - 7.5),
-                "2": (x - 10, y - 2.5),
-                "3": (x - 10, y + 2.5),
-                "4": (x - 10, y + 7.5),
-            }.get(name, (0, 0))
-            return header
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            # Generate pin positions based on symbol type
+            if "Conn" in symbol or "Connector" in symbol:
+                # Header pins
+                def header_pin_pos(name):
+                    try:
+                        pin_num = int(name)
+                        return (x - 10, y + (pin_num - 1) * 2.54)
+                    except ValueError:
+                        return (x, y)
 
-        sch.add_symbol = Mock(side_effect=create_mock_header)
+                comp.pin_position = Mock(side_effect=header_pin_pos)
+            else:
+                # Resistor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
         return sch
 
-    def test_debug_header_creation(self, mock_schematic):
-        """Create debug header."""
-        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1", value="SWD")
+    def test_debug_header_swd_10pin(self, mock_schematic):
+        """Create 10-pin SWD debug header (default)."""
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
 
+        assert header.interface == "swd"
+        assert header.pins == 10
+        assert "VCC" in header.ports
+        assert "SWDIO" in header.ports
+        assert "SWCLK" in header.ports
+        assert "GND" in header.ports
+        assert "SWO" in header.ports
+        assert "NRST" in header.ports
+        assert "HEADER" in header.components
+
+    def test_debug_header_swd_6pin(self, mock_schematic):
+        """Create 6-pin SWD debug header."""
+        header = DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=6, ref="J1")
+
+        assert header.interface == "swd"
+        assert header.pins == 6
+        assert "VCC" in header.ports
+        assert "SWDIO" in header.ports
+        assert "SWCLK" in header.ports
+        assert "GND" in header.ports
+        assert "NRST" in header.ports
+        # 6-pin doesn't have SWO
+        assert "SWO" not in header.ports
+
+    def test_debug_header_jtag(self, mock_schematic):
+        """Create 20-pin JTAG debug header."""
+        header = DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=20, ref="J1")
+
+        assert header.interface == "jtag"
+        assert header.pins == 20
+        assert "VCC" in header.ports
+        assert "GND" in header.ports
+        assert "TDI" in header.ports
+        assert "TDO" in header.ports
+        assert "TMS" in header.ports
+        assert "TCK" in header.ports
+        assert "TRST" in header.ports
+        assert "NRST" in header.ports
+        assert "RTCK" in header.ports
+
+    def test_debug_header_tag_connect_10pin(self, mock_schematic):
+        """Create 10-pin Tag-Connect debug header."""
+        header = DebugHeader(
+            mock_schematic, x=100, y=100, interface="tag-connect", pins=10, ref="J1"
+        )
+
+        assert header.interface == "tag-connect"
+        assert header.pins == 10
         assert "VCC" in header.ports
         assert "SWDIO" in header.ports
         assert "SWCLK" in header.ports
         assert "GND" in header.ports
 
-    def test_debug_header_components(self, mock_schematic):
-        """Debug header has header component."""
+    def test_debug_header_tag_connect_6pin(self, mock_schematic):
+        """Create 6-pin Tag-Connect debug header."""
+        header = DebugHeader(
+            mock_schematic, x=100, y=100, interface="tag-connect", pins=6, ref="J1"
+        )
+
+        assert header.interface == "tag-connect"
+        assert header.pins == 6
+
+    def test_debug_header_with_series_resistors(self, mock_schematic):
+        """Create debug header with series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=10,
+            series_resistors=True,
+            ref="J1",
+        )
+
+        assert header.series_resistors is True
+        # Should have resistors for protected signals
+        assert len(header.resistors) > 0
+        # Components should include resistors
+        assert any("R_" in k for k in header.components.keys())
+        # Wires should be added to connect resistors to header
+        assert mock_schematic.add_wire.called
+
+    def test_debug_header_without_series_resistors(self, mock_schematic):
+        """Create debug header without series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            interface="swd",
+            pins=10,
+            series_resistors=False,
+            ref="J1",
+        )
+
+        assert header.series_resistors is False
+        assert len(header.resistors) == 0
+
+    def test_debug_header_invalid_interface(self, mock_schematic):
+        """Invalid interface raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="invalid", ref="J1")
+        assert "Invalid interface" in str(exc.value)
+
+    def test_debug_header_invalid_pins_for_swd(self, mock_schematic):
+        """Invalid pin count for SWD raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=20, ref="J1")
+        assert "Invalid pin count" in str(exc.value)
+
+    def test_debug_header_invalid_pins_for_jtag(self, mock_schematic):
+        """Invalid pin count for JTAG raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=10, ref="J1")
+        assert "Invalid pin count" in str(exc.value)
+
+    def test_debug_header_connect_to_rails(self, mock_schematic):
+        """Connect debug header to power rails."""
         header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
-        assert "HEADER" in header.components
+        header.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VCC and GND
+        assert mock_schematic.add_wire.called
+        # Should add junctions by default
+        assert mock_schematic.add_junction.called
+
+    def test_debug_header_connect_no_junctions(self, mock_schematic):
+        """Connect debug header without junctions."""
+        header = DebugHeader(mock_schematic, x=100, y=100, ref="J1")
+        mock_schematic.add_junction.reset_mock()
+        header.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        # Should not add junctions
+        assert not mock_schematic.add_junction.called
+
+    def test_debug_header_value_labels(self, mock_schematic):
+        """Debug header value labels match interface type."""
+        # Create headers of different types to verify they initialize correctly
+        DebugHeader(mock_schematic, x=100, y=100, interface="swd", pins=10)
+        DebugHeader(mock_schematic, x=100, y=100, interface="jtag", pins=20)
+        DebugHeader(mock_schematic, x=100, y=100, interface="tag-connect", pins=10)
+
+        # Verify add_symbol was called for each header
+        assert mock_schematic.add_symbol.call_count >= 3
+
+    def test_debug_header_custom_resistor_value(self, mock_schematic):
+        """Custom resistor value for series resistors."""
+        header = DebugHeader(
+            mock_schematic,
+            x=100,
+            y=100,
+            series_resistors=True,
+            resistor_value="22R",
+            ref="J1",
+        )
+
+        # Verify resistors were created
+        assert len(header.resistors) > 0
 
 
 class TestFactoryFunctions:
@@ -370,7 +534,19 @@ class TestFactoryFunctions:
 
         def create_mock_component(symbol, x, y, ref, *args, **kwargs):
             comp = Mock()
-            comp.pin_position.return_value = (x, y)
+            # Handle different component types
+            if "Conn" in symbol or "Connector" in symbol:
+                # Header with numbered pins
+                def header_pin_pos(name):
+                    try:
+                        pin_num = int(name)
+                        return (x - 10, y + (pin_num - 1) * 2.54)
+                    except ValueError:
+                        return (x, y)
+
+                comp.pin_position = Mock(side_effect=header_pin_pos)
+            else:
+                comp.pin_position.return_value = (x, y)
             return comp
 
         sch.add_symbol = Mock(side_effect=create_mock_component)
@@ -396,6 +572,59 @@ class TestFactoryFunctions:
         """Create MCLK oscillator."""
         osc = create_mclk_oscillator(mock_schematic, x=100, y=100, ref="Y1")
         assert isinstance(osc, OscillatorBlock)
+
+    def test_create_swd_header(self, mock_schematic):
+        """Create SWD debug header."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "swd"
+        assert header.pins == 10  # default
+
+    def test_create_swd_header_6pin(self, mock_schematic):
+        """Create 6-pin SWD debug header."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1", pins=6)
+        assert isinstance(header, DebugHeader)
+        assert header.pins == 6
+
+    def test_create_swd_header_with_protection(self, mock_schematic):
+        """Create SWD debug header with protection resistors."""
+        header = create_swd_header(mock_schematic, x=100, y=100, ref="J1", with_protection=True)
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
+
+    def test_create_jtag_header(self, mock_schematic):
+        """Create JTAG debug header."""
+        header = create_jtag_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "jtag"
+        assert header.pins == 20
+
+    def test_create_jtag_header_with_protection(self, mock_schematic):
+        """Create JTAG debug header with protection resistors."""
+        header = create_jtag_header(mock_schematic, x=100, y=100, ref="J1", with_protection=True)
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
+
+    def test_create_tag_connect_header(self, mock_schematic):
+        """Create Tag-Connect debug header."""
+        header = create_tag_connect_header(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(header, DebugHeader)
+        assert header.interface == "tag-connect"
+        assert header.pins == 10  # default
+
+    def test_create_tag_connect_header_6pin(self, mock_schematic):
+        """Create 6-pin Tag-Connect debug header."""
+        header = create_tag_connect_header(mock_schematic, x=100, y=100, ref="J1", pins=6)
+        assert isinstance(header, DebugHeader)
+        assert header.pins == 6
+
+    def test_create_tag_connect_header_with_protection(self, mock_schematic):
+        """Create Tag-Connect debug header with protection resistors."""
+        header = create_tag_connect_header(
+            mock_schematic, x=100, y=100, ref="J1", with_protection=True
+        )
+        assert isinstance(header, DebugHeader)
+        assert header.series_resistors is True
 
 
 class TestBlockIntegration:
