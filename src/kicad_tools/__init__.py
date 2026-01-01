@@ -15,6 +15,7 @@ Modules:
     manufacturers: PCB manufacturer design rules (JLCPCB, OSHPark, etc.)
     operations: Schematic and PCB operations
     router: PCB autorouter with A* pathfinding
+    constraints: Constraint locking for multi-stage optimization
 
 Quick Start::
 
@@ -38,6 +39,12 @@ Quick Start::
 __version__ = "0.2.0"
 
 # Core S-expression handling
+# Constraints - Multi-stage optimization locking
+from kicad_tools.constraints import (
+    ConstraintManager,
+    ConstraintViolation,
+    LockType,
+)
 from kicad_tools.core.sexp_file import load_pcb, load_schematic, save_pcb, save_schematic
 
 # Project
@@ -94,4 +101,8 @@ __all__ = [
     "PCBReasoningAgent",
     "PCBState",
     "CommandInterpreter",
+    # Constraints - Multi-stage optimization locking
+    "ConstraintManager",
+    "ConstraintViolation",
+    "LockType",
 ]

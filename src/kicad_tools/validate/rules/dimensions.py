@@ -77,19 +77,18 @@ class DimensionRules(DRCRule):
                 net = pcb.get_net(segment.net_number)
                 net_name = net.name if net else f"net:{segment.net_number}"
 
-                results.add(DRCViolation(
-                    rule_id="dimension_trace_width",
-                    severity="error",
-                    message=(
-                        f"Trace width {segment.width:.3f}mm < "
-                        f"minimum {min_width:.3f}mm"
-                    ),
-                    location=segment.start,
-                    layer=segment.layer,
-                    actual_value=segment.width,
-                    required_value=min_width,
-                    items=(net_name,),
-                ))
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_trace_width",
+                        severity="error",
+                        message=(f"Trace width {segment.width:.3f}mm < minimum {min_width:.3f}mm"),
+                        location=segment.start,
+                        layer=segment.layer,
+                        actual_value=segment.width,
+                        required_value=min_width,
+                        items=(net_name,),
+                    )
+                )
 
     def _check_via_dimensions(
         self,
@@ -109,52 +108,51 @@ class DimensionRules(DRCRule):
 
             # Check drill diameter
             if via.drill < min_drill:
-                results.add(DRCViolation(
-                    rule_id="dimension_via_drill",
-                    severity="error",
-                    message=(
-                        f"Via drill {via.drill:.3f}mm < "
-                        f"minimum {min_drill:.3f}mm"
-                    ),
-                    location=via.position,
-                    layer=via.layers[0] if via.layers else None,
-                    actual_value=via.drill,
-                    required_value=min_drill,
-                    items=(net_name,),
-                ))
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_via_drill",
+                        severity="error",
+                        message=(f"Via drill {via.drill:.3f}mm < minimum {min_drill:.3f}mm"),
+                        location=via.position,
+                        layer=via.layers[0] if via.layers else None,
+                        actual_value=via.drill,
+                        required_value=min_drill,
+                        items=(net_name,),
+                    )
+                )
 
             # Check via outer diameter
             if via.size < min_diameter:
-                results.add(DRCViolation(
-                    rule_id="dimension_via_diameter",
-                    severity="error",
-                    message=(
-                        f"Via diameter {via.size:.3f}mm < "
-                        f"minimum {min_diameter:.3f}mm"
-                    ),
-                    location=via.position,
-                    layer=via.layers[0] if via.layers else None,
-                    actual_value=via.size,
-                    required_value=min_diameter,
-                    items=(net_name,),
-                ))
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_via_diameter",
+                        severity="error",
+                        message=(f"Via diameter {via.size:.3f}mm < minimum {min_diameter:.3f}mm"),
+                        location=via.position,
+                        layer=via.layers[0] if via.layers else None,
+                        actual_value=via.size,
+                        required_value=min_diameter,
+                        items=(net_name,),
+                    )
+                )
 
             # Check annular ring: (outer diameter - drill) / 2
             annular_ring = (via.size - via.drill) / 2
             if annular_ring < min_annular:
-                results.add(DRCViolation(
-                    rule_id="dimension_annular_ring",
-                    severity="error",
-                    message=(
-                        f"Annular ring {annular_ring:.3f}mm < "
-                        f"minimum {min_annular:.3f}mm"
-                    ),
-                    location=via.position,
-                    layer=via.layers[0] if via.layers else None,
-                    actual_value=annular_ring,
-                    required_value=min_annular,
-                    items=(net_name,),
-                ))
+                results.add(
+                    DRCViolation(
+                        rule_id="dimension_annular_ring",
+                        severity="error",
+                        message=(
+                            f"Annular ring {annular_ring:.3f}mm < minimum {min_annular:.3f}mm"
+                        ),
+                        location=via.position,
+                        layer=via.layers[0] if via.layers else None,
+                        actual_value=annular_ring,
+                        required_value=min_annular,
+                        items=(net_name,),
+                    )
+                )
 
     def _check_drill_clearance(
         self,
@@ -186,12 +184,14 @@ class DimensionRules(DRCRule):
                     abs_x = fp.position[0] + pad.position[0]
                     abs_y = fp.position[1] + pad.position[1]
                     net_name = pad.net_name if pad.net_name else f"net:{pad.net_number}"
-                    drills.append(((abs_x, abs_y), pad.drill, f"{fp.reference}-{pad.number}:{net_name}"))
+                    drills.append(
+                        ((abs_x, abs_y), pad.drill, f"{fp.reference}-{pad.number}:{net_name}")
+                    )
 
         # Check all pairs for clearance
         # Edge-to-edge distance = center-to-center - (r1 + r2)
         for i, (pos1, drill1, item1) in enumerate(drills):
-            for pos2, drill2, item2 in drills[i + 1:]:
+            for pos2, drill2, item2 in drills[i + 1 :]:
                 # Calculate center-to-center distance
                 dx = pos2[0] - pos1[0]
                 dy = pos2[1] - pos1[1]
@@ -205,16 +205,18 @@ class DimensionRules(DRCRule):
                     mid_x = (pos1[0] + pos2[0]) / 2
                     mid_y = (pos1[1] + pos2[1]) / 2
 
-                    results.add(DRCViolation(
-                        rule_id="dimension_drill_clearance",
-                        severity="error",
-                        message=(
-                            f"Drill-to-drill clearance {edge_distance:.3f}mm < "
-                            f"minimum {min_clearance:.3f}mm"
-                        ),
-                        location=(mid_x, mid_y),
-                        layer=None,  # Drills span multiple layers
-                        actual_value=edge_distance,
-                        required_value=min_clearance,
-                        items=(item1, item2),
-                    ))
+                    results.add(
+                        DRCViolation(
+                            rule_id="dimension_drill_clearance",
+                            severity="error",
+                            message=(
+                                f"Drill-to-drill clearance {edge_distance:.3f}mm < "
+                                f"minimum {min_clearance:.3f}mm"
+                            ),
+                            location=(mid_x, mid_y),
+                            layer=None,  # Drills span multiple layers
+                            actual_value=edge_distance,
+                            required_value=min_clearance,
+                            items=(item1, item2),
+                        )
+                    )
