@@ -625,21 +625,230 @@ class TestPlacementOptimizer:
         assert comp.y == initial_y
 
 
-class TestRoutingOptimizer:
-    """Tests for RoutingOptimizer (placeholder)."""
-
-    def test_not_implemented(self):
-        with pytest.raises(NotImplementedError):
-            RoutingOptimizer()
-
-
 class TestFigureOfMerit:
-    """Tests for FigureOfMerit."""
+    """Tests for FigureOfMerit dataclass."""
 
     def test_instantiation(self):
-        # FigureOfMerit is a placeholder class
-        fom = FigureOfMerit()
-        assert fom is not None
+        """Test FigureOfMerit can be created with all fields."""
+        fom = FigureOfMerit(
+            nets_total=10,
+            nets_routed=10,
+            vias=5,
+            segments=25,
+            corners=12,
+            total_length_mm=150.0,
+            routing_time_s=2.5,
+        )
+        assert fom.nets_total == 10
+        assert fom.nets_routed == 10
+        assert fom.vias == 5
+        assert fom.segments == 25
+        assert fom.corners == 12
+        assert fom.total_length_mm == 150.0
+        assert fom.routing_time_s == 2.5
+        assert fom.drc_violations == 0  # Default value
+
+    def test_completion_rate_full(self):
+        """Test completion rate when all nets routed."""
+        fom = FigureOfMerit(
+            nets_total=10,
+            nets_routed=10,
+            vias=0,
+            segments=10,
+            corners=0,
+            total_length_mm=100.0,
+            routing_time_s=1.0,
+        )
+        assert fom.completion_rate == 1.0
+
+    def test_completion_rate_partial(self):
+        """Test completion rate when some nets failed."""
+        fom = FigureOfMerit(
+            nets_total=10,
+            nets_routed=7,
+            vias=0,
+            segments=7,
+            corners=0,
+            total_length_mm=70.0,
+            routing_time_s=1.0,
+        )
+        assert fom.completion_rate == 0.7
+
+    def test_completion_rate_zero_nets(self):
+        """Test completion rate when no nets to route."""
+        fom = FigureOfMerit(
+            nets_total=0,
+            nets_routed=0,
+            vias=0,
+            segments=0,
+            corners=0,
+            total_length_mm=0.0,
+            routing_time_s=0.0,
+        )
+        assert fom.completion_rate == 0.0
+
+    def test_score_complete_routing(self):
+        """Test score calculation for complete routing."""
+        fom = FigureOfMerit(
+            nets_total=10,
+            nets_routed=10,
+            vias=5,
+            segments=25,
+            corners=10,
+            total_length_mm=100.0,
+            routing_time_s=1.0,
+            drc_violations=0,
+        )
+        # Score = 1000 - 5*10 - 10*1 - 100*0.1 - 0*100 = 1000 - 50 - 10 - 10 = 930
+        assert fom.score == 930.0
+
+    def test_score_incomplete_routing(self):
+        """Test score calculation for incomplete routing."""
+        fom = FigureOfMerit(
+            nets_total=10,
+            nets_routed=5,
+            vias=0,
+            segments=5,
+            corners=0,
+            total_length_mm=50.0,
+            routing_time_s=1.0,
+        )
+        # Incomplete: score = -1000 * (1 - 0.5) = -500
+        assert fom.score == -500.0
+
+    def test_score_with_drc_violations(self):
+        """Test that DRC violations reduce score."""
+        fom = FigureOfMerit(
+            nets_total=10,
+            nets_routed=10,
+            vias=0,
+            segments=10,
+            corners=0,
+            total_length_mm=0.0,
+            routing_time_s=1.0,
+            drc_violations=2,
+        )
+        # Score = 1000 - 0 - 0 - 0 - 2*100 = 800
+        assert fom.score == 800.0
+
+
+class TestRoutingOptimizer:
+    """Tests for RoutingOptimizer."""
+
+    def test_instantiation(self):
+        """Test RoutingOptimizer can be instantiated."""
+        optimizer = RoutingOptimizer()
+        assert optimizer is not None
+        assert optimizer.base_rules is None
+
+    def test_instantiation_with_rules(self):
+        """Test RoutingOptimizer can be instantiated with base rules."""
+        from kicad_tools.router.rules import DesignRules
+
+        rules = DesignRules(cost_via=15.0)
+        optimizer = RoutingOptimizer(base_rules=rules)
+        assert optimizer.base_rules is not None
+        assert optimizer.base_rules.cost_via == 15.0
+
+    def test_optimize_net_order_greedy(self):
+        """Test greedy net ordering optimization."""
+        from kicad_tools.router import Autorouter
+        from kicad_tools.router.layers import Layer
+
+        def create_router():
+            router = Autorouter(50, 50)
+            # Add two simple components with one 2-pin net
+            router.add_component(
+                "U1",
+                [
+                    {"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "NET1"},
+                    {"number": "2", "x": 10, "y": 15, "net": 2, "net_name": "NET2"},
+                ],
+            )
+            router.add_component(
+                "U2",
+                [
+                    {"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "NET1"},
+                    {"number": "2", "x": 30, "y": 15, "net": 2, "net_name": "NET2"},
+                ],
+            )
+            return router
+
+        optimizer = RoutingOptimizer()
+        order, fom = optimizer.optimize_net_order(create_router, method="greedy")
+
+        # Should return a valid order
+        assert len(order) == 2
+        assert set(order) == {1, 2}
+        assert isinstance(fom, FigureOfMerit)
+
+    def test_optimize_net_order_critical_first(self):
+        """Test critical-first net ordering puts power/clock nets first."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            router.add_component(
+                "U1",
+                [
+                    {"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "DATA"},
+                    {"number": "2", "x": 10, "y": 15, "net": 2, "net_name": "GND"},
+                    {"number": "3", "x": 10, "y": 20, "net": 3, "net_name": "CLK"},
+                ],
+            )
+            router.add_component(
+                "U2",
+                [
+                    {"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "DATA"},
+                    {"number": "2", "x": 30, "y": 15, "net": 2, "net_name": "GND"},
+                    {"number": "3", "x": 30, "y": 20, "net": 3, "net_name": "CLK"},
+                ],
+            )
+            return router
+
+        optimizer = RoutingOptimizer()
+        order, fom = optimizer.optimize_net_order(create_router, method="critical_first")
+
+        # GND (power) should be first, CLK second, DATA last
+        assert len(order) == 3
+        assert order[0] == 2  # GND
+        assert order[1] == 3  # CLK
+        assert order[2] == 1  # DATA
+
+    def test_optimize_net_order_empty_nets(self):
+        """Test net ordering with no nets returns empty."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            # No components, no nets
+            return router
+
+        optimizer = RoutingOptimizer()
+        order, fom = optimizer.optimize_net_order(create_router, method="greedy")
+
+        assert order == []
+        assert fom.nets_total == 0
+
+    def test_optimize_net_order_invalid_method(self):
+        """Test that invalid method raises ValueError."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            router.add_component(
+                "U1",
+                [{"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "NET1"}],
+            )
+            router.add_component(
+                "U2",
+                [{"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "NET1"}],
+            )
+            return router
+
+        optimizer = RoutingOptimizer()
+        with pytest.raises(ValueError, match="Unknown optimization method"):
+            optimizer.optimize_net_order(create_router, method="invalid_method")
 
 
 class TestPin:
