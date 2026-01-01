@@ -1,5 +1,7 @@
 """Tests for kicad_tools.exceptions module."""
 
+import json
+
 import pytest
 
 from kicad_tools.exceptions import (
@@ -12,6 +14,7 @@ from kicad_tools.exceptions import (
     ParseError,
     RoutingError,
     ValidationError,
+    _class_name_to_error_code,
 )
 
 
@@ -64,6 +67,72 @@ class TestKiCadToolsError:
         assert "Suggestions:" in msg
         assert "Install KiCad" in msg
 
+    def test_error_code_auto_generated(self):
+        """Test that error_code is auto-generated from class name."""
+        err = KiCadToolsError("Test error")
+        assert err.error_code == "KI_CAD_TOOLS"
+
+    def test_error_code_explicit(self):
+        """Test that explicit error_code overrides auto-generation."""
+        err = KiCadToolsError("Test error", error_code="CUSTOM_CODE")
+        assert err.error_code == "CUSTOM_CODE"
+
+    def test_to_dict_basic(self):
+        """Test to_dict returns correct structure."""
+        err = KiCadToolsError("Test message")
+        result = err.to_dict()
+        assert result["error_code"] == "KI_CAD_TOOLS"
+        assert result["message"] == "Test message"
+        assert result["context"] == {}
+        assert result["suggestions"] == []
+
+    def test_to_dict_with_all_fields(self):
+        """Test to_dict with all fields populated."""
+        err = KiCadToolsError(
+            "Full error",
+            context={"key": "value"},
+            suggestions=["Try this"],
+            error_code="CUSTOM",
+        )
+        result = err.to_dict()
+        assert result["error_code"] == "CUSTOM"
+        assert result["message"] == "Full error"
+        assert result["context"] == {"key": "value"}
+        assert result["suggestions"] == ["Try this"]
+
+    def test_to_dict_json_serializable(self):
+        """Test that to_dict output is JSON-serializable."""
+        err = KiCadToolsError(
+            "Test",
+            context={"file": "test.txt", "line": 42},
+            suggestions=["Fix it", "Try again"],
+        )
+        # Should not raise
+        json_str = json.dumps(err.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["message"] == "Test"
+        assert parsed["context"]["line"] == 42
+
+
+class TestClassNameToErrorCode:
+    """Tests for the error code conversion helper."""
+
+    def test_simple_class_name(self):
+        """Test simple class name conversion."""
+        assert _class_name_to_error_code("ParseError") == "PARSE"
+
+    def test_multi_word_class_name(self):
+        """Test multi-word class name conversion."""
+        assert _class_name_to_error_code("FileNotFoundError") == "FILE_NOT_FOUND"
+
+    def test_class_without_error_suffix(self):
+        """Test class name without Error suffix."""
+        assert _class_name_to_error_code("Configuration") == "CONFIGURATION"
+
+    def test_complex_class_name(self):
+        """Test complex class names."""
+        assert _class_name_to_error_code("KiCadToolsError") == "KI_CAD_TOOLS"
+
 
 class TestParseError:
     """Tests for ParseError exception."""
@@ -73,6 +142,11 @@ class TestParseError:
         err = ParseError("Unexpected token")
         assert "Unexpected token" in str(err)
         assert isinstance(err, KiCadToolsError)
+
+    def test_error_code(self):
+        """Test ParseError has correct error code."""
+        err = ParseError("Test")
+        assert err.error_code == "PARSE"
 
     def test_with_line_and_column(self):
         """Test parse error with line/column info."""
@@ -133,6 +207,32 @@ class TestValidationError:
         msg = str(err)
         assert "file: config.json" in msg
         assert "section: settings" in msg
+
+    def test_error_code(self):
+        """Test ValidationError has correct error code."""
+        err = ValidationError(["Test"])
+        assert err.error_code == "VALIDATION"
+
+    def test_to_dict_includes_errors(self):
+        """Test ValidationError to_dict includes individual errors."""
+        errors = ["Error 1", "Error 2", "Error 3"]
+        err = ValidationError(errors, context={"file": "test.json"})
+        result = err.to_dict()
+        assert result["error_code"] == "VALIDATION"
+        assert result["errors"] == errors
+        assert result["context"] == {"file": "test.json"}
+
+    def test_to_dict_json_serializable(self):
+        """Test ValidationError to_dict is JSON-serializable."""
+        err = ValidationError(
+            ["Missing field", "Invalid value"],
+            context={"file": "data.json"},
+            suggestions=["Check the schema"],
+        )
+        json_str = json.dumps(err.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["errors"] == ["Missing field", "Invalid value"]
+        assert parsed["suggestions"] == ["Check the schema"]
 
 
 class TestFileFormatError:
@@ -259,3 +359,64 @@ class TestExceptionHierarchy:
 
         with pytest.raises(KiCadToolsError):
             raise ConfigurationError("test")
+
+
+class TestErrorCodes:
+    """Test that all exception classes have correct error codes."""
+
+    def test_all_exceptions_have_error_codes(self):
+        """Test all exception classes have auto-generated error codes."""
+        test_cases = [
+            (ParseError("test"), "PARSE"),
+            (ValidationError(["test"]), "VALIDATION"),
+            (FileFormatError("test"), "FILE_FORMAT"),
+            (FileNotFoundError("test"), "FILE_NOT_FOUND"),
+            (RoutingError("test"), "ROUTING"),
+            (ComponentError("test"), "COMPONENT"),
+            (ConfigurationError("test"), "CONFIGURATION"),
+            (ExportError("test"), "EXPORT"),
+        ]
+        for err, expected_code in test_cases:
+            assert err.error_code == expected_code, f"{type(err).__name__} has wrong error code"
+
+    def test_all_exceptions_have_to_dict(self):
+        """Test all exception classes have to_dict method."""
+        exceptions = [
+            ParseError("test"),
+            ValidationError(["test"]),
+            FileFormatError("test"),
+            FileNotFoundError("test"),
+            RoutingError("test"),
+            ComponentError("test"),
+            ConfigurationError("test"),
+            ExportError("test"),
+        ]
+        for err in exceptions:
+            result = err.to_dict()
+            assert "error_code" in result
+            assert "message" in result
+            assert "context" in result
+            assert "suggestions" in result
+
+    def test_error_codes_are_unique(self):
+        """Test that each exception type has a unique error code."""
+        exceptions = [
+            ParseError("test"),
+            ValidationError(["test"]),
+            FileFormatError("test"),
+            FileNotFoundError("test"),
+            RoutingError("test"),
+            ComponentError("test"),
+            ConfigurationError("test"),
+            ExportError("test"),
+        ]
+        codes = [err.error_code for err in exceptions]
+        assert len(codes) == len(set(codes)), "Duplicate error codes found"
+
+    def test_custom_error_code_override(self):
+        """Test that custom error codes can be passed to subclasses."""
+        err = FileNotFoundError("test", error_code="CUSTOM_NOT_FOUND")
+        assert err.error_code == "CUSTOM_NOT_FOUND"
+
+        err2 = ConfigurationError("test", error_code="CONFIG_INVALID")
+        assert err2.error_code == "CONFIG_INVALID"
