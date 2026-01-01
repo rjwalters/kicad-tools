@@ -91,7 +91,7 @@ class SymbolDef:
     @classmethod
     def _parse_library_sexp(cls, lib_id: str, lib_paths: list[Path] = None) -> "SymbolDef":
         """Parse symbol definition from library using SExp parser."""
-        from kicad_sexp import parse_file
+        from kicad_tools.sexp import parse_file
 
         if lib_paths is None:
             lib_paths = KICAD_SYMBOL_PATHS
@@ -249,7 +249,7 @@ class SymbolDef:
             nodes.append(self._add_prefix_to_node(self._sexp_node, lib_name))
         else:
             # Fall back to parsing raw_sexp string
-            from kicad_sexp import parse_string
+            from kicad_tools.sexp import parse_string
 
             # Parse the raw_sexp which may contain multiple symbols
             # wrapped each (symbol ...) in parsing

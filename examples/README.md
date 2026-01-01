@@ -10,6 +10,7 @@ This directory contains example projects demonstrating common workflows with kic
 | [02-bom-generation](02-bom-generation/) | Extract Bill of Materials | BOM extraction, grouping, export |
 | [03-drc-checking](03-drc-checking/) | Parse DRC reports, check manufacturer rules | DRC parsing, manufacturer validation |
 | [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
+| [05-end-to-end](05-end-to-end/) | Create complete designs programmatically | Circuit blocks, power rails, schematic generation |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 
 ## Quick Start
@@ -77,6 +78,28 @@ from kicad_tools.router import load_pcb_for_routing, DesignRules
 
 router, _ = load_pcb_for_routing("board.kicad_pcb", rules=rules)
 router.route_all_monte_carlo(num_trials=10)
+```
+
+### 05 - End-to-End Design
+
+Create complete schematic designs programmatically using circuit blocks.
+
+```python
+from kicad_tools.schematic.models.schematic import Schematic
+from kicad_tools.schematic.blocks import CrystalOscillator, DebugHeader
+
+# Create schematic
+sch = Schematic(title="My Board", date="2025-01")
+
+# Add power rails
+sch.add_rail(y=30, x_start=25, x_end=200, net_label="+3.3V")
+
+# Add circuit blocks
+xtal = CrystalOscillator(sch, x=100, y=80, frequency="8MHz")
+debug = DebugHeader(sch, x=150, y=100, interface="swd")
+
+# Write output
+sch.write("output/board.kicad_sch")
 ```
 
 ### LLM Routing
