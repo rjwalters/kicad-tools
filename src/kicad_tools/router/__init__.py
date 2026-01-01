@@ -94,6 +94,18 @@ from .zones import (
     fill_zones_by_priority,
     get_connection_type,
 )
+from .analysis import (
+    BlockingObstacle,
+    CongestionZone,
+    NetRoutabilityReport,
+    ObstacleType,
+    RouteAlternative,
+    RoutabilityAnalyzer,
+    RoutabilityReport,
+    RoutingFailureDiagnostic,
+    RoutingSeverity,
+    analyze_routing_failure,
+)
 
 __all__ = [
     # High-level API
@@ -180,4 +192,15 @@ __all__ = [
     "ConnectionType",
     "fill_zones_by_priority",
     "get_connection_type",
+    # Analysis
+    "RoutabilityAnalyzer",
+    "RoutabilityReport",
+    "NetRoutabilityReport",
+    "RoutingFailureDiagnostic",
+    "BlockingObstacle",
+    "CongestionZone",
+    "RouteAlternative",
+    "ObstacleType",
+    "RoutingSeverity",
+    "analyze_routing_failure",
 ]
