@@ -480,7 +480,11 @@ all = [
     { name = "markitdown" },
     { name = "pdfplumber" },
     { name = "pymupdf" },
+    { name = "pyyaml" },
     { name = "requests" },
+]
+constraints = [
+    { name = "pyyaml" },
 ]
 datasheet = [
     { name = "markitdown" },
@@ -511,6 +515,8 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "pyyaml", marker = "extra == 'all'", specifier = ">=6.0" },
+    { name = "pyyaml", marker = "extra == 'constraints'", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'all'", specifier = ">=2.28" },
     { name = "requests", marker = "extra == 'parts'", specifier = ">=2.28" },
     { name = "responses", marker = "extra == 'dev'", specifier = ">=0.23.0" },
@@ -518,7 +524,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
-provides-extras = ["parts", "datasheet", "all", "dev"]
+provides-extras = ["parts", "datasheet", "constraints", "all", "dev"]
 
 [[package]]
 name = "librt"
