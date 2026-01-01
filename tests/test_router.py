@@ -2156,11 +2156,12 @@ class TestLoadPcbForRouting:
     def test_load_pcb_unquoted_pad_numbers(self, tmp_path):
         """Test parsing pads with unquoted numeric pad numbers (Issue #173).
 
-        KiCad uses unquoted numbers for numeric pads (e.g., '(pad 1 smd ...)')
-        but quoted strings for alphanumeric pads like BGA (e.g., '(pad "A1" smd ...)').
-        The parser must handle both formats.
+        KiCad uses unquoted pad numbers for numeric pads:
+            (pad 1 smd rect ...)
+        But quoted for alphanumeric (BGA):
+            (pad "A1" smd rect ...)
         """
-        # PCB with unquoted pad numbers (common in real KiCad files)
+        # Create a PCB with UNQUOTED pad numbers (real KiCad format)
         pcb_content = """(kicad_pcb
   (version 20240108)
   (generator "test")
@@ -2168,21 +2169,32 @@ class TestLoadPcbForRouting:
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
   )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
   (net 0 "")
-  (net 1 "NET1")
+  (net 1 "VCC")
   (net 2 "GND")
-  (gr_rect (start 100 100) (end 150 140)
-    (stroke (width 0.1) (type default))
-    (fill none)
-    (layer "Edge.Cuts")
-  )
-  (footprint "Test"
+  (net 3 "SIG")
+  (footprint "Package_SO:SOIC-8"
     (layer "F.Cu")
     (at 120 120)
-    (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
-    (pad 1 smd rect (at 0 0) (size 0.6 1.0) (layers "F.Cu") (net 1 "NET1"))
-    (pad 2 smd rect (at 0.65 0) (size 0.6 1.0) (layers "F.Cu") (net 2 "GND"))
-    (pad 3 smd rect (at 1.3 0) (size 0.6 1.0) (layers "F.Cu") (net 1 "NET1"))
+    (fp_text reference "U1" (at 0 -3) (layer "F.SilkS"))
+    (pad 1 smd rect (at -1.905 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 1 "VCC"))
+    (pad 2 smd rect (at -0.635 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 3 smd rect (at 0.635 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 3 "SIG"))
+    (pad 4 smd rect (at 1.905 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 5 smd rect (at 1.905 2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 6 smd rect (at 0.635 2.475) (size 0.6 1.2) (layers "F.Cu") (net 3 "SIG"))
+    (pad 7 smd rect (at -0.635 2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 8 smd rect (at -1.905 2.475) (size 0.6 1.2) (layers "F.Cu") (net 1 "VCC"))
+  )
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x04"
+    (layer "F.Cu")
+    (at 140 120)
+    (fp_text reference "J1" (at 0 -3) (layer "F.SilkS"))
+    (pad 1 thru_hole oval (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 1 "VCC"))
+    (pad 2 thru_hole oval (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 2 "GND"))
+    (pad 3 thru_hole oval (at 0 5.08) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 3 "SIG"))
+    (pad 4 thru_hole oval (at 0 7.62) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 2 "GND"))
   )
 )
 """
@@ -2191,23 +2203,30 @@ class TestLoadPcbForRouting:
 
         router, net_map = load_pcb_for_routing(str(pcb_file))
 
-        # Should have parsed all 3 pads
-        assert len(router.pads) == 3
-
-        # Verify pad numbers were extracted correctly (keys are (ref, pin) tuples)
-        pad_keys = set(router.pads.keys())
-        assert ("U1", "1") in pad_keys
-        assert ("U1", "2") in pad_keys
-        assert ("U1", "3") in pad_keys
-
-        # Verify nets were assigned
-        assert "NET1" in net_map
+        # Should have found all nets
+        assert "VCC" in net_map
         assert "GND" in net_map
+        assert "SIG" in net_map
 
-    def test_load_pcb_mixed_pad_formats(self, tmp_path):
-        """Test parsing pads with both quoted and unquoted pad numbers.
+        # Should have found all 12 pads (8 from U1 + 4 from J1)
+        assert len(router.pads) == 12
 
-        Real PCBs may have both numeric pads (unquoted) and BGA-style pads (quoted).
+        # Check specific pads were parsed correctly
+        pad_refs = {ref for ref, _ in router.pads.keys()}
+        assert "U1" in pad_refs
+        assert "J1" in pad_refs
+
+        # Check pad numbers were parsed (should be strings "1", "2", etc.)
+        pad_nums = {num for _, num in router.pads.keys()}
+        assert "1" in pad_nums
+        assert "8" in pad_nums
+
+    def test_load_pcb_mixed_quoted_unquoted_pads(self, tmp_path):
+        """Test parsing PCB with both quoted and unquoted pad numbers.
+
+        This tests the case where a board has both:
+        - Numeric pads: (pad 1 smd ...) - unquoted
+        - BGA pads: (pad "A1" smd ...) - quoted
         """
         pcb_content = """(kicad_pcb
   (version 20240108)
@@ -2216,28 +2235,25 @@ class TestLoadPcbForRouting:
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
   )
+  (gr_rect (start 100 100) (end 160 150) (layer "Edge.Cuts"))
   (net 0 "")
-  (net 1 "NET1")
+  (net 1 "VCC")
   (net 2 "GND")
-  (gr_rect (start 100 100) (end 150 140)
-    (stroke (width 0.1) (type default))
-    (fill none)
-    (layer "Edge.Cuts")
-  )
-  (footprint "BGA"
+  (footprint "Package_SO:SOIC-8"
     (layer "F.Cu")
-    (at 120 120)
+    (at 110 120)
     (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
-    (pad "A1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
-    (pad "A2" smd rect (at 0.8 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "GND"))
-    (pad "B1" smd rect (at 0 0.8) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+    (pad 1 smd rect (at 0 0) (size 0.6 1.2) (layers "F.Cu") (net 1 "VCC"))
+    (pad 2 smd rect (at 1.27 0) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
   )
-  (footprint "SOIC"
+  (footprint "Package_BGA:BGA-4"
     (layer "F.Cu")
-    (at 130 120)
+    (at 140 130)
     (fp_text reference "U2" (at 0 0) (layer "F.SilkS"))
-    (pad 1 smd rect (at 0 0) (size 0.6 1.0) (layers "F.Cu") (net 1 "NET1"))
-    (pad 2 smd rect (at 0.65 0) (size 0.6 1.0) (layers "F.Cu") (net 2 "GND"))
+    (pad "A1" smd circle (at -0.5 -0.5) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC"))
+    (pad "A2" smd circle (at 0.5 -0.5) (size 0.4 0.4) (layers "F.Cu") (net 2 "GND"))
+    (pad "B1" smd circle (at -0.5 0.5) (size 0.4 0.4) (layers "F.Cu") (net 2 "GND"))
+    (pad "B2" smd circle (at 0.5 0.5) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC"))
   )
 )
 """
@@ -2246,18 +2262,15 @@ class TestLoadPcbForRouting:
 
         router, net_map = load_pcb_for_routing(str(pcb_file))
 
-        # Should have parsed all 5 pads (3 BGA + 2 SOIC)
-        assert len(router.pads) == 5
+        # Should have found all 6 pads (2 from U1 + 4 from U2)
+        assert len(router.pads) == 6
 
-        # Verify both pad formats were extracted (keys are (ref, pin) tuples)
+        # Check both numeric and alphanumeric pad numbers
         pad_keys = set(router.pads.keys())
-        # BGA pads (quoted)
-        assert ("U1", "A1") in pad_keys
-        assert ("U1", "A2") in pad_keys
-        assert ("U1", "B1") in pad_keys
-        # SOIC pads (unquoted)
-        assert ("U2", "1") in pad_keys
-        assert ("U2", "2") in pad_keys
+        assert ("U1", "1") in pad_keys  # Unquoted numeric
+        assert ("U1", "2") in pad_keys  # Unquoted numeric
+        assert ("U2", "A1") in pad_keys  # Quoted alphanumeric
+        assert ("U2", "B2") in pad_keys  # Quoted alphanumeric
 
 
 # =============================================================================
