@@ -27,9 +27,7 @@ class TestStaircaseCompression:
         config = OptimizationConfig(compress_staircase=False)
         return TraceOptimizer(config)
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
         """Helper to create a segment with default properties."""
         return Segment(
             x1=x1,
@@ -465,15 +463,258 @@ class TestFindStaircaseEnd:
         end_idx = optimizer._find_staircase_end(segments, 0)
         assert end_idx == 3  # Staircase ends before vertical segment
 
-    def test_not_45_degree_apart(self, optimizer):
-        """Test that non-45° angle differences are not detected as staircase."""
+    def test_rectilinear_hv_staircase_detected(self, optimizer):
+        """Test that 90° H/V patterns ARE detected as staircases.
+
+        This is the core fix for issue #124 - A* router produces H/V
+        alternating patterns that should be compressed.
+        """
         segments = [
             self.make_segment(0, 0, 1, 0),  # 0° horizontal
-            self.make_segment(1, 0, 1, 1),  # 90° vertical (90° apart, not 45°)
+            self.make_segment(1, 0, 1, 1),  # 90° vertical
+            self.make_segment(1, 1, 2, 1),  # 0° horizontal
+            self.make_segment(2, 1, 2, 2),  # 90° vertical
+            self.make_segment(2, 2, 3, 2),  # 0° horizontal
         ]
 
         end_idx = optimizer._find_staircase_end(segments, 0)
-        assert end_idx == 1  # Not a staircase
+        assert end_idx == 5  # All segments are part of staircase
+
+    def test_invalid_angle_not_detected(self, optimizer):
+        """Test that angle differences outside valid ranges are not detected."""
+        # Create segments with 30° angle difference (outside both 45° and 90° ranges)
+        # 0° horizontal to 30° diagonal
+        import math
+
+        segments = [
+            self.make_segment(0, 0, 1, 0),  # 0° horizontal
+            self.make_segment(1, 0, 2, math.tan(math.radians(30))),  # ~30°
+        ]
+
+        end_idx = optimizer._find_staircase_end(segments, 0)
+        assert end_idx == 1  # Not a valid staircase
+
+
+class TestRectilinearStaircaseCompression:
+    """Tests for rectilinear (H/V) staircase compression (issue #124)."""
+
+    @pytest.fixture
+    def optimizer(self):
+        """Create a TraceOptimizer with default config."""
+        return TraceOptimizer()
+
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
+        """Helper to create a segment with default properties."""
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    def test_hv_staircase_compressed(self, optimizer):
+        """Test that alternating H/V segments are compressed.
+
+        Creates a staircase pattern like the A* router produces:
+          Seg 0: horizontal (0°)
+          Seg 1: vertical (90°)
+          Seg 2: horizontal (0°)
+          Seg 3: vertical (90°)
+          ... etc
+
+        Should be compressed to 2 segments: diagonal + orthogonal.
+        """
+        segments = []
+        x, y = 0.0, 0.0
+
+        # Create 10 alternating H/V segments (classic A* staircase)
+        for i in range(10):
+            if i % 2 == 0:
+                # Horizontal segment going right (0°)
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                # Vertical segment going up (90°)
+                new_y = y + 1.0
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Before: 10 segments
+        assert len(segments) == 10
+
+        # After: should be ≤4 segments
+        result = optimizer.compress_staircase(segments)
+        assert len(result) <= 4, f"Expected ≤4 segments, got {len(result)}"
+
+        # Verify endpoints are preserved
+        assert abs(result[0].x1 - segments[0].x1) < 1e-4
+        assert abs(result[0].y1 - segments[0].y1) < 1e-4
+        assert abs(result[-1].x2 - segments[-1].x2) < 1e-4
+        assert abs(result[-1].y2 - segments[-1].y2) < 1e-4
+
+    def test_hv_staircase_properties_preserved(self, optimizer):
+        """Test that width, layer, net, net_name are preserved after compression."""
+        template = Segment(
+            x1=0,
+            y1=0,
+            x2=1,
+            y2=0,
+            width=0.35,
+            layer=Layer.B_CU,
+            net=42,
+            net_name="SWDIO",
+        )
+
+        # Create H/V staircase with specific properties
+        segments = []
+        x, y = 0, 0
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 0.5
+                seg = Segment(
+                    x1=x,
+                    y1=y,
+                    x2=new_x,
+                    y2=y,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+                segments.append(seg)
+                x = new_x
+            else:
+                new_y = y + 0.5
+                seg = Segment(
+                    x1=x,
+                    y1=y,
+                    x2=x,
+                    y2=new_y,
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+                segments.append(seg)
+                y = new_y
+
+        result = optimizer.compress_staircase(segments)
+
+        # All result segments should have same properties
+        for seg in result:
+            assert seg.width == template.width
+            assert seg.layer == template.layer
+            assert seg.net == template.net
+            assert seg.net_name == template.net_name
+
+    def test_perfect_diagonal_hv_staircase(self, optimizer):
+        """Test H/V staircase where dx == dy produces single diagonal."""
+        # Create equal H/V steps that result in perfect diagonal
+        segments = []
+        x, y = 0.0, 0.0
+
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 1.0
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Total displacement: 3mm horizontal, 3mm vertical = perfect 45° diagonal
+        result = optimizer.compress_staircase(segments)
+
+        # Should compress to 1-2 segments (diagonal, or diagonal + small stub)
+        assert len(result) <= 2, f"Expected ≤2 segments for perfect diagonal, got {len(result)}"
+
+    def test_asymmetric_hv_staircase(self, optimizer):
+        """Test H/V staircase with unequal H and V totals."""
+        # Create staircase where total H > total V
+        segments = []
+        x, y = 0.0, 0.0
+
+        for i in range(6):
+            if i % 2 == 0:
+                new_x = x + 2.0  # Longer horizontal
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 1.0  # Shorter vertical
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Total: 6mm horizontal, 3mm vertical
+        result = optimizer.compress_staircase(segments)
+
+        # Should compress to 2 segments (diagonal + horizontal stub)
+        assert len(result) <= 3, f"Expected ≤3 segments, got {len(result)}"
+
+        # Verify endpoints preserved
+        assert abs(result[-1].x2 - segments[-1].x2) < 1e-4
+        assert abs(result[-1].y2 - segments[-1].y2) < 1e-4
+
+    def test_hv_staircase_in_full_pipeline(self, optimizer):
+        """Test that H/V staircase compression works in full optimize pipeline."""
+        segments = []
+        x, y = 0.0, 0.0
+
+        for i in range(8):
+            if i % 2 == 0:
+                new_x = x + 0.5
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 0.5
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Use full optimize_segments which includes all passes
+        result = optimizer.optimize_segments(segments)
+
+        # Should be significantly reduced
+        assert len(result) < len(segments)
+
+    def test_mixed_diagonal_and_hv_patterns(self, optimizer):
+        """Test that both diagonal and H/V staircases can be in same route."""
+        segments = []
+
+        # First: diagonal staircase (H + 45° diagonal)
+        x, y = 0.0, 0.0
+        for i in range(4):
+            if i % 2 == 0:
+                new_x = x + 1.0
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_x, new_y = x + 0.5, y + 0.5
+                segments.append(self.make_segment(x, y, new_x, new_y))
+                x, y = new_x, new_y
+
+        # Then: H/V staircase
+        for i in range(4):
+            if i % 2 == 0:
+                new_x = x + 0.5
+                segments.append(self.make_segment(x, y, new_x, y))
+                x = new_x
+            else:
+                new_y = y + 0.5
+                segments.append(self.make_segment(x, y, x, new_y))
+                y = new_y
+
+        # Total: 8 segments
+        assert len(segments) == 8
+
+        result = optimizer.compress_staircase(segments)
+
+        # Both patterns should be compressed
+        assert len(result) < len(segments)
 
 
 class TestConfigOptions:
@@ -540,9 +781,7 @@ class TestChainSorting:
     def optimizer(self):
         return TraceOptimizer()
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
         """Helper to create a segment with default properties."""
         return Segment(
             x1=x1,
@@ -590,8 +829,8 @@ class TestChainSorting:
         """Test that chain segments are sorted in path order."""
         # Create segments in scrambled order
         segments = [
-            self.make_segment(5, 0, 5, 5),   # Middle (should be second)
-            self.make_segment(0, 0, 5, 0),   # Start (should be first)
+            self.make_segment(5, 0, 5, 5),  # Middle (should be second)
+            self.make_segment(0, 0, 5, 0),  # Start (should be first)
             self.make_segment(5, 5, 10, 5),  # End (should be third)
         ]
 
@@ -613,8 +852,8 @@ class TestChainSorting:
         """Test that segments with reversed direction are handled correctly."""
         # Create segments where one is "backwards"
         segments = [
-            self.make_segment(0, 0, 5, 0),   # Forward: (0,0) -> (5,0)
-            self.make_segment(5, 5, 5, 0),   # Backwards: end connects to previous end
+            self.make_segment(0, 0, 5, 0),  # Forward: (0,0) -> (5,0)
+            self.make_segment(5, 5, 5, 0),  # Backwards: end connects to previous end
         ]
 
         chains = optimizer._sort_into_chains(segments)
@@ -635,9 +874,7 @@ class TestMultiChainOptimization:
     def optimizer(self):
         return TraceOptimizer()
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
         """Helper to create a segment with default properties."""
         return Segment(
             x1=x1,
@@ -722,9 +959,9 @@ class TestMultiChainOptimization:
         """Test that a T-junction (3 segments meeting at a point) forms one chain."""
         # T-junction: segments meet at (5, 0)
         segments = [
-            self.make_segment(0, 0, 5, 0),   # Left arm
+            self.make_segment(0, 0, 5, 0),  # Left arm
             self.make_segment(5, 0, 10, 0),  # Right arm
-            self.make_segment(5, 0, 5, 5),   # Vertical arm
+            self.make_segment(5, 0, 5, 5),  # Vertical arm
         ]
 
         chains = optimizer._sort_into_chains(segments)
@@ -779,8 +1016,7 @@ class TestSegmentsTouch:
 
     def make_segment(self, x1, y1, x2, y2):
         return Segment(
-            x1=x1, y1=y1, x2=x2, y2=y2,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+            x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
         )
 
     def test_end_to_start_connection(self, optimizer):
@@ -841,8 +1077,15 @@ class MockCollisionChecker:
         return True
 
     def _paths_cross(
-        self, ax1: float, ay1: float, ax2: float, ay2: float,
-        bx1: float, by1: float, bx2: float, by2: float
+        self,
+        ax1: float,
+        ay1: float,
+        ax2: float,
+        ay2: float,
+        bx1: float,
+        by1: float,
+        bx2: float,
+        by2: float,
     ) -> bool:
         """Simplified check if two paths cross."""
         # Check if they share any significant overlap
@@ -885,8 +1128,10 @@ class TestCollisionChecker:
     def test_grid_collision_checker_clear_path(self, grid_checker):
         """Test that an unobstructed path is clear."""
         result = grid_checker.path_is_clear(
-            x1=1.0, y1=1.0,
-            x2=5.0, y2=1.0,
+            x1=1.0,
+            y1=1.0,
+            x2=5.0,
+            y2=1.0,
             layer=Layer.F_CU,
             width=0.2,
             exclude_net=1,
@@ -900,8 +1145,10 @@ class TestCollisionChecker:
 
         # Mark some cells as blocked by another net
         blocking_seg = RouteSegment(
-            x1=3.0, y1=0.0,
-            x2=3.0, y2=5.0,
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
             width=0.2,
             layer=Layer.F_CU,
             net=2,  # Different net
@@ -910,13 +1157,16 @@ class TestCollisionChecker:
 
         # Create a route and mark it on the grid
         from kicad_tools.router import Route
+
         blocking_route = Route(net=2, net_name="BLOCKER", segments=[blocking_seg])
         simple_grid.mark_route(blocking_route)
 
         # Check if path crossing the blocker is detected
         result = grid_checker.path_is_clear(
-            x1=1.0, y1=2.5,
-            x2=5.0, y2=2.5,  # This crosses the vertical segment at x=3.0
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,  # This crosses the vertical segment at x=3.0
             layer=Layer.F_CU,
             width=0.2,
             exclude_net=1,  # We're net 1, the blocker is net 2
@@ -930,8 +1180,10 @@ class TestCollisionChecker:
         from kicad_tools.router import Segment as RouteSegment
 
         same_net_seg = RouteSegment(
-            x1=3.0, y1=0.0,
-            x2=3.0, y2=5.0,
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
             width=0.2,
             layer=Layer.F_CU,
             net=1,  # Same net
@@ -942,8 +1194,10 @@ class TestCollisionChecker:
 
         # Check if path crossing same-net segment is allowed
         result = grid_checker.path_is_clear(
-            x1=1.0, y1=2.5,
-            x2=5.0, y2=2.5,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
             layer=Layer.F_CU,
             width=0.2,
             exclude_net=1,  # Same net as the segment
@@ -954,12 +1208,13 @@ class TestCollisionChecker:
 class TestCollisionAwareOptimization:
     """Tests for collision-aware optimization in TraceOptimizer."""
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
         """Helper to create a segment."""
         return Segment(
-            x1=x1, y1=y1, x2=x2, y2=y2,
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
             width=0.2,
             layer=Layer.F_CU,
             net=net,
