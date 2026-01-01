@@ -141,6 +141,65 @@ def main(argv: list[str] | None = None) -> int:
     nets_parser.add_argument("--net", help="Trace a specific net by label")
     nets_parser.add_argument("--stats", action="store_true", help="Show statistics only")
 
+    # Netlist subcommand (with subcommands)
+    netlist_parser = subparsers.add_parser("netlist", help="Netlist analysis and comparison tools")
+    netlist_subparsers = netlist_parser.add_subparsers(
+        dest="netlist_command", help="Netlist commands"
+    )
+
+    # netlist analyze
+    netlist_analyze = netlist_subparsers.add_parser("analyze", help="Show connectivity statistics")
+    netlist_analyze.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_analyze.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist list
+    netlist_list = netlist_subparsers.add_parser(
+        "list", help="List all nets with connection counts"
+    )
+    netlist_list.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_list.add_argument(
+        "--format", dest="netlist_format", choices=["table", "json"], default="table"
+    )
+    netlist_list.add_argument(
+        "--sort",
+        dest="netlist_sort",
+        choices=["name", "connections"],
+        default="connections",
+    )
+
+    # netlist show
+    netlist_show = netlist_subparsers.add_parser("show", help="Show specific net details")
+    netlist_show.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_show.add_argument("--net", dest="netlist_net", required=True, help="Net name")
+    netlist_show.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist check
+    netlist_check = netlist_subparsers.add_parser("check", help="Find connectivity issues")
+    netlist_check.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_check.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist compare
+    netlist_compare = netlist_subparsers.add_parser("compare", help="Compare two netlists")
+    netlist_compare.add_argument("netlist_old", help="Path to old .kicad_sch file")
+    netlist_compare.add_argument("netlist_new", help="Path to new .kicad_sch file")
+    netlist_compare.add_argument(
+        "--format", dest="netlist_format", choices=["text", "json"], default="text"
+    )
+
+    # netlist export
+    netlist_export = netlist_subparsers.add_parser("export", help="Export netlist file")
+    netlist_export.add_argument("netlist_schematic", help="Path to .kicad_sch file")
+    netlist_export.add_argument("-o", "--output", dest="netlist_output", help="Output path")
+    netlist_export.add_argument(
+        "--format", dest="netlist_format", choices=["kicad", "json"], default="kicad"
+    )
+
     # ERC subcommand
     erc_parser = subparsers.add_parser("erc", help="Parse ERC report")
     erc_parser.add_argument("report", help="Path to ERC report (.json or .rpt)")
@@ -852,6 +911,33 @@ def _dispatch_command(args) -> int:
         if args.stats:
             sub_argv.append("--stats")
         return nets_cmd(sub_argv)
+
+    elif args.command == "netlist":
+        from .netlist_cmd import main as netlist_cmd
+
+        if not args.netlist_command:
+            # No subcommand, show help
+            return netlist_cmd(["--help"])
+
+        sub_argv = [args.netlist_command]
+
+        if args.netlist_command == "compare":
+            sub_argv.extend([args.netlist_old, args.netlist_new])
+        elif args.netlist_command == "export":
+            sub_argv.append(args.netlist_schematic)
+            if hasattr(args, "netlist_output") and args.netlist_output:
+                sub_argv.extend(["-o", args.netlist_output])
+        else:
+            sub_argv.append(args.netlist_schematic)
+
+        if hasattr(args, "netlist_format") and args.netlist_format:
+            sub_argv.extend(["--format", args.netlist_format])
+        if hasattr(args, "netlist_sort") and args.netlist_sort != "connections":
+            sub_argv.extend(["--sort", args.netlist_sort])
+        if hasattr(args, "netlist_net") and args.netlist_net:
+            sub_argv.extend(["--net", args.netlist_net])
+
+        return netlist_cmd(sub_argv)
 
     elif args.command == "erc":
         from .erc_cmd import main as erc_cmd

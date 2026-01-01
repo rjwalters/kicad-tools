@@ -281,6 +281,33 @@ class Netlist:
                     break
         return power_nets
 
+    def find_single_pin_nets(self) -> list[NetlistNet]:
+        """Find nets with only one connection (potential issues).
+
+        Single-pin nets often indicate unconnected pins or incomplete
+        connectivity in the schematic.
+
+        Returns:
+            List of nets with exactly one connection.
+        """
+        return [net for net in self.nets if net.connection_count == 1]
+
+    def find_floating_pins(self) -> list[tuple[str, str, str]]:
+        """Find pins that appear on nets with only one connection.
+
+        These are pins that are connected to a net but have no other
+        connections, suggesting they may be unintentionally floating.
+
+        Returns:
+            List of tuples (reference, pin, net_name) for floating pins.
+        """
+        floating = []
+        for net in self.nets:
+            if len(net.nodes) == 1:
+                node = net.nodes[0]
+                floating.append((node.reference, node.pin, net.name))
+        return floating
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
