@@ -12,6 +12,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools sch <command> <file>   - Schematic analysis tools
     kicad-tools pcb <command> <file>   - PCB query tools
     kicad-tools lib <command> <file>   - Symbol library tools
+    kicad-tools footprint <command>    - Footprint generation tools
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
@@ -57,6 +58,11 @@ Examples:
     kct reason board.kicad_pcb --analyze
     kct validate-footprints board.kicad_pcb --min-pad-gap 0.15
     kct fix-footprints board.kicad_pcb --min-pad-gap 0.2 --dry-run
+    kct footprint generate soic --pins 8 -o SOIC8.kicad_mod
+    kct footprint generate chip --size 0402 --prefix R
+    kct footprint generate qfp --pins 48 --pitch 0.5
+    kct footprint generate sot --variant SOT-23
+    kct footprint generate --list
     kct interactive
     kct interactive --project myboard.kicad_pro
 """
@@ -407,6 +413,20 @@ def main(argv: list[str] | None = None) -> int:
     lib_export = lib_subparsers.add_parser("export", help="Export library to JSON")
     lib_export.add_argument("path", help="Path to library file or item")
     lib_export.add_argument("--format", choices=["json"], default="json")
+
+    # FOOTPRINT subcommand - footprint generation tools
+    footprint_parser = subparsers.add_parser("footprint", help="Footprint generation and tools")
+    footprint_subparsers = footprint_parser.add_subparsers(
+        dest="footprint_command", help="Footprint commands"
+    )
+
+    # footprint generate - delegates to footprint_generate.py for subcommands
+    # This command passes all its arguments to the footprint_generate.main() function
+    footprint_subparsers.add_parser(
+        "generate",
+        help="Generate parametric footprints",
+        add_help=False,  # Let footprint_generate handle help
+    )
 
     # MFR subcommand - manufacturer tools
     mfr_parser = subparsers.add_parser("mfr", help="Manufacturer tools")
@@ -802,6 +822,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Auto-load a project on startup",
     )
 
+    # Handle footprint generate specially - it has its own subcommand parser
+    if argv is None:
+        argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == "footprint" and argv[1] == "generate":
+        from .footprint_generate import main as generate_main
+
+        return generate_main(argv[2:]) or 0
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -912,6 +940,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "lib":
         return _run_lib_command(args)
+
+    elif args.command == "footprint":
+        return _run_footprint_command(args)
 
     elif args.command == "mfr":
         return _run_mfr_command(args)
@@ -1303,6 +1334,23 @@ def _run_lib_command(args) -> int:
 
     elif args.lib_command == "export":
         return export_library(args.path, args.format)
+
+    return 1
+
+
+def _run_footprint_command(args) -> int:
+    """Handle footprint subcommands."""
+    if not args.footprint_command:
+        print("Usage: kicad-tools footprint <command> [options]")
+        print("Commands: generate")
+        return 1
+
+    if args.footprint_command == "generate":
+        from .footprint_generate import main as generate_main
+
+        # Pass all remaining arguments to the generate subcommand
+        sub_argv = args.fp_args if hasattr(args, "fp_args") and args.fp_args else []
+        return generate_main(sub_argv) or 0
 
     return 1
 
