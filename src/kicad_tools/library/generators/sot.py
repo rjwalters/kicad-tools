@@ -39,8 +39,7 @@ def create_sot(
     if variant is not None:
         if variant not in SOT_STANDARDS:
             raise ValueError(
-                f"Unknown SOT variant: {variant}. "
-                f"Valid variants: {list(SOT_STANDARDS.keys())}"
+                f"Unknown SOT variant: {variant}. Valid variants: {list(SOT_STANDARDS.keys())}"
             )
         std = SOT_STANDARDS[variant]
         pins = std["pins"]
@@ -83,20 +82,20 @@ def create_sot(
             pin_num = i + 1
             # SOT-223 has a larger tab for the last pin
             if variant == "SOT-223" and pin_num == pins:
-                fp.add_pad(
-                    str(pin_num), x, y, tab_width, tab_height, shape="rect"
-                )
+                fp.add_pad(str(pin_num), x, y, tab_width, tab_height, shape="rect")
             elif variant == "SOT-89" and pin_num == 2:
                 # SOT-89 has an extended center tab
-                fp.add_pad(
-                    str(pin_num), x, y - 0.7, tab_width, tab_height + 1.4, shape="rect"
-                )
+                fp.add_pad(str(pin_num), x, y - 0.7, tab_width, tab_height + 1.4, shape="rect")
             else:
                 fp.add_pad(str(pin_num), x, y, pad_width, pad_height)
     else:
         # Generic SOT-23 style layout
         if pins == 3:
-            positions = [(-pitch / 2, body_length / 2), (pitch / 2, body_length / 2), (0, -body_length / 2)]
+            positions = [
+                (-pitch / 2, body_length / 2),
+                (pitch / 2, body_length / 2),
+                (0, -body_length / 2),
+            ]
         else:
             raise ValueError(f"Custom SOT layout not implemented for {pins} pins")
 

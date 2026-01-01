@@ -15,16 +15,14 @@ import pytest
 
 from kicad_tools.library import (
     Footprint,
-    Pad,
-    create_soic,
-    create_qfp,
-    create_qfn,
-    create_sot,
     create_chip,
     create_dip,
     create_pin_header,
+    create_qfn,
+    create_qfp,
+    create_soic,
+    create_sot,
 )
-
 
 # =============================================================================
 # Footprint Data Class Tests

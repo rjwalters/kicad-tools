@@ -8,12 +8,48 @@ These dimensions are based on JEDEC and IPC-7351 standards.
 # Narrow body (3.9mm) packages
 SOIC_STANDARDS = {
     8: {"pitch": 1.27, "body_width": 3.9, "body_length": 4.9, "pad_width": 1.95, "pad_height": 0.6},
-    14: {"pitch": 1.27, "body_width": 3.9, "body_length": 8.65, "pad_width": 1.95, "pad_height": 0.6},
-    16: {"pitch": 1.27, "body_width": 3.9, "body_length": 9.9, "pad_width": 1.95, "pad_height": 0.6},
-    18: {"pitch": 1.27, "body_width": 7.5, "body_length": 11.55, "pad_width": 1.95, "pad_height": 0.6},
-    20: {"pitch": 1.27, "body_width": 7.5, "body_length": 12.8, "pad_width": 1.95, "pad_height": 0.6},
-    24: {"pitch": 1.27, "body_width": 7.5, "body_length": 15.4, "pad_width": 1.95, "pad_height": 0.6},
-    28: {"pitch": 1.27, "body_width": 7.5, "body_length": 17.9, "pad_width": 1.95, "pad_height": 0.6},
+    14: {
+        "pitch": 1.27,
+        "body_width": 3.9,
+        "body_length": 8.65,
+        "pad_width": 1.95,
+        "pad_height": 0.6,
+    },
+    16: {
+        "pitch": 1.27,
+        "body_width": 3.9,
+        "body_length": 9.9,
+        "pad_width": 1.95,
+        "pad_height": 0.6,
+    },
+    18: {
+        "pitch": 1.27,
+        "body_width": 7.5,
+        "body_length": 11.55,
+        "pad_width": 1.95,
+        "pad_height": 0.6,
+    },
+    20: {
+        "pitch": 1.27,
+        "body_width": 7.5,
+        "body_length": 12.8,
+        "pad_width": 1.95,
+        "pad_height": 0.6,
+    },
+    24: {
+        "pitch": 1.27,
+        "body_width": 7.5,
+        "body_length": 15.4,
+        "pad_width": 1.95,
+        "pad_height": 0.6,
+    },
+    28: {
+        "pitch": 1.27,
+        "body_width": 7.5,
+        "body_length": 17.9,
+        "pad_width": 1.95,
+        "pad_height": 0.6,
+    },
 }
 
 # TSSOP (Thin Shrink Small Outline Package) - JEDEC MO-153
@@ -126,15 +162,78 @@ SOT_STANDARDS = {
 # Chip components (resistors, capacitors, etc.)
 # Imperial size -> metric size (mm)
 CHIP_SIZES = {
-    "0201": {"length": 0.6, "width": 0.3, "pad_width": 0.4, "pad_height": 0.35, "pad_gap": 0.3, "metric": "0603"},
-    "0402": {"length": 1.0, "width": 0.5, "pad_width": 0.6, "pad_height": 0.55, "pad_gap": 0.5, "metric": "1005"},
-    "0603": {"length": 1.6, "width": 0.8, "pad_width": 0.9, "pad_height": 0.95, "pad_gap": 0.8, "metric": "1608"},
-    "0805": {"length": 2.0, "width": 1.25, "pad_width": 1.0, "pad_height": 1.35, "pad_gap": 1.0, "metric": "2012"},
-    "1206": {"length": 3.2, "width": 1.6, "pad_width": 1.15, "pad_height": 1.8, "pad_gap": 1.8, "metric": "3216"},
-    "1210": {"length": 3.2, "width": 2.5, "pad_width": 1.15, "pad_height": 2.7, "pad_gap": 1.8, "metric": "3225"},
-    "1812": {"length": 4.5, "width": 3.2, "pad_width": 1.3, "pad_height": 3.4, "pad_gap": 2.6, "metric": "4532"},
-    "2010": {"length": 5.0, "width": 2.5, "pad_width": 1.3, "pad_height": 2.7, "pad_gap": 3.0, "metric": "5025"},
-    "2512": {"length": 6.3, "width": 3.2, "pad_width": 1.5, "pad_height": 3.4, "pad_gap": 4.0, "metric": "6332"},
+    "0201": {
+        "length": 0.6,
+        "width": 0.3,
+        "pad_width": 0.4,
+        "pad_height": 0.35,
+        "pad_gap": 0.3,
+        "metric": "0603",
+    },
+    "0402": {
+        "length": 1.0,
+        "width": 0.5,
+        "pad_width": 0.6,
+        "pad_height": 0.55,
+        "pad_gap": 0.5,
+        "metric": "1005",
+    },
+    "0603": {
+        "length": 1.6,
+        "width": 0.8,
+        "pad_width": 0.9,
+        "pad_height": 0.95,
+        "pad_gap": 0.8,
+        "metric": "1608",
+    },
+    "0805": {
+        "length": 2.0,
+        "width": 1.25,
+        "pad_width": 1.0,
+        "pad_height": 1.35,
+        "pad_gap": 1.0,
+        "metric": "2012",
+    },
+    "1206": {
+        "length": 3.2,
+        "width": 1.6,
+        "pad_width": 1.15,
+        "pad_height": 1.8,
+        "pad_gap": 1.8,
+        "metric": "3216",
+    },
+    "1210": {
+        "length": 3.2,
+        "width": 2.5,
+        "pad_width": 1.15,
+        "pad_height": 2.7,
+        "pad_gap": 1.8,
+        "metric": "3225",
+    },
+    "1812": {
+        "length": 4.5,
+        "width": 3.2,
+        "pad_width": 1.3,
+        "pad_height": 3.4,
+        "pad_gap": 2.6,
+        "metric": "4532",
+    },
+    "2010": {
+        "length": 5.0,
+        "width": 2.5,
+        "pad_width": 1.3,
+        "pad_height": 2.7,
+        "pad_gap": 3.0,
+        "metric": "5025",
+    },
+    "2512": {
+        "length": 6.3,
+        "width": 3.2,
+        "pad_width": 1.5,
+        "pad_height": 3.4,
+        "pad_gap": 4.0,
+        "metric": "6332",
+    },
 }
 
 # DIP (Dual In-line Package) standards

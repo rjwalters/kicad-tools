@@ -4,11 +4,11 @@ Parametric footprint generators for common package types.
 These generators create KiCad footprints following IPC-7351 naming conventions.
 """
 
-from .soic import create_soic
-from .qfp import create_qfp
-from .qfn import create_qfn
-from .sot import create_sot
 from .chip import create_chip
+from .qfn import create_qfn
+from .qfp import create_qfp
+from .soic import create_soic
+from .sot import create_sot
 from .through_hole import create_dip, create_pin_header
 
 __all__ = [

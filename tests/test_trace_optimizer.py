@@ -27,9 +27,7 @@ class TestStaircaseCompression:
         config = OptimizationConfig(compress_staircase=False)
         return TraceOptimizer(config)
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float) -> Segment:
         """Helper to create a segment with default properties."""
         return Segment(
             x1=x1,
@@ -540,9 +538,7 @@ class TestChainSorting:
     def optimizer(self):
         return TraceOptimizer()
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
         """Helper to create a segment with default properties."""
         return Segment(
             x1=x1,
@@ -590,8 +586,8 @@ class TestChainSorting:
         """Test that chain segments are sorted in path order."""
         # Create segments in scrambled order
         segments = [
-            self.make_segment(5, 0, 5, 5),   # Middle (should be second)
-            self.make_segment(0, 0, 5, 0),   # Start (should be first)
+            self.make_segment(5, 0, 5, 5),  # Middle (should be second)
+            self.make_segment(0, 0, 5, 0),  # Start (should be first)
             self.make_segment(5, 5, 10, 5),  # End (should be third)
         ]
 
@@ -613,8 +609,8 @@ class TestChainSorting:
         """Test that segments with reversed direction are handled correctly."""
         # Create segments where one is "backwards"
         segments = [
-            self.make_segment(0, 0, 5, 0),   # Forward: (0,0) -> (5,0)
-            self.make_segment(5, 5, 5, 0),   # Backwards: end connects to previous end
+            self.make_segment(0, 0, 5, 0),  # Forward: (0,0) -> (5,0)
+            self.make_segment(5, 5, 5, 0),  # Backwards: end connects to previous end
         ]
 
         chains = optimizer._sort_into_chains(segments)
@@ -635,9 +631,7 @@ class TestMultiChainOptimization:
     def optimizer(self):
         return TraceOptimizer()
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
         """Helper to create a segment with default properties."""
         return Segment(
             x1=x1,
@@ -722,9 +716,9 @@ class TestMultiChainOptimization:
         """Test that a T-junction (3 segments meeting at a point) forms one chain."""
         # T-junction: segments meet at (5, 0)
         segments = [
-            self.make_segment(0, 0, 5, 0),   # Left arm
+            self.make_segment(0, 0, 5, 0),  # Left arm
             self.make_segment(5, 0, 10, 0),  # Right arm
-            self.make_segment(5, 0, 5, 5),   # Vertical arm
+            self.make_segment(5, 0, 5, 5),  # Vertical arm
         ]
 
         chains = optimizer._sort_into_chains(segments)
@@ -779,8 +773,7 @@ class TestSegmentsTouch:
 
     def make_segment(self, x1, y1, x2, y2):
         return Segment(
-            x1=x1, y1=y1, x2=x2, y2=y2,
-            width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+            x1=x1, y1=y1, x2=x2, y2=y2, width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
         )
 
     def test_end_to_start_connection(self, optimizer):
@@ -841,8 +834,15 @@ class MockCollisionChecker:
         return True
 
     def _paths_cross(
-        self, ax1: float, ay1: float, ax2: float, ay2: float,
-        bx1: float, by1: float, bx2: float, by2: float
+        self,
+        ax1: float,
+        ay1: float,
+        ax2: float,
+        ay2: float,
+        bx1: float,
+        by1: float,
+        bx2: float,
+        by2: float,
     ) -> bool:
         """Simplified check if two paths cross."""
         # Check if they share any significant overlap
@@ -885,8 +885,10 @@ class TestCollisionChecker:
     def test_grid_collision_checker_clear_path(self, grid_checker):
         """Test that an unobstructed path is clear."""
         result = grid_checker.path_is_clear(
-            x1=1.0, y1=1.0,
-            x2=5.0, y2=1.0,
+            x1=1.0,
+            y1=1.0,
+            x2=5.0,
+            y2=1.0,
             layer=Layer.F_CU,
             width=0.2,
             exclude_net=1,
@@ -900,8 +902,10 @@ class TestCollisionChecker:
 
         # Mark some cells as blocked by another net
         blocking_seg = RouteSegment(
-            x1=3.0, y1=0.0,
-            x2=3.0, y2=5.0,
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
             width=0.2,
             layer=Layer.F_CU,
             net=2,  # Different net
@@ -910,13 +914,16 @@ class TestCollisionChecker:
 
         # Create a route and mark it on the grid
         from kicad_tools.router import Route
+
         blocking_route = Route(net=2, net_name="BLOCKER", segments=[blocking_seg])
         simple_grid.mark_route(blocking_route)
 
         # Check if path crossing the blocker is detected
         result = grid_checker.path_is_clear(
-            x1=1.0, y1=2.5,
-            x2=5.0, y2=2.5,  # This crosses the vertical segment at x=3.0
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,  # This crosses the vertical segment at x=3.0
             layer=Layer.F_CU,
             width=0.2,
             exclude_net=1,  # We're net 1, the blocker is net 2
@@ -930,8 +937,10 @@ class TestCollisionChecker:
         from kicad_tools.router import Segment as RouteSegment
 
         same_net_seg = RouteSegment(
-            x1=3.0, y1=0.0,
-            x2=3.0, y2=5.0,
+            x1=3.0,
+            y1=0.0,
+            x2=3.0,
+            y2=5.0,
             width=0.2,
             layer=Layer.F_CU,
             net=1,  # Same net
@@ -942,8 +951,10 @@ class TestCollisionChecker:
 
         # Check if path crossing same-net segment is allowed
         result = grid_checker.path_is_clear(
-            x1=1.0, y1=2.5,
-            x2=5.0, y2=2.5,
+            x1=1.0,
+            y1=2.5,
+            x2=5.0,
+            y2=2.5,
             layer=Layer.F_CU,
             width=0.2,
             exclude_net=1,  # Same net as the segment
@@ -954,12 +965,13 @@ class TestCollisionChecker:
 class TestCollisionAwareOptimization:
     """Tests for collision-aware optimization in TraceOptimizer."""
 
-    def make_segment(
-        self, x1: float, y1: float, x2: float, y2: float, net: int = 1
-    ) -> Segment:
+    def make_segment(self, x1: float, y1: float, x2: float, y2: float, net: int = 1) -> Segment:
         """Helper to create a segment."""
         return Segment(
-            x1=x1, y1=y1, x2=x2, y2=y2,
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
             width=0.2,
             layer=Layer.F_CU,
             net=net,

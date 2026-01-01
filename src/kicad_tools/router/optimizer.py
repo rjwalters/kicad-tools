@@ -661,16 +661,18 @@ class TraceOptimizer:
 
         # If we couldn't create any segments, create a direct connection
         if not result:
-            result.append(Segment(
-                x1=start[0],
-                y1=start[1],
-                x2=end[0],
-                y2=end[1],
-                width=template.width,
-                layer=template.layer,
-                net=template.net,
-                net_name=template.net_name,
-            ))
+            result.append(
+                Segment(
+                    x1=start[0],
+                    y1=start[1],
+                    x2=end[0],
+                    y2=end[1],
+                    width=template.width,
+                    layer=template.layer,
+                    net=template.net,
+                    net_name=template.net_name,
+                )
+            )
 
         return result
 
@@ -988,12 +990,14 @@ class TraceOptimizer:
                     if i == j:
                         continue
                     # Check if start of seg matches any endpoint of other
-                    if (abs(seg.x1 - other.x1) < tol and abs(seg.y1 - other.y1) < tol) or \
-                       (abs(seg.x1 - other.x2) < tol and abs(seg.y1 - other.y2) < tol):
+                    if (abs(seg.x1 - other.x1) < tol and abs(seg.y1 - other.y1) < tol) or (
+                        abs(seg.x1 - other.x2) < tol and abs(seg.y1 - other.y2) < tol
+                    ):
                         start_shared = True
                     # Check if end of seg matches any endpoint of other
-                    if (abs(seg.x2 - other.x1) < tol and abs(seg.y2 - other.y1) < tol) or \
-                       (abs(seg.x2 - other.x2) < tol and abs(seg.y2 - other.y2) < tol):
+                    if (abs(seg.x2 - other.x1) < tol and abs(seg.y2 - other.y1) < tol) or (
+                        abs(seg.x2 - other.x2) < tol and abs(seg.y2 - other.y2) < tol
+                    ):
                         end_shared = True
 
                 # If start is not shared, this is a good starting point
@@ -1013,8 +1017,8 @@ class TraceOptimizer:
         # Ensure segment is oriented so we're starting from an unshared endpoint
         # Check if current.start is shared with remaining segments
         start_shared = any(
-            (abs(current.x1 - other.x1) < tol and abs(current.y1 - other.y1) < tol) or
-            (abs(current.x1 - other.x2) < tol and abs(current.y1 - other.y2) < tol)
+            (abs(current.x1 - other.x1) < tol and abs(current.y1 - other.y1) < tol)
+            or (abs(current.x1 - other.x2) < tol and abs(current.y1 - other.y2) < tol)
             for other in remaining
         )
         if start_shared:

@@ -53,7 +53,9 @@ def create_chip(
         if metric:
             name = f"{prefix}_{metric_size}Metric" if prefix else f"{metric_size}Metric"
         else:
-            name = f"{prefix}_{size}_{metric_size}Metric" if prefix else f"{size}_{metric_size}Metric"
+            name = (
+                f"{prefix}_{size}_{metric_size}Metric" if prefix else f"{size}_{metric_size}Metric"
+            )
 
     # Determine component type for description
     if prefix == "R":

@@ -251,7 +251,9 @@ def _find_footprint(library: str, footprint_name: str) -> Path | None:
     """Find a footprint file by library and name."""
     # Ensure extensions
     lib_name = library if library.endswith(".pretty") else f"{library}.pretty"
-    fp_name = footprint_name if footprint_name.endswith(".kicad_mod") else f"{footprint_name}.kicad_mod"
+    fp_name = (
+        footprint_name if footprint_name.endswith(".kicad_mod") else f"{footprint_name}.kicad_mod"
+    )
 
     # Check if library is a direct path
     lib_path = Path(library)

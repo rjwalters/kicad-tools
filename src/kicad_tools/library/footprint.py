@@ -16,9 +16,7 @@ class Pad:
 
     name: str
     pad_type: Literal["smd", "thru_hole", "np_thru_hole", "connect"] = "smd"
-    shape: Literal["circle", "rect", "oval", "roundrect", "trapezoid", "custom"] = (
-        "roundrect"
-    )
+    shape: Literal["circle", "rect", "oval", "roundrect", "trapezoid", "custom"] = "roundrect"
     x: float = 0.0
     y: float = 0.0
     width: float = 1.0
@@ -318,7 +316,7 @@ class Footprint:
     def to_sexp(self) -> str:
         """Convert footprint to KiCad S-expression format."""
         lines = [f'(footprint "{self.name}"']
-        lines.append('\t(version 20241229)')
+        lines.append("\t(version 20241229)")
         lines.append('\t(generator "kicad_tools")')
         lines.append('\t(layer "F.Cu")')
 
@@ -331,8 +329,8 @@ class Footprint:
 
         # Reference and Value properties (always present)
         ref_y = self._get_ref_position()
-        lines.append(f'\t(property "Reference" "REF**"')
-        lines.append(f'\t\t(at 0 {_fmt(ref_y)} 0)')
+        lines.append('\t(property "Reference" "REF**"')
+        lines.append(f"\t\t(at 0 {_fmt(ref_y)} 0)")
         lines.append('\t\t(layer "F.SilkS")')
         lines.append("\t\t(effects")
         lines.append("\t\t\t(font")
@@ -343,7 +341,7 @@ class Footprint:
         lines.append("\t)")
 
         lines.append(f'\t(property "Value" "{self.name}"')
-        lines.append(f'\t\t(at 0 {_fmt(-ref_y)} 0)')
+        lines.append(f"\t\t(at 0 {_fmt(-ref_y)} 0)")
         lines.append('\t\t(layer "F.Fab")')
         lines.append("\t\t(effects")
         lines.append("\t\t\t(font")
