@@ -148,6 +148,60 @@ def minimal_pcb(tmp_path: Path) -> Path:
     return pcb_file
 
 
+# PCB that passes all DRC checks - for testing kct check command
+# This fixture is specifically designed to have no DRC violations:
+# - Board outline with adequate edge clearance
+# - Traces with proper clearance from pads
+# - Silkscreen text with adequate height (1.0mm >= JLCPCB 0.8mm minimum)
+DRC_CLEAN_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect (start 100 100) (end 150 150)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 125 125)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000011"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "00000000-0000-0000-0000-000000000012"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (segment (start 122 125) (end 115 125) (width 0.25) (layer "F.Cu") (net 1)
+    (uuid "00000000-0000-0000-0000-000000000020"))
+)
+"""
+
+
+@pytest.fixture
+def drc_clean_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file that passes all DRC checks."""
+    pcb_file = tmp_path / "drc_clean.kicad_pcb"
+    pcb_file.write_text(DRC_CLEAN_PCB)
+    return pcb_file
+
+
 # PCB with edge cuts and multiple components for routing tests
 ROUTING_TEST_PCB = """(kicad_pcb
   (version 20240108)
