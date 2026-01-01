@@ -2153,6 +2153,125 @@ class TestLoadPcbForRouting:
         assert router.grid.width == 65.0
         assert router.grid.height == 56.0
 
+    def test_load_pcb_unquoted_pad_numbers(self, tmp_path):
+        """Test parsing pads with unquoted numeric pad numbers (Issue #173).
+
+        KiCad uses unquoted pad numbers for numeric pads:
+            (pad 1 smd rect ...)
+        But quoted for alphanumeric (BGA):
+            (pad "A1" smd rect ...)
+        """
+        # Create a PCB with UNQUOTED pad numbers (real KiCad format)
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG")
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "U1" (at 0 -3) (layer "F.SilkS"))
+    (pad 1 smd rect (at -1.905 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 1 "VCC"))
+    (pad 2 smd rect (at -0.635 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 3 smd rect (at 0.635 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 3 "SIG"))
+    (pad 4 smd rect (at 1.905 -2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 5 smd rect (at 1.905 2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 6 smd rect (at 0.635 2.475) (size 0.6 1.2) (layers "F.Cu") (net 3 "SIG"))
+    (pad 7 smd rect (at -0.635 2.475) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+    (pad 8 smd rect (at -1.905 2.475) (size 0.6 1.2) (layers "F.Cu") (net 1 "VCC"))
+  )
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x04"
+    (layer "F.Cu")
+    (at 140 120)
+    (fp_text reference "J1" (at 0 -3) (layer "F.SilkS"))
+    (pad 1 thru_hole oval (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 1 "VCC"))
+    (pad 2 thru_hole oval (at 0 2.54) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 2 "GND"))
+    (pad 3 thru_hole oval (at 0 5.08) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 3 "SIG"))
+    (pad 4 thru_hole oval (at 0 7.62) (size 1.7 1.7) (drill 1.0) (layers "*.Cu") (net 2 "GND"))
+  )
+)
+"""
+        pcb_file = tmp_path / "unquoted_pads.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(str(pcb_file))
+
+        # Should have found all nets
+        assert "VCC" in net_map
+        assert "GND" in net_map
+        assert "SIG" in net_map
+
+        # Should have found all 12 pads (8 from U1 + 4 from J1)
+        assert len(router.pads) == 12
+
+        # Check specific pads were parsed correctly
+        pad_refs = {ref for ref, _ in router.pads.keys()}
+        assert "U1" in pad_refs
+        assert "J1" in pad_refs
+
+        # Check pad numbers were parsed (should be strings "1", "2", etc.)
+        pad_nums = {num for _, num in router.pads.keys()}
+        assert "1" in pad_nums
+        assert "8" in pad_nums
+
+    def test_load_pcb_mixed_quoted_unquoted_pads(self, tmp_path):
+        """Test parsing PCB with both quoted and unquoted pad numbers.
+
+        This tests the case where a board has both:
+        - Numeric pads: (pad 1 smd ...) - unquoted
+        - BGA pads: (pad "A1" smd ...) - quoted
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 160 150) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (at 110 120)
+    (fp_text reference "U1" (at 0 0) (layer "F.SilkS"))
+    (pad 1 smd rect (at 0 0) (size 0.6 1.2) (layers "F.Cu") (net 1 "VCC"))
+    (pad 2 smd rect (at 1.27 0) (size 0.6 1.2) (layers "F.Cu") (net 2 "GND"))
+  )
+  (footprint "Package_BGA:BGA-4"
+    (layer "F.Cu")
+    (at 140 130)
+    (fp_text reference "U2" (at 0 0) (layer "F.SilkS"))
+    (pad "A1" smd circle (at -0.5 -0.5) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC"))
+    (pad "A2" smd circle (at 0.5 -0.5) (size 0.4 0.4) (layers "F.Cu") (net 2 "GND"))
+    (pad "B1" smd circle (at -0.5 0.5) (size 0.4 0.4) (layers "F.Cu") (net 2 "GND"))
+    (pad "B2" smd circle (at 0.5 0.5) (size 0.4 0.4) (layers "F.Cu") (net 1 "VCC"))
+  )
+)
+"""
+        pcb_file = tmp_path / "mixed_pads.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(str(pcb_file))
+
+        # Should have found all 6 pads (2 from U1 + 4 from U2)
+        assert len(router.pads) == 6
+
+        # Check both numeric and alphanumeric pad numbers
+        pad_keys = set(router.pads.keys())
+        assert ("U1", "1") in pad_keys  # Unquoted numeric
+        assert ("U1", "2") in pad_keys  # Unquoted numeric
+        assert ("U2", "A1") in pad_keys  # Quoted alphanumeric
+        assert ("U2", "B2") in pad_keys  # Quoted alphanumeric
+
 
 # =============================================================================
 # Net Class Setup and PCB Merge Tests (Issue #45 - KiCad 7+ Compatibility)
