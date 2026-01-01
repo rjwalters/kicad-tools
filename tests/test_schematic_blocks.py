@@ -6,6 +6,7 @@ import pytest
 
 from kicad_tools.schematic.blocks import (
     CircuitBlock,
+    CrystalOscillator,
     DebugHeader,
     DecouplingCaps,
     LDOBlock,
@@ -322,6 +323,120 @@ class TestOscillatorBlockMocked:
 
         # Should add wire for EN to VCC rail
         assert mock_schematic.add_wire.call_count >= 3
+
+
+class TestCrystalOscillatorMocked:
+    """Tests for CrystalOscillator with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "Crystal" in str(symbol):
+                # Crystal has pins 1 and 2 on left and right
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Capacitor has pins 1 (top) and 2 (bottom)
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_crystal_oscillator_creation(self, mock_schematic):
+        """Create crystal oscillator."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100, frequency="8MHz", load_caps="20pF")
+
+        assert xtal.schematic == mock_schematic
+        assert xtal.x == 100
+        assert xtal.y == 100
+        assert "IN" in xtal.ports
+        assert "OUT" in xtal.ports
+        assert "GND" in xtal.ports
+
+    def test_crystal_oscillator_components(self, mock_schematic):
+        """Crystal oscillator has crystal and two caps."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+
+        assert "XTAL" in xtal.components
+        assert "C1" in xtal.components
+        assert "C2" in xtal.components
+
+    def test_crystal_oscillator_wires_caps_to_crystal(self, mock_schematic):
+        """Crystal oscillator wires load caps to crystal."""
+        CrystalOscillator(mock_schematic, x=100, y=100)
+
+        # Should add wires for crystal-to-cap and cap-to-cap ground
+        assert mock_schematic.add_wire.call_count >= 5
+
+    def test_crystal_oscillator_adds_junctions(self, mock_schematic):
+        """Crystal oscillator adds junctions at connection points."""
+        CrystalOscillator(mock_schematic, x=100, y=100)
+
+        # Should add junctions at crystal-to-cap connections
+        assert mock_schematic.add_junction.call_count >= 2
+
+    def test_crystal_oscillator_different_cap_values(self, mock_schematic):
+        """Crystal oscillator supports different cap values."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100, load_caps=("18pF", "22pF"))
+
+        # Should create both caps
+        assert "C1" in xtal.components
+        assert "C2" in xtal.components
+
+    def test_crystal_oscillator_custom_ref_prefix(self, mock_schematic):
+        """Crystal oscillator uses custom reference prefix."""
+        CrystalOscillator(mock_schematic, x=100, y=100, ref_prefix="Y2")
+
+        # Check add_symbol was called with Y2 reference
+        calls = mock_schematic.add_symbol.call_args_list
+        crystal_call = [c for c in calls if "Crystal" in str(c)]
+        assert len(crystal_call) >= 1
+
+    def test_crystal_oscillator_connect_to_rails(self, mock_schematic):
+        """Crystal oscillator connects to ground rail."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        xtal.connect_to_rails(gnd_rail_y=150)
+
+        # Should add wire to ground rail
+        assert mock_schematic.add_wire.called
+        assert mock_schematic.add_junction.called
+
+    def test_crystal_oscillator_connect_without_junction(self, mock_schematic):
+        """Crystal oscillator can connect without junction."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+        mock_schematic.add_junction.reset_mock()
+
+        xtal.connect_to_rails(gnd_rail_y=150, add_junction=False)
+
+        # Should not add junction
+        assert not mock_schematic.add_junction.called
+
+    def test_crystal_oscillator_port_positions(self, mock_schematic):
+        """Crystal oscillator ports have correct positions."""
+        xtal = CrystalOscillator(mock_schematic, x=100, y=100)
+
+        # IN and OUT should be tuples
+        assert isinstance(xtal.ports["IN"], tuple)
+        assert isinstance(xtal.ports["OUT"], tuple)
+        assert isinstance(xtal.ports["GND"], tuple)
+
+        # IN should be on left (lower x), OUT on right (higher x)
+        assert xtal.ports["IN"][0] < xtal.ports["OUT"][0]
 
 
 class TestDebugHeaderMocked:
