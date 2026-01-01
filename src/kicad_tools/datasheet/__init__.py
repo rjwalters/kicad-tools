@@ -75,9 +75,11 @@ from .exceptions import (
 )
 
 # PDF parsing functionality
+from .footprint_matcher import FootprintMatch, FootprintMatcher, GeneratorSuggestion
 from .images import ExtractedImage, classify_image
 from .manager import DatasheetManager
 from .models import Datasheet, DatasheetResult, DatasheetSearchResult
+from .package import PackageInfo, parse_package_name
 from .parser import DatasheetParser, ParsedDatasheet
 from .pin_inference import infer_pin_type
 from .pins import ExtractedPin, PinTable
@@ -101,6 +103,13 @@ __all__ = [
     "ExtractedPin",
     "PinTable",
     "infer_pin_type",
+    # Package extraction
+    "PackageInfo",
+    "parse_package_name",
+    # Footprint matching
+    "FootprintMatcher",
+    "FootprintMatch",
+    "GeneratorSuggestion",
     # Cache
     "DatasheetCache",
     "get_default_cache_path",

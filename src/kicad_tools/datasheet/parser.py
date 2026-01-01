@@ -608,6 +608,167 @@ class DatasheetParser:
 
         return sorted(packages)
 
+    def extract_packages(
+        self,
+        pages: Iterable[int] | None = None,
+    ) -> list:
+        """
+        Extract structured package information from the datasheet.
+
+        Searches for package specifications including dimensions, pitch,
+        and pin counts. Returns structured PackageInfo objects.
+
+        Args:
+            pages: Optional page numbers to search (1-indexed).
+                   If None, searches all pages.
+
+        Returns:
+            List of PackageInfo objects with extracted package details.
+
+        Example:
+            >>> parser = DatasheetParser("STM32F103.pdf")
+            >>> packages = parser.extract_packages()
+            >>> for pkg in packages:
+            ...     print(f"{pkg.name}: {pkg.body_width}x{pkg.body_length}mm")
+        """
+        import re
+
+        from .package import (
+            PackageInfo,
+            extract_dimension_from_text,
+            get_default_body_size,
+            get_default_pitch,
+            parse_package_name,
+        )
+
+        tables = self.extract_tables(pages)
+        packages: list[PackageInfo] = []
+        seen_packages: set[str] = set()
+
+        # Package pattern for names
+        package_pattern = re.compile(
+            r"\b(LQFP|QFP|TQFP|PQFP|CQFP|BGA|FBGA|LFBGA|TFBGA|WLCSP|"
+            r"QFN|DFN|WQFN|UQFN|VQFN|HVQFN|SON|WSON|"
+            r"SOIC|SOP|SSOP|TSSOP|MSOP|TSOP|QSOP|VSOP|"
+            r"DIP|PDIP|CDIP|CERDIP|PLCC|LGA|"
+            r"SOT-?23|SOT-?223|SOT-?89|SOT-?363|SOT-?143|SOT-?323|SC-?70|"
+            r"TO-?\d+|DPAK|D2PAK)[\s_-]?(\d+)?",
+            re.IGNORECASE,
+        )
+
+        # Dimension patterns
+        dimension_pattern = re.compile(
+            r"(\d+\.?\d*)\s*[xX×]\s*(\d+\.?\d*)\s*(mm)?",
+        )
+        pitch_pattern = re.compile(
+            r"(?:pitch|[Pp])[:\s]*(\d+\.?\d*)\s*(mm)?|"
+            r"(\d+\.?\d*)\s*mm\s+pitch",
+            re.IGNORECASE,
+        )
+
+        # Search tables for package information
+        for table in tables:
+            # Check headers and cells for package names
+            all_text = " ".join(table.headers)
+            for row in table.rows:
+                all_text += " " + " ".join(str(cell) for cell in row)
+
+            # Find package names
+            for match in package_pattern.finditer(all_text):
+                pkg_prefix = match.group(1).upper()
+                pkg_pins = match.group(2)
+
+                # Construct package name
+                if pkg_pins:
+                    pkg_name = f"{pkg_prefix}{pkg_pins}"
+                else:
+                    pkg_name = pkg_prefix
+
+                # Skip if already processed
+                if pkg_name in seen_packages:
+                    continue
+                seen_packages.add(pkg_name)
+
+                # Parse the package name
+                parsed = parse_package_name(pkg_name)
+                pkg_type = parsed.get("type", pkg_prefix.lower())
+                pin_count = parsed.get("pin_count") or (int(pkg_pins) if pkg_pins else 0)
+
+                if pin_count == 0:
+                    continue  # Skip packages without pin count
+
+                # Try to extract dimensions from surrounding text
+                context_start = max(0, match.start() - 200)
+                context_end = min(len(all_text), match.end() + 200)
+                context = all_text[context_start:context_end]
+
+                # Look for dimensions
+                body_width, body_length = 0.0, 0.0
+                pitch = 0.0
+
+                # Check parsed body size from name
+                if parsed.get("body_size"):
+                    body_width, body_length = parsed["body_size"]
+
+                # Try to find dimensions in context
+                dim_match = dimension_pattern.search(context)
+                if dim_match and body_width == 0:
+                    body_width = float(dim_match.group(1))
+                    body_length = float(dim_match.group(2))
+
+                # Look for pitch
+                if parsed.get("pitch"):
+                    pitch = parsed["pitch"]
+                else:
+                    pitch_match = pitch_pattern.search(context)
+                    if pitch_match:
+                        pitch = float(pitch_match.group(1) or pitch_match.group(3) or 0)
+
+                # Extract additional dimensions from text
+                extracted_dims = extract_dimension_from_text(context)
+                if "D" in extracted_dims and body_width == 0:
+                    body_width = extracted_dims["D"]
+                if "E" in extracted_dims and body_length == 0:
+                    body_length = extracted_dims["E"]
+                if "PITCH" in extracted_dims and pitch == 0:
+                    pitch = extracted_dims["PITCH"]
+
+                # Use defaults if dimensions not found
+                if body_width == 0 or body_length == 0:
+                    body_width, body_length = get_default_body_size(pkg_type, pin_count)
+
+                if pitch == 0:
+                    pitch = get_default_pitch(pkg_type, pin_count)
+
+                # Calculate confidence based on what was extracted vs defaulted
+                confidence = 0.3  # Base confidence
+                if parsed.get("body_size") or dim_match:
+                    confidence += 0.3
+                if parsed.get("pitch") or pitch_pattern.search(context):
+                    confidence += 0.2
+                if pkg_pins:
+                    confidence += 0.2
+
+                packages.append(
+                    PackageInfo(
+                        name=pkg_name,
+                        type=pkg_type,
+                        pin_count=pin_count,
+                        body_width=body_width,
+                        body_length=body_length,
+                        pitch=pitch,
+                        height=None,
+                        exposed_pad=None,
+                        source_page=table.page,
+                        confidence=min(confidence, 1.0),
+                    )
+                )
+
+        # Sort by confidence, then by name
+        packages.sort(key=lambda p: (-p.confidence, p.name))
+
+        return packages
+
     def extract_pins_dataframe(
         self,
         pages: Iterable[int] | None = None,

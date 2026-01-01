@@ -2,15 +2,17 @@
 CLI commands for datasheet search, download, and PDF parsing.
 
 Provides commands:
-    kct datasheet search <part>     - Search for datasheets
-    kct datasheet download <part>   - Download a datasheet
-    kct datasheet list              - List cached datasheets
-    kct datasheet cache             - Cache management
-    kct datasheet convert <pdf>     - Convert PDF to markdown
-    kct datasheet extract-images <pdf> - Extract images from PDF
-    kct datasheet extract-tables <pdf> - Extract tables from PDF
-    kct datasheet extract-pins <pdf> - Extract pin definitions from PDF
-    kct datasheet info <pdf>        - Show PDF information
+    kct datasheet search <part>         - Search for datasheets
+    kct datasheet download <part>       - Download a datasheet
+    kct datasheet list                  - List cached datasheets
+    kct datasheet cache                 - Cache management
+    kct datasheet convert <pdf>         - Convert PDF to markdown
+    kct datasheet extract-images <pdf>  - Extract images from PDF
+    kct datasheet extract-tables <pdf>  - Extract tables from PDF
+    kct datasheet extract-pins <pdf>    - Extract pin definitions from PDF
+    kct datasheet extract-package <pdf> - Extract package information from PDF
+    kct datasheet suggest-footprint <pdf> - Suggest matching footprints
+    kct datasheet info <pdf>            - Show PDF information
 """
 
 from __future__ import annotations
@@ -171,6 +173,48 @@ def main(argv: list[str] | None = None) -> int:
     info_parser.add_argument("pdf", help="Path to PDF file")
     info_parser.add_argument("--format", choices=["text", "json"], default="text")
 
+    # extract-package subcommand
+    pkg_parser = subparsers.add_parser(
+        "extract-package", help="Extract package information from PDF"
+    )
+    pkg_parser.add_argument("pdf", help="Path to PDF file")
+    pkg_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: stdout)",
+    )
+    pkg_parser.add_argument(
+        "--pages",
+        help="Page range to search (e.g., '1-10' or '1,2,5')",
+    )
+    pkg_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # suggest-footprint subcommand
+    footprint_parser = subparsers.add_parser(
+        "suggest-footprint", help="Suggest matching footprints for packages in PDF"
+    )
+    footprint_parser.add_argument("pdf", help="Path to PDF file")
+    footprint_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: stdout)",
+    )
+    footprint_parser.add_argument(
+        "--pages",
+        help="Page range to search (e.g., '1-10' or '1,2,5')",
+    )
+    footprint_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -196,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
             return _extract_pins(args)
         elif args.command == "info":
             return _info(args)
+        elif args.command == "extract-package":
+            return _extract_package(args)
+        elif args.command == "suggest-footprint":
+            return _suggest_footprint(args)
     except ImportError as e:
         print(f"Error: {e}", file=sys.stderr)
         print(
@@ -652,6 +700,133 @@ def _info(args) -> int:
             print(f"Pages:   {parser.page_count}")
             print(f"Images:  {len(images)} (>= 100x100 px)")
             print(f"Tables:  {len(tables)}")
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _extract_package(args) -> int:
+    """Handle extract-package command."""
+    try:
+        from ..datasheet.parser import DatasheetParser
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[datasheet]", file=sys.stderr)
+        return 1
+
+    pdf_path = Path(args.pdf)
+    if not pdf_path.exists():
+        print(f"Error: File not found: {pdf_path}", file=sys.stderr)
+        return 1
+
+    try:
+        parser = DatasheetParser(pdf_path)
+        pages = _parse_pages(args.pages)
+        packages = parser.extract_packages(pages)
+
+        if not packages:
+            print("No packages found in document", file=sys.stderr)
+            return 0
+
+        if args.format == "json":
+            data = {
+                "packages": [pkg.to_dict() for pkg in packages],
+                "source": str(pdf_path),
+            }
+            content = json.dumps(data, indent=2)
+        else:
+            lines = [f"Packages found in {pdf_path.name}:"]
+            for pkg in packages:
+                lines.append(
+                    f"  {pkg.name}: {pkg.body_width}x{pkg.body_length}mm, "
+                    f"{pkg.pitch}mm pitch, {pkg.pin_count} pins"
+                )
+                if pkg.exposed_pad:
+                    lines.append(f"    Exposed pad: {pkg.exposed_pad[0]}x{pkg.exposed_pad[1]}mm")
+            content = "\n".join(lines)
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content)
+            print(f"Extracted {len(packages)} packages to: {output_path}")
+        else:
+            print(content)
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _suggest_footprint(args) -> int:
+    """Handle suggest-footprint command."""
+    try:
+        from ..datasheet.footprint_matcher import FootprintMatcher
+        from ..datasheet.parser import DatasheetParser
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[datasheet]", file=sys.stderr)
+        return 1
+
+    pdf_path = Path(args.pdf)
+    if not pdf_path.exists():
+        print(f"Error: File not found: {pdf_path}", file=sys.stderr)
+        return 1
+
+    try:
+        parser = DatasheetParser(pdf_path)
+        pages = _parse_pages(args.pages)
+        packages = parser.extract_packages(pages)
+
+        if not packages:
+            print("No packages found in document", file=sys.stderr)
+            return 0
+
+        matcher = FootprintMatcher()
+
+        if args.format == "json":
+            results = []
+            for pkg in packages:
+                matches = matcher.find_matches(pkg)
+                suggestion = matcher.suggest_generator(pkg)
+                results.append(
+                    {
+                        "package": pkg.to_dict(),
+                        "matches": [m.to_dict() for m in matches],
+                        "generator_suggestion": suggestion.to_dict(),
+                    }
+                )
+            data = {"source": str(pdf_path), "results": results}
+            content = json.dumps(data, indent=2)
+        else:
+            lines = []
+            for pkg in packages:
+                lines.append(f"\n{pkg.name}:")
+
+                matches = matcher.find_matches(pkg)
+                if matches:
+                    lines.append("  Matches:")
+                    for i, match in enumerate(matches[:3]):  # Top 3 matches
+                        prefix = "Best match" if i == 0 else "Alternative"
+                        lines.append(f"    {prefix}: {match.full_name} ({match.confidence:.0%})")
+
+                suggestion = matcher.suggest_generator(pkg)
+                lines.append(f"  Generator: {suggestion.command}")
+
+            content = "\n".join(lines)
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content)
+            print(f"Suggestions written to: {output_path}")
+        else:
+            print(content)
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
