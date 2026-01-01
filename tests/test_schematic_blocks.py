@@ -16,6 +16,7 @@ from kicad_tools.schematic.blocks import (
     MCUBlock,
     OscillatorBlock,
     Port,
+    USBConnector,
     USBPowerInput,
     create_3v3_ldo,
     create_12v_barrel_jack,
@@ -26,7 +27,9 @@ from kicad_tools.schematic.blocks import (
     create_status_led,
     create_swd_header,
     create_tag_connect_header,
+    create_usb_micro_b,
     create_usb_power,
+    create_usb_type_c,
 )
 
 
@@ -1437,3 +1440,378 @@ class TestPowerInputFactoryFunctions:
         """Create LiPo battery input."""
         batt = create_lipo_battery(mock_schematic, x=100, y=100, ref="J1")
         assert isinstance(batt, BatteryInput)
+
+
+class TestUSBConnectorMocked:
+    """Tests for USBConnector with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "USB" in str(symbol) or "Connector" in str(symbol):
+                # USB connector pins
+                comp.pin_position.side_effect = lambda name: {
+                    "VBUS": (x - 10, y - 10),
+                    "GND": (x - 10, y + 10),
+                    "D+": (x - 10, y - 5),
+                    "D-": (x - 10, y),
+                    "CC1": (x - 10, y + 5),
+                    "CC2": (x - 10, y + 7),
+                    "ID": (x - 10, y + 5),
+                    "SHIELD": (x - 10, y + 15),
+                }.get(name, (x, y))
+            elif "TVS" in str(symbol) or "D_TVS" in str(symbol):
+                # TVS diode pins
+                comp.pin_position.side_effect = lambda name: {
+                    "A": (x - 5, y),
+                    "K": (x + 5, y),
+                }.get(name, (x, y))
+            else:
+                comp.pin_position.return_value = (x, y)
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_usb_connector_type_c_creation(self, mock_schematic):
+        """Create USB Type-C connector."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=True,
+        )
+
+        assert usb.schematic == mock_schematic
+        assert usb.x == 100
+        assert usb.y == 100
+        assert usb.connector_type == "type-c"
+        assert "CONN" in usb.components
+        assert "VBUS" in usb.ports
+        assert "GND" in usb.ports
+        assert "D+" in usb.ports
+        assert "D-" in usb.ports
+        assert "CC1" in usb.ports
+        assert "CC2" in usb.ports
+
+    def test_usb_connector_micro_b_creation(self, mock_schematic):
+        """Create USB Micro-B connector."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="micro-b",
+            esd_protection=True,
+        )
+
+        assert usb.connector_type == "micro-b"
+        assert "VBUS" in usb.ports
+        assert "GND" in usb.ports
+        assert "D+" in usb.ports
+        assert "D-" in usb.ports
+        assert "ID" in usb.ports
+        # Micro-B should not have CC pins
+        assert "CC1" not in usb.ports
+        assert "CC2" not in usb.ports
+
+    def test_usb_connector_mini_b_creation(self, mock_schematic):
+        """Create USB Mini-B connector."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="mini-b",
+            esd_protection=False,
+        )
+
+        assert usb.connector_type == "mini-b"
+        assert "ID" in usb.ports
+
+    def test_usb_connector_type_a_creation(self, mock_schematic):
+        """Create USB Type-A connector."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-a",
+            esd_protection=False,
+        )
+
+        assert usb.connector_type == "type-a"
+        assert "VBUS" in usb.ports
+        assert "GND" in usb.ports
+        assert "D+" in usb.ports
+        assert "D-" in usb.ports
+        # Type-A should not have CC or ID pins
+        assert "CC1" not in usb.ports
+        assert "ID" not in usb.ports
+
+    def test_usb_connector_with_esd_protection(self, mock_schematic):
+        """Create USB connector with ESD protection."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=True,
+        )
+
+        assert usb.esd_protection is True
+        assert "TVS_ESD" in usb.components
+        assert "ESD" in usb.tvs_diodes
+        # Should add wires for D+ and D- to TVS
+        assert mock_schematic.add_wire.called
+
+    def test_usb_connector_without_esd_protection(self, mock_schematic):
+        """Create USB connector without ESD protection."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+
+        assert usb.esd_protection is False
+        assert "TVS_ESD" not in usb.components
+        assert len(usb.tvs_diodes) == 0
+
+    def test_usb_connector_with_vbus_protection(self, mock_schematic):
+        """Create USB connector with VBUS protection."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+            vbus_protection=True,
+        )
+
+        assert usb.vbus_protection is True
+        assert "TVS_VBUS" in usb.components
+        assert "VBUS" in usb.tvs_diodes
+
+    def test_usb_connector_with_both_protections(self, mock_schematic):
+        """Create USB connector with both ESD and VBUS protection."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=True,
+            vbus_protection=True,
+        )
+
+        assert "TVS_ESD" in usb.components
+        assert "TVS_VBUS" in usb.components
+        assert len(usb.tvs_diodes) == 2
+
+    def test_usb_connector_invalid_type(self, mock_schematic):
+        """Invalid connector type raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            USBConnector(
+                mock_schematic,
+                x=100,
+                y=100,
+                connector_type="invalid",
+            )
+        assert "Invalid connector type" in str(exc.value)
+
+    def test_usb_connector_connect_to_rails(self, mock_schematic):
+        """Connect USB connector to power rails."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        usb.connect_to_rails(vbus_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VBUS and GND to rails
+        assert mock_schematic.add_wire.call_count >= 2
+        assert mock_schematic.add_junction.called
+
+    def test_usb_connector_connect_to_rails_no_junctions(self, mock_schematic):
+        """Connect USB connector without junctions."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+        mock_schematic.add_junction.reset_mock()
+
+        usb.connect_to_rails(vbus_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        assert not mock_schematic.add_junction.called
+
+    def test_usb_connector_connect_vbus_only(self, mock_schematic):
+        """Connect only VBUS rail."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+        mock_schematic.add_wire.reset_mock()
+
+        usb.connect_to_rails(vbus_rail_y=50)
+
+        # Should only connect VBUS
+        assert mock_schematic.add_wire.call_count == 1
+
+    def test_usb_connector_has_cc_pins(self, mock_schematic):
+        """Type-C connector has CC pins."""
+        usb_c = USBConnector(
+            mock_schematic, x=100, y=100, connector_type="type-c", esd_protection=False
+        )
+        usb_micro = USBConnector(
+            mock_schematic, x=100, y=100, connector_type="micro-b", esd_protection=False
+        )
+
+        assert usb_c.has_cc_pins() is True
+        assert usb_micro.has_cc_pins() is False
+
+    def test_usb_connector_has_id_pin(self, mock_schematic):
+        """Micro-B/Mini-B connectors have ID pin."""
+        usb_c = USBConnector(
+            mock_schematic, x=100, y=100, connector_type="type-c", esd_protection=False
+        )
+        usb_micro = USBConnector(
+            mock_schematic, x=100, y=100, connector_type="micro-b", esd_protection=False
+        )
+
+        assert usb_c.has_id_pin() is False
+        assert usb_micro.has_id_pin() is True
+
+    def test_usb_connector_custom_tvs_values(self, mock_schematic):
+        """Custom TVS part values."""
+        USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=True,
+            esd_tvs_value="TPD2E001",
+            vbus_protection=True,
+            vbus_tvs_value="SMBJ6.0A",
+        )
+
+        # Verify add_symbol was called with custom values
+        calls = mock_schematic.add_symbol.call_args_list
+        tvs_calls = [c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)]
+        assert len(tvs_calls) >= 1
+
+    def test_usb_connector_port_lookup(self, mock_schematic):
+        """USB connector port() method works."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+
+        vbus_pos = usb.port("VBUS")
+        assert isinstance(vbus_pos, tuple)
+        assert len(vbus_pos) == 2
+
+        dp_pos = usb.port("D+")
+        assert isinstance(dp_pos, tuple)
+
+    def test_usb_connector_port_not_found(self, mock_schematic):
+        """USB connector raises KeyError for unknown port."""
+        usb = USBConnector(
+            mock_schematic,
+            x=100,
+            y=100,
+            connector_type="type-c",
+            esd_protection=False,
+        )
+
+        with pytest.raises(KeyError) as exc:
+            usb.port("NONEXISTENT")
+        assert "NONEXISTENT" in str(exc.value)
+
+
+class TestUSBConnectorFactoryFunctions:
+    """Tests for USB connector factory functions."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "VBUS": (x - 10, y - 10),
+                "GND": (x - 10, y + 10),
+                "D+": (x - 10, y - 5),
+                "D-": (x - 10, y),
+                "CC1": (x - 10, y + 5),
+                "CC2": (x - 10, y + 7),
+                "ID": (x - 10, y + 5),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_create_usb_type_c(self, mock_schematic):
+        """Create USB Type-C connector via factory."""
+        usb = create_usb_type_c(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(usb, USBConnector)
+        assert usb.connector_type == "type-c"
+
+    def test_create_usb_type_c_with_esd(self, mock_schematic):
+        """Create USB Type-C with ESD protection."""
+        usb = create_usb_type_c(mock_schematic, x=100, y=100, ref="J1", with_esd=True)
+        assert usb.esd_protection is True
+
+    def test_create_usb_type_c_without_esd(self, mock_schematic):
+        """Create USB Type-C without ESD protection."""
+        usb = create_usb_type_c(mock_schematic, x=100, y=100, ref="J1", with_esd=False)
+        assert usb.esd_protection is False
+
+    def test_create_usb_type_c_with_vbus_protection(self, mock_schematic):
+        """Create USB Type-C with VBUS protection."""
+        usb = create_usb_type_c(
+            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
+        )
+        assert usb.vbus_protection is True
+
+    def test_create_usb_micro_b(self, mock_schematic):
+        """Create USB Micro-B connector via factory."""
+        usb = create_usb_micro_b(mock_schematic, x=100, y=100, ref="J1")
+        assert isinstance(usb, USBConnector)
+        assert usb.connector_type == "micro-b"
+
+    def test_create_usb_micro_b_with_esd(self, mock_schematic):
+        """Create USB Micro-B with ESD protection."""
+        usb = create_usb_micro_b(mock_schematic, x=100, y=100, ref="J1", with_esd=True)
+        assert usb.esd_protection is True
+
+    def test_create_usb_micro_b_with_vbus_protection(self, mock_schematic):
+        """Create USB Micro-B with VBUS protection."""
+        usb = create_usb_micro_b(
+            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
+        )
+        assert usb.vbus_protection is True
