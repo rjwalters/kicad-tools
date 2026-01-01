@@ -253,6 +253,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress progress output (for scripting)",
     )
     parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bar during routing",
+    )
+    parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="Output JSON progress events (for agent/IDE integration)",
+    )
+    parser.add_argument(
         "--power-nets",
         help=(
             "Generate copper zones for power nets: 'NET1:LAYER1,NET2:LAYER2,...' "
@@ -303,7 +313,18 @@ def main(argv: list[str] | None = None) -> int:
     # Import progress helpers
     from kicad_tools.cli.progress import spinner
 
+    # Import progress callback support
+    from kicad_tools.progress import ProgressCallback, create_json_callback
+
     quiet = args.quiet
+
+    # Build progress callback based on flags
+    progress_callback: ProgressCallback | None = None
+    if args.progress_json:
+        progress_callback = create_json_callback()
+    elif args.progress:
+        # Will create Rich progress below
+        pass
 
     # Print header (unless quiet)
     if not quiet:
@@ -412,26 +433,71 @@ def main(argv: list[str] | None = None) -> int:
     # Route
     if not quiet:
         print(f"\n--- Routing ({args.strategy}) ---")
-    try:
-        with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
-            if args.differential_pairs and args.strategy == "basic":
-                # Use differential pair-aware routing for basic strategy
-                _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
-            elif args.bus_routing and args.strategy == "basic":
-                # Use bus-aware routing for basic strategy
-                _ = router.route_all_with_buses(bus_config)
-            elif args.strategy == "basic":
-                _ = router.route_all()
-            elif args.strategy == "negotiated":
-                _ = router.route_all_negotiated(max_iterations=args.iterations)
-            elif args.strategy == "monte-carlo":
-                _ = router.route_all_monte_carlo(
-                    num_trials=args.mc_trials,
-                    verbose=args.verbose and not quiet,
-                )
-    except Exception as e:
-        print(f"Error during routing: {e}", file=sys.stderr)
-        return 1
+
+    # Create Rich progress callback if --progress flag used
+    if args.progress and not args.progress_json:
+        from kicad_tools.cli.progress import create_progress
+
+        def make_rich_progress_callback(progress_bar, task_id):
+            """Create callback that updates Rich progress bar."""
+
+            def callback(prog: float, message: str, cancelable: bool) -> bool:
+                if prog >= 0:
+                    progress_bar.update(task_id, completed=int(prog * 100), description=message)
+                else:
+                    progress_bar.update(task_id, description=message)
+                return True
+
+            return callback
+
+        try:
+            with create_progress(quiet=quiet) as progress_bar:
+                task_id = progress_bar.add_task(f"Routing {nets_to_route} nets...", total=100)
+                progress_callback = make_rich_progress_callback(progress_bar, task_id)
+
+                if args.differential_pairs and args.strategy == "basic":
+                    _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+                elif args.bus_routing and args.strategy == "basic":
+                    _ = router.route_all_with_buses(bus_config)
+                elif args.strategy == "basic":
+                    _ = router.route_all(progress_callback=progress_callback)
+                elif args.strategy == "negotiated":
+                    _ = router.route_all_negotiated(
+                        max_iterations=args.iterations,
+                        progress_callback=progress_callback,
+                    )
+                elif args.strategy == "monte-carlo":
+                    _ = router.route_all_monte_carlo(
+                        num_trials=args.mc_trials,
+                        verbose=args.verbose and not quiet,
+                        progress_callback=progress_callback,
+                    )
+        except Exception as e:
+            print(f"Error during routing: {e}", file=sys.stderr)
+            return 1
+    else:
+        try:
+            with spinner(f"Routing {nets_to_route} nets...", quiet=quiet or args.progress_json):
+                if args.differential_pairs and args.strategy == "basic":
+                    _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+                elif args.bus_routing and args.strategy == "basic":
+                    _ = router.route_all_with_buses(bus_config)
+                elif args.strategy == "basic":
+                    _ = router.route_all(progress_callback=progress_callback)
+                elif args.strategy == "negotiated":
+                    _ = router.route_all_negotiated(
+                        max_iterations=args.iterations,
+                        progress_callback=progress_callback,
+                    )
+                elif args.strategy == "monte-carlo":
+                    _ = router.route_all_monte_carlo(
+                        num_trials=args.mc_trials,
+                        verbose=args.verbose and not quiet,
+                        progress_callback=progress_callback,
+                    )
+        except Exception as e:
+            print(f"Error during routing: {e}", file=sys.stderr)
+            return 1
 
     # Get statistics
     stats = router.get_statistics()

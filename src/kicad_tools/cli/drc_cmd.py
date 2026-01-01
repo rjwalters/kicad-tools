@@ -96,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Show detailed violation information",
     )
     parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bar during manufacturer rules check",
+    )
+    parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="Output JSON progress events (for agent/IDE integration)",
+    )
+    parser.add_argument(
         "--keep-report",
         action="store_true",
         help="Keep the DRC report file after running",
@@ -153,7 +163,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Manufacturer check mode
     if args.mfr:
-        return output_manufacturer_check(report, args.mfr, args.layers, args.verbose)
+        return output_manufacturer_check(
+            report,
+            args.mfr,
+            args.layers,
+            args.verbose,
+            progress=args.progress,
+            progress_json=args.progress_json,
+        )
 
     # Apply filters
     violations = list(report.violations)
@@ -373,8 +390,12 @@ def output_manufacturer_check(
     mfr: str,
     layers: int,
     verbose: bool,
+    progress: bool = False,
+    progress_json: bool = False,
 ) -> int:
     """Check DRC violations against manufacturer limits."""
+    from kicad_tools.progress import create_json_callback
+
     profile = get_profile(mfr)
 
     print(f"\n{'=' * 60}")
@@ -383,7 +404,31 @@ def output_manufacturer_check(
     print(f"Layer count: {layers}")
     print(f"Website: {profile.website}")
 
-    checks = check_manufacturer_rules(report, mfr, layers=layers)
+    # Build progress callback and run checks based on flags
+    if progress_json:
+        progress_callback = create_json_callback()
+        checks = check_manufacturer_rules(
+            report, mfr, layers=layers, progress_callback=progress_callback
+        )
+    elif progress:
+        from kicad_tools.cli.progress import create_progress
+
+        # Use Rich progress bar
+        with create_progress() as progress_bar:
+            task_id = progress_bar.add_task("Checking manufacturer rules...", total=100)
+
+            def rich_callback(prog: float, message: str, cancelable: bool) -> bool:
+                if prog >= 0:
+                    progress_bar.update(task_id, completed=int(prog * 100), description=message)
+                else:
+                    progress_bar.update(task_id, description=message)
+                return True
+
+            checks = check_manufacturer_rules(
+                report, mfr, layers=layers, progress_callback=rich_callback
+            )
+    else:
+        checks = check_manufacturer_rules(report, mfr, layers=layers)
 
     compatible_count = 0
     incompatible = []
