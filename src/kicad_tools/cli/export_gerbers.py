@@ -300,6 +300,16 @@ def main():
     parser.add_argument(
         "--no-rename", action="store_true", help="Keep KiCad naming (don't rename for Seeed)"
     )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bar during export",
+    )
+    parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="Output JSON progress events (for agent/IDE integration)",
+    )
 
     args = parser.parse_args()
 
@@ -330,24 +340,79 @@ def main():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
-    # Export Gerbers
-    if not export_gerbers(args.pcb, output_dir, kicad_cli):
-        sys.exit(1)
+    # Build progress callback based on flags
+    progress_callback = None
+    if args.progress_json:
+        from kicad_tools.progress import create_json_callback
 
-    # Export position file
-    export_position_file(args.pcb, output_dir, kicad_cli)
+        progress_callback = create_json_callback()
+    elif args.progress:
+        from kicad_tools.cli.progress import create_progress
 
-    # Rename for Seeed
-    if not args.no_rename:
-        rename_for_seeed(output_dir, project_name)
+    # Calculate total steps
+    total_steps = 4  # gerbers, position, rename/fab notes, zip
+    if args.no_zip:
+        total_steps -= 1
 
-    # Generate fab notes
-    generate_fab_notes(output_dir, project_name)
+    def report_progress(step: int, message: str):
+        """Report progress for current step."""
+        if args.progress_json and progress_callback:
+            progress_callback(step / total_steps, message, True)
 
-    # Create ZIP
-    if not args.no_zip:
-        zip_path = create_zip(output_dir, project_name)
-        print(f"\n✓ Ready for upload to Seeed Fusion: {zip_path}")
+    if args.progress and not args.progress_json:
+        # Use Rich progress bar
+        with create_progress() as progress_bar:
+            task_id = progress_bar.add_task("Exporting...", total=total_steps)
+
+            # Export Gerbers
+            progress_bar.update(task_id, description="Exporting Gerbers...")
+            if not export_gerbers(args.pcb, output_dir, kicad_cli):
+                sys.exit(1)
+            progress_bar.advance(task_id)
+
+            # Export position file
+            progress_bar.update(task_id, description="Exporting position file...")
+            export_position_file(args.pcb, output_dir, kicad_cli)
+            progress_bar.advance(task_id)
+
+            # Rename for Seeed
+            if not args.no_rename:
+                progress_bar.update(task_id, description="Renaming for Seeed...")
+                rename_for_seeed(output_dir, project_name)
+
+            # Generate fab notes
+            progress_bar.update(task_id, description="Generating fab notes...")
+            generate_fab_notes(output_dir, project_name)
+            progress_bar.advance(task_id)
+
+            # Create ZIP
+            if not args.no_zip:
+                progress_bar.update(task_id, description="Creating ZIP...")
+                zip_path = create_zip(output_dir, project_name)
+                progress_bar.advance(task_id)
+                print(f"\n✓ Ready for upload to Seeed Fusion: {zip_path}")
+    else:
+        # No Rich progress bar (either JSON or no progress)
+        report_progress(0, "Exporting Gerbers...")
+        if not export_gerbers(args.pcb, output_dir, kicad_cli):
+            sys.exit(1)
+
+        report_progress(1, "Exporting position file...")
+        export_position_file(args.pcb, output_dir, kicad_cli)
+
+        if not args.no_rename:
+            report_progress(2, "Renaming for Seeed...")
+            rename_for_seeed(output_dir, project_name)
+
+        report_progress(2, "Generating fab notes...")
+        generate_fab_notes(output_dir, project_name)
+
+        if not args.no_zip:
+            report_progress(3, "Creating ZIP...")
+            zip_path = create_zip(output_dir, project_name)
+            if args.progress_json and progress_callback:
+                progress_callback(1.0, f"Export complete: {zip_path.name}", False)
+            print(f"\n✓ Ready for upload to Seeed Fusion: {zip_path}")
 
 
 if __name__ == "__main__":
