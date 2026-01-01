@@ -87,9 +87,7 @@ class TestPcbQuery:
         """Test footprints command with sorting."""
         from kicad_tools.cli.pcb_query import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["pcb-query", str(minimal_pcb), "footprints", "--sorted"]
-        )
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "footprints", "--sorted"])
         main()
 
         captured = capsys.readouterr()
@@ -100,9 +98,7 @@ class TestPcbQuery:
         from kicad_tools.cli.pcb_query import main
 
         # R1 exists in minimal_pcb fixture
-        monkeypatch.setattr(
-            "sys.argv", ["pcb-query", str(minimal_pcb), "footprint", "R1"]
-        )
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "footprint", "R1"])
         main()
 
         captured = capsys.readouterr()
@@ -122,9 +118,7 @@ class TestPcbQuery:
         """Test nets command with JSON output."""
         from kicad_tools.cli.pcb_query import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"]
-        )
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--format", "json"])
         main()
 
         captured = capsys.readouterr()
@@ -135,9 +129,7 @@ class TestPcbQuery:
         """Test nets command with sorting."""
         from kicad_tools.cli.pcb_query import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--sorted"]
-        )
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "nets", "--sorted"])
         main()
 
         captured = capsys.readouterr()
@@ -192,9 +184,7 @@ class TestPcbQuery:
         """Test vias command with JSON output."""
         from kicad_tools.cli.pcb_query import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["pcb-query", str(minimal_pcb), "vias", "--format", "json"]
-        )
+        monkeypatch.setattr("sys.argv", ["pcb-query", str(minimal_pcb), "vias", "--format", "json"])
         main()
 
         captured = capsys.readouterr()
@@ -371,9 +361,7 @@ class TestPcbModify:
         """Test flip command with dry run."""
         from kicad_tools.cli.pcb_modify import main
 
-        monkeypatch.setattr(
-            "sys.argv", ["pcb-modify", str(legacy_pcb), "flip", "R1", "--dry-run"]
-        )
+        monkeypatch.setattr("sys.argv", ["pcb-modify", str(legacy_pcb), "flip", "R1", "--dry-run"])
         main()
 
         captured = capsys.readouterr()
