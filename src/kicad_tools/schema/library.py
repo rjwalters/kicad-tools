@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
@@ -518,6 +519,68 @@ class SymbolLibrary:
             children.append(sym.to_sexp_node())
 
         return SExp(name="kicad_symbol_lib", children=children)
+
+    def create_symbol_from_datasheet(
+        self,
+        name: str,
+        pins: Any,
+        layout: str = "functional",
+        datasheet_url: str = "",
+        manufacturer: str = "",
+        description: str = "",
+        footprint: str = "",
+        properties: dict[str, str] | None = None,
+        interactive: bool = False,
+    ) -> LibrarySymbol:
+        """
+        Create a symbol from datasheet-extracted pins.
+
+        This is a convenience method that uses the SymbolGenerator to create
+        a symbol from extracted pin data and add it to this library.
+
+        Args:
+            name: Symbol name (e.g., "STM32F103C8T6")
+            pins: PinTable or list of ExtractedPin from datasheet parsing
+            layout: Pin layout style ("functional", "physical", "simple")
+            datasheet_url: URL to the component datasheet
+            manufacturer: Component manufacturer
+            description: Component description
+            footprint: KiCad footprint reference (e.g., "Package_QFP:LQFP-48")
+            properties: Additional properties to set
+            interactive: If True, prompt for confirmation (not yet implemented)
+
+        Returns:
+            The created LibrarySymbol
+
+        Example:
+            >>> from kicad_tools.datasheet import DatasheetParser
+            >>> from kicad_tools.schema.library import SymbolLibrary
+            >>>
+            >>> parser = DatasheetParser("STM32F103.pdf")
+            >>> pins = parser.extract_pins(package="LQFP48")
+            >>>
+            >>> lib = SymbolLibrary.create("myproject.kicad_sym")
+            >>> sym = lib.create_symbol_from_datasheet(
+            ...     name="STM32F103C8T6",
+            ...     pins=pins,
+            ...     datasheet_url="https://example.com/stm32f103.pdf",
+            ... )
+            >>> lib.save()
+        """
+        from kicad_tools.datasheet.symbol_generator import create_symbol_from_datasheet
+
+        return create_symbol_from_datasheet(
+            library=self,
+            name=name,
+            pins=pins,
+            layout=layout,
+            datasheet_url=datasheet_url,
+            manufacturer=manufacturer,
+            description=description,
+            footprint=footprint,
+            properties=properties,
+            interactive=interactive,
+        )
 
 
 class LibraryManager:
