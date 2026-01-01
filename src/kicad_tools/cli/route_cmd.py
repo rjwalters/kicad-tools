@@ -129,6 +129,94 @@ def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: boo
         return "n"
 
 
+def show_failure_diagnostics(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> None:
+    """Show detailed diagnostics for failed routes.
+
+    Args:
+        router: The Autorouter instance
+        net_map: Mapping of net names to net IDs
+        nets_to_route: Total number of nets that should be routed
+        quiet: If True, skip output
+    """
+    if quiet:
+        return
+
+    from kicad_tools.router import RoutabilityAnalyzer
+
+    # Find unrouted nets
+    routed_net_ids = {route.net for route in router.routes}
+    all_net_ids = {v for k, v in net_map.items() if v > 0}
+    unrouted_ids = all_net_ids - routed_net_ids
+
+    if not unrouted_ids:
+        return
+
+    print(f"\n{'=' * 60}")
+    print("ROUTING FAILURE DIAGNOSTICS")
+    print(f"{'=' * 60}")
+    print(f"\nFailed to route {len(unrouted_ids)} net(s):\n")
+
+    # Get net name mapping
+    reverse_net = {v: k for k, v in net_map.items()}
+
+    for net_id in sorted(unrouted_ids):
+        net_name = reverse_net.get(net_id, f"Net_{net_id}")
+        pad_keys = router.nets.get(net_id, [])
+
+        if not pad_keys:
+            continue
+
+        print(f"Net: {net_name}")
+
+        # Get pad positions
+        pads = [router.pads[k] for k in pad_keys if k in router.pads]
+        if len(pads) >= 2:
+            # Calculate distance
+            import math
+            total_dist = 0.0
+            for i, p1 in enumerate(pads):
+                for p2 in pads[i+1:]:
+                    dist = math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
+                    total_dist = max(total_dist, dist)
+
+            print(f"  Pads: {len(pads)}")
+            print(f"  Max distance: {total_dist:.2f}mm")
+            print("  Endpoints:")
+            for ref, pin in pad_keys[:4]:  # Show first 4 pads
+                pad = router.pads.get((ref, pin))
+                if pad:
+                    print(f"    - {ref}.{pin} at ({pad.x:.2f}, {pad.y:.2f})")
+            if len(pad_keys) > 4:
+                print(f"    - ... and {len(pad_keys) - 4} more")
+
+        # Analyze what's blocking the path
+        try:
+            analyzer = RoutabilityAnalyzer(router)
+            net_report = analyzer._analyze_net(net_id, pad_keys)
+
+            if net_report.blocking_obstacles:
+                print("  Blocked by:")
+                for obs in net_report.blocking_obstacles[:5]:
+                    print(f"    - {obs}")
+
+            if net_report.suggestions:
+                print("  Suggestions:")
+                for sug in net_report.suggestions:
+                    print(f"    - {sug}")
+
+            if net_report.alternatives:
+                print("  Alternatives:")
+                for alt in net_report.alternatives[:3]:
+                    print(f"    {alt}")
+
+        except Exception:
+            pass  # Skip analysis if it fails
+
+        print()
+
+    print(f"{'=' * 60}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
@@ -210,6 +298,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Show what would be done without writing output",
     )
     parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Analyze routability before routing and show diagnostic report",
+    )
+    parser.add_argument(
         "--bus-routing",
         action="store_true",
         help="Enable bus-aware routing (routes bus signals together)",
@@ -288,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         BusRoutingMode,
         DesignRules,
         DifferentialPairConfig,
+        RoutabilityAnalyzer,
         load_pcb_for_routing,
     )
 
@@ -355,6 +449,68 @@ def main(argv: list[str] | None = None) -> int:
                 if net_name and net_name not in skip_nets:
                     pad_count = len(router.nets.get(net_num, []))
                     print(f"    {net_name}: {pad_count} pads")
+
+    # Analyze routability if requested
+    if args.analyze:
+        if not quiet:
+            print("\n--- Routability Analysis ---")
+        try:
+            analyzer = RoutabilityAnalyzer(router)
+            report = analyzer.analyze()
+
+            # Print analysis report
+            print(f"\n{'=' * 60}")
+            print("ROUTABILITY ANALYSIS")
+            print(f"{'=' * 60}")
+            print(
+                f"Estimated completion: {report.estimated_success_rate * 100:.0f}% "
+                f"({report.expected_routable}/{report.total_nets} nets)"
+            )
+
+            # Show layer utilization
+            if report.layer_utilization:
+                print("\nLayer Utilization:")
+                for layer_name, util in report.layer_utilization.items():
+                    bar = "#" * int(util * 20)
+                    print(f"  {layer_name:10s}: [{bar:20s}] {util * 100:.0f}%")
+
+            # Show problem nets
+            if report.problem_nets:
+                print(f"\nProblem Nets ({len(report.problem_nets)}):")
+                for net_report in report.problem_nets[:10]:  # Show first 10
+                    print(f"\n  {net_report.net_name} ({net_report.pad_count} pads):")
+                    print(f"    Severity: {net_report.severity.name}")
+                    print(f"    Difficulty: {net_report.difficulty_score:.0f}/100")
+                    if net_report.blocking_obstacles:
+                        print("    Blocked by:")
+                        for obs in net_report.blocking_obstacles[:5]:
+                            print(f"      - {obs}")
+                    if net_report.alternatives:
+                        print("    Alternatives:")
+                        for alt in net_report.alternatives[:3]:
+                            print(f"      {alt}")
+                    if net_report.suggestions:
+                        print("    Suggestions:")
+                        for sug in net_report.suggestions:
+                            print(f"      - {sug}")
+
+            # Show recommendations
+            if report.recommendations:
+                print("\nRecommendations:")
+                for i, rec in enumerate(report.recommendations, 1):
+                    print(f"  {i}. {rec}")
+
+            print(f"{'=' * 60}")
+
+            # If just analyzing, exit here
+            if args.dry_run:
+                return 0
+
+        except Exception as e:
+            print(f"Warning: Analysis failed: {e}", file=sys.stderr)
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
 
     # Configure bus routing if enabled
     bus_config = None
@@ -537,6 +693,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
             print("  Some nets may require manual routing or a different strategy.")
+
+            # Show detailed failure diagnostics
+            show_failure_diagnostics(router, net_map, nets_to_route, quiet=quiet)
 
     if stats["nets_routed"] == nets_to_route:
         return 0
