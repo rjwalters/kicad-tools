@@ -389,8 +389,8 @@ class TestLCSCDatasheetSource:
 
         source = LCSCDatasheetSource()
 
-        # Mock the LCSCClient
-        with patch("kicad_tools.datasheet.sources.lcsc.LCSCClient") as MockClient:
+        # Mock the LCSCClient (imported inside the search method)
+        with patch("kicad_tools.parts.lcsc.LCSCClient") as MockClient:
             mock_client = MagicMock()
             MockClient.return_value = mock_client
 
@@ -430,7 +430,8 @@ class TestLCSCDatasheetSource:
 
         source = LCSCDatasheetSource()
 
-        with patch("kicad_tools.datasheet.sources.lcsc.LCSCClient") as MockClient:
+        # Mock the LCSCClient (imported inside the search method)
+        with patch("kicad_tools.parts.lcsc.LCSCClient") as MockClient:
             mock_client = MagicMock()
             MockClient.return_value = mock_client
 
