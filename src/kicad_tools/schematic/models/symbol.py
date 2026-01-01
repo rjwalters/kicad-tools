@@ -374,6 +374,68 @@ class SymbolInstance:
         """Get positions of all pins."""
         return {p.name: self.pin_position(p.name) for p in self.symbol_def.pins}
 
+    def bounding_box(self, padding: float = 2.54) -> tuple[float, float, float, float]:
+        """Calculate the bounding box of this symbol instance.
+
+        The bounding box is computed from pin positions plus optional padding.
+        This provides a conservative estimate of the symbol's extent.
+
+        Args:
+            padding: Extra space around the symbol in mm (default: 2.54mm = 100mil)
+
+        Returns:
+            Tuple of (min_x, min_y, max_x, max_y) defining the bounding box
+        """
+        if not self.symbol_def.pins:
+            # No pins - use a default size around the symbol center
+            half_size = 5.08 + padding  # ~200mil default + padding
+            return (
+                self.x - half_size,
+                self.y - half_size,
+                self.x + half_size,
+                self.y + half_size,
+            )
+
+        # Get all pin positions
+        positions = [self.pin_position(p.name or p.number) for p in self.symbol_def.pins]
+
+        min_x = min(p[0] for p in positions)
+        max_x = max(p[0] for p in positions)
+        min_y = min(p[1] for p in positions)
+        max_y = max(p[1] for p in positions)
+
+        return (
+            min_x - padding,
+            min_y - padding,
+            max_x + padding,
+            max_y + padding,
+        )
+
+    def overlaps(self, other: "SymbolInstance", padding: float = 2.54) -> bool:
+        """Check if this symbol's bounding box overlaps with another.
+
+        Args:
+            other: Another SymbolInstance to check against
+            padding: Extra space around each symbol in mm
+
+        Returns:
+            True if the bounding boxes overlap
+        """
+        box1 = self.bounding_box(padding)
+        box2 = other.bounding_box(padding)
+
+        # Check for non-overlap conditions
+        if box1[2] < box2[0]:  # self.max_x < other.min_x
+            return False
+        if box1[0] > box2[2]:  # self.min_x > other.max_x
+            return False
+        if box1[3] < box2[1]:  # self.max_y < other.min_y
+            return False
+        if box1[1] > box2[3]:  # self.min_y > other.max_y
+            return False
+
+        return True
+
     def to_sexp_node(self, project_name: str, sheet_path: str) -> SExp:
         """Build S-expression tree for this symbol instance."""
         # Note: x, y formatting reserved for future position string output
