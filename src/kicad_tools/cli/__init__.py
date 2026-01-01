@@ -879,6 +879,52 @@ def main(argv: list[str] | None = None) -> int:
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
+    # placement optimize
+    placement_optimize = placement_subparsers.add_parser(
+        "optimize", help="Optimize placement for routability"
+    )
+    placement_optimize.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_optimize.add_argument("-o", "--output", help="Output file path")
+    placement_optimize.add_argument(
+        "--strategy",
+        choices=["force-directed", "evolutionary", "hybrid"],
+        default="force-directed",
+        help="Optimization strategy (default: force-directed)",
+    )
+    placement_optimize.add_argument(
+        "--iterations",
+        type=int,
+        default=1000,
+        help="Max iterations for physics simulation (default: 1000)",
+    )
+    placement_optimize.add_argument(
+        "--generations",
+        type=int,
+        default=100,
+        help="Generations for evolutionary/hybrid mode (default: 100)",
+    )
+    placement_optimize.add_argument(
+        "--population",
+        type=int,
+        default=50,
+        help="Population size for evolutionary/hybrid mode (default: 50)",
+    )
+    placement_optimize.add_argument(
+        "--grid",
+        type=float,
+        default=0.0,
+        help="Position grid snap in mm (0 to disable, default: 0)",
+    )
+    placement_optimize.add_argument(
+        "--fixed",
+        help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    placement_optimize.add_argument("--dry-run", action="store_true", help="Preview only")
+    placement_optimize.add_argument("-v", "--verbose", action="store_true")
+    placement_optimize.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
     # CONFIG subcommand - configuration management
     config_parser = subparsers.add_parser("config", help="View and manage configuration")
     config_parser.add_argument(
@@ -1855,7 +1901,7 @@ def _run_placement_command(args) -> int:
     """Handle placement command."""
     if not args.placement_command:
         print("Usage: kicad-tools placement <command> [options] <file>")
-        print("Commands: check, fix")
+        print("Commands: check, fix, optimize")
         return 1
 
     from .placement_cmd import main as placement_main
@@ -1885,6 +1931,31 @@ def _run_placement_command(args) -> int:
             sub_argv.extend(["--strategy", args.strategy])
         if args.anchor:
             sub_argv.extend(["--anchor", args.anchor])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "optimize":
+        sub_argv = ["optimize", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.strategy != "force-directed":
+            sub_argv.extend(["--strategy", args.strategy])
+        if args.iterations != 1000:
+            sub_argv.extend(["--iterations", str(args.iterations)])
+        if args.generations != 100:
+            sub_argv.extend(["--generations", str(args.generations)])
+        if args.population != 50:
+            sub_argv.extend(["--population", str(args.population)])
+        if args.grid != 0.0:
+            sub_argv.extend(["--grid", str(args.grid)])
+        if args.fixed:
+            sub_argv.extend(["--fixed", args.fixed])
         if args.dry_run:
             sub_argv.append("--dry-run")
         if args.verbose:
