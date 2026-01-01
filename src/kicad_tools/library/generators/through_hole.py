@@ -110,7 +110,9 @@ def create_dip(
     fp.add_line((silk_x, -silk_y), (silk_x, silk_y), "F.SilkS", 0.12)
     fp.add_line((silk_x, silk_y), (-silk_x, silk_y), "F.SilkS", 0.12)
     fp.add_line((-silk_x, silk_y), (-silk_x, -silk_y + notch_radius), "F.SilkS", 0.12)
-    fp.add_line((-silk_x, -silk_y + notch_radius), (-silk_x + notch_radius, -silk_y), "F.SilkS", 0.12)
+    fp.add_line(
+        (-silk_x, -silk_y + notch_radius), (-silk_x + notch_radius, -silk_y), "F.SilkS", 0.12
+    )
 
     # Pin 1 marker
     fp.add_circle((-row_spacing / 2, -span / 2 - 0.8), 0.2, "F.SilkS", 0.12, fill=True)
@@ -205,8 +207,12 @@ def create_pin_header(
         silk_x = pitch + 0.1
     silk_y = span / 2 + pitch / 2
 
-    fp.add_rect((-silk_x - silk_margin, -silk_y - silk_margin),
-                (silk_x + silk_margin, silk_y + silk_margin), "F.SilkS", 0.12)
+    fp.add_rect(
+        (-silk_x - silk_margin, -silk_y - silk_margin),
+        (silk_x + silk_margin, silk_y + silk_margin),
+        "F.SilkS",
+        0.12,
+    )
 
     # Pin 1 marker
     marker_x = -silk_x - silk_margin - 0.3 if rows == 1 else -row_offset - 0.5

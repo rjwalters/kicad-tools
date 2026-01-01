@@ -16,15 +16,15 @@ Usage:
     fp.save("MyFootprints.pretty/R_0603_Custom.kicad_mod")
 """
 
-from .footprint import Footprint, Pad, GraphicLine, GraphicRect, GraphicCircle, GraphicArc
+from .footprint import Footprint, GraphicArc, GraphicCircle, GraphicLine, GraphicRect, Pad
 from .generators import (
-    create_soic,
-    create_qfp,
-    create_qfn,
-    create_sot,
     create_chip,
     create_dip,
     create_pin_header,
+    create_qfn,
+    create_qfp,
+    create_soic,
+    create_sot,
 )
 
 __all__ = [

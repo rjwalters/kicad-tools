@@ -14,19 +14,21 @@ from pathlib import Path
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
 # Valid KiCad pin types
-VALID_PIN_TYPES = frozenset({
-    "input",
-    "output",
-    "bidirectional",
-    "power_in",
-    "power_out",
-    "passive",
-    "unspecified",
-    "tri_state",
-    "open_collector",
-    "open_emitter",
-    "no_connect",
-})
+VALID_PIN_TYPES = frozenset(
+    {
+        "input",
+        "output",
+        "bidirectional",
+        "power_in",
+        "power_out",
+        "passive",
+        "unspecified",
+        "tri_state",
+        "open_collector",
+        "open_emitter",
+        "no_connect",
+    }
+)
 
 
 @dataclass
@@ -110,9 +112,7 @@ class LibraryPin:
             )
         """
         # Build effects for name and number
-        font_effects = SExp.list(
-            "effects", SExp.list("font", SExp.list("size", 1.27, 1.27))
-        )
+        font_effects = SExp.list("effects", SExp.list("font", SExp.list("size", 1.27, 1.27)))
 
         children: list[SExp] = [
             SExp(value=self.type),

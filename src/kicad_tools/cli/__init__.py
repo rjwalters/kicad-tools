@@ -14,6 +14,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools lib <command> <file>   - Symbol library tools
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
+    kicad-tools datasheet <command>    - Datasheet search and download
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
@@ -643,6 +644,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Cache action (default: stats)",
     )
 
+    # DATASHEET subcommand - datasheet search and download
+    datasheet_parser = subparsers.add_parser("datasheet", help="Datasheet search and download")
+    datasheet_subparsers = datasheet_parser.add_subparsers(
+        dest="datasheet_command", help="Datasheet commands"
+    )
+
+    # datasheet search
+    datasheet_search = datasheet_subparsers.add_parser("search", help="Search for datasheets")
+    datasheet_search.add_argument("part", help="Part number to search for")
+    datasheet_search.add_argument("--format", choices=["text", "json"], default="text")
+    datasheet_search.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
+
+    # datasheet download
+    datasheet_download = datasheet_subparsers.add_parser("download", help="Download a datasheet")
+    datasheet_download.add_argument("part", help="Part number to download")
+    datasheet_download.add_argument("-o", "--output", help="Output directory (default: cache)")
+    datasheet_download.add_argument(
+        "--force", action="store_true", help="Force download even if cached"
+    )
+
+    # datasheet list
+    datasheet_list = datasheet_subparsers.add_parser("list", help="List cached datasheets")
+    datasheet_list.add_argument("--format", choices=["text", "json"], default="text")
+
+    # datasheet cache
+    datasheet_cache = datasheet_subparsers.add_parser("cache", help="Cache management")
+    datasheet_cache.add_argument(
+        "cache_action",
+        nargs="?",
+        choices=["stats", "clear", "clear-expired"],
+        default="stats",
+        help="Cache action (default: stats)",
+    )
+    datasheet_cache.add_argument(
+        "--older-than", type=int, help="For clear: only clear entries older than N days"
+    )
+
     # PLACEMENT subcommand - placement conflict detection and resolution
     placement_parser = subparsers.add_parser("placement", help="Detect and fix placement conflicts")
     placement_subparsers = placement_parser.add_subparsers(
@@ -848,6 +886,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "parts":
         return _run_parts_command(args)
+
+    elif args.command == "datasheet":
+        return _run_datasheet_command(args)
 
     elif args.command == "route":
         return _run_route_command(args)
@@ -1339,6 +1380,46 @@ def _run_parts_command(args) -> int:
     elif args.parts_command == "cache":
         sub_argv = ["cache", args.cache_action]
         return parts_main(sub_argv) or 0
+
+    return 1
+
+
+def _run_datasheet_command(args) -> int:
+    """Handle datasheet subcommands."""
+    if not args.datasheet_command:
+        print("Usage: kicad-tools datasheet <command> [options]")
+        print("Commands: search, download, list, cache")
+        return 1
+
+    from .datasheet_cmd import main as datasheet_main
+
+    if args.datasheet_command == "search":
+        sub_argv = ["search", args.part]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.limit != 10:
+            sub_argv.extend(["--limit", str(args.limit)])
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "download":
+        sub_argv = ["download", args.part]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.force:
+            sub_argv.append("--force")
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "list":
+        sub_argv = ["list"]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "cache":
+        sub_argv = ["cache", args.cache_action]
+        if getattr(args, "older_than", None):
+            sub_argv.extend(["--older-than", str(args.older_than)])
+        return datasheet_main(sub_argv) or 0
 
     return 1
 

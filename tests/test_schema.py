@@ -1216,7 +1216,7 @@ class TestSymbolCreation:
 
         sym = LibrarySymbol(name="Test")
         for i, pin_type in enumerate(sorted(VALID_PIN_TYPES)):
-            sym.add_pin(str(i + 1), f"PIN{i+1}", pin_type, (0, i * 2.54))
+            sym.add_pin(str(i + 1), f"PIN{i + 1}", pin_type, (0, i * 2.54))
         assert len(sym.pins) == len(VALID_PIN_TYPES)
 
     def test_add_property_to_symbol(self):
