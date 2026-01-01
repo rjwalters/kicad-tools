@@ -753,7 +753,6 @@ class TestRoutingOptimizer:
     def test_optimize_net_order_greedy(self):
         """Test greedy net ordering optimization."""
         from kicad_tools.router import Autorouter
-        from kicad_tools.router.layers import Layer
 
         def create_router():
             router = Autorouter(50, 50)
