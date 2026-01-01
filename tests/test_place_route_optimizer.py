@@ -1,13 +1,11 @@
 """Tests for kicad_tools.optimize.place_route module."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from kicad_tools.optimize import OptimizationResult, PlaceRouteOptimizer
-from kicad_tools.placement.conflict import Point
-
 
 # =============================================================================
 # Test PCB fixtures
@@ -576,10 +574,6 @@ class TestPlaceRouteOptimizerIntegration:
         """Test that optimization respects max_iterations limit."""
         pcb_path = tmp_path / "test.kicad_pcb"
         pcb_path.write_text(SIMPLE_PCB)
-
-        from kicad_tools.schema.pcb import PCB
-
-        pcb = PCB.load(str(pcb_path))
 
         # Create optimizer with a router that never completes
         mock_router = MagicMock()
