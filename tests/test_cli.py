@@ -402,3 +402,182 @@ class TestCLIStandaloneEntryPoints:
         monkeypatch.setattr(sys, "argv", ["kicad-bom", str(simple_rc_schematic)])
         result = bom_main()
         assert result == 0
+
+
+class TestFootprintGenerateCommand:
+    """Tests for the footprint generate CLI command."""
+
+    def test_list_generators(self, capsys):
+        """Test --list flag shows available generators."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "--list"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "soic" in captured.out.lower()
+        assert "qfp" in captured.out.lower()
+        assert "chip" in captured.out.lower()
+        assert "sot" in captured.out.lower()
+        assert "dip" in captured.out.lower()
+
+    def test_list_generators_json(self, capsys):
+        """Test --list --json shows generators in JSON format."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "--list", "--json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "soic" in data
+        assert "qfp" in data
+        assert "chip" in data
+
+    def test_generate_soic(self, capsys):
+        """Test generating SOIC footprint."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "soic", "--pins", "8"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert '(footprint "SOIC-8' in captured.out
+        assert '(pad "1"' in captured.out
+        assert '(pad "8"' in captured.out
+
+    def test_generate_soic_json(self, capsys):
+        """Test generating SOIC footprint with JSON output."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "soic", "--pins", "8", "--json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "SOIC-8" in data["name"]
+        assert len(data["pads"]) == 8
+
+    def test_generate_chip(self, capsys):
+        """Test generating chip footprint."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "chip", "--size", "0402", "--prefix", "R"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "R_0402" in captured.out
+        assert '(pad "1"' in captured.out
+        assert '(pad "2"' in captured.out
+
+    def test_generate_sot(self, capsys):
+        """Test generating SOT footprint."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "sot", "--variant", "SOT-23"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert '(footprint "SOT-23"' in captured.out
+        assert '(pad "1"' in captured.out
+
+    def test_generate_dip(self, capsys):
+        """Test generating DIP footprint."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "dip", "--pins", "8"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "DIP-8" in captured.out
+        assert "thru_hole" in captured.out
+
+    def test_generate_qfp(self, capsys):
+        """Test generating QFP footprint."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "qfp", "--pins", "48", "--pitch", "0.5"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "LQFP-48" in captured.out
+
+    def test_generate_qfn_with_exposed_pad(self, capsys):
+        """Test generating QFN footprint with exposed pad."""
+        from kicad_tools.cli import main
+
+        result = main(
+            [
+                "footprint",
+                "generate",
+                "qfn",
+                "--pins",
+                "16",
+                "--body-size",
+                "3.0",
+                "--exposed-pad",
+                "1.7",
+            ]
+        )
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "QFN-16" in captured.out
+        assert '(pad "17"' in captured.out  # Exposed pad
+
+    def test_generate_pin_header(self, capsys):
+        """Test generating pin header footprint."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate", "pin-header", "--pins", "10", "--rows", "2"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "PinHeader" in captured.out
+        assert "2x5" in captured.out  # 10 pins in 2 rows = 2x5
+
+    def test_generate_to_file(self, tmp_path, capsys):
+        """Test generating footprint to file."""
+        from kicad_tools.cli import main
+
+        output_path = tmp_path / "SOIC-8.kicad_mod"
+        result = main(["footprint", "generate", "soic", "--pins", "8", "-o", str(output_path)])
+        assert result == 0
+
+        assert output_path.exists()
+        content = output_path.read_text()
+        assert '(footprint "SOIC-8' in content
+
+        captured = capsys.readouterr()
+        assert "Saved:" in captured.out
+
+    def test_generate_missing_required_arg(self, capsys):
+        """Test error when required argument is missing."""
+        from kicad_tools.cli import main
+
+        # argparse exits with code 2 for missing required arguments
+        with pytest.raises(SystemExit) as exc_info:
+            main(["footprint", "generate", "soic"])
+        assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        assert "--pins" in captured.err
+
+    def test_generate_invalid_chip_size(self, capsys):
+        """Test error for invalid chip size."""
+        from kicad_tools.cli import main
+
+        # argparse exits with code 2 for invalid choices
+        with pytest.raises(SystemExit) as exc_info:
+            main(["footprint", "generate", "chip", "--size", "invalid"])
+        assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        assert "invalid" in captured.err.lower()
+
+    def test_generate_help(self, capsys):
+        """Test footprint generate shows help."""
+        from kicad_tools.cli import main
+
+        result = main(["footprint", "generate"])
+        assert result == 0  # Shows help and exits
