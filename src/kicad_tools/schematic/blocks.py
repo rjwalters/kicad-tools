@@ -527,6 +527,181 @@ class OscillatorBlock(CircuitBlock):
         sch.add_junction(gnd_pos[0], gnd_rail_y)
 
 
+class CrystalOscillator(CircuitBlock):
+    """
+    Crystal oscillator with load capacitors.
+
+    Places a passive crystal with two load capacitors for connection to an MCU
+    oscillator input. The load capacitors are pre-wired to the crystal and ground.
+
+    Schematic:
+             ┌─────┐
+      IN ────┤     ├──── OUT
+             │ Y1  │
+             └──┬──┘
+                │
+        ┌───────┼───────┐
+        │       │       │
+       ─┴─     ─┴─     ─┴─
+       C1      GND     C2
+       ─┬─             ─┬─
+        │               │
+        └───────┬───────┘
+                │
+               GND
+
+    Ports:
+        - IN: Crystal input (connect to MCU OSC_IN)
+        - OUT: Crystal output (connect to MCU OSC_OUT)
+        - GND: Ground reference
+
+    Example:
+        from kicad_tools.schematic.blocks import CrystalOscillator
+
+        # Create crystal oscillator
+        xtal = CrystalOscillator(
+            sch,
+            x=200, y=80,
+            frequency="8MHz",
+            load_caps="20pF",
+            ref_prefix="Y",
+        )
+
+        # Wire to MCU
+        sch.add_wire(xtal.port("IN"), mcu.port("OSC_IN"))
+        sch.add_wire(xtal.port("OUT"), mcu.port("OSC_OUT"))
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        frequency: str = "8MHz",
+        load_caps: str | tuple[str, str] = "20pF",
+        ref_prefix: str = "Y",
+        cap_ref_start: int = 1,
+        crystal_symbol: str = "Device:Crystal",
+        cap_symbol: str = "Device:C",
+    ):
+        """
+        Create a crystal oscillator with load capacitors.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of crystal center
+            y: Y coordinate of crystal center
+            frequency: Frequency value for crystal label (e.g., "8MHz", "16MHz")
+            load_caps: Load capacitor value(s). Either a single string for both
+                caps (e.g., "20pF") or a tuple for different values
+                (e.g., ("18pF", "22pF"))
+            ref_prefix: Reference designator prefix for crystal (e.g., "Y" or "Y1")
+            cap_ref_start: Starting reference number for capacitors
+            crystal_symbol: KiCad symbol for crystal
+            cap_symbol: KiCad symbol for capacitors
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+
+        # Parse reference prefix
+        if ref_prefix[-1].isdigit():
+            y_ref = ref_prefix
+        else:
+            y_ref = f"{ref_prefix}1"
+
+        # Parse load cap values
+        if isinstance(load_caps, str):
+            cap1_value = load_caps
+            cap2_value = load_caps
+        else:
+            cap1_value, cap2_value = load_caps
+
+        # Component spacing
+        cap_y_offset = 15  # mm below crystal
+        cap_x_spacing = 15  # mm between caps (crystal is centered)
+
+        # Place crystal
+        self.crystal = sch.add_symbol(crystal_symbol, x, y, y_ref, frequency)
+
+        # Place load capacitors below crystal
+        c1_x = x - cap_x_spacing / 2
+        c2_x = x + cap_x_spacing / 2
+        cap_y = y + cap_y_offset
+
+        c1_ref = f"C{cap_ref_start}"
+        c2_ref = f"C{cap_ref_start + 1}"
+
+        self.cap1 = sch.add_symbol(cap_symbol, c1_x, cap_y, c1_ref, cap1_value)
+        self.cap2 = sch.add_symbol(cap_symbol, c2_x, cap_y, c2_ref, cap2_value)
+
+        self.components = {
+            "XTAL": self.crystal,
+            "C1": self.cap1,
+            "C2": self.cap2,
+        }
+
+        # Get crystal pin positions
+        # Standard crystal symbols have pins 1 and 2
+        xtal_pin1 = self.crystal.pin_position("1")
+        xtal_pin2 = self.crystal.pin_position("2")
+
+        # Get capacitor pin positions
+        c1_pin1 = self.cap1.pin_position("1")  # Top of cap
+        c1_pin2 = self.cap1.pin_position("2")  # Bottom of cap
+        c2_pin1 = self.cap2.pin_position("1")  # Top of cap
+        c2_pin2 = self.cap2.pin_position("2")  # Bottom of cap
+
+        # Wire crystal pin 1 to C1 top
+        sch.add_wire(xtal_pin1, (c1_pin1[0], xtal_pin1[1]))  # Horizontal from xtal
+        sch.add_wire((c1_pin1[0], xtal_pin1[1]), c1_pin1)  # Vertical down to cap
+
+        # Wire crystal pin 2 to C2 top
+        sch.add_wire(xtal_pin2, (c2_pin1[0], xtal_pin2[1]))  # Horizontal from xtal
+        sch.add_wire((c2_pin1[0], xtal_pin2[1]), c2_pin1)  # Vertical down to cap
+
+        # Wire cap bottoms together (ground bus)
+        sch.add_wire(c1_pin2, c2_pin2)
+
+        # Add junctions at crystal-to-cap connection points
+        sch.add_junction(c1_pin1[0], xtal_pin1[1])
+        sch.add_junction(c2_pin1[0], xtal_pin2[1])
+
+        # Define ports
+        # IN/OUT are at the crystal pins (before junction points)
+        # GND is at the midpoint of the capacitor ground bus
+        gnd_x = (c1_pin2[0] + c2_pin2[0]) / 2
+        gnd_y = c1_pin2[1]
+
+        self.ports = {
+            "IN": xtal_pin1,
+            "OUT": xtal_pin2,
+            "GND": (gnd_x, gnd_y),
+        }
+
+        # Store internal positions for connect_to_rails
+        self._c1_gnd = c1_pin2
+        self._c2_gnd = c2_pin2
+
+    def connect_to_rails(self, gnd_rail_y: float, add_junction: bool = True):
+        """
+        Connect the oscillator ground to a ground rail.
+
+        Args:
+            gnd_rail_y: Y coordinate of ground rail
+            add_junction: Whether to add a junction marker at the rail connection
+        """
+        sch = self.schematic
+        gnd_pos = self.ports["GND"]
+
+        # Connect ground bus to GND rail
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+
+        if add_junction:
+            sch.add_junction(gnd_pos[0], gnd_rail_y)
+
+
 class DebugHeader(CircuitBlock):
     """
     SWD debug header for ARM Cortex-M microcontrollers.
