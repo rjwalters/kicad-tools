@@ -11,12 +11,12 @@ from kicad_tools.datasheet.exceptions import (
     DatasheetDownloadError,
     DatasheetSearchError,
 )
+from kicad_tools.datasheet.images import ExtractedImage, classify_image
 from kicad_tools.datasheet.models import (
     Datasheet,
     DatasheetResult,
     DatasheetSearchResult,
 )
-from kicad_tools.datasheet.images import ExtractedImage, classify_image
 from kicad_tools.datasheet.tables import ExtractedTable
 
 
@@ -1203,3 +1203,426 @@ class TestModuleExports:
         assert ExtractedImage is not None
         assert ExtractedTable is not None
         assert classify_image is not None
+
+    def test_pin_extraction_exports(self):
+        from kicad_tools.datasheet import (
+            ExtractedPin,
+            PinTable,
+            infer_pin_type,
+        )
+
+        assert ExtractedPin is not None
+        assert PinTable is not None
+        assert infer_pin_type is not None
+
+
+class TestExtractedPin:
+    """Tests for ExtractedPin dataclass."""
+
+    def test_creation(self):
+        from kicad_tools.datasheet.pins import ExtractedPin
+
+        pin = ExtractedPin(
+            number="1",
+            name="VCC",
+            type="power_in",
+            type_confidence=0.95,
+            type_source="inferred",
+            description="Power supply",
+            alt_functions=[],
+            electrical_type="P",
+            source_page=5,
+        )
+        assert pin.number == "1"
+        assert pin.name == "VCC"
+        assert pin.type == "power_in"
+        assert pin.type_confidence == 0.95
+        assert pin.electrical_type == "P"
+
+    def test_defaults(self):
+        from kicad_tools.datasheet.pins import ExtractedPin
+
+        pin = ExtractedPin(number="1", name="TEST")
+        assert pin.type == "passive"
+        assert pin.type_confidence == 0.5
+        assert pin.type_source == "inferred"
+        assert pin.description == ""
+        assert pin.alt_functions == []
+        assert pin.source_page == 0
+
+    def test_to_dict(self):
+        from kicad_tools.datasheet.pins import ExtractedPin
+
+        pin = ExtractedPin(
+            number="1",
+            name="VCC",
+            type="power_in",
+            description="Supply",
+        )
+        d = pin.to_dict()
+        assert d["number"] == "1"
+        assert d["name"] == "VCC"
+        assert d["type"] == "power_in"
+        assert d["description"] == "Supply"
+
+    def test_from_dict(self):
+        from kicad_tools.datasheet.pins import ExtractedPin
+
+        data = {
+            "number": "5",
+            "name": "GPIO0",
+            "type": "bidirectional",
+            "type_confidence": 0.85,
+        }
+        pin = ExtractedPin.from_dict(data)
+        assert pin.number == "5"
+        assert pin.name == "GPIO0"
+        assert pin.type == "bidirectional"
+        assert pin.type_confidence == 0.85
+
+
+class TestPinTable:
+    """Tests for PinTable dataclass."""
+
+    def test_creation(self):
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [
+            ExtractedPin(number="1", name="VCC", type="power_in"),
+            ExtractedPin(number="2", name="GND", type="power_in"),
+            ExtractedPin(number="3", name="PA0", type="bidirectional"),
+        ]
+        table = PinTable(
+            pins=pins,
+            package="LQFP48",
+            source_pages=[10, 11],
+            confidence=0.9,
+        )
+        assert table.pin_count == 3
+        assert table.package == "LQFP48"
+        assert table.confidence == 0.9
+
+    def test_get_pin(self):
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [
+            ExtractedPin(number="1", name="VCC"),
+            ExtractedPin(number="2", name="GND"),
+        ]
+        table = PinTable(pins=pins)
+
+        pin = table.get_pin("1")
+        assert pin is not None
+        assert pin.name == "VCC"
+
+        assert table.get_pin("99") is None
+
+    def test_get_pins_by_type(self):
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [
+            ExtractedPin(number="1", name="VCC", type="power_in"),
+            ExtractedPin(number="2", name="GND", type="power_in"),
+            ExtractedPin(number="3", name="PA0", type="bidirectional"),
+        ]
+        table = PinTable(pins=pins)
+
+        power_pins = table.get_pins_by_type("power_in")
+        assert len(power_pins) == 2
+
+    def test_to_json(self):
+        import json
+
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [ExtractedPin(number="1", name="VCC", type="power_in")]
+        table = PinTable(pins=pins, package="QFN32")
+
+        json_str = table.to_json()
+        data = json.loads(json_str)
+        assert data["package"] == "QFN32"
+        assert len(data["pins"]) == 1
+
+    def test_to_csv(self):
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [
+            ExtractedPin(number="1", name="VCC", type="power_in"),
+            ExtractedPin(number="2", name="PA0", type="bidirectional"),
+        ]
+        table = PinTable(pins=pins)
+
+        csv = table.to_csv()
+        assert "Number" in csv  # Header
+        assert "VCC" in csv
+        assert "PA0" in csv
+
+    def test_to_markdown(self):
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [
+            ExtractedPin(number="1", name="VCC", type="power_in"),
+        ]
+        table = PinTable(pins=pins)
+
+        md = table.to_markdown()
+        assert "| Number |" in md
+        assert "| 1 |" in md
+        assert "VCC" in md
+
+    def test_iteration(self):
+        from kicad_tools.datasheet.pins import ExtractedPin, PinTable
+
+        pins = [
+            ExtractedPin(number="1", name="VCC"),
+            ExtractedPin(number="2", name="GND"),
+        ]
+        table = PinTable(pins=pins)
+
+        names = [p.name for p in table]
+        assert names == ["VCC", "GND"]
+        assert len(table) == 2
+
+
+class TestPinTypeInference:
+    """Tests for pin type inference."""
+
+    def test_power_pin_vcc(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("VCC")
+        assert result.pin_type == "power_in"
+        assert result.confidence >= 0.9
+
+    def test_power_pin_vdd(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("VDD")
+        assert result.pin_type == "power_in"
+
+    def test_power_pin_gnd(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("GND")
+        assert result.pin_type == "power_in"
+
+    def test_gpio_pin(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("PA0")
+        assert result.pin_type == "bidirectional"
+
+        result = infer_pin_type("GPIO12")
+        assert result.pin_type == "bidirectional"
+
+    def test_no_connect_pin(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("NC")
+        assert result.pin_type == "no_connect"
+        assert result.confidence == 1.0
+
+    def test_reset_pin(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("NRST")
+        assert result.pin_type == "input"
+
+        result = infer_pin_type("RESET")
+        assert result.pin_type == "input"
+
+    def test_tx_rx_pins(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("TX")
+        assert result.pin_type == "output"
+
+        result = infer_pin_type("RX")
+        assert result.pin_type == "input"
+
+    def test_spi_pins(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("MOSI")
+        assert result.pin_type == "output"
+
+        result = infer_pin_type("MISO")
+        assert result.pin_type == "input"
+
+        result = infer_pin_type("SCK")
+        assert result.pin_type == "input"
+
+    def test_i2c_pins(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("SDA")
+        assert result.pin_type == "bidirectional"
+
+        result = infer_pin_type("SCL")
+        assert result.pin_type == "bidirectional"
+
+    def test_electrical_type_override(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        # Electrical type from datasheet should override pattern matching
+        result = infer_pin_type("UNKNOWN", electrical_type="I/O")
+        assert result.pin_type == "bidirectional"
+        assert result.confidence >= 0.9
+
+        result = infer_pin_type("CUSTOM", electrical_type="P")
+        assert result.pin_type == "power_in"
+
+    def test_description_hint(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("PIN1", description="Power supply input")
+        assert result.pin_type == "power_in"
+
+    def test_unknown_pin(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result = infer_pin_type("XYZABC123")
+        # Unknown pins default to bidirectional with low confidence
+        assert result.pin_type == "bidirectional"
+        assert result.confidence < 0.5
+
+    def test_case_insensitive(self):
+        from kicad_tools.datasheet.pin_inference import infer_pin_type
+
+        result_upper = infer_pin_type("VCC")
+        result_lower = infer_pin_type("vcc")
+        assert result_upper.pin_type == result_lower.pin_type
+
+
+class TestColumnIdentification:
+    """Tests for column identification in pin tables."""
+
+    def test_identify_number_column(self):
+        from kicad_tools.datasheet.pin_inference import identify_column_type
+
+        assert identify_column_type("Pin No") == "number"
+        assert identify_column_type("Pin #") == "number"
+        assert identify_column_type("Pin Number") == "number"
+        assert identify_column_type("#") == "number"
+
+    def test_identify_name_column(self):
+        from kicad_tools.datasheet.pin_inference import identify_column_type
+
+        assert identify_column_type("Name") == "name"
+        assert identify_column_type("Signal") == "name"
+        assert identify_column_type("Pin Name") == "name"
+
+    def test_identify_type_column(self):
+        from kicad_tools.datasheet.pin_inference import identify_column_type
+
+        assert identify_column_type("Type") == "type"
+        assert identify_column_type("I/O") == "type"
+        assert identify_column_type("Direction") == "type"
+
+    def test_identify_description_column(self):
+        from kicad_tools.datasheet.pin_inference import identify_column_type
+
+        assert identify_column_type("Description") == "description"
+        assert identify_column_type("Function") == "description"
+
+    def test_unrecognized_column(self):
+        from kicad_tools.datasheet.pin_inference import identify_column_type
+
+        assert identify_column_type("Random Header") is None
+
+
+class TestIsPinTable:
+    """Tests for pin table detection."""
+
+    def test_valid_pin_table(self):
+        from kicad_tools.datasheet.pin_inference import is_pin_table
+
+        headers = ["Pin No", "Name", "Type", "Description"]
+        is_table, confidence = is_pin_table(headers)
+        assert is_table is True
+        assert confidence > 0.5
+
+    def test_missing_number_column(self):
+        from kicad_tools.datasheet.pin_inference import is_pin_table
+
+        headers = ["Name", "Type", "Description"]
+        is_table, _ = is_pin_table(headers)
+        assert is_table is False
+
+    def test_missing_name_column(self):
+        from kicad_tools.datasheet.pin_inference import is_pin_table
+
+        headers = ["Pin No", "Type", "Description"]
+        is_table, _ = is_pin_table(headers)
+        assert is_table is False
+
+    def test_empty_headers(self):
+        from kicad_tools.datasheet.pin_inference import is_pin_table
+
+        is_table, confidence = is_pin_table([])
+        assert is_table is False
+        assert confidence == 0.0
+
+
+class TestApplyTypeOverrides:
+    """Tests for applying manual type overrides."""
+
+    def test_override_single_pin(self):
+        from kicad_tools.datasheet.pin_inference import apply_type_overrides
+        from kicad_tools.datasheet.pins import ExtractedPin
+
+        pins = [
+            ExtractedPin(number="1", name="VCC", type="bidirectional"),
+            ExtractedPin(number="2", name="GND", type="bidirectional"),
+        ]
+
+        apply_type_overrides(pins, {"1": "power_in"})
+
+        assert pins[0].type == "power_in"
+        assert pins[0].type_confidence == 1.0
+        assert pins[0].type_source == "manual"
+        assert pins[1].type == "bidirectional"  # Unchanged
+
+    def test_override_multiple_pins(self):
+        from kicad_tools.datasheet.pin_inference import apply_type_overrides
+        from kicad_tools.datasheet.pins import ExtractedPin
+
+        pins = [
+            ExtractedPin(number="1", name="P1", type="passive"),
+            ExtractedPin(number="2", name="P2", type="passive"),
+            ExtractedPin(number="3", name="P3", type="passive"),
+        ]
+
+        apply_type_overrides(pins, {"1": "input", "3": "output"})
+
+        assert pins[0].type == "input"
+        assert pins[1].type == "passive"
+        assert pins[2].type == "output"
+
+
+class TestCLIExtractPins:
+    """Tests for extract-pins CLI command."""
+
+    def test_extract_pins_file_not_found(self):
+        from kicad_tools.cli.datasheet_cmd import main
+
+        result = main(["extract-pins", "/nonexistent/file.pdf"])
+        assert result == 1
+
+    def test_extract_pins_help(self, capsys):
+        from kicad_tools.cli.datasheet_cmd import main
+
+        # --help causes sys.exit(0), which raises SystemExit
+        with pytest.raises(SystemExit) as exc_info:
+            main(["extract-pins", "--help"])
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        assert "extract-pins" in captured.out
+        assert "--format" in captured.out
+
+    def test_parse_pages_for_pins(self):
+        from kicad_tools.cli.datasheet_cmd import _parse_pages
+
+        assert _parse_pages("1-5") == [1, 2, 3, 4, 5]
+        assert _parse_pages("10,15,20") == [10, 15, 20]

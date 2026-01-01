@@ -1441,9 +1441,7 @@ class TestSymbolLibrarySave:
 class TestSymbolLibraryRoundTrip:
     """Tests for round-trip fidelity (load → save preserves structure)."""
 
-    def test_round_trip_preserves_content(
-        self, minimal_symbol_library: Path, tmp_path: Path
-    ):
+    def test_round_trip_preserves_content(self, minimal_symbol_library: Path, tmp_path: Path):
         """Test that loading and saving preserves the original content."""
         # Load the library
         lib = SymbolLibrary.load(str(minimal_symbol_library))
@@ -1460,16 +1458,18 @@ class TestSymbolLibraryRoundTrip:
         # This is a known limitation - the main symbols and their unit symbols are preserved,
         # but nested unit symbols may be duplicated. The important thing is that the
         # main symbols (without _N_N suffixes) are preserved correctly.
-        main_symbols_orig = {k for k in lib.symbols.keys() if "_0_" not in k and "_1_" not in k.split(":")[-1]}
-        main_symbols_reload = {k for k in reloaded.symbols.keys() if "_0_" not in k and "_1_" not in k.split(":")[-1]}
+        main_symbols_orig = {
+            k for k in lib.symbols if "_0_" not in k and "_1_" not in k.split(":")[-1]
+        }
+        main_symbols_reload = {
+            k for k in reloaded.symbols if "_0_" not in k and "_1_" not in k.split(":")[-1]
+        }
         assert main_symbols_orig == main_symbols_reload
         assert reloaded.version == lib.version
         # Round-trip preserves original generator (not changed to "kicad_tools")
         assert reloaded.generator == lib.generator
 
-    def test_round_trip_preserves_symbols(
-        self, minimal_symbol_library: Path, tmp_path: Path
-    ):
+    def test_round_trip_preserves_symbols(self, minimal_symbol_library: Path, tmp_path: Path):
         """Test that symbols are preserved through round-trip."""
         lib = SymbolLibrary.load(str(minimal_symbol_library))
 
