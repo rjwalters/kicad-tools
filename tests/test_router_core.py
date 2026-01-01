@@ -570,3 +570,177 @@ class TestAutorouterRouteAll:
         routes = router_with_nets.route_all()
         # Should not fail, net 0 is skipped
         assert isinstance(routes, list)
+
+
+class TestNegotiatedModePadObstacles:
+    """Tests for pad obstacle handling in negotiated routing mode.
+
+    Issue #174: Autorouter was creating traces through pads because
+    pad clearance zones weren't being treated as obstacles in negotiated mode.
+    These tests verify the fix.
+    """
+
+    @pytest.fixture
+    def router(self):
+        """Create router with standard rules."""
+        return Autorouter(width=50.0, height=40.0)
+
+    def test_pad_blocks_other_net_in_negotiated_mode(self, router):
+        """Test that pads block routes from other nets in negotiated mode.
+
+        This is the core test for issue #174. A route from net 2 should not
+        be able to pass through a pad belonging to net 1.
+        """
+        # Add a pad for net 1 in the center
+        pad1 = [
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": 20.0,
+                "width": 2.0,
+                "height": 2.0,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+        router.add_component("U1", pad1)
+
+        # Add pads for net 2 that would route through net 1's pad if unblocked
+        pad2 = [
+            {
+                "number": "1",
+                "x": 20.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "NET2",
+            },
+            {
+                "number": "2",
+                "x": 30.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "NET2",
+            },
+        ]
+        router.add_component("R1", pad2)
+
+        # Route using negotiated mode
+        routes = router.route_all_negotiated(max_iterations=5)
+
+        # If any route was created for net 2, verify it doesn't pass through net 1's pad
+        net2_routes = [r for r in routes if r.net == 2]
+        for route in net2_routes:
+            for seg in route.segments:
+                # The segment should not pass through the center of net 1's pad
+                # Check if segment crosses the pad area (23-27 on x-axis at y=20)
+                if seg.y1 == 20.0 and seg.y2 == 20.0:  # Horizontal at pad level
+                    # If both endpoints are outside pad, segment shouldn't pass through
+                    if seg.x1 < 23.0 and seg.x2 > 27.0:
+                        # This would indicate the route went through the pad
+                        pytest.fail("Route from net 2 passed through net 1's pad area")
+
+    def test_grid_cell_usage_count_distinguishes_pads_from_routes(self, router):
+        """Test that pad cells have usage_count=0 while routed cells have usage_count>0."""
+        # Add a pad
+        pad = [
+            {
+                "number": "1",
+                "x": 25.0,
+                "y": 20.0,
+                "width": 1.0,
+                "height": 1.0,
+                "net": 1,
+                "net_name": "NET1",
+            }
+        ]
+        router.add_component("U1", pad)
+
+        # Check that pad center cell has usage_count=0
+        gx, gy = router.grid.world_to_grid(25.0, 20.0)
+        layer_idx = router.grid.layer_to_index(Layer.F_CU.value)
+        cell = router.grid.grid[layer_idx][gy][gx]
+
+        assert cell.blocked is True, "Pad cell should be blocked"
+        assert cell.net == 1, "Pad cell should have net assigned"
+        assert cell.usage_count == 0, "Pad cell should have usage_count=0 (static obstacle)"
+
+    def test_routed_cell_has_usage_count_after_marking(self, router):
+        """Test that routed cells get usage_count>0 after mark_route_usage."""
+        # Add two pads to route between
+        pads = [
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 20.0,
+                "y": 20.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+        router.add_component("R1", pads)
+
+        # Route the net using negotiated mode
+        routes = router._route_net_negotiated(1, present_cost_factor=0.5)
+
+        if routes:
+            # Mark route usage (this is what happens in route_all_negotiated)
+            for route in routes:
+                router.grid.mark_route_usage(route)
+
+            # Check that routed cells have usage_count > 0
+            for route in routes:
+                for seg in route.segments:
+                    gx, gy = router.grid.world_to_grid(seg.x1, seg.y1)
+                    layer_idx = router.grid.layer_to_index(seg.layer.value)
+                    cell = router.grid.grid[layer_idx][gy][gx]
+
+                    # Routed cells should have usage_count > 0
+                    # (unless they're pad cells which are special)
+                    if not cell.is_obstacle:
+                        assert cell.usage_count > 0, "Routed cell should have usage_count > 0"
+
+    def test_same_net_can_reach_own_pad(self, router):
+        """Test that a net can route to its own pads (not blocked by own pad)."""
+        # Add two pads for the same net
+        pads = [
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 20.0,
+                "width": 1.0,
+                "height": 1.0,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.0,
+                "y": 20.0,
+                "width": 1.0,
+                "height": 1.0,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+        router.add_component("U1", pads)
+
+        # Route using negotiated mode - should succeed
+        routes = router.route_all_negotiated(max_iterations=5)
+
+        # Should be able to route to own pads
+        net1_routes = [r for r in routes if r.net == 1]
+        assert len(net1_routes) > 0 or len(router.routes) > 0, "Should be able to route to own pads"
