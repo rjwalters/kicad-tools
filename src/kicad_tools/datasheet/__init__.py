@@ -1,10 +1,12 @@
 """
-Datasheet search and download infrastructure.
+Datasheet module providing search, download, and PDF parsing functionality.
 
-Provides tools for searching, downloading, and caching component datasheets
-from various sources (LCSC, Octopart, etc.).
+This module provides tools for:
+1. Searching for datasheets from LCSC, Octopart, etc.
+2. Downloading and caching datasheets locally
+3. Parsing PDF datasheets, converting to markdown, extracting images/tables
 
-Example::
+Search and Download Example::
 
     from kicad_tools.datasheet import DatasheetManager
 
@@ -38,8 +40,32 @@ Example::
     # Clear cache
     manager.clear_cache()
     manager.clear_cache(older_than_days=30)
+
+PDF Parsing Example::
+
+    from kicad_tools.datasheet import DatasheetParser
+
+    parser = DatasheetParser("STM32F103.pdf")
+
+    # Convert to markdown
+    markdown = parser.to_markdown()
+
+    # Extract images
+    images = parser.extract_images()
+    for img in images:
+        img.save(f"output/{img.suggested_filename}")
+
+    # Extract tables
+    tables = parser.extract_tables()
+    for table in tables:
+        print(table.to_markdown())
+
+Requires optional dependencies:
+    pip install kicad-tools[parts]     # For search/download
+    pip install kicad-tools[datasheet]  # For PDF parsing
 """
 
+# Search and download functionality
 from .cache import DatasheetCache, get_default_cache_path
 from .exceptions import (
     DatasheetCacheError,
@@ -51,13 +77,24 @@ from .manager import DatasheetManager
 from .models import Datasheet, DatasheetResult, DatasheetSearchResult
 from .sources import DatasheetSource, LCSCDatasheetSource, OctopartDatasheetSource
 
+# PDF parsing functionality
+from .images import ExtractedImage, classify_image
+from .parser import DatasheetParser, ParsedDatasheet
+from .tables import ExtractedTable
+
 __all__ = [
-    # Main interface
+    # Main interfaces
     "DatasheetManager",
-    # Models
+    "DatasheetParser",
+    # Search/download models
     "Datasheet",
     "DatasheetResult",
     "DatasheetSearchResult",
+    # PDF parsing models
+    "ParsedDatasheet",
+    "ExtractedImage",
+    "ExtractedTable",
+    "classify_image",
     # Cache
     "DatasheetCache",
     "get_default_cache_path",

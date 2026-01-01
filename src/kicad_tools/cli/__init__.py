@@ -14,7 +14,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools lib <command> <file>   - Symbol library tools
     kicad-tools mfr <command>          - Manufacturer tools
     kicad-tools parts <command>        - LCSC parts lookup and search
-    kicad-tools datasheet <command>    - Datasheet search and download
+    kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
@@ -50,6 +50,8 @@ Examples:
     kct mfr compare
     kct parts lookup C123456
     kct parts search "100nF 0402" --in-stock
+    kct datasheet convert STM32F103.pdf --output summary.md
+    kct datasheet extract-images STM32F103.pdf --output images/
     kct route board.kicad_pcb --strategy negotiated
     kct reason board.kicad_pcb --export-state
     kct reason board.kicad_pcb --analyze
@@ -644,8 +646,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Cache action (default: stats)",
     )
 
-    # DATASHEET subcommand - datasheet search and download
-    datasheet_parser = subparsers.add_parser("datasheet", help="Datasheet search and download")
+    # DATASHEET subcommand - datasheet search, download, and PDF parsing
+    datasheet_parser = subparsers.add_parser("datasheet", help="Datasheet search, download, and PDF parsing")
     datasheet_subparsers = datasheet_parser.add_subparsers(
         dest="datasheet_command", help="Datasheet commands"
     )
@@ -680,6 +682,34 @@ def main(argv: list[str] | None = None) -> int:
     datasheet_cache.add_argument(
         "--older-than", type=int, help="For clear: only clear entries older than N days"
     )
+
+    # datasheet convert (PDF parsing)
+    ds_convert = datasheet_subparsers.add_parser("convert", help="Convert PDF to markdown")
+    ds_convert.add_argument("pdf", help="Path to PDF file")
+    ds_convert.add_argument("-o", "--output", help="Output file path (default: stdout)")
+    ds_convert.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+
+    # datasheet extract-images
+    ds_images = datasheet_subparsers.add_parser("extract-images", help="Extract images from PDF")
+    ds_images.add_argument("pdf", help="Path to PDF file")
+    ds_images.add_argument("-o", "--output", required=True, help="Output directory for images")
+    ds_images.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+    ds_images.add_argument(
+        "--min-size", type=int, default=100, help="Minimum image dimension (default: 100)"
+    )
+    ds_images.add_argument("--format", choices=["text", "json"], default="text")
+
+    # datasheet extract-tables
+    ds_tables = datasheet_subparsers.add_parser("extract-tables", help="Extract tables from PDF")
+    ds_tables.add_argument("pdf", help="Path to PDF file")
+    ds_tables.add_argument("-o", "--output", help="Output directory for tables")
+    ds_tables.add_argument("--pages", help="Page range (e.g., '1-10' or '1,2,5')")
+    ds_tables.add_argument("--format", choices=["markdown", "csv", "json"], default="markdown")
+
+    # datasheet info
+    ds_info = datasheet_subparsers.add_parser("info", help="Show PDF information")
+    ds_info.add_argument("pdf", help="Path to PDF file")
+    ds_info.add_argument("--format", choices=["text", "json"], default="text")
 
     # PLACEMENT subcommand - placement conflict detection and resolution
     placement_parser = subparsers.add_parser("placement", help="Detect and fix placement conflicts")
@@ -1388,7 +1418,7 @@ def _run_datasheet_command(args) -> int:
     """Handle datasheet subcommands."""
     if not args.datasheet_command:
         print("Usage: kicad-tools datasheet <command> [options]")
-        print("Commands: search, download, list, cache")
+        print("Commands: search, download, list, cache, convert, extract-images, extract-tables, info")
         return 1
 
     from .datasheet_cmd import main as datasheet_main
@@ -1419,6 +1449,40 @@ def _run_datasheet_command(args) -> int:
         sub_argv = ["cache", args.cache_action]
         if getattr(args, "older_than", None):
             sub_argv.extend(["--older-than", str(args.older_than)])
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "convert":
+        sub_argv = ["convert", args.pdf]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.pages:
+            sub_argv.extend(["--pages", args.pages])
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "extract-images":
+        sub_argv = ["extract-images", args.pdf, "-o", args.output]
+        if args.pages:
+            sub_argv.extend(["--pages", args.pages])
+        if args.min_size != 100:
+            sub_argv.extend(["--min-size", str(args.min_size)])
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "extract-tables":
+        sub_argv = ["extract-tables", args.pdf]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.pages:
+            sub_argv.extend(["--pages", args.pages])
+        if args.format != "markdown":
+            sub_argv.extend(["--format", args.format])
+        return datasheet_main(sub_argv) or 0
+
+    elif args.datasheet_command == "info":
+        sub_argv = ["info", args.pdf]
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
         return datasheet_main(sub_argv) or 0
 
     return 1
