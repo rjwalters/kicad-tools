@@ -279,7 +279,7 @@ class GraphicText:
 
 
 @dataclass
-class GraphicLine:
+class BoardGraphic:
     """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc).
 
     Used for board outlines, silkscreen graphics, and other board-level drawings.
@@ -294,8 +294,8 @@ class GraphicLine:
     uuid: str = ""
 
     @classmethod
-    def from_sexp(cls, sexp: SExp, graphic_type: str) -> GraphicLine:
-        """Parse graphic line from S-expression."""
+    def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
+        """Parse board graphic from S-expression."""
         graphic = cls(
             graphic_type=graphic_type,
             layer="",
@@ -762,6 +762,7 @@ class PCB:
         self._graphic_lines: list[GraphicLine] = []
         self._graphic_arcs: list[GraphicArc] = []
         self._texts: list[GraphicText] = []
+        self._graphics: list[BoardGraphic] = []
         self._setup: Setup | None = None
         self._title_block: dict[str, str] = {}
         self._parse()
@@ -808,7 +809,7 @@ class PCB:
                 self._texts.append(text)
             elif tag in ("gr_line", "gr_rect", "gr_circle", "gr_arc"):
                 graphic_type = tag[3:]  # Remove "gr_" prefix
-                graphic = GraphicLine.from_sexp(child, graphic_type)
+                graphic = BoardGraphic.from_sexp(child, graphic_type)
                 self._graphics.append(graphic)
 
     def _parse_layers(self, sexp: SExp):
@@ -1000,6 +1001,17 @@ class PCB:
         for text in self._texts:
             if text.layer == layer:
                 yield text
+
+    @property
+    def graphics(self) -> list[BoardGraphic]:
+        """All board-level graphic elements (gr_line, gr_rect, etc.)."""
+        return self._graphics
+
+    def graphics_on_layer(self, layer: str) -> Iterator[BoardGraphic]:
+        """Get graphic elements on a specific layer."""
+        for graphic in self._graphics:
+            if graphic.layer == layer:
+                yield graphic
 
     def get_board_outline(self) -> list[tuple[float, float]]:
         """Extract board outline polygon from Edge.Cuts layer.

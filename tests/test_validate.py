@@ -385,7 +385,6 @@ class TestModuleImports:
 
         assert DRCRule is not None
 
-
     def test_import_dimension_rules(self):
         """Test importing dimension rules class."""
         from kicad_tools.validate.rules import DimensionRules
@@ -1077,6 +1076,7 @@ class TestPointToSegmentDistance:
         rule = EdgeClearanceRule()
         dist = rule._point_to_segment_distance((3, 4), (0, 0), (0, 0))
         assert dist == pytest.approx(5.0)  # 3-4-5 triangle
+
     def test_import_silkscreen_rules(self):
         """Test importing silkscreen rule functions."""
         from kicad_tools.validate.rules import (
