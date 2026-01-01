@@ -5,6 +5,7 @@ implementations for the pure Python DRC checker.
 """
 
 from .base import DRCRule
+from .clearance import ClearanceRule
 from .dimensions import DimensionRules
 
-__all__ = ["DRCRule", "DimensionRules"]
+__all__ = ["DRCRule", "ClearanceRule", "DimensionRules"]

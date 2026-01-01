@@ -330,13 +330,13 @@ class TestDRCChecker:
         checker = DRCChecker(pcb, manufacturer="jlcpcb")
 
         # Stub methods (not yet implemented) should return empty results
-        assert len(checker.check_clearances()) == 0
         assert len(checker.check_edge_clearances()) == 0
         assert len(checker.check_silkscreen()) == 0
 
-        # check_dimensions is implemented (issue #94), check_all may have violations
+        # check_dimensions and check_clearances are implemented
         # We just verify they return DRCResults instances
         assert isinstance(checker.check_dimensions(), DRCResults)
+        assert isinstance(checker.check_clearances(), DRCResults)
         assert isinstance(checker.check_all(), DRCResults)
 
     def test_check_all_aggregates_results(self, fixtures_dir: Path):
@@ -390,3 +390,377 @@ class TestModuleImports:
         from kicad_tools.validate.rules import DimensionRules
 
         assert DimensionRules is not None
+
+    def test_import_clearance_rule(self):
+        """Test importing ClearanceRule class."""
+        from kicad_tools.validate.rules import ClearanceRule
+
+        assert ClearanceRule is not None
+
+
+# PCB with clearance violations for testing
+CLEARANCE_VIOLATION_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "NET2")
+  (net 3 "NET3")
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg1"))
+  (segment (start 100 100.05) (end 110 100.05) (width 0.2) (layer "F.Cu") (net 2) (uuid "seg2"))
+  (via (at 120 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via1"))
+  (via (at 120.3 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via2"))
+)
+"""
+
+# PCB with no violations (adequate clearances)
+CLEARANCE_PASS_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "NET2")
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg1"))
+  (segment (start 100 101) (end 110 101) (width 0.2) (layer "F.Cu") (net 2) (uuid "seg2"))
+  (via (at 120 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via1"))
+  (via (at 122 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via2"))
+)
+"""
+
+# PCB with same-net elements (should not trigger violations)
+SAME_NET_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg1"))
+  (segment (start 100 100.05) (end 110 100.05) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg2"))
+)
+"""
+
+# PCB with elements on different layers (should not trigger violations)
+DIFFERENT_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (net 2 "NET2")
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg1"))
+  (segment (start 100 100) (end 110 100) (width 0.2) (layer "B.Cu") (net 2) (uuid "seg2"))
+)
+"""
+
+
+class TestClearanceRule:
+    """Tests for the ClearanceRule implementation."""
+
+    def test_trace_to_trace_violation(self, tmp_path: Path):
+        """Test detection of trace-to-trace clearance violation."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_violation.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_VIOLATION_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Should find violations
+        assert len(results) > 0
+        assert results.passed is False
+
+        # Check that trace-to-trace violation is reported
+        segment_violations = [v for v in results if "segment" in v.rule_id]
+        assert len(segment_violations) > 0
+
+    def test_via_to_via_violation(self, tmp_path: Path):
+        """Test detection of via-to-via clearance violation."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_violation.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_VIOLATION_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Should find via violations
+        via_violations = [v for v in results if "via" in v.rule_id]
+        assert len(via_violations) > 0
+
+    def test_no_violations_with_adequate_clearance(self, tmp_path: Path):
+        """Test that adequate clearances pass."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_pass.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_PASS_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Should pass
+        assert results.passed is True
+        assert len(results) == 0
+
+    def test_same_net_no_violation(self, tmp_path: Path):
+        """Test that same-net elements don't trigger violations."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "same_net.kicad_pcb"
+        pcb_file.write_text(SAME_NET_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Same net elements can touch, no violations expected
+        assert results.passed is True
+        assert len(results) == 0
+
+    def test_different_layers_no_violation(self, tmp_path: Path):
+        """Test that elements on different layers don't trigger violations."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "different_layer.kicad_pcb"
+        pcb_file.write_text(DIFFERENT_LAYER_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Different layer elements should not conflict
+        assert results.passed is True
+        assert len(results) == 0
+
+    def test_violation_has_location(self, tmp_path: Path):
+        """Test that violations include location information."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_violation.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_VIOLATION_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Violations should have location
+        for violation in results:
+            assert violation.location is not None
+            assert len(violation.location) == 2
+
+    def test_violation_has_values(self, tmp_path: Path):
+        """Test that violations include actual and required values."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_violation.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_VIOLATION_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Violations should have actual/required values
+        for violation in results:
+            assert violation.actual_value is not None
+            assert violation.required_value is not None
+            assert violation.actual_value < violation.required_value
+
+    def test_violation_has_layer(self, tmp_path: Path):
+        """Test that violations include layer information."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_violation.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_VIOLATION_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Violations should have layer
+        for violation in results:
+            assert violation.layer is not None
+            assert violation.layer in ("F.Cu", "B.Cu")
+
+    def test_violation_has_items(self, tmp_path: Path):
+        """Test that violations include item references."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_violation.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_VIOLATION_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Violations should have item references
+        for violation in results:
+            assert len(violation.items) == 2
+
+    def test_rules_checked_count(self, tmp_path: Path):
+        """Test that rules_checked reflects number of copper layers checked."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_file = tmp_path / "clearance_pass.kicad_pcb"
+        pcb_file.write_text(CLEARANCE_PASS_PCB)
+
+        pcb = PCB.load(str(pcb_file))
+        checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
+        results = checker.check_clearances()
+
+        # Should check both F.Cu and B.Cu
+        assert results.rules_checked == 2
+
+
+class TestClearanceRuleDistanceCalculations:
+    """Unit tests for distance calculation functions."""
+
+    def test_point_to_segment_distance(self):
+        """Test point-to-segment distance calculation."""
+        from kicad_tools.validate.rules.clearance import _point_to_segment_distance
+
+        # Point directly above segment midpoint
+        dist = _point_to_segment_distance(5, 1, 0, 0, 10, 0)
+        assert dist == pytest.approx(1.0)
+
+        # Point at segment start
+        dist = _point_to_segment_distance(0, 0, 0, 0, 10, 0)
+        assert dist == pytest.approx(0.0)
+
+        # Point to the left of segment
+        dist = _point_to_segment_distance(-1, 0, 0, 0, 10, 0)
+        assert dist == pytest.approx(1.0)
+
+    def test_segment_to_segment_distance(self):
+        """Test segment-to-segment distance calculation."""
+        from kicad_tools.validate.rules.clearance import _segment_to_segment_distance
+
+        # Parallel segments
+        dist = _segment_to_segment_distance(0, 0, 10, 0, 0, 1, 10, 1)
+        assert dist == pytest.approx(1.0)
+
+        # Touching segments
+        dist = _segment_to_segment_distance(0, 0, 10, 0, 10, 0, 20, 0)
+        assert dist == pytest.approx(0.0)
+
+    def test_circle_circle_clearance(self):
+        """Test circle-to-circle clearance calculation."""
+        from kicad_tools.validate.rules.clearance import (
+            CopperElement,
+            _circle_circle_clearance,
+        )
+
+        # Two circles with known geometry
+        c1 = CopperElement(
+            element_type="via",
+            layer="F.Cu",
+            net_number=1,
+            geometry=(0, 0, 1.0, 1.0),  # center at origin, diameter 1
+            reference="Via1",
+        )
+        c2 = CopperElement(
+            element_type="via",
+            layer="F.Cu",
+            net_number=2,
+            geometry=(2, 0, 1.0, 1.0),  # center at (2,0), diameter 1
+            reference="Via2",
+        )
+
+        clearance, loc_x, loc_y = _circle_circle_clearance(c1, c2)
+        # Distance between centers = 2, radii = 0.5 each
+        # Clearance = 2 - 0.5 - 0.5 = 1.0
+        assert clearance == pytest.approx(1.0)
+        assert loc_x == pytest.approx(1.0)  # midpoint
+        assert loc_y == pytest.approx(0.0)
+
+    def test_copper_element_from_segment(self):
+        """Test creating CopperElement from Segment."""
+        from kicad_tools.schema.pcb import Segment
+        from kicad_tools.validate.rules.clearance import CopperElement
+
+        seg = Segment(
+            start=(0.0, 0.0),
+            end=(10.0, 0.0),
+            width=0.2,
+            layer="F.Cu",
+            net_number=1,
+            uuid="test-uuid",
+        )
+
+        elem = CopperElement.from_segment(seg)
+        assert elem.element_type == "segment"
+        assert elem.layer == "F.Cu"
+        assert elem.net_number == 1
+        assert elem.geometry == (0.0, 0.0, 10.0, 0.0, 0.2)
+
+    def test_copper_element_from_via(self):
+        """Test creating CopperElement from Via."""
+        from kicad_tools.schema.pcb import Via
+        from kicad_tools.validate.rules.clearance import CopperElement
+
+        via = Via(
+            position=(100.0, 100.0),
+            size=0.8,
+            drill=0.4,
+            layers=["F.Cu", "B.Cu"],
+            net_number=1,
+            uuid="test-uuid",
+        )
+
+        elem = CopperElement.from_via(via)
+        assert elem.element_type == "via"
+        assert elem.layer == "*"  # Vias span layers
+        assert elem.net_number == 1
+        assert elem.geometry == (100.0, 100.0, 0.8, 0.8)
