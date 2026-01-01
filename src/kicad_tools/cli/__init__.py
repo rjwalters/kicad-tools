@@ -9,6 +9,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools drc <report>           - Parse DRC report
     kicad-tools bom <schematic>        - Generate bill of materials
     kicad-tools check <pcb>            - Pure Python DRC (no kicad-cli)
+    kicad-tools validate --sync        - Check schematic-to-PCB netlist sync
     kicad-tools sch <command> <file>   - Schematic analysis tools
     kicad-tools pcb <command> <file>   - PCB query tools
     kicad-tools lib <command> <file>   - Symbol library tools
@@ -881,6 +882,57 @@ def main(argv: list[str] | None = None) -> int:
         help="Auto-load a project on startup",
     )
 
+    # VALIDATE subcommand - validation tools
+    validate_parser = subparsers.add_parser("validate", help="Validation tools")
+    validate_parser.add_argument(
+        "validate_project",
+        nargs="?",
+        help="Path to .kicad_pro file",
+    )
+    validate_parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Check schematic-to-PCB netlist synchronization",
+    )
+    validate_parser.add_argument(
+        "--schematic",
+        "-s",
+        dest="validate_schematic",
+        help="Path to .kicad_sch file (if not using project file)",
+    )
+    validate_parser.add_argument(
+        "--pcb",
+        "-p",
+        dest="validate_pcb",
+        help="Path to .kicad_pcb file (if not using project file)",
+    )
+    validate_parser.add_argument(
+        "--format",
+        dest="validate_format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    validate_parser.add_argument(
+        "--errors-only",
+        dest="validate_errors_only",
+        action="store_true",
+        help="Show only errors, not warnings",
+    )
+    validate_parser.add_argument(
+        "--strict",
+        dest="validate_strict",
+        action="store_true",
+        help="Exit with error code on warnings",
+    )
+    validate_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="validate_verbose",
+        action="store_true",
+        help="Show detailed issue information",
+    )
+
     # Handle footprint generate specially - it has its own subcommand parser
     if argv is None:
         argv = sys.argv[1:]
@@ -1062,6 +1114,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "interactive":
         return _run_interactive_command(args)
+
+    elif args.command == "validate":
+        return _run_validate_command(args)
 
     return 0
 
@@ -1792,6 +1847,33 @@ def _run_interactive_command(args) -> int:
     if args.project:
         sub_argv.extend(["--project", args.project])
     return interactive_main(sub_argv)
+
+
+def _run_validate_command(args) -> int:
+    """Handle validate command."""
+    if not args.sync:
+        print("Usage: kicad-tools validate --sync [options] <project>")
+        print("Currently only --sync is supported.")
+        return 1
+
+    from .validate_sync_cmd import main as validate_sync_main
+
+    sub_argv = []
+    if args.validate_project:
+        sub_argv.append(args.validate_project)
+    if args.validate_schematic:
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if args.validate_pcb:
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if args.validate_format != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if args.validate_errors_only:
+        sub_argv.append("--errors-only")
+    if args.validate_strict:
+        sub_argv.append("--strict")
+    if args.validate_verbose:
+        sub_argv.append("--verbose")
+    return validate_sync_main(sub_argv)
 
 
 def symbols_main() -> int:

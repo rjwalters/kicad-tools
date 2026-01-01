@@ -45,6 +45,7 @@ from .schema.schematic import Schematic
 if TYPE_CHECKING:
     from .drc.checker import ManufacturerCheck
     from .export import AssemblyPackageResult
+    from .validate.netlist import SyncResult
 
 
 @dataclass
@@ -550,6 +551,38 @@ class Project:
             List of orphaned footprints
         """
         return self.cross_reference().orphaned
+
+    def check_sync(self) -> SyncResult:
+        """
+        Check if schematic and PCB netlists are in sync.
+
+        Validates that:
+        - All schematic symbols have footprints on PCB
+        - No orphaned footprints exist on PCB
+        - Net names match between schematic and PCB
+        - Pin-to-pad mappings are consistent
+
+        Returns:
+            SyncResult with all issues found
+
+        Example::
+
+            project = Project.load("my_board.kicad_pro")
+            result = project.check_sync()
+
+            if not result.in_sync:
+                for issue in result.issues:
+                    print(f"{issue.severity}: {issue.message}")
+                    print(f"  Fix: {issue.suggestion}")
+        """
+        from .validate.netlist import NetlistValidator, SyncResult
+
+        if not self.schematic or not self.pcb:
+            logger.warning("Cannot check sync: missing schematic or PCB")
+            return SyncResult()
+
+        validator = NetlistValidator(self.schematic, self.pcb)
+        return validator.validate()
 
     def export_assembly(
         self,
