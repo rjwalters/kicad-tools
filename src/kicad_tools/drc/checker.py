@@ -1,7 +1,13 @@
 """Manufacturer design rule checking for DRC reports."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.progress import ProgressCallback
 
 from .report import DRCReport
 from .violation import DRCViolation, ViolationType
@@ -47,6 +53,7 @@ def check_manufacturer_rules(
     manufacturer_id: str,
     layers: int = 2,
     copper_oz: float = 1.0,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[ManufacturerCheck]:
     """Check DRC violations against manufacturer design rules.
 
@@ -55,6 +62,9 @@ def check_manufacturer_rules(
         manufacturer_id: Manufacturer ID (e.g., "jlcpcb", "oshpark")
         layers: Layer count for rules lookup
         copper_oz: Copper weight in oz
+        progress_callback: Optional callback for progress reporting.
+            Signature: (progress: float, message: str, cancelable: bool) -> bool
+            Returns False to cancel, True to continue.
 
     Returns:
         List of check results for each relevant violation
@@ -79,11 +89,23 @@ def check_manufacturer_rules(
 
     rules = profile.get_design_rules(layers=layers, copper_oz=copper_oz)
     results: list[ManufacturerCheck] = []
+    violations = list(report.violations)
+    total = len(violations)
 
-    for violation in report.violations:
+    for i, violation in enumerate(violations):
+        # Report progress
+        if progress_callback is not None:
+            progress = i / total if total > 0 else 0.0
+            if not progress_callback(progress, f"Checking violation {i + 1}/{total}", True):
+                break  # Cancelled
+
         check = _check_violation(violation, profile.id, profile.name, rules)
         if check:
             results.append(check)
+
+    # Final progress report
+    if progress_callback is not None:
+        progress_callback(1.0, f"Checked {len(results)} violations", False)
 
     return results
 

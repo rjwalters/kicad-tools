@@ -12,6 +12,10 @@ import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.progress import ProgressCallback
 
 from kicad_tools.exceptions import (
     ConfigurationError,
@@ -186,6 +190,7 @@ class GerberExporter:
         self,
         config: GerberConfig | None = None,
         output_dir: str | Path | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> Path:
         """
         Export Gerbers with given configuration.
@@ -193,6 +198,9 @@ class GerberExporter:
         Args:
             config: Export configuration
             output_dir: Output directory (overrides config.output_dir)
+            progress_callback: Optional callback for progress reporting.
+                Signature: (progress: float, message: str, cancelable: bool) -> bool
+                Returns False to cancel, True to continue.
 
         Returns:
             Path to output (directory or zip file)
@@ -204,25 +212,50 @@ class GerberExporter:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Calculate total steps for progress
+        total_steps = 1  # Gerbers
+        if config.generate_drill:
+            total_steps += 1
+        if config.create_zip:
+            total_steps += 1
+        current_step = 0
+
         # Export Gerbers
+        if progress_callback is not None:
+            if not progress_callback(current_step / total_steps, "Exporting Gerber files", True):
+                return out_dir
         self._export_gerbers(config, out_dir)
+        current_step += 1
 
         # Export drill files
         if config.generate_drill:
+            if progress_callback is not None:
+                if not progress_callback(current_step / total_steps, "Exporting drill files", True):
+                    return out_dir
             self._export_drill(config, out_dir)
+            current_step += 1
 
         # Create zip if requested
         if config.create_zip:
+            if progress_callback is not None:
+                if not progress_callback(current_step / total_steps, "Creating zip archive", True):
+                    return out_dir
             zip_path = out_dir / config.zip_name
             self._create_zip(out_dir, zip_path)
+
+            if progress_callback is not None:
+                progress_callback(1.0, f"Export complete: {zip_path.name}", False)
             return zip_path
 
+        if progress_callback is not None:
+            progress_callback(1.0, "Export complete", False)
         return out_dir
 
     def export_for_manufacturer(
         self,
         manufacturer: str,
         output_dir: str | Path | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> Path:
         """
         Export Gerbers using manufacturer preset.
@@ -230,6 +263,7 @@ class GerberExporter:
         Args:
             manufacturer: Manufacturer ID (jlcpcb, pcbway, oshpark)
             output_dir: Output directory
+            progress_callback: Optional callback for progress reporting.
 
         Returns:
             Path to output (directory or zip file)
@@ -247,7 +281,7 @@ class GerberExporter:
             )
 
         logger.info(f"Exporting Gerbers for {preset.name}")
-        return self.export(preset.config, output_dir)
+        return self.export(preset.config, output_dir, progress_callback=progress_callback)
 
     def _export_gerbers(self, config: GerberConfig, output_dir: Path) -> None:
         """Export Gerber files using kicad-cli."""
@@ -378,6 +412,7 @@ def export_gerbers(
     pcb_path: str | Path,
     manufacturer: str = "jlcpcb",
     output_dir: str | Path | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Path:
     """
     Convenience function to export Gerbers.
@@ -386,6 +421,9 @@ def export_gerbers(
         pcb_path: Path to KiCad PCB file
         manufacturer: Manufacturer ID or "generic"
         output_dir: Output directory
+        progress_callback: Optional callback for progress reporting.
+            Signature: (progress: float, message: str, cancelable: bool) -> bool
+            Returns False to cancel, True to continue.
 
     Returns:
         Path to output (directory or zip file)
@@ -393,6 +431,8 @@ def export_gerbers(
     exporter = GerberExporter(pcb_path)
 
     if manufacturer.lower() in MANUFACTURER_PRESETS:
-        return exporter.export_for_manufacturer(manufacturer, output_dir)
+        return exporter.export_for_manufacturer(
+            manufacturer, output_dir, progress_callback=progress_callback
+        )
     else:
-        return exporter.export(output_dir=output_dir)
+        return exporter.export(output_dir=output_dir, progress_callback=progress_callback)

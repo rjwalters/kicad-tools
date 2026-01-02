@@ -23,6 +23,18 @@ Example::
     print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 """
 
+from .analysis import (
+    BlockingObstacle,
+    CongestionZone,
+    NetRoutabilityReport,
+    ObstacleType,
+    RoutabilityAnalyzer,
+    RoutabilityReport,
+    RouteAlternative,
+    RoutingFailureDiagnostic,
+    RoutingSeverity,
+    analyze_routing_failure,
+)
 from .bus import (
     BusGroup,
     BusRoutingConfig,
@@ -180,4 +192,15 @@ __all__ = [
     "ConnectionType",
     "fill_zones_by_priority",
     "get_connection_type",
+    # Analysis
+    "RoutabilityAnalyzer",
+    "RoutabilityReport",
+    "NetRoutabilityReport",
+    "RoutingFailureDiagnostic",
+    "BlockingObstacle",
+    "CongestionZone",
+    "RouteAlternative",
+    "ObstacleType",
+    "RoutingSeverity",
+    "analyze_routing_failure",
 ]

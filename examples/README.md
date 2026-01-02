@@ -10,7 +10,9 @@ This directory contains example projects demonstrating common workflows with kic
 | [02-bom-generation](02-bom-generation/) | Extract Bill of Materials | BOM extraction, grouping, export |
 | [03-drc-checking](03-drc-checking/) | Parse DRC reports, check manufacturer rules | DRC parsing, manufacturer validation |
 | [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
+| [05-end-to-end](05-end-to-end/) | Create complete designs programmatically | Circuit blocks, power rails, schematic generation |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
+| [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
 ## Quick Start
 
@@ -79,6 +81,28 @@ router, _ = load_pcb_for_routing("board.kicad_pcb", rules=rules)
 router.route_all_monte_carlo(num_trials=10)
 ```
 
+### 05 - End-to-End Design
+
+Create complete schematic designs programmatically using circuit blocks.
+
+```python
+from kicad_tools.schematic.models.schematic import Schematic
+from kicad_tools.schematic.blocks import CrystalOscillator, DebugHeader
+
+# Create schematic
+sch = Schematic(title="My Board", date="2025-01")
+
+# Add power rails
+sch.add_rail(y=30, x_start=25, x_end=200, net_label="+3.3V")
+
+# Add circuit blocks
+xtal = CrystalOscillator(sch, x=100, y=80, frequency="8MHz")
+debug = DebugHeader(sch, x=150, y=100, interface="swd")
+
+# Write output
+sch.write("output/board.kicad_sch")
+```
+
 ### LLM Routing
 
 Integrate LLMs for semantic PCB layout decisions.
@@ -92,6 +116,29 @@ while not agent.is_complete():
     command = call_your_llm(prompt)
     result, diagnosis = agent.execute_dict(command)
 agent.save("board_routed.kicad_pcb")
+```
+
+### Agent Integration
+
+Tool definitions and examples for AI agents (Claude, GPT-4, local models).
+
+```python
+# Claude integration
+from agent_integration.claude.tools import KICAD_TOOLS
+
+# OpenAI integration
+import json
+with open("agent-integration/openai/tools.json") as f:
+    functions = json.load(f)["functions"]
+
+# Common wrapper for any LLM
+from agent_integration.common.kicad_tools_wrapper import KiCadAgent
+agent = KiCadAgent()
+result = agent.execute("add_schematic_symbol", {
+    "lib_id": "Device:R",
+    "x": 100, "y": 80,
+    "reference": "R1"
+})
 ```
 
 ## CLI Commands

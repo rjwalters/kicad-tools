@@ -1,5 +1,6 @@
 """Tests for schematic-related CLI commands."""
 
+import contextlib
 import json
 from pathlib import Path
 
@@ -11,8 +12,9 @@ class TestSchListSymbols:
 
     def test_file_not_found(self, capsys):
         """Test handling of missing file."""
-        from kicad_tools.cli.sch_list_symbols import main
         import sys
+
+        from kicad_tools.cli.sch_list_symbols import main
 
         # Capture the sys.exit
         with pytest.raises(SystemExit) as exc_info:
@@ -330,8 +332,9 @@ class TestSchSummary:
 
     def test_run_summary_missing_file_handles_gracefully(self, capsys):
         """Test run_summary with missing file returns success (empty summary)."""
-        from kicad_tools.cli.sch_summary import run_summary
         from pathlib import Path
+
+        from kicad_tools.cli.sch_summary import run_summary
 
         # The summary builder handles missing files gracefully
         result = run_summary(Path("nonexistent.kicad_sch"))
@@ -619,10 +622,8 @@ class TestSchValidate:
         monkeypatch.setattr(
             "sys.argv", ["sch-validate", str(minimal_schematic), "--format", "json"]
         )
-        try:
+        with contextlib.suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
 
         captured = capsys.readouterr()
         if captured.out.strip():
@@ -720,10 +721,8 @@ class TestSchCheckConnections:
                 "json",
             ],
         )
-        try:
+        with contextlib.suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
 
         captured = capsys.readouterr()
         if captured.out.strip():
@@ -767,10 +766,8 @@ class TestSchFindUnconnected:
             "sys.argv",
             ["sch-find-unconnected", str(minimal_schematic), "--format", "json"],
         )
-        try:
+        with contextlib.suppress(SystemExit):
             main()
-        except SystemExit:
-            pass
 
         captured = capsys.readouterr()
         if captured.out.strip():
