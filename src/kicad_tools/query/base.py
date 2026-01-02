@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 T = TypeVar("T")
 
@@ -309,3 +312,74 @@ class BaseQuery(Generic[T]):
     def __getitem__(self, index: int) -> T:
         """Get item by index from results."""
         return self.all()[index]
+
+
+class ComponentQueryMixin(Generic[T]):
+    """Mixin providing common query methods for component-like items.
+
+    Provides convenience methods shared between SymbolQuery and FootprintQuery
+    for filtering by reference designator, value, and component type.
+
+    This mixin expects the class to have a `filter()` method that returns
+    a query of the same type (for chaining).
+    """
+
+    def by_reference(self, reference: str) -> T | None:
+        """Get item by reference designator.
+
+        Args:
+            reference: Reference designator (e.g., "U1", "R1", "C1")
+
+        Returns:
+            Item with matching reference, or None
+
+        Example:
+            u1 = query.by_reference("U1")
+        """
+        return self.filter(reference=reference).first()  # type: ignore[attr-defined]
+
+    def by_value(self, value: str) -> Self:
+        """Filter by value.
+
+        Args:
+            value: Component value (e.g., "10k", "100nF")
+
+        Returns:
+            Query filtered to matching value
+
+        Example:
+            caps_100nf = query.by_value("100nF").all()
+        """
+        return cast("Self", self.filter(value=value))  # type: ignore[attr-defined]
+
+    def capacitors(self) -> Self:
+        """Filter to capacitors (C* references).
+
+        Returns:
+            Query filtered to capacitors
+        """
+        return cast("Self", self.filter(reference__startswith="C"))  # type: ignore[attr-defined]
+
+    def resistors(self) -> Self:
+        """Filter to resistors (R* references).
+
+        Returns:
+            Query filtered to resistors
+        """
+        return cast("Self", self.filter(reference__startswith="R"))  # type: ignore[attr-defined]
+
+    def ics(self) -> Self:
+        """Filter to ICs (U* references).
+
+        Returns:
+            Query filtered to ICs
+        """
+        return cast("Self", self.filter(reference__startswith="U"))  # type: ignore[attr-defined]
+
+    def connectors(self) -> Self:
+        """Filter to connectors (J* references).
+
+        Returns:
+            Query filtered to connectors
+        """
+        return cast("Self", self.filter(reference__startswith="J"))  # type: ignore[attr-defined]

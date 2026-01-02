@@ -7,16 +7,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from .base import BaseQuery
+from .base import BaseQuery, ComponentQueryMixin
 
 if TYPE_CHECKING:
     from ..schema.symbol import SymbolInstance
 
 
-class SymbolQuery(BaseQuery["SymbolInstance"]):
+class SymbolQuery(ComponentQueryMixin["SymbolInstance"], BaseQuery["SymbolInstance"]):
     """Query interface for symbol instances.
 
     Extends BaseQuery with symbol-specific convenience methods.
+    Inherits common component methods from ComponentQueryMixin.
 
     Example:
         query = SymbolQuery(symbols)
@@ -24,20 +25,6 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         caps = query.capacitors().all()
         power = query.filter(lib_id__startswith="power:").all()
     """
-
-    def by_reference(self, reference: str) -> SymbolInstance | None:
-        """Get symbol by reference designator.
-
-        Args:
-            reference: Reference designator (e.g., "U1", "R1", "C1")
-
-        Returns:
-            Symbol with matching reference, or None
-
-        Example:
-            u1 = query.by_reference("U1")
-        """
-        return self.filter(reference=reference).first()
 
     def by_lib_id(self, lib_id: str) -> SymbolQuery:
         """Filter by library ID.
@@ -53,20 +40,6 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         """
         return cast("SymbolQuery", self.filter(lib_id=lib_id))
 
-    def by_value(self, value: str) -> SymbolQuery:
-        """Filter by value.
-
-        Args:
-            value: Component value (e.g., "10k", "100nF")
-
-        Returns:
-            Query filtered to matching value
-
-        Example:
-            caps_100nf = query.by_value("100nF").all()
-        """
-        return cast("SymbolQuery", self.filter(value=value))
-
     def by_footprint(self, footprint: str) -> SymbolQuery:
         """Filter by footprint.
 
@@ -81,22 +54,6 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
         """
         return cast("SymbolQuery", self.filter(footprint=footprint))
 
-    def capacitors(self) -> SymbolQuery:
-        """Filter to capacitors (C* references).
-
-        Returns:
-            Query filtered to capacitors
-        """
-        return cast("SymbolQuery", self.filter(reference__startswith="C"))
-
-    def resistors(self) -> SymbolQuery:
-        """Filter to resistors (R* references).
-
-        Returns:
-            Query filtered to resistors
-        """
-        return cast("SymbolQuery", self.filter(reference__startswith="R"))
-
     def inductors(self) -> SymbolQuery:
         """Filter to inductors (L* references).
 
@@ -104,22 +61,6 @@ class SymbolQuery(BaseQuery["SymbolInstance"]):
             Query filtered to inductors
         """
         return cast("SymbolQuery", self.filter(reference__startswith="L"))
-
-    def ics(self) -> SymbolQuery:
-        """Filter to ICs (U* references).
-
-        Returns:
-            Query filtered to ICs
-        """
-        return cast("SymbolQuery", self.filter(reference__startswith="U"))
-
-    def connectors(self) -> SymbolQuery:
-        """Filter to connectors (J* references).
-
-        Returns:
-            Query filtered to connectors
-        """
-        return cast("SymbolQuery", self.filter(reference__startswith="J"))
 
     def transistors(self) -> SymbolQuery:
         """Filter to transistors (Q* references).
