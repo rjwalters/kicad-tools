@@ -7,16 +7,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from .base import BaseQuery
+from .base import BaseQuery, ComponentQueryMixin
 
 if TYPE_CHECKING:
     from ..schema.pcb import Footprint
 
 
-class FootprintQuery(BaseQuery["Footprint"]):
+class FootprintQuery(ComponentQueryMixin["Footprint"], BaseQuery["Footprint"]):
     """Query interface for PCB footprints.
 
     Extends BaseQuery with footprint-specific convenience methods.
+    Inherits common component methods from ComponentQueryMixin.
 
     Example:
         query = FootprintQuery(footprints)
@@ -24,20 +25,6 @@ class FootprintQuery(BaseQuery["Footprint"]):
         smd = query.smd().all()
         top = query.on_layer("F.Cu").all()
     """
-
-    def by_reference(self, reference: str) -> Footprint | None:
-        """Get footprint by reference designator.
-
-        Args:
-            reference: Reference designator (e.g., "U1", "R1", "C1")
-
-        Returns:
-            Footprint with matching reference, or None
-
-        Example:
-            u1 = query.by_reference("U1")
-        """
-        return self.filter(reference=reference).first()
 
     def by_name(self, name: str) -> FootprintQuery:
         """Filter by footprint name.
@@ -52,20 +39,6 @@ class FootprintQuery(BaseQuery["Footprint"]):
             r0402 = query.by_name("Resistor_SMD:R_0402_1005Metric").all()
         """
         return cast("FootprintQuery", self.filter(name=name))
-
-    def by_value(self, value: str) -> FootprintQuery:
-        """Filter by value.
-
-        Args:
-            value: Component value (e.g., "10k", "100nF")
-
-        Returns:
-            Query filtered to matching value
-
-        Example:
-            caps_100nf = query.by_value("100nF").all()
-        """
-        return cast("FootprintQuery", self.filter(value=value))
 
     def on_layer(self, layer: str) -> FootprintQuery:
         """Filter by layer.
@@ -112,38 +85,6 @@ class FootprintQuery(BaseQuery["Footprint"]):
             Query filtered to through-hole footprints
         """
         return cast("FootprintQuery", self.filter(attr="through_hole"))
-
-    def capacitors(self) -> FootprintQuery:
-        """Filter to capacitors (C* references).
-
-        Returns:
-            Query filtered to capacitors
-        """
-        return cast("FootprintQuery", self.filter(reference__startswith="C"))
-
-    def resistors(self) -> FootprintQuery:
-        """Filter to resistors (R* references).
-
-        Returns:
-            Query filtered to resistors
-        """
-        return cast("FootprintQuery", self.filter(reference__startswith="R"))
-
-    def ics(self) -> FootprintQuery:
-        """Filter to ICs (U* references).
-
-        Returns:
-            Query filtered to ICs
-        """
-        return cast("FootprintQuery", self.filter(reference__startswith="U"))
-
-    def connectors(self) -> FootprintQuery:
-        """Filter to connectors (J* references).
-
-        Returns:
-            Query filtered to connectors
-        """
-        return cast("FootprintQuery", self.filter(reference__startswith="J"))
 
     def with_prefix(self, prefix: str) -> FootprintQuery:
         """Filter by reference prefix.
