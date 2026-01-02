@@ -50,7 +50,15 @@ from .interface import (
 )
 
 # MCU blocks
-from .mcu import MCUBlock, ResetButton, create_reset_button
+from .mcu import (
+    BootModeSelector,
+    MCUBlock,
+    ResetButton,
+    create_esp32_boot,
+    create_generic_boot,
+    create_reset_button,
+    create_stm32_boot,
+)
 
 # Power blocks
 from .power import (
@@ -59,10 +67,12 @@ from .power import (
     DecouplingCaps,
     LDOBlock,
     USBPowerInput,
-    create_3v3_ldo,
+    VoltageDivider,
     create_12v_barrel_jack,
+    create_3v3_ldo,
     create_lipo_battery,
     create_usb_power,
+    create_voltage_divider,
 )
 
 # Timing blocks
@@ -86,10 +96,12 @@ __all__ = [
     "BarrelJackInput",
     "USBPowerInput",
     "BatteryInput",
+    "VoltageDivider",
     "create_3v3_ldo",
     "create_12v_barrel_jack",
     "create_usb_power",
     "create_lipo_battery",
+    "create_voltage_divider",
     # Timing
     "OscillatorBlock",
     "CrystalOscillator",
@@ -109,7 +121,11 @@ __all__ = [
     "create_usb_micro_b",
     "create_i2c_pullups",
     # MCU
+    "BootModeSelector",
     "MCUBlock",
     "ResetButton",
+    "create_esp32_boot",
+    "create_generic_boot",
     "create_reset_button",
+    "create_stm32_boot",
 ]
