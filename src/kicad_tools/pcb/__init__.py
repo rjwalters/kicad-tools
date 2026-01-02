@@ -8,6 +8,9 @@ This module provides tools for *creating and editing* PCB content:
 - Manufacturer design rule helpers (Seeed Fusion, etc.)
 
 For *reading and parsing* existing PCB files, use ``kicad_tools.schema.pcb``.
+
+Block-based layout is available via the ``blocks`` subpackage:
+    from kicad_tools.pcb.blocks import MCUBlock, LDOBlock, PCBLayout
 """
 
 from .editor import (
@@ -19,6 +22,7 @@ from .editor import (
     Via,
     Zone,
 )
+from .exporter import KiCadPCBExporter, update_pcb_placements
 from .footprints import (
     Footprint,
     FootprintLibrary,
@@ -26,6 +30,7 @@ from .footprints import (
     get_footprint_pads,
     get_library,
 )
+from .layout import PCBLayout
 
 __all__ = [
     # Editor
@@ -42,4 +47,9 @@ __all__ = [
     "PadInfo",
     "get_library",
     "get_footprint_pads",
+    # Layout
+    "PCBLayout",
+    # Exporter
+    "KiCadPCBExporter",
+    "update_pcb_placements",
 ]
