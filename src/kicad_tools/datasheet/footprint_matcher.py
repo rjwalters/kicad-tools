@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.utils.scoring import adjust_confidence
+
 from .package import PackageInfo
 
 
@@ -205,18 +207,19 @@ class FootprintMatcher:
             params["ep_length"] = package.exposed_pad[1]
 
         # Calculate confidence based on available information
-        confidence = 0.5  # Base confidence
-        if package.pitch > 0:
-            confidence += 0.2
-        if package.body_width > 0 and package.body_length > 0:
-            confidence += 0.2
-        if package.confidence > 0.7:
-            confidence += 0.1
+        pitch_bonus = 0.2 if package.pitch > 0 else 0.0
+        body_bonus = 0.2 if package.body_width > 0 and package.body_length > 0 else 0.0
+        pkg_confidence_bonus = 0.1 if package.confidence > 0.7 else 0.0
+
+        confidence = adjust_confidence(
+            0.5,  # Base confidence
+            bonus=pitch_bonus + body_bonus + pkg_confidence_bonus,
+        )
 
         return GeneratorSuggestion(
             generator=pkg_type,
             params=params,
-            confidence=min(confidence, 1.0),
+            confidence=confidence,
         )
 
     def _generate_footprint_patterns(
@@ -354,25 +357,24 @@ class FootprintMatcher:
         base_confidence: float,
         dimension_match: dict[str, bool],
     ) -> float:
-        """Calculate final confidence score."""
-        confidence = base_confidence
+        """Calculate final confidence score using unified scoring."""
+        # Pin count mismatch is a major penalty
+        pin_multiplier = 1.0 if dimension_match.get("pin_count", False) else 0.5
 
-        # Adjust based on dimension matches
-        if dimension_match["pin_count"]:
-            confidence *= 1.0  # Pin count is expected to match
-        else:
-            confidence *= 0.5  # Major penalty for pin mismatch
+        # Calculate bonuses for other dimension matches
+        bonus = 0.0
+        if dimension_match.get("body_size", False):
+            bonus += 0.05
+        if dimension_match.get("pitch", False):
+            bonus += 0.03
+        if dimension_match.get("type", False):
+            bonus += 0.02
 
-        if dimension_match["body_size"]:
-            confidence += 0.05
-
-        if dimension_match["pitch"]:
-            confidence += 0.03
-
-        if dimension_match["type"]:
-            confidence += 0.02
-
-        return min(confidence, 1.0)
+        return adjust_confidence(
+            base_confidence,
+            multiplier=pin_multiplier,
+            bonus=bonus,
+        )
 
     def get_all_suggestions(
         self,

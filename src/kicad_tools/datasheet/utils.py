@@ -4,6 +4,8 @@ Utility functions for datasheet processing.
 
 from __future__ import annotations
 
+from kicad_tools.utils.scoring import calculate_string_confidence
+
 
 def calculate_part_confidence(query: str, part_number: str) -> float:
     """
@@ -21,12 +23,12 @@ def calculate_part_confidence(query: str, part_number: str) -> float:
     Returns:
         Confidence score between 0.0 and 1.0
     """
-    query_lower = query.lower()
-    part_lower = (part_number or "").lower()
-
-    if query_lower == part_lower:
-        return 1.0
-    elif query_lower in part_lower or part_lower in query_lower:
-        return 0.9
-    else:
-        return 0.7
+    result = calculate_string_confidence(
+        query,
+        part_number or "",
+        case_sensitive=False,
+        exact_score=1.0,
+        substring_score=0.9,
+        no_match_score=0.7,
+    )
+    return result.confidence
