@@ -80,7 +80,7 @@ from .optimizer import (
     OptimizationConfig,
     OptimizationStats,
     TraceOptimizer,
-)
+)  # noqa: F401 - optimizer is now a package
 from .pathfinder import AStarNode, Router
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from .rules import (
