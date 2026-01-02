@@ -16,6 +16,7 @@ from kicad_tools.schematic.blocks import (
     MCUBlock,
     OscillatorBlock,
     Port,
+    ResetButton,
     USBConnector,
     USBPowerInput,
     create_3v3_ldo,
@@ -24,6 +25,7 @@ from kicad_tools.schematic.blocks import (
     create_lipo_battery,
     create_mclk_oscillator,
     create_power_led,
+    create_reset_button,
     create_status_led,
     create_swd_header,
     create_tag_connect_header,
@@ -1166,9 +1168,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_pfet(self, mock_schematic):
         """Create barrel jack with P-FET protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="12V", protection="pfet"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="12V", protection="pfet")
 
         assert jack.schematic == mock_schematic
         assert jack.x == 100
@@ -1182,9 +1182,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_diode(self, mock_schematic):
         """Create barrel jack with diode protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="9V", protection="diode"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="9V", protection="diode")
 
         assert "JACK" in jack.components
         assert "D" in jack.components
@@ -1193,9 +1191,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_no_protection(self, mock_schematic):
         """Create barrel jack without protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="5V", protection="none"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="5V", protection="none")
 
         assert "JACK" in jack.components
         assert "C_FILT" in jack.components
@@ -1257,9 +1253,7 @@ class TestUSBPowerInputMocked:
 
     def test_usb_power_creation_fuse(self, mock_schematic):
         """Create USB power input with fuse protection."""
-        usb = USBPowerInput(
-            mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF"
-        )
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF")
 
         assert usb.schematic == mock_schematic
         assert "VBUS_IN" in usb.ports
@@ -1369,9 +1363,7 @@ class TestBatteryInputMocked:
 
     def test_battery_input_creation_diode(self, mock_schematic):
         """Create battery input with diode protection."""
-        batt = BatteryInput(
-            mock_schematic, x=100, y=100, voltage="7.4V", protection="diode"
-        )
+        batt = BatteryInput(mock_schematic, x=100, y=100, voltage="7.4V", protection="diode")
 
         assert "CONN" in batt.components
         assert "D" in batt.components
@@ -1712,7 +1704,9 @@ class TestUSBConnectorMocked:
 
         # Verify add_symbol was called with custom values
         calls = mock_schematic.add_symbol.call_args_list
-        tvs_calls = [c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)]
+        tvs_calls = [
+            c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)
+        ]
         assert len(tvs_calls) >= 1
 
     def test_usb_connector_port_lookup(self, mock_schematic):
@@ -1793,9 +1787,7 @@ class TestUSBConnectorFactoryFunctions:
 
     def test_create_usb_type_c_with_vbus_protection(self, mock_schematic):
         """Create USB Type-C with VBUS protection."""
-        usb = create_usb_type_c(
-            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
-        )
+        usb = create_usb_type_c(mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True)
         assert usb.vbus_protection is True
 
     def test_create_usb_micro_b(self, mock_schematic):
@@ -1811,7 +1803,306 @@ class TestUSBConnectorFactoryFunctions:
 
     def test_create_usb_micro_b_with_vbus_protection(self, mock_schematic):
         """Create USB Micro-B with VBUS protection."""
-        usb = create_usb_micro_b(
-            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
-        )
+        usb = create_usb_micro_b(mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True)
         assert usb.vbus_protection is True
+
+
+class TestResetButtonMocked:
+    """Tests for ResetButton with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "SW_Push" in str(symbol) or "Switch" in str(symbol):
+                # Tactile switch pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),  # Top
+                    "2": (x, y + 5),  # Bottom
+                }.get(name, (0, 0))
+            elif "TVS" in str(symbol) or "D_TVS" in str(symbol):
+                # TVS diode pins
+                comp.pin_position.side_effect = lambda name: {
+                    "A": (x - 5, y),
+                    "K": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Resistor or capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),  # Top
+                    "2": (x, y + 5),  # Bottom
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_reset_button_creation_active_low(self, mock_schematic):
+        """Create reset button with active-low configuration (default)."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            pullup_value="10k",
+            debounce_cap="100nF",
+            ref_prefix="SW",
+        )
+
+        assert reset.schematic == mock_schematic
+        assert reset.x == 100
+        assert reset.y == 100
+        assert reset.active_low is True
+        assert reset.esd_protection is False
+        assert "VCC" in reset.ports
+        assert "NRST" in reset.ports
+        assert "GND" in reset.ports
+        assert "RST" not in reset.ports  # Active-low uses NRST
+        assert "SW" in reset.components
+        assert "R" in reset.components
+        assert "C" in reset.components
+
+    def test_reset_button_creation_active_high(self, mock_schematic):
+        """Create reset button with active-high configuration."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            active_low=False,
+            ref_prefix="SW",
+        )
+
+        assert reset.active_low is False
+        assert "VCC" in reset.ports
+        assert "RST" in reset.ports  # Active-high uses RST
+        assert "GND" in reset.ports
+        assert "NRST" not in reset.ports
+
+    def test_reset_button_with_esd_protection(self, mock_schematic):
+        """Create reset button with ESD protection."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            esd_protection=True,
+            ref_prefix="SW",
+        )
+
+        assert reset.esd_protection is True
+        assert "TVS" in reset.components
+        assert reset.tvs is not None
+
+    def test_reset_button_without_esd_protection(self, mock_schematic):
+        """Create reset button without ESD protection."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            esd_protection=False,
+            ref_prefix="SW",
+        )
+
+        assert reset.esd_protection is False
+        assert "TVS" not in reset.components
+        assert reset.tvs is None
+
+    def test_reset_button_adds_wires(self, mock_schematic):
+        """Reset button wires components together."""
+        ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+        # Should add wires for:
+        # - resistor to switch
+        # - switch to cap (horizontal + vertical)
+        # - switch bottom to cap bottom (horizontal + vertical)
+        # - junction at reset node
+        assert mock_schematic.add_wire.call_count >= 4
+        assert mock_schematic.add_junction.called
+
+    def test_reset_button_esd_adds_more_wires(self, mock_schematic):
+        """Reset button with ESD adds extra wires for TVS."""
+        ResetButton(mock_schematic, x=100, y=100, esd_protection=False, ref_prefix="SW")
+        base_wire_count = mock_schematic.add_wire.call_count
+
+        mock_schematic.add_wire.reset_mock()
+        ResetButton(mock_schematic, x=100, y=100, esd_protection=True, ref_prefix="SW")
+        esd_wire_count = mock_schematic.add_wire.call_count
+
+        # ESD version should have more wires (TVS anode connections)
+        assert esd_wire_count > base_wire_count
+
+    def test_reset_button_connect_to_rails_active_low(self, mock_schematic):
+        """Connect active-low reset button to power rails."""
+        reset = ResetButton(mock_schematic, x=100, y=100, active_low=True, ref_prefix="SW")
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for: VCC, GND (switch), GND (cap)
+        assert mock_schematic.add_wire.call_count >= 3
+        # Should add junctions by default
+        assert mock_schematic.add_junction.called
+
+    def test_reset_button_connect_to_rails_active_high(self, mock_schematic):
+        """Connect active-high reset button to power rails."""
+        reset = ResetButton(mock_schematic, x=100, y=100, active_low=False, ref_prefix="SW")
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for: GND (resistor), VCC (switch), VCC (cap)
+        assert mock_schematic.add_wire.call_count >= 3
+        assert mock_schematic.add_junction.called
+
+    def test_reset_button_connect_with_esd(self, mock_schematic):
+        """Connect reset button with ESD to rails includes TVS cathode."""
+        reset = ResetButton(mock_schematic, x=100, y=100, esd_protection=True, ref_prefix="SW")
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for: VCC, GND (switch), GND (cap), GND (TVS cathode)
+        assert mock_schematic.add_wire.call_count >= 4
+        # Should add junctions including for TVS
+        assert mock_schematic.add_junction.call_count >= 4
+
+    def test_reset_button_connect_no_junctions(self, mock_schematic):
+        """Connect reset button without junctions."""
+        reset = ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        assert not mock_schematic.add_junction.called
+
+    def test_reset_button_custom_values(self, mock_schematic):
+        """Create reset button with custom component values."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            pullup_value="4.7k",
+            debounce_cap="220nF",
+            ref_prefix="SW",
+        )
+
+        # Verify components were created
+        assert "SW" in reset.components
+        assert "R" in reset.components
+        assert "C" in reset.components
+
+    def test_reset_button_custom_refs(self, mock_schematic):
+        """Create reset button with custom reference designators."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref_prefix="SW2",
+            resistor_ref_start=5,
+            cap_ref_start=10,
+            tvs_ref_start=3,
+            esd_protection=True,
+        )
+
+        # Verify components were created
+        assert "SW" in reset.components
+        assert "R" in reset.components
+        assert "C" in reset.components
+        assert "TVS" in reset.components
+
+    def test_reset_button_port_lookup(self, mock_schematic):
+        """Reset button port() method works."""
+        reset = ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+
+        vcc_pos = reset.port("VCC")
+        assert isinstance(vcc_pos, tuple)
+        assert len(vcc_pos) == 2
+
+        nrst_pos = reset.port("NRST")
+        assert isinstance(nrst_pos, tuple)
+
+    def test_reset_button_port_not_found(self, mock_schematic):
+        """Reset button raises KeyError for unknown port."""
+        reset = ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+
+        with pytest.raises(KeyError) as exc:
+            reset.port("NONEXISTENT")
+        assert "NONEXISTENT" in str(exc.value)
+
+    def test_reset_button_custom_tvs_value(self, mock_schematic):
+        """Create reset button with custom TVS value."""
+        ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            esd_protection=True,
+            tvs_value="ESD9B5.0ST5G",
+            ref_prefix="SW",
+        )
+
+        # Verify TVS was created with custom value
+        calls = mock_schematic.add_symbol.call_args_list
+        tvs_calls = [c for c in calls if "TVS" in str(c) or "ESD9B5.0ST5G" in str(c)]
+        assert len(tvs_calls) >= 1
+
+
+class TestResetButtonFactoryFunction:
+    """Tests for create_reset_button factory function."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_create_reset_button(self, mock_schematic):
+        """Create reset button via factory."""
+        reset = create_reset_button(mock_schematic, x=100, y=100, ref="SW1")
+        assert isinstance(reset, ResetButton)
+        assert reset.active_low is True
+        assert reset.esd_protection is False
+
+    def test_create_reset_button_with_custom_values(self, mock_schematic):
+        """Create reset button with custom values via factory."""
+        reset = create_reset_button(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="SW1",
+            pullup_value="4.7k",
+            debounce_cap="220nF",
+        )
+        assert isinstance(reset, ResetButton)
+
+    def test_create_reset_button_with_esd(self, mock_schematic):
+        """Create reset button with ESD protection via factory."""
+        reset = create_reset_button(mock_schematic, x=100, y=100, ref="SW1", with_esd=True)
+        assert isinstance(reset, ResetButton)
+        assert reset.esd_protection is True
+        assert "TVS" in reset.components
+
+    def test_create_reset_button_without_esd(self, mock_schematic):
+        """Create reset button without ESD protection via factory."""
+        reset = create_reset_button(mock_schematic, x=100, y=100, ref="SW1", with_esd=False)
+        assert isinstance(reset, ResetButton)
+        assert reset.esd_protection is False
+        assert "TVS" not in reset.components
