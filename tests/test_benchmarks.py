@@ -15,6 +15,20 @@ from pathlib import Path
 
 import pytest
 
+# Check if pytest-benchmark is available
+try:
+    import pytest_benchmark  # noqa: F401
+
+    HAS_BENCHMARK = True
+except ImportError:
+    HAS_BENCHMARK = False
+
+# Marker to skip tests when pytest-benchmark is not installed
+requires_benchmark = pytest.mark.skipif(
+    not HAS_BENCHMARK,
+    reason="pytest-benchmark not installed (install with: pip install pytest-benchmark)",
+)
+
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.schematic import Schematic
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
@@ -232,6 +246,7 @@ def xlarge_pcb_content() -> str:
 # --- S-Expression Parsing Benchmarks ---
 
 
+@requires_benchmark
 class TestSexpParseBenchmarks:
     """Benchmarks for S-expression parsing."""
 
@@ -279,6 +294,7 @@ class TestSexpParseBenchmarks:
 # --- Schematic Loading Benchmarks ---
 
 
+@requires_benchmark
 class TestSchematicLoadBenchmarks:
     """Benchmarks for schematic loading (file to schema objects)."""
 
@@ -322,6 +338,7 @@ class TestSchematicLoadBenchmarks:
 # --- PCB Loading Benchmarks ---
 
 
+@requires_benchmark
 class TestPCBLoadBenchmarks:
     """Benchmarks for PCB loading (file to schema objects)."""
 
@@ -365,6 +382,7 @@ class TestPCBLoadBenchmarks:
 # --- Query Benchmarks ---
 
 
+@requires_benchmark
 class TestQueryBenchmarks:
     """Benchmarks for query operations."""
 
@@ -436,6 +454,7 @@ class TestQueryBenchmarks:
 # --- Serialization Benchmarks ---
 
 
+@requires_benchmark
 class TestSerializationBenchmarks:
     """Benchmarks for S-expression serialization."""
 
