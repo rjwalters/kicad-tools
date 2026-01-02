@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from ..models import DatasheetResult
+from ..utils import calculate_part_confidence
 from .base import DatasheetSource
 
 logger = logging.getLogger(__name__)
@@ -154,17 +155,7 @@ class OctopartDatasheetSource(DatasheetSource):
                 for ds in datasheets:
                     url = ds.get("url", "")
                     if url:
-                        # Calculate confidence
-                        confidence = 1.0
-                        query_lower = part_number.lower()
-                        mpn_lower = mpn.lower()
-
-                        if query_lower == mpn_lower:
-                            confidence = 1.0
-                        elif query_lower in mpn_lower or mpn_lower in query_lower:
-                            confidence = 0.9
-                        else:
-                            confidence = 0.7
+                        confidence = calculate_part_confidence(part_number, mpn)
 
                         results.append(
                             DatasheetResult(
