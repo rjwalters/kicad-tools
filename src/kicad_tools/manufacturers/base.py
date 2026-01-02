@@ -6,6 +6,52 @@ manufacturer profiles that can be used across different fabrication houses.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+# Data directory containing YAML configuration files
+_DATA_DIR = Path(__file__).parent / "data"
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file, with graceful fallback if pyyaml is not installed."""
+    try:
+        import yaml
+    except ImportError as e:
+        raise ImportError(
+            "PyYAML is required to load manufacturer configurations from YAML. "
+            "Install it with: pip install pyyaml  or  pip install kicad-tools[constraints]"
+        ) from e
+
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, "DesignRules"]:
+    """
+    Load design rules from a YAML configuration file.
+
+    Args:
+        manufacturer_id: Manufacturer identifier (e.g., "jlcpcb", "seeed")
+
+    Returns:
+        Dict mapping configuration name to DesignRules instance
+
+    Raises:
+        FileNotFoundError: If configuration file doesn't exist
+        ImportError: If pyyaml is not installed
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}.yaml"
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"No configuration file found for manufacturer: {manufacturer_id}")
+
+    data = _load_yaml(yaml_path)
+    rules = {}
+
+    for config_name, config_data in data.get("design_rules", {}).items():
+        rules[config_name] = DesignRules(**config_data)
+
+    return rules
 
 
 @dataclass

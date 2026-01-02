@@ -1,0 +1,92 @@
+# Seeed Fusion Design Rules Configuration
+# Source: https://www.seeedstudio.com/fusion_pcb.html
+#         https://support.seeedstudio.com/knowledgebase/articles/447362-fusion-pcb-specification
+#
+# All measurements in millimeters unless otherwise noted.
+# Note: Seeed values are slightly more conservative than JLCPCB.
+
+design_rules:
+  2layer_1oz:
+    min_trace_width_mm: 0.1524      # 6 mil
+    min_clearance_mm: 0.1524        # 6 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15   # 6 mil
+    min_silkscreen_height_mm: 0.8   # 32 mil
+    min_solder_mask_dam_mm: 0.1
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0
+
+  2layer_2oz:
+    min_trace_width_mm: 0.2         # 8 mil for 2oz
+    min_clearance_mm: 0.2           # 8 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.0
+
+  4layer_1oz:
+    min_trace_width_mm: 0.1524      # 6 mil (conservative)
+    min_clearance_mm: 0.1524        # 6 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+
+  4layer_2oz:
+    min_trace_width_mm: 0.2         # 8 mil for 2oz outer
+    min_clearance_mm: 0.2           # 8 mil
+    min_via_drill_mm: 0.3
+    min_via_diameter_mm: 0.6
+    min_annular_ring_mm: 0.15
+    min_hole_diameter_mm: 0.3
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 1.0
+
+  6layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.25
+    min_via_diameter_mm: 0.5
+    min_annular_ring_mm: 0.125
+    min_hole_diameter_mm: 0.25
+    max_hole_diameter_mm: 6.3
+    min_copper_to_edge_mm: 0.5
+    min_hole_to_edge_mm: 0.5
+    min_silkscreen_width_mm: 0.15
+    min_silkscreen_height_mm: 0.8
+    min_solder_mask_dam_mm: 0.1
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
