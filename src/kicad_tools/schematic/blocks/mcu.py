@@ -126,9 +126,7 @@ class MCUBlock(CircuitBlock):
 
         for i, cap_value in enumerate(bypass_caps):
             cap_ref = f"{cap_ref_prefix}{cap_ref_start + i}"
-            cap = sch.add_symbol(
-                cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value
-            )
+            cap = sch.add_symbol(cap_symbol, cap_x + i * cap_spacing, cap_y, cap_ref, cap_value)
             self.bypass_caps.append(cap)
             self.components[f"C{i + 1}"] = cap
 
@@ -272,8 +270,7 @@ class MCUBlock(CircuitBlock):
                 if pin.name:
                     pin_upper = pin.name.upper()
                     is_power = any(
-                        pin_upper.startswith(p)
-                        for p in self.VDD_PATTERNS + self.GND_PATTERNS
+                        pin_upper.startswith(p) for p in self.VDD_PATTERNS + self.GND_PATTERNS
                     )
                     if not is_power:
                         gpio_pins.append(pin.name)
@@ -464,7 +461,7 @@ class ResetButton(CircuitBlock):
         sch.add_wire((c_pin2[0], sw_pin2[1]), c_pin2)  # Vertical
 
         # Add TVS diode if requested
-        self.tvs: "SymbolInstance | None" = None
+        self.tvs: SymbolInstance | None = None
         if esd_protection:
             tvs_ref = f"D{tvs_ref_start}"
             tvs_x = x + tvs_offset_x
