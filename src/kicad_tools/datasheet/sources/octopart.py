@@ -12,7 +12,7 @@ from pathlib import Path
 
 from ..models import DatasheetResult
 from ..utils import calculate_part_confidence
-from .base import DatasheetSource, requires_requests
+from .base import HTTPDatasheetSource, requires_requests
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 OCTOPART_API_URL = "https://octopart.com/api/v4/rest/search"
 
 
-class OctopartDatasheetSource(DatasheetSource):
+class OctopartDatasheetSource(HTTPDatasheetSource):
     """
     Datasheet source using Octopart API.
 
@@ -54,28 +54,20 @@ class OctopartDatasheetSource(DatasheetSource):
             api_key: Octopart API key (optional, but required for API access)
             timeout: Request timeout in seconds
         """
+        super().__init__(timeout=timeout)
         self.api_key = api_key
-        self.timeout = timeout
-        self._session = None
         self._last_request_time = 0.0
 
     @property
     def name(self) -> str:
         return "octopart"
 
-    def _get_session(self):
-        """Get or create requests session."""
-        if self._session is None:
-            import requests
-
-            self._session = requests.Session()
-            self._session.headers.update(
-                {
-                    "Accept": "application/json",
-                    "User-Agent": ("kicad-tools/1.0 (https://github.com/rjwalters/kicad-tools)"),
-                }
-            )
-        return self._session
+    def _get_default_headers(self) -> dict[str, str]:
+        """Get default HTTP headers for Octopart requests."""
+        return {
+            "Accept": "application/json",
+            "User-Agent": "kicad-tools/1.0 (https://github.com/rjwalters/kicad-tools)",
+        }
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
@@ -162,6 +154,8 @@ class OctopartDatasheetSource(DatasheetSource):
         """
         Download a datasheet found via Octopart.
 
+        Includes rate limiting to comply with Octopart's API limits.
+
         Args:
             result: The DatasheetResult to download
             output_path: Where to save the file
@@ -172,24 +166,5 @@ class OctopartDatasheetSource(DatasheetSource):
         Raises:
             DatasheetDownloadError: If download fails
         """
-        session = self._get_session()
         self._rate_limit()
-        return self._download_file(
-            session=session,
-            url=result.datasheet_url,
-            output_path=output_path,
-            timeout=self.timeout,
-        )
-
-    def close(self) -> None:
-        """Close the HTTP session."""
-        if self._session:
-            self._session.close()
-            self._session = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-        return False
+        return super().download(result, output_path)

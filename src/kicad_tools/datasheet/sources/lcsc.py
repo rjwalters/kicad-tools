@@ -7,12 +7,11 @@ Uses the existing LCSCClient to fetch datasheet URLs from JLCPCB's API.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..models import DatasheetResult
 from ..utils import calculate_part_confidence
-from .base import DatasheetSource, requires_requests
+from .base import HTTPDatasheetSource, requires_requests
 
 if TYPE_CHECKING:
     pass
@@ -20,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class LCSCDatasheetSource(DatasheetSource):
+class LCSCDatasheetSource(HTTPDatasheetSource):
     """
     Datasheet source using LCSC/JLCPCB API.
 
@@ -41,34 +40,26 @@ class LCSCDatasheetSource(DatasheetSource):
         Args:
             timeout: Request timeout in seconds
         """
-        self.timeout = timeout
-        self._session = None
+        super().__init__(timeout=timeout)
 
     @property
     def name(self) -> str:
         return "lcsc"
 
-    def _get_session(self):
-        """Get or create requests session."""
-        if self._session is None:
-            import requests
-
-            self._session = requests.Session()
-            self._session.headers.update(
-                {
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Content-Type": "application/json",
-                    "Origin": "https://jlcpcb.com",
-                    "Referer": "https://jlcpcb.com/parts",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                }
-            )
-        return self._session
+    def _get_default_headers(self) -> dict[str, str]:
+        """Get default HTTP headers for LCSC requests."""
+        return {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/json",
+            "Origin": "https://jlcpcb.com",
+            "Referer": "https://jlcpcb.com/parts",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
 
     @requires_requests
     def search(self, part_number: str) -> list[DatasheetResult]:
@@ -124,39 +115,3 @@ class LCSCDatasheetSource(DatasheetSource):
             logger.warning(f"LCSC search failed for '{part_number}': {e}")
 
         return results
-
-    @requires_requests
-    def download(self, result: DatasheetResult, output_path: Path) -> Path:
-        """
-        Download a datasheet from LCSC.
-
-        Args:
-            result: The DatasheetResult to download
-            output_path: Where to save the file
-
-        Returns:
-            Path to the downloaded file
-
-        Raises:
-            DatasheetDownloadError: If download fails
-        """
-        session = self._get_session()
-        return self._download_file(
-            session=session,
-            url=result.datasheet_url,
-            output_path=output_path,
-            timeout=self.timeout,
-        )
-
-    def close(self) -> None:
-        """Close the HTTP session."""
-        if self._session:
-            self._session.close()
-            self._session = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-        return False

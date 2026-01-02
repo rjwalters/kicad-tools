@@ -8,15 +8,17 @@ import logging
 from abc import ABC, abstractmethod
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 if TYPE_CHECKING:
     from ..models import DatasheetResult
 
 logger = logging.getLogger(__name__)
 
+F = TypeVar("F", bound=Callable)
 
-def requires_requests(func):
+
+def requires_requests(func: F) -> F:
     """
     Decorator to check if requests library is available.
 
@@ -35,7 +37,7 @@ def requires_requests(func):
             )
         return func(*args, **kwargs)
 
-    return wrapper
+    return wrapper  # type: ignore[return-value]
 
 
 class DatasheetSource(ABC):
@@ -136,3 +138,105 @@ class DatasheetSource(ABC):
 
     def __str__(self) -> str:
         return self.name
+
+
+class HTTPDatasheetSource(DatasheetSource):
+    """
+    Base class for HTTP-based datasheet sources.
+
+    Provides common session management, download functionality,
+    and context manager support for sources that use HTTP requests.
+
+    Subclasses must implement:
+        - name: The source name
+        - search: Part number search logic
+        - _get_default_headers: HTTP headers for requests
+    """
+
+    def __init__(self, timeout: float = 30.0):
+        """
+        Initialize the HTTP datasheet source.
+
+        Args:
+            timeout: Request timeout in seconds
+        """
+        self.timeout = timeout
+        self._session = None
+
+    @abstractmethod
+    def _get_default_headers(self) -> dict[str, str]:
+        """
+        Get default HTTP headers for requests.
+
+        Returns:
+            Dictionary of HTTP headers
+        """
+        ...
+
+    def _get_session(self):
+        """Get or create requests session with default headers."""
+        if self._session is None:
+            import requests
+
+            self._session = requests.Session()
+            self._session.headers.update(self._get_default_headers())
+        return self._session
+
+    @requires_requests
+    def download(self, result: DatasheetResult, output_path: Path) -> Path:
+        """
+        Download a datasheet to the specified path.
+
+        Args:
+            result: The DatasheetResult to download
+            output_path: Where to save the file
+
+        Returns:
+            Path to the downloaded file
+
+        Raises:
+            DatasheetDownloadError: If download fails
+        """
+        import requests
+
+        from ..exceptions import DatasheetDownloadError
+
+        session = self._get_session()
+
+        try:
+            response = session.get(
+                result.datasheet_url,
+                timeout=self.timeout,
+                stream=True,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+
+            # Ensure parent directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write to file
+            with open(output_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            logger.info(f"Downloaded datasheet to {output_path}")
+            return output_path
+
+        except requests.RequestException as e:
+            raise DatasheetDownloadError(
+                f"Failed to download datasheet from {result.datasheet_url}: {e}"
+            ) from e
+
+    def close(self) -> None:
+        """Close the HTTP session."""
+        if self._session:
+            self._session.close()
+            self._session = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
