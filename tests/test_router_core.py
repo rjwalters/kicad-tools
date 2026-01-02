@@ -572,6 +572,126 @@ class TestAutorouterRouteAll:
         assert isinstance(routes, list)
 
 
+class TestAutorouterZones:
+    """Tests for zone (copper pour) support."""
+
+    @pytest.fixture
+    def router(self):
+        return Autorouter(width=50.0, height=40.0)
+
+    def test_get_zone_statistics_empty(self, router):
+        """Test zone statistics when no zones added."""
+        stats = router.get_zone_statistics()
+        assert "zones" in stats
+        assert stats["zone_count"] == 0
+
+    def test_clear_zones(self, router):
+        """Test clearing zones."""
+        router.clear_zones()
+        stats = router.get_zone_statistics()
+        assert stats["zone_count"] == 0
+
+
+class TestAutorouterAdvanced:
+    """Tests for advanced routing methods."""
+
+    @pytest.fixture
+    def router_with_nets(self):
+        """Create router with multiple nets."""
+        router = Autorouter(width=50.0, height=40.0)
+
+        pads1 = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        pads2 = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+            {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+        ]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        return router
+
+    def test_route_all_advanced_single_pass(self, router_with_nets):
+        """Test route_all_advanced with single pass."""
+        routes = router_with_nets.route_all_advanced(monte_carlo_trials=0, use_negotiated=False)
+        assert isinstance(routes, list)
+
+    def test_route_all_advanced_negotiated(self, router_with_nets):
+        """Test route_all_advanced with negotiated mode."""
+        routes = router_with_nets.route_all_advanced(monte_carlo_trials=0, use_negotiated=True)
+        assert isinstance(routes, list)
+
+    def test_reset_for_new_trial(self, router_with_nets):
+        """Test resetting router for new trial."""
+        # Route first
+        router_with_nets.route_all()
+        original_routes = len(router_with_nets.routes)
+
+        # Reset
+        router_with_nets._reset_for_new_trial()
+
+        # Routes should be cleared
+        assert router_with_nets.routes == []
+        # Pads should still be tracked
+        assert len(router_with_nets.pads) > 0
+
+
+class TestAutorouterBusDetection:
+    """Tests for bus signal detection."""
+
+    @pytest.fixture
+    def router_with_bus(self):
+        """Create router with bus signals."""
+        router = Autorouter(width=50.0, height=40.0)
+
+        # Add data bus signals
+        for i in range(4):
+            pads = [
+                {"number": "1", "x": 10.0 + i*2, "y": 10.0, "net": 10+i, "net_name": f"DATA[{i}]"},
+                {"number": "2", "x": 10.0 + i*2, "y": 20.0, "net": 10+i, "net_name": f"DATA[{i}]"},
+            ]
+            router.add_component(f"U{i}", pads)
+
+        return router
+
+    def test_detect_buses(self, router_with_bus):
+        """Test bus detection from net names."""
+        buses = router_with_bus.detect_buses(min_bus_width=2)
+        assert isinstance(buses, list)
+
+    def test_get_bus_analysis(self, router_with_bus):
+        """Test getting bus analysis summary."""
+        analysis = router_with_bus.get_bus_analysis()
+        assert isinstance(analysis, dict)
+
+
+class TestAutorouterDiffPair:
+    """Tests for differential pair support."""
+
+    @pytest.fixture
+    def router(self):
+        return Autorouter(width=50.0, height=40.0)
+
+    def test_detect_diff_pairs(self, router):
+        """Test differential pair detection."""
+        # Add differential pair signals
+        pads_p = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "USB_D+"},
+            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "USB_D+"},
+        ]
+        pads_n = [
+            {"number": "1", "x": 10.0, "y": 12.0, "net": 2, "net_name": "USB_D-"},
+            {"number": "2", "x": 20.0, "y": 12.0, "net": 2, "net_name": "USB_D-"},
+        ]
+        router.add_component("J1", pads_p)
+        router.add_component("J2", pads_n)
+
+        pairs = router.detect_differential_pairs()
+        assert isinstance(pairs, list)
+
+
 class TestNegotiatedModePadObstacles:
     """Tests for pad obstacle handling in negotiated routing mode.
 
