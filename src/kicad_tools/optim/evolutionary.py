@@ -31,14 +31,9 @@ import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
-from kicad_tools.optim import (
-    Component,
-    PlacementConfig,
-    PlacementOptimizer,
-    Polygon,
-    Spring,
-    Vector2D,
-)
+from kicad_tools.optim.geometry import Polygon, Vector2D
+from kicad_tools.optim.models import Component, PlacementConfig, Spring
+from kicad_tools.optim.placement import PlacementOptimizer
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
