@@ -172,9 +172,7 @@ class DebugHeader(CircuitBlock):
                     r_x = pin_pos[0] - resistor_offset
                     r_y = pin_pos[1]
 
-                    resistor = sch.add_symbol(
-                        resistor_symbol, r_x, r_y, r_ref, resistor_value
-                    )
+                    resistor = sch.add_symbol(resistor_symbol, r_x, r_y, r_ref, resistor_value)
                     self.resistors[signal] = resistor
                     self.components[f"R_{signal}"] = resistor
                     r_idx += 1
@@ -196,8 +194,7 @@ class DebugHeader(CircuitBlock):
 
         if self.interface not in valid_configs:
             raise ValueError(
-                f"Invalid interface '{self.interface}'. "
-                f"Valid options: {list(valid_configs.keys())}"
+                f"Invalid interface '{self.interface}'. Valid options: {list(valid_configs.keys())}"
             )
 
         if self.pins not in valid_configs[self.interface]:
@@ -211,11 +208,7 @@ class DebugHeader(CircuitBlock):
         if self.interface == "swd":
             return self.SWD_6PIN_PINOUT if self.pins == 6 else self.SWD_10PIN_PINOUT
         elif self.interface == "tag-connect":
-            return (
-                self.TAG_CONNECT_6PIN_PINOUT
-                if self.pins == 6
-                else self.TAG_CONNECT_10PIN_PINOUT
-            )
+            return self.TAG_CONNECT_6PIN_PINOUT if self.pins == 6 else self.TAG_CONNECT_10PIN_PINOUT
         else:  # jtag
             return self.JTAG_20PIN_PINOUT
 
@@ -453,9 +446,7 @@ class USBConnector(CircuitBlock):
         tvs_offset_x = 20  # Distance to TVS diodes from connector
 
         # Place connector
-        self.connector = sch.add_symbol(
-            connector_symbol, x, y, j_ref, self.connector_type.upper()
-        )
+        self.connector = sch.add_symbol(connector_symbol, x, y, j_ref, self.connector_type.upper())
         self.components = {"CONN": self.connector}
 
         # Get connector pin positions
@@ -478,9 +469,7 @@ class USBConnector(CircuitBlock):
             tvs_x = x + tvs_offset_x
             tvs_y = (conn_pins["D+"][1] + conn_pins["D-"][1]) / 2
 
-            self.esd_tvs = sch.add_symbol(
-                esd_tvs_symbol, tvs_x, tvs_y, tvs_ref, esd_tvs_value
-            )
+            self.esd_tvs = sch.add_symbol(esd_tvs_symbol, tvs_x, tvs_y, tvs_ref, esd_tvs_value)
             self.tvs_diodes["ESD"] = self.esd_tvs
             self.components["TVS_ESD"] = self.esd_tvs
             tvs_idx += 1

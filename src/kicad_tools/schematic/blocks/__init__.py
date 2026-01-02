@@ -59,8 +59,8 @@ from .power import (
     DecouplingCaps,
     LDOBlock,
     USBPowerInput,
-    create_12v_barrel_jack,
     create_3v3_ldo,
+    create_12v_barrel_jack,
     create_lipo_battery,
     create_usb_power,
 )
