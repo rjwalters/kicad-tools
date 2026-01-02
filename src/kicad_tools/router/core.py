@@ -62,6 +62,9 @@ class Autorouter:
         self._bus_router: BusRouter | None = None
         self._diffpair_router: DiffPairRouter | None = None
 
+        # Track iterations used by negotiated routing
+        self.last_iterations_used: int = 0
+
     def add_component(self, ref: str, pads: list[dict]):
         """Add a component's pads."""
         for pad_info in pads:
@@ -238,11 +241,14 @@ class Autorouter:
 
         if overflow == 0:
             print("  No conflicts - routing complete!")
+            self.last_iterations_used = 0
             if progress_callback is not None:
                 progress_callback(1.0, "Routing complete - no conflicts", False)
             return list(self.routes)
 
+        iterations_used = 0
         for iteration in range(1, max_iterations + 1):
+            iterations_used = iteration
             if progress_callback is not None:
                 progress = iteration / (max_iterations + 1)
                 if not progress_callback(
@@ -277,11 +283,13 @@ class Autorouter:
                 print(f"  Convergence achieved at iteration {iteration}!")
                 break
 
+        self.last_iterations_used = iterations_used
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         print("\n=== Negotiated Routing Complete ===")
         print(f"  Total nets: {len(net_order)}")
         print(f"  Successful: {successful_nets}")
         print(f"  Final overflow: {overflow}")
+        print(f"  Iterations used: {iterations_used}")
 
         if progress_callback is not None:
             status = "converged" if overflow == 0 else f"overflow={overflow}"

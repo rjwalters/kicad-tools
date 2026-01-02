@@ -244,7 +244,7 @@ class AdaptiveAutorouter:
             if method == "negotiated":
                 routes = router.route_all_negotiated(max_iterations=max_iterations)
                 overflow = router.grid.get_total_overflow()
-                iterations = max_iterations  # TODO: track actual iterations used
+                iterations = router.last_iterations_used
             else:
                 routes = router.route_all()
                 overflow = 0  # Simple routing doesn't track overflow
