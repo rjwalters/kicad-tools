@@ -32,11 +32,11 @@ Usage:
 # Re-export geometry types
 from ..geometry import Layer, Point, Rectangle
 
-# Re-export primitive types
-from ..primitives import Pad, Port, TraceSegment, Via
-
 # Re-export placement types
 from ..placement import ComponentPlacement, get_footprint_pads
+
+# Re-export primitive types
+from ..primitives import Pad, Port, TraceSegment, Via
 
 # Block classes
 from .base import PCBBlock
