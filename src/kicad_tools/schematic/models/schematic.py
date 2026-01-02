@@ -105,7 +105,7 @@ class Schematic:
             sch.add_symbol("Device:R", 100, 100, "R5", "10k")
             sch.write("power.kicad_sch")
         """
-        from kicad_sexp import parse_file
+        from kicad_tools.sexp import parse_file
 
         path = Path(path)
         if not path.exists():
