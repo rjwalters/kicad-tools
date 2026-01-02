@@ -1,6 +1,5 @@
 """Tests for kicad_tools.utils module."""
 
-import tempfile
 from pathlib import Path
 
 from kicad_tools.utils import ensure_parent_dir
