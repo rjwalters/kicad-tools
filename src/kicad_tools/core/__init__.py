@@ -2,6 +2,7 @@
 
 from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
 
+from .severity import SeverityMixin
 from .sexp_file import (
     load_pcb,
     load_schematic,
@@ -21,4 +22,5 @@ __all__ = [
     "save_pcb",
     "load_symbol_lib",
     "save_symbol_lib",
+    "SeverityMixin",
 ]
