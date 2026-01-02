@@ -4,23 +4,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from kicad_tools.core import SeverityMixin
 
-class Severity(Enum):
+
+class Severity(SeverityMixin, Enum):
     """Violation severity level."""
 
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
-
-    @classmethod
-    def from_string(cls, s: str) -> "Severity":
-        """Parse severity from string."""
-        s_lower = s.lower().strip()
-        if "error" in s_lower:
-            return cls.ERROR
-        elif "warning" in s_lower:
-            return cls.WARNING
-        return cls.INFO
 
 
 class ViolationType(Enum):
