@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,28 @@ if TYPE_CHECKING:
     from ..models import DatasheetResult
 
 logger = logging.getLogger(__name__)
+
+
+def requires_requests(func):
+    """
+    Decorator to check if requests library is available.
+
+    Raises ImportError with installation instructions if requests is not installed.
+    Used by datasheet sources that need HTTP functionality.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            import requests  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "The 'requests' library is required for datasheet operations. "
+                "Install with: pip install kicad-tools[parts]"
+            )
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 class DatasheetSource(ABC):
@@ -109,9 +132,7 @@ class DatasheetSource(ABC):
             return output_path
 
         except requests.RequestException as e:
-            raise DatasheetDownloadError(
-                f"Failed to download datasheet from {url}: {e}"
-            ) from e
+            raise DatasheetDownloadError(f"Failed to download datasheet from {url}: {e}") from e
 
     def __str__(self) -> str:
         return self.name
