@@ -27,6 +27,7 @@ from .base import (
     DesignRules,
     ManufacturerProfile,
     PartsLibrary,
+    load_design_rules_from_yaml,
 )
 from .jlcpcb import JLCPCB_PROFILE
 from .oshpark import OSHPARK_PROFILE
@@ -43,6 +44,7 @@ __all__ = [
     "get_profile",
     "list_manufacturers",
     "get_manufacturer_ids",
+    "load_design_rules_from_yaml",
     # Profiles (for direct access)
     "JLCPCB_PROFILE",
     "SEEED_PROFILE",

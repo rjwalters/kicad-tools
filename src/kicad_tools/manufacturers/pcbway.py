@@ -7,85 +7,13 @@ Source: https://www.pcbway.com/capabilities.html
 
 from .base import (
     AssemblyCapabilities,
-    DesignRules,
     ManufacturerProfile,
     PartsLibrary,
+    load_design_rules_from_yaml,
 )
 
-# PCBWay Design Rules
-# Similar to JLCPCB with some variations
-
-PCBWAY_2LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.127,  # 5 mil
-    min_clearance_mm=0.127,  # 5 mil
-    min_via_drill_mm=0.2,
-    min_via_diameter_mm=0.4,
-    min_annular_ring_mm=0.1,
-    min_hole_diameter_mm=0.2,
-    max_hole_diameter_mm=6.3,
-    min_copper_to_edge_mm=0.25,
-    min_hole_to_edge_mm=0.4,
-    min_silkscreen_width_mm=0.15,
-    min_silkscreen_height_mm=0.8,
-    min_solder_mask_dam_mm=0.08,
-    board_thickness_mm=1.6,
-    outer_copper_oz=1.0,
-    inner_copper_oz=0.0,
-)
-
-PCBWAY_2LAYER_2OZ = DesignRules(
-    min_trace_width_mm=0.2,  # 8 mil for 2oz
-    min_clearance_mm=0.2,  # 8 mil
-    min_via_drill_mm=0.2,
-    min_via_diameter_mm=0.4,
-    min_annular_ring_mm=0.1,
-    min_hole_diameter_mm=0.2,
-    max_hole_diameter_mm=6.3,
-    min_copper_to_edge_mm=0.25,
-    min_hole_to_edge_mm=0.4,
-    min_silkscreen_width_mm=0.15,
-    min_silkscreen_height_mm=0.8,
-    min_solder_mask_dam_mm=0.08,
-    board_thickness_mm=1.6,
-    outer_copper_oz=2.0,
-    inner_copper_oz=0.0,
-)
-
-PCBWAY_4LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.1016,  # 4 mil
-    min_clearance_mm=0.1016,  # 4 mil
-    min_via_drill_mm=0.2,
-    min_via_diameter_mm=0.4,
-    min_annular_ring_mm=0.1,
-    min_hole_diameter_mm=0.2,
-    max_hole_diameter_mm=6.3,
-    min_copper_to_edge_mm=0.25,
-    min_hole_to_edge_mm=0.4,
-    min_silkscreen_width_mm=0.15,
-    min_silkscreen_height_mm=0.8,
-    min_solder_mask_dam_mm=0.08,
-    board_thickness_mm=1.6,
-    outer_copper_oz=1.0,
-    inner_copper_oz=0.5,
-)
-
-PCBWAY_6LAYER_1OZ = DesignRules(
-    min_trace_width_mm=0.0889,  # 3.5 mil
-    min_clearance_mm=0.0889,  # 3.5 mil
-    min_via_drill_mm=0.15,
-    min_via_diameter_mm=0.35,
-    min_annular_ring_mm=0.1,
-    min_hole_diameter_mm=0.15,
-    max_hole_diameter_mm=6.3,
-    min_copper_to_edge_mm=0.25,
-    min_hole_to_edge_mm=0.4,
-    min_silkscreen_width_mm=0.15,
-    min_silkscreen_height_mm=0.8,
-    min_solder_mask_dam_mm=0.08,
-    board_thickness_mm=1.6,
-    outer_copper_oz=1.0,
-    inner_copper_oz=0.5,
-)
+# Load design rules from YAML configuration
+_DESIGN_RULES = load_design_rules_from_yaml("pcbway")
 
 # PCBWay Assembly Capabilities
 PCBWAY_ASSEMBLY = AssemblyCapabilities(
@@ -173,12 +101,7 @@ PCBWAY_PROFILE = ManufacturerProfile(
     id="pcbway",
     name="PCBWay",
     website="https://www.pcbway.com",
-    design_rules={
-        "2layer_1oz": PCBWAY_2LAYER_1OZ,
-        "2layer_2oz": PCBWAY_2LAYER_2OZ,
-        "4layer_1oz": PCBWAY_4LAYER_1OZ,
-        "6layer_1oz": PCBWAY_6LAYER_1OZ,
-    },
+    design_rules=_DESIGN_RULES,
     assembly=PCBWAY_ASSEMBLY,
     parts_library=PCBWAY_PARTS,
     lead_times={

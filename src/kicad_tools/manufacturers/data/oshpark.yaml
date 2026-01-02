@@ -1,0 +1,114 @@
+# OSHPark Design Rules Configuration
+# Source: https://docs.oshpark.com/design-tools/
+#
+# All measurements in millimeters unless otherwise noted.
+# Note: OSHPark is PCB-only, no assembly services.
+
+design_rules:
+  # Standard 2-layer service (purple boards)
+  2layer_1oz:
+    min_trace_width_mm: 0.1524      # 6 mil
+    min_clearance_mm: 0.1524        # 6 mil
+    min_via_drill_mm: 0.254         # 10 mil
+    min_via_diameter_mm: 0.508      # 20 mil (10 mil annular)
+    min_annular_ring_mm: 0.127      # 5 mil
+    min_hole_diameter_mm: 0.254     # 10 mil
+    max_hole_diameter_mm: 6.35      # 250 mil
+    min_copper_to_edge_mm: 0.381    # 15 mil
+    min_hole_to_edge_mm: 0.381      # 15 mil
+    min_silkscreen_width_mm: 0.127  # 5 mil
+    min_silkscreen_height_mm: 0.762 # 30 mil
+    min_solder_mask_dam_mm: 0.102   # 4 mil
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0
+
+  # Alias for standard 2-layer
+  2layer_standard:
+    min_trace_width_mm: 0.1524
+    min_clearance_mm: 0.1524
+    min_via_drill_mm: 0.254
+    min_via_diameter_mm: 0.508
+    min_annular_ring_mm: 0.127
+    min_hole_diameter_mm: 0.254
+    max_hole_diameter_mm: 6.35
+    min_copper_to_edge_mm: 0.381
+    min_hole_to_edge_mm: 0.381
+    min_silkscreen_width_mm: 0.127
+    min_silkscreen_height_mm: 0.762
+    min_solder_mask_dam_mm: 0.102
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0
+
+  # 4-layer service
+  4layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.254         # 10 mil
+    min_via_diameter_mm: 0.508      # 20 mil
+    min_annular_ring_mm: 0.127      # 5 mil
+    min_hole_diameter_mm: 0.254
+    max_hole_diameter_mm: 6.35
+    min_copper_to_edge_mm: 0.381
+    min_hole_to_edge_mm: 0.381
+    min_silkscreen_width_mm: 0.127
+    min_silkscreen_height_mm: 0.762
+    min_solder_mask_dam_mm: 0.102
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+
+  # Swift service (2-layer, faster turnaround)
+  swift:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.254
+    min_via_diameter_mm: 0.508
+    min_annular_ring_mm: 0.127
+    min_hole_diameter_mm: 0.254
+    max_hole_diameter_mm: 6.35
+    min_copper_to_edge_mm: 0.254    # Tighter for Swift
+    min_hole_to_edge_mm: 0.254
+    min_silkscreen_width_mm: 0.127
+    min_silkscreen_height_mm: 0.762
+    min_solder_mask_dam_mm: 0.102
+    board_thickness_mm: 0.8         # 0.8mm for Swift
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0
+
+  # After Dark (black solder mask, 2oz copper)
+  afterdark:
+    min_trace_width_mm: 0.1524      # 6 mil
+    min_clearance_mm: 0.1524        # 6 mil
+    min_via_drill_mm: 0.254
+    min_via_diameter_mm: 0.508
+    min_annular_ring_mm: 0.127
+    min_hole_diameter_mm: 0.254
+    max_hole_diameter_mm: 6.35
+    min_copper_to_edge_mm: 0.381
+    min_hole_to_edge_mm: 0.381
+    min_silkscreen_width_mm: 0.127
+    min_silkscreen_height_mm: 0.762
+    min_solder_mask_dam_mm: 0.102
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0            # 2oz copper
+    inner_copper_oz: 0.0
+
+  # Alias - After Dark is the 2oz option
+  2layer_2oz:
+    min_trace_width_mm: 0.1524
+    min_clearance_mm: 0.1524
+    min_via_drill_mm: 0.254
+    min_via_diameter_mm: 0.508
+    min_annular_ring_mm: 0.127
+    min_hole_diameter_mm: 0.254
+    max_hole_diameter_mm: 6.35
+    min_copper_to_edge_mm: 0.381
+    min_hole_to_edge_mm: 0.381
+    min_silkscreen_width_mm: 0.127
+    min_silkscreen_height_mm: 0.762
+    min_solder_mask_dam_mm: 0.102
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.0
