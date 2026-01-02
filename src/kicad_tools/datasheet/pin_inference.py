@@ -3,12 +3,20 @@ Pin type inference from pin names and patterns.
 
 This module provides automatic detection of KiCad pin types based on
 common naming conventions found in datasheets.
+
+Confidence values follow the unified scoring framework in kicad_tools.utils.scoring:
+- 0.95-1.0: Exact/very high confidence matches
+- 0.8-0.9: High confidence pattern matches
+- 0.6-0.7: Medium confidence (description-based)
+- 0.3: Low confidence fallback
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+
+from kicad_tools.utils.scoring import ConfidenceLevel
 
 # KiCad pin types
 KICAD_PIN_TYPES = {
@@ -266,7 +274,7 @@ def infer_pin_type(
     # Default to bidirectional with low confidence for unknown pins
     return PinTypeMatch(
         pin_type="bidirectional",
-        confidence=0.3,
+        confidence=ConfidenceLevel.VERY_LOW.value,
         matched_pattern=None,
     )
 
