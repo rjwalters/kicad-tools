@@ -11,32 +11,16 @@ import time
 from pathlib import Path
 
 from ..models import DatasheetResult
-from .base import DatasheetSource
+from .base import HTTPDatasheetSource, requires_requests
 
 logger = logging.getLogger(__name__)
-
-
-def _requires_requests(func):
-    """Decorator to check if requests is available."""
-
-    def wrapper(*args, **kwargs):
-        try:
-            import requests  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "The 'requests' library is required for Octopart API access. "
-                "Install with: pip install kicad-tools[parts]"
-            )
-        return func(*args, **kwargs)
-
-    return wrapper
 
 
 # Octopart API endpoint
 OCTOPART_API_URL = "https://octopart.com/api/v4/rest/search"
 
 
-class OctopartDatasheetSource(DatasheetSource):
+class OctopartDatasheetSource(HTTPDatasheetSource):
     """
     Datasheet source using Octopart API.
 
@@ -69,28 +53,20 @@ class OctopartDatasheetSource(DatasheetSource):
             api_key: Octopart API key (optional, but required for API access)
             timeout: Request timeout in seconds
         """
+        super().__init__(timeout=timeout)
         self.api_key = api_key
-        self.timeout = timeout
-        self._session = None
         self._last_request_time = 0.0
 
     @property
     def name(self) -> str:
         return "octopart"
 
-    def _get_session(self):
-        """Get or create requests session."""
-        if self._session is None:
-            import requests
-
-            self._session = requests.Session()
-            self._session.headers.update(
-                {
-                    "Accept": "application/json",
-                    "User-Agent": ("kicad-tools/1.0 (https://github.com/rjwalters/kicad-tools)"),
-                }
-            )
-        return self._session
+    def _get_default_headers(self) -> dict[str, str]:
+        """Get default HTTP headers for Octopart requests."""
+        return {
+            "Accept": "application/json",
+            "User-Agent": "kicad-tools/1.0 (https://github.com/rjwalters/kicad-tools)",
+        }
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
@@ -100,7 +76,7 @@ class OctopartDatasheetSource(DatasheetSource):
             time.sleep(sleep_time)
         self._last_request_time = time.time()
 
-    @_requires_requests
+    @requires_requests
     def search(self, part_number: str) -> list[DatasheetResult]:
         """
         Search Octopart for datasheets matching the part number.
@@ -182,10 +158,12 @@ class OctopartDatasheetSource(DatasheetSource):
 
         return results
 
-    @_requires_requests
+    @requires_requests
     def download(self, result: DatasheetResult, output_path: Path) -> Path:
         """
         Download a datasheet found via Octopart.
+
+        Includes rate limiting to comply with Octopart's API limits.
 
         Args:
             result: The DatasheetResult to download
@@ -197,47 +175,5 @@ class OctopartDatasheetSource(DatasheetSource):
         Raises:
             DatasheetDownloadError: If download fails
         """
-        import requests
-
-        from ..exceptions import DatasheetDownloadError
-
-        session = self._get_session()
         self._rate_limit()
-
-        try:
-            response = session.get(
-                result.datasheet_url,
-                timeout=self.timeout,
-                stream=True,
-                allow_redirects=True,
-            )
-            response.raise_for_status()
-
-            # Ensure parent directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write to file
-            with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-            logger.info(f"Downloaded datasheet to {output_path}")
-            return output_path
-
-        except requests.RequestException as e:
-            raise DatasheetDownloadError(
-                f"Failed to download datasheet from {result.datasheet_url}: {e}"
-            ) from e
-
-    def close(self) -> None:
-        """Close the HTTP session."""
-        if self._session:
-            self._session.close()
-            self._session = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-        return False
+        return super().download(result, output_path)
