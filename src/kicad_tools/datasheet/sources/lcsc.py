@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..models import DatasheetResult
+from ..utils import calculate_part_confidence
 from .base import HTTPDatasheetSource, requires_requests
 
 if TYPE_CHECKING:
@@ -97,17 +98,7 @@ class LCSCDatasheetSource(HTTPDatasheetSource):
             search_result = client.search(part_number, page_size=10)
             for part in search_result.parts:
                 if part.datasheet_url:
-                    # Calculate confidence based on match quality
-                    confidence = 1.0
-                    query_lower = part_number.lower()
-                    mfr_lower = (part.mfr_part or "").lower()
-
-                    if query_lower == mfr_lower:
-                        confidence = 1.0
-                    elif query_lower in mfr_lower or mfr_lower in query_lower:
-                        confidence = 0.9
-                    else:
-                        confidence = 0.7
+                    confidence = calculate_part_confidence(part_number, part.mfr_part or "")
 
                     results.append(
                         DatasheetResult(
