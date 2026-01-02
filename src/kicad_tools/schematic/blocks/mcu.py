@@ -598,3 +598,455 @@ def create_reset_button(
         esd_protection=with_esd,
         ref_prefix=ref,
     )
+
+
+class BootModeSelector(CircuitBlock):
+    """
+    Boot mode selector circuit for MCU boot configuration.
+
+    Supports common MCU boot mode configurations including STM32, ESP32,
+    and generic single-pin boot selectors. Each configuration includes
+    appropriate pull-up/pull-down resistors and optional boot button.
+
+    Schematic (STM32 BOOT0 with button):
+        VCC ─────────────────┬────
+                             │
+                            [SW]  (optional BOOT button)
+                             │
+        BOOT0 ───────────────┼────
+                             │
+                            [R]   (10k pull-down for normal boot)
+                             │
+        GND ─────────────────┴────
+
+    Schematic (ESP32 GPIO0 with button):
+        VCC ─────────────────┬────
+                             │
+                            [R]   (10k pull-up for normal boot)
+                             │
+        GPIO0 ───────────────┼────
+                             │
+                            [SW]  (optional BOOT button)
+                             │
+        GND ─────────────────┴────
+
+    Boot Mode Configurations:
+        STM32:
+            BOOT0=0 → Boot from Main Flash (default)
+            BOOT0=1 → Boot from System Memory (bootloader)
+
+        ESP32:
+            GPIO0=1 → Normal boot (default)
+            GPIO0=0 → Download mode
+
+    Ports:
+        - VCC: Power input
+        - GND: Ground
+        - BOOT0: Boot pin (STM32 mode)
+        - BOOT1: Second boot pin (STM32 mode, if enabled)
+        - GPIO0: Boot pin (ESP32 mode)
+        - GPIO2: Second boot pin (ESP32 mode, if enabled)
+        - BOOT: Boot pin (generic mode)
+
+    Example:
+        from kicad_tools.schematic.blocks import BootModeSelector
+
+        # STM32 boot configuration (BOOT0 low = boot from flash)
+        boot = BootModeSelector(
+            sch,
+            x=100, y=50,
+            mode="stm32",
+            default_state="flash",  # BOOT0 = low
+            include_button=True,    # Add button to force bootloader
+            ref_prefix="R",
+        )
+
+        # ESP32 boot configuration
+        boot = BootModeSelector(
+            sch,
+            x=100, y=50,
+            mode="esp32",
+            default_state="normal",  # GPIO0 = high
+            include_button=True,     # Add BOOT button
+            ref_prefix="R",
+        )
+
+        # Access ports
+        boot.port("VCC")    # Power
+        boot.port("BOOT0")  # Boot pin (STM32)
+        boot.port("GND")    # Ground
+    """
+
+    # Mode configurations
+    MODE_CONFIGS = {
+        "stm32": {
+            "pins": ["BOOT0"],
+            "default_high": False,  # BOOT0=0 for flash boot
+            "boot_pin_name": "BOOT0",
+        },
+        "stm32_dual": {
+            "pins": ["BOOT0", "BOOT1"],
+            "default_high": False,  # BOOT0=0, BOOT1=0 for flash boot
+            "boot_pin_name": "BOOT0",
+        },
+        "esp32": {
+            "pins": ["GPIO0"],
+            "default_high": True,  # GPIO0=1 for normal boot
+            "boot_pin_name": "GPIO0",
+        },
+        "esp32_dual": {
+            "pins": ["GPIO0", "GPIO2"],
+            "default_high": True,  # GPIO0=1, GPIO2=0 for normal boot
+            "boot_pin_name": "GPIO0",
+        },
+        "generic": {
+            "pins": ["BOOT"],
+            "default_high": False,  # Configurable
+            "boot_pin_name": "BOOT",
+        },
+    }
+
+    # Default state mappings for user-friendly names
+    STATE_MAPPINGS = {
+        "stm32": {
+            "flash": False,  # BOOT0 low
+            "bootloader": True,  # BOOT0 high
+            "system": True,  # Same as bootloader
+            "low": False,
+            "high": True,
+        },
+        "stm32_dual": {
+            "flash": False,
+            "bootloader": True,
+            "system": True,
+            "low": False,
+            "high": True,
+        },
+        "esp32": {
+            "normal": True,  # GPIO0 high
+            "download": False,  # GPIO0 low
+            "flash": False,  # Same as download
+            "low": False,
+            "high": True,
+        },
+        "esp32_dual": {
+            "normal": True,
+            "download": False,
+            "flash": False,
+            "low": False,
+            "high": True,
+        },
+        "generic": {
+            "low": False,
+            "high": True,
+        },
+    }
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        mode: str = "stm32",
+        default_state: str = "flash",
+        include_button: bool = True,
+        resistor_value: str = "10k",
+        ref_prefix: str = "R",
+        button_ref_prefix: str = "SW",
+        resistor_symbol: str = "Device:R",
+        button_symbol: str = "Switch:SW_Push",
+    ):
+        """
+        Create a boot mode selector circuit.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of circuit center
+            y: Y coordinate of circuit center
+            mode: Boot mode configuration - "stm32", "stm32_dual", "esp32",
+                "esp32_dual", or "generic"
+            default_state: Default boot state (mode-specific):
+                - STM32: "flash" (low) or "bootloader"/"system" (high)
+                - ESP32: "normal" (high) or "download"/"flash" (low)
+                - Generic: "low" or "high"
+            include_button: If True, add a push button for boot mode selection
+            resistor_value: Pull-up/pull-down resistor value (e.g., "10k", "4.7k")
+            ref_prefix: Reference designator prefix for resistor
+            button_ref_prefix: Reference designator prefix for button
+            resistor_symbol: KiCad symbol for resistor
+            button_symbol: KiCad symbol for push button
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+        self.mode = mode.lower()
+        self.include_button = include_button
+        self.resistor_value = resistor_value
+
+        # Validate mode
+        if self.mode not in self.MODE_CONFIGS:
+            raise ValueError(
+                f"Invalid mode '{mode}'. Valid options: {list(self.MODE_CONFIGS.keys())}"
+            )
+
+        config = self.MODE_CONFIGS[self.mode]
+
+        # Parse default state
+        state_map = self.STATE_MAPPINGS.get(self.mode, {})
+        if default_state.lower() in state_map:
+            self.default_high = state_map[default_state.lower()]
+        else:
+            # Interpret as boolean-like
+            self.default_high = default_state.lower() in ("high", "true", "1")
+
+        # Parse reference prefixes
+        r_ref = ref_prefix if ref_prefix[-1].isdigit() else f"{ref_prefix}1"
+        sw_ref = button_ref_prefix if button_ref_prefix[-1].isdigit() else f"{button_ref_prefix}1"
+
+        # Component spacing
+        component_spacing = 10  # mm between components
+
+        # Initialize components dict
+        self.components = {}
+        self.resistors = {}
+        self.buttons = {}
+
+        # Calculate positions based on whether we're pulling up or down
+        if self.default_high:
+            # Pull-up configuration: resistor on top, button on bottom
+            resistor_y = y - component_spacing
+            button_y = y + component_spacing
+        else:
+            # Pull-down configuration: button on top, resistor on bottom
+            button_y = y - component_spacing
+            resistor_y = y + component_spacing
+
+        # Place resistor (always present)
+        self.resistor = sch.add_symbol(resistor_symbol, x, resistor_y, r_ref, resistor_value)
+        self.components["R"] = self.resistor
+        self.resistors["R1"] = self.resistor
+
+        # Get resistor pin positions
+        r_pin1 = self.resistor.pin_position("1")
+        r_pin2 = self.resistor.pin_position("2")
+
+        # Determine which resistor pin connects to boot pin vs rail
+        if self.default_high:
+            # Pull-up: pin1 connects to VCC, pin2 connects to boot pin
+            r_rail_pin = r_pin1
+            r_boot_pin = r_pin2
+        else:
+            # Pull-down: pin1 connects to boot pin, pin2 connects to GND
+            r_boot_pin = r_pin1
+            r_rail_pin = r_pin2
+
+        # Place button if requested
+        if include_button:
+            self.button = sch.add_symbol(button_symbol, x, button_y, sw_ref, "BOOT")
+            self.components["SW"] = self.button
+            self.buttons["SW1"] = self.button
+
+            # Get button pin positions
+            sw_pin1 = self.button.pin_position("1")
+            sw_pin2 = self.button.pin_position("2")
+
+            # Wire button to boot pin junction
+            # The boot pin junction is at the resistor's boot pin level
+            boot_junction_y = r_boot_pin[1]
+            boot_junction_x = x
+
+            # Connect button pin closest to boot junction
+            if self.default_high:
+                # Button connects boot pin to GND when pressed
+                # Button is below the boot pin
+                sch.add_wire(sw_pin1, (boot_junction_x, boot_junction_y))
+            else:
+                # Button connects boot pin to VCC when pressed
+                # Button is above the boot pin
+                sch.add_wire(sw_pin2, (boot_junction_x, boot_junction_y))
+
+            # Store button rail pin for connect_to_rails
+            if self.default_high:
+                self._button_rail_pin = sw_pin2  # Bottom connects to GND
+            else:
+                self._button_rail_pin = sw_pin1  # Top connects to VCC
+        else:
+            self._button_rail_pin = None
+
+        # Build ports dictionary
+        self.ports = {}
+
+        # Boot pin port at the junction point
+        boot_pin_name = config["boot_pin_name"]
+        self.ports[boot_pin_name] = (x, r_boot_pin[1])
+
+        # VCC and GND ports at the resistor/button ends
+        if self.default_high:
+            self.ports["VCC"] = r_rail_pin  # Resistor connects to VCC
+            if include_button:
+                self.ports["GND"] = self._button_rail_pin  # Button connects to GND
+            else:
+                # GND port at a reasonable offset below the circuit
+                self.ports["GND"] = (x, y + component_spacing * 2)
+        else:
+            self.ports["GND"] = r_rail_pin  # Resistor connects to GND
+            if include_button:
+                self.ports["VCC"] = self._button_rail_pin  # Button connects to VCC
+            else:
+                # VCC port at a reasonable offset above the circuit
+                self.ports["VCC"] = (x, y - component_spacing * 2)
+
+        # Store internal state for connect_to_rails
+        self._r_rail_pin = r_rail_pin
+        self._boot_junction = (x, r_boot_pin[1])
+
+    def connect_to_rails(
+        self,
+        vcc_rail_y: float,
+        gnd_rail_y: float,
+        add_junctions: bool = True,
+    ) -> None:
+        """
+        Connect boot selector to power rails.
+
+        Args:
+            vcc_rail_y: Y coordinate of VCC rail
+            gnd_rail_y: Y coordinate of GND rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        if self.default_high:
+            # Pull-up configuration: resistor to VCC, button to GND
+            # Connect resistor to VCC
+            sch.add_wire(self._r_rail_pin, (self._r_rail_pin[0], vcc_rail_y))
+            if add_junctions:
+                sch.add_junction(self._r_rail_pin[0], vcc_rail_y)
+
+            # Connect button to GND if present
+            if self.include_button and self._button_rail_pin:
+                sch.add_wire(self._button_rail_pin, (self._button_rail_pin[0], gnd_rail_y))
+                if add_junctions:
+                    sch.add_junction(self._button_rail_pin[0], gnd_rail_y)
+        else:
+            # Pull-down configuration: resistor to GND, button to VCC
+            # Connect resistor to GND
+            sch.add_wire(self._r_rail_pin, (self._r_rail_pin[0], gnd_rail_y))
+            if add_junctions:
+                sch.add_junction(self._r_rail_pin[0], gnd_rail_y)
+
+            # Connect button to VCC if present
+            if self.include_button and self._button_rail_pin:
+                sch.add_wire(self._button_rail_pin, (self._button_rail_pin[0], vcc_rail_y))
+                if add_junctions:
+                    sch.add_junction(self._button_rail_pin[0], vcc_rail_y)
+
+    def get_boot_pin_name(self) -> str:
+        """Get the primary boot pin name for this mode."""
+        return self.MODE_CONFIGS[self.mode]["boot_pin_name"]
+
+    def is_default_high(self) -> bool:
+        """Check if the default boot state is high."""
+        return self.default_high
+
+
+def create_stm32_boot(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "R1",
+    include_button: bool = True,
+    resistor_value: str = "10k",
+) -> BootModeSelector:
+    """
+    Create STM32 boot mode selector (BOOT0 pin configuration).
+
+    Default configuration boots from flash (BOOT0 = low).
+    Optional button pulls BOOT0 high to enter bootloader mode.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Resistor reference designator
+        include_button: Add BOOT button for bootloader entry
+        resistor_value: Pull-down resistor value
+    """
+    return BootModeSelector(
+        sch,
+        x,
+        y,
+        mode="stm32",
+        default_state="flash",
+        include_button=include_button,
+        resistor_value=resistor_value,
+        ref_prefix=ref,
+    )
+
+
+def create_esp32_boot(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "R1",
+    include_button: bool = True,
+    resistor_value: str = "10k",
+) -> BootModeSelector:
+    """
+    Create ESP32 boot mode selector (GPIO0 pin configuration).
+
+    Default configuration is normal boot (GPIO0 = high).
+    Optional button pulls GPIO0 low to enter download mode.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Resistor reference designator
+        include_button: Add BOOT button for download mode entry
+        resistor_value: Pull-up resistor value
+    """
+    return BootModeSelector(
+        sch,
+        x,
+        y,
+        mode="esp32",
+        default_state="normal",
+        include_button=include_button,
+        resistor_value=resistor_value,
+        ref_prefix=ref,
+    )
+
+
+def create_generic_boot(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "R1",
+    default_high: bool = False,
+    include_button: bool = True,
+    resistor_value: str = "10k",
+) -> BootModeSelector:
+    """
+    Create a generic boot mode selector.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Resistor reference designator
+        default_high: If True, use pull-up (default high). If False, use pull-down.
+        include_button: Add BOOT button
+        resistor_value: Pull-up or pull-down resistor value
+    """
+    return BootModeSelector(
+        sch,
+        x,
+        y,
+        mode="generic",
+        default_state="high" if default_high else "low",
+        include_button=include_button,
+        resistor_value=resistor_value,
+        ref_prefix=ref,
+    )
