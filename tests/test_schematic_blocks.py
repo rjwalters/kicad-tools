@@ -21,6 +21,7 @@ from kicad_tools.schematic.blocks import (
     ResetButton,
     USBConnector,
     USBPowerInput,
+    VoltageDivider,
     create_3v3_ldo,
     create_12v_barrel_jack,
     create_esp32_boot,
@@ -38,6 +39,7 @@ from kicad_tools.schematic.blocks import (
     create_usb_micro_b,
     create_usb_power,
     create_usb_type_c,
+    create_voltage_divider,
 )
 
 
@@ -207,6 +209,353 @@ class TestDecouplingCapsMocked:
 
         # Should wire each cap
         assert mock_schematic.wire_decoupling_cap.call_count == 2
+
+
+class TestVoltageDividerMocked:
+    """Tests for VoltageDivider with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            # Resistor pins: 1 at top, 2 at bottom
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_voltage_divider_creation(self, mock_schematic):
+        """Create basic voltage divider."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="10k", r_bottom="10k", ref_start=1
+        )
+
+        assert divider.schematic == mock_schematic
+        assert divider.x == 100
+        assert divider.y == 100
+        assert "VIN" in divider.ports
+        assert "VOUT" in divider.ports
+        assert "GND" in divider.ports
+        assert "R_TOP" in divider.components
+        assert "R_BOTTOM" in divider.components
+
+    def test_voltage_divider_with_filter_cap(self, mock_schematic):
+        """Create voltage divider with filter capacitor."""
+        divider = VoltageDivider(
+            mock_schematic,
+            x=100,
+            y=100,
+            r_top="100k",
+            r_bottom="47k",
+            filter_cap="100nF",
+            ref_start=1,
+        )
+
+        assert divider.has_filter_cap is True
+        assert "C_FILT" in divider.components
+
+    def test_voltage_divider_without_filter_cap(self, mock_schematic):
+        """Create voltage divider without filter capacitor."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="10k", r_bottom="10k", ref_start=1
+        )
+
+        assert divider.has_filter_cap is False
+        assert "C_FILT" not in divider.components
+
+    def test_voltage_divider_wires_resistors(self, mock_schematic):
+        """Voltage divider wires resistors together."""
+        VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        # Should add wire between R_top and R_bottom
+        assert mock_schematic.add_wire.called
+
+    def test_voltage_divider_adds_junction(self, mock_schematic):
+        """Voltage divider adds junction at VOUT."""
+        VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        # Should add junction at VOUT point
+        assert mock_schematic.add_junction.called
+
+    def test_get_ratio_equal_resistors(self, mock_schematic):
+        """Get ratio for 1:1 divider (50%)."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="10k", r_bottom="10k", ref_start=1
+        )
+
+        ratio = divider.get_ratio()
+        assert ratio == pytest.approx(0.5)
+
+    def test_get_ratio_2_to_1(self, mock_schematic):
+        """Get ratio for 2:1 divider (33%)."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="20k", r_bottom="10k", ref_start=1
+        )
+
+        ratio = divider.get_ratio()
+        assert ratio == pytest.approx(1 / 3)
+
+    def test_get_ratio_3_to_1(self, mock_schematic):
+        """Get ratio for 3:1 divider (25%)."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="30k", r_bottom="10k", ref_start=1
+        )
+
+        ratio = divider.get_ratio()
+        assert ratio == pytest.approx(0.25)
+
+    def test_get_output_voltage(self, mock_schematic):
+        """Calculate output voltage."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="10k", r_bottom="10k", ref_start=1
+        )
+
+        # 12V input with 1:1 divider should give 6V output
+        output = divider.get_output_voltage(12.0)
+        assert output == pytest.approx(6.0)
+
+    def test_get_output_voltage_12v_to_3v(self, mock_schematic):
+        """Calculate 12V to 3V conversion."""
+        # For 12V -> 3V, ratio = 0.25, R_top = 3 * R_bottom
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="30k", r_bottom="10k", ref_start=1
+        )
+
+        output = divider.get_output_voltage(12.0)
+        assert output == pytest.approx(3.0)
+
+    def test_parse_resistance_k_suffix(self, mock_schematic):
+        """Parse resistance with k suffix."""
+        divider = VoltageDivider(
+            mock_schematic, x=100, y=100, r_top="10k", r_bottom="4.7k", ref_start=1
+        )
+
+        assert divider._parse_resistance("10k") == 10000
+        assert divider._parse_resistance("4.7k") == 4700
+
+    def test_parse_resistance_m_suffix(self, mock_schematic):
+        """Parse resistance with M suffix."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        assert divider._parse_resistance("1M") == 1_000_000
+        assert divider._parse_resistance("2.2M") == 2_200_000
+
+    def test_parse_resistance_r_suffix(self, mock_schematic):
+        """Parse resistance with R suffix."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        assert divider._parse_resistance("100R") == 100
+        assert divider._parse_resistance("47R") == 47
+
+    def test_parse_resistance_inline_r(self, mock_schematic):
+        """Parse resistance with inline R notation (e.g., 4R7)."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        assert divider._parse_resistance("4R7") == pytest.approx(4.7)
+        assert divider._parse_resistance("10R5") == pytest.approx(10.5)
+
+    def test_parse_resistance_plain_number(self, mock_schematic):
+        """Parse resistance as plain number."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        assert divider._parse_resistance("1000") == 1000
+        assert divider._parse_resistance("470") == 470
+
+    def test_connect_to_rails(self, mock_schematic):
+        """Connect voltage divider to power rails."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        divider.connect_to_rails(vin_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VIN and GND
+        assert mock_schematic.add_wire.call_count >= 2
+        # Should add junctions by default
+        assert mock_schematic.add_junction.called
+
+    def test_connect_to_rails_with_filter_cap(self, mock_schematic):
+        """Connect voltage divider with filter cap to rails."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, filter_cap="100nF", ref_start=1)
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        divider.connect_to_rails(vin_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VIN, GND, and cap GND
+        assert mock_schematic.add_wire.call_count >= 3
+        # Should add junction for cap GND
+        assert mock_schematic.add_junction.call_count >= 3
+
+    def test_connect_to_rails_no_junctions(self, mock_schematic):
+        """Connect without adding junctions."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+        mock_schematic.add_junction.reset_mock()
+
+        divider.connect_to_rails(vin_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        # Junction should NOT be called for rails (only for VOUT during init)
+        # Reset before connect_to_rails so we're checking only rail junctions
+        assert not mock_schematic.add_junction.called
+
+    def test_port_lookup(self, mock_schematic):
+        """Look up ports by name."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        vin_pos = divider.port("VIN")
+        assert isinstance(vin_pos, tuple)
+        assert len(vin_pos) == 2
+
+        vout_pos = divider.port("VOUT")
+        assert isinstance(vout_pos, tuple)
+
+        gnd_pos = divider.port("GND")
+        assert isinstance(gnd_pos, tuple)
+
+    def test_port_not_found(self, mock_schematic):
+        """KeyError when port not found."""
+        divider = VoltageDivider(mock_schematic, x=100, y=100, ref_start=1)
+
+        with pytest.raises(KeyError) as exc:
+            divider.port("INVALID")
+        assert "INVALID" in str(exc.value)
+
+    def test_custom_ref_prefix(self, mock_schematic):
+        """Custom reference designator prefix."""
+        VoltageDivider(mock_schematic, x=100, y=100, ref_prefix="R", ref_start=5)
+
+        # Check add_symbol was called with R5 and R6
+        calls = mock_schematic.add_symbol.call_args_list
+        refs = [str(c) for c in calls]
+        assert any("R5" in r for r in refs)
+        assert any("R6" in r for r in refs)
+
+    def test_custom_spacing(self, mock_schematic):
+        """Custom resistor spacing."""
+        VoltageDivider(mock_schematic, x=100, y=100, resistor_spacing=20, ref_start=1)
+
+        # First resistor at y=100, second at y=120 (100 + 20)
+        calls = mock_schematic.add_symbol.call_args_list
+        # First call (R_top) should have y=100
+        # Second call (R_bottom) should have y=120
+        assert calls[0][0][2] == 100  # y position of first resistor
+        assert calls[1][0][2] == 120  # y position of second resistor
+
+
+class TestVoltageDividerFactoryMocked:
+    """Tests for create_voltage_divider factory function."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_create_voltage_divider_basic(self, mock_schematic):
+        """Create voltage divider from target voltages."""
+        divider = create_voltage_divider(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=12.0,
+            output_voltage=3.0,
+        )
+
+        assert isinstance(divider, VoltageDivider)
+        # Ratio should be approximately 0.25 (3V / 12V)
+        assert divider.get_ratio() == pytest.approx(0.25, rel=0.1)
+
+    def test_create_voltage_divider_with_filter(self, mock_schematic):
+        """Create voltage divider with filter cap."""
+        divider = create_voltage_divider(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=5.0,
+            output_voltage=2.5,
+            with_filter=True,
+        )
+
+        assert divider.has_filter_cap is True
+        assert "C_FILT" in divider.components
+
+    def test_create_voltage_divider_low_impedance(self, mock_schematic):
+        """Create low impedance voltage divider."""
+        divider = create_voltage_divider(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=5.0,
+            output_voltage=2.5,
+            impedance="low",
+        )
+
+        # Low impedance uses 1k base, so for 2:1 ratio both resistors ~1k
+        ratio = divider.get_ratio()
+        assert ratio == pytest.approx(0.5, rel=0.1)
+
+    def test_create_voltage_divider_high_impedance(self, mock_schematic):
+        """Create high impedance voltage divider."""
+        divider = create_voltage_divider(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=12.0,
+            output_voltage=6.0,
+            impedance="high",
+        )
+
+        # High impedance uses 100k base
+        ratio = divider.get_ratio()
+        assert ratio == pytest.approx(0.5, rel=0.1)
+
+    def test_create_voltage_divider_3v3_from_12v(self, mock_schematic):
+        """Create 3.3V output from 12V input."""
+        divider = create_voltage_divider(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=12.0,
+            output_voltage=3.3,
+            impedance="medium",
+        )
+
+        output = divider.get_output_voltage(12.0)
+        assert output == pytest.approx(3.3, rel=0.1)
+
+    def test_create_voltage_divider_half_voltage(self, mock_schematic):
+        """Create 50% voltage divider."""
+        divider = create_voltage_divider(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=10.0,
+            output_voltage=5.0,
+        )
+
+        # 50% ratio
+        assert divider.get_ratio() == pytest.approx(0.5, rel=0.01)
 
 
 class TestLDOBlockMocked:
