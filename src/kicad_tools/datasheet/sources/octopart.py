@@ -12,25 +12,9 @@ from pathlib import Path
 
 from ..models import DatasheetResult
 from ..utils import calculate_part_confidence
-from .base import DatasheetSource
+from .base import DatasheetSource, requires_requests
 
 logger = logging.getLogger(__name__)
-
-
-def _requires_requests(func):
-    """Decorator to check if requests is available."""
-
-    def wrapper(*args, **kwargs):
-        try:
-            import requests  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "The 'requests' library is required for Octopart API access. "
-                "Install with: pip install kicad-tools[parts]"
-            )
-        return func(*args, **kwargs)
-
-    return wrapper
 
 
 # Octopart API endpoint
@@ -101,7 +85,7 @@ class OctopartDatasheetSource(DatasheetSource):
             time.sleep(sleep_time)
         self._last_request_time = time.time()
 
-    @_requires_requests
+    @requires_requests
     def search(self, part_number: str) -> list[DatasheetResult]:
         """
         Search Octopart for datasheets matching the part number.
@@ -173,7 +157,7 @@ class OctopartDatasheetSource(DatasheetSource):
 
         return results
 
-    @_requires_requests
+    @requires_requests
     def download(self, result: DatasheetResult, output_path: Path) -> Path:
         """
         Download a datasheet found via Octopart.

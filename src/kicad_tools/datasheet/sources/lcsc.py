@@ -12,28 +12,12 @@ from typing import TYPE_CHECKING
 
 from ..models import DatasheetResult
 from ..utils import calculate_part_confidence
-from .base import DatasheetSource
+from .base import DatasheetSource, requires_requests
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
-
-
-def _requires_requests(func):
-    """Decorator to check if requests is available."""
-
-    def wrapper(*args, **kwargs):
-        try:
-            import requests  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "The 'requests' library is required for datasheet downloads. "
-                "Install with: pip install kicad-tools[parts]"
-            )
-        return func(*args, **kwargs)
-
-    return wrapper
 
 
 class LCSCDatasheetSource(DatasheetSource):
@@ -86,7 +70,7 @@ class LCSCDatasheetSource(DatasheetSource):
             )
         return self._session
 
-    @_requires_requests
+    @requires_requests
     def search(self, part_number: str) -> list[DatasheetResult]:
         """
         Search LCSC for datasheets matching the part number.
@@ -123,9 +107,7 @@ class LCSCDatasheetSource(DatasheetSource):
             search_result = client.search(part_number, page_size=10)
             for part in search_result.parts:
                 if part.datasheet_url:
-                    confidence = calculate_part_confidence(
-                        part_number, part.mfr_part or ""
-                    )
+                    confidence = calculate_part_confidence(part_number, part.mfr_part or "")
 
                     results.append(
                         DatasheetResult(
@@ -143,7 +125,7 @@ class LCSCDatasheetSource(DatasheetSource):
 
         return results
 
-    @_requires_requests
+    @requires_requests
     def download(self, result: DatasheetResult, output_path: Path) -> Path:
         """
         Download a datasheet from LCSC.
