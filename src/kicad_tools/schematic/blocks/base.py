@@ -32,14 +32,27 @@ class CircuitBlock:
     - Exposes ports for external connections
 
     Subclasses should implement their setup logic in __init__, calling
-    super().__init__() first and then setting up components, wiring, and ports.
+    super().__init__(sch, x, y) first and then setting up components,
+    wiring, and ports.
     """
 
-    def __init__(self):
-        """Initialize base attributes."""
-        self.schematic: Schematic = None
-        self.x: float = 0
-        self.y: float = 0
+    def __init__(
+        self,
+        sch: "Schematic" = None,
+        x: float = 0,
+        y: float = 0,
+    ):
+        """
+        Initialize base attributes.
+
+        Args:
+            sch: Schematic to add components to
+            x: X coordinate of block origin
+            y: Y coordinate of block origin
+        """
+        self.schematic: Schematic = sch
+        self.x: float = x
+        self.y: float = y
         self.ports: dict[str, tuple[float, float]] = {}
         self.components: dict[str, SymbolInstance] = {}
 

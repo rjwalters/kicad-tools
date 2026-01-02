@@ -97,10 +97,7 @@ class MCUBlock(CircuitBlock):
             cap_symbol: KiCad symbol for bypass capacitors
             unit: Symbol unit number (for multi-unit symbols)
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
 
         # Default bypass caps if not specified
         if bypass_caps is None:
@@ -396,10 +393,7 @@ class ResetButton(CircuitBlock):
             tvs_symbol: KiCad symbol for TVS diode
             tvs_value: Part value for TVS diode (e.g., "PESD5V0S1BL")
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.active_low = active_low
         self.esd_protection = esd_protection
 
@@ -773,10 +767,7 @@ class BootModeSelector(CircuitBlock):
             resistor_symbol: KiCad symbol for resistor
             button_symbol: KiCad symbol for push button
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.mode = mode.lower()
         self.include_button = include_button
         self.resistor_value = resistor_value
