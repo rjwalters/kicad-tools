@@ -3,6 +3,7 @@
 Usage:
     kicad-tools placement check board.kicad_pcb
     kicad-tools placement fix board.kicad_pcb --strategy spread
+    kicad-tools placement optimize board.kicad_pcb --strategy force-directed
 """
 
 import argparse
@@ -141,6 +142,195 @@ def cmd_fix(args) -> int:
             print(f"Warning: {result.new_conflicts} conflicts remain after fixes")
 
     return 0 if result.success else 1
+
+
+def cmd_optimize(args) -> int:
+    """Optimize component placement for routability."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optim import (
+        EvolutionaryPlacementOptimizer,
+        PlacementConfig,
+        PlacementOptimizer,
+    )
+    from kicad_tools.optim.evolutionary import EvolutionaryConfig
+    from kicad_tools.schema.pcb import PCB
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    # Parse fixed components
+    fixed_refs = []
+    if args.fixed:
+        fixed_refs = [r.strip() for r in args.fixed.split(",") if r.strip()]
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    strategy = args.strategy
+    if not quiet:
+        print(f"Optimization strategy: {strategy}")
+        if fixed_refs:
+            print(f"Fixed components: {', '.join(fixed_refs)}")
+
+    try:
+        if strategy == "force-directed":
+            # Physics-based optimization
+            config = PlacementConfig(
+                grid_size=args.grid if args.grid > 0 else 0.0,
+                rotation_grid=90.0,
+            )
+
+            with spinner("Creating optimizer from PCB...", quiet=quiet):
+                optimizer = PlacementOptimizer.from_pcb(pcb, config=config, fixed_refs=fixed_refs)
+
+            if not quiet:
+                print(f"Optimizing {len(optimizer.components)} components...")
+                print(f"  - {len(optimizer.springs)} net connections")
+                print(f"  - Max iterations: {args.iterations}")
+
+            # Run simulation with progress
+            def callback(iteration: int, energy: float):
+                if args.verbose and iteration % 100 == 0:
+                    print(f"  Iteration {iteration}: energy={energy:.4f}")
+
+            with spinner(
+                f"Running force-directed optimization ({args.iterations} iterations)...",
+                quiet=quiet,
+            ):
+                iterations_run = optimizer.run(
+                    iterations=args.iterations, callback=callback if args.verbose else None
+                )
+
+            # Snap to grid
+            if args.grid > 0:
+                optimizer.snap_to_grid(args.grid, 90.0)
+
+            if not quiet:
+                print(f"\nConverged after {iterations_run} iterations")
+                print(f"Total wire length: {optimizer.total_wire_length():.2f} mm")
+                print(f"System energy: {optimizer.compute_energy():.4f}")
+
+        elif strategy == "evolutionary":
+            # Genetic algorithm optimization
+            config = EvolutionaryConfig(
+                generations=args.generations,
+                population_size=args.population,
+                grid_snap=args.grid if args.grid > 0 else 0.127,
+            )
+
+            with spinner("Creating evolutionary optimizer from PCB...", quiet=quiet):
+                optimizer = EvolutionaryPlacementOptimizer.from_pcb(
+                    pcb, config=config, fixed_refs=fixed_refs
+                )
+
+            if not quiet:
+                print(f"Optimizing {len(optimizer.components)} components...")
+                print(f"  - Generations: {args.generations}")
+                print(f"  - Population: {args.population}")
+
+            def callback(gen: int, best):
+                if args.verbose:
+                    print(f"  Generation {gen}: fitness={best.fitness:.2f}")
+
+            with spinner(
+                f"Running evolutionary optimization ({args.generations} generations)...",
+                quiet=quiet,
+            ):
+                best = optimizer.optimize(
+                    generations=args.generations,
+                    population_size=args.population,
+                    callback=callback if args.verbose else None,
+                )
+
+            if not quiet:
+                print(f"\nBest fitness: {best.fitness:.2f}")
+                print(optimizer.report())
+
+        elif strategy == "hybrid":
+            # Evolutionary + physics refinement
+            config = EvolutionaryConfig(
+                generations=args.generations,
+                population_size=args.population,
+                grid_snap=args.grid if args.grid > 0 else 0.127,
+            )
+
+            physics_config = PlacementConfig(
+                grid_size=args.grid if args.grid > 0 else 0.0,
+                rotation_grid=90.0,
+            )
+
+            with spinner("Creating hybrid optimizer from PCB...", quiet=quiet):
+                evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
+                    pcb, config=config, fixed_refs=fixed_refs
+                )
+
+            if not quiet:
+                print(f"Optimizing {len(evo_optimizer.components)} components...")
+                print(f"  - Phase 1: Evolutionary ({args.generations} generations)")
+                print(f"  - Phase 2: Physics refinement ({args.iterations} iterations)")
+
+            def callback(gen: int, best):
+                if args.verbose:
+                    print(f"  Generation {gen}: fitness={best.fitness:.2f}")
+
+            with spinner("Running hybrid optimization...", quiet=quiet):
+                optimizer = evo_optimizer.optimize_hybrid(
+                    evolutionary_generations=args.generations,
+                    population_size=args.population,
+                    physics_iterations=args.iterations,
+                    physics_config=physics_config,
+                    callback=callback if args.verbose else None,
+                )
+
+            if not quiet:
+                print(f"\nTotal wire length: {optimizer.total_wire_length():.2f} mm")
+                print(f"System energy: {optimizer.compute_energy():.4f}")
+
+        else:
+            print(f"Error: Unknown strategy '{strategy}'", file=sys.stderr)
+            return 1
+
+    except Exception as e:
+        print(f"Error during optimization: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+
+            traceback.print_exc()
+        return 1
+
+    # Dry run - just report
+    if args.dry_run:
+        if not quiet:
+            print("\n(Dry run - no changes made)")
+            print(optimizer.report())
+        return 0
+
+    # Write results
+    output_path = Path(args.output) if args.output else pcb_path
+
+    try:
+        with spinner("Writing optimized placement...", quiet=quiet):
+            updated = optimizer.write_to_pcb(pcb)
+            pcb.save(str(output_path))
+
+        if not quiet:
+            print(f"\nUpdated {updated} component positions")
+            print(f"Saved to: {output_path}")
+
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 def output_table(conflicts: list[Conflict], verbose: bool = False):
@@ -300,6 +490,60 @@ def main(argv: list[str] | None = None) -> int:
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
+    # Optimize subcommand
+    optimize_parser = subparsers.add_parser(
+        "optimize", help="Optimize component placement for routability"
+    )
+    optimize_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    optimize_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    optimize_parser.add_argument(
+        "--strategy",
+        choices=["force-directed", "evolutionary", "hybrid"],
+        default="force-directed",
+        help="Optimization strategy (default: force-directed)",
+    )
+    optimize_parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1000,
+        help="Max iterations for physics simulation (default: 1000)",
+    )
+    optimize_parser.add_argument(
+        "--generations",
+        type=int,
+        default=100,
+        help="Generations for evolutionary/hybrid mode (default: 100)",
+    )
+    optimize_parser.add_argument(
+        "--population",
+        type=int,
+        default=50,
+        help="Population size for evolutionary/hybrid mode (default: 50)",
+    )
+    optimize_parser.add_argument(
+        "--grid",
+        type=float,
+        default=0.0,
+        help="Position grid snap in mm (0 to disable, default: 0)",
+    )
+    optimize_parser.add_argument(
+        "--fixed",
+        help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    optimize_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview optimization without saving",
+    )
+    optimize_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    optimize_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -310,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args)
     elif args.command == "fix":
         return cmd_fix(args)
+    elif args.command == "optimize":
+        return cmd_optimize(args)
 
     return 0
 

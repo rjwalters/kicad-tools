@@ -101,7 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     # Validate we have both files
     if not schematic_path or not pcb_path:
         if not args.project:
-            print("Error: Must provide either project file or both --schematic and --pcb", file=sys.stderr)
+            print(
+                "Error: Must provide either project file or both --schematic and --pcb",
+                file=sys.stderr,
+            )
         else:
             if not schematic_path:
                 print("Error: Could not find schematic file in project", file=sys.stderr)

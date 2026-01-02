@@ -35,7 +35,9 @@ from .indicators import LEDIndicator, create_power_led, create_status_led
 # Interface blocks
 from .interface import (
     DebugHeader,
+    I2CPullups,
     USBConnector,
+    create_i2c_pullups,
     create_jtag_header,
     create_swd_header,
     create_tag_connect_header,
@@ -44,7 +46,7 @@ from .interface import (
 )
 
 # MCU blocks
-from .mcu import MCUBlock
+from .mcu import MCUBlock, ResetButton, create_reset_button
 
 # Power blocks
 from .power import (
@@ -91,11 +93,15 @@ __all__ = [
     # Interface
     "DebugHeader",
     "USBConnector",
+    "I2CPullups",
     "create_swd_header",
     "create_jtag_header",
     "create_tag_connect_header",
     "create_usb_type_c",
     "create_usb_micro_b",
+    "create_i2c_pullups",
     # MCU
     "MCUBlock",
+    "ResetButton",
+    "create_reset_button",
 ]

@@ -21,9 +21,15 @@ Note on net class metadata:
     as this is incompatible with KiCad 7+.
 """
 
+from __future__ import annotations
+
 import math
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.progress import ProgressCallback
 
 from .core import Autorouter
 from .layers import Layer
@@ -39,6 +45,7 @@ def route_pcb(
     origin_x: float = 0,
     origin_y: float = 0,
     skip_nets: list[str] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[str, dict]:
     """
     Route a PCB given component placements and net assignments.
@@ -59,6 +66,9 @@ def route_pcb(
         rules: DesignRules (optional)
         origin_x, origin_y: Board origin
         skip_nets: Net names to skip (e.g., ["GND", "+3.3V"] for plane nets)
+        progress_callback: Optional callback for progress reporting.
+            Signature: (progress: float, message: str, cancelable: bool) -> bool
+            Returns False to cancel, True to continue.
 
     Returns:
         Tuple of (sexp_string, statistics_dict)
@@ -129,7 +139,7 @@ def route_pcb(
 
     # Route nets
     print(f"Autorouting {len(nets_to_route)} nets...")
-    router.route_all(nets_to_route)
+    router.route_all(nets_to_route, progress_callback=progress_callback)
 
     stats = router.get_statistics()
     print(

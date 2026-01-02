@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from .base import CircuitBlock
 
 if TYPE_CHECKING:
-    from kicad_sch_helper import Schematic
+    from kicad_sch_helper import Schematic, SymbolInstance
 
 
 class MCUBlock(CircuitBlock):
@@ -285,3 +285,316 @@ class MCUBlock(CircuitBlock):
             "VDD": self.vdd_pins.copy(),
             "GND": self.gnd_pins.copy(),
         }
+
+
+class ResetButton(CircuitBlock):
+    """
+    Reset button with pull-up resistor and debounce capacitor.
+
+    Places a tactile switch with debounce circuit for MCU reset. The circuit
+    includes a pull-up resistor and debounce capacitor. Optional ESD protection
+    can be added with a TVS diode.
+
+    Schematic (active-low, default):
+        VCC ────┬────────────
+                │
+               [R]  (pull-up, typically 10k)
+                │
+        NRST ───┼────┬───────
+                │   [C]  (debounce, 100nF typical)
+               [SW]  │
+                │    │
+        GND ────┴────┴───────
+
+    Schematic (active-high):
+        GND ────┬────────────
+                │
+               [R]  (pull-down, typically 10k)
+                │
+        RST ────┼────┬───────
+                │   [C]  (debounce, 100nF typical)
+               [SW]  │
+                │    │
+        VCC ────┴────┴───────
+
+    Ports:
+        - VCC: Power input (for pull-up/pull-down)
+        - NRST (or RST): Reset output (active-low or active-high)
+        - GND: Ground
+
+    Example:
+        from kicad_tools.schematic.blocks import ResetButton
+
+        # Basic reset button (active-low)
+        reset = ResetButton(
+            sch,
+            x=100, y=50,
+            pullup_value="10k",
+            debounce_cap="100nF",
+            ref_prefix="SW",
+        )
+
+        # With ESD protection
+        reset = ResetButton(
+            sch,
+            x=100, y=50,
+            pullup_value="10k",
+            debounce_cap="100nF",
+            esd_protection=True,
+            ref_prefix="SW",
+        )
+
+        # Active-high reset (rare but exists)
+        reset = ResetButton(
+            sch,
+            x=100, y=50,
+            active_low=False,
+            ref_prefix="SW",
+        )
+
+        # Access ports
+        reset.port("VCC")   # Power for pull-up
+        reset.port("NRST")  # Reset output (active low)
+        reset.port("GND")   # Ground
+    """
+
+    def __init__(
+        self,
+        sch: "Schematic",
+        x: float,
+        y: float,
+        pullup_value: str = "10k",
+        debounce_cap: str = "100nF",
+        active_low: bool = True,
+        esd_protection: bool = False,
+        ref_prefix: str = "SW",
+        resistor_ref_start: int = 1,
+        cap_ref_start: int = 1,
+        tvs_ref_start: int = 1,
+        switch_symbol: str = "Switch:SW_Push",
+        resistor_symbol: str = "Device:R",
+        cap_symbol: str = "Device:C",
+        tvs_symbol: str = "Device:D_TVS",
+        tvs_value: str = "PESD5V0S1BL",
+    ):
+        """
+        Create a reset button with pull-up and debounce capacitor.
+
+        Args:
+            sch: Schematic to add to
+            x: X coordinate of switch center
+            y: Y coordinate of switch center
+            pullup_value: Pull-up (or pull-down) resistor value (e.g., "10k")
+            debounce_cap: Debounce capacitor value (e.g., "100nF")
+            active_low: If True (default), reset is active-low (NRST).
+                If False, reset is active-high (RST).
+            esd_protection: If True, add TVS diode for ESD protection
+            ref_prefix: Reference designator prefix for switch (e.g., "SW" or "SW1")
+            resistor_ref_start: Starting reference number for resistor
+            cap_ref_start: Starting reference number for capacitor
+            tvs_ref_start: Starting reference number for TVS diode
+            switch_symbol: KiCad symbol for tactile switch
+            resistor_symbol: KiCad symbol for resistor
+            cap_symbol: KiCad symbol for capacitor
+            tvs_symbol: KiCad symbol for TVS diode
+            tvs_value: Part value for TVS diode (e.g., "PESD5V0S1BL")
+        """
+        super().__init__()
+        self.schematic = sch
+        self.x = x
+        self.y = y
+        self.active_low = active_low
+        self.esd_protection = esd_protection
+
+        # Parse reference prefix
+        if ref_prefix[-1].isdigit():
+            sw_ref = ref_prefix
+        else:
+            sw_ref = f"{ref_prefix}1"
+
+        r_ref = f"R{resistor_ref_start}"
+        c_ref = f"C{cap_ref_start}"
+
+        # Component spacing
+        resistor_offset_y = -15  # Resistor above switch
+        cap_offset_x = 15  # Cap to the right of switch
+        tvs_offset_x = 25  # TVS further right if present
+
+        # Place switch
+        self.switch = sch.add_symbol(switch_symbol, x, y, sw_ref, "RESET")
+        self.components = {"SW": self.switch}
+
+        # Get switch pin positions
+        # Standard tactile switch has pins 1 and 2
+        sw_pin1 = self.switch.pin_position("1")
+        sw_pin2 = self.switch.pin_position("2")
+
+        # Place pull-up/pull-down resistor above switch
+        r_y = y + resistor_offset_y
+        self.resistor = sch.add_symbol(resistor_symbol, x, r_y, r_ref, pullup_value)
+        self.components["R"] = self.resistor
+
+        # Get resistor pin positions
+        r_pin1 = self.resistor.pin_position("1")  # Top
+        r_pin2 = self.resistor.pin_position("2")  # Bottom
+
+        # Place debounce capacitor to the right
+        c_x = x + cap_offset_x
+        self.cap = sch.add_symbol(cap_symbol, c_x, y, c_ref, debounce_cap)
+        self.components["C"] = self.cap
+
+        # Get cap pin positions
+        c_pin1 = self.cap.pin_position("1")  # Top
+        c_pin2 = self.cap.pin_position("2")  # Bottom
+
+        # Wire resistor bottom to switch top and cap top (reset node)
+
+        # Wire resistor pin 2 to switch pin 1 (vertical)
+        sch.add_wire(r_pin2, sw_pin1)
+
+        # Wire reset node to cap top
+        # Create junction at the reset node
+        sch.add_wire(sw_pin1, (c_pin1[0], sw_pin1[1]))  # Horizontal to cap x
+        sch.add_wire((c_pin1[0], sw_pin1[1]), c_pin1)  # Vertical to cap top
+        sch.add_junction(sw_pin1[0], sw_pin1[1])
+
+        # Wire switch bottom to cap bottom (ground node for active-low)
+        # For active-high, this would be VCC
+        sch.add_wire(sw_pin2, (c_pin2[0], sw_pin2[1]))  # Horizontal
+        sch.add_wire((c_pin2[0], sw_pin2[1]), c_pin2)  # Vertical
+
+        # Add TVS diode if requested
+        self.tvs: "SymbolInstance | None" = None
+        if esd_protection:
+            tvs_ref = f"D{tvs_ref_start}"
+            tvs_x = x + tvs_offset_x
+            self.tvs = sch.add_symbol(tvs_symbol, tvs_x, y, tvs_ref, tvs_value)
+            self.components["TVS"] = self.tvs
+
+            # Get TVS pin positions
+            tvs_anode = self.tvs.pin_position("A")
+            tvs_cathode = self.tvs.pin_position("K")
+
+            # Wire TVS anode to reset node
+            sch.add_wire((c_pin1[0], sw_pin1[1]), (tvs_anode[0], sw_pin1[1]))
+            sch.add_wire((tvs_anode[0], sw_pin1[1]), tvs_anode)
+
+            # TVS cathode goes to ground (will be wired in connect_to_rails)
+            # Store for later
+            self._tvs_cathode = tvs_cathode
+
+        # Define ports
+        # Reset output is at the junction between resistor, switch, and cap
+        reset_port_x = c_pin1[0]  # At cap top x position
+        reset_port_y = sw_pin1[1]  # At switch pin 1 y position
+
+        if active_low:
+            # Active-low: VCC at top, GND at bottom
+            self.ports = {
+                "VCC": r_pin1,  # Top of resistor (pull-up to VCC)
+                "NRST": (reset_port_x, reset_port_y),  # Reset output
+                "GND": sw_pin2,  # Bottom of switch (to GND)
+            }
+        else:
+            # Active-high: GND at top, VCC at bottom
+            self.ports = {
+                "GND": r_pin1,  # Top of resistor (pull-down to GND)
+                "RST": (reset_port_x, reset_port_y),  # Reset output
+                "VCC": sw_pin2,  # Bottom of switch (to VCC)
+            }
+
+        # Store internal positions for connect_to_rails
+        self._resistor_top = r_pin1
+        self._switch_bottom = sw_pin2
+        self._cap_bottom = c_pin2
+
+    def connect_to_rails(
+        self,
+        vcc_rail_y: float,
+        gnd_rail_y: float,
+        add_junctions: bool = True,
+    ) -> None:
+        """
+        Connect reset button to power rails.
+
+        Args:
+            vcc_rail_y: Y coordinate of VCC rail
+            gnd_rail_y: Y coordinate of GND rail
+            add_junctions: Whether to add junction markers
+        """
+        sch = self.schematic
+
+        if self.active_low:
+            # Active-low: Connect resistor top to VCC, switch bottom to GND
+            vcc_pos = self._resistor_top
+            gnd_pos = self._switch_bottom
+
+            # Connect pull-up to VCC rail
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+
+            # Connect switch and cap bottom to GND rail
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+
+            # Connect cap bottom to GND rail
+            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], gnd_rail_y))
+
+            if add_junctions:
+                sch.add_junction(vcc_pos[0], vcc_rail_y)
+                sch.add_junction(gnd_pos[0], gnd_rail_y)
+                sch.add_junction(self._cap_bottom[0], gnd_rail_y)
+        else:
+            # Active-high: Connect resistor top to GND, switch bottom to VCC
+            gnd_pos = self._resistor_top
+            vcc_pos = self._switch_bottom
+
+            # Connect pull-down to GND rail
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+
+            # Connect switch and cap bottom to VCC rail
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+
+            # Connect cap bottom to VCC rail
+            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], vcc_rail_y))
+
+            if add_junctions:
+                sch.add_junction(gnd_pos[0], gnd_rail_y)
+                sch.add_junction(vcc_pos[0], vcc_rail_y)
+                sch.add_junction(self._cap_bottom[0], vcc_rail_y)
+
+        # Connect TVS cathode to GND if present
+        if self.esd_protection and hasattr(self, "_tvs_cathode"):
+            sch.add_wire(self._tvs_cathode, (self._tvs_cathode[0], gnd_rail_y))
+            if add_junctions:
+                sch.add_junction(self._tvs_cathode[0], gnd_rail_y)
+
+
+def create_reset_button(
+    sch: "Schematic",
+    x: float,
+    y: float,
+    ref: str = "SW1",
+    pullup_value: str = "10k",
+    debounce_cap: str = "100nF",
+    with_esd: bool = False,
+) -> ResetButton:
+    """
+    Create a reset button with standard values.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate
+        y: Y coordinate
+        ref: Switch reference designator
+        pullup_value: Pull-up resistor value (default "10k")
+        debounce_cap: Debounce capacitor value (default "100nF")
+        with_esd: Add ESD protection TVS diode
+    """
+    return ResetButton(
+        sch,
+        x,
+        y,
+        pullup_value=pullup_value,
+        debounce_cap=debounce_cap,
+        esd_protection=with_esd,
+        ref_prefix=ref,
+    )

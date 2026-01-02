@@ -373,7 +373,7 @@ class NetlistValidator:
 
                 # Check for common naming variations
                 for pair in common_net_pairs:
-                    if (sch_net.upper() in pair and pcb_net.upper() in pair and sch_net != pcb_net):
+                    if sch_net.upper() in pair and pcb_net.upper() in pair and sch_net != pcb_net:
                         result.add(
                             SyncIssue(
                                 severity="error",

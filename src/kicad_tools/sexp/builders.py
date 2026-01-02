@@ -6,7 +6,7 @@ Convenience functions for building KiCad schematic S-expressions.
 These builders produce SExp nodes that serialize to valid KiCad format.
 
 Usage:
-    from kicad_sexp_builders import xy, at, stroke, effects, uuid_node
+    from kicad_tools.sexp.builders import xy, at, stroke, effects, uuid_node
 
     wire_node = SExp.list("wire",
         SExp.list("pts", xy(10, 20), xy(30, 40)),

@@ -16,6 +16,7 @@ Modules:
     operations: Schematic and PCB operations
     router: PCB autorouter with A* pathfinding
     constraints: Constraint locking for multi-stage optimization
+    progress: Progress callback infrastructure for long-running operations
 
 Quick Start::
 
@@ -34,6 +35,13 @@ Quick Start::
     project = Project.load("project.kicad_pro")
     result = project.cross_reference()
     project.export_assembly("output/", manufacturer="jlcpcb")
+
+    # Use progress callbacks for long operations
+    from kicad_tools.progress import ProgressCallback, ProgressContext
+    def on_progress(progress, message, cancelable):
+        print(f"{progress*100:.0f}%: {message}")
+        return True  # Continue
+    # ... use with router, DRC, export functions
 """
 
 __version__ = "0.2.0"
@@ -46,6 +54,19 @@ from kicad_tools.constraints import (
     LockType,
 )
 from kicad_tools.core.sexp_file import load_pcb, load_schematic, save_pcb, save_schematic
+
+# Progress callback infrastructure
+from kicad_tools.progress import (
+    ProgressCallback,
+    ProgressContext,
+    ProgressEvent,
+    SubProgressCallback,
+    create_json_callback,
+    create_print_callback,
+    get_current_callback,
+    null_progress,
+    report_progress,
+)
 
 # Project
 from kicad_tools.project import Project
@@ -105,4 +126,14 @@ __all__ = [
     "ConstraintManager",
     "ConstraintViolation",
     "LockType",
+    # Progress - callback infrastructure for long operations
+    "ProgressCallback",
+    "ProgressContext",
+    "ProgressEvent",
+    "SubProgressCallback",
+    "create_json_callback",
+    "create_print_callback",
+    "get_current_callback",
+    "null_progress",
+    "report_progress",
 ]

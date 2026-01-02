@@ -11,19 +11,23 @@ from kicad_tools.schematic.blocks import (
     CrystalOscillator,
     DebugHeader,
     DecouplingCaps,
+    I2CPullups,
     LDOBlock,
     LEDIndicator,
     MCUBlock,
     OscillatorBlock,
     Port,
+    ResetButton,
     USBConnector,
     USBPowerInput,
     create_3v3_ldo,
     create_12v_barrel_jack,
+    create_i2c_pullups,
     create_jtag_header,
     create_lipo_battery,
     create_mclk_oscillator,
     create_power_led,
+    create_reset_button,
     create_status_led,
     create_swd_header,
     create_tag_connect_header,
@@ -450,6 +454,305 @@ class TestCrystalOscillatorMocked:
 
         # IN should be on left (lower x), OUT on right (higher x)
         assert xtal.ports["IN"][0] < xtal.ports["OUT"][0]
+
+
+class TestI2CPullupsMocked:
+    """Tests for I2CPullups with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            # Resistor pins (vertical orientation)
+            if "R" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),  # Top (VCC side)
+                    "2": (x, y + 5),  # Bottom (signal side)
+                }.get(name, (0, 0))
+            # Capacitor pins
+            else:
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),  # Top (signal side)
+                    "2": (x, y + 5),  # Bottom (GND side)
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_i2c_pullups_creation_basic(self, mock_schematic):
+        """Create basic I2C pull-ups without filter caps."""
+        i2c = I2CPullups(
+            mock_schematic,
+            x=100,
+            y=100,
+            resistor_value="4.7k",
+            ref_start=1,
+        )
+
+        assert i2c.schematic == mock_schematic
+        assert i2c.x == 100
+        assert i2c.y == 100
+        assert i2c.resistor_value == "4.7k"
+        assert "VCC" in i2c.ports
+        assert "SDA" in i2c.ports
+        assert "SCL" in i2c.ports
+        assert "GND" in i2c.ports
+        assert "R_SDA" in i2c.components
+        assert "R_SCL" in i2c.components
+
+    def test_i2c_pullups_creation_with_filter_caps(self, mock_schematic):
+        """Create I2C pull-ups with filter capacitors."""
+        i2c = I2CPullups(
+            mock_schematic,
+            x=100,
+            y=100,
+            resistor_value="2.2k",
+            filter_caps="100pF",
+            ref_start=1,
+        )
+
+        assert i2c.filter_caps_value == "100pF"
+        assert "R_SDA" in i2c.components
+        assert "R_SCL" in i2c.components
+        assert "C_SDA" in i2c.components
+        assert "C_SCL" in i2c.components
+
+    def test_i2c_pullups_no_caps_when_none(self, mock_schematic):
+        """No capacitors when filter_caps is None."""
+        i2c = I2CPullups(
+            mock_schematic,
+            x=100,
+            y=100,
+            resistor_value="4.7k",
+            filter_caps=None,
+            ref_start=1,
+        )
+
+        assert "C_SDA" not in i2c.components
+        assert "C_SCL" not in i2c.components
+
+    def test_i2c_pullups_wires_vcc_bus(self, mock_schematic):
+        """I2C pull-ups wires resistor tops together (VCC bus)."""
+        I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+
+        # Should wire resistor tops together
+        assert mock_schematic.add_wire.called
+
+    def test_i2c_pullups_wires_caps_to_resistors(self, mock_schematic):
+        """I2C pull-ups with caps wires caps to resistors."""
+        I2CPullups(
+            mock_schematic, x=100, y=100, resistor_value="4.7k", filter_caps="100pF", ref_start=1
+        )
+
+        # Should wire resistors to caps and caps to GND bus
+        # At least: VCC bus + SDA cap + SCL cap + GND bus = 4 wires
+        assert mock_schematic.add_wire.call_count >= 4
+
+    def test_i2c_pullups_adds_junctions_with_caps(self, mock_schematic):
+        """I2C pull-ups with caps adds junctions at signal tap points."""
+        I2CPullups(
+            mock_schematic, x=100, y=100, resistor_value="4.7k", filter_caps="100pF", ref_start=1
+        )
+
+        # Should add junctions at SDA and SCL tap points
+        assert mock_schematic.add_junction.call_count >= 2
+
+    def test_i2c_pullups_no_junctions_without_caps(self, mock_schematic):
+        """I2C pull-ups without caps doesn't add junctions during construction."""
+        mock_schematic.add_junction.reset_mock()
+        I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+
+        # No junctions needed without filter caps (no tap points)
+        assert mock_schematic.add_junction.call_count == 0
+
+    def test_i2c_pullups_connect_to_rails(self, mock_schematic):
+        """Connect I2C pull-ups to power rails."""
+        i2c = I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        i2c.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wire for VCC
+        assert mock_schematic.add_wire.called
+        assert mock_schematic.add_junction.called
+
+    def test_i2c_pullups_connect_to_rails_with_caps(self, mock_schematic):
+        """Connect I2C pull-ups with caps to rails including GND."""
+        i2c = I2CPullups(
+            mock_schematic, x=100, y=100, resistor_value="4.7k", filter_caps="100pF", ref_start=1
+        )
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        i2c.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for VCC and GND
+        assert mock_schematic.add_wire.call_count >= 2
+        assert mock_schematic.add_junction.call_count >= 2
+
+    def test_i2c_pullups_connect_no_junctions(self, mock_schematic):
+        """Connect I2C pull-ups without adding junctions."""
+        i2c = I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+        mock_schematic.add_junction.reset_mock()
+
+        i2c.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        assert not mock_schematic.add_junction.called
+
+    def test_i2c_pullups_custom_spacing(self, mock_schematic):
+        """I2C pull-ups uses custom spacing."""
+        i2c = I2CPullups(
+            mock_schematic, x=100, y=100, resistor_value="4.7k", spacing=20, ref_start=1
+        )
+
+        # Both resistors should be created
+        assert "R_SDA" in i2c.components
+        assert "R_SCL" in i2c.components
+
+    def test_i2c_pullups_custom_ref_prefixes(self, mock_schematic):
+        """I2C pull-ups uses custom reference prefixes."""
+        I2CPullups(
+            mock_schematic,
+            x=100,
+            y=100,
+            resistor_value="4.7k",
+            filter_caps="100pF",
+            ref_start=5,
+            ref_prefix_r="RN",
+            ref_prefix_c="CF",
+        )
+
+        # Verify add_symbol was called with custom refs
+        calls = mock_schematic.add_symbol.call_args_list
+        refs = [c[0][3] for c in calls]  # 4th positional arg is ref
+        assert "RN5" in refs
+        assert "RN6" in refs
+        assert "CF5" in refs
+        assert "CF6" in refs
+
+    def test_i2c_pullups_port_positions(self, mock_schematic):
+        """I2C pull-ups port positions are tuples."""
+        i2c = I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+
+        assert isinstance(i2c.ports["VCC"], tuple)
+        assert isinstance(i2c.ports["SDA"], tuple)
+        assert isinstance(i2c.ports["SCL"], tuple)
+        assert isinstance(i2c.ports["GND"], tuple)
+        assert len(i2c.ports["VCC"]) == 2
+        assert len(i2c.ports["SDA"]) == 2
+
+    def test_i2c_pullups_port_lookup(self, mock_schematic):
+        """I2C pull-ups port() method works."""
+        i2c = I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+
+        vcc_pos = i2c.port("VCC")
+        assert isinstance(vcc_pos, tuple)
+
+        sda_pos = i2c.port("SDA")
+        assert isinstance(sda_pos, tuple)
+
+    def test_i2c_pullups_port_not_found(self, mock_schematic):
+        """I2C pull-ups raises KeyError for unknown port."""
+        i2c = I2CPullups(mock_schematic, x=100, y=100, resistor_value="4.7k", ref_start=1)
+
+        with pytest.raises(KeyError) as exc:
+            i2c.port("NONEXISTENT")
+        assert "NONEXISTENT" in str(exc.value)
+
+
+class TestI2CPullupsFactoryFunction:
+    """Tests for create_i2c_pullups factory function."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_create_i2c_pullups_standard_speed(self, mock_schematic):
+        """Create I2C pull-ups for standard speed (100kHz)."""
+        i2c = create_i2c_pullups(mock_schematic, x=100, y=100, speed="standard")
+
+        assert isinstance(i2c, I2CPullups)
+        assert i2c.resistor_value == "4.7k"
+        assert i2c.filter_caps_value is None
+
+    def test_create_i2c_pullups_fast_speed(self, mock_schematic):
+        """Create I2C pull-ups for fast speed (400kHz)."""
+        i2c = create_i2c_pullups(mock_schematic, x=100, y=100, speed="fast")
+
+        assert isinstance(i2c, I2CPullups)
+        assert i2c.resistor_value == "2.2k"
+
+    def test_create_i2c_pullups_fast_plus_speed(self, mock_schematic):
+        """Create I2C pull-ups for fast+ speed (1MHz)."""
+        i2c = create_i2c_pullups(mock_schematic, x=100, y=100, speed="fast_plus")
+
+        assert isinstance(i2c, I2CPullups)
+        assert i2c.resistor_value == "1k"
+
+    def test_create_i2c_pullups_with_filter(self, mock_schematic):
+        """Create I2C pull-ups with filter capacitors."""
+        i2c = create_i2c_pullups(mock_schematic, x=100, y=100, with_filter=True)
+
+        assert i2c.filter_caps_value == "100pF"
+        assert "C_SDA" in i2c.components
+        assert "C_SCL" in i2c.components
+
+    def test_create_i2c_pullups_without_filter(self, mock_schematic):
+        """Create I2C pull-ups without filter capacitors."""
+        i2c = create_i2c_pullups(mock_schematic, x=100, y=100, with_filter=False)
+
+        assert i2c.filter_caps_value is None
+        assert "C_SDA" not in i2c.components
+        assert "C_SCL" not in i2c.components
+
+    def test_create_i2c_pullups_custom_ref_start(self, mock_schematic):
+        """Create I2C pull-ups with custom ref start."""
+        create_i2c_pullups(mock_schematic, x=100, y=100, ref_start=10)
+
+        # Verify add_symbol was called with refs starting at 10
+        calls = mock_schematic.add_symbol.call_args_list
+        refs = [c[0][3] for c in calls]  # 4th positional arg is ref
+        assert "R10" in refs
+        assert "R11" in refs
+
+    def test_create_i2c_pullups_invalid_speed(self, mock_schematic):
+        """Invalid speed raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            create_i2c_pullups(mock_schematic, x=100, y=100, speed="invalid")
+        assert "Invalid speed" in str(exc.value)
+
+    def test_create_i2c_pullups_speed_normalization(self, mock_schematic):
+        """Speed strings are normalized (case, hyphen, space)."""
+        # These should all work
+        i2c1 = create_i2c_pullups(mock_schematic, x=100, y=100, speed="FAST")
+        assert i2c1.resistor_value == "2.2k"
+
+        i2c2 = create_i2c_pullups(mock_schematic, x=100, y=100, speed="fast-plus")
+        assert i2c2.resistor_value == "1k"
+
+        i2c3 = create_i2c_pullups(mock_schematic, x=100, y=100, speed="fast plus")
+        assert i2c3.resistor_value == "1k"
 
 
 class TestDebugHeaderMocked:
@@ -1166,9 +1469,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_pfet(self, mock_schematic):
         """Create barrel jack with P-FET protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="12V", protection="pfet"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="12V", protection="pfet")
 
         assert jack.schematic == mock_schematic
         assert jack.x == 100
@@ -1182,9 +1483,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_diode(self, mock_schematic):
         """Create barrel jack with diode protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="9V", protection="diode"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="9V", protection="diode")
 
         assert "JACK" in jack.components
         assert "D" in jack.components
@@ -1193,9 +1492,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_no_protection(self, mock_schematic):
         """Create barrel jack without protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="5V", protection="none"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="5V", protection="none")
 
         assert "JACK" in jack.components
         assert "C_FILT" in jack.components
@@ -1257,9 +1554,7 @@ class TestUSBPowerInputMocked:
 
     def test_usb_power_creation_fuse(self, mock_schematic):
         """Create USB power input with fuse protection."""
-        usb = USBPowerInput(
-            mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF"
-        )
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF")
 
         assert usb.schematic == mock_schematic
         assert "VBUS_IN" in usb.ports
@@ -1369,9 +1664,7 @@ class TestBatteryInputMocked:
 
     def test_battery_input_creation_diode(self, mock_schematic):
         """Create battery input with diode protection."""
-        batt = BatteryInput(
-            mock_schematic, x=100, y=100, voltage="7.4V", protection="diode"
-        )
+        batt = BatteryInput(mock_schematic, x=100, y=100, voltage="7.4V", protection="diode")
 
         assert "CONN" in batt.components
         assert "D" in batt.components
@@ -1712,7 +2005,9 @@ class TestUSBConnectorMocked:
 
         # Verify add_symbol was called with custom values
         calls = mock_schematic.add_symbol.call_args_list
-        tvs_calls = [c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)]
+        tvs_calls = [
+            c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)
+        ]
         assert len(tvs_calls) >= 1
 
     def test_usb_connector_port_lookup(self, mock_schematic):
@@ -1793,9 +2088,7 @@ class TestUSBConnectorFactoryFunctions:
 
     def test_create_usb_type_c_with_vbus_protection(self, mock_schematic):
         """Create USB Type-C with VBUS protection."""
-        usb = create_usb_type_c(
-            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
-        )
+        usb = create_usb_type_c(mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True)
         assert usb.vbus_protection is True
 
     def test_create_usb_micro_b(self, mock_schematic):
@@ -1811,7 +2104,306 @@ class TestUSBConnectorFactoryFunctions:
 
     def test_create_usb_micro_b_with_vbus_protection(self, mock_schematic):
         """Create USB Micro-B with VBUS protection."""
-        usb = create_usb_micro_b(
-            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
-        )
+        usb = create_usb_micro_b(mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True)
         assert usb.vbus_protection is True
+
+
+class TestResetButtonMocked:
+    """Tests for ResetButton with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "SW_Push" in str(symbol) or "Switch" in str(symbol):
+                # Tactile switch pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),  # Top
+                    "2": (x, y + 5),  # Bottom
+                }.get(name, (0, 0))
+            elif "TVS" in str(symbol) or "D_TVS" in str(symbol):
+                # TVS diode pins
+                comp.pin_position.side_effect = lambda name: {
+                    "A": (x - 5, y),
+                    "K": (x + 5, y),
+                }.get(name, (0, 0))
+            else:
+                # Resistor or capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),  # Top
+                    "2": (x, y + 5),  # Bottom
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_reset_button_creation_active_low(self, mock_schematic):
+        """Create reset button with active-low configuration (default)."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            pullup_value="10k",
+            debounce_cap="100nF",
+            ref_prefix="SW",
+        )
+
+        assert reset.schematic == mock_schematic
+        assert reset.x == 100
+        assert reset.y == 100
+        assert reset.active_low is True
+        assert reset.esd_protection is False
+        assert "VCC" in reset.ports
+        assert "NRST" in reset.ports
+        assert "GND" in reset.ports
+        assert "RST" not in reset.ports  # Active-low uses NRST
+        assert "SW" in reset.components
+        assert "R" in reset.components
+        assert "C" in reset.components
+
+    def test_reset_button_creation_active_high(self, mock_schematic):
+        """Create reset button with active-high configuration."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            active_low=False,
+            ref_prefix="SW",
+        )
+
+        assert reset.active_low is False
+        assert "VCC" in reset.ports
+        assert "RST" in reset.ports  # Active-high uses RST
+        assert "GND" in reset.ports
+        assert "NRST" not in reset.ports
+
+    def test_reset_button_with_esd_protection(self, mock_schematic):
+        """Create reset button with ESD protection."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            esd_protection=True,
+            ref_prefix="SW",
+        )
+
+        assert reset.esd_protection is True
+        assert "TVS" in reset.components
+        assert reset.tvs is not None
+
+    def test_reset_button_without_esd_protection(self, mock_schematic):
+        """Create reset button without ESD protection."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            esd_protection=False,
+            ref_prefix="SW",
+        )
+
+        assert reset.esd_protection is False
+        assert "TVS" not in reset.components
+        assert reset.tvs is None
+
+    def test_reset_button_adds_wires(self, mock_schematic):
+        """Reset button wires components together."""
+        ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+        # Should add wires for:
+        # - resistor to switch
+        # - switch to cap (horizontal + vertical)
+        # - switch bottom to cap bottom (horizontal + vertical)
+        # - junction at reset node
+        assert mock_schematic.add_wire.call_count >= 4
+        assert mock_schematic.add_junction.called
+
+    def test_reset_button_esd_adds_more_wires(self, mock_schematic):
+        """Reset button with ESD adds extra wires for TVS."""
+        ResetButton(mock_schematic, x=100, y=100, esd_protection=False, ref_prefix="SW")
+        base_wire_count = mock_schematic.add_wire.call_count
+
+        mock_schematic.add_wire.reset_mock()
+        ResetButton(mock_schematic, x=100, y=100, esd_protection=True, ref_prefix="SW")
+        esd_wire_count = mock_schematic.add_wire.call_count
+
+        # ESD version should have more wires (TVS anode connections)
+        assert esd_wire_count > base_wire_count
+
+    def test_reset_button_connect_to_rails_active_low(self, mock_schematic):
+        """Connect active-low reset button to power rails."""
+        reset = ResetButton(mock_schematic, x=100, y=100, active_low=True, ref_prefix="SW")
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for: VCC, GND (switch), GND (cap)
+        assert mock_schematic.add_wire.call_count >= 3
+        # Should add junctions by default
+        assert mock_schematic.add_junction.called
+
+    def test_reset_button_connect_to_rails_active_high(self, mock_schematic):
+        """Connect active-high reset button to power rails."""
+        reset = ResetButton(mock_schematic, x=100, y=100, active_low=False, ref_prefix="SW")
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for: GND (resistor), VCC (switch), VCC (cap)
+        assert mock_schematic.add_wire.call_count >= 3
+        assert mock_schematic.add_junction.called
+
+    def test_reset_button_connect_with_esd(self, mock_schematic):
+        """Connect reset button with ESD to rails includes TVS cathode."""
+        reset = ResetButton(mock_schematic, x=100, y=100, esd_protection=True, ref_prefix="SW")
+        mock_schematic.add_wire.reset_mock()
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        # Should add wires for: VCC, GND (switch), GND (cap), GND (TVS cathode)
+        assert mock_schematic.add_wire.call_count >= 4
+        # Should add junctions including for TVS
+        assert mock_schematic.add_junction.call_count >= 4
+
+    def test_reset_button_connect_no_junctions(self, mock_schematic):
+        """Connect reset button without junctions."""
+        reset = ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+        mock_schematic.add_junction.reset_mock()
+
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, add_junctions=False)
+
+        assert not mock_schematic.add_junction.called
+
+    def test_reset_button_custom_values(self, mock_schematic):
+        """Create reset button with custom component values."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            pullup_value="4.7k",
+            debounce_cap="220nF",
+            ref_prefix="SW",
+        )
+
+        # Verify components were created
+        assert "SW" in reset.components
+        assert "R" in reset.components
+        assert "C" in reset.components
+
+    def test_reset_button_custom_refs(self, mock_schematic):
+        """Create reset button with custom reference designators."""
+        reset = ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref_prefix="SW2",
+            resistor_ref_start=5,
+            cap_ref_start=10,
+            tvs_ref_start=3,
+            esd_protection=True,
+        )
+
+        # Verify components were created
+        assert "SW" in reset.components
+        assert "R" in reset.components
+        assert "C" in reset.components
+        assert "TVS" in reset.components
+
+    def test_reset_button_port_lookup(self, mock_schematic):
+        """Reset button port() method works."""
+        reset = ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+
+        vcc_pos = reset.port("VCC")
+        assert isinstance(vcc_pos, tuple)
+        assert len(vcc_pos) == 2
+
+        nrst_pos = reset.port("NRST")
+        assert isinstance(nrst_pos, tuple)
+
+    def test_reset_button_port_not_found(self, mock_schematic):
+        """Reset button raises KeyError for unknown port."""
+        reset = ResetButton(mock_schematic, x=100, y=100, ref_prefix="SW")
+
+        with pytest.raises(KeyError) as exc:
+            reset.port("NONEXISTENT")
+        assert "NONEXISTENT" in str(exc.value)
+
+    def test_reset_button_custom_tvs_value(self, mock_schematic):
+        """Create reset button with custom TVS value."""
+        ResetButton(
+            mock_schematic,
+            x=100,
+            y=100,
+            esd_protection=True,
+            tvs_value="ESD9B5.0ST5G",
+            ref_prefix="SW",
+        )
+
+        # Verify TVS was created with custom value
+        calls = mock_schematic.add_symbol.call_args_list
+        tvs_calls = [c for c in calls if "TVS" in str(c) or "ESD9B5.0ST5G" in str(c)]
+        assert len(tvs_calls) >= 1
+
+
+class TestResetButtonFactoryFunction:
+    """Tests for create_reset_button factory function."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        return sch
+
+    def test_create_reset_button(self, mock_schematic):
+        """Create reset button via factory."""
+        reset = create_reset_button(mock_schematic, x=100, y=100, ref="SW1")
+        assert isinstance(reset, ResetButton)
+        assert reset.active_low is True
+        assert reset.esd_protection is False
+
+    def test_create_reset_button_with_custom_values(self, mock_schematic):
+        """Create reset button with custom values via factory."""
+        reset = create_reset_button(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="SW1",
+            pullup_value="4.7k",
+            debounce_cap="220nF",
+        )
+        assert isinstance(reset, ResetButton)
+
+    def test_create_reset_button_with_esd(self, mock_schematic):
+        """Create reset button with ESD protection via factory."""
+        reset = create_reset_button(mock_schematic, x=100, y=100, ref="SW1", with_esd=True)
+        assert isinstance(reset, ResetButton)
+        assert reset.esd_protection is True
+        assert "TVS" in reset.components
+
+    def test_create_reset_button_without_esd(self, mock_schematic):
+        """Create reset button without ESD protection via factory."""
+        reset = create_reset_button(mock_schematic, x=100, y=100, ref="SW1", with_esd=False)
+        assert isinstance(reset, ResetButton)
+        assert reset.esd_protection is False
+        assert "TVS" not in reset.components
