@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from kicad_tools.utils import ensure_parent_dir
+
 
 @dataclass
 class Pad:
@@ -376,8 +378,7 @@ class Footprint:
     def save(self, filepath: str | Path) -> None:
         """Save footprint to a .kicad_mod file."""
         filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(self.to_sexp())
+        ensure_parent_dir(filepath).write_text(self.to_sexp())
 
 
 def _fmt(val: float) -> str:

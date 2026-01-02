@@ -22,6 +22,7 @@ from kicad_tools.config import (
     generate_template,
     get_config_paths,
 )
+from kicad_tools.utils import ensure_parent_dir
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -201,8 +202,7 @@ def _init_config(user: bool = False) -> int:
     """Create a template config file."""
     if user:
         target = USER_CONFIG_PATH
-        # Create parent directory if needed
-        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(target)
     else:
         target = Path.cwd() / CONFIG_FILENAMES[0]  # .kicad-tools.toml
 
