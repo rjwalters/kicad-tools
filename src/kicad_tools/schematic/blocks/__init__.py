@@ -32,7 +32,7 @@ from .base import CircuitBlock, Port
 # Indicator blocks
 from .indicators import LEDIndicator, create_power_led, create_status_led
 
-# Interface blocks
+# Interface blocks (organized by protocol type)
 from .interface import (
     CANTransceiver,
     DebugHeader,
