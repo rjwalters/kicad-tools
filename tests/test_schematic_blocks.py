@@ -2292,8 +2292,8 @@ class TestI2CPullupsMocked:
 
     def test_i2c_pullups_with_filter_caps(self, mock_schematic):
         """Create I2C pull-ups with filter capacitors."""
-        pullups = I2CPullups(mock_schematic, x=100, y=100, filter_cap="100pF")
-        assert pullups.filter_cap == "100pF"
+        pullups = I2CPullups(mock_schematic, x=100, y=100, filter_caps="100pF")
+        assert pullups.filter_caps_value == "100pF"
 
     def test_i2c_pullups_ports(self, mock_schematic):
         """Verify I2C pull-ups port definitions."""
@@ -2318,12 +2318,14 @@ class TestI2CPullupsFactoryFunctions:
 
     def test_create_i2c_pullups_default(self, mock_schematic):
         """Create I2C pull-ups with default values."""
-        pullups = create_i2c_pullups(mock_schematic, x=100, y=100, ref="R1")
+        pullups = create_i2c_pullups(mock_schematic, x=100, y=100)
         assert isinstance(pullups, I2CPullups)
 
     def test_create_i2c_pullups_custom_value(self, mock_schematic):
-        """Create I2C pull-ups with custom resistor value."""
-        pullups = create_i2c_pullups(mock_schematic, x=100, y=100, ref="R1", resistor_value="10k")
+        """Create I2C pull-ups with custom resistor value using class directly."""
+        # Use I2CPullups directly for custom resistor values
+        # Factory function uses speed presets, not custom values
+        pullups = I2CPullups(mock_schematic, x=100, y=100, resistor_value="10k")
         assert pullups.resistor_value == "10k"
 
 
