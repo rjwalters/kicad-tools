@@ -34,9 +34,13 @@ from .indicators import LEDIndicator, create_power_led, create_status_led
 
 # Interface blocks
 from .interface import (
+    CANTransceiver,
     DebugHeader,
     I2CPullups,
     USBConnector,
+    create_can_transceiver_mcp2551,
+    create_can_transceiver_sn65hvd230,
+    create_can_transceiver_tja1050,
     create_i2c_pullups,
     create_jtag_header,
     create_swd_header,
@@ -91,9 +95,13 @@ __all__ = [
     "CrystalOscillator",
     "create_mclk_oscillator",
     # Interface
+    "CANTransceiver",
     "DebugHeader",
     "USBConnector",
     "I2CPullups",
+    "create_can_transceiver_mcp2551",
+    "create_can_transceiver_sn65hvd230",
+    "create_can_transceiver_tja1050",
     "create_swd_header",
     "create_jtag_header",
     "create_tag_connect_header",

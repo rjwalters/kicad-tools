@@ -7,6 +7,7 @@ import pytest
 from kicad_tools.schematic.blocks import (
     BarrelJackInput,
     BatteryInput,
+    CANTransceiver,
     CircuitBlock,
     CrystalOscillator,
     DebugHeader,
@@ -22,6 +23,9 @@ from kicad_tools.schematic.blocks import (
     USBPowerInput,
     create_3v3_ldo,
     create_12v_barrel_jack,
+    create_can_transceiver_mcp2551,
+    create_can_transceiver_sn65hvd230,
+    create_can_transceiver_tja1050,
     create_i2c_pullups,
     create_jtag_header,
     create_lipo_battery,
@@ -2407,3 +2411,243 @@ class TestResetButtonFactoryFunction:
         assert isinstance(reset, ResetButton)
         assert reset.esd_protection is False
         assert "TVS" not in reset.components
+
+
+class TestCANTransceiverMocked:
+    """Tests for CANTransceiver with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            if "MCP2551" in str(symbol) or "Interface_CAN" in str(symbol):
+                # CAN transceiver pins (MCP2551-style)
+                comp.pin_position.side_effect = lambda name: {
+                    "VDD": (x - 10, y - 10),
+                    "VSS": (x - 10, y + 10),
+                    "TXD": (x - 10, y - 5),
+                    "RXD": (x - 10, y),
+                    "CANH": (x + 10, y - 5),
+                    "CANL": (x + 10, y + 5),
+                    "VCC": (x - 10, y - 10),
+                    "GND": (x - 10, y + 10),
+                    "D": (x - 10, y - 5),  # SN65HVD230 TXD
+                    "R": (x - 10, y),  # SN65HVD230 RXD
+                    "STBY": (x - 10, y + 5),
+                    "S": (x - 10, y + 5),  # TJA1051 STBY
+                }.get(name, (x, y))
+            elif "TVS" in str(symbol) or "D_TVS" in str(symbol):
+                # TVS diode pins
+                comp.pin_position.side_effect = lambda name: {
+                    "A": (x - 5, y),
+                    "K": (x + 5, y),
+                }.get(name, (x, y))
+            elif "Device:R" in str(symbol):
+                # Resistor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (x, y))
+            else:
+                # Capacitor pins
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_can_transceiver_mcp2551_creation(self, mock_schematic):
+        """Create MCP2551 CAN transceiver (default)."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="MCP2551",
+        )
+
+        assert can.schematic == mock_schematic
+        assert can.x == 100
+        assert can.y == 100
+        assert can.transceiver_type == "MCP2551"
+        assert "XCVR" in can.components
+        assert "C_DEC" in can.components
+        assert "VCC" in can.ports
+        assert "GND" in can.ports
+        assert "TXD" in can.ports
+        assert "RXD" in can.ports
+        assert "CANH" in can.ports
+        assert "CANL" in can.ports
+
+    def test_can_transceiver_sn65hvd230_creation(self, mock_schematic):
+        """Create SN65HVD230 CAN transceiver (3.3V)."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="SN65HVD230",
+        )
+
+        assert can.transceiver_type == "SN65HVD230"
+        assert can.get_voltage() == 3.3
+
+    def test_can_transceiver_with_termination(self, mock_schematic):
+        """Create CAN transceiver with 120ohm termination."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="MCP2551",
+            termination=True,
+        )
+
+        assert can.termination is True
+        assert "R_TERM" in can.components
+        assert len(can.termination_resistors) == 1
+
+    def test_can_transceiver_with_split_termination(self, mock_schematic):
+        """Create CAN transceiver with split termination."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="MCP2551",
+            termination="split",
+        )
+
+        assert can.termination == "split"
+        assert "R_SPLIT1" in can.components
+        assert "R_SPLIT2" in can.components
+        assert "C_SPLIT" in can.components
+
+    def test_can_transceiver_without_termination(self, mock_schematic):
+        """Create CAN transceiver without termination."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="MCP2551",
+            termination=False,
+        )
+
+        assert can.termination is False
+        assert "R_TERM" not in can.components
+
+    def test_can_transceiver_with_esd_protection(self, mock_schematic):
+        """Create CAN transceiver with ESD protection."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="MCP2551",
+            esd_protection=True,
+        )
+
+        assert can.esd_protection is True
+        assert "TVS_CANH" in can.components
+        assert "TVS_CANL" in can.components
+
+    def test_can_transceiver_invalid_type(self, mock_schematic):
+        """Invalid transceiver type raises ValueError."""
+        with pytest.raises(ValueError) as exc:
+            CANTransceiver(
+                mock_schematic,
+                x=100,
+                y=100,
+                transceiver="INVALID_CHIP",
+            )
+        assert "Unknown transceiver" in str(exc.value)
+
+    def test_can_transceiver_connect_to_rails(self, mock_schematic):
+        """Connect CAN transceiver to power rails."""
+        can = CANTransceiver(
+            mock_schematic,
+            x=100,
+            y=100,
+            transceiver="MCP2551",
+        )
+        mock_schematic.add_wire.reset_mock()
+
+        can.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+
+        assert mock_schematic.wire_decoupling_cap.called
+        assert mock_schematic.add_wire.called
+
+    def test_can_transceiver_get_voltage(self, mock_schematic):
+        """Get operating voltage for different transceivers."""
+        can_5v = CANTransceiver(mock_schematic, x=100, y=100, transceiver="MCP2551")
+        can_3v3 = CANTransceiver(mock_schematic, x=100, y=100, transceiver="SN65HVD230")
+
+        assert can_5v.get_voltage() == 5.0
+        assert can_3v3.get_voltage() == 3.3
+
+
+class TestCANTransceiverFactoryFunctions:
+    """Tests for CAN transceiver factory functions."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "VDD": (x - 10, y - 10),
+                "VSS": (x - 10, y + 10),
+                "TXD": (x - 10, y - 5),
+                "RXD": (x - 10, y),
+                "CANH": (x + 10, y - 5),
+                "CANL": (x + 10, y + 5),
+                "VCC": (x - 10, y - 10),
+                "GND": (x - 10, y + 10),
+                "D": (x - 10, y - 5),
+                "R": (x - 10, y),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_create_can_transceiver_mcp2551(self, mock_schematic):
+        """Create MCP2551 CAN transceiver via factory."""
+        can = create_can_transceiver_mcp2551(mock_schematic, x=100, y=100, ref="U1")
+        assert isinstance(can, CANTransceiver)
+        assert can.transceiver_type == "MCP2551"
+
+    def test_create_can_transceiver_mcp2551_with_termination(self, mock_schematic):
+        """Create MCP2551 with termination via factory."""
+        can = create_can_transceiver_mcp2551(
+            mock_schematic, x=100, y=100, ref="U1", termination=True
+        )
+        assert can.termination is True
+        assert "R_TERM" in can.components
+
+    def test_create_can_transceiver_sn65hvd230(self, mock_schematic):
+        """Create SN65HVD230 CAN transceiver via factory."""
+        can = create_can_transceiver_sn65hvd230(mock_schematic, x=100, y=100, ref="U1")
+        assert isinstance(can, CANTransceiver)
+        assert can.transceiver_type == "SN65HVD230"
+        assert can.get_voltage() == 3.3
+
+    def test_create_can_transceiver_tja1050(self, mock_schematic):
+        """Create TJA1050 CAN transceiver via factory."""
+        can = create_can_transceiver_tja1050(mock_schematic, x=100, y=100, ref="U1")
+        assert isinstance(can, CANTransceiver)
+        assert can.transceiver_type == "TJA1050"
+        assert can.get_voltage() == 5.0
