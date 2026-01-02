@@ -55,10 +55,12 @@ from .power import (
     DecouplingCaps,
     LDOBlock,
     USBPowerInput,
+    VoltageDivider,
     create_12v_barrel_jack,
     create_3v3_ldo,
     create_lipo_battery,
     create_usb_power,
+    create_voltage_divider,
 )
 
 # Timing blocks
@@ -82,10 +84,12 @@ __all__ = [
     "BarrelJackInput",
     "USBPowerInput",
     "BatteryInput",
+    "VoltageDivider",
     "create_3v3_ldo",
     "create_12v_barrel_jack",
     "create_usb_power",
     "create_lipo_battery",
+    "create_voltage_divider",
     # Timing
     "OscillatorBlock",
     "CrystalOscillator",
