@@ -165,36 +165,13 @@ class LCSCDatasheetSource(DatasheetSource):
         Raises:
             DatasheetDownloadError: If download fails
         """
-        import requests
-
-        from ..exceptions import DatasheetDownloadError
-
         session = self._get_session()
-
-        try:
-            response = session.get(
-                result.datasheet_url,
-                timeout=self.timeout,
-                stream=True,
-                allow_redirects=True,
-            )
-            response.raise_for_status()
-
-            # Ensure parent directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write to file
-            with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-            logger.info(f"Downloaded datasheet to {output_path}")
-            return output_path
-
-        except requests.RequestException as e:
-            raise DatasheetDownloadError(
-                f"Failed to download datasheet from {result.datasheet_url}: {e}"
-            ) from e
+        return self._download_file(
+            session=session,
+            url=result.datasheet_url,
+            output_path=output_path,
+            timeout=self.timeout,
+        )
 
     def close(self) -> None:
         """Close the HTTP session."""
