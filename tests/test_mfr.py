@@ -472,8 +472,8 @@ class TestTwoLayerRules:
                 assert rules.inner_copper_oz == 0.0  # 2-layer has no inner layers
 
 
-class TestDRUFiles:
-    """Tests for .kicad_dru rule files."""
+class TestDRUFiles2Layer:
+    """Tests for 2-layer .kicad_dru rule files."""
 
     def test_jlcpcb_2layer_1oz_dru_exists(self):
         """Test that JLCPCB 2-layer 1oz .kicad_dru file exists."""

@@ -1166,9 +1166,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_pfet(self, mock_schematic):
         """Create barrel jack with P-FET protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="12V", protection="pfet"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="12V", protection="pfet")
 
         assert jack.schematic == mock_schematic
         assert jack.x == 100
@@ -1182,9 +1180,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_diode(self, mock_schematic):
         """Create barrel jack with diode protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="9V", protection="diode"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="9V", protection="diode")
 
         assert "JACK" in jack.components
         assert "D" in jack.components
@@ -1193,9 +1189,7 @@ class TestBarrelJackInputMocked:
 
     def test_barrel_jack_creation_no_protection(self, mock_schematic):
         """Create barrel jack without protection."""
-        jack = BarrelJackInput(
-            mock_schematic, x=100, y=100, voltage="5V", protection="none"
-        )
+        jack = BarrelJackInput(mock_schematic, x=100, y=100, voltage="5V", protection="none")
 
         assert "JACK" in jack.components
         assert "C_FILT" in jack.components
@@ -1257,9 +1251,7 @@ class TestUSBPowerInputMocked:
 
     def test_usb_power_creation_fuse(self, mock_schematic):
         """Create USB power input with fuse protection."""
-        usb = USBPowerInput(
-            mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF"
-        )
+        usb = USBPowerInput(mock_schematic, x=100, y=100, protection="fuse", filter_cap="10uF")
 
         assert usb.schematic == mock_schematic
         assert "VBUS_IN" in usb.ports
@@ -1369,9 +1361,7 @@ class TestBatteryInputMocked:
 
     def test_battery_input_creation_diode(self, mock_schematic):
         """Create battery input with diode protection."""
-        batt = BatteryInput(
-            mock_schematic, x=100, y=100, voltage="7.4V", protection="diode"
-        )
+        batt = BatteryInput(mock_schematic, x=100, y=100, voltage="7.4V", protection="diode")
 
         assert "CONN" in batt.components
         assert "D" in batt.components
@@ -1712,7 +1702,9 @@ class TestUSBConnectorMocked:
 
         # Verify add_symbol was called with custom values
         calls = mock_schematic.add_symbol.call_args_list
-        tvs_calls = [c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)]
+        tvs_calls = [
+            c for c in calls if "TVS" in str(c) or "TPD2E001" in str(c) or "SMBJ6.0A" in str(c)
+        ]
         assert len(tvs_calls) >= 1
 
     def test_usb_connector_port_lookup(self, mock_schematic):
@@ -1793,9 +1785,7 @@ class TestUSBConnectorFactoryFunctions:
 
     def test_create_usb_type_c_with_vbus_protection(self, mock_schematic):
         """Create USB Type-C with VBUS protection."""
-        usb = create_usb_type_c(
-            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
-        )
+        usb = create_usb_type_c(mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True)
         assert usb.vbus_protection is True
 
     def test_create_usb_micro_b(self, mock_schematic):
@@ -1811,7 +1801,5 @@ class TestUSBConnectorFactoryFunctions:
 
     def test_create_usb_micro_b_with_vbus_protection(self, mock_schematic):
         """Create USB Micro-B with VBUS protection."""
-        usb = create_usb_micro_b(
-            mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True
-        )
+        usb = create_usb_micro_b(mock_schematic, x=100, y=100, ref="J1", with_vbus_protection=True)
         assert usb.vbus_protection is True

@@ -299,15 +299,11 @@ class RoutabilityAnalyzer:
         # Calculate estimated success rate
         total = len(report.net_reports)
         if total > 0:
-            easy_nets = len(
-                [r for r in report.net_reports if r.severity == RoutingSeverity.LOW]
-            )
+            easy_nets = len([r for r in report.net_reports if r.severity == RoutingSeverity.LOW])
             medium_nets = len(
                 [r for r in report.net_reports if r.severity == RoutingSeverity.MEDIUM]
             )
-            hard_nets = len(
-                [r for r in report.net_reports if r.severity == RoutingSeverity.HIGH]
-            )
+            hard_nets = len([r for r in report.net_reports if r.severity == RoutingSeverity.HIGH])
             critical_nets = len(
                 [r for r in report.net_reports if r.severity == RoutingSeverity.CRITICAL]
             )
@@ -315,10 +311,7 @@ class RoutabilityAnalyzer:
             # Estimate success rates per difficulty
             # Easy: ~98%, Medium: ~90%, Hard: ~70%, Critical: ~40%
             expected = (
-                easy_nets * 0.98
-                + medium_nets * 0.90
-                + hard_nets * 0.70
-                + critical_nets * 0.40
+                easy_nets * 0.98 + medium_nets * 0.90 + hard_nets * 0.70 + critical_nets * 0.40
             )
             report.estimated_success_rate = expected / total
 
@@ -330,9 +323,7 @@ class RoutabilityAnalyzer:
 
         return report
 
-    def _analyze_net(
-        self, net_id: int, pad_keys: list[tuple[str, str]]
-    ) -> NetRoutabilityReport:
+    def _analyze_net(self, net_id: int, pad_keys: list[tuple[str, str]]) -> NetRoutabilityReport:
         """Analyze routability of a single net.
 
         Args:
@@ -395,7 +386,7 @@ class RoutabilityAnalyzer:
 
         # Generate suggestions
         report.suggestions = self._generate_net_suggestions(report)
-        report.alternatives = self._generate_alternatives(pad_objs, blocking_obstacles)
+        report.alternatives = self._generate_alternatives(blocking_obstacles)
 
         return report
 
@@ -458,12 +449,8 @@ class RoutabilityAnalyzer:
                         height=self.grid.resolution * self.grid.congestion_size,
                         layer=layer_idx,
                         density=congestion,
-                        competing_nets=self._count_nets_in_region(
-                            gx, gy, layer_idx
-                        ),
-                        available_channels=max(
-                            1, int((1.0 - congestion) * 3)
-                        ),  # Rough estimate
+                        competing_nets=self._count_nets_in_region(gx, gy, layer_idx),
+                        available_channels=max(1, int((1.0 - congestion) * 3)),  # Rough estimate
                     )
                     congestion_zones.append(zone)
 
@@ -641,9 +628,7 @@ class RoutabilityAnalyzer:
 
         return utilization
 
-    def _generate_net_suggestions(
-        self, report: NetRoutabilityReport
-    ) -> list[str]:
+    def _generate_net_suggestions(self, report: NetRoutabilityReport) -> list[str]:
         """Generate suggestions for a problem net.
 
         Args:
@@ -665,9 +650,7 @@ class RoutabilityAnalyzer:
             if pad_obstacles:
                 refs = {o.ref for o in pad_obstacles if o.ref}
                 if refs:
-                    suggestions.append(
-                        f"Move component(s): {', '.join(sorted(refs))}"
-                    )
+                    suggestions.append(f"Move component(s): {', '.join(sorted(refs))}")
 
         if any(z.is_bottleneck for z in report.congestion_zones):
             suggestions.append("Consider using via(s) to route on different layer")
@@ -676,13 +659,10 @@ class RoutabilityAnalyzer:
 
         return suggestions
 
-    def _generate_alternatives(
-        self, pads: list[Pad], obstacles: list[BlockingObstacle]
-    ) -> list[RouteAlternative]:
+    def _generate_alternatives(self, obstacles: list[BlockingObstacle]) -> list[RouteAlternative]:
         """Generate alternative routing options.
 
         Args:
-            pads: List of pads to connect
             obstacles: Blocking obstacles found
 
         Returns:
@@ -734,8 +714,7 @@ class RoutabilityAnalyzer:
         for layer_name, util in report.layer_utilization.items():
             if util > 0.6:
                 recommendations.append(
-                    f"Layer {layer_name} is {util * 100:.0f}% utilized - "
-                    "routing may be constrained"
+                    f"Layer {layer_name} is {util * 100:.0f}% utilized - routing may be constrained"
                 )
 
         # Check for many critical nets
@@ -743,15 +722,11 @@ class RoutabilityAnalyzer:
             [r for r in report.net_reports if r.severity == RoutingSeverity.CRITICAL]
         )
         if critical_count > 0:
-            recommendations.append(
-                f"{critical_count} net(s) have critical routing difficulty"
-            )
+            recommendations.append(f"{critical_count} net(s) have critical routing difficulty")
 
         # Suggest layer count if needed
         if self.grid.num_layers == 2 and report.estimated_success_rate < 0.85:
-            recommendations.append(
-                "Consider 4-layer stackup for improved routability"
-            )
+            recommendations.append("Consider 4-layer stackup for improved routability")
 
         if not recommendations:
             recommendations.append("Board appears routable with current design")
@@ -864,7 +839,9 @@ def analyze_routing_failure(
     # Generate suggestions based on obstacles
     if diagnostic.blocking_obstacles:
         pad_refs = {
-            o.ref for o in diagnostic.blocking_obstacles if o.ref and o.obstacle_type == ObstacleType.PAD
+            o.ref
+            for o in diagnostic.blocking_obstacles
+            if o.ref and o.obstacle_type == ObstacleType.PAD
         }
         if pad_refs:
             diagnostic.suggestions.append(
@@ -873,14 +850,16 @@ def analyze_routing_failure(
 
         if grid.num_layers > 1:
             diagnostic.suggestions.append("Try routing on a different layer using vias")
-        elif grid.num_layers == 2:
+        if grid.num_layers == 2:
             diagnostic.suggestions.append("Consider 4-layer stackup for more routing options")
 
         trace_obstacles = [
             o for o in diagnostic.blocking_obstacles if o.obstacle_type == ObstacleType.TRACE
         ]
         if trace_obstacles:
-            diagnostic.suggestions.append("Try different net ordering (some routes may need to be ripped up)")
+            diagnostic.suggestions.append(
+                "Try different net ordering (some routes may need to be ripped up)"
+            )
 
     # Generate alternatives
     if grid.num_layers > 1:
