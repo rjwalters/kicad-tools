@@ -13,7 +13,7 @@ Performance optimizations in this module:
 - Pre-compiled character sets for fast whitespace/delimiter detection
 
 Usage:
-    from kicad_sexp import SExp, parse_file, parse_string
+    from kicad_tools.sexp import SExp, parse_file, parse_string
 
     # Parse a schematic
     doc = parse_file("project.kicad_sch")

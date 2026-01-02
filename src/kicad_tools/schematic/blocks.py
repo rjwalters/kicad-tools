@@ -25,6 +25,102 @@ Usage:
     # Add LED indicator
     led = LEDIndicator(sch, x=150, y=80, ref_prefix="D1", label="PWR")
     led.connect_to_rails(RAIL_3V3, RAIL_GND)
+
+
+KiCad Symbol Library Requirements
+---------------------------------
+
+The circuit blocks in this module require specific KiCad symbol libraries.
+Most blocks use symbols from the standard ``Device`` library which is included
+with all KiCad installations. Some blocks require additional libraries.
+
+**Library Requirements by Block:**
+
++------------------------+----------------------------------+---------------------------+
+| Block                  | Required Libraries               | Notes                     |
++========================+==================================+===========================+
+| LEDIndicator           | Device                           | Standard KiCad library    |
+| DecouplingCaps         | Device                           | Standard KiCad library    |
+| CrystalOscillator      | Device                           | Standard KiCad library    |
++------------------------+----------------------------------+---------------------------+
+| LDOBlock               | Device, Regulator_Linear         | Default uses AP2204K-1.5  |
+| OscillatorBlock        | Device, Oscillator               | Default uses ASE-xxxMHz   |
++------------------------+----------------------------------+---------------------------+
+| DebugHeader            | Device, Connector_Generic        | Generic connectors        |
+| BatteryInput           | Device, Connector_Generic        |                           |
++------------------------+----------------------------------+---------------------------+
+| USBConnector           | Device, Connector                | USB-specific connectors   |
+| BarrelJackInput        | Device, Connector                | Barrel jack symbols       |
+| USBPowerInput          | Device                           | Standard KiCad library    |
++------------------------+----------------------------------+---------------------------+
+| MCUBlock               | Device, (user-specified MCU lib) | MCU library varies        |
++------------------------+----------------------------------+---------------------------+
+
+**Default Symbols Used:**
+
+- ``Device:LED`` - LEDIndicator
+- ``Device:R`` - LEDIndicator, DebugHeader (series resistors)
+- ``Device:C`` - Most blocks for bypass/filter capacitors
+- ``Device:CP`` - BarrelJackInput (polarized capacitor)
+- ``Device:Crystal`` - CrystalOscillator
+- ``Device:D_TVS`` - USBConnector (ESD protection)
+- ``Device:D_Schottky`` - BarrelJackInput, BatteryInput (protection diodes)
+- ``Device:Q_PMOS_GSD`` - BarrelJackInput, BatteryInput (reverse protection)
+- ``Device:Polyfuse`` - USBPowerInput (fuse protection)
+- ``Regulator_Linear:AP2204K-1.5`` - LDOBlock
+- ``Oscillator:ASE-xxxMHz`` - OscillatorBlock
+- ``Connector:USB_C_Receptacle_USB2.0`` - USBConnector (Type-C)
+- ``Connector:USB_Micro-B`` - USBConnector (Micro-B)
+- ``Connector:USB_Mini-B`` - USBConnector (Mini-B)
+- ``Connector:USB_A`` - USBConnector (Type-A)
+- ``Connector:Barrel_Jack_Switch`` - BarrelJackInput
+- ``Connector_Generic:Conn_01x02`` - BatteryInput
+- ``Connector_Generic:Conn_01x06`` - DebugHeader (6-pin SWD)
+- ``Connector_Generic:Conn_01x10`` - DebugHeader (10-pin SWD/Tag-Connect)
+- ``Connector_Generic:Conn_02x05_Odd_Even`` - DebugHeader (10-pin ARM Cortex)
+- ``Connector_Generic:Conn_02x10_Odd_Even`` - DebugHeader (20-pin JTAG)
+
+**Troubleshooting Missing Libraries:**
+
+If you encounter a ``LibraryNotFoundError`` like::
+
+    LibraryNotFoundError: Library 'Connector.kicad_sym' not found
+
+1. **Check KiCad Installation**: Ensure KiCad 8+ is installed and symbol
+   libraries are in the standard location:
+
+   - Linux: ``/usr/share/kicad/symbols/``
+   - macOS: ``/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/``
+   - Windows: ``C:\\Program Files\\KiCad\\<version>\\share\\kicad\\symbols\\``
+
+2. **Use Custom Symbol Overrides**: Most blocks accept a ``*_symbol`` parameter
+   to specify an alternative symbol::
+
+       # Use a different LDO symbol
+       ldo = LDOBlock(sch, x=100, y=80, ref="U1",
+                      ldo_symbol="Regulator_Linear:XC6206P332MR")
+
+       # Use a different USB connector symbol
+       usb = USBConnector(sch, x=50, y=100,
+                          connector_symbol="MyLib:USB_C_Custom")
+
+3. **Add Custom Library Paths**: The underlying ``SymbolDef.from_library()``
+   accepts a ``lib_paths`` parameter for custom search locations.
+
+4. **MCU Symbols**: The ``MCUBlock`` requires you to specify the MCU symbol,
+   which varies by manufacturer. Common libraries include:
+
+   - ``MCU_ST_STM32F1`` - STM32F1 series
+   - ``MCU_ST_STM32F4`` - STM32F4 series
+   - ``MCU_Microchip_ATmega`` - ATmega series
+   - ``MCU_NXP_LPC`` - NXP LPC series
+   - ``MCU_RaspberryPi_RP2040`` - RP2040
+
+   Example::
+
+       mcu = MCUBlock(sch, x=150, y=100,
+                      mcu_symbol="MCU_ST_STM32F1:STM32F103C8Tx",
+                      ref="U1")
 """
 
 import contextlib

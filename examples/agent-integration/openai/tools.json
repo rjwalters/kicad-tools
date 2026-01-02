@@ -1,0 +1,501 @@
+{
+  "name": "kicad_tools",
+  "description": "OpenAI function definitions for kicad-tools PCB design automation",
+  "version": "1.0.0",
+  "functions": [
+    {
+      "name": "load_schematic",
+      "description": "Load a KiCad schematic file (.kicad_sch) for analysis or modification.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Path to the KiCad schematic file (.kicad_sch)"
+          }
+        },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "add_schematic_symbol",
+      "description": "Add a component symbol to the schematic at specified coordinates.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "lib_id": {
+            "type": "string",
+            "description": "Library:SymbolName (e.g., 'Device:R', 'Device:C', 'Device:LED')"
+          },
+          "x": {
+            "type": "number",
+            "description": "X coordinate in mm"
+          },
+          "y": {
+            "type": "number",
+            "description": "Y coordinate in mm"
+          },
+          "reference": {
+            "type": "string",
+            "description": "Reference designator (e.g., 'R1', 'C1', 'U1')"
+          },
+          "value": {
+            "type": "string",
+            "description": "Component value (e.g., '10k', '100nF', 'ATtiny85')"
+          },
+          "rotation": {
+            "type": "number",
+            "description": "Rotation in degrees (0, 90, 180, 270)",
+            "default": 0
+          }
+        },
+        "required": ["lib_id", "x", "y"]
+      }
+    },
+    {
+      "name": "add_wire",
+      "description": "Add a wire connecting two points on the schematic.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_x": {"type": "number", "description": "Start X coordinate in mm"},
+          "start_y": {"type": "number", "description": "Start Y coordinate in mm"},
+          "end_x": {"type": "number", "description": "End X coordinate in mm"},
+          "end_y": {"type": "number", "description": "End Y coordinate in mm"}
+        },
+        "required": ["start_x", "start_y", "end_x", "end_y"]
+      }
+    },
+    {
+      "name": "wire_components",
+      "description": "Connect two component pins with a wire, automatically routing between them.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "from_ref": {
+            "type": "string",
+            "description": "Source component reference (e.g., 'R1')"
+          },
+          "from_pin": {
+            "type": "string",
+            "description": "Source pin name or number (e.g., '1', 'VCC')"
+          },
+          "to_ref": {
+            "type": "string",
+            "description": "Target component reference (e.g., 'U1')"
+          },
+          "to_pin": {
+            "type": "string",
+            "description": "Target pin name or number (e.g., 'GND', 'PA0')"
+          }
+        },
+        "required": ["from_ref", "from_pin", "to_ref", "to_pin"]
+      }
+    },
+    {
+      "name": "add_power_symbol",
+      "description": "Add a power symbol (VCC, GND, +3V3, etc.) to the schematic.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "description": "Power symbol name (e.g., 'VCC', 'GND', '+3V3', '+5V')"
+          },
+          "x": {"type": "number", "description": "X coordinate in mm"},
+          "y": {"type": "number", "description": "Y coordinate in mm"}
+        },
+        "required": ["symbol", "x", "y"]
+      }
+    },
+    {
+      "name": "add_led_indicator",
+      "description": "Add an LED with current-limiting resistor. Creates LED, resistor, and wiring.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {"type": "number", "description": "X coordinate in mm"},
+          "y": {"type": "number", "description": "Y coordinate in mm"},
+          "ref_prefix": {
+            "type": "string",
+            "description": "Reference prefix (e.g., 'D1')",
+            "default": "D"
+          },
+          "label": {
+            "type": "string",
+            "description": "LED label (e.g., 'PWR', 'STATUS')",
+            "default": "LED"
+          },
+          "resistor_value": {
+            "type": "string",
+            "description": "Current limiting resistor value",
+            "default": "330R"
+          }
+        },
+        "required": ["x", "y"]
+      }
+    },
+    {
+      "name": "add_decoupling_caps",
+      "description": "Add a bank of decoupling capacitors for power filtering.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": {"type": "number", "description": "X coordinate in mm"},
+          "y": {"type": "number", "description": "Y coordinate in mm"},
+          "ref_start": {
+            "type": "string",
+            "description": "Starting reference (e.g., 'C1')",
+            "default": "C"
+          },
+          "values": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Capacitor values (e.g., ['10uF', '100nF'])"
+          }
+        },
+        "required": ["x", "y"]
+      }
+    },
+    {
+      "name": "list_symbols",
+      "description": "List all component symbols in the current schematic.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "list_nets",
+      "description": "List all nets (connections) in the current schematic.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "save_schematic",
+      "description": "Save the current schematic to a file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Output file path (.kicad_sch)"
+          }
+        },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "load_pcb",
+      "description": "Load a KiCad PCB file (.kicad_pcb) for layout or routing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Path to the KiCad PCB file (.kicad_pcb)"
+          }
+        },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "route_net",
+      "description": "Route a net on the PCB, connecting all pads of the specified net.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "net": {
+            "type": "string",
+            "description": "Net name to route (e.g., 'GND', 'SCL', 'VCC')"
+          },
+          "prefer_layer": {
+            "type": "string",
+            "description": "Preferred copper layer (e.g., 'F.Cu', 'B.Cu')"
+          },
+          "avoid_regions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Region names to avoid"
+          },
+          "minimize_vias": {
+            "type": "boolean",
+            "description": "Try to minimize layer transitions",
+            "default": true
+          },
+          "trace_width": {
+            "type": "number",
+            "description": "Trace width in mm (uses default if not specified)"
+          }
+        },
+        "required": ["net"]
+      }
+    },
+    {
+      "name": "place_component",
+      "description": "Move a component to a new position on the PCB.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "Component reference (e.g., 'U1', 'R1')"
+          },
+          "x": {"type": "number", "description": "X coordinate in mm"},
+          "y": {"type": "number", "description": "Y coordinate in mm"},
+          "rotation": {
+            "type": "number",
+            "description": "Rotation in degrees"
+          },
+          "side": {
+            "type": "string",
+            "enum": ["top", "bottom"],
+            "description": "Board side for component placement",
+            "default": "top"
+          }
+        },
+        "required": ["ref", "x", "y"]
+      }
+    },
+    {
+      "name": "delete_trace",
+      "description": "Delete traces of a net, optionally near a specific location.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "net": {
+            "type": "string",
+            "description": "Net name to delete traces from"
+          },
+          "near_x": {
+            "type": "number",
+            "description": "X coordinate to search near"
+          },
+          "near_y": {
+            "type": "number",
+            "description": "Y coordinate to search near"
+          },
+          "radius": {
+            "type": "number",
+            "description": "Search radius in mm",
+            "default": 2.0
+          },
+          "delete_all": {
+            "type": "boolean",
+            "description": "Delete all routing for this net",
+            "default": false
+          }
+        },
+        "required": ["net"]
+      }
+    },
+    {
+      "name": "add_via",
+      "description": "Add a via for layer transition.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "net": {"type": "string", "description": "Net name for the via"},
+          "x": {"type": "number", "description": "X coordinate in mm"},
+          "y": {"type": "number", "description": "Y coordinate in mm"},
+          "from_layer": {
+            "type": "string",
+            "description": "Starting layer",
+            "default": "F.Cu"
+          },
+          "to_layer": {
+            "type": "string",
+            "description": "Ending layer",
+            "default": "B.Cu"
+          }
+        },
+        "required": ["net", "x", "y"]
+      }
+    },
+    {
+      "name": "define_zone",
+      "description": "Define a copper pour zone for power or ground planes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "net": {
+            "type": "string",
+            "description": "Net for the zone (e.g., 'GND', 'VCC')"
+          },
+          "layer": {
+            "type": "string",
+            "description": "Copper layer (e.g., 'F.Cu', 'B.Cu')"
+          },
+          "bounds": {
+            "type": "object",
+            "properties": {
+              "x1": {"type": "number"},
+              "y1": {"type": "number"},
+              "x2": {"type": "number"},
+              "y2": {"type": "number"}
+            },
+            "description": "Zone bounding box coordinates"
+          },
+          "priority": {
+            "type": "integer",
+            "description": "Zone priority (higher = fills first)",
+            "default": 0
+          }
+        },
+        "required": ["net", "layer"]
+      }
+    },
+    {
+      "name": "route_all",
+      "description": "Auto-route all unrouted nets on the PCB.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string",
+            "enum": ["simple", "monte_carlo", "iterative"],
+            "description": "Routing strategy to use",
+            "default": "simple"
+          },
+          "max_iterations": {
+            "type": "integer",
+            "description": "Maximum routing iterations",
+            "default": 100
+          }
+        }
+      }
+    },
+    {
+      "name": "check_drc",
+      "description": "Run design rule check on the current PCB.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "manufacturer": {
+            "type": "string",
+            "description": "Manufacturer rules to check against (e.g., 'jlcpcb', 'oshpark', 'pcbway')"
+          },
+          "layers": {
+            "type": "integer",
+            "description": "Number of PCB layers",
+            "default": 2
+          }
+        }
+      }
+    },
+    {
+      "name": "get_violations",
+      "description": "Get current DRC violations on the board.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["error", "warning", "all"],
+            "description": "Filter by severity level",
+            "default": "all"
+          }
+        }
+      }
+    },
+    {
+      "name": "extract_bom",
+      "description": "Extract Bill of Materials from the schematic.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "enum": ["value", "footprint", "none"],
+            "description": "How to group components",
+            "default": "value"
+          },
+          "format": {
+            "type": "string",
+            "enum": ["json", "csv", "markdown"],
+            "description": "Output format",
+            "default": "json"
+          }
+        }
+      }
+    },
+    {
+      "name": "export_gerbers",
+      "description": "Export Gerber files for PCB manufacturing.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "output_dir": {
+            "type": "string",
+            "description": "Output directory for Gerber files"
+          },
+          "manufacturer": {
+            "type": "string",
+            "description": "Manufacturer preset (e.g., 'jlcpcb', 'oshpark')"
+          }
+        },
+        "required": ["output_dir"]
+      }
+    },
+    {
+      "name": "save_pcb",
+      "description": "Save the current PCB to a file.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Output file path (.kicad_pcb)"
+          }
+        },
+        "required": ["file_path"]
+      }
+    },
+    {
+      "name": "analyze_board",
+      "description": "Get comprehensive analysis of current PCB state.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "get_unrouted_nets",
+      "description": "List all nets that haven't been routed yet.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "get_component_info",
+      "description": "Get detailed information about a specific component.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string",
+            "description": "Component reference (e.g., 'U1')"
+          }
+        },
+        "required": ["ref"]
+      }
+    },
+    {
+      "name": "get_net_info",
+      "description": "Get detailed information about a specific net.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "net": {
+            "type": "string",
+            "description": "Net name"
+          }
+        },
+        "required": ["net"]
+      }
+    }
+  ]
+}

@@ -11,9 +11,15 @@ For PCB file I/O, see the io module:
 - load_pcb_for_routing: Function to load a KiCad PCB file for routing
 """
 
+from __future__ import annotations
+
 import math
 import random
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.progress import ProgressCallback
 
 from .bus import (
     BusGroup,
@@ -373,22 +379,39 @@ class Autorouter:
         pad_count = len(self.nets.get(net_id, []))
         return (priority, pad_count)
 
-    def route_all(self, net_order: list[int] | None = None) -> list[Route]:
+    def route_all(
+        self,
+        net_order: list[int] | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[Route]:
         """Route all nets in priority order.
 
         Args:
             net_order: Optional list specifying routing order.
                        If None, uses net class priority then pad count.
+            progress_callback: Optional callback for progress reporting.
+                Signature: (progress: float, message: str, cancelable: bool) -> bool
+                Returns False to cancel, True to continue.
         """
         if net_order is None:
             # Sort by: (1) net class priority, (2) pad count
             # Higher priority nets (power, clock) route first to get best paths
             net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
 
+        # Filter out "no net"
+        nets_to_route = [n for n in net_order if n != 0]
+        total_nets = len(nets_to_route)
+
         all_routes: list[Route] = []
-        for net in net_order:
-            if net == 0:
-                continue  # Skip "no net"
+        for i, net in enumerate(nets_to_route):
+            # Report progress
+            if progress_callback is not None:
+                progress = i / total_nets if total_nets > 0 else 0.0
+                net_name = self.net_names.get(net, f"Net {net}")
+                if not progress_callback(progress, f"Routing {net_name}", True):
+                    # Cancelled
+                    break
+
             routes = self.route_net(net)
             all_routes.extend(routes)
             if routes:
@@ -398,6 +421,11 @@ class Autorouter:
                     f"{sum(len(r.vias) for r in routes)} vias"
                 )
 
+        # Final progress report
+        if progress_callback is not None:
+            routed_count = len({r.net for r in all_routes})
+            progress_callback(1.0, f"Routed {routed_count}/{total_nets} nets", False)
+
         return all_routes
 
     def route_all_negotiated(
@@ -406,6 +434,7 @@ class Autorouter:
         initial_present_factor: float = 0.5,
         present_factor_increment: float = 0.5,
         history_increment: float = 1.0,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -422,6 +451,9 @@ class Autorouter:
             initial_present_factor: Starting multiplier for present sharing cost
             present_factor_increment: How much to increase present factor each iteration
             history_increment: Amount to add to history cost for overused cells
+            progress_callback: Optional callback for progress reporting.
+                Signature: (progress: float, message: str, cancelable: bool) -> bool
+                Returns False to cancel, True to continue.
 
         Returns:
             List of all successfully routed routes
@@ -441,6 +473,11 @@ class Autorouter:
         print("\n--- Iteration 0: Initial routing with sharing ---")
         present_factor = initial_present_factor
 
+        # Report initial progress
+        if progress_callback is not None:
+            if not progress_callback(0.0, "Initial routing pass", True):
+                return list(self.routes)
+
         for net in net_order:
             routes = self._route_net_negotiated(net, present_factor)
             if routes:
@@ -456,10 +493,20 @@ class Autorouter:
 
         if overflow == 0:
             print("  No conflicts - routing complete!")
+            if progress_callback is not None:
+                progress_callback(1.0, "Routing complete - no conflicts", False)
             return list(self.routes)
 
         # Iterative negotiation
         for iteration in range(1, max_iterations + 1):
+            # Report progress for this iteration
+            if progress_callback is not None:
+                progress = iteration / (max_iterations + 1)
+                if not progress_callback(
+                    progress, f"Iteration {iteration}/{max_iterations}: rip-up and reroute", True
+                ):
+                    break  # Cancelled
+
             print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
             present_factor += present_factor_increment
 
@@ -533,6 +580,13 @@ class Autorouter:
         print(f"  Total nets: {len(net_order)}")
         print(f"  Successful: {successful_nets}")
         print(f"  Final overflow: {overflow}")
+
+        # Final progress report
+        if progress_callback is not None:
+            status = "converged" if overflow == 0 else f"overflow={overflow}"
+            progress_callback(
+                1.0, f"Routing complete: {successful_nets}/{len(net_order)} nets ({status})", False
+            )
 
         return list(self.routes)
 
@@ -725,6 +779,7 @@ class Autorouter:
         use_negotiated: bool = False,
         seed: int | None = None,
         verbose: bool = True,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[Route]:
         """Route using Monte Carlo multi-start with randomized net orderings.
 
@@ -737,6 +792,9 @@ class Autorouter:
             use_negotiated: Use negotiated congestion per trial (if available)
             seed: Random seed for reproducibility (None = random)
             verbose: Print progress information
+            progress_callback: Optional callback for progress reporting.
+                Signature: (progress: float, message: str, cancelable: bool) -> bool
+                Returns False to cancel, True to continue.
 
         Returns:
             Best routes found across all trials
@@ -758,6 +816,12 @@ class Autorouter:
         best_trial = -1
 
         for trial in range(num_trials):
+            # Report progress for this trial
+            if progress_callback is not None:
+                progress = trial / num_trials
+                if not progress_callback(progress, f"Trial {trial + 1}/{num_trials}", True):
+                    break  # Cancelled
+
             # Reset grid state for this trial
             self._reset_for_new_trial()
 
@@ -800,28 +864,42 @@ class Autorouter:
 
         # Restore best solution
         self.routes = best_routes if best_routes else []
+
+        # Final progress report
+        if progress_callback is not None:
+            routed = len({r.net for r in self.routes}) if self.routes else 0
+            progress_callback(
+                1.0, f"Best result: trial {best_trial + 1}, {routed}/{len(base_order)} nets", False
+            )
+
         return self.routes
 
     def route_all_advanced(
-        self, monte_carlo_trials: int = 0, use_negotiated: bool = False
+        self,
+        monte_carlo_trials: int = 0,
+        use_negotiated: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[Route]:
         """Unified entry point for advanced routing strategies.
 
         Args:
             monte_carlo_trials: Number of random orderings to try (0 = single pass)
             use_negotiated: Use negotiated congestion routing
+            progress_callback: Optional callback for progress reporting.
 
         Returns:
             Best routes found
         """
         if monte_carlo_trials > 0:
             return self.route_all_monte_carlo(
-                num_trials=monte_carlo_trials, use_negotiated=use_negotiated
+                num_trials=monte_carlo_trials,
+                use_negotiated=use_negotiated,
+                progress_callback=progress_callback,
             )
         elif use_negotiated and hasattr(self, "route_all_negotiated"):
-            return self.route_all_negotiated()
+            return self.route_all_negotiated(progress_callback=progress_callback)
         else:
-            return self.route_all()
+            return self.route_all(progress_callback=progress_callback)
 
     def to_sexp(self) -> str:
         """Generate KiCad S-expressions for all routes."""
