@@ -46,7 +46,15 @@ from .interface import (
 )
 
 # MCU blocks
-from .mcu import MCUBlock, ResetButton, create_reset_button
+from .mcu import (
+    BootModeSelector,
+    MCUBlock,
+    ResetButton,
+    create_esp32_boot,
+    create_generic_boot,
+    create_reset_button,
+    create_stm32_boot,
+)
 
 # Power blocks
 from .power import (
@@ -101,7 +109,11 @@ __all__ = [
     "create_usb_micro_b",
     "create_i2c_pullups",
     # MCU
+    "BootModeSelector",
     "MCUBlock",
     "ResetButton",
+    "create_esp32_boot",
+    "create_generic_boot",
     "create_reset_button",
+    "create_stm32_boot",
 ]
