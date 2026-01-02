@@ -12,6 +12,7 @@ This directory contains example projects demonstrating common workflows with kic
 | [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
 | [05-end-to-end](05-end-to-end/) | Create complete designs programmatically | Circuit blocks, power rails, schematic generation |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
+| [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
 ## Quick Start
 
@@ -115,6 +116,29 @@ while not agent.is_complete():
     command = call_your_llm(prompt)
     result, diagnosis = agent.execute_dict(command)
 agent.save("board_routed.kicad_pcb")
+```
+
+### Agent Integration
+
+Tool definitions and examples for AI agents (Claude, GPT-4, local models).
+
+```python
+# Claude integration
+from agent_integration.claude.tools import KICAD_TOOLS
+
+# OpenAI integration
+import json
+with open("agent-integration/openai/tools.json") as f:
+    functions = json.load(f)["functions"]
+
+# Common wrapper for any LLM
+from agent_integration.common.kicad_tools_wrapper import KiCadAgent
+agent = KiCadAgent()
+result = agent.execute("add_schematic_symbol", {
+    "lib_id": "Device:R",
+    "x": 100, "y": 80,
+    "reference": "R1"
+})
 ```
 
 ## CLI Commands
