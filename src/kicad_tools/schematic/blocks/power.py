@@ -48,10 +48,7 @@ class DecouplingCaps(CircuitBlock):
             spacing: Horizontal spacing between caps
             cap_symbol: KiCad symbol for capacitors
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.caps = []
 
         # Place capacitors
@@ -145,14 +142,10 @@ class LDOBlock(CircuitBlock):
             cap_ref_start: Starting reference number for caps
             en_tied_to_vin: If True, tie EN pin to VIN
         """
-        super().__init__()
+        super().__init__(sch, x, y)
 
         if output_caps is None:
             output_caps = ["10uF", "100nF"]
-
-        self.schematic = sch
-        self.x = x
-        self.y = y
 
         # Spacing constants
         cap_spacing = 15
@@ -293,10 +286,7 @@ class BarrelJackInput(CircuitBlock):
             diode_symbol: KiCad symbol for Schottky diode
             cap_symbol: KiCad symbol for polarized capacitor
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.protection = protection
 
         # Component spacing
@@ -444,10 +434,7 @@ class USBPowerInput(CircuitBlock):
             fuse_symbol: KiCad symbol for fuse/polyfuse
             cap_symbol: KiCad symbol for capacitor
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.protection = protection
 
         # Component spacing
@@ -568,10 +555,7 @@ class BatteryInput(CircuitBlock):
             diode_symbol: KiCad symbol for Schottky diode
             cap_symbol: KiCad symbol for capacitor
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.protection = protection
         self.voltage = voltage
         self.connector_type = connector
@@ -845,10 +829,7 @@ class VoltageDivider(CircuitBlock):
             resistor_symbol: KiCad symbol for resistors
             cap_symbol: KiCad symbol for capacitor
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.r_top_value = r_top
         self.r_bottom_value = r_bottom
         self.has_filter_cap = filter_cap is not None

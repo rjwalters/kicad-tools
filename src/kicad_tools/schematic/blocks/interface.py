@@ -132,10 +132,7 @@ class DebugHeader(CircuitBlock):
             header_symbol: KiCad symbol for header (auto-selected if None)
             resistor_symbol: KiCad symbol for resistors
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.interface = interface.lower()
         self.pins = pins
         self.series_resistors = series_resistors
@@ -415,10 +412,7 @@ class USBConnector(CircuitBlock):
             esd_tvs_value: Part value for ESD TVS (e.g., "USBLC6-2SC6")
             vbus_tvs_value: Part value for VBUS TVS (e.g., "SMBJ5.0A")
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.connector_type = connector_type.lower()
         self.esd_protection = esd_protection
         self.vbus_protection = vbus_protection
@@ -853,10 +847,7 @@ class I2CPullups(CircuitBlock):
             resistor_symbol: KiCad symbol for resistors
             cap_symbol: KiCad symbol for capacitors
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.resistor_value = resistor_value
         self.filter_caps_value = filter_caps
 
@@ -1215,10 +1206,7 @@ class CANTransceiver(CircuitBlock):
             tvs_symbol: KiCad symbol for TVS diodes
             tvs_value: Part value for CAN TVS diode (e.g., "PESD1CAN")
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
         self.transceiver_type = transceiver
         self.termination = termination
         self.esd_protection = esd_protection

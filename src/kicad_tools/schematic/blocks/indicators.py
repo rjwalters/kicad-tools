@@ -48,10 +48,7 @@ class LEDIndicator(CircuitBlock):
             resistor_symbol: KiCad symbol for resistor
             vertical: If True, LED is vertical (rotated 90°)
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
 
         # Parse reference prefix
         d_ref = ref_prefix if ref_prefix[-1].isdigit() else ref_prefix

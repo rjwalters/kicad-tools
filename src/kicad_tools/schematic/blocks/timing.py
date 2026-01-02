@@ -52,10 +52,7 @@ class OscillatorBlock(CircuitBlock):
             cap_ref: Capacitor reference designator
             en_tied_to_vcc: If True, tie EN pin to VCC
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
 
         # Place oscillator
         self.osc = sch.add_symbol(osc_symbol, x, y, ref, value)
@@ -192,10 +189,7 @@ class CrystalOscillator(CircuitBlock):
             crystal_symbol: KiCad symbol for crystal
             cap_symbol: KiCad symbol for capacitors
         """
-        super().__init__()
-        self.schematic = sch
-        self.x = x
-        self.y = y
+        super().__init__(sch, x, y)
 
         # Parse reference prefix
         if ref_prefix[-1].isdigit():
