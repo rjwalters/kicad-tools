@@ -10,6 +10,8 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
+from kicad_tools.utils import ensure_parent_dir
+
 if TYPE_CHECKING:
     from ..models import DatasheetResult
 
@@ -122,8 +124,7 @@ class DatasheetSource(ABC):
             )
             response.raise_for_status()
 
-            # Ensure parent directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_parent_dir(output_path)
 
             # Write to file in chunks
             with open(output_path, "wb") as f:

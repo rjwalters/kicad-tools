@@ -37,6 +37,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from kicad_tools.utils import ensure_parent_dir
+
 if TYPE_CHECKING:
     from ..datasheet import Datasheet, PinTable
     from ..datasheet.models import DatasheetResult
@@ -556,7 +558,7 @@ class PartImporter:
         sexp = self._pending_symbol
 
         # Create library file if it doesn't exist
-        self.symbol_library.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(self.symbol_library)
 
         if self.symbol_library.exists() and not options.overwrite:
             # TODO: Append to existing library instead of overwriting

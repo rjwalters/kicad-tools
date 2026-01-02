@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.utils import ensure_parent_dir
+
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for datasheet CLI."""
@@ -516,8 +518,7 @@ def _convert(args) -> int:
 
         if args.output:
             output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(markdown)
+            ensure_parent_dir(output_path).write_text(markdown)
             print(f"Converted to: {output_path}")
         else:
             print(markdown)
@@ -705,8 +706,7 @@ def _extract_pins(args) -> int:
         # Output
         if args.output:
             output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(content)
+            ensure_parent_dir(output_path).write_text(content)
             print(f"Extracted {len(pin_table)} pins to: {output_path}")
         else:
             print(content)
@@ -768,7 +768,7 @@ def _generate_symbol(args) -> int:
             library = SymbolLibrary.load(str(output_path))
         else:
             print(f"Creating new library: {output_path}")
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_parent_dir(output_path)
             library = SymbolLibrary.create(str(output_path))
 
         # Generate symbol
@@ -899,8 +899,7 @@ def _extract_package(args) -> int:
 
         if args.output:
             output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(content)
+            ensure_parent_dir(output_path).write_text(content)
             print(f"Extracted {len(packages)} packages to: {output_path}")
         else:
             print(content)
@@ -971,8 +970,7 @@ def _suggest_footprint(args) -> int:
 
         if args.output:
             output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(content)
+            ensure_parent_dir(output_path).write_text(content)
             print(f"Suggestions written to: {output_path}")
         else:
             print(content)

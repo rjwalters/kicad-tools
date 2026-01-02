@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from kicad_tools.utils import ensure_parent_dir
+
 
 class PinType(Enum):
     """KiCad pin electrical types."""
@@ -904,8 +906,7 @@ Examples:
         return
 
     # Write output
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(sexp)
+    ensure_parent_dir(args.output).write_text(sexp)
     print(f"\nWrote {args.output} ({len(sexp)} bytes)")
     print(f"  Symbol: {sym.name}")
     print(f"  Pins: {len(sym.pins)}")

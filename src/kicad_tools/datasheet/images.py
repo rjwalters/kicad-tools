@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.utils import ensure_parent_dir
+
 if TYPE_CHECKING:
     pass
 
@@ -74,8 +76,7 @@ class ExtractedImage:
             path: Output file path
         """
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(self.data)
+        ensure_parent_dir(path).write_bytes(self.data)
 
     def __repr__(self) -> str:
         return (

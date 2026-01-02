@@ -40,6 +40,7 @@ from kicad_tools.library.generators import (
     create_sot,
 )
 from kicad_tools.library.generators.standards import CHIP_SIZES, SOT_STANDARDS
+from kicad_tools.utils import ensure_parent_dir
 
 # Generator info for --list and help
 GENERATORS = {
@@ -285,8 +286,7 @@ def _output_footprint(fp, args) -> int:
         if not output_path.suffix:
             output_path = output_path.with_suffix(".kicad_mod")
 
-        # Create parent directories if needed
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_parent_dir(output_path)
 
         try:
             fp.save(str(output_path))
