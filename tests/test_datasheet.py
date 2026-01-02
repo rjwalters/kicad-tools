@@ -18,6 +18,42 @@ from kicad_tools.datasheet.models import (
     DatasheetSearchResult,
 )
 from kicad_tools.datasheet.tables import ExtractedTable
+from kicad_tools.datasheet.utils import calculate_part_confidence
+
+
+class TestCalculatePartConfidence:
+    """Tests for calculate_part_confidence utility function."""
+
+    def test_exact_match(self):
+        """Test exact match returns 1.0 confidence."""
+        assert calculate_part_confidence("STM32F103C8T6", "STM32F103C8T6") == 1.0
+
+    def test_exact_match_case_insensitive(self):
+        """Test exact match is case-insensitive."""
+        assert calculate_part_confidence("stm32f103c8t6", "STM32F103C8T6") == 1.0
+        assert calculate_part_confidence("STM32F103C8T6", "stm32f103c8t6") == 1.0
+
+    def test_query_in_part_number(self):
+        """Test partial match when query is substring of part number."""
+        assert calculate_part_confidence("STM32", "STM32F103C8T6") == 0.9
+
+    def test_part_number_in_query(self):
+        """Test partial match when part number is substring of query."""
+        assert calculate_part_confidence("STM32F103C8T6-FULL", "STM32F103C8T6") == 0.9
+
+    def test_no_match(self):
+        """Test no match returns 0.7 confidence."""
+        assert calculate_part_confidence("LM7805", "STM32F103C8T6") == 0.7
+
+    def test_empty_part_number(self):
+        """Test empty part number is treated as substring (empty is in everything)."""
+        # Empty string is a substring of any string, so returns 0.9
+        assert calculate_part_confidence("STM32", "") == 0.9
+
+    def test_none_part_number(self):
+        """Test None part number is handled gracefully as empty string."""
+        # None is converted to empty string, which is a substring of any string
+        assert calculate_part_confidence("STM32", None) == 0.9
 
 
 class TestDatasheetResult:
