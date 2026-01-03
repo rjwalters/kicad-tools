@@ -1,0 +1,3 @@
+[submodule "vendor/atopile"]
+	path = vendor/atopile
+	url = https://github.com/atopile/atopile.git
