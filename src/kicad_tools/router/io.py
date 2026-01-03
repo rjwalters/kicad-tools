@@ -580,10 +580,12 @@ def _extract_edge_segments(
     segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
 
     # Look for gr_rect on Edge.Cuts (simple rectangular boards)
+    # Use .*? with re.DOTALL to match nested parentheses in stroke/fill attributes
     for rect_match in re.finditer(
         r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)"
-        r'[^)]*\(layer\s+"Edge\.Cuts"\)',
+        r'.*?\(layer\s+"Edge\.Cuts"\)',
         pcb_text,
+        re.DOTALL,
     ):
         x1, y1, x2, y2 = map(float, rect_match.groups())
         # Convert rectangle to 4 line segments
@@ -598,9 +600,10 @@ def _extract_edge_segments(
 
     # Also handle gr_rect where layer comes before coordinates
     for rect_match in re.finditer(
-        r'\(gr_rect[^)]*\(layer\s+"Edge\.Cuts"\)[^)]*'
+        r'\(gr_rect.*?\(layer\s+"Edge\.Cuts"\).*?'
         r"\(start\s+([\d.]+)\s+([\d.]+)\)\s*\(end\s+([\d.]+)\s+([\d.]+)\)",
         pcb_text,
+        re.DOTALL,
     ):
         x1, y1, x2, y2 = map(float, rect_match.groups())
         segments.extend(
@@ -615,8 +618,9 @@ def _extract_edge_segments(
     # Look for gr_line elements on Edge.Cuts (complex board outlines)
     for line_match in re.finditer(
         r"\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+"
-        r'\(end\s+([\d.-]+)\s+([\d.-]+)\)[^)]*\(layer\s+"Edge\.Cuts"\)',
+        r'\(end\s+([\d.-]+)\s+([\d.-]+)\).*?\(layer\s+"Edge\.Cuts"\)',
         pcb_text,
+        re.DOTALL,
     ):
         x1, y1, x2, y2 = map(float, line_match.groups())
         segments.append(((x1, y1), (x2, y2)))
