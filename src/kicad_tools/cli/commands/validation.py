@@ -3,6 +3,7 @@
 __all__ = [
     "run_check_command",
     "run_validate_command",
+    "run_validate_connectivity_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
 ]
@@ -79,9 +80,17 @@ def run_check_command(args) -> int:
 
 def run_validate_command(args) -> int:
     """Handle validate command."""
+    # Route to connectivity validation if --connectivity flag is set
+    if getattr(args, "connectivity", False):
+        return run_validate_connectivity_command(args)
+
+    # Default to sync validation
     if not args.sync:
         print("Usage: kicad-tools validate --sync [options] <project>")
-        print("Currently only --sync is supported.")
+        print("       kicad-tools validate --connectivity [options] <pcb>")
+        print("\nOptions:")
+        print("  --sync           Check schematic-to-PCB netlist synchronization")
+        print("  --connectivity   Check net connectivity on PCB (detect unrouted nets)")
         return 1
 
     from ..validate_sync_cmd import main as validate_sync_main
@@ -102,3 +111,29 @@ def run_validate_command(args) -> int:
     if args.validate_verbose:
         sub_argv.append("--verbose")
     return validate_sync_main(sub_argv)
+
+
+def run_validate_connectivity_command(args) -> int:
+    """Handle validate --connectivity command."""
+    from ..validate_connectivity_cmd import main as validate_connectivity_main
+
+    sub_argv = []
+
+    # Get PCB path from project or --pcb flag
+    pcb_path = getattr(args, "validate_pcb", None) or getattr(args, "validate_project", None)
+    if not pcb_path:
+        print("Error: PCB file required. Use --pcb or provide a .kicad_pcb file.")
+        return 1
+
+    sub_argv.append(pcb_path)
+
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+
+    return validate_connectivity_main(sub_argv)
