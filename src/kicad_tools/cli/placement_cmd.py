@@ -172,7 +172,10 @@ def cmd_optimize(args) -> int:
         EvolutionaryPlacementOptimizer,
         PlacementConfig,
         PlacementOptimizer,
+        add_keepout_zones,
+        detect_keepout_zones,
         load_constraints_from_yaml,
+        load_keepout_zones_from_yaml,
     )
     from kicad_tools.optim.evolutionary import EvolutionaryConfig
     from kicad_tools.schema.pcb import PCB
@@ -213,6 +216,33 @@ def cmd_optimize(args) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Load keepout zones
+    keepout_zones = []
+    if getattr(args, "keepout", None):
+        keepout_path = Path(args.keepout)
+        if not keepout_path.exists():
+            print(f"Error: Keepout file not found: {keepout_path}", file=sys.stderr)
+            return 1
+        try:
+            with spinner("Loading keepout zones...", quiet=quiet):
+                keepout_zones = load_keepout_zones_from_yaml(str(keepout_path))
+            if not quiet:
+                print(f"Loaded {len(keepout_zones)} keepout zones from {keepout_path}")
+        except Exception as e:
+            print(f"Error loading keepout file: {e}", file=sys.stderr)
+            return 1
+
+    # Auto-detect keepout zones if requested
+    if getattr(args, "auto_keepout", False):
+        try:
+            with spinner("Detecting keepout zones...", quiet=quiet):
+                auto_zones = detect_keepout_zones(pcb)
+            keepout_zones.extend(auto_zones)
+            if not quiet:
+                print(f"Auto-detected {len(auto_zones)} keepout zones")
+        except Exception as e:
+            print(f"Warning: Could not auto-detect keepout zones: {e}", file=sys.stderr)
+
     strategy = args.strategy
     enable_clustering = getattr(args, "cluster", False)
     edge_detect = getattr(args, "edge_detect", False)
@@ -225,6 +255,8 @@ def cmd_optimize(args) -> int:
             print("Functional clustering: enabled")
         if edge_detect:
             print("Edge detection: enabled")
+        if keepout_zones:
+            print(f"Keepout zones: {len(keepout_zones)}")
 
     try:
         if strategy == "force-directed":
@@ -244,6 +276,12 @@ def cmd_optimize(args) -> int:
             if constraints:
                 optimizer.add_grouping_constraints(constraints)
 
+            # Add keepout zones to optimizer
+            if keepout_zones:
+                zones_added = add_keepout_zones(optimizer, keepout_zones)
+                if not quiet:
+                    print(f"  - Added {zones_added} keepout zones")
+
             if not quiet:
                 print(f"Optimizing {len(optimizer.components)} components...")
                 print(f"  - {len(optimizer.springs)} net connections")
@@ -251,6 +289,7 @@ def cmd_optimize(args) -> int:
                     print(f"  - {len(optimizer.clusters)} functional clusters detected")
                 if constraints:
                     print(f"  - {len(constraints)} grouping constraints")
+                print(f"  - {len(optimizer.keepouts)} keepout zones")
                 print(f"  - Max iterations: {args.iterations}")
                 if config.thermal_enabled:
                     heat_sources = optimizer.get_heat_sources()
@@ -304,12 +343,19 @@ def cmd_optimize(args) -> int:
                     pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
                 )
 
+            # Add keepout zones to optimizer
+            if keepout_zones:
+                zones_added = add_keepout_zones(optimizer, keepout_zones)
+                if not quiet:
+                    print(f"  - Added {zones_added} keepout zones")
+
             if not quiet:
                 print(f"Optimizing {len(optimizer.components)} components...")
                 if enable_clustering and optimizer.clusters:
                     print(f"  - {len(optimizer.clusters)} functional clusters detected")
                 print(f"  - Generations: {args.generations}")
                 print(f"  - Population: {args.population}")
+                print(f"  - Keepout zones: {len(optimizer.keepouts)}")
 
             def callback(gen: int, best):
                 if args.verbose:
@@ -347,12 +393,19 @@ def cmd_optimize(args) -> int:
                     pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
                 )
 
+            # Add keepout zones to optimizer
+            if keepout_zones:
+                zones_added = add_keepout_zones(evo_optimizer, keepout_zones)
+                if not quiet:
+                    print(f"  - Added {zones_added} keepout zones")
+
             if not quiet:
                 print(f"Optimizing {len(evo_optimizer.components)} components...")
                 if enable_clustering and evo_optimizer.clusters:
                     print(f"  - {len(evo_optimizer.clusters)} functional clusters detected")
                 print(f"  - Phase 1: Evolutionary ({args.generations} generations)")
                 print(f"  - Phase 2: Physics refinement ({args.iterations} iterations)")
+                print(f"  - Keepout zones: {len(evo_optimizer.keepouts)}")
 
             def callback(gen: int, best):
                 if args.verbose:
@@ -691,6 +744,17 @@ def main(argv: list[str] | None = None) -> int:
         "--thermal",
         action="store_true",
         help="Enable thermal-aware placement (keeps heat sources away from sensitive components)",
+    )
+    optimize_parser.add_argument(
+        "--keepout",
+        metavar="FILE",
+        help="YAML file defining keepout zones",
+    )
+    optimize_parser.add_argument(
+        "--auto-keepout",
+        action="store_true",
+        dest="auto_keepout",
+        help="Auto-detect keepout zones from mounting holes and connectors",
     )
     optimize_parser.add_argument(
         "--dry-run",
