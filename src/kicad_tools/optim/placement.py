@@ -27,6 +27,14 @@ from kicad_tools.optim.edge_placement import (
     detect_edge_components,
 )
 from kicad_tools.optim.geometry import Polygon, Vector2D
+from kicad_tools.optim.thermal import (
+    ThermalClass,
+    ThermalConfig,
+    ThermalConstraint,
+    ThermalProperties,
+    classify_thermal_properties,
+    detect_thermal_constraints,
+)
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -66,6 +74,8 @@ class PlacementOptimizer:
         self.clusters: list[FunctionalCluster] = []
         self.grouping_constraints: list[GroupingConstraint] = []
         self._component_map: dict[str, Component] = {}
+        self.thermal_constraints: list[ThermalConstraint] = []
+        self._thermal_props: dict[str, ThermalProperties] = {}
 
         # Edge constraints
         self.board_edges = BoardEdges.from_polygon(board_outline)
@@ -189,6 +199,10 @@ class PlacementOptimizer:
 
         for constraint in all_constraints:
             optimizer.add_edge_constraint(constraint)
+
+        # Apply thermal properties if enabled
+        if config and config.thermal_enabled:
+            optimizer.apply_thermal_properties(pcb)
 
         return optimizer
 
@@ -583,6 +597,141 @@ class PlacementOptimizer:
                     )
 
         return violations
+
+    def apply_thermal_properties(self, pcb: PCB):
+        """
+        Apply thermal classification to all components.
+
+        Classifies components as heat sources, heat-sensitive, or neutral,
+        and detects thermal constraints.
+
+        Args:
+            pcb: The PCB object used to create this optimizer
+        """
+        # Classify components
+        self._thermal_props = classify_thermal_properties(pcb)
+
+        # Apply to components
+        for comp in self.components:
+            if comp.ref in self._thermal_props:
+                comp.thermal_properties = self._thermal_props[comp.ref]
+
+        # Detect constraints
+        thermal_config = ThermalConfig(
+            heat_source_separation_mm=self.config.thermal_separation_mm,
+            edge_preference_max_mm=self.config.thermal_edge_preference_mm,
+            thermal_repulsion_strength=self.config.thermal_repulsion_strength,
+            edge_attraction_strength=self.config.thermal_edge_attraction,
+        )
+        self.thermal_constraints = detect_thermal_constraints(
+            pcb, self._thermal_props, thermal_config
+        )
+
+    def get_heat_sources(self) -> list[Component]:
+        """Get all components classified as heat sources."""
+        return [
+            comp
+            for comp in self.components
+            if comp.thermal_properties
+            and comp.thermal_properties.thermal_class == ThermalClass.HEAT_SOURCE
+        ]
+
+    def get_heat_sensitive(self) -> list[Component]:
+        """Get all components classified as heat-sensitive."""
+        return [
+            comp
+            for comp in self.components
+            if comp.thermal_properties
+            and comp.thermal_properties.thermal_class == ThermalClass.HEAT_SENSITIVE
+        ]
+
+    def compute_thermal_forces(self) -> dict[str, Vector2D]:
+        """
+        Compute thermal-related forces on all components.
+
+        Includes:
+        - Repulsion between heat sources and heat-sensitive components
+        - Edge attraction for heat sources (they should be near board edges)
+
+        Returns:
+            Dictionary mapping component reference to force vector
+        """
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+
+        if not self.config.thermal_enabled:
+            return forces
+
+        heat_sources = self.get_heat_sources()
+        heat_sensitive = self.get_heat_sensitive()
+
+        # 1. Repulsion between heat sources and sensitive components
+        for source in heat_sources:
+            if source.fixed:
+                continue
+            source_pos = source.position()
+
+            for sensitive in heat_sensitive:
+                sensitive_pos = sensitive.position()
+                delta = source_pos - sensitive_pos
+                distance = delta.magnitude()
+
+                # Clamp minimum distance
+                distance = max(distance, self.config.min_distance)
+
+                # Strong repulsion when closer than thermal_separation_mm
+                if distance < self.config.thermal_separation_mm:
+                    # Force magnitude inversely proportional to distance^2
+                    force_mag = self.config.thermal_repulsion_strength / (distance * distance)
+                    force = delta.normalized() * force_mag
+
+                    # Apply to source (push away from sensitive)
+                    forces[source.ref] = forces[source.ref] + force
+
+                    # Also push sensitive away if not fixed
+                    if not sensitive.fixed:
+                        forces[sensitive.ref] = forces[sensitive.ref] - force
+
+        # 2. Edge attraction for heat sources
+        for source in heat_sources:
+            if source.fixed:
+                continue
+            source_pos = source.position()
+
+            # Find nearest edge and distance
+            min_edge_dist = float("inf")
+            nearest_edge_point = source_pos
+
+            for edge_start, edge_end in self.board_outline.edges():
+                # Project point onto edge
+                edge = edge_end - edge_start
+                edge_len = edge.magnitude()
+                if edge_len < 1e-10:
+                    continue
+
+                to_point = source_pos - edge_start
+                t = to_point.dot(edge) / (edge_len * edge_len)
+                t = max(0.0, min(1.0, t))
+
+                closest = edge_start + edge * t
+                dist = (source_pos - closest).magnitude()
+
+                if dist < min_edge_dist:
+                    min_edge_dist = dist
+                    nearest_edge_point = closest
+
+            # Apply attraction force toward edge if far from edge
+            if min_edge_dist > self.config.thermal_edge_preference_mm:
+                # Force toward nearest edge point
+                to_edge = nearest_edge_point - source_pos
+                distance = to_edge.magnitude()
+                if distance > 0.1:
+                    # Gentle attraction, stronger when farther
+                    excess_dist = min_edge_dist - self.config.thermal_edge_preference_mm
+                    force_mag = self.config.thermal_edge_attraction * excess_dist
+                    force = to_edge.normalized() * force_mag
+                    forces[source.ref] = forces[source.ref] + force
+
+        return forces
 
     def compute_edge_to_point_force(
         self, point: Vector2D, edge_start: Vector2D, edge_end: Vector2D, charge_density: float
@@ -1144,7 +1293,13 @@ class PlacementOptimizer:
                 if comp and not comp.fixed:
                     forces[ref] = forces[ref] + force
 
-        # 6. Rotation potential torque (torsion spring toward 90 deg slots)
+        # 6. Thermal forces (heat source repulsion and edge attraction)
+        if self.config.thermal_enabled:
+            thermal_forces = self.compute_thermal_forces()
+            for ref, force in thermal_forces.items():
+                forces[ref] = forces[ref] + force
+
+        # 7. Rotation potential torque (torsion spring toward 90 deg slots)
         for comp in self.components:
             if not comp.fixed:
                 rot_torque = comp.compute_rotation_potential_torque(self.config.rotation_stiffness)

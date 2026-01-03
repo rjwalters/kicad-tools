@@ -966,6 +966,11 @@ def _add_placement_parser(subparsers) -> None:
         action="store_true",
         help="Auto-detect edge components (connectors, mounting holes, etc.)",
     )
+    placement_optimize.add_argument(
+        "--thermal",
+        action="store_true",
+        help="Enable thermal-aware placement (keeps heat sources away from sensitive components)",
+    )
     placement_optimize.add_argument("--dry-run", action="store_true", help="Preview only")
     placement_optimize.add_argument("-v", "--verbose", action="store_true")
     placement_optimize.add_argument(
