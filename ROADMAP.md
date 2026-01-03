@@ -114,6 +114,13 @@ boards. This release adds intelligence to the placement step.
 When DRC fails or routing is congested, agents need actionable guidance—not
 just error codes. This release makes the feedback loop agent-friendly.
 
+**Rich Error Diagnostics** *(inspired by atopile)*
+- [ ] Source-attached exceptions with file:line:position tracking
+- [ ] Rich terminal rendering with syntax highlighting (via Rich library)
+- [ ] Error accumulation for batch validation (report ALL DRC violations)
+- [ ] S-expression snippet extraction for error context
+- [ ] Fix suggestions for common errors
+
 **Actionable Feedback**
 - [ ] DRC errors with specific fix suggestions ("move C1 0.5mm left")
 - [ ] Routing congestion analysis ("area around U1 pins 4-7 is congested")
@@ -134,6 +141,90 @@ just error codes. This release makes the feedback loop agent-friendly.
 - [ ] Part availability checking (LCSC stock levels)
 - [ ] Alternative part suggestions
 
+### v0.8.0 - AI Agent Integration
+
+**Focus**: Enable AI agents to interact with KiCad designs via MCP.
+
+*(Inspired by atopile's MCP server architecture)*
+
+**MCP Server**
+- [ ] FastMCP server exposing kicad-tools functionality
+- [ ] Two-tier tool design: discovery (read-only) + action (mutations)
+- [ ] Session management for stateful placement refinement
+- [ ] Support stdio and HTTP transports
+
+**MCP Tools**
+| Category | Tools | State |
+|----------|-------|-------|
+| Analysis | `analyze_board`, `get_drc_violations`, `measure_clearance` | Stateless |
+| Export | `export_gerbers`, `export_bom`, `export_assembly` | Stateless |
+| Placement | `placement_analyze`, `placement_suggestions` | Stateless |
+| Placement Session | `start_session`, `query_move`, `apply_move`, `commit` | Stateful |
+| Routing | `route_net`, `get_unrouted_nets` | Stateless |
+
+**Layout Preservation** *(inspired by atopile)*
+- [ ] Hierarchical address-based component matching (`power.ldo.package`)
+- [ ] Preserve placement/routing when regenerating PCB from schematic
+- [ ] Anchor-based offset calculation for subcircuit layouts
+- [ ] Net remapping for name changes
+- [ ] Incremental layout updates (only touch changed components)
+
+### v0.9.0 - Typed Interfaces & Constraints
+
+**Focus**: Type-safe circuit blocks and parametric part selection.
+
+*(Inspired by atopile's interface system and constraint solver)*
+
+**Typed Interface System**
+- [ ] Interface protocols: `PowerInterface`, `I2CInterface`, `SPIInterface`, `USBInterface`
+- [ ] Type-checked connections (catch I2C→SPI misconnections at design time)
+- [ ] Automatic reference management (power/ground auto-wiring)
+- [ ] Parameter validation on connection (voltage/current compatibility)
+
+**Constraint-Based Part Selection**
+- [ ] Interval types for tolerances (`Interval(9.5k, 10.5k)` for 10kΩ ±5%)
+- [ ] Unit-aware interval arithmetic (prevent ohms + volts)
+- [ ] Parameter constraints with equations (`v_out = v_in * ratio`)
+- [ ] LCSC API integration for parametric queries
+- [ ] Auto-select parts meeting constraints
+
+**Example**:
+```python
+# Current approach
+ldo = LDOBlock(sch, ref="U1", value="AMS1117-3.3")
+
+# Constraint-based approach
+ldo = LDOBlock(sch, ref="U1",
+               input_voltage=Interval(4.5, 5.5),
+               output_voltage=Interval.from_center_rel(3.3, 0.05),
+               output_current=0.5)
+# System auto-selects LDO and caps from LCSC
+```
+
+### v0.10.0 - IDE Integration
+
+**Focus**: Language Server Protocol for KiCad files in VS Code.
+
+*(Inspired by atopile's LSP implementation)*
+
+**LSP Server**
+- [ ] pygls-based server for `.kicad_sch` and `.kicad_pcb` files
+- [ ] Full document sync with 2-second debounce
+- [ ] In-memory graph storage for quick queries
+
+**LSP Features**
+| Feature | Description |
+|---------|-------------|
+| Diagnostics | Real-time DRC/ERC squiggly underlines |
+| Hover | Component details, net info, pad specs |
+| Go-to-Definition | Navigate net references, schematic↔PCB linking |
+| Completion | Component refs, net names, library items |
+
+**VS Code Extension**
+- [ ] Extension packaging and distribution
+- [ ] Syntax highlighting for S-expression files
+- [ ] Custom commands for kicad-tools operations
+
 ### v1.0.0 - Production Ready
 
 **Focus**: API stability and production deployment.
@@ -143,6 +234,15 @@ just error codes. This release makes the feedback loop agent-friendly.
 - [ ] Performance optimization for large boards (1000+ components)
 - [ ] Robust error handling across all modules
 - [ ] CI/CD integration examples
+
+### Beyond v1.0 - Ecosystem
+
+**Package Registry** *(inspired by atopile)*
+- [ ] Package manifest format for circuit blocks
+- [ ] DAG-based dependency resolution
+- [ ] Git/registry/file dependency types
+- [ ] Publishing workflow via GitHub Actions
+- [ ] Community block ecosystem
 
 ---
 
