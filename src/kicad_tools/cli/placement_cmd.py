@@ -380,6 +380,134 @@ def cmd_distribute(args) -> int:
     return 0
 
 
+def cmd_suggest(args) -> int:
+    """Generate placement suggestions with rationale."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optim import (
+        PlacementOptimizer,
+        explain_placement,
+        generate_placement_suggestions,
+    )
+    from kicad_tools.schema.pcb import PCB
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Create optimizer
+    try:
+        with spinner("Creating optimizer...", quiet=quiet):
+            optimizer = PlacementOptimizer.from_pcb(pcb)
+    except Exception as e:
+        print(f"Error creating optimizer: {e}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        print(f"Analyzing {len(optimizer.components)} components...")
+
+    # Generate suggestions
+    if args.component:
+        # Single component explanation
+        with spinner(f"Analyzing {args.component}...", quiet=quiet):
+            suggestion = explain_placement(optimizer=optimizer, reference=args.component)
+
+        if not suggestion:
+            print(f"Error: Component '{args.component}' not found", file=sys.stderr)
+            return 1
+
+        if args.format == "json":
+            print(json.dumps(suggestion.to_dict(), indent=2))
+        else:
+            output_suggestion_text(suggestion, args.verbose)
+    else:
+        # All components
+        with spinner("Generating suggestions...", quiet=quiet):
+            suggestions = generate_placement_suggestions(optimizer=optimizer)
+
+        if args.format == "json":
+            output = {ref: s.to_dict() for ref, s in suggestions.items()}
+            print(json.dumps(output, indent=2))
+        else:
+            output_suggestions_text(suggestions, args.verbose)
+
+    return 0
+
+
+
+def output_suggestion_text(suggestion, verbose: bool = False):
+    """Output a single suggestion in text format."""
+    print(f"\n{suggestion.reference}:")
+    print(f"  Position: ({suggestion.suggested_x:.2f}, {suggestion.suggested_y:.2f})")
+    print(f"  Rotation: {suggestion.suggested_rotation:.1f}°")
+    print(f"  Confidence: {suggestion.confidence:.0%}")
+    print("  Rationale:")
+    for reason in suggestion.rationale:
+        print(f"    - {reason}")
+
+    if suggestion.constraints_satisfied:
+        print("  Constraints Satisfied:")
+        for c in suggestion.constraints_satisfied:
+            print(f"    ✓ {c}")
+
+    if suggestion.constraints_violated:
+        print("  Constraints Violated:")
+        for c in suggestion.constraints_violated:
+            print(f"    ✗ {c}")
+
+    if verbose and suggestion.alternatives:
+        print("  Alternatives:")
+        for alt in suggestion.alternatives:
+            print(
+                f"    - ({alt.x:.2f}, {alt.y:.2f}) @ {alt.rotation:.0f}° "
+                f"(score: {alt.score:.2f}): {alt.tradeoff}"
+            )
+
+
+def output_suggestions_text(suggestions: dict, verbose: bool = False):
+    """Output all suggestions in text format."""
+    print(f"\nPlacement Suggestions ({len(suggestions)} components)")
+    print("=" * 60)
+
+    # Sort by confidence (lowest first to highlight issues)
+    sorted_suggestions = sorted(suggestions.values(), key=lambda s: s.confidence)
+
+    for suggestion in sorted_suggestions:
+        confidence_indicator = (
+            "✓" if suggestion.confidence >= 0.8 else "⚠" if suggestion.confidence >= 0.5 else "✗"
+        )
+        print(
+            f"\n{confidence_indicator} {suggestion.reference}: "
+            f"({suggestion.suggested_x:.2f}, {suggestion.suggested_y:.2f}) @ {suggestion.suggested_rotation:.0f}° "
+            f"[{suggestion.confidence:.0%}]"
+        )
+        for reason in suggestion.rationale[:3]:  # Limit to 3 reasons in summary
+            print(f"    - {reason}")
+
+        if verbose:
+            if suggestion.constraints_violated:
+                print("    Violations:")
+                for c in suggestion.constraints_violated:
+                    print(f"      ✗ {c}")
+
+    # Summary
+    high_conf = sum(1 for s in suggestions.values() if s.confidence >= 0.8)
+    medium_conf = sum(1 for s in suggestions.values() if 0.5 <= s.confidence < 0.8)
+    low_conf = sum(1 for s in suggestions.values() if s.confidence < 0.5)
+
+    print(f"\nSummary: {high_conf} high confidence, {medium_conf} medium, {low_conf} low")
+
+
 def cmd_optimize(args) -> int:
     """Optimize component placement for routability."""
     from kicad_tools.cli.progress import spinner
@@ -1085,6 +1213,27 @@ def main(argv: list[str] | None = None) -> int:
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
+    # Suggest subcommand
+    suggest_parser = subparsers.add_parser(
+        "suggest", help="Generate placement suggestions with rationale"
+    )
+    suggest_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    suggest_parser.add_argument(
+        "--component",
+        "-c",
+        help="Explain placement for specific component reference",
+    )
+    suggest_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    suggest_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    suggest_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -1103,6 +1252,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_distribute(args)
     elif args.command == "optimize":
         return cmd_optimize(args)
+    elif args.command == "suggest":
+        return cmd_suggest(args)
 
     return 0
 
