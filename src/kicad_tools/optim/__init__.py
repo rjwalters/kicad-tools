@@ -46,6 +46,15 @@ Example (evolutionary)::
     pcb.save("optimized.kicad_pcb")
 """
 
+from kicad_tools.optim.alignment import (
+    AlignmentConstraint,
+    AlignmentType,
+    align_components,
+    align_to_reference,
+    apply_alignment_constraints,
+    distribute_components,
+    snap_to_grid,
+)
 from kicad_tools.optim.clustering import ClusterDetector, detect_functional_clusters
 from kicad_tools.optim.components import (
     ClusterType,
@@ -117,6 +126,15 @@ from kicad_tools.optim.thermal import (
 )
 
 __all__ = [
+    # Alignment
+    "AlignmentType",
+    "AlignmentConstraint",
+    "snap_to_grid",
+    "align_components",
+    "distribute_components",
+    "align_to_reference",
+    "apply_alignment_constraints",
+    # Placement optimization
     "PlacementOptimizer",
     "EvolutionaryPlacementOptimizer",
     "RoutingOptimizer",
