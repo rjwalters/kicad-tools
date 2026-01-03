@@ -47,9 +47,9 @@ class TestConfigDataclasses:
         """RouteConfig has correct defaults."""
         config = RouteConfig()
         assert config.strategy == "negotiated"
-        assert config.grid_resolution == 0.25
+        assert config.grid_resolution == 0.1
         assert config.trace_width == 0.2
-        assert config.clearance == 0.15
+        assert config.clearance == 0.2
         assert config.via_drill == 0.3
         assert config.via_diameter == 0.6
 
