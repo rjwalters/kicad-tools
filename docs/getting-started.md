@@ -143,12 +143,16 @@ print(f"Nets: {len(pcb.nets)}")
 
 ## Next Steps
 
-Now that you have kicad-tools installed, explore these tutorials:
+Now that you have kicad-tools installed, explore these guides:
 
-- **[Schematic Analysis](tutorials/schematic-analysis.md)** - Deep dive into symbols, nets, and BOM generation
-- **[DRC with Manufacturer Rules](tutorials/drc-manufacturer-rules.md)** - Validate designs against fabrication limits
-- **[Manufacturing Export](tutorials/manufacturing-export.md)** - Export for JLCPCB and other fabs
-- **[Query API](tutorials/query-api.md)** - Advanced filtering and analysis
+- **[Schematic Analysis](guides/schematic-analysis.md)** - Deep dive into symbols, nets, and BOM generation
+- **[DRC & Validation](guides/drc-and-validation.md)** - Validate designs against fabrication limits
+- **[Manufacturing Export](guides/manufacturing-export.md)** - Export for JLCPCB and other fabs
+- **[Query API](guides/query-api.md)** - Advanced filtering and analysis
+- **[Placement Optimization](guides/placement-optimization.md)** - Optimize component placement
+- **[Routing](guides/routing.md)** - Autoroute PCBs with the A* router
+
+See the [Documentation Index](index.md) for the complete list.
 
 ## Getting Help
 
