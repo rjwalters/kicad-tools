@@ -115,6 +115,15 @@ from kicad_tools.optim.signal_integrity import (
     classify_nets,
     get_si_score,
 )
+from kicad_tools.optim.suggestions import (
+    AlternativePosition,
+    ForceContribution,
+    PlacementSuggestion,
+    RationaleType,
+    explain_placement,
+    generate_placement_suggestions,
+    suggest_improvement,
+)
 from kicad_tools.optim.thermal import (
     ThermalClass,
     ThermalConfig,
@@ -197,4 +206,12 @@ __all__ = [
     "add_keepout_zones",
     "validate_keepout_violations",
     "load_keepout_zones_from_yaml",
+    # Placement suggestions
+    "PlacementSuggestion",
+    "AlternativePosition",
+    "ForceContribution",
+    "RationaleType",
+    "generate_placement_suggestions",
+    "explain_placement",
+    "suggest_improvement",
 ]

@@ -7,7 +7,7 @@ def run_placement_command(args) -> int:
     """Handle placement command."""
     if not args.placement_command:
         print("Usage: kicad-tools placement <command> [options] <file>")
-        print("Commands: check, fix, optimize, snap, align, distribute")
+        print("Commands: check, fix, optimize, snap, align, distribute, suggest")
         return 1
 
     from ..placement_cmd import main as placement_main
@@ -129,6 +129,18 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--spacing", str(args.spacing)])
         if args.dry_run:
             sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "suggest":
+        sub_argv = ["suggest", args.pcb]
+        if getattr(args, "component", None):
+            sub_argv.extend(["--component", args.component])
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         if args.verbose:
             sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
