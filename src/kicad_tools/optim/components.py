@@ -9,10 +9,21 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from enum import Enum
 
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
-__all__ = ["Pin", "Component", "Spring", "Keepout"]
+
+class ClusterType(Enum):
+    """Type of functional cluster."""
+
+    POWER = "power"  # IC + bypass/decoupling capacitors
+    INTERFACE = "interface"  # Connector + ESD protection + series resistors
+    TIMING = "timing"  # Oscillator/crystal + load capacitors
+    DRIVER = "driver"  # Driver IC + gate resistors + flyback diodes
+
+
+__all__ = ["Pin", "Component", "Spring", "Keepout", "FunctionalCluster", "ClusterType"]
 
 
 @dataclass
@@ -195,3 +206,32 @@ class Keepout:
     outline: Polygon
     charge_multiplier: float = 10.0  # Higher = stronger repulsion
     name: str = ""
+
+
+@dataclass
+class FunctionalCluster:
+    """
+    A group of functionally-related components that should be placed near each other.
+
+    Used to enforce proximity constraints during placement optimization.
+    For example, bypass capacitors should be placed immediately adjacent to
+    the IC power pins they decouple.
+
+    Attributes:
+        cluster_type: Type of functional grouping (power, interface, timing, driver)
+        anchor: Reference designator of the main component (e.g., "U1")
+        members: List of other component reference designators in the cluster
+        max_distance_mm: Maximum allowed distance from anchor center (in mm)
+        anchor_pin: Optional specific pin on anchor that members should be near
+    """
+
+    cluster_type: ClusterType
+    anchor: str  # Reference designator of main component (e.g., "U1")
+    members: list[str] = field(default_factory=list)  # Other components in cluster
+    max_distance_mm: float = 5.0  # Maximum distance from anchor
+    anchor_pin: str | None = None  # Specific pin on anchor (e.g., "VCC")
+
+    @property
+    def all_components(self) -> list[str]:
+        """Get all component references in the cluster (anchor + members)."""
+        return [self.anchor] + list(self.members)
