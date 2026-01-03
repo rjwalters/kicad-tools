@@ -2739,9 +2739,7 @@ class TestLoadPcbForRoutingDrcCompliance:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            router, net_map = load_pcb_for_routing(
-                str(pcb_file), rules=rules, validate_drc=True
-            )
+            router, net_map = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=True)
 
             # Should emit a warning
             assert len(w) >= 1
@@ -2772,9 +2770,7 @@ class TestLoadPcbForRoutingDrcCompliance:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            router, net_map = load_pcb_for_routing(
-                str(pcb_file), rules=rules, validate_drc=False
-            )
+            router, net_map = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=False)
 
             # Should NOT emit a warning
             assert len(w) == 0
@@ -3451,3 +3447,220 @@ class TestPathfinderZoneAwareness:
         assert not router._can_place_via_in_zones(5, 5, net=1)
         # Net 2 via should be allowed (through own zone)
         assert router._can_place_via_in_zones(5, 5, net=2)
+
+
+# =============================================================================
+# BOARD EDGE CLEARANCE TESTS (Issue #296)
+# =============================================================================
+
+
+class TestEdgeClearance:
+    """Tests for board edge clearance functionality (Issue #296)."""
+
+    def test_add_edge_keepout_blocks_cells(self):
+        """Test that add_edge_keepout blocks cells near board edges."""
+        from kicad_tools.router.grid import RoutingGrid
+
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(20, 20, rules, origin_x=0, origin_y=0)
+
+        # Define a simple rectangular board outline
+        edge_segments = [
+            ((0, 0), (20, 0)),  # Bottom edge
+            ((20, 0), (20, 20)),  # Right edge
+            ((20, 20), (0, 20)),  # Top edge
+            ((0, 20), (0, 0)),  # Left edge
+        ]
+
+        # Apply 1mm edge clearance
+        blocked_count = grid.add_edge_keepout(edge_segments, clearance=1.0)
+
+        # Should have blocked some cells
+        assert blocked_count > 0
+
+        # Cells at the edge should be blocked (within 1mm = 2 grid cells)
+        gx0, gy0 = grid.world_to_grid(0.5, 0.5)  # Near corner
+        layer_idx = grid.get_routable_indices()[0]
+        assert grid.grid[layer_idx][gy0][gx0].blocked is True
+
+        # Cells in the center should NOT be blocked
+        gx_center, gy_center = grid.world_to_grid(10, 10)
+        assert grid.grid[layer_idx][gy_center][gx_center].blocked is False
+
+    def test_add_edge_keepout_respects_clearance_distance(self):
+        """Test that edge keepout uses correct clearance distance."""
+        from kicad_tools.router.grid import RoutingGrid
+
+        rules = DesignRules(grid_resolution=0.25)
+        grid = RoutingGrid(20, 20, rules, origin_x=0, origin_y=0)
+
+        # Single horizontal edge segment at bottom
+        edge_segments = [((0, 0), (20, 0))]
+
+        # Apply 0.5mm edge clearance
+        grid.add_edge_keepout(edge_segments, clearance=0.5)
+
+        layer_idx = grid.get_routable_indices()[0]
+
+        # Cell at 0.4mm from edge should be blocked (within 0.5mm clearance)
+        gx, gy = grid.world_to_grid(10, 0.4)
+        assert grid.grid[layer_idx][gy][gx].blocked is True
+
+        # Cell at 1.0mm from edge should NOT be blocked
+        gx, gy = grid.world_to_grid(10, 1.0)
+        assert grid.grid[layer_idx][gy][gx].blocked is False
+
+    def test_add_edge_keepout_no_clearance(self):
+        """Test that zero clearance blocks no cells."""
+        from kicad_tools.router.grid import RoutingGrid
+
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(20, 20, rules)
+
+        edge_segments = [((0, 0), (20, 0))]
+        blocked_count = grid.add_edge_keepout(edge_segments, clearance=0.0)
+
+        assert blocked_count == 0
+
+    def test_add_edge_keepout_empty_segments(self):
+        """Test that empty segment list blocks no cells."""
+        from kicad_tools.router.grid import RoutingGrid
+
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(20, 20, rules)
+
+        blocked_count = grid.add_edge_keepout([], clearance=1.0)
+
+        assert blocked_count == 0
+
+    def test_add_edge_keepout_all_layers(self):
+        """Test that edge keepout applies to all routable layers."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.layers import LayerStack
+
+        # Use 4-layer board (signal-gnd-pwr-signal configuration)
+        layer_stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(20, 20, rules, layer_stack=layer_stack)
+
+        edge_segments = [((0, 0), (20, 0))]
+        grid.add_edge_keepout(edge_segments, clearance=1.0)
+
+        # All routable layers should have cells blocked near edge
+        routable_indices = grid.get_routable_indices()
+        gx, gy = grid.world_to_grid(10, 0.5)
+
+        for layer_idx in routable_indices:
+            assert grid.grid[layer_idx][gy][gx].blocked is True
+
+
+class TestExtractEdgeSegments:
+    """Tests for extracting board edge segments from PCB files."""
+
+    def test_extract_gr_rect_edge(self):
+        """Test extracting edge segments from gr_rect element."""
+        from kicad_tools.router.io import _extract_edge_segments
+
+        pcb_text = """(kicad_pcb
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+)"""
+
+        segments = _extract_edge_segments(pcb_text)
+
+        # gr_rect should produce 4 edge segments
+        assert len(segments) == 4
+
+        # Check that segments form a rectangle
+        all_points = set()
+        for (x1, y1), (x2, y2) in segments:
+            all_points.add((x1, y1))
+            all_points.add((x2, y2))
+
+        # Should have 4 corner points
+        assert (100, 100) in all_points
+        assert (150, 100) in all_points
+        assert (150, 140) in all_points
+        assert (100, 140) in all_points
+
+    def test_extract_gr_line_edges(self):
+        """Test extracting edge segments from gr_line elements."""
+        from kicad_tools.router.io import _extract_edge_segments
+
+        pcb_text = """(kicad_pcb
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 0) (end 50 50) (layer "Edge.Cuts") (width 0.1))
+)"""
+
+        segments = _extract_edge_segments(pcb_text)
+
+        # Should extract 2 line segments
+        assert len(segments) == 2
+        assert ((0, 0), (50, 0)) in segments
+        assert ((50, 0), (50, 50)) in segments
+
+    def test_ignores_non_edge_cuts_layer(self):
+        """Test that non-Edge.Cuts layers are ignored."""
+        from kicad_tools.router.io import _extract_edge_segments
+
+        pcb_text = """(kicad_pcb
+  (gr_line (start 0 0) (end 50 0) (layer "F.SilkS") (width 0.1))
+  (gr_rect (start 0 0) (end 50 50) (layer "F.Cu"))
+)"""
+
+        segments = _extract_edge_segments(pcb_text)
+
+        # Should not extract any segments (not on Edge.Cuts)
+        assert len(segments) == 0
+
+
+class TestLoadPcbEdgeClearance:
+    """Tests for edge_clearance parameter in load_pcb_for_routing."""
+
+    def test_edge_clearance_applied(self, tmp_path):
+        """Test that edge_clearance is applied when loading PCB."""
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        # Create a minimal PCB file with Edge.Cuts rectangle
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))
+)""")
+
+        # Load with edge clearance
+        router, _ = load_pcb_for_routing(
+            str(pcb_file),
+            edge_clearance=1.0,
+            validate_drc=False,
+        )
+
+        # Cells near edge should be blocked
+        layer_idx = router.grid.get_routable_indices()[0]
+        gx, gy = router.grid.world_to_grid(0.5, 0.5)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is True
+
+    def test_no_edge_clearance_by_default(self, tmp_path):
+        """Test that no edge clearance is applied by default."""
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (gr_rect (start 0 0) (end 20 20) (layer "Edge.Cuts"))
+)""")
+
+        # Load without edge clearance (default)
+        router, _ = load_pcb_for_routing(
+            str(pcb_file),
+            edge_clearance=None,
+            validate_drc=False,
+        )
+
+        # Edge cells should NOT be blocked (no components yet)
+        layer_idx = router.grid.get_routable_indices()[0]
+        gx, gy = router.grid.world_to_grid(0.5, 0.5)
+        assert router.grid.grid[layer_idx][gy][gx].blocked is False
