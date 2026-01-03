@@ -61,6 +61,23 @@ kicad-tools provides the programmatic interface between AI reasoning and KiCad f
   - Symbol generation from datasheets
   - Part import workflow
 
+### v0.5.0 - Workflow Polish
+
+- **Circuit Blocks** (`kicad_tools.schematic.blocks`):
+  - MCUBlock, CrystalOscillator, USBConnector, DebugHeader
+  - I2CPullups, ResetButton, VoltageDivider, BootModeSelector
+  - CANTransceiver, BarrelJackInput, USBPowerInput, BatteryInput
+- **Schematic Enhancements**:
+  - Auto-layout for schematic symbols (avoid overlaps)
+  - Schematic-to-PCB netlist sync validation
+- **API Refinements**:
+  - Unified `Project` class for schematic + PCB workflows
+  - Actionable error messages with fix suggestions
+  - Progress callbacks for long operations
+- **Examples & Documentation**:
+  - End-to-end PCB design example
+  - Agent integration examples (Claude, OpenAI)
+
 ---
 
 ## Current Capabilities
@@ -144,25 +161,6 @@ vdd = mcu_block.port("VDD")
 ---
 
 ## Planned Versions
-
-### v0.5.0 - Workflow Polish
-
-**Focus**: Smooth out rough edges in the agent workflow.
-
-**End-to-End Examples**
-- [ ] Complete example: datasheet → symbol → schematic → PCB → gerbers
-- [ ] Agent integration examples (Claude, GPT)
-- [ ] Jupyter notebook tutorials
-
-**Schematic Enhancements**
-- [ ] More circuit blocks: MCU, connector, ESD protection, crystal oscillator
-- [ ] Auto-layout for schematic symbols (avoid overlaps)
-- [ ] Schematic-to-PCB netlist sync validation
-
-**API Refinements**
-- [ ] Unified `Project` class for schematic + PCB workflows
-- [ ] Better error messages with fix suggestions
-- [ ] Progress callbacks for long operations
 
 ### v0.6.0 - Manufacturing Independence
 
@@ -305,3 +303,4 @@ else:
 | 0.2.0 | 2025-12-30 | Manufacturing: LCSC, export, autorouter |
 | 0.3.0 | 2025-12-31 | Reasoning: LLM integration, diff pairs, zones |
 | 0.4.0 | 2025-12-31 | Libraries: symbol/footprint creation, pure Python DRC, datasheets |
+| 0.5.0 | 2026-01-02 | Workflow Polish: circuit blocks, Project class, examples |
