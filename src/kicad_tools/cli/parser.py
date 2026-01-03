@@ -903,6 +903,11 @@ def _add_placement_parser(subparsers) -> None:
     placement_check.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
+    placement_check.add_argument(
+        "--signal-integrity",
+        action="store_true",
+        help="Analyze signal integrity and show placement hints",
+    )
 
     # placement fix
     placement_fix = placement_subparsers.add_parser("fix", help="Suggest and apply placement fixes")

@@ -27,6 +27,8 @@ def run_placement_command(args) -> int:
         # Use command-level quiet or global quiet
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
+        if getattr(args, "signal_integrity", False):
+            sub_argv.append("--signal-integrity")
         return placement_main(sub_argv) or 0
 
     elif args.placement_command == "fix":

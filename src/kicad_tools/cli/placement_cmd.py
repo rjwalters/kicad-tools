@@ -57,6 +57,27 @@ def cmd_check(args) -> int:
     else:
         output_table(conflicts, args.verbose)
 
+    # Signal integrity analysis if requested
+    if getattr(args, "signal_integrity", False):
+        from kicad_tools.optim.signal_integrity import (
+            analyze_placement_for_si,
+            classify_nets,
+            get_si_score,
+        )
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            with spinner("Analyzing signal integrity...", quiet=quiet):
+                pcb = PCB.load(str(pcb_path))
+                classifications = classify_nets(pcb)
+                hints = analyze_placement_for_si(pcb, classifications)
+                score = get_si_score(pcb, classifications)
+        except Exception as e:
+            print(f"Error analyzing signal integrity: {e}", file=sys.stderr)
+            return 1
+
+        output_si_analysis(classifications, hints, score, args.verbose)
+
     # Return code based on conflicts
     errors = [c for c in conflicts if c.severity.value == "error"]
     return 1 if errors else 0
@@ -450,6 +471,64 @@ def output_json(conflicts: list[Conflict]):
     print(json.dumps([c.to_dict() for c in conflicts], indent=2))
 
 
+def output_si_analysis(
+    classifications: dict,
+    hints: list,
+    score: float,
+    verbose: bool = False,
+):
+    """Output signal integrity analysis results."""
+    from kicad_tools.optim.signal_integrity import SignalClass
+
+    print("\n" + "=" * 60)
+    print("Signal Integrity Analysis")
+    print("=" * 60)
+
+    # Summary of net classifications
+    class_counts: dict[str, int] = {}
+    for classification in classifications.values():
+        class_name = classification.signal_class.value
+        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
+    print("\nNet Classification Summary:")
+    print("-" * 40)
+    for signal_class in SignalClass:
+        count = class_counts.get(signal_class.value, 0)
+        if count > 0:
+            print(f"  {signal_class.value:<20} {count:>4} nets")
+
+    print(f"\n  Total: {len(classifications)} nets classified")
+
+    # SI Score
+    print(f"\nSignal Integrity Score: {score:.1f}/100")
+
+    if score >= 80:
+        print("  ✅ Good - placement supports signal integrity")
+    elif score >= 60:
+        print("  ⚠️  Fair - some improvements recommended")
+    else:
+        print("  ❌ Poor - significant improvements needed")
+
+    # Hints
+    if hints:
+        print(f"\nPlacement Hints ({len(hints)} issues found):")
+        print("-" * 60)
+
+        for hint in hints:
+            severity_icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(
+                hint.severity, "⚪"
+            )
+            print(f"\n{severity_icon} [{hint.hint_type}] {hint.description}")
+            print(f"   Components: {', '.join(hint.affected_components[:5])}")
+            print(f"   → {hint.suggestion}")
+            if hint.estimated_improvement and verbose:
+                print(f"   Potential improvement: {hint.estimated_improvement:.1f}mm")
+    else:
+        print("\n✅ No signal integrity issues detected!")
+
+    print("")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for placement commands."""
     parser = argparse.ArgumentParser(
@@ -494,6 +573,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     check_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     check_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+    check_parser.add_argument(
+        "--signal-integrity",
+        action="store_true",
+        help="Analyze signal integrity and show placement hints",
+    )
 
     # Fix subcommand
     fix_parser = subparsers.add_parser("fix", help="Suggest and apply placement fixes")
