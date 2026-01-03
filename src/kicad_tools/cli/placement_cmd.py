@@ -230,6 +230,221 @@ def cmd_snap(args) -> int:
     return 0
 
 
+def cmd_refine(args) -> int:
+    """Interactive placement refinement session."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optim.query import process_json_request
+    from kicad_tools.optim.session import PlacementSession
+    from kicad_tools.schema.pcb import PCB
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    # Parse fixed components
+    fixed_refs = []
+    if args.fixed:
+        fixed_refs = [r.strip() for r in args.fixed.split(",") if r.strip()]
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Create session
+    try:
+        with spinner("Creating placement session...", quiet=quiet):
+            session = PlacementSession(pcb, fixed_refs=fixed_refs)
+    except Exception as e:
+        print(f"Error creating session: {e}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        status = session.get_status()
+        print("Placement session started")
+        print(f"  Components: {status['components']}")
+        print(f"  Initial score: {status['initial_score']:.4f}")
+        print(f"  Violations: {status['violations']}")
+
+    # JSON mode - read commands from stdin, write responses to stdout
+    if args.json:
+        if not quiet:
+            print("\nJSON mode: reading commands from stdin...\n")
+
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower() in ("quit", "exit"):
+                break
+
+            response = process_json_request(session, line)
+            print(response)
+            sys.stdout.flush()
+
+        return 0
+
+    # Interactive mode
+    if not quiet:
+        print("\nInteractive mode. Commands:")
+        print("  query <ref> <x> <y> [rotation]  - Query move impact")
+        print("  apply <ref> <x> <y> [rotation]  - Apply move")
+        print("  suggest <ref>                   - Get placement suggestions")
+        print("  undo                            - Undo last move")
+        print("  status                          - Show session status")
+        print("  list                            - List all components")
+        print("  commit                          - Save changes to PCB")
+        print("  rollback                        - Discard all changes")
+        print("  quit                            - Exit (without saving)")
+        print()
+
+    output_path = Path(args.output) if args.output else pcb_path
+
+    while True:
+        try:
+            cmd_line = input("> ").strip()
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print("\nInterrupted")
+            break
+
+        if not cmd_line:
+            continue
+
+        parts = cmd_line.split()
+        cmd = parts[0].lower()
+
+        try:
+            if cmd in ("quit", "exit", "q"):
+                if session.pending_moves:
+                    print(f"Warning: {len(session.pending_moves)} pending moves will be discarded")
+                break
+
+            elif cmd == "query":
+                if len(parts) < 4:
+                    print("Usage: query <ref> <x> <y> [rotation]")
+                    continue
+                ref = parts[1]
+                x = float(parts[2])
+                y = float(parts[3])
+                rotation = float(parts[4]) if len(parts) > 4 else None
+
+                result = session.query_move(ref, x, y, rotation)
+                if result.success:
+                    print(f"Score: {result.score_delta:+.4f}", end="")
+                    if result.new_violations:
+                        print(f", {len(result.new_violations)} new violation(s)", end="")
+                    if result.resolved_violations:
+                        print(f", {len(result.resolved_violations)} resolved", end="")
+                    print()
+                    if result.routing_impact.estimated_length_change_mm != 0:
+                        print(
+                            f"  Routing: {result.routing_impact.estimated_length_change_mm:+.2f}mm "
+                            f"({', '.join(result.routing_impact.affected_nets[:3])}...)"
+                        )
+                    if result.warnings:
+                        for w in result.warnings:
+                            print(f"  Warning: {w}")
+                else:
+                    print(f"Error: {result.error_message}")
+
+            elif cmd == "apply":
+                if len(parts) < 4:
+                    print("Usage: apply <ref> <x> <y> [rotation]")
+                    continue
+                ref = parts[1]
+                x = float(parts[2])
+                y = float(parts[3])
+                rotation = float(parts[4]) if len(parts) > 4 else None
+
+                result = session.apply_move(ref, x, y, rotation)
+                if result.success:
+                    print(f"Applied. Pending: {len(session.pending_moves)} move(s)")
+                else:
+                    print(f"Error: {result.error_message}")
+
+            elif cmd == "suggest":
+                if len(parts) < 2:
+                    print("Usage: suggest <ref>")
+                    continue
+                ref = parts[1]
+                suggestions = session.get_suggestions(ref)
+                if suggestions:
+                    print(f"Suggestions for {ref}:")
+                    for i, s in enumerate(suggestions[:5], 1):
+                        print(f"  {i}. ({s.x:.2f}, {s.y:.2f}) score: +{s.score:.4f}")
+                else:
+                    print("No improvements found nearby")
+
+            elif cmd == "undo":
+                if session.undo():
+                    print(f"Undone. Pending: {len(session.pending_moves)} move(s)")
+                else:
+                    print("Nothing to undo")
+
+            elif cmd == "status":
+                status = session.get_status()
+                print(f"Pending moves: {status['pending_moves']}")
+                print(f"Current score: {status['current_score']:.4f}")
+                print(f"Score change: {status['score_change']:+.4f}")
+                print(f"Violations: {status['violations']}")
+
+            elif cmd == "list":
+                components = session.list_components()
+                for c in components[:20]:  # Limit to first 20
+                    fixed_str = " [FIXED]" if c["fixed"] else ""
+                    print(
+                        f"  {c['ref']:8s}: ({c['x']:7.2f}, {c['y']:7.2f}) @ {c['rotation']:5.1f}°{fixed_str}"
+                    )
+                if len(components) > 20:
+                    print(f"  ... and {len(components) - 20} more")
+
+            elif cmd == "commit":
+                if not session.pending_moves:
+                    print("No pending moves to commit")
+                    continue
+                session.commit()
+                pcb.save(str(output_path))
+                print(f"Committed {len(session.pending_moves)} move(s) to {output_path}")
+
+            elif cmd == "rollback":
+                if not session.pending_moves:
+                    print("No pending moves to rollback")
+                    continue
+                count = len(session.pending_moves)
+                session.rollback()
+                print(f"Rolled back {count} move(s)")
+
+            elif cmd == "help":
+                print("Commands:")
+                print("  query <ref> <x> <y> [rotation]  - Query move impact")
+                print("  apply <ref> <x> <y> [rotation]  - Apply move")
+                print("  suggest <ref>                   - Get placement suggestions")
+                print("  undo                            - Undo last move")
+                print("  status                          - Show session status")
+                print("  list                            - List all components")
+                print("  commit                          - Save changes to PCB")
+                print("  rollback                        - Discard all changes")
+                print("  quit                            - Exit (without saving)")
+
+            else:
+                print(f"Unknown command: {cmd}. Type 'help' for available commands.")
+
+        except ValueError as e:
+            print(f"Invalid input: {e}")
+        except Exception as e:
+            print(f"Error: {e}")
+
+    return 0
+
+
 def cmd_align(args) -> int:
     """Align components in row or column."""
     from kicad_tools.cli.progress import spinner
@@ -442,7 +657,6 @@ def cmd_suggest(args) -> int:
             output_suggestions_text(suggestions, args.verbose)
 
     return 0
-
 
 
 def output_suggestion_text(suggestion, verbose: bool = False):
@@ -1234,6 +1448,28 @@ def main(argv: list[str] | None = None) -> int:
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
+    # Refine subcommand (interactive placement refinement)
+    refine_parser = subparsers.add_parser("refine", help="Interactive placement refinement session")
+    refine_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    refine_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    refine_parser.add_argument(
+        "--fixed",
+        help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    refine_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON API mode (read commands from stdin, write responses to stdout)",
+    )
+    refine_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    refine_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -1254,6 +1490,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_optimize(args)
     elif args.command == "suggest":
         return cmd_suggest(args)
+    elif args.command == "refine":
+        return cmd_refine(args)
 
     return 0
 
