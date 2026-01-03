@@ -3684,6 +3684,67 @@ class TestExtractEdgeSegments:
         # Should not extract any segments (not on Edge.Cuts)
         assert len(segments) == 0
 
+    def test_extract_gr_rect_with_stroke_fill_attributes(self):
+        """Test extracting edge from gr_rect with KiCad 7/8 stroke/fill attributes.
+
+        KiCad 7+ includes stroke and fill attributes with nested parentheses.
+        The regex must handle these nested structures correctly.
+        See issue #318.
+        """
+        from kicad_tools.router.io import _extract_edge_segments
+
+        # KiCad 7/8 format with stroke and fill (nested parentheses)
+        pcb_text = """(kicad_pcb
+  (gr_rect
+    (start 0 0)
+    (end 15 15)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+)"""
+
+        segments = _extract_edge_segments(pcb_text)
+
+        # gr_rect should produce 4 edge segments
+        assert len(segments) == 4
+
+        # Check that segments form the expected rectangle
+        all_points = set()
+        for (x1, y1), (x2, y2) in segments:
+            all_points.add((x1, y1))
+            all_points.add((x2, y2))
+
+        # Should have 4 corner points
+        assert (0, 0) in all_points
+        assert (15, 0) in all_points
+        assert (15, 15) in all_points
+        assert (0, 15) in all_points
+
+    def test_extract_gr_line_with_stroke_attributes(self):
+        """Test extracting edge from gr_line with KiCad 7/8 stroke attributes.
+
+        See issue #318.
+        """
+        from kicad_tools.router.io import _extract_edge_segments
+
+        # KiCad 7/8 format with stroke attribute
+        pcb_text = """(kicad_pcb
+  (gr_line (start 0 0) (end 50 0)
+    (stroke (width 0.1) (type default))
+    (layer "Edge.Cuts"))
+  (gr_line (start 50 0) (end 50 50)
+    (stroke (width 0.1) (type default))
+    (layer "Edge.Cuts"))
+)"""
+
+        segments = _extract_edge_segments(pcb_text)
+
+        # Should extract 2 line segments
+        assert len(segments) == 2
+        assert ((0, 0), (50, 0)) in segments
+        assert ((50, 0), (50, 50)) in segments
+
 
 class TestLoadPcbEdgeClearance:
     """Tests for edge_clearance parameter in load_pcb_for_routing."""
