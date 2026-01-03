@@ -626,9 +626,9 @@ def _add_route_parser(subparsers) -> None:
         help="Routing strategy (default: negotiated)",
     )
     route_parser.add_argument("--skip-nets", help="Comma-separated nets to skip")
-    route_parser.add_argument("--grid", type=float, default=0.25, help="Grid resolution in mm")
+    route_parser.add_argument("--grid", type=float, default=0.1, help="Grid resolution in mm")
     route_parser.add_argument("--trace-width", type=float, default=0.2, help="Trace width in mm")
-    route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
+    route_parser.add_argument("--clearance", type=float, default=0.2, help="Clearance in mm")
     route_parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill size in mm")
     route_parser.add_argument("--via-diameter", type=float, default=0.6, help="Via diameter in mm")
     route_parser.add_argument("--mc-trials", type=int, default=10, help="Monte Carlo trials")

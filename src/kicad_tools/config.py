@@ -81,9 +81,9 @@ class RouteConfig:
     """Routing configuration."""
 
     strategy: str = "negotiated"
-    grid_resolution: float = 0.25
+    grid_resolution: float = 0.1
     trace_width: float = 0.2
-    clearance: float = 0.15
+    clearance: float = 0.2
     via_drill: float = 0.3
     via_diameter: float = 0.6
 
@@ -390,13 +390,13 @@ def generate_template() -> str:
 # strategy = "negotiated"
 
 # Grid resolution in mm
-# grid_resolution = 0.25
+# grid_resolution = 0.1
 
 # Default trace width in mm
 # trace_width = 0.2
 
 # Default clearance in mm
-# clearance = 0.15
+# clearance = 0.2
 
 # Via drill size in mm
 # via_drill = 0.3
