@@ -26,7 +26,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from kicad_tools.optim.session import MoveResult, PlacementSuggestion, RoutingImpact, Violation
+from kicad_tools.optim.session import MoveResult, PositionSuggestion, RoutingImpact, Violation
 
 if TYPE_CHECKING:
     from kicad_tools.optim.session import PlacementSession
@@ -267,7 +267,7 @@ def find_best_position(
     region: Rectangle | None = None,
     num_suggestions: int = 5,
     grid_step: float = 2.5,
-) -> list[PlacementSuggestion]:
+) -> list[PositionSuggestion]:
     """
     Find best positions for component within optional region.
 
@@ -295,7 +295,7 @@ def find_best_position(
             y_max=comp_pos["y"] + search_radius,
         )
 
-    suggestions: list[PlacementSuggestion] = []
+    suggestions: list[PositionSuggestion] = []
 
     # Grid search within region
     x = region.x_min
@@ -312,7 +312,7 @@ def find_best_position(
                 # Calculate distance from current position for rationale
                 dist = math.sqrt((x - comp_pos["x"]) ** 2 + (y - comp_pos["y"]) ** 2)
                 suggestions.append(
-                    PlacementSuggestion(
+                    PositionSuggestion(
                         x=x,
                         y=y,
                         rotation=comp_pos["rotation"],

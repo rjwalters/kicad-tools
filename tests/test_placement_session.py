@@ -8,7 +8,7 @@ import pytest
 from kicad_tools.optim import (
     MoveResult,
     PlacementSession,
-    PlacementSuggestion,
+    PositionSuggestion,
     RoutingImpact,
     Violation,
     find_best_position,
@@ -232,7 +232,7 @@ class TestPlacementSession:
         assert isinstance(suggestions, list)
         # May or may not find improvements depending on initial state
         for s in suggestions:
-            assert isinstance(s, PlacementSuggestion)
+            assert isinstance(s, PositionSuggestion)
             assert s.score >= 0  # Only improvements are returned
 
     def test_status_updates(self, session: PlacementSession):
@@ -473,12 +473,12 @@ class TestRoutingImpact:
         assert d["crossing_changes"] == 1
 
 
-class TestPlacementSuggestion:
-    """Tests for PlacementSuggestion dataclass."""
+class TestPositionSuggestion:
+    """Tests for PositionSuggestion dataclass."""
 
     def test_suggestion_to_dict(self):
-        """Test PlacementSuggestion.to_dict()."""
-        s = PlacementSuggestion(
+        """Test PositionSuggestion.to_dict()."""
+        s = PositionSuggestion(
             x=125.0,
             y=130.0,
             rotation=90.0,

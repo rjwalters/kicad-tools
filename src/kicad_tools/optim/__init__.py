@@ -118,11 +118,11 @@ from kicad_tools.optim.session import (
     Move,
     MoveResult,
     PlacementSession,
+    PositionSuggestion,
     RoutingImpact,
     SessionState,
     Violation,
 )
-from kicad_tools.optim.session import PlacementSuggestion as SessionPlacementSuggestion
 from kicad_tools.optim.signal_integrity import (
     NetClassification,
     SignalClass,
@@ -169,7 +169,7 @@ __all__ = [
     "PlacementSession",
     "MoveResult",
     "RoutingImpact",
-    "SessionPlacementSuggestion",
+    "PositionSuggestion",
     "SessionState",
     "Move",
     "Violation",

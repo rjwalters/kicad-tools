@@ -42,7 +42,7 @@ __all__ = [
     "PlacementSession",
     "MoveResult",
     "RoutingImpact",
-    "PlacementSuggestion",
+    "PositionSuggestion",
     "SessionState",
     "Move",
     "Violation",
@@ -121,8 +121,8 @@ class MoveResult:
 
 
 @dataclass
-class PlacementSuggestion:
-    """A suggested position for a component."""
+class PositionSuggestion:
+    """A suggested position for a component during interactive refinement."""
 
     x: float
     y: float
@@ -587,7 +587,7 @@ class PlacementSession:
         ref: str,
         num_suggestions: int = 5,
         search_radius: float = 20.0,
-    ) -> list[PlacementSuggestion]:
+    ) -> list[PositionSuggestion]:
         """
         Get suggested positions for component.
 
@@ -643,7 +643,7 @@ class PlacementSession:
                 # Only suggest improvements
                 if score_delta < 0:
                     suggestions.append(
-                        PlacementSuggestion(
+                        PositionSuggestion(
                             x=new_x,
                             y=new_y,
                             rotation=orig_rot,
