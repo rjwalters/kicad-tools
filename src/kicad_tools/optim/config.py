@@ -46,3 +46,7 @@ class PlacementConfig:
     # Grid snapping
     grid_size: float = 0.0  # Position grid in mm (0 = no snapping)
     rotation_grid: float = 90.0  # Rotation grid in degrees (90 for cardinal)
+
+    # Functional clustering
+    cluster_stiffness: float = 50.0  # Strong spring for cluster member attraction
+    cluster_enabled: bool = False  # Enable automatic cluster detection

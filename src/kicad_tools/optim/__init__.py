@@ -46,7 +46,15 @@ Example (evolutionary)::
     pcb.save("optimized.kicad_pcb")
 """
 
-from kicad_tools.optim.components import Component, Keepout, Pin, Spring
+from kicad_tools.optim.clustering import ClusterDetector, detect_functional_clusters
+from kicad_tools.optim.components import (
+    ClusterType,
+    Component,
+    FunctionalCluster,
+    Keepout,
+    Pin,
+    Spring,
+)
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.evolutionary import (
     EvolutionaryConfig,
@@ -71,4 +79,8 @@ __all__ = [
     "EvolutionaryConfig",
     "Individual",
     "Pin",
+    "FunctionalCluster",
+    "ClusterType",
+    "ClusterDetector",
+    "detect_functional_clusters",
 ]

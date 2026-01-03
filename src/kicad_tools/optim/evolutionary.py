@@ -31,7 +31,7 @@ import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
-from kicad_tools.optim.components import Component, Spring
+from kicad_tools.optim.components import Component, FunctionalCluster, Spring
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.geometry import Polygon, Vector2D
 from kicad_tools.optim.placement import PlacementOptimizer
@@ -136,9 +136,11 @@ class EvolutionaryPlacementOptimizer:
         self.config = config or EvolutionaryConfig()
         self.components: list[Component] = []
         self.springs: list[Spring] = []
+        self.clusters: list[FunctionalCluster] = []
         self._component_map: dict[str, Component] = {}
         self._board_bounds = self._compute_board_bounds()
         self._fitness_history: list[float] = []
+        self._cluster_members: set[str] = set()  # Components that are in clusters
 
     def _compute_board_bounds(self) -> tuple[float, float, float, float]:
         """Compute bounding box of board outline (min_x, min_y, max_x, max_y)."""
@@ -154,6 +156,7 @@ class EvolutionaryPlacementOptimizer:
         pcb: PCB,
         config: EvolutionaryConfig | None = None,
         fixed_refs: list[str] | None = None,
+        enable_clustering: bool = False,
     ) -> EvolutionaryPlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -165,14 +168,19 @@ class EvolutionaryPlacementOptimizer:
             pcb: Loaded PCB object
             config: Optimization parameters
             fixed_refs: List of reference designators for fixed components
+            enable_clustering: If True, detect and preserve functional clusters
         """
         # Use PlacementOptimizer to extract components and nets
-        physics_opt = PlacementOptimizer.from_pcb(pcb, fixed_refs=fixed_refs)
+        physics_opt = PlacementOptimizer.from_pcb(
+            pcb, fixed_refs=fixed_refs, enable_clustering=enable_clustering
+        )
 
         optimizer = cls(physics_opt.board_outline, config)
         optimizer.components = physics_opt.components
         optimizer.springs = physics_opt.springs
+        optimizer.clusters = physics_opt.clusters
         optimizer._component_map = physics_opt._component_map
+        optimizer._update_cluster_members()
 
         return optimizer
 
@@ -190,9 +198,18 @@ class EvolutionaryPlacementOptimizer:
         optimizer = cls(physics_optimizer.board_outline, config)
         optimizer.components = physics_optimizer.components
         optimizer.springs = physics_optimizer.springs
+        optimizer.clusters = physics_optimizer.clusters
         optimizer._component_map = physics_optimizer._component_map
+        optimizer._update_cluster_members()
 
         return optimizer
+
+    def _update_cluster_members(self):
+        """Build set of all component refs that are part of clusters."""
+        self._cluster_members = set()
+        for cluster in self.clusters:
+            self._cluster_members.add(cluster.anchor)
+            self._cluster_members.update(cluster.members)
 
     def add_component(self, comp: Component):
         """Add a component to the optimizer."""
@@ -275,6 +292,9 @@ class EvolutionaryPlacementOptimizer:
 
         Uses spatial partitioning - components in left half from parent1,
         right half from parent2 (with some randomization).
+
+        Cluster integrity is preserved: all members of a cluster are taken
+        from the same parent as the cluster anchor.
         """
         child = Individual()
         min_x, _, max_x, _ = self._board_bounds
@@ -283,18 +303,35 @@ class EvolutionaryPlacementOptimizer:
         # Add some randomization to the partition line
         partition_x = mid_x + random.gauss(0, (max_x - min_x) * 0.1)
 
-        for ref in parent1.positions:
-            # Use parent1's current position to decide partition
-            p1_x, p1_y = parent1.positions[ref]
+        # Determine which parent each cluster should come from (based on anchor position)
+        cluster_parent: dict[str, Individual] = {}  # ref -> parent for cluster members
+        for cluster in self.clusters:
+            if cluster.anchor in parent1.positions:
+                anchor_x, _ = parent1.positions[cluster.anchor]
+                chosen_parent = parent1 if anchor_x < partition_x else parent2
+                # All cluster members should come from same parent
+                cluster_parent[cluster.anchor] = chosen_parent
+                for member in cluster.members:
+                    cluster_parent[member] = chosen_parent
 
-            if p1_x < partition_x:
-                # Take from parent1
-                child.positions[ref] = parent1.positions[ref]
-                child.rotations[ref] = parent1.rotations[ref]
+        for ref in parent1.positions:
+            # Check if this component is part of a cluster
+            if ref in cluster_parent:
+                chosen = cluster_parent[ref]
+                child.positions[ref] = chosen.positions[ref]
+                child.rotations[ref] = chosen.rotations[ref]
             else:
-                # Take from parent2
-                child.positions[ref] = parent2.positions[ref]
-                child.rotations[ref] = parent2.rotations[ref]
+                # Use parent1's current position to decide partition
+                p1_x, p1_y = parent1.positions[ref]
+
+                if p1_x < partition_x:
+                    # Take from parent1
+                    child.positions[ref] = parent1.positions[ref]
+                    child.rotations[ref] = parent1.rotations[ref]
+                else:
+                    # Take from parent2
+                    child.positions[ref] = parent2.positions[ref]
+                    child.rotations[ref] = parent2.rotations[ref]
 
         return child
 

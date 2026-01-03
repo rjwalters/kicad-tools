@@ -176,10 +176,14 @@ def cmd_optimize(args) -> int:
         return 1
 
     strategy = args.strategy
+    enable_clustering = getattr(args, "cluster", False)
+
     if not quiet:
         print(f"Optimization strategy: {strategy}")
         if fixed_refs:
             print(f"Fixed components: {', '.join(fixed_refs)}")
+        if enable_clustering:
+            print("Functional clustering: enabled")
 
     try:
         if strategy == "force-directed":
@@ -190,11 +194,15 @@ def cmd_optimize(args) -> int:
             )
 
             with spinner("Creating optimizer from PCB...", quiet=quiet):
-                optimizer = PlacementOptimizer.from_pcb(pcb, config=config, fixed_refs=fixed_refs)
+                optimizer = PlacementOptimizer.from_pcb(
+                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
+                )
 
             if not quiet:
                 print(f"Optimizing {len(optimizer.components)} components...")
                 print(f"  - {len(optimizer.springs)} net connections")
+                if enable_clustering and optimizer.clusters:
+                    print(f"  - {len(optimizer.clusters)} functional clusters detected")
                 print(f"  - Max iterations: {args.iterations}")
 
             # Run simulation with progress
@@ -229,11 +237,13 @@ def cmd_optimize(args) -> int:
 
             with spinner("Creating evolutionary optimizer from PCB...", quiet=quiet):
                 optimizer = EvolutionaryPlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs
+                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
                 )
 
             if not quiet:
                 print(f"Optimizing {len(optimizer.components)} components...")
+                if enable_clustering and optimizer.clusters:
+                    print(f"  - {len(optimizer.clusters)} functional clusters detected")
                 print(f"  - Generations: {args.generations}")
                 print(f"  - Population: {args.population}")
 
@@ -270,11 +280,13 @@ def cmd_optimize(args) -> int:
 
             with spinner("Creating hybrid optimizer from PCB...", quiet=quiet):
                 evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs
+                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
                 )
 
             if not quiet:
                 print(f"Optimizing {len(evo_optimizer.components)} components...")
+                if enable_clustering and evo_optimizer.clusters:
+                    print(f"  - {len(evo_optimizer.clusters)} functional clusters detected")
                 print(f"  - Phase 1: Evolutionary ({args.generations} generations)")
                 print(f"  - Phase 2: Physics refinement ({args.iterations} iterations)")
 
@@ -533,6 +545,11 @@ def main(argv: list[str] | None = None) -> int:
     optimize_parser.add_argument(
         "--fixed",
         help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    optimize_parser.add_argument(
+        "--cluster",
+        action="store_true",
+        help="Enable functional clustering (groups bypass caps near ICs, etc.)",
     )
     optimize_parser.add_argument(
         "--dry-run",

@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from kicad_tools.optim.components import Component, Keepout, Pin, Spring
+from kicad_tools.optim.components import Component, FunctionalCluster, Keepout, Pin, Spring
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
@@ -51,6 +51,7 @@ class PlacementOptimizer:
         self.components: list[Component] = []
         self.springs: list[Spring] = []
         self.keepouts: list[Keepout] = []
+        self.clusters: list[FunctionalCluster] = []
         self._component_map: dict[str, Component] = {}
 
     @classmethod
@@ -59,6 +60,7 @@ class PlacementOptimizer:
         pcb: PCB,
         config: PlacementConfig | None = None,
         fixed_refs: list[str] | None = None,
+        enable_clustering: bool | None = None,
     ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -68,6 +70,8 @@ class PlacementOptimizer:
             config: Optimization parameters
             fixed_refs: List of reference designators for fixed components
                        (e.g., ["J1", "J2"] for connectors)
+            enable_clustering: If True, detect and add functional clusters.
+                              If None, uses config.cluster_enabled.
         """
         fixed_refs = set(fixed_refs or [])
 
@@ -141,6 +145,17 @@ class PlacementOptimizer:
 
         # Create springs for nets
         optimizer.create_springs_from_nets()
+
+        # Detect and add functional clusters if enabled
+        use_clustering = (
+            enable_clustering if enable_clustering is not None else optimizer.config.cluster_enabled
+        )
+        if use_clustering:
+            from kicad_tools.optim.clustering import detect_functional_clusters
+
+            clusters = detect_functional_clusters(optimizer.components)
+            for cluster in clusters:
+                optimizer.add_cluster(cluster)
 
         return optimizer
 
@@ -364,6 +379,107 @@ class PlacementOptimizer:
         """Check if net is a clock net."""
         name_lower = name.lower()
         return any(p in name_lower for p in ["clk", "clock", "mclk", "sclk", "bclk", "xtal"])
+
+    def add_cluster(self, cluster: FunctionalCluster):
+        """
+        Add a functional cluster to the optimizer.
+
+        Creates strong springs between the cluster anchor and all member
+        components to keep them close together during optimization.
+
+        Args:
+            cluster: FunctionalCluster defining the group
+        """
+        self.clusters.append(cluster)
+        self._create_cluster_springs(cluster)
+
+    def _create_cluster_springs(self, cluster: FunctionalCluster):
+        """
+        Create springs to enforce cluster proximity constraints.
+
+        Creates strong springs from anchor component center to each member
+        component center. These springs have higher stiffness than normal
+        net connections to ensure cluster members stay close together.
+
+        Args:
+            cluster: FunctionalCluster to create springs for
+        """
+        anchor_comp = self._component_map.get(cluster.anchor)
+        if not anchor_comp:
+            return
+
+        # Find the anchor pin to use (if specified) or use component center
+        anchor_pin = None
+        if cluster.anchor_pin:
+            anchor_pin = next(
+                (p for p in anchor_comp.pins if p.number == cluster.anchor_pin),
+                None,
+            )
+
+        # If no specific anchor pin, use the first pin as proxy for center
+        if anchor_pin is None and anchor_comp.pins:
+            anchor_pin = anchor_comp.pins[0]
+
+        if anchor_pin is None:
+            return
+
+        # Create strong springs from anchor to each member
+        for member_ref in cluster.members:
+            member_comp = self._component_map.get(member_ref)
+            if not member_comp or not member_comp.pins:
+                continue
+
+            # Use first pin of member component
+            member_pin = member_comp.pins[0]
+
+            # Create cluster spring with high stiffness
+            spring = Spring(
+                comp1_ref=cluster.anchor,
+                pin1_num=anchor_pin.number,
+                comp2_ref=member_ref,
+                pin2_num=member_pin.number,
+                stiffness=self.config.cluster_stiffness,
+                rest_length=0.0,  # Want them as close as possible
+                net=-1,  # Special marker for cluster springs
+                net_name=f"_cluster_{cluster.cluster_type.value}",
+            )
+            self.springs.append(spring)
+
+    def get_clusters(self) -> list[FunctionalCluster]:
+        """Get all registered functional clusters."""
+        return list(self.clusters)
+
+    def validate_cluster_distances(self) -> list[tuple[str, str, float, float]]:
+        """
+        Check if cluster members are within their max distance constraints.
+
+        Returns:
+            List of (cluster_anchor, member_ref, actual_distance, max_distance)
+            tuples for violations.
+        """
+        violations = []
+
+        for cluster in self.clusters:
+            anchor_comp = self._component_map.get(cluster.anchor)
+            if not anchor_comp:
+                continue
+
+            anchor_pos = Vector2D(anchor_comp.x, anchor_comp.y)
+
+            for member_ref in cluster.members:
+                member_comp = self._component_map.get(member_ref)
+                if not member_comp:
+                    continue
+
+                member_pos = Vector2D(member_comp.x, member_comp.y)
+                distance = (member_pos - anchor_pos).magnitude()
+
+                if distance > cluster.max_distance_mm:
+                    violations.append(
+                        (cluster.anchor, member_ref, distance, cluster.max_distance_mm)
+                    )
+
+        return violations
 
     def compute_edge_to_point_force(
         self, point: Vector2D, edge_start: Vector2D, edge_end: Vector2D, charge_density: float
@@ -991,6 +1107,8 @@ class PlacementOptimizer:
         ]
 
         for comp in sorted(self.components, key=lambda c: c.ref):
-            lines.append(f"  {comp.ref:8s}: ({comp.x:7.2f}, {comp.y:7.2f}) @ {comp.rotation:6.1f} deg")
+            lines.append(
+                f"  {comp.ref:8s}: ({comp.x:7.2f}, {comp.y:7.2f}) @ {comp.rotation:6.1f} deg"
+            )
 
         return "\n".join(lines)
