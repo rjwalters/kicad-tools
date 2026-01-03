@@ -12,9 +12,9 @@ Example::
     from kicad_tools.router import Autorouter, DesignRules
 
     rules = DesignRules(
-        grid_resolution=0.25,
+        grid_resolution=0.1,
         trace_width=0.2,
-        clearance=0.15,
+        trace_clearance=0.2,
     )
 
     router = Autorouter(width=100, height=80, rules=rules)
