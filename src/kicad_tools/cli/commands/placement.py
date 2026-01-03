@@ -64,6 +64,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--grid", str(args.grid)])
         if args.fixed:
             sub_argv.extend(["--fixed", args.fixed])
+        if getattr(args, "cluster", False):
+            sub_argv.append("--cluster")
         if getattr(args, "constraints", None):
             sub_argv.extend(["--constraints", args.constraints])
         if getattr(args, "edge_detect", False):

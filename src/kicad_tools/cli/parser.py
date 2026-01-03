@@ -967,6 +967,26 @@ def _add_placement_parser(subparsers) -> None:
         help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
     )
     placement_optimize.add_argument(
+        "--cluster",
+        action="store_true",
+        help="Enable functional clustering (groups bypass caps near ICs, etc.)",
+    )
+    placement_optimize.add_argument(
+        "--constraints",
+        help="Path to YAML file with grouping constraints",
+    )
+    placement_optimize.add_argument(
+        "--keepout",
+        metavar="FILE",
+        help="YAML file defining keepout zones",
+    )
+    placement_optimize.add_argument(
+        "--auto-keepout",
+        action="store_true",
+        dest="auto_keepout",
+        help="Auto-detect keepout zones from mounting holes and connectors",
+    )
+    placement_optimize.add_argument(
         "--edge-detect",
         action="store_true",
         help="Auto-detect edge components (connectors, mounting holes, etc.)",
@@ -979,6 +999,145 @@ def _add_placement_parser(subparsers) -> None:
     placement_optimize.add_argument("--dry-run", action="store_true", help="Preview only")
     placement_optimize.add_argument("-v", "--verbose", action="store_true")
     placement_optimize.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement snap
+    placement_snap = placement_subparsers.add_parser("snap", help="Snap components to grid")
+    placement_snap.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_snap.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_snap.add_argument(
+        "--grid",
+        type=float,
+        default=0.5,
+        help="Grid size in mm (default: 0.5)",
+    )
+    placement_snap.add_argument(
+        "--rotation",
+        type=int,
+        default=90,
+        help="Rotation snap in degrees (0 to disable, default: 90)",
+    )
+    placement_snap.add_argument("--dry-run", action="store_true", help="Preview without saving")
+    placement_snap.add_argument("-v", "--verbose", action="store_true")
+    placement_snap.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement align
+    placement_align = placement_subparsers.add_parser(
+        "align", help="Align components in row or column"
+    )
+    placement_align.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_align.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_align.add_argument(
+        "--components",
+        "-c",
+        required=True,
+        help="Comma-separated component refs to align (e.g., R1,R2,R3)",
+    )
+    placement_align.add_argument(
+        "--axis",
+        choices=["row", "column"],
+        default="row",
+        help="Alignment axis: row (horizontal) or column (vertical) (default: row)",
+    )
+    placement_align.add_argument(
+        "--reference",
+        choices=["center", "top", "bottom", "left", "right"],
+        default="center",
+        help="Alignment reference point (default: center)",
+    )
+    placement_align.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.1,
+        help="Tolerance for already-aligned components in mm (default: 0.1)",
+    )
+    placement_align.add_argument("--dry-run", action="store_true", help="Preview without saving")
+    placement_align.add_argument("-v", "--verbose", action="store_true")
+    placement_align.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement distribute
+    placement_distribute = placement_subparsers.add_parser(
+        "distribute", help="Distribute components evenly"
+    )
+    placement_distribute.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_distribute.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_distribute.add_argument(
+        "--components",
+        "-c",
+        required=True,
+        help="Comma-separated component refs to distribute (e.g., LED1,LED2,LED3,LED4)",
+    )
+    placement_distribute.add_argument(
+        "--axis",
+        choices=["horizontal", "vertical"],
+        default="horizontal",
+        help="Distribution axis (default: horizontal)",
+    )
+    placement_distribute.add_argument(
+        "--spacing",
+        type=float,
+        default=0.0,
+        help="Fixed spacing in mm (0 for automatic even distribution, default: 0)",
+    )
+    placement_distribute.add_argument(
+        "--dry-run", action="store_true", help="Preview without saving"
+    )
+    placement_distribute.add_argument("-v", "--verbose", action="store_true")
+    placement_distribute.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement suggest
+    placement_suggest = placement_subparsers.add_parser(
+        "suggest", help="Generate placement suggestions with rationale"
+    )
+    placement_suggest.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_suggest.add_argument(
+        "--component",
+        "-c",
+        help="Explain placement for specific component reference",
+    )
+    placement_suggest.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    placement_suggest.add_argument("-v", "--verbose", action="store_true")
+    placement_suggest.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
+    # placement refine
+    placement_refine = placement_subparsers.add_parser(
+        "refine", help="Interactive placement refinement session"
+    )
+    placement_refine.add_argument("pcb", help="Path to .kicad_pcb file")
+    placement_refine.add_argument(
+        "-o", "--output", help="Output file path (default: modify in place)"
+    )
+    placement_refine.add_argument(
+        "--fixed",
+        help="Comma-separated component refs to keep fixed (e.g., J1,J2,H1)",
+    )
+    placement_refine.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON API mode (read commands from stdin, write responses to stdout)",
+    )
+    placement_refine.add_argument("-v", "--verbose", action="store_true")
+    placement_refine.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
 
