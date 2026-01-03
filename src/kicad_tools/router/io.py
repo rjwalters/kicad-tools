@@ -149,6 +149,60 @@ def route_pcb(
     return router.to_sexp(), stats
 
 
+def _extract_pad_blocks(section: str) -> list[str]:
+    """
+    Extract complete (pad ...) S-expression blocks from a footprint section.
+
+    KiCad 7+ uses multi-line pad definitions like:
+        (pad "1" smd roundrect
+          (at -0.9500 0.9000)
+          (size 0.6000 1.1000)
+          ...
+        )
+
+    This function finds each (pad ...) block and extracts the complete
+    content by counting parentheses to find the matching closing paren.
+
+    Args:
+        section: Footprint section text from a KiCad PCB file
+
+    Returns:
+        List of complete pad block strings
+    """
+    pad_blocks: list[str] = []
+
+    # Find all positions where "(pad " starts
+    start_pos = 0
+    while True:
+        pad_start = section.find("(pad ", start_pos)
+        if pad_start == -1:
+            break
+
+        # Count parentheses to find the matching closing paren
+        depth = 0
+        in_string = False
+        i = pad_start
+        while i < len(section):
+            char = section[i]
+
+            if char == '"' and (i == 0 or section[i - 1] != "\\"):
+                in_string = not in_string
+            elif not in_string:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        # Found the matching closing paren
+                        pad_blocks.append(section[pad_start : i + 1])
+                        break
+            i += 1
+
+        start_pos = i + 1
+
+    return pad_blocks
+
+
 def load_pcb_for_routing(
     pcb_path: str,
     skip_nets: list[str] | None = None,
@@ -222,45 +276,45 @@ def load_pcb_for_routing(
             continue
         ref = ref_match.group(1)
 
-        # Parse pads - match each pad individually
+        # Parse pads - extract complete (pad ...) blocks
+        # KiCad 7+ uses multi-line pad definitions, so we need to extract
+        # complete S-expression blocks rather than parsing line-by-line
         pads: list[dict] = []
-        # Find all (pad ...) blocks in the footprint section
-        # Use a line-by-line approach for robustness
-        for line in section.split("\n"):
-            line = line.strip()
-            if not line.startswith("(pad "):
-                continue
 
+        # Find all complete (pad ...) blocks using parenthesis matching
+        pad_blocks = _extract_pad_blocks(section)
+
+        for pad_block in pad_blocks:
             # Extract pad number and type
             # Handle both quoted ("A1") and unquoted (1) pad numbers
             # KiCad uses unquoted numbers for numeric pads, quoted for alphanumeric (BGA)
-            pad_start = re.match(r'\(pad\s+(?:"([^"]+)"|(\S+))\s+(\w+)', line)
+            pad_start = re.match(r'\(pad\s+(?:"([^"]+)"|(\S+))\s+(\w+)', pad_block)
             if not pad_start:
                 continue
             pad_num = pad_start.group(1) or pad_start.group(2)
             pad_type = pad_start.group(3)  # smd or thru_hole
 
-            # Extract at position
-            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", line)
+            # Extract at position (now searches entire multi-line block)
+            at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
             if not at_match:
                 continue
             pad_x = float(at_match.group(1))
             pad_y = float(at_match.group(2))
 
             # Extract size
-            size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", line)
+            size_match = re.search(r"\(size\s+([\d.]+)\s+([\d.]+)\)", pad_block)
             if not size_match:
                 continue
             pad_w = float(size_match.group(1))
             pad_h = float(size_match.group(2))
 
             # Extract net (if present)
-            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', line)
+            net_match = re.search(r'\(net\s+(\d+)\s+"([^"]+)"\)', pad_block)
             net_num = int(net_match.group(1)) if net_match else 0
             net_name = net_match.group(2) if net_match else ""
 
             # Extract drill size if present
-            drill_match = re.search(r"\(drill\s+([\d.]+)", line)
+            drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
             drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
             # Override with netlist if provided
