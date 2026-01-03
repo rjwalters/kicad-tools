@@ -39,6 +39,9 @@ class PlacementConfig:
     boundary_charge: float = 200.0  # Extra charge on board edges
     boundary_margin: float = 1.0  # Minimum distance from board edge
 
+    # Edge constraint parameters
+    edge_stiffness: float = 50.0  # Spring constant for edge constraints
+
     # Convergence
     energy_threshold: float = 0.01  # Stop when system energy below this
     velocity_threshold: float = 0.001  # Stop when max velocity below this

@@ -68,6 +68,14 @@ from kicad_tools.optim.constraints import (
     expand_member_patterns,
     validate_grouping_constraints,
 )
+from kicad_tools.optim.edge_placement import (
+    BoardEdges,
+    Edge,
+    EdgeConstraint,
+    EdgeSide,
+    detect_edge_components,
+    get_board_edges,
+)
 from kicad_tools.optim.evolutionary import (
     EvolutionaryConfig,
     EvolutionaryPlacementOptimizer,
@@ -105,4 +113,11 @@ __all__ = [
     "expand_member_patterns",
     "load_constraints_from_yaml",
     "save_constraints_to_yaml",
+    # Edge placement
+    "EdgeConstraint",
+    "EdgeSide",
+    "Edge",
+    "BoardEdges",
+    "detect_edge_components",
+    "get_board_edges",
 ]

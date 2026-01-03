@@ -10,8 +10,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from kicad_tools.optim.geometry import Polygon, Vector2D
+
+if TYPE_CHECKING:
+    from kicad_tools.optim.edge_placement import EdgeConstraint
 
 
 class ClusterType(Enum):
@@ -56,6 +60,9 @@ class Component:
     pins: list[Pin] = field(default_factory=list)
     fixed: bool = False  # If True, component doesn't move
     mass: float = 1.0  # For physics simulation
+
+    # Edge constraint (if component should stay at board edge)
+    edge_constraint: EdgeConstraint | None = None
 
     # Physics state
     vx: float = 0.0  # Linear velocity

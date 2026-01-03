@@ -20,6 +20,12 @@ from kicad_tools.optim.constraints import (
     GroupingConstraint,
     validate_grouping_constraints,
 )
+from kicad_tools.optim.edge_placement import (
+    BoardEdges,
+    EdgeConstraint,
+    compute_edge_force,
+    detect_edge_components,
+)
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
 if TYPE_CHECKING:
@@ -61,6 +67,10 @@ class PlacementOptimizer:
         self.grouping_constraints: list[GroupingConstraint] = []
         self._component_map: dict[str, Component] = {}
 
+        # Edge constraints
+        self.board_edges = BoardEdges.from_polygon(board_outline)
+        self._edge_constraints: dict[str, EdgeConstraint] = {}
+
     @classmethod
     def from_pcb(
         cls,
@@ -68,6 +78,8 @@ class PlacementOptimizer:
         config: PlacementConfig | None = None,
         fixed_refs: list[str] | None = None,
         enable_clustering: bool | None = None,
+        edge_detect: bool = False,
+        edge_constraints: list[EdgeConstraint] | None = None,
     ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -79,6 +91,8 @@ class PlacementOptimizer:
                        (e.g., ["J1", "J2"] for connectors)
             enable_clustering: If True, detect and add functional clusters.
                               If None, uses config.cluster_enabled.
+            edge_detect: If True, auto-detect edge components (connectors, etc.)
+            edge_constraints: Manual list of edge constraints to apply
         """
         fixed_refs = set(fixed_refs or [])
 
@@ -163,6 +177,18 @@ class PlacementOptimizer:
             clusters = detect_functional_clusters(optimizer.components)
             for cluster in clusters:
                 optimizer.add_cluster(cluster)
+
+        # Apply edge constraints
+        all_constraints: list[EdgeConstraint] = []
+
+        if edge_detect:
+            all_constraints.extend(detect_edge_components(pcb))
+
+        if edge_constraints:
+            all_constraints.extend(edge_constraints)
+
+        for constraint in all_constraints:
+            optimizer.add_edge_constraint(constraint)
 
         return optimizer
 
@@ -362,6 +388,46 @@ class PlacementOptimizer:
         """
         outline = Polygon.circle(x, y, radius)
         return self.add_keepout(outline, charge_multiplier, name)
+
+    def add_edge_constraint(self, constraint: EdgeConstraint) -> None:
+        """
+        Add an edge constraint for a component.
+
+        Edge constraints keep components at board edges during optimization.
+        Useful for connectors, mounting holes, and other edge-accessible components.
+
+        Args:
+            constraint: EdgeConstraint specifying component and edge behavior
+        """
+        self._edge_constraints[constraint.reference] = constraint
+
+        # Also set on the component if it exists
+        comp = self._component_map.get(constraint.reference)
+        if comp:
+            comp.edge_constraint = constraint
+
+    def add_edge_constraints(self, constraints: list[EdgeConstraint]) -> None:
+        """
+        Add multiple edge constraints.
+
+        Args:
+            constraints: List of EdgeConstraint objects
+        """
+        for constraint in constraints:
+            self.add_edge_constraint(constraint)
+
+    def get_edge_constraint(self, ref: str) -> EdgeConstraint | None:
+        """Get edge constraint for a component by reference."""
+        return self._edge_constraints.get(ref)
+
+    @property
+    def edge_constrained_components(self) -> list[Component]:
+        """Get list of components with edge constraints."""
+        return [
+            comp
+            for comp in self.components
+            if comp.ref in self._edge_constraints
+        ]
 
     def create_springs_from_nets(self):
         """Create springs connecting all pins on the same net."""
@@ -1083,6 +1149,18 @@ class PlacementOptimizer:
             if not comp.fixed:
                 rot_torque = comp.compute_rotation_potential_torque(self.config.rotation_stiffness)
                 torques[comp.ref] += rot_torque
+
+        # 7. Edge constraint forces
+        for comp in self.components:
+            if comp.fixed:
+                continue
+
+            constraint = self._edge_constraints.get(comp.ref)
+            if constraint:
+                edge_force, _ = compute_edge_force(
+                    comp, constraint, self.board_edges, stiffness=self.config.edge_stiffness
+                )
+                forces[comp.ref] = forces[comp.ref] + edge_force
 
         return forces, torques
 
