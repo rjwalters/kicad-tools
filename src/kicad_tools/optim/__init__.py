@@ -84,6 +84,15 @@ from kicad_tools.optim.evolutionary import (
 from kicad_tools.optim.geometry import Polygon, Vector2D
 from kicad_tools.optim.placement import PlacementOptimizer
 from kicad_tools.optim.routing import FigureOfMerit, RoutingOptimizer
+from kicad_tools.optim.signal_integrity import (
+    NetClassification,
+    SignalClass,
+    SignalIntegrityHint,
+    add_si_constraints,
+    analyze_placement_for_si,
+    classify_nets,
+    get_si_score,
+)
 from kicad_tools.optim.thermal import (
     ThermalClass,
     ThermalConfig,
@@ -129,6 +138,14 @@ __all__ = [
     "BoardEdges",
     "detect_edge_components",
     "get_board_edges",
+    # Signal integrity
+    "SignalClass",
+    "NetClassification",
+    "SignalIntegrityHint",
+    "classify_nets",
+    "analyze_placement_for_si",
+    "get_si_score",
+    "add_si_constraints",
     # Thermal awareness
     "ThermalClass",
     "ThermalConfig",
