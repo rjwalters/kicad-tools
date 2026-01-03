@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-01-03
+
+### Added
+
+#### Intelligent Placement Engine (`kicad_tools.optim`)
+
+Comprehensive placement optimization for PCB component positioning:
+
+- **Functional Clustering** (`optim/clustering.py`)
+  - `ClusterDetector` - Detects related component groups
+  - `detect_functional_clusters()` - Find MCU+bypass caps, timing circuits, etc.
+  - `ClusterType` enum: POWER, TIMING, INTERFACE, ANALOG
+
+- **Thermal-Aware Placement** (`optim/thermal.py`)
+  - `ThermalClass` - Heat source, heat sensitive, neutral classification
+  - `classify_thermal_properties()` - Auto-detect thermal components
+  - `detect_thermal_constraints()` - Generate separation constraints
+  - Heat sources pushed to edges, separated from sensitive components
+
+- **Signal Integrity Hints** (`optim/signal_integrity.py`)
+  - `SignalClass` - CLOCK, HIGH_SPEED, DIFFERENTIAL, ANALOG, POWER, GENERAL
+  - `classify_nets()` - Auto-classify nets by name patterns
+  - `analyze_placement_for_si()` - Get SI warnings
+  - `get_si_score()` - Placement quality metric
+
+- **Edge Placement** (`optim/edge_placement.py`)
+  - `detect_edge_components()` - Find connectors, mounting holes
+  - `EdgeConstraint` - Keep components at board edges
+  - `BoardEdges` - Edge detection and constraint generation
+
+- **Keep-out Zones** (`optim/keepout.py`)
+  - `KeepoutZone` - Define no-go areas
+  - `create_keepout_from_component()` - Auto-generate from components
+  - `load_keepout_zones_from_yaml()` - Load from config file
+  - `validate_keepout_violations()` - Check placement against zones
+
+#### Placement Constraints (`kicad_tools.optim`)
+
+Declarative constraint system for component placement:
+
+- **Component Grouping** (`optim/constraints.py`)
+  - `GroupingConstraint` - Keep components together
+  - `SpatialConstraint` - Position constraints
+  - `validate_grouping_constraints()` - Check constraint satisfaction
+
+- **Alignment** (`optim/alignment.py`)
+  - `snap_to_grid()` - Grid alignment
+  - `align_components()` - Row/column alignment
+  - `distribute_components()` - Even spacing
+  - `AlignmentConstraint` - Declarative alignment rules
+
+#### Agent Integration (`kicad_tools.optim`)
+
+AI-friendly APIs for placement optimization:
+
+- **Placement Suggestions** (`optim/suggestions.py`)
+  - `PlacementSuggestion` - Suggested position with rationale
+  - `generate_placement_suggestions()` - Get improvement ideas
+  - `explain_placement()` - Why is component here?
+  - `suggest_improvement()` - Specific move suggestions
+
+- **Iterative Refinement** (`optim/session.py`, `optim/query.py`)
+  - `PlacementSession` - Stateful refinement session
+  - `query_position()` - "What if I move X here?"
+  - `query_swap()` - "What if I swap X and Y?"
+  - `find_best_position()` - Optimal position search
+  - `process_json_request()` - JSON API for agents
+
+#### CLI Commands
+
+New placement optimization commands:
+
+- `kicad-tools placement optimize --cluster` - Enable clustering
+- `kicad-tools placement optimize --thermal` - Enable thermal awareness
+- `kicad-tools placement optimize --edge-detect` - Edge component detection
+- `kicad-tools placement optimize --keepout FILE` - Load keepout zones
+- `kicad-tools placement suggest` - Get suggestions
+- `kicad-tools placement refine` - Interactive refinement
+
 ## [0.5.0] - 2026-01-02
 
 ### Added
@@ -310,6 +389,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.6.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.5.0
 [0.4.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.4.0
 [0.3.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.3.0
