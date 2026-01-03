@@ -99,9 +99,7 @@ class TestCalculateStringConfidence:
 
     def test_exact_match_case_sensitive(self):
         """Test case-sensitive mode - different cases don't match."""
-        result = calculate_string_confidence(
-            "stm32f103", "STM32F103", case_sensitive=True
-        )
+        result = calculate_string_confidence("stm32f103", "STM32F103", case_sensitive=True)
         assert result.confidence == 0.7  # no match in case-sensitive mode
         assert result.match_type == "search"
 

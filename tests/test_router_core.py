@@ -649,8 +649,20 @@ class TestAutorouterBusDetection:
         # Add data bus signals
         for i in range(4):
             pads = [
-                {"number": "1", "x": 10.0 + i*2, "y": 10.0, "net": 10+i, "net_name": f"DATA[{i}]"},
-                {"number": "2", "x": 10.0 + i*2, "y": 20.0, "net": 10+i, "net_name": f"DATA[{i}]"},
+                {
+                    "number": "1",
+                    "x": 10.0 + i * 2,
+                    "y": 10.0,
+                    "net": 10 + i,
+                    "net_name": f"DATA[{i}]",
+                },
+                {
+                    "number": "2",
+                    "x": 10.0 + i * 2,
+                    "y": 20.0,
+                    "net": 10 + i,
+                    "net_name": f"DATA[{i}]",
+                },
             ]
             router.add_component(f"U{i}", pads)
 

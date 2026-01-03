@@ -53,8 +53,12 @@ def create_component_with_bounds(
     x1, y1, x2, y2 = bounds
     # Create pads at the corners of the bounds
     pads = [
-        PadState(ref=ref, number="1", x=x1, y=y1, net="", net_id=0, layer="F.Cu", width=0.5, height=0.5),
-        PadState(ref=ref, number="2", x=x2, y=y2, net="", net_id=0, layer="F.Cu", width=0.5, height=0.5),
+        PadState(
+            ref=ref, number="1", x=x1, y=y1, net="", net_id=0, layer="F.Cu", width=0.5, height=0.5
+        ),
+        PadState(
+            ref=ref, number="2", x=x2, y=y2, net="", net_id=0, layer="F.Cu", width=0.5, height=0.5
+        ),
     ]
     return ComponentState(
         ref=ref,
@@ -221,9 +225,7 @@ class TestRoutingDiagnosis:
             failure_reason=FailureReason.PATH_BLOCKED,
             failure_location=(30.0, 40.0),
             failure_description="Blocked by component U1",
-            blocking_obstacles=[
-                Obstacle(type="component", name="U1", position=(30.0, 40.0))
-            ],
+            blocking_obstacles=[Obstacle(type="component", name="U1", position=(30.0, 40.0))],
         )
         assert diag.success is False
         assert diag.failure_reason == FailureReason.PATH_BLOCKED
@@ -387,8 +389,12 @@ class TestDiagnosisEngine:
     def state_with_traces(self):
         """Create a PCB state with traces."""
         traces = [
-            TraceState(net="GND", net_id=1, x1=0.0, y1=50.0, x2=100.0, y2=50.0, layer="F.Cu", width=0.25),
-            TraceState(net="VCC", net_id=2, x1=50.0, y1=0.0, x2=50.0, y2=100.0, layer="F.Cu", width=0.25),
+            TraceState(
+                net="GND", net_id=1, x1=0.0, y1=50.0, x2=100.0, y2=50.0, layer="F.Cu", width=0.25
+            ),
+            TraceState(
+                net="VCC", net_id=2, x1=50.0, y1=0.0, x2=50.0, y2=100.0, layer="F.Cu", width=0.25
+            ),
         ]
         return create_test_pcb_state(traces=traces)
 
@@ -396,11 +402,46 @@ class TestDiagnosisEngine:
     def state_with_violations(self):
         """Create a PCB state with DRC violations."""
         violations = [
-            ViolationState(type="clearance", severity="error", message="Clearance violation", x=30.0, y=40.0, nets=["NET1", "NET2"]),
-            ViolationState(type="clearance", severity="error", message="Clearance violation", x=35.0, y=45.0, nets=["NET1", "NET3"]),
-            ViolationState(type="shorting_items", severity="error", message="Items are shorted", x=50.0, y=50.0, nets=["GND"]),
-            ViolationState(type="unconnected_items", severity="error", message="Unconnected items", x=60.0, y=70.0, nets=["DATA"]),
-            ViolationState(type="track_width", severity="warning", message="Track too narrow", x=80.0, y=80.0, nets=["VCC"]),
+            ViolationState(
+                type="clearance",
+                severity="error",
+                message="Clearance violation",
+                x=30.0,
+                y=40.0,
+                nets=["NET1", "NET2"],
+            ),
+            ViolationState(
+                type="clearance",
+                severity="error",
+                message="Clearance violation",
+                x=35.0,
+                y=45.0,
+                nets=["NET1", "NET3"],
+            ),
+            ViolationState(
+                type="shorting_items",
+                severity="error",
+                message="Items are shorted",
+                x=50.0,
+                y=50.0,
+                nets=["GND"],
+            ),
+            ViolationState(
+                type="unconnected_items",
+                severity="error",
+                message="Unconnected items",
+                x=60.0,
+                y=70.0,
+                nets=["DATA"],
+            ),
+            ViolationState(
+                type="track_width",
+                severity="warning",
+                message="Track too narrow",
+                x=80.0,
+                y=80.0,
+                nets=["VCC"],
+            ),
         ]
         return create_test_pcb_state(violations=violations)
 
@@ -427,7 +468,9 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_success(self, empty_state):
         """Test diagnosing a successful routing."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=True, command_type=CommandType.ROUTE_NET, message="Routed successfully")
+        result = CommandResult(
+            success=True, command_type=CommandType.ROUTE_NET, message="Routed successfully"
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -444,7 +487,9 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_failure_blocked(self, state_with_components):
         """Test diagnosing a routing blocked by component."""
         engine = DiagnosisEngine(state_with_components)
-        result = CommandResult(success=False, command_type=CommandType.ROUTE_NET, message="Path blocked by obstacle")
+        result = CommandResult(
+            success=False, command_type=CommandType.ROUTE_NET, message="Path blocked by obstacle"
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -461,7 +506,11 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_failure_clearance(self, empty_state):
         """Test diagnosing a clearance violation failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.ROUTE_NET, message="Clearance violation detected")
+        result = CommandResult(
+            success=False,
+            command_type=CommandType.ROUTE_NET,
+            message="Clearance violation detected",
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -476,7 +525,11 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_failure_layer(self, empty_state):
         """Test diagnosing a no layer available failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.ROUTE_NET, message="No layer available for routing")
+        result = CommandResult(
+            success=False,
+            command_type=CommandType.ROUTE_NET,
+            message="No layer available for routing",
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -491,7 +544,9 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_failure_congestion(self, empty_state):
         """Test diagnosing a congestion failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.ROUTE_NET, message="Area too congested")
+        result = CommandResult(
+            success=False, command_type=CommandType.ROUTE_NET, message="Area too congested"
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -506,7 +561,9 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_failure_net_not_found(self, empty_state):
         """Test diagnosing a net not found failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.ROUTE_NET, message="Net not found in design")
+        result = CommandResult(
+            success=False, command_type=CommandType.ROUTE_NET, message="Net not found in design"
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -521,7 +578,9 @@ class TestDiagnosisEngine:
     def test_diagnose_routing_generates_alternatives(self, state_with_components):
         """Test that routing diagnosis generates alternatives."""
         engine = DiagnosisEngine(state_with_components)
-        result = CommandResult(success=False, command_type=CommandType.ROUTE_NET, message="Path blocked")
+        result = CommandResult(
+            success=False, command_type=CommandType.ROUTE_NET, message="Path blocked"
+        )
 
         diag = engine.diagnose_routing(
             result=result,
@@ -532,13 +591,17 @@ class TestDiagnosisEngine:
 
         assert len(diag.alternatives) > 0
         # Should include layer change option
-        assert any("layer" in alt.description.lower() or "via" in alt.description.lower()
-                   for alt in diag.alternatives)
+        assert any(
+            "layer" in alt.description.lower() or "via" in alt.description.lower()
+            for alt in diag.alternatives
+        )
 
     def test_diagnose_placement_success(self, empty_state):
         """Test diagnosing a successful placement."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=True, command_type=CommandType.PLACE_COMPONENT, message="Placed successfully")
+        result = CommandResult(
+            success=True, command_type=CommandType.PLACE_COMPONENT, message="Placed successfully"
+        )
 
         diag = engine.diagnose_placement(
             result=result,
@@ -553,7 +616,9 @@ class TestDiagnosisEngine:
     def test_diagnose_placement_not_found(self, empty_state):
         """Test diagnosing component not found failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.PLACE_COMPONENT, message="Component not found")
+        result = CommandResult(
+            success=False, command_type=CommandType.PLACE_COMPONENT, message="Component not found"
+        )
 
         diag = engine.diagnose_placement(
             result=result,
@@ -567,7 +632,11 @@ class TestDiagnosisEngine:
     def test_diagnose_placement_occupied(self, state_with_components):
         """Test diagnosing position occupied failure."""
         engine = DiagnosisEngine(state_with_components)
-        result = CommandResult(success=False, command_type=CommandType.PLACE_COMPONENT, message="Position occupied by another component")
+        result = CommandResult(
+            success=False,
+            command_type=CommandType.PLACE_COMPONENT,
+            message="Position occupied by another component",
+        )
 
         diag = engine.diagnose_placement(
             result=result,
@@ -582,7 +651,11 @@ class TestDiagnosisEngine:
     def test_diagnose_placement_out_of_bounds(self, empty_state):
         """Test diagnosing out of bounds failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.PLACE_COMPONENT, message="Position out of bounds")
+        result = CommandResult(
+            success=False,
+            command_type=CommandType.PLACE_COMPONENT,
+            message="Position out of bounds",
+        )
 
         diag = engine.diagnose_placement(
             result=result,
@@ -596,7 +669,9 @@ class TestDiagnosisEngine:
     def test_diagnose_placement_fixed(self, empty_state):
         """Test diagnosing fixed component failure."""
         engine = DiagnosisEngine(empty_state)
-        result = CommandResult(success=False, command_type=CommandType.PLACE_COMPONENT, message="Component is fixed")
+        result = CommandResult(
+            success=False, command_type=CommandType.PLACE_COMPONENT, message="Component is fixed"
+        )
 
         diag = engine.diagnose_placement(
             result=result,
@@ -610,7 +685,11 @@ class TestDiagnosisEngine:
     def test_diagnose_placement_suggests_alternatives(self, state_with_components):
         """Test that placement diagnosis suggests alternatives."""
         engine = DiagnosisEngine(state_with_components)
-        result = CommandResult(success=False, command_type=CommandType.PLACE_COMPONENT, message="Position overlap detected")
+        result = CommandResult(
+            success=False,
+            command_type=CommandType.PLACE_COMPONENT,
+            message="Position overlap detected",
+        )
 
         # Target near the edge of U1's bounds (40-60, 40-60)
         # so some +5mm offsets will find clear positions
@@ -775,7 +854,9 @@ class TestDiagnosisEngine:
         assert len(alternatives) > 0
         # Should include directional options and layer change
         directions = [alt.direction for alt in alternatives if alt.direction]
-        assert len(directions) > 0 or any("layer" in alt.description.lower() for alt in alternatives)
+        assert len(directions) > 0 or any(
+            "layer" in alt.description.lower() for alt in alternatives
+        )
 
     def test_generate_routing_alternatives_no_obstacles(self, empty_state):
         """Test that no alternatives generated without obstacles."""
@@ -790,7 +871,9 @@ class TestDiagnosisEngine:
     def test_suggest_violation_fix_clearance(self, empty_state):
         """Test suggesting fix for clearance violation."""
         engine = DiagnosisEngine(empty_state)
-        violation = ViolationState(type="clearance", severity="error", message="Clearance", x=50.0, y=50.0)
+        violation = ViolationState(
+            type="clearance", severity="error", message="Clearance", x=50.0, y=50.0
+        )
 
         fix = engine._suggest_violation_fix(violation)
         assert fix is not None
@@ -799,7 +882,9 @@ class TestDiagnosisEngine:
     def test_suggest_violation_fix_shorting(self, empty_state):
         """Test suggesting fix for shorting violation."""
         engine = DiagnosisEngine(empty_state)
-        violation = ViolationState(type="shorting_items", severity="error", message="Short", x=50.0, y=50.0, nets=["GND"])
+        violation = ViolationState(
+            type="shorting_items", severity="error", message="Short", x=50.0, y=50.0, nets=["GND"]
+        )
 
         fix = engine._suggest_violation_fix(violation)
         assert fix is not None
@@ -808,7 +893,14 @@ class TestDiagnosisEngine:
     def test_suggest_violation_fix_unconnected(self, empty_state):
         """Test suggesting fix for unconnected violation."""
         engine = DiagnosisEngine(empty_state)
-        violation = ViolationState(type="unconnected_items", severity="error", message="Unconnected", x=50.0, y=50.0, nets=["DATA"])
+        violation = ViolationState(
+            type="unconnected_items",
+            severity="error",
+            message="Unconnected",
+            x=50.0,
+            y=50.0,
+            nets=["DATA"],
+        )
 
         fix = engine._suggest_violation_fix(violation)
         assert fix is not None
@@ -817,7 +909,9 @@ class TestDiagnosisEngine:
     def test_suggest_violation_fix_track_width(self, empty_state):
         """Test suggesting fix for track width violation."""
         engine = DiagnosisEngine(empty_state)
-        violation = ViolationState(type="track_width", severity="warning", message="Track width", x=50.0, y=50.0)
+        violation = ViolationState(
+            type="track_width", severity="warning", message="Track width", x=50.0, y=50.0
+        )
 
         fix = engine._suggest_violation_fix(violation)
         assert fix is not None
@@ -826,7 +920,9 @@ class TestDiagnosisEngine:
     def test_suggest_violation_fix_unknown(self, empty_state):
         """Test that unknown violation returns None."""
         engine = DiagnosisEngine(empty_state)
-        violation = ViolationState(type="unknown_type", severity="error", message="Unknown", x=50.0, y=50.0)
+        violation = ViolationState(
+            type="unknown_type", severity="error", message="Unknown", x=50.0, y=50.0
+        )
 
         fix = engine._suggest_violation_fix(violation)
         assert fix is None

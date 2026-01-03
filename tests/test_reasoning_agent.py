@@ -786,12 +786,8 @@ class TestPCBReasoningAgentPrompt:
 
         # Add history
         command = RouteNetCommand(net="VCC")
-        result = CommandResult(
-            success=True, command_type=CommandType.ROUTE_NET, message="Done"
-        )
-        agent.history.append(
-            ReasoningStep(1, "t1", command, result)
-        )
+        result = CommandResult(success=True, command_type=CommandType.ROUTE_NET, message="Done")
+        agent.history.append(ReasoningStep(1, "t1", command, result))
 
         prompt = agent.get_prompt(include_history=True)
 
@@ -1012,9 +1008,7 @@ class TestPCBReasoningAgentSaveExport:
 
         # Add history
         command = RouteNetCommand(net="VCC")
-        result = CommandResult(
-            success=True, command_type=CommandType.ROUTE_NET, message="Done"
-        )
+        result = CommandResult(success=True, command_type=CommandType.ROUTE_NET, message="Done")
         agent.history.append(ReasoningStep(1, "t1", command, result))
 
         agent.export_history("/output/history.json")
@@ -1023,6 +1017,7 @@ class TestPCBReasoningAgentSaveExport:
         written_json = mock_write.call_args[0][0]
 
         import json
+
         data = json.loads(written_json)
 
         assert data["pcb_file"] == "/test/board.kicad_pcb"

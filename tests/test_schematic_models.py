@@ -1081,12 +1081,18 @@ class TestSchematicWiringHelpers:
 
         # Create a mock symbol def with known pin positions
         pins = [
-            Pin(name="VIN", number="1", x=-5.08, y=2.54, angle=180, length=2.54, pin_type="power_in"),
-            Pin(name="VOUT", number="2", x=5.08, y=2.54, angle=0, length=2.54, pin_type="power_out"),
+            Pin(
+                name="VIN", number="1", x=-5.08, y=2.54, angle=180, length=2.54, pin_type="power_in"
+            ),
+            Pin(
+                name="VOUT", number="2", x=5.08, y=2.54, angle=0, length=2.54, pin_type="power_out"
+            ),
             Pin(name="GND", number="3", x=0, y=-5.08, angle=270, length=2.54, pin_type="power_in"),
             Pin(name="EN", number="4", x=-5.08, y=0, angle=180, length=2.54, pin_type="input"),
         ]
-        sym_def = SymbolDef(lib_id="Regulator_Linear:AP2204K-3.3", name="AP2204K-3.3", raw_sexp="", pins=pins)
+        sym_def = SymbolDef(
+            lib_id="Regulator_Linear:AP2204K-3.3", name="AP2204K-3.3", raw_sexp="", pins=pins
+        )
         sch._symbol_defs["Regulator_Linear:AP2204K-3.3"] = sym_def
 
         # Add symbol at position
@@ -1175,7 +1181,15 @@ class TestSymbolInstanceAdvanced:
         pins = [
             Pin(name="VCC", number="1", x=0, y=5.08, angle=90, length=2.54, pin_type="power_in"),
             Pin(name="GND", number="2", x=0, y=-5.08, angle=270, length=2.54, pin_type="power_in"),
-            Pin(name="DATA", number="3", x=-5.08, y=0, angle=180, length=2.54, pin_type="bidirectional"),
+            Pin(
+                name="DATA",
+                number="3",
+                x=-5.08,
+                y=0,
+                angle=180,
+                length=2.54,
+                pin_type="bidirectional",
+            ),
             Pin(name="CLK", number="4", x=5.08, y=0, angle=0, length=2.54, pin_type="input"),
         ]
         return SymbolDef(lib_id="Test:MultiPin", name="MultiPin", raw_sexp="", pins=pins)
@@ -1312,7 +1326,7 @@ class TestSchematicAutoLayout:
                 x=100.0 + i * 20,
                 y=100.0,
                 rotation=0,
-                reference=f"R{i+1}",
+                reference=f"R{i + 1}",
                 value="10k",
             )
             sch.symbols.append(inst)
@@ -1337,8 +1351,12 @@ class TestSchematicAutoLayout:
         sch._symbol_defs["Device:R"] = sym_def
 
         # Add overlapping symbols
-        inst1 = SymbolInstance(symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k")
-        inst2 = SymbolInstance(symbol_def=sym_def, x=102.0, y=100.0, rotation=0, reference="R2", value="10k")
+        inst1 = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k"
+        )
+        inst2 = SymbolInstance(
+            symbol_def=sym_def, x=102.0, y=100.0, rotation=0, reference="R2", value="10k"
+        )
         sch.symbols.extend([inst1, inst2])
 
         overlaps = sch.find_overlapping_symbols(padding=2.54)
@@ -1363,7 +1381,9 @@ class TestSchematicAutoLayout:
         sch._symbol_defs["Device:R"] = sym_def
 
         # Place symbol at (100, 100)
-        inst = SymbolInstance(symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k")
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k"
+        )
         sch.symbols.append(inst)
 
         # Request position near existing symbol
@@ -1377,7 +1397,9 @@ class TestSchematicAutoLayout:
         sym_def = sch._symbol_defs["Device:R"]
 
         # Create temp symbol at overlapping position
-        temp = SymbolInstance(symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="_TEMP_", value="")
+        temp = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="_TEMP_", value=""
+        )
 
         assert sch._position_overlaps(temp, padding=2.54) is True
 
@@ -1398,8 +1420,12 @@ class TestSchematicValidationAdvanced:
         sym_def = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=pins)
 
         # Add two symbols with same reference
-        inst1 = SymbolInstance(symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k")
-        inst2 = SymbolInstance(symbol_def=sym_def, x=150.0, y=100.0, rotation=0, reference="R1", value="20k")
+        inst1 = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k"
+        )
+        inst2 = SymbolInstance(
+            symbol_def=sym_def, x=150.0, y=100.0, rotation=0, reference="R1", value="20k"
+        )
         sch.symbols.extend([inst1, inst2])
 
         issues = sch.validate()
@@ -1415,7 +1441,9 @@ class TestSchematicValidationAdvanced:
         sym_def = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=pins)
 
         # Add off-grid symbol
-        inst = SymbolInstance(symbol_def=sym_def, x=100.1, y=100.2, rotation=0, reference="R1", value="10k")
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.1, y=100.2, rotation=0, reference="R1", value="10k"
+        )
         sch.symbols.append(inst)
 
         issues = sch.validate(fix_auto=True)
@@ -1457,7 +1485,9 @@ class TestSchematicValidationAdvanced:
         pins = [Pin(name="VCC", number="1", x=0, y=0, angle=0, length=0, pin_type="power_in")]
         sym_def = SymbolDef(lib_id="Device:IC", name="IC", raw_sexp="", pins=pins)
 
-        inst = SymbolInstance(symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="U1", value="IC")
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="U1", value="IC"
+        )
         sch.symbols.append(inst)
 
         # Connect wire to the power pin position
@@ -1556,7 +1586,9 @@ class TestSymbolInstanceFromSexp:
             "symbol",
             "Custom:Part",
             SExp.list(
-                "pin", "input", "line",
+                "pin",
+                "input",
+                "line",
                 SExp.list("at", 0, 0, 0),
                 SExp.list("length", 2.54),
                 SExp.list("name", "IN"),
@@ -1564,10 +1596,7 @@ class TestSymbolInstanceFromSexp:
             ),
         )
 
-        inst = SymbolInstance.from_sexp(
-            sym_sexp,
-            lib_symbols={"Custom:Part": lib_sym}
-        )
+        inst = SymbolInstance.from_sexp(sym_sexp, lib_symbols={"Custom:Part": lib_sym})
 
         assert inst.reference == "U1"
         assert len(inst.symbol_def.pins) == 1
@@ -1586,6 +1615,7 @@ class TestSymbolInstanceFromSexp:
 
         # Disable registry to force fallback behavior
         import kicad_tools.schematic.models.symbol as symbol_module
+
         original_registry_available = symbol_module._REGISTRY_AVAILABLE
         symbol_module._REGISTRY_AVAILABLE = False
 
@@ -1619,7 +1649,7 @@ class TestSchematicSymbolSearch:
                 x=100.0 + i * 20,
                 y=100.0,
                 rotation=0,
-                reference=f"R{i+1}",
+                reference=f"R{i + 1}",
                 value="10k",
             )
             sch.symbols.append(inst)
@@ -1632,7 +1662,7 @@ class TestSchematicSymbolSearch:
                 x=100.0 + i * 20,
                 y=150.0,
                 rotation=0,
-                reference=f"C{i+1}",
+                reference=f"C{i + 1}",
                 value="100nF",
             )
             sch.symbols.append(inst)

@@ -130,6 +130,106 @@ kct reason board.kicad_pcb --auto-route
 
 See `examples/llm-routing/` for complete examples.
 
+### Circuit Blocks
+
+Build schematics using reusable, tested circuit blocks:
+
+```python
+from kicad_tools.schematic import Schematic
+from kicad_tools.schematic.blocks import (
+    MCUBlock, CrystalOscillator, LDOBlock, USBConnector,
+    DebugHeader, I2CPullups, ResetButton
+)
+
+sch = Schematic.create("project.kicad_sch")
+
+# Add an MCU with bypass capacitors
+mcu = MCUBlock(sch, x=150, y=100,
+    part="STM32F103C8T6",
+    bypass_caps=["100nF", "100nF", "100nF", "4.7uF"])
+
+# Add crystal oscillator
+xtal = CrystalOscillator(sch, x=100, y=100,
+    frequency="8MHz", load_caps="20pF")
+
+# Add power supply
+ldo = LDOBlock(sch, x=50, y=100,
+    input_voltage=5.0, output_voltage=3.3)
+
+# Add USB connector with ESD protection
+usb = USBConnector(sch, x=50, y=150,
+    connector_type="type-c", esd_protection=True)
+
+# Add debug header for programming
+debug = DebugHeader(sch, x=200, y=100, interface="swd")
+
+# Add I2C pull-ups
+i2c = I2CPullups(sch, x=180, y=150, pullup_value="4.7k")
+
+# Add reset button with debounce
+reset = ResetButton(sch, x=120, y=50, debounce_cap="100nF")
+
+# Connect via ports
+sch.add_wire(ldo.port("VOUT"), mcu.port("VDD"))
+sch.add_wire(xtal.port("OUT"), mcu.port("OSC_IN"))
+
+sch.save()
+```
+
+Available blocks:
+- **MCUBlock**: Microcontroller with bypass capacitors
+- **CrystalOscillator**: Crystal/oscillator with load capacitors
+- **LDOBlock**: Linear regulator with input/output capacitors
+- **USBConnector**: USB-B/Mini/Micro/Type-C with optional ESD protection
+- **DebugHeader**: SWD/JTAG/Tag-Connect programming headers
+- **I2CPullups**: I2C bus pull-up resistors with optional filtering
+- **ResetButton**: Reset switch with debounce capacitor
+- **BarrelJackInput/USBPowerInput/BatteryInput**: Power input circuits
+- **LEDIndicator**: Status LED with current-limiting resistor
+- **DecouplingCaps**: Decoupling capacitor placement
+
+See `examples/05-end-to-end/` for a complete design example.
+
+### Project Workflow
+
+Work with complete KiCad projects using the unified Project class:
+
+```python
+from kicad_tools import Project
+
+# Load a KiCad project
+project = Project.load("myboard.kicad_pro")
+
+# Cross-reference schematic to PCB
+result = project.cross_reference()
+print(f"Unplaced components: {result.unplaced}")
+
+# Export manufacturing files
+project.export_assembly("output/", manufacturer="jlcpcb")
+```
+
+### Progress Callbacks
+
+Monitor long-running operations with progress callbacks:
+
+```python
+from kicad_tools import ProgressCallback, ProgressContext
+from kicad_tools.router import Autorouter
+
+def on_progress(progress: float, message: str, cancelable: bool) -> bool:
+    print(f"{progress*100:.0f}%: {message}")
+    return True  # Return False to cancel
+
+# Use with context manager
+with ProgressContext(on_progress):
+    router = Autorouter(...)
+    router.route_all()  # Progress reported automatically
+
+# Or create JSON-formatted callbacks for automation
+from kicad_tools import create_json_callback
+callback = create_json_callback()
+```
+
 ### Parametric Footprint Generators
 
 Create KiCad footprints programmatically with IPC-7351 naming:
@@ -341,6 +441,8 @@ All commands support `--format json` for machine-readable output.
 |--------|-------------|
 | `core` | S-expression parsing and file I/O |
 | `schema` | Data models (Schematic, PCB, Symbol, Wire, Label) |
+| `schematic.blocks` | Reusable circuit blocks (MCU, LDO, USB, debug headers, etc.) |
+| `project` | Unified Project class for schematic+PCB workflows |
 | `library` | Footprint generation and symbol library management |
 | `drc` | Design Rule Check report parsing (kicad-cli output) |
 | `validate` | Pure Python DRC checker (no kicad-cli needed) |
@@ -350,6 +452,7 @@ All commands support `--format json` for machine-readable output.
 | `router` | A* PCB autorouter with trace optimization |
 | `optim` | Placement optimization (physics-based, evolutionary) |
 | `reasoning` | LLM-driven PCB layout with chain-of-thought reasoning |
+| `progress` | Progress callbacks for long-running operations |
 | `datasheet` | Datasheet search, download, and PDF parsing |
 
 ## Features
@@ -358,6 +461,7 @@ All commands support `--format json` for machine-readable output.
 - **Round-trip editing** - Parse, modify, and save files preserving formatting
 - **Full S-expression support** - Handles all KiCad 8.0+ file formats
 - **Schematic analysis** - Symbols, wires, labels, hierarchy traversal
+- **Circuit blocks** - Reusable blocks for MCU, power, USB, debug headers, I2C, reset
 - **PCB analysis** - Footprints, nets, traces, vias, zones
 - **Manufacturer rules** - JLCPCB, PCBWay, OSHPark, Seeed design rules
 - **PCB autorouter** - A* pathfinding with net class awareness
@@ -367,6 +471,7 @@ All commands support `--format json` for machine-readable output.
 - **Footprint generation** - Parametric generators for common packages
 - **Symbol library creation** - Programmatic symbol creation and editing
 - **Datasheet tools** - Search, download, and PDF parsing
+- **Progress callbacks** - Monitor and cancel long-running operations
 - **JSON output** - Machine-readable output for automation
 
 ## Requirements

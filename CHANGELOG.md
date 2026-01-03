@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-01-02
+
+### Added
+
+#### Circuit Blocks (`kicad_tools.schematic.blocks`)
+
+Reusable, tested circuit blocks for common schematic patterns:
+
+- **MCUBlock** - Microcontroller with configurable bypass capacitors
+- **CrystalOscillator** - Crystal/oscillator with load capacitors
+- **USBConnector** - USB-B/Mini/Micro/Type-C with optional ESD protection
+- **DebugHeader** - SWD, JTAG, and Tag-Connect programming headers
+- **I2CPullups** - I2C bus pull-up resistors with optional filtering capacitors
+- **ResetButton** - Reset switch with debounce capacitor and optional ESD protection
+- **BarrelJackInput** - DC barrel jack with reverse polarity protection
+- **USBPowerInput** - USB power input with fuse and ESD protection
+- **BatteryInput** - Battery connector with protection circuitry
+- **LDOBlock** - Linear regulator with input/output capacitors
+- **LEDIndicator** - Status LED with current-limiting resistor
+- **DecouplingCaps** - Decoupling capacitor placement helper
+
+All blocks feature:
+- Ports for inter-block wiring
+- Configurable component values
+- Optional protection circuits
+- Factory functions for common configurations
+
+#### Schematic Enhancements
+
+- **Auto-layout** (`schematic.layout`)
+  - Automatic symbol placement to avoid overlaps
+  - Configurable spacing and alignment options
+
+- **Netlist Sync Validation** (`validate.netlist`)
+  - Compare schematic netlist to PCB netlist
+  - Detect missing/extra components and nets
+  - CLI: `kct validate-sync schematic.kicad_sch pcb.kicad_pcb`
+
+#### API Refinements
+
+- **Unified Project Class** (`kicad_tools.Project`)
+  - Load complete KiCad projects (`.kicad_pro`)
+  - Cross-reference schematics to PCBs
+  - Find unplaced components
+  - Export manufacturing packages
+
+- **Actionable Error Messages** (`kicad_tools.exceptions`)
+  - All exceptions include `error_code` field
+  - Structured `to_dict()` for JSON serialization
+  - Fix suggestions included in error messages
+
+- **Progress Callbacks** (`kicad_tools.progress`)
+  - `ProgressCallback` protocol for monitoring long operations
+  - `ProgressContext` context manager for scoped progress
+  - `create_json_callback()` for automation
+  - Cancelable operations via callback return value
+  - Integration with router, DRC, and export operations
+
+#### Examples & Documentation
+
+- **End-to-End Example** (`examples/05-end-to-end/`)
+  - Complete workflow from schematic to manufacturing files
+  - Demonstrates circuit blocks, routing, and export
+
+- **Agent Integration Examples** (`examples/agent-integration/`)
+  - Claude integration with tool definitions and prompts
+  - OpenAI integration with function calling
+  - Common utilities for error handling and API wrapping
+
+### Changed
+
+- Improved exception hierarchy with structured error information
+- Router operations now support progress callbacks
+- DRC checker supports progress reporting
+
 ## [0.4.0] - 2025-12-31
 
 ### Added
@@ -235,6 +310,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python 3.10+
 - numpy >= 1.20
 
+[0.5.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.5.0
 [0.4.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.4.0
 [0.3.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.2.0

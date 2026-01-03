@@ -62,6 +62,9 @@ def _categorize_part(description: str, package: str) -> PartCategory:
     """Guess category from description and package."""
     desc_lower = description.lower()
 
+    # Check crystal/resonator before resistor since "resonator" contains " res"
+    if any(x in desc_lower for x in ["crystal", "oscillator", "resonator"]):
+        return PartCategory.CRYSTAL
     if any(x in desc_lower for x in ["resistor", "res ", " res", "ohm"]):
         return PartCategory.RESISTOR
     if any(x in desc_lower for x in ["capacitor", "cap ", " cap", "farad", "mlcc"]):
@@ -79,8 +82,6 @@ def _categorize_part(description: str, package: str) -> PartCategory:
         return PartCategory.IC
     if any(x in desc_lower for x in ["connector", "header", "socket", "jack", "plug"]):
         return PartCategory.CONNECTOR
-    if any(x in desc_lower for x in ["crystal", "oscillator", "resonator"]):
-        return PartCategory.CRYSTAL
     if any(x in desc_lower for x in ["led", "light emitting"]):
         return PartCategory.LED
     if any(x in desc_lower for x in ["switch", "button", "tactile"]):

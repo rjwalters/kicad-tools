@@ -2,6 +2,8 @@
 Utility modules for kicad-tools.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from .scoring import (
@@ -28,6 +30,12 @@ def ensure_parent_dir(path: Path) -> Path:
         The original path, unchanged. This allows chaining like:
             with ensure_parent_dir(output_path).open('w') as f:
                 ...
+
+    Example:
+        >>> from pathlib import Path
+        >>> output = Path("/tmp/test/subdir/file.txt")
+        >>> ensure_parent_dir(output)
+        PosixPath('/tmp/test/subdir/file.txt')
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
