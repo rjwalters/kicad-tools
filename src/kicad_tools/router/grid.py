@@ -146,9 +146,14 @@ class RoutingGrid:
         return stats
 
     def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
-        """Convert world coordinates to grid indices."""
-        gx = int((x - self.origin_x) / self.resolution)
-        gy = int((y - self.origin_y) / self.resolution)
+        """Convert world coordinates to grid indices.
+
+        Uses round() instead of int() to avoid floating point precision errors.
+        For example, (112.6 - 75.0) / 0.1 = 375.9999999999999 should map to 376,
+        but int() would truncate to 375, causing off-by-one grid cell errors.
+        """
+        gx = round((x - self.origin_x) / self.resolution)
+        gy = round((y - self.origin_y) / self.resolution)
         return (max(0, min(gx, self.cols - 1)), max(0, min(gy, self.rows - 1)))
 
     def grid_to_world(self, gx: int, gy: int) -> tuple[float, float]:

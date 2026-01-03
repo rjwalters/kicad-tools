@@ -94,6 +94,32 @@ class TestRoutingGridCoordinates:
         assert abs(back_x - original_x) <= grid.resolution
         assert abs(back_y - original_y) <= grid.resolution
 
+    def test_world_to_grid_floating_point_precision(self):
+        """Test that world_to_grid handles floating point precision correctly.
+
+        This tests the bug fix for issue #278 where coordinates like 112.6
+        with origin 75.0 and resolution 0.1 would produce:
+            (112.6 - 75.0) / 0.1 = 375.9999999999999
+
+        Using int() would truncate to 375, but the correct answer is 376.
+        Using round() fixes this.
+        """
+        rules = DesignRules(grid_resolution=0.1)
+        # Use origin that triggers floating point precision issues
+        grid = RoutingGrid(width=100.0, height=100.0, rules=rules, origin_x=75.0, origin_y=75.0)
+
+        # These coordinates triggered the bug before the fix
+        # (112.6 - 75.0) / 0.1 = 375.9999999999999 -> should be 376
+        gx, gy = grid.world_to_grid(112.6, 112.6)
+        assert gx == 376, f"Expected 376 but got {gx} - floating point precision bug"
+        assert gy == 376, f"Expected 376 but got {gy} - floating point precision bug"
+
+        # Test another edge case
+        # (112.8 - 75.0) / 0.1 = 377.9999999999999 -> should be 378
+        gx, gy = grid.world_to_grid(112.8, 112.8)
+        assert gx == 378, f"Expected 378 but got {gx} - floating point precision bug"
+        assert gy == 378, f"Expected 378 but got {gy} - floating point precision bug"
+
 
 class TestRoutingGridLayers:
     """Tests for layer management methods."""
