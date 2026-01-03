@@ -68,10 +68,15 @@ from .heuristics import (
     WeightedCongestionHeuristic,
 )
 from .io import (
+    ClearanceViolation,
+    PCBDesignRules,
     generate_netclass_setup,
     load_pcb_for_routing,
     merge_routes_into_pcb,
+    parse_pcb_design_rules,
     route_pcb,
+    validate_grid_resolution,
+    validate_routes,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
 from .optimizer import (
