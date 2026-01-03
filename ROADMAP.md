@@ -2,15 +2,37 @@
 
 **Mission**: Enable AI agents to design PCBs programmatically.
 
-kicad-tools provides the programmatic interface between AI reasoning and KiCad file manipulation. It's not about replacing KiCad—it's about making PCB design automatable by agents.
+kicad-tools provides the programmatic interface between AI reasoning and KiCad
+file manipulation. We complement KiCad—we don't replace it.
 
 ## Design Philosophy
 
 1. **Agent-First API** - Every operation callable from code with structured I/O
 2. **Rich Feedback** - Validation returns actionable information, not just pass/fail
 3. **Round-Trip Fidelity** - Edits preserve existing file structure
-4. **Minimal Dependencies** - Core operations work without external tools
+4. **Leverage KiCad** - Use kicad-cli for complex operations (Gerbers, rendering); focus our effort on agent-specific capabilities
 5. **Hierarchical Abstractions** - Work with circuit blocks, not just primitives
+
+---
+
+## Agent Workflow
+
+The complete agent PCB design workflow:
+
+| Step | Capability | Status |
+|------|------------|--------|
+| Parse datasheets | `datasheet` module | v0.4.0 |
+| Create symbols/footprints | `library` module, generators | v0.4.0 |
+| Design schematic | `Schematic`, circuit blocks | v0.5.0 |
+| Place components | `PCBEditor`, placement optimization | v0.2.0 |
+| Route traces | `Autorouter`, diff pairs, zones | v0.3.0 |
+| Validate design | Pure Python DRC | v0.4.0 |
+| Export for manufacturing | `AssemblyPackage` (via kicad-cli) | v0.2.0 |
+
+**Current gaps** (addressed in planned versions):
+- Intelligent initial placement based on circuit function
+- Actionable feedback when designs fail validation
+- Design quality metrics beyond pass/fail
 
 ---
 
@@ -43,162 +65,84 @@ kicad-tools provides the programmatic interface between AI reasoning and KiCad f
 - Bus routing for grouped signals
 - Zone-aware routing with thermal relief
 - Interactive REPL mode
-- Staircase pattern compression
 
 ### v0.4.0 - Library Management & Validation
 
 - **Symbol library tools**: create, edit, save
 - **Footprint library tools**: create, edit, save
-- **Parametric footprint generators**:
-  - SOIC, QFP, QFN, DFN, BGA
-  - Chip (0402-1206), SOT variants
-  - Through-hole (DIP, SIP, pin headers)
+- **Parametric footprint generators**: SOIC, QFP, QFN, DFN, BGA, chip, SOT, DIP
 - **Pure Python DRC** (no kicad-cli required)
-  - Clearance, dimension, edge, silkscreen checks
-  - Manufacturer presets (2/4/6 layer)
-- **Datasheet tools**:
-  - PDF parsing and pin extraction
-  - Symbol generation from datasheets
-  - Part import workflow
+- **Datasheet tools**: PDF parsing, pin extraction, symbol generation
 
 ### v0.5.0 - Workflow Polish
 
-- **Circuit Blocks** (`kicad_tools.schematic.blocks`):
-  - MCUBlock, CrystalOscillator, USBConnector, DebugHeader
-  - I2CPullups, ResetButton, VoltageDivider, BootModeSelector
-  - CANTransceiver, BarrelJackInput, USBPowerInput, BatteryInput
-- **Schematic Enhancements**:
-  - Auto-layout for schematic symbols (avoid overlaps)
-  - Schematic-to-PCB netlist sync validation
-- **API Refinements**:
-  - Unified `Project` class for schematic + PCB workflows
-  - Actionable error messages with fix suggestions
-  - Progress callbacks for long operations
-- **Examples & Documentation**:
-  - End-to-end PCB design example
-  - Agent integration examples (Claude, OpenAI)
-
----
-
-## Current Capabilities
-
-### What Agents Can Do Today
-
-| Workflow Step | API | CLI |
-|--------------|-----|-----|
-| Parse datasheets, extract pins | `kicad_tools.datasheet` | `kct datasheet` |
-| Create symbols from specs | `SymbolLibrary.create_symbol()` | `kct lib` |
-| Generate parametric footprints | `library.generators.*` | `kct footprint generate` |
-| Create schematics programmatically | `Schematic.add_symbol()`, `.add_wire()` | - |
-| Use circuit blocks (LDO, LED, etc.) | `schematic.blocks.*` | - |
-| Place components on PCB | `PCBEditor.place_component()` | - |
-| Route traces | `Autorouter.route_all()` | `kct route` |
-| Route differential pairs | `route_differential_pair()` | `kct route` |
-| Optimize traces | `TraceOptimizer` | `kct optimize-traces` |
-| Fix placement conflicts | `PlacementFixer` | `kct placement fix` |
-| Validate against DRC | `DRCChecker` | `kct check` |
-| Export for manufacturing | `AssemblyPackage` | `kct export assembly` |
-
-### Schematic Primitives
-
-```python
-from kicad_tools.schematic import Schematic
-
-sch = Schematic.create("project.kicad_sch")
-
-# Add components
-u1 = sch.add_symbol("Device:R", x=100, y=50, ref="R1", value="10k")
-u2 = sch.add_symbol("Device:C", x=100, y=70, ref="C1", value="100nF")
-
-# Wire them up
-sch.add_wire((100, 55), (100, 65))
-sch.add_label("VCC", x=100, y=45)
-
-# Power symbols
-sch.add_power("GND", x=100, y=80)
-sch.add_rail("VCC", start=(50, 30), end=(150, 30))
-
-sch.save()
-```
-
-### Circuit Blocks (Higher-Level Abstraction)
-
-```python
-from kicad_tools.schematic.blocks import LDOBlock, LEDIndicator, DecouplingCaps
-
-# Create LDO power supply section
-ldo = LDOBlock(sch, x=100, y=80,
-    input_voltage=5.0,
-    output_voltage=3.3,
-    input_cap="10uF",
-    output_caps=["10uF", "100nF"])
-
-# Add LED indicator
-led = LEDIndicator(sch, x=150, y=80, label="PWR")
-
-# Connect blocks via ports
-sch.add_wire(ldo.port("VOUT"), led.port("VCC"))
-```
-
-### PCB Blocks
-
-```python
-from kicad_tools.pcb.blocks import PCBBlock, BlockAssembler
-
-# Define block with internal placement + routing
-mcu_block = MCUBlock(
-    mcu_footprint="QFP-48",
-    bypass_caps=["C1", "C2", "C3", "C4"]
-)
-
-# Place on PCB
-mcu_block.place(x=100, y=50, rotation=0)
-
-# Get ports for inter-block routing
-vdd = mcu_block.port("VDD")
-```
+- **Circuit Blocks**: MCUBlock, CrystalOscillator, USBConnector, DebugHeader, LDOBlock, etc.
+- **Schematic Enhancements**: auto-layout, netlist sync validation
+- **API Refinements**: unified `Project` class, progress callbacks, actionable errors
+- **Examples**: end-to-end PCB design, agent integration examples
 
 ---
 
 ## Planned Versions
 
-### v0.6.0 - Manufacturing Independence
+### v0.6.0 - Intelligent Placement
 
-**Focus**: Remove kicad-cli dependency for manufacturing outputs.
+**Focus**: Help agents make better initial component placement decisions.
 
-**Pure Python Exports**
-- [ ] Gerber generation (RS-274X)
-- [ ] Drill file generation (Excellon)
-- [ ] Direct pick-and-place generation
-- [ ] SVG/PDF preview generation
-
-**Manufacturing Validation**
-- [ ] Gerber preview/verification
-- [ ] Basic panelization support
-
-### v0.7.0 - Intelligent Placement
-
-**Focus**: Smarter initial component placement.
+Placement is where agents struggle most—random placement leads to unroutable
+boards. This release adds intelligence to the placement step.
 
 **Placement Engine**
-- [ ] Functional clustering (group related components)
-- [ ] Thermal-aware placement
-- [ ] Signal integrity hints (keep high-speed near source)
-- [ ] Edge placement for connectors/interfaces
+- [ ] Functional clustering (group related components: MCU+bypass caps, USB+ESD)
+- [ ] Thermal-aware placement (power components near edges, heat spreading)
+- [ ] Signal integrity hints (keep high-speed traces short, minimize stubs)
+- [ ] Edge placement for connectors and interfaces
 
 **Placement Constraints**
-- [ ] Keep-out zones
-- [ ] Component grouping rules
-- [ ] Alignment constraints
+- [ ] Keep-out zones (mechanical, thermal, RF)
+- [ ] Component grouping rules (define which components belong together)
+- [ ] Alignment constraints (grid snap, row/column alignment)
+
+**Agent Integration**
+- [ ] Placement suggestions with rationale (explainable to LLMs)
+- [ ] Iterative refinement API (agent can query "what if I move X here?")
+
+### v0.7.0 - Design Feedback & Iteration
+
+**Focus**: Help agents understand failures and improve designs.
+
+When DRC fails or routing is congested, agents need actionable guidance—not
+just error codes. This release makes the feedback loop agent-friendly.
+
+**Actionable Feedback**
+- [ ] DRC errors with specific fix suggestions ("move C1 0.5mm left")
+- [ ] Routing congestion analysis ("area around U1 pins 4-7 is congested")
+- [ ] Constraint conflict detection ("keepout overlaps required via")
+
+**Design Quality Metrics**
+- [ ] Trace length reports (for timing-critical nets)
+- [ ] Thermal analysis hints (identify hot spots)
+- [ ] Signal integrity estimates (crosstalk risk, impedance discontinuities)
+
+**Cross-Domain Validation**
+- [ ] Schematic↔PCB consistency checks
+- [ ] BOM↔placement verification (all parts placed?)
+- [ ] Net connectivity validation
+
+**Cost Awareness**
+- [ ] Manufacturing cost estimation (board + assembly)
+- [ ] Part availability checking (LCSC stock levels)
+- [ ] Alternative part suggestions
 
 ### v1.0.0 - Production Ready
 
-**Focus**: Stable API, production deployment.
+**Focus**: API stability and production deployment.
 
-- [ ] API stability guarantees
+- [ ] API stability guarantees (semantic versioning)
 - [ ] Comprehensive documentation
-- [ ] Performance optimization for large boards
-- [ ] Container-ready deployment (no external deps)
+- [ ] Performance optimization for large boards (1000+ components)
+- [ ] Robust error handling across all modules
+- [ ] CI/CD integration examples
 
 ---
 
@@ -209,79 +153,8 @@ These are explicitly **not** planned:
 - **Schematic capture GUI** - Use KiCad for interactive design
 - **3D rendering** - Use KiCad's 3D viewer
 - **SPICE simulation** - Use dedicated simulators
-- **Full gerber viewer** - Use gerbv or KiCad
+- **Gerber generation** - Use kicad-cli (battle-tested, reliable)
 - **Replacing KiCad** - We complement it, not replace it
-
----
-
-## Architecture
-
-```
-kicad_tools/
-├── schematic/          # Schematic creation & editing
-│   ├── models/         # Schematic data model
-│   └── blocks.py       # Reusable circuit blocks
-├── pcb/                # PCB creation & editing
-│   ├── editor.py       # PCBEditor class
-│   └── blocks.py       # PCB block abstractions
-├── library/            # Symbol & footprint libraries
-│   └── generators/     # Parametric footprint generators
-├── router/             # A* autorouter
-├── optim/              # Trace & placement optimization
-├── validate/           # Pure Python DRC
-├── datasheet/          # PDF parsing, pin extraction
-├── reasoning/          # LLM integration
-├── export/             # Manufacturing outputs
-├── manufacturers/      # Design rules per fab
-├── parts/              # LCSC parts database
-└── cli/                # Command-line interface
-```
-
----
-
-## Agent Workflow Example
-
-```python
-from kicad_tools import Project
-from kicad_tools.datasheet import DatasheetManager
-from kicad_tools.library import SymbolLibrary
-from kicad_tools.schematic import Schematic
-from kicad_tools.schematic.blocks import LDOBlock, DecouplingCaps
-from kicad_tools.router import route_pcb
-from kicad_tools.validate import DRCChecker
-
-# 1. Get part info from datasheet
-ds = DatasheetManager()
-stm32_pins = ds.extract_pins("STM32F103C8T6")
-
-# 2. Create symbol from pins
-lib = SymbolLibrary.create("project.kicad_sym")
-lib.create_symbol_from_pins("STM32F103C8T6", stm32_pins)
-lib.save()
-
-# 3. Create schematic with circuit blocks
-sch = Schematic.create("project.kicad_sch")
-mcu = sch.add_symbol("project:STM32F103C8T6", x=150, y=100)
-ldo = LDOBlock(sch, x=50, y=100, input_voltage=5.0, output_voltage=3.3)
-decoupling = DecouplingCaps(sch, symbol=mcu, caps=["100nF", "100nF", "4.7uF"])
-
-# Wire power
-sch.add_wire(ldo.port("VOUT"), mcu.pin("VDD"))
-sch.save()
-
-# 4. Route PCB
-route_pcb("project.kicad_pcb", strategy="negotiated")
-
-# 5. Validate
-checker = DRCChecker.from_file("project.kicad_pcb", manufacturer="jlcpcb")
-results = checker.check_all()
-
-if results.errors:
-    for err in results.errors:
-        print(f"DRC Error: {err.message} at {err.location}")
-else:
-    print("Design passes DRC!")
-```
 
 ---
 
@@ -289,8 +162,8 @@ else:
 
 1. Maintain round-trip fidelity for all file modifications
 2. Add tests for new functionality
-3. Support `--json` output in CLI commands
-4. Every API should return actionable errors
+3. Support `--format json` in CLI commands
+4. Return actionable errors from every API
 5. Test with real KiCad files (8.0+)
 
 ---
@@ -303,4 +176,4 @@ else:
 | 0.2.0 | 2025-12-30 | Manufacturing: LCSC, export, autorouter |
 | 0.3.0 | 2025-12-31 | Reasoning: LLM integration, diff pairs, zones |
 | 0.4.0 | 2025-12-31 | Libraries: symbol/footprint creation, pure Python DRC, datasheets |
-| 0.5.0 | 2026-01-02 | Workflow Polish: circuit blocks, Project class, examples |
+| 0.5.0 | 2026-01-02 | Workflow: circuit blocks, Project class, examples |
