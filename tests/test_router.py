@@ -2417,6 +2417,408 @@ class TestLoadPcbForRouting:
 
 
 # =============================================================================
+# DRC Compliance Tests (Issue #267 - Router DRC Compliance)
+# =============================================================================
+
+import warnings
+
+from kicad_tools.router.io import (
+    ClearanceViolation,
+    PCBDesignRules,
+    parse_pcb_design_rules,
+    validate_grid_resolution,
+    validate_routes,
+)
+
+
+class TestParsePcbDesignRules:
+    """Tests for parse_pcb_design_rules function."""
+
+    def test_returns_defaults_for_empty_setup(self):
+        """Test that defaults are returned when setup section is empty."""
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (setup
+  )
+)"""
+        rules = parse_pcb_design_rules(pcb_text)
+
+        assert rules.min_track_width == 0.2
+        assert rules.min_via_diameter == 0.6
+        assert rules.min_via_drill == 0.3
+        assert rules.min_clearance == 0.2
+
+    def test_returns_defaults_for_no_setup(self):
+        """Test that defaults are returned when no setup section exists."""
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+)"""
+        rules = parse_pcb_design_rules(pcb_text)
+
+        assert rules.min_track_width == 0.2
+        assert rules.min_clearance == 0.2
+
+    def test_parses_net_class_clearance(self):
+        """Test parsing clearance from net class definition."""
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (setup)
+  (net_class "Default" "Default net class"
+    (clearance 0.15)
+    (trace_width 0.25)
+    (via_dia 0.8)
+    (via_drill 0.4)
+  )
+)"""
+        rules = parse_pcb_design_rules(pcb_text)
+
+        assert rules.min_clearance == 0.15
+        assert rules.min_track_width == 0.25
+        assert rules.min_via_diameter == 0.8
+        assert rules.min_via_drill == 0.4
+
+    def test_uses_minimum_from_multiple_net_classes(self):
+        """Test that minimum values are used across multiple net classes."""
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (net_class "Default"
+    (clearance 0.2)
+    (trace_width 0.25)
+  )
+  (net_class "HighSpeed"
+    (clearance 0.1)
+    (trace_width 0.15)
+  )
+)"""
+        rules = parse_pcb_design_rules(pcb_text)
+
+        # Should use the minimum values
+        assert rules.min_clearance == 0.1
+        assert rules.min_track_width == 0.15
+
+    def test_to_design_rules_conversion(self):
+        """Test converting PCBDesignRules to DesignRules."""
+        pcb_rules = PCBDesignRules(
+            min_track_width=0.15,
+            min_via_diameter=0.5,
+            min_via_drill=0.25,
+            min_clearance=0.1,
+        )
+
+        design_rules = pcb_rules.to_design_rules()
+
+        assert design_rules.trace_width == 0.15
+        assert design_rules.via_diameter == 0.5
+        assert design_rules.via_drill == 0.25
+        assert design_rules.trace_clearance == 0.1
+        # Grid resolution should be clearance / 2 for DRC compliance
+        assert design_rules.grid_resolution == 0.05
+
+    def test_to_design_rules_custom_grid(self):
+        """Test converting with custom grid resolution."""
+        pcb_rules = PCBDesignRules(min_clearance=0.2)
+        design_rules = pcb_rules.to_design_rules(grid_resolution=0.1)
+
+        assert design_rules.grid_resolution == 0.1
+
+
+class TestValidateGridResolution:
+    """Tests for validate_grid_resolution function."""
+
+    def test_no_warning_when_compliant(self):
+        """Test no warnings when grid resolution is <= clearance/2."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            issues = validate_grid_resolution(0.1, 0.2, warn=True)
+
+            assert len(issues) == 0
+            assert len(w) == 0
+
+    def test_warning_when_resolution_exceeds_half_clearance(self):
+        """Test warning when grid resolution > clearance/2."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            issues = validate_grid_resolution(0.15, 0.2, warn=True)
+
+            assert len(issues) == 1
+            assert "may cause clearance violations" in issues[0]
+            assert len(w) == 1
+
+    def test_error_when_resolution_exceeds_clearance(self):
+        """Test error message when grid resolution > clearance."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            issues = validate_grid_resolution(0.3, 0.2, warn=True)
+
+            assert len(issues) == 1
+            assert "WILL cause DRC violations" in issues[0]
+            assert len(w) == 1
+
+    def test_warn_false_suppresses_warnings(self):
+        """Test that warn=False suppresses warnings.warn() calls."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            issues = validate_grid_resolution(0.3, 0.2, warn=False)
+
+            # Issues should still be returned
+            assert len(issues) == 1
+            # But no warning should be emitted
+            assert len(w) == 0
+
+    def test_exact_half_is_compliant(self):
+        """Test that exactly clearance/2 is compliant (edge case)."""
+        issues = validate_grid_resolution(0.1, 0.2, warn=False)
+        assert len(issues) == 0
+
+
+class TestValidateRoutes:
+    """Tests for validate_routes function."""
+
+    def test_no_violations_for_empty_routes(self):
+        """Test no violations when router has no routes."""
+        router = Autorouter(width=50, height=50)
+        violations = validate_routes(router)
+        assert len(violations) == 0
+
+    def test_detects_clearance_violation(self):
+        """Test detection of clearance violations between routes and pads."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Add two pads on different nets
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+                {"number": "2", "x": 20, "y": 10, "width": 1.0, "height": 1.0, "net": 2},
+            ],
+        )
+
+        # Manually add a route that passes very close to the second pad
+        from kicad_tools.router.primitives import Route, Segment
+
+        segment = Segment(x1=10, y1=10, x2=19.5, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # Should detect the violation (route too close to pad on net 2)
+        assert len(violations) >= 1
+        assert violations[0].obstacle_type == "pad"
+        assert violations[0].net == 1
+        assert violations[0].obstacle_net == 2
+
+    def test_no_violation_for_same_net_proximity(self):
+        """Test no violation when route is near pad on same net."""
+        rules = DesignRules(trace_clearance=0.2, grid_resolution=0.1)
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Add two pads on the same net
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+                {"number": "2", "x": 20, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+            ],
+        )
+
+        # Add route connecting them (passes very close)
+        from kicad_tools.router.primitives import Route, Segment
+
+        segment = Segment(x1=10.5, y1=10, x2=19.5, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # No violation - route is on same net as nearby pads
+        assert len(violations) == 0
+
+
+class TestLoadPcbForRoutingDrcCompliance:
+    """Tests for DRC compliance features in load_pcb_for_routing."""
+
+    def test_uses_pcb_rules_by_default(self, tmp_path):
+        """Test that PCB design rules are used when available."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "NET1")
+  (net_class "Default"
+    (clearance 0.15)
+    (trace_width 0.18)
+    (via_dia 0.5)
+    (via_drill 0.25)
+  )
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "NET1"))
+  )
+)"""
+        pcb_file = tmp_path / "test_drc.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), use_pcb_rules=True, validate_drc=False
+        )
+
+        # Should use rules from PCB
+        assert router.rules.trace_clearance == 0.15
+        assert router.rules.trace_width == 0.18
+        assert router.rules.via_diameter == 0.5
+        assert router.rules.via_drill == 0.25
+
+    def test_use_pcb_rules_false_uses_defaults(self, tmp_path):
+        """Test that use_pcb_rules=False ignores PCB design rules."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "NET1")
+  (net_class "Default"
+    (clearance 0.15)
+    (trace_width 0.18)
+  )
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "NET1"))
+  )
+)"""
+        pcb_file = tmp_path / "test_drc.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), use_pcb_rules=False, validate_drc=False
+        )
+
+        # Should use default rules, not PCB rules
+        assert router.rules.trace_clearance == 0.2  # Default
+        assert router.rules.grid_resolution == 0.1  # Default
+
+    def test_validate_drc_emits_warning(self, tmp_path):
+        """Test that validate_drc=True emits warnings for bad grid resolution."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_drc.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with bad grid resolution
+        rules = DesignRules(grid_resolution=0.25, trace_clearance=0.2)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            router, net_map = load_pcb_for_routing(
+                str(pcb_file), rules=rules, validate_drc=True
+            )
+
+            # Should emit a warning
+            assert len(w) >= 1
+            assert "clearance" in str(w[0].message).lower()
+
+    def test_validate_drc_false_no_warning(self, tmp_path):
+        """Test that validate_drc=False suppresses warnings."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_drc.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with bad grid resolution
+        rules = DesignRules(grid_resolution=0.25, trace_clearance=0.2)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            router, net_map = load_pcb_for_routing(
+                str(pcb_file), rules=rules, validate_drc=False
+            )
+
+            # Should NOT emit a warning
+            assert len(w) == 0
+
+    def test_custom_rules_override_pcb_rules(self, tmp_path):
+        """Test that explicit rules parameter overrides PCB rules."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net_class "Default"
+    (clearance 0.15)
+    (trace_width 0.18)
+  )
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_drc.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        custom_rules = DesignRules(
+            trace_width=0.3,
+            trace_clearance=0.25,
+            grid_resolution=0.1,
+        )
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), rules=custom_rules, use_pcb_rules=True, validate_drc=False
+        )
+
+        # Custom rules should be used, not PCB rules
+        assert router.rules.trace_width == 0.3
+        assert router.rules.trace_clearance == 0.25
+
+
+# =============================================================================
 # Net Class Setup and PCB Merge Tests (Issue #45 - KiCad 7+ Compatibility)
 # =============================================================================
 

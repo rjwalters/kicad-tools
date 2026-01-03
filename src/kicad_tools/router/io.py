@@ -6,6 +6,9 @@ This module provides:
 - load_pcb_for_routing: Load a KiCad PCB file and create an Autorouter
 - merge_routes_into_pcb: Merge routed traces into an existing PCB file
 - generate_netclass_setup: Generate KiCad 7+ compatible net class setup
+- parse_pcb_design_rules: Extract design rules from a KiCad PCB file
+- validate_grid_resolution: Check grid resolution vs clearance for DRC compliance
+- validate_routes: Post-route validation for clearance issues
 
 These functions handle the translation between KiCad file formats and
 the autorouter's internal representations.
@@ -19,12 +22,20 @@ Note on net class metadata:
 
     DO NOT use the old KiCad 6 format with (net_settings (net_class ...))
     as this is incompatible with KiCad 7+.
+
+DRC Compliance (v0.5.1):
+    For DRC-clean output, ensure:
+    1. Grid resolution <= clearance / 2 (use validate_grid_resolution)
+    2. Via sizes meet PCB minimums (use parse_pcb_design_rules)
+    3. Post-route validation (use validate_routes)
 """
 
 from __future__ import annotations
 
 import math
 import re
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,6 +45,355 @@ if TYPE_CHECKING:
 from .core import Autorouter
 from .layers import Layer
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
+
+
+# =============================================================================
+# DRC COMPLIANCE TYPES AND FUNCTIONS
+# =============================================================================
+
+
+@dataclass
+class PCBDesignRules:
+    """Design rules extracted from a KiCad PCB file's setup section.
+
+    These represent the board's actual constraints and should be used
+    to configure the router for DRC-compliant output.
+    """
+
+    # Track constraints
+    min_track_width: float = 0.2  # mm
+    # Via constraints
+    min_via_diameter: float = 0.6  # mm
+    min_via_drill: float = 0.3  # mm
+    # Clearances
+    min_clearance: float = 0.2  # mm
+    # Copper to edge
+    copper_edge_clearance: float = 0.3  # mm
+
+    def to_design_rules(
+        self,
+        grid_resolution: float | None = None,
+    ) -> DesignRules:
+        """Convert to DesignRules for the router.
+
+        Args:
+            grid_resolution: Override grid resolution. If None, uses
+                            clearance / 2 for DRC compliance.
+
+        Returns:
+            DesignRules configured with these constraints.
+        """
+        # Default to clearance / 2 for DRC compliance
+        if grid_resolution is None:
+            grid_resolution = self.min_clearance / 2
+
+        return DesignRules(
+            trace_width=self.min_track_width,
+            trace_clearance=self.min_clearance,
+            via_drill=self.min_via_drill,
+            via_diameter=self.min_via_diameter,
+            via_clearance=self.min_clearance,
+            grid_resolution=grid_resolution,
+        )
+
+
+@dataclass
+class ClearanceViolation:
+    """A potential clearance violation detected during post-route validation."""
+
+    segment_index: int
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    net: int
+    obstacle_type: str  # "pad", "via", "segment"
+    obstacle_net: int
+    distance: float  # Actual distance in mm
+    required: float  # Required clearance in mm
+
+
+def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
+    """Parse design rules from a KiCad PCB file's setup section.
+
+    Extracts via/track minimums from the (setup ...) section of a KiCad PCB.
+    This allows the router to respect the board's actual constraints.
+
+    KiCad 7+ stores design rules in these locations:
+    - (setup (pad_to_mask_clearance X)) - pad mask clearance
+    - (setup (min_via_annular_width X)) - minimum via annular ring
+    - Net class definitions for track widths and clearances
+
+    Args:
+        pcb_text: Contents of a .kicad_pcb file
+
+    Returns:
+        PCBDesignRules with extracted or default values.
+
+    Example:
+        >>> pcb_text = Path("board.kicad_pcb").read_text()
+        >>> rules = parse_pcb_design_rules(pcb_text)
+        >>> print(f"Min track: {rules.min_track_width}mm")
+    """
+    rules = PCBDesignRules()
+
+    # Track whether we've found values from the PCB (vs using defaults)
+    found_clearance = False
+    found_track_width = False
+    found_via_diameter = False
+    found_via_drill = False
+
+    # Extract setup section (optional - may not exist or be empty)
+    setup_match = re.search(r"\(setup\s+(.*?)\n\s*\)", pcb_text, re.DOTALL)
+    if setup_match:
+        setup_text = setup_match.group(1)
+
+        # Parse pad_to_mask_clearance (often indicates minimum clearance)
+        mask_match = re.search(r"\(pad_to_mask_clearance\s+([\d.]+)\)", setup_text)
+        if mask_match:
+            mask_clearance = float(mask_match.group(1))
+            if mask_clearance > 0:
+                # Use as hint for clearance, but not definitive
+                pass
+
+        # Parse min_via_annular_width if present
+        via_ann_match = re.search(r"\(min_via_annular_width\s+([\d.]+)\)", setup_text)
+        if via_ann_match:
+            ann_width = float(via_ann_match.group(1))
+            # Via diameter = drill + 2 * annular width
+            # We'll use this to calculate minimum via diameter
+            pass
+
+    # Look for net class definitions (KiCad 7+ format)
+    # Note: These can exist even without a setup section
+    # These are typically in the form: (net_class "Default" ...)
+    # with (clearance X), (trace_width X), (via_dia X), (via_drill X)
+    # Net class blocks can span multiple lines
+
+    # Find all net_class blocks using bracket matching
+    for nc_match in re.finditer(r'\(net_class\s+"([^"]+)"', pcb_text):
+        class_name = nc_match.group(1)
+        start_pos = nc_match.start()
+
+        # Find the matching closing paren for this net_class block
+        depth = 0
+        end_pos = start_pos
+        for i, char in enumerate(pcb_text[start_pos:], start_pos):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    end_pos = i + 1
+                    break
+
+        nc_block = pcb_text[start_pos:end_pos]
+
+        # Extract values from the block
+        # Use min() only after we've found a value from this PCB
+        clearance_match = re.search(r"\(clearance\s+([\d.]+)\)", nc_block)
+        if clearance_match:
+            clearance = float(clearance_match.group(1))
+            if clearance > 0:
+                if found_clearance:
+                    rules.min_clearance = min(rules.min_clearance, clearance)
+                else:
+                    rules.min_clearance = clearance
+                    found_clearance = True
+
+        trace_match = re.search(r"\(trace_width\s+([\d.]+)\)", nc_block)
+        if trace_match:
+            trace_width = float(trace_match.group(1))
+            if trace_width > 0:
+                if found_track_width:
+                    rules.min_track_width = min(rules.min_track_width, trace_width)
+                else:
+                    rules.min_track_width = trace_width
+                    found_track_width = True
+
+        via_dia_match = re.search(r"\(via_dia\s+([\d.]+)\)", nc_block)
+        if via_dia_match:
+            via_dia = float(via_dia_match.group(1))
+            if via_dia > 0:
+                if found_via_diameter:
+                    rules.min_via_diameter = min(rules.min_via_diameter, via_dia)
+                else:
+                    rules.min_via_diameter = via_dia
+                    found_via_diameter = True
+
+        via_drill_match = re.search(r"\(via_drill\s+([\d.]+)\)", nc_block)
+        if via_drill_match:
+            via_drill = float(via_drill_match.group(1))
+            if via_drill > 0:
+                if found_via_drill:
+                    rules.min_via_drill = min(rules.min_via_drill, via_drill)
+                else:
+                    rules.min_via_drill = via_drill
+                    found_via_drill = True
+
+    # Also check for board-level constraints (KiCad 8 format)
+    # (design_settings (min_clearance X) (min_track_width X) ...)
+    design_match = re.search(r"\(design_settings\s+(.*?)\n\s*\)", pcb_text, re.DOTALL)
+    if design_match:
+        design_text = design_match.group(1)
+
+        min_clear_match = re.search(r"\(min_clearance\s+([\d.]+)\)", design_text)
+        if min_clear_match:
+            rules.min_clearance = float(min_clear_match.group(1))
+
+        min_track_match = re.search(r"\(min_track_width\s+([\d.]+)\)", design_text)
+        if min_track_match:
+            rules.min_track_width = float(min_track_match.group(1))
+
+        min_via_match = re.search(r"\(min_via_diameter\s+([\d.]+)\)", design_text)
+        if min_via_match:
+            rules.min_via_diameter = float(min_via_match.group(1))
+
+        min_drill_match = re.search(r"\(min_via_drill\s+([\d.]+)\)", design_text)
+        if min_drill_match:
+            rules.min_via_drill = float(min_drill_match.group(1))
+
+    return rules
+
+
+def validate_grid_resolution(
+    grid_resolution: float,
+    clearance: float,
+    warn: bool = True,
+) -> list[str]:
+    """Validate grid resolution against clearance for DRC compliance.
+
+    The discrete routing grid can cause clearance violations when the grid
+    resolution is too coarse relative to the required clearance. For reliable
+    DRC compliance, grid_resolution should be <= clearance / 2.
+
+    Args:
+        grid_resolution: Router grid resolution in mm
+        clearance: Required trace/via clearance in mm
+        warn: If True, emit warnings via warnings.warn()
+
+    Returns:
+        List of warning messages (empty if compliant).
+
+    Example:
+        >>> warnings = validate_grid_resolution(0.25, 0.2)
+        >>> if warnings:
+        ...     print("Grid resolution may cause DRC violations")
+    """
+    issues: list[str] = []
+
+    recommended = clearance / 2
+
+    if grid_resolution > clearance:
+        msg = (
+            f"Grid resolution {grid_resolution}mm exceeds clearance {clearance}mm. "
+            f"This WILL cause DRC violations. Use grid_resolution <= {clearance}mm."
+        )
+        issues.append(msg)
+        if warn:
+            warnings.warn(msg, stacklevel=2)
+
+    elif grid_resolution > recommended:
+        msg = (
+            f"Grid resolution {grid_resolution}mm may cause clearance violations "
+            f"with {clearance}mm clearance. Recommend grid_resolution <= {recommended}mm "
+            f"for reliable DRC compliance."
+        )
+        issues.append(msg)
+        if warn:
+            warnings.warn(msg, stacklevel=2)
+
+    return issues
+
+
+def validate_routes(
+    router: Autorouter,
+    rules: DesignRules | None = None,
+) -> list[ClearanceViolation]:
+    """Validate routed traces for potential clearance violations.
+
+    Performs a simplified post-route check for obvious clearance issues.
+    This is not a full DRC check but can catch common problems before
+    exporting to KiCad.
+
+    Args:
+        router: Autorouter instance with completed routes
+        rules: DesignRules to check against (uses router.rules if None)
+
+    Returns:
+        List of potential ClearanceViolation issues.
+
+    Note:
+        This is a basic validation. For comprehensive DRC, export the
+        PCB and run KiCad's built-in DRC checker.
+    """
+    if rules is None:
+        rules = router.rules
+
+    violations: list[ClearanceViolation] = []
+    clearance = rules.trace_clearance
+
+    # Check each route segment against pads of different nets
+    for route_idx, route in enumerate(router.routes):
+        route_net = route.net
+
+        for seg_idx, segment in enumerate(route.segments):
+            # Check against all pads
+            for (ref, num), pad in router.pads.items():
+                # Skip pads on the same net
+                if pad.net == route_net:
+                    continue
+
+                # Calculate minimum distance from segment to pad center
+                # (simplified - actual check would use pad geometry)
+                dist = _point_to_segment_distance(
+                    pad.x, pad.y, segment.x1, segment.y1, segment.x2, segment.y2
+                )
+
+                # Account for pad size (use larger dimension)
+                pad_radius = max(pad.width, pad.height) / 2
+                effective_dist = dist - pad_radius - rules.trace_width / 2
+
+                if effective_dist < clearance:
+                    violations.append(
+                        ClearanceViolation(
+                            segment_index=seg_idx,
+                            x1=segment.x1,
+                            y1=segment.y1,
+                            x2=segment.x2,
+                            y2=segment.y2,
+                            net=route_net,
+                            obstacle_type="pad",
+                            obstacle_net=pad.net,
+                            distance=effective_dist,
+                            required=clearance,
+                        )
+                    )
+
+    return violations
+
+
+def _point_to_segment_distance(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float
+) -> float:
+    """Calculate minimum distance from a point to a line segment."""
+    # Vector from start to end
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Handle zero-length segment
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq == 0:
+        return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+
+    # Project point onto line, clamped to segment
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / seg_len_sq))
+
+    # Closest point on segment
+    closest_x = x1 + t * dx
+    closest_y = y1 + t * dy
+
+    return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
 
 
 def route_pcb(
@@ -208,6 +568,8 @@ def load_pcb_for_routing(
     skip_nets: list[str] | None = None,
     netlist: dict[str, str] | None = None,
     rules: DesignRules | None = None,
+    use_pcb_rules: bool = True,
+    validate_drc: bool = True,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -218,13 +580,34 @@ def load_pcb_for_routing(
         netlist: Optional dict mapping "REF.PIN" to net name (e.g., {"U1.1": "+3.3V"})
                  If provided, overrides any net assignments in the PCB file.
         rules: DesignRules for routing (grid resolution, trace width, etc.)
-               If None, uses default rules.
+               If None and use_pcb_rules=True, extracts rules from PCB.
+               If None and use_pcb_rules=False, uses default rules.
+        use_pcb_rules: If True and rules=None, parse design rules from the PCB
+                       file's setup section and use them as defaults.
+        validate_drc: If True, validate grid resolution against clearance and
+                      emit warnings for potential DRC issues.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
+
+    Example:
+        >>> # Use PCB's design rules automatically
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb")
+        >>>
+        >>> # Override with custom rules
+        >>> custom = DesignRules(grid_resolution=0.1, trace_width=0.15)
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb", rules=custom)
+        >>>
+        >>> # Skip DRC validation warnings
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb", validate_drc=False)
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
+
+    # Parse PCB design rules if needed
+    pcb_rules: PCBDesignRules | None = None
+    if rules is None and use_pcb_rules:
+        pcb_rules = parse_pcb_design_rules(pcb_text)
 
     # Parse board dimensions from Edge.Cuts gr_rect
     edge_match = re.search(
@@ -365,9 +748,23 @@ def load_pcb_for_routing(
                 }
             )
 
-    # Create router with provided rules or defaults
+    # Create router with provided rules, PCB rules, or defaults
     if rules is None:
-        rules = DesignRules(grid_resolution=0.25)
+        if pcb_rules is not None:
+            # Use rules extracted from PCB file
+            rules = pcb_rules.to_design_rules()
+        else:
+            # Fall back to conservative defaults
+            rules = DesignRules(grid_resolution=0.1)
+
+    # Validate grid resolution for DRC compliance
+    if validate_drc:
+        validate_grid_resolution(
+            rules.grid_resolution,
+            rules.trace_clearance,
+            warn=True,
+        )
+
     router = Autorouter(
         width=board_width,
         height=board_height,
