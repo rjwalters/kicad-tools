@@ -75,6 +75,9 @@ class GridCell:
     # Zone fields for copper pour support
     is_zone: bool = False  # True if cell is part of a copper pour zone
     zone_id: str | None = None  # UUID of the zone (for multi-zone layers)
+    # Pad ownership tracking (prevents route rip-up from corrupting pad cells)
+    pad_blocked: bool = False  # True if blocked by a pad (not a route)
+    original_net: int = 0  # Net that first claimed this cell (for restoration)
 
 
 @dataclass
