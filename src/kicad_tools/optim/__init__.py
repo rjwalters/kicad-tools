@@ -84,6 +84,15 @@ from kicad_tools.optim.evolutionary import (
 from kicad_tools.optim.geometry import Polygon, Vector2D
 from kicad_tools.optim.placement import PlacementOptimizer
 from kicad_tools.optim.routing import FigureOfMerit, RoutingOptimizer
+from kicad_tools.optim.thermal import (
+    ThermalClass,
+    ThermalConfig,
+    ThermalConstraint,
+    ThermalProperties,
+    classify_thermal_properties,
+    detect_thermal_constraints,
+    get_thermal_summary,
+)
 
 __all__ = [
     "PlacementOptimizer",
@@ -120,4 +129,12 @@ __all__ = [
     "BoardEdges",
     "detect_edge_components",
     "get_board_edges",
+    # Thermal awareness
+    "ThermalClass",
+    "ThermalConfig",
+    "ThermalConstraint",
+    "ThermalProperties",
+    "classify_thermal_properties",
+    "detect_thermal_constraints",
+    "get_thermal_summary",
 ]

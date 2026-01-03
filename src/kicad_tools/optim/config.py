@@ -53,3 +53,12 @@ class PlacementConfig:
     # Functional clustering
     cluster_stiffness: float = 50.0  # Strong spring for cluster member attraction
     cluster_enabled: bool = False  # Enable automatic cluster detection
+
+    # Thermal awareness
+    thermal_enabled: bool = False  # Enable thermal-aware placement
+    thermal_separation_mm: float = (
+        15.0  # Min distance between heat sources and sensitive components
+    )
+    thermal_edge_preference_mm: float = 10.0  # Max distance from edge for heat sources
+    thermal_repulsion_strength: float = 500.0  # Repulsion between heat sources and sensitive
+    thermal_edge_attraction: float = 50.0  # Edge attraction for heat sources

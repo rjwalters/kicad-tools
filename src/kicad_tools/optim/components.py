@@ -16,6 +16,7 @@ from kicad_tools.optim.geometry import Polygon, Vector2D
 
 if TYPE_CHECKING:
     from kicad_tools.optim.edge_placement import EdgeConstraint
+    from kicad_tools.optim.thermal import ThermalProperties
 
 
 class ClusterType(Enum):
@@ -63,6 +64,9 @@ class Component:
 
     # Edge constraint (if component should stay at board edge)
     edge_constraint: EdgeConstraint | None = None
+
+    # Thermal properties (assigned during optimization setup)
+    thermal_properties: ThermalProperties | None = None
 
     # Physics state
     vx: float = 0.0  # Linear velocity

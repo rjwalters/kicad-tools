@@ -211,6 +211,7 @@ def cmd_optimize(args) -> int:
             config = PlacementConfig(
                 grid_size=args.grid if args.grid > 0 else 0.0,
                 rotation_grid=90.0,
+                thermal_enabled=getattr(args, "thermal", False),
             )
 
             with spinner("Creating optimizer from PCB...", quiet=quiet):
@@ -230,6 +231,12 @@ def cmd_optimize(args) -> int:
                 if constraints:
                     print(f"  - {len(constraints)} grouping constraints")
                 print(f"  - Max iterations: {args.iterations}")
+                if config.thermal_enabled:
+                    heat_sources = optimizer.get_heat_sources()
+                    heat_sensitive = optimizer.get_heat_sensitive()
+                    print(
+                        f"  - Thermal mode: {len(heat_sources)} heat sources, {len(heat_sensitive)} heat-sensitive"
+                    )
 
             # Run simulation with progress
             def callback(iteration: int, energy: float):
@@ -595,6 +602,11 @@ def main(argv: list[str] | None = None) -> int:
         "--edge-detect",
         action="store_true",
         help="Auto-detect edge components (connectors, mounting holes, etc.)",
+    )
+    optimize_parser.add_argument(
+        "--thermal",
+        action="store_true",
+        help="Enable thermal-aware placement (keeps heat sources away from sensitive components)",
     )
     optimize_parser.add_argument(
         "--dry-run",

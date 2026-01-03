@@ -942,3 +942,271 @@ class TestPlacementOptimizerIntegration:
         # Should converge immediately (no movable components)
         iterations = optimizer.run(iterations=1000, dt=0.01)
         assert iterations < 1000
+
+
+class TestThermalClasses:
+    """Tests for thermal classification classes."""
+
+    def test_thermal_class_enum(self):
+        from kicad_tools.optim import ThermalClass
+
+        assert ThermalClass.HEAT_SOURCE.value == "heat_source"
+        assert ThermalClass.HEAT_SENSITIVE.value == "heat_sensitive"
+        assert ThermalClass.NEUTRAL.value == "neutral"
+
+    def test_thermal_properties_defaults(self):
+        from kicad_tools.optim import ThermalClass, ThermalProperties
+
+        props = ThermalProperties()
+        assert props.thermal_class == ThermalClass.NEUTRAL
+        assert props.power_dissipation_w == 0.0
+        assert props.max_temp_c == 85.0
+        assert props.thermal_sensitivity == "none"
+        assert props.needs_thermal_relief is False
+
+    def test_thermal_properties_heat_source(self):
+        from kicad_tools.optim import ThermalClass, ThermalProperties
+
+        props = ThermalProperties(
+            thermal_class=ThermalClass.HEAT_SOURCE,
+            power_dissipation_w=1.5,
+            max_temp_c=125.0,
+            needs_thermal_relief=True,
+        )
+        assert props.thermal_class == ThermalClass.HEAT_SOURCE
+        assert props.power_dissipation_w == 1.5
+        assert props.needs_thermal_relief is True
+
+    def test_thermal_constraint(self):
+        from kicad_tools.optim import ThermalConstraint
+
+        constraint = ThermalConstraint(
+            constraint_type="min_separation",
+            parameters={"heat_source": "U1", "sensitive": "Y1", "min_distance_mm": 15.0},
+        )
+        assert constraint.constraint_type == "min_separation"
+        assert constraint.parameters["heat_source"] == "U1"
+        assert constraint.parameters["min_distance_mm"] == 15.0
+
+    def test_thermal_config_defaults(self):
+        from kicad_tools.optim import ThermalConfig
+
+        config = ThermalConfig()
+        assert config.heat_source_separation_mm == 15.0
+        assert config.edge_preference_max_mm == 10.0
+        assert config.thermal_repulsion_strength == 500.0
+
+
+class TestThermalClassification:
+    """Tests for thermal classification of components."""
+
+    def test_classify_ldo_as_heat_source(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        # LDO should be classified as heat source
+        # Use "SOT223" without hyphen to match detection pattern
+        props = _classify_component("U1", "AMS1117-3.3", "SOT223", None)
+
+        assert props.thermal_class == ThermalClass.HEAT_SOURCE
+        assert props.needs_thermal_relief is True  # SOT223 has thermal tab
+
+    def test_classify_lm7805_as_heat_source(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        props = _classify_component("U2", "LM7805", "TO-220", None)
+        assert props.thermal_class == ThermalClass.HEAT_SOURCE
+
+    def test_classify_power_resistor_as_heat_source(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        # Low value resistor should be heat source
+        props = _classify_component("R1", "0.1R", "2512", None)
+        assert props.thermal_class == ThermalClass.HEAT_SOURCE
+
+    def test_classify_crystal_as_heat_sensitive(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        props = _classify_component("Y1", "8MHz", "HC49", None)
+        assert props.thermal_class == ThermalClass.HEAT_SENSITIVE
+        assert props.thermal_sensitivity == "high"
+
+    def test_classify_crystal_32khz_as_heat_sensitive(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        props = _classify_component("Y2", "32.768kHz", "SMD-3215", None)
+        assert props.thermal_class == ThermalClass.HEAT_SENSITIVE
+
+    def test_classify_voltage_reference_as_heat_sensitive(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        props = _classify_component("U3", "LM4040", "SOT-23", None)
+        assert props.thermal_class == ThermalClass.HEAT_SENSITIVE
+
+    def test_classify_regular_ic_as_neutral(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        props = _classify_component("U4", "STM32F103", "LQFP-64", None)
+        assert props.thermal_class == ThermalClass.NEUTRAL
+
+    def test_classify_regular_resistor_as_neutral(self):
+        from kicad_tools.optim import ThermalClass
+        from kicad_tools.optim.thermal import _classify_component
+
+        props = _classify_component("R2", "10k", "0603", None)
+        assert props.thermal_class == ThermalClass.NEUTRAL
+
+
+class TestThermalConstraintDetection:
+    """Tests for thermal constraint detection."""
+
+    def test_get_thermal_summary(self):
+        from kicad_tools.optim import ThermalClass, ThermalProperties, get_thermal_summary
+
+        props = {
+            "U1": ThermalProperties(thermal_class=ThermalClass.HEAT_SOURCE),
+            "Y1": ThermalProperties(thermal_class=ThermalClass.HEAT_SENSITIVE),
+            "R1": ThermalProperties(thermal_class=ThermalClass.NEUTRAL),
+        }
+        summary = get_thermal_summary(props)
+        assert "U1" in summary["heat_sources"]
+        assert "Y1" in summary["heat_sensitive"]
+        assert "R1" in summary["neutral"]
+
+
+class TestThermalOptimization:
+    """Tests for thermal-aware placement optimization."""
+
+    def test_placement_config_thermal_defaults(self):
+        config = PlacementConfig()
+        assert config.thermal_enabled is False
+        assert config.thermal_separation_mm == 15.0
+        assert config.thermal_edge_preference_mm == 10.0
+        assert config.thermal_repulsion_strength == 500.0
+
+    def test_placement_config_thermal_enabled(self):
+        config = PlacementConfig(
+            thermal_enabled=True,
+            thermal_separation_mm=20.0,
+        )
+        assert config.thermal_enabled is True
+        assert config.thermal_separation_mm == 20.0
+
+    def test_get_heat_sources_empty(self):
+        board = Polygon.rectangle(50, 50, 100, 80)
+        optimizer = PlacementOptimizer(board)
+        assert optimizer.get_heat_sources() == []
+
+    def test_get_heat_sensitive_empty(self):
+        board = Polygon.rectangle(50, 50, 100, 80)
+        optimizer = PlacementOptimizer(board)
+        assert optimizer.get_heat_sensitive() == []
+
+    def test_compute_thermal_forces_disabled(self):
+        """Thermal forces should be zero when thermal mode is disabled."""
+        board = Polygon.rectangle(50, 50, 100, 80)
+        config = PlacementConfig(thermal_enabled=False)
+        optimizer = PlacementOptimizer(board, config)
+
+        comp = Component(ref="U1", x=50.0, y=50.0)
+        optimizer.add_component(comp)
+
+        forces = optimizer.compute_thermal_forces()
+        assert forces["U1"].magnitude() == 0.0
+
+    def test_compute_thermal_forces_enabled_no_thermal_components(self):
+        """Thermal forces should be zero when no thermal components exist."""
+        board = Polygon.rectangle(50, 50, 100, 80)
+        config = PlacementConfig(thermal_enabled=True)
+        optimizer = PlacementOptimizer(board, config)
+
+        comp = Component(ref="U1", x=50.0, y=50.0)
+        optimizer.add_component(comp)
+
+        forces = optimizer.compute_thermal_forces()
+        # No thermal properties assigned, so no thermal forces
+        assert forces["U1"].magnitude() == 0.0
+
+    def test_compute_thermal_forces_with_heat_source_and_sensitive(self):
+        """Heat sources should repel heat-sensitive components."""
+        from kicad_tools.optim import ThermalClass, ThermalProperties
+
+        board = Polygon.rectangle(50, 50, 100, 80)
+        config = PlacementConfig(
+            thermal_enabled=True,
+            thermal_separation_mm=20.0,
+            thermal_repulsion_strength=500.0,
+        )
+        optimizer = PlacementOptimizer(board, config)
+
+        # Heat source at (30, 50)
+        heat_source = Component(ref="U1", x=30.0, y=50.0, width=5.0, height=5.0)
+        heat_source.thermal_properties = ThermalProperties(thermal_class=ThermalClass.HEAT_SOURCE)
+        optimizer.add_component(heat_source)
+
+        # Heat sensitive at (40, 50) - only 10mm away
+        sensitive = Component(ref="Y1", x=40.0, y=50.0, width=2.0, height=2.0)
+        sensitive.thermal_properties = ThermalProperties(thermal_class=ThermalClass.HEAT_SENSITIVE)
+        optimizer.add_component(sensitive)
+
+        forces = optimizer.compute_thermal_forces()
+
+        # Heat source should be pushed away from sensitive (negative x direction)
+        assert forces["U1"].x < 0
+        # Sensitive should be pushed away from heat source (positive x direction)
+        assert forces["Y1"].x > 0
+
+    def test_thermal_edge_attraction_for_heat_source(self):
+        """Heat sources far from edges should be attracted to edges."""
+        from kicad_tools.optim import ThermalClass, ThermalProperties
+
+        board = Polygon.rectangle(50, 50, 100, 80)
+        config = PlacementConfig(
+            thermal_enabled=True,
+            thermal_edge_preference_mm=10.0,
+            thermal_edge_attraction=50.0,
+        )
+        optimizer = PlacementOptimizer(board, config)
+
+        # Heat source in center, far from any edge
+        heat_source = Component(ref="U1", x=50.0, y=50.0, width=5.0, height=5.0)
+        heat_source.thermal_properties = ThermalProperties(thermal_class=ThermalClass.HEAT_SOURCE)
+        optimizer.add_component(heat_source)
+
+        forces = optimizer.compute_thermal_forces()
+
+        # Heat source should feel some attraction force toward nearest edge
+        # The force should be non-zero since it's far from all edges
+        assert forces["U1"].magnitude() > 0
+
+    def test_thermal_forces_included_in_optimization(self):
+        """Verify thermal forces are included in compute_forces_and_torques."""
+        from kicad_tools.optim import ThermalClass, ThermalProperties
+
+        board = Polygon.rectangle(50, 50, 100, 80)
+        config = PlacementConfig(
+            thermal_enabled=True,
+            thermal_repulsion_strength=5000.0,  # High value to ensure effect is visible
+        )
+        optimizer = PlacementOptimizer(board, config)
+
+        # Two components close together
+        heat_source = Component(ref="U1", x=48.0, y=50.0, width=5.0, height=5.0)
+        heat_source.thermal_properties = ThermalProperties(thermal_class=ThermalClass.HEAT_SOURCE)
+        optimizer.add_component(heat_source)
+
+        sensitive = Component(ref="Y1", x=52.0, y=50.0, width=2.0, height=2.0)
+        sensitive.thermal_properties = ThermalProperties(thermal_class=ThermalClass.HEAT_SENSITIVE)
+        optimizer.add_component(sensitive)
+
+        forces, torques = optimizer.compute_forces_and_torques()
+
+        # Both components should have forces applied
+        assert forces["U1"].magnitude() > 0
+        assert forces["Y1"].magnitude() > 0
