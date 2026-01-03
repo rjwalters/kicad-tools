@@ -137,7 +137,12 @@ class Router:
                     # In negotiated mode, allow sharing non-obstacle cells
                     if allow_sharing and not cell.is_obstacle:
                         # Allow routing through used cells (will get cost penalty)
-                        if cell.net != 0 and cell.net != net:
+                        # No-net pads (cell.net == 0) must always block other nets
+                        # See issue #317: routes incorrectly allowed through no-net pads
+                        if cell.net == 0:
+                            if cell.usage_count == 0:
+                                return True  # Static no-net obstacle (pad) - block
+                        elif cell.net != net:
                             # Only allow sharing if this cell has been used by routes
                             # (usage_count > 0). Cells with usage_count == 0 are static
                             # obstacles like pads that should never be shared.
@@ -198,7 +203,12 @@ class Router:
             if cell.blocked:
                 if allow_sharing and not cell.is_obstacle:
                     # In negotiated mode, non-obstacle cells can be shared
-                    if cell.net != 0 and cell.net != net:
+                    # No-net pads (cell.net == 0) must always block other nets
+                    # See issue #317: routes incorrectly allowed through no-net pads
+                    if cell.net == 0:
+                        if cell.usage_count == 0:
+                            return True  # Static no-net obstacle (pad) - block
+                    elif cell.net != net:
                         # Only allow sharing if this cell has been used by routes
                         # (usage_count > 0). Cells with usage_count == 0 are static
                         # obstacles like pads that should never be shared.
@@ -238,7 +248,12 @@ class Router:
                     # In negotiated mode, allow sharing non-obstacle cells
                     if allow_sharing and not cell.is_obstacle:
                         # Allow routing through used cells (will get cost penalty)
-                        if cell.net != 0 and cell.net != net:
+                        # No-net pads (cell.net == 0) must always block other nets
+                        # See issue #317: routes incorrectly allowed through no-net pads
+                        if cell.net == 0:
+                            if cell.usage_count == 0:
+                                return True  # Static no-net obstacle (pad) - block
+                        elif cell.net != net:
                             # Only allow sharing if this cell has been used by routes
                             # (usage_count > 0). Cells with usage_count == 0 are static
                             # obstacles like pads that should never be shared.
