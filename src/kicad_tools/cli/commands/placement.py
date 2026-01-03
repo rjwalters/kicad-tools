@@ -7,7 +7,7 @@ def run_placement_command(args) -> int:
     """Handle placement command."""
     if not args.placement_command:
         print("Usage: kicad-tools placement <command> [options] <file>")
-        print("Commands: check, fix, optimize")
+        print("Commands: check, fix, optimize, snap, align, distribute")
         return 1
 
     from ..placement_cmd import main as placement_main
@@ -75,6 +75,58 @@ def run_placement_command(args) -> int:
         if args.verbose:
             sub_argv.append("--verbose")
         # Use command-level quiet or global quiet
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "snap":
+        sub_argv = ["snap", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        if args.grid != 0.5:
+            sub_argv.extend(["--grid", str(args.grid)])
+        if args.rotation != 90:
+            sub_argv.extend(["--rotation", str(args.rotation)])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "align":
+        sub_argv = ["align", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        sub_argv.extend(["--components", args.components])
+        if args.axis != "row":
+            sub_argv.extend(["--axis", args.axis])
+        if args.reference != "center":
+            sub_argv.extend(["--reference", args.reference])
+        if args.tolerance != 0.1:
+            sub_argv.extend(["--tolerance", str(args.tolerance)])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
+            sub_argv.append("--quiet")
+        return placement_main(sub_argv) or 0
+
+    elif args.placement_command == "distribute":
+        sub_argv = ["distribute", args.pcb]
+        if args.output:
+            sub_argv.extend(["-o", args.output])
+        sub_argv.extend(["--components", args.components])
+        if args.axis != "horizontal":
+            sub_argv.extend(["--axis", args.axis])
+        if args.spacing != 0.0:
+            sub_argv.extend(["--spacing", str(args.spacing)])
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.verbose:
+            sub_argv.append("--verbose")
         if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
             sub_argv.append("--quiet")
         return placement_main(sub_argv) or 0

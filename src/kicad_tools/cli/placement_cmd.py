@@ -4,6 +4,9 @@ Usage:
     kicad-tools placement check board.kicad_pcb
     kicad-tools placement fix board.kicad_pcb --strategy spread
     kicad-tools placement optimize board.kicad_pcb --strategy force-directed
+    kicad-tools placement snap board.kicad_pcb --grid 0.5
+    kicad-tools placement align board.kicad_pcb -c R1,R2,R3,R4 --axis row
+    kicad-tools placement distribute board.kicad_pcb -c LED1,LED2,LED3 --spacing 5.0
 """
 
 import argparse
@@ -163,6 +166,218 @@ def cmd_fix(args) -> int:
             print(f"Warning: {result.new_conflicts} conflicts remain after fixes")
 
     return 0 if result.success else 1
+
+
+def cmd_snap(args) -> int:
+    """Snap components to grid."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optim import PlacementConfig, PlacementOptimizer, snap_to_grid
+    from kicad_tools.schema.pcb import PCB
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Create optimizer from PCB
+    config = PlacementConfig()
+    with spinner("Creating optimizer...", quiet=quiet):
+        optimizer = PlacementOptimizer.from_pcb(pcb, config=config)
+
+    if not quiet:
+        print(f"Found {len(optimizer.components)} components")
+
+    # Snap to grid
+    rotation_snap = args.rotation if args.rotation > 0 else None
+    with spinner(f"Snapping to {args.grid}mm grid...", quiet=quiet):
+        count = snap_to_grid(optimizer, grid_mm=args.grid, rotation_snap=rotation_snap)
+
+    if not quiet:
+        print(f"Snapped {count} components")
+
+    if args.dry_run:
+        if not quiet:
+            print("\n(Dry run - no changes made)")
+            print(optimizer.report())
+        return 0
+
+    # Write results
+    output_path = Path(args.output) if args.output else pcb_path
+
+    try:
+        with spinner("Writing snapped placement...", quiet=quiet):
+            updated = optimizer.write_to_pcb(pcb)
+            pcb.save(str(output_path))
+
+        if not quiet:
+            print(f"\nUpdated {updated} component positions")
+            print(f"Saved to: {output_path}")
+
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def cmd_align(args) -> int:
+    """Align components in row or column."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optim import PlacementConfig, PlacementOptimizer, align_components
+    from kicad_tools.schema.pcb import PCB
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if not args.components:
+        print("Error: No components specified. Use --components R1,R2,R3", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Create optimizer from PCB
+    config = PlacementConfig()
+    with spinner("Creating optimizer...", quiet=quiet):
+        optimizer = PlacementOptimizer.from_pcb(pcb, config=config)
+
+    # Parse components
+    refs = [r.strip() for r in args.components.split(",") if r.strip()]
+    if not quiet:
+        print(f"Aligning {len(refs)} components: {', '.join(refs)}")
+
+    # Align components
+    axis = "horizontal" if args.axis == "row" else "vertical"
+    with spinner(f"Aligning {axis}ly...", quiet=quiet):
+        count = align_components(
+            optimizer,
+            refs,
+            axis=axis,
+            reference=args.reference,
+            tolerance_mm=args.tolerance,
+        )
+
+    if not quiet:
+        print(f"Aligned {count} components")
+
+    if args.dry_run:
+        if not quiet:
+            print("\n(Dry run - no changes made)")
+        return 0
+
+    # Write results
+    output_path = Path(args.output) if args.output else pcb_path
+
+    try:
+        with spinner("Writing aligned placement...", quiet=quiet):
+            updated = optimizer.write_to_pcb(pcb)
+            pcb.save(str(output_path))
+
+        if not quiet:
+            print(f"\nUpdated {updated} component positions")
+            print(f"Saved to: {output_path}")
+
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def cmd_distribute(args) -> int:
+    """Distribute components evenly."""
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optim import PlacementConfig, PlacementOptimizer, distribute_components
+    from kicad_tools.schema.pcb import PCB
+
+    quiet = getattr(args, "quiet", False)
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if not args.components:
+        print(
+            "Error: No components specified. Use --components LED1,LED2,LED3,LED4", file=sys.stderr
+        )
+        return 1
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Create optimizer from PCB
+    config = PlacementConfig()
+    with spinner("Creating optimizer...", quiet=quiet):
+        optimizer = PlacementOptimizer.from_pcb(pcb, config=config)
+
+    # Parse components
+    refs = [r.strip() for r in args.components.split(",") if r.strip()]
+    if not quiet:
+        print(f"Distributing {len(refs)} components: {', '.join(refs)}")
+
+    # Distribute components
+    spacing = args.spacing if args.spacing > 0 else None
+    with spinner(f"Distributing {args.axis}...", quiet=quiet):
+        count = distribute_components(
+            optimizer,
+            refs,
+            axis=args.axis,
+            spacing_mm=spacing,
+        )
+
+    if not quiet:
+        if spacing:
+            print(f"Distributed {count} components with {spacing}mm spacing")
+        else:
+            print(f"Distributed {count} components evenly")
+
+    if args.dry_run:
+        if not quiet:
+            print("\n(Dry run - no changes made)")
+        return 0
+
+    # Write results
+    output_path = Path(args.output) if args.output else pcb_path
+
+    try:
+        with spinner("Writing distributed placement...", quiet=quiet):
+            updated = optimizer.write_to_pcb(pcb)
+            pcb.save(str(output_path))
+
+        if not quiet:
+            print(f"\nUpdated {updated} component positions")
+            print(f"Saved to: {output_path}")
+
+    except Exception as e:
+        print(f"Error saving PCB: {e}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 def cmd_optimize(args) -> int:
@@ -629,6 +844,110 @@ def main(argv: list[str] | None = None) -> int:
     fix_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     fix_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
+    # Snap subcommand
+    snap_parser = subparsers.add_parser("snap", help="Snap components to grid")
+    snap_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    snap_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    snap_parser.add_argument(
+        "--grid",
+        type=float,
+        default=0.5,
+        help="Grid size in mm (default: 0.5)",
+    )
+    snap_parser.add_argument(
+        "--rotation",
+        type=int,
+        default=90,
+        help="Rotation snap in degrees (0 to disable, default: 90)",
+    )
+    snap_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without saving",
+    )
+    snap_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    snap_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+
+    # Align subcommand
+    align_parser = subparsers.add_parser("align", help="Align components in row or column")
+    align_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    align_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    align_parser.add_argument(
+        "--components",
+        "-c",
+        required=True,
+        help="Comma-separated component refs to align (e.g., R1,R2,R3)",
+    )
+    align_parser.add_argument(
+        "--axis",
+        choices=["row", "column"],
+        default="row",
+        help="Alignment axis: row (horizontal) or column (vertical) (default: row)",
+    )
+    align_parser.add_argument(
+        "--reference",
+        choices=["center", "top", "bottom", "left", "right"],
+        default="center",
+        help="Alignment reference point (default: center)",
+    )
+    align_parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.1,
+        help="Tolerance for already-aligned components in mm (default: 0.1)",
+    )
+    align_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without saving",
+    )
+    align_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    align_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
+
+    # Distribute subcommand
+    distribute_parser = subparsers.add_parser("distribute", help="Distribute components evenly")
+    distribute_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    distribute_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: modify in place)",
+    )
+    distribute_parser.add_argument(
+        "--components",
+        "-c",
+        required=True,
+        help="Comma-separated component refs to distribute (e.g., LED1,LED2,LED3,LED4)",
+    )
+    distribute_parser.add_argument(
+        "--axis",
+        choices=["horizontal", "vertical"],
+        default="horizontal",
+        help="Distribution axis (default: horizontal)",
+    )
+    distribute_parser.add_argument(
+        "--spacing",
+        type=float,
+        default=0.0,
+        help="Fixed spacing in mm (0 for automatic even distribution, default: 0)",
+    )
+    distribute_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without saving",
+    )
+    distribute_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    distribute_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+
     # Optimize subcommand
     optimize_parser = subparsers.add_parser(
         "optimize", help="Optimize component placement for routability"
@@ -712,6 +1031,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args)
     elif args.command == "fix":
         return cmd_fix(args)
+    elif args.command == "snap":
+        return cmd_snap(args)
+    elif args.command == "align":
+        return cmd_align(args)
+    elif args.command == "distribute":
+        return cmd_distribute(args)
     elif args.command == "optimize":
         return cmd_optimize(args)
 
