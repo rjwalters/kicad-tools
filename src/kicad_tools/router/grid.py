@@ -313,8 +313,8 @@ class RoutingGrid:
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
                             marked_cells.add((nx, ny))
+                            cell.net = seg.net
                         cell.blocked = True
-                        cell.net = seg.net
 
         # Simple line marking
         if gx1 == gx2:  # Vertical
@@ -359,8 +359,8 @@ class RoutingGrid:
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
                             self._update_congestion(nx, ny, layer_idx)
+                            cell.net = via.net
                         cell.blocked = True
-                        cell.net = via.net
 
     def unmark_route(self, route: Route) -> None:
         """Unmark a route's cells (rip-up). Reverses mark_route()."""
