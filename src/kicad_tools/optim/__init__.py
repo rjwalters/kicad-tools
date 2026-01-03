@@ -56,6 +56,18 @@ from kicad_tools.optim.components import (
     Spring,
 )
 from kicad_tools.optim.config import PlacementConfig
+from kicad_tools.optim.constraint_loader import (
+    load_constraints_from_yaml,
+    save_constraints_to_yaml,
+)
+from kicad_tools.optim.constraints import (
+    ConstraintType,
+    ConstraintViolation,
+    GroupingConstraint,
+    SpatialConstraint,
+    expand_member_patterns,
+    validate_grouping_constraints,
+)
 from kicad_tools.optim.evolutionary import (
     EvolutionaryConfig,
     EvolutionaryPlacementOptimizer,
@@ -79,8 +91,18 @@ __all__ = [
     "EvolutionaryConfig",
     "Individual",
     "Pin",
+    # Functional clustering
     "FunctionalCluster",
     "ClusterType",
     "ClusterDetector",
     "detect_functional_clusters",
+    # Constraints
+    "GroupingConstraint",
+    "SpatialConstraint",
+    "ConstraintType",
+    "ConstraintViolation",
+    "validate_grouping_constraints",
+    "expand_member_patterns",
+    "load_constraints_from_yaml",
+    "save_constraints_to_yaml",
 ]

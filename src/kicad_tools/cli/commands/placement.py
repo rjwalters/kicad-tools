@@ -62,6 +62,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--grid", str(args.grid)])
         if args.fixed:
             sub_argv.extend(["--fixed", args.fixed])
+        if getattr(args, "constraints", None):
+            sub_argv.extend(["--constraints", args.constraints])
         if args.dry_run:
             sub_argv.append("--dry-run")
         if args.verbose:

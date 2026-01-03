@@ -151,6 +151,7 @@ def cmd_optimize(args) -> int:
         EvolutionaryPlacementOptimizer,
         PlacementConfig,
         PlacementOptimizer,
+        load_constraints_from_yaml,
     )
     from kicad_tools.optim.evolutionary import EvolutionaryConfig
     from kicad_tools.schema.pcb import PCB
@@ -166,6 +167,22 @@ def cmd_optimize(args) -> int:
     fixed_refs = []
     if args.fixed:
         fixed_refs = [r.strip() for r in args.fixed.split(",") if r.strip()]
+
+    # Load constraints if specified
+    constraints = []
+    if args.constraints:
+        constraints_path = Path(args.constraints)
+        if not constraints_path.exists():
+            print(f"Error: Constraint file not found: {constraints_path}", file=sys.stderr)
+            return 1
+        try:
+            with spinner("Loading constraints...", quiet=quiet):
+                constraints = load_constraints_from_yaml(constraints_path)
+            if not quiet:
+                print(f"Loaded {len(constraints)} grouping constraints")
+        except Exception as e:
+            print(f"Error loading constraints: {e}", file=sys.stderr)
+            return 1
 
     # Load PCB
     try:
@@ -198,11 +215,17 @@ def cmd_optimize(args) -> int:
                     pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
                 )
 
+            # Add constraints if loaded
+            if constraints:
+                optimizer.add_grouping_constraints(constraints)
+
             if not quiet:
                 print(f"Optimizing {len(optimizer.components)} components...")
                 print(f"  - {len(optimizer.springs)} net connections")
                 if enable_clustering and optimizer.clusters:
                     print(f"  - {len(optimizer.clusters)} functional clusters detected")
+                if constraints:
+                    print(f"  - {len(constraints)} grouping constraints")
                 print(f"  - Max iterations: {args.iterations}")
 
             # Run simulation with progress
@@ -226,6 +249,16 @@ def cmd_optimize(args) -> int:
                 print(f"\nConverged after {iterations_run} iterations")
                 print(f"Total wire length: {optimizer.total_wire_length():.2f} mm")
                 print(f"System energy: {optimizer.compute_energy():.4f}")
+
+                # Report constraint violations if any
+                if constraints:
+                    violations = optimizer.validate_constraints()
+                    if violations:
+                        print(f"\nConstraint violations ({len(violations)}):")
+                        for v in violations:
+                            print(f"  - {v}")
+                    else:
+                        print("\nAll grouping constraints satisfied!")
 
         elif strategy == "evolutionary":
             # Genetic algorithm optimization
@@ -550,6 +583,10 @@ def main(argv: list[str] | None = None) -> int:
         "--cluster",
         action="store_true",
         help="Enable functional clustering (groups bypass caps near ICs, etc.)",
+    )
+    optimize_parser.add_argument(
+        "--constraints",
+        help="Path to YAML file with grouping constraints",
     )
     optimize_parser.add_argument(
         "--dry-run",

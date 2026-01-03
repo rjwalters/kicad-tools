@@ -14,6 +14,12 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.optim.components import Component, FunctionalCluster, Keepout, Pin, Spring
 from kicad_tools.optim.config import PlacementConfig
+from kicad_tools.optim.constraints import (
+    ConstraintType,
+    ConstraintViolation,
+    GroupingConstraint,
+    validate_grouping_constraints,
+)
 from kicad_tools.optim.geometry import Polygon, Vector2D
 
 if TYPE_CHECKING:
@@ -52,6 +58,7 @@ class PlacementOptimizer:
         self.springs: list[Spring] = []
         self.keepouts: list[Keepout] = []
         self.clusters: list[FunctionalCluster] = []
+        self.grouping_constraints: list[GroupingConstraint] = []
         self._component_map: dict[str, Component] = {}
 
     @classmethod
@@ -289,6 +296,36 @@ class PlacementOptimizer:
     def get_component(self, ref: str) -> Component | None:
         """Get component by reference."""
         return self._component_map.get(ref)
+
+    def add_grouping_constraint(self, constraint: GroupingConstraint) -> None:
+        """
+        Add a grouping constraint to the optimizer.
+
+        Constraints define spatial relationships between component groups
+        and are enforced as soft penalty forces during optimization.
+
+        Args:
+            constraint: Grouping constraint to add
+        """
+        self.grouping_constraints.append(constraint)
+
+    def add_grouping_constraints(self, constraints: list[GroupingConstraint]) -> None:
+        """
+        Add multiple grouping constraints to the optimizer.
+
+        Args:
+            constraints: List of grouping constraints to add
+        """
+        self.grouping_constraints.extend(constraints)
+
+    def validate_constraints(self) -> list[ConstraintViolation]:
+        """
+        Check if current placement satisfies all grouping constraints.
+
+        Returns:
+            List of constraint violations (empty if all satisfied)
+        """
+        return validate_grouping_constraints(self.components, self.grouping_constraints)
 
     def add_keepout(
         self, outline: Polygon, charge_multiplier: float = 10.0, name: str = ""
@@ -640,6 +677,241 @@ class PlacementOptimizer:
 
         return force1, force2
 
+    def compute_constraint_forces(
+        self,
+        constraint_stiffness: float = 50.0,
+    ) -> dict[str, Vector2D]:
+        """
+        Compute penalty forces from grouping constraints.
+
+        Constraints act as soft springs that pull components toward
+        satisfying the constraint conditions.
+
+        Args:
+            constraint_stiffness: Stiffness of constraint penalty springs
+
+        Returns:
+            Dict mapping component ref to constraint penalty force
+        """
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+
+        if not self.grouping_constraints:
+            return forces
+
+        all_refs = list(self._component_map.keys())
+
+        for group in self.grouping_constraints:
+            members = group.get_resolved_members(all_refs)
+            member_comps = [
+                self._component_map[ref] for ref in members if ref in self._component_map
+            ]
+
+            if len(member_comps) < 2:
+                continue
+
+            for constraint in group.constraints:
+                constraint_forces = self._compute_single_constraint_forces(
+                    constraint, member_comps, constraint_stiffness
+                )
+                for ref, force in constraint_forces.items():
+                    forces[ref] = forces[ref] + force
+
+        return forces
+
+    def _compute_single_constraint_forces(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute forces for a single constraint."""
+        forces: dict[str, Vector2D] = {}
+
+        if constraint.constraint_type == ConstraintType.MAX_DISTANCE:
+            forces = self._constraint_force_max_distance(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.ALIGNMENT:
+            forces = self._constraint_force_alignment(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.ORDERING:
+            forces = self._constraint_force_ordering(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.WITHIN_BOX:
+            forces = self._constraint_force_within_box(constraint, members, stiffness)
+        elif constraint.constraint_type == ConstraintType.RELATIVE_POSITION:
+            forces = self._constraint_force_relative_position(constraint, members, stiffness)
+
+        return forces
+
+    def _constraint_force_max_distance(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for max_distance constraint."""
+        forces = {}
+        params = constraint.parameters
+        anchor_ref = params["anchor"]
+        radius = params["radius_mm"]
+
+        anchor = self._component_map.get(anchor_ref)
+        if not anchor:
+            return forces
+
+        for comp in members:
+            if comp.ref == anchor_ref:
+                continue
+
+            dx = comp.x - anchor.x
+            dy = comp.y - anchor.y
+            dist = math.sqrt(dx * dx + dy * dy)
+
+            if dist > radius and dist > 1e-10:
+                # Pull toward anchor
+                excess = dist - radius
+                direction = Vector2D(-dx / dist, -dy / dist)
+                forces[comp.ref] = direction * (stiffness * excess)
+
+        return forces
+
+    def _constraint_force_alignment(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for alignment constraint."""
+        forces = {}
+        params = constraint.parameters
+        axis = params["axis"]
+
+        if len(members) < 2:
+            return forces
+
+        # Compute target position (mean)
+        if axis == "horizontal":
+            target = sum(comp.y for comp in members) / len(members)
+            for comp in members:
+                deviation = target - comp.y
+                forces[comp.ref] = Vector2D(0.0, stiffness * deviation)
+        else:  # vertical
+            target = sum(comp.x for comp in members) / len(members)
+            for comp in members:
+                deviation = target - comp.x
+                forces[comp.ref] = Vector2D(stiffness * deviation, 0.0)
+
+        return forces
+
+    def _constraint_force_ordering(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for ordering constraint."""
+        forces = {}
+        params = constraint.parameters
+        axis = params["axis"]
+        expected_order = params["order"]
+
+        comp_by_ref = {comp.ref: comp for comp in members}
+        ordered_comps = [(ref, comp_by_ref[ref]) for ref in expected_order if ref in comp_by_ref]
+
+        if len(ordered_comps) < 2:
+            return forces
+
+        # Check adjacent pairs and push to correct order
+        for i in range(len(ordered_comps) - 1):
+            ref1, comp1 = ordered_comps[i]
+            ref2, comp2 = ordered_comps[i + 1]
+
+            if axis == "horizontal":
+                if comp1.x >= comp2.x:
+                    # Push comp1 left, comp2 right
+                    overlap = comp1.x - comp2.x + 1.0  # Small margin
+                    forces[ref1] = forces.get(ref1, Vector2D(0, 0)) + Vector2D(
+                        -stiffness * overlap / 2, 0
+                    )
+                    forces[ref2] = forces.get(ref2, Vector2D(0, 0)) + Vector2D(
+                        stiffness * overlap / 2, 0
+                    )
+            else:  # vertical
+                if comp1.y >= comp2.y:
+                    overlap = comp1.y - comp2.y + 1.0
+                    forces[ref1] = forces.get(ref1, Vector2D(0, 0)) + Vector2D(
+                        0, -stiffness * overlap / 2
+                    )
+                    forces[ref2] = forces.get(ref2, Vector2D(0, 0)) + Vector2D(
+                        0, stiffness * overlap / 2
+                    )
+
+        return forces
+
+    def _constraint_force_within_box(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for within_box constraint."""
+        forces = {}
+        params = constraint.parameters
+        box_x = params["x"]
+        box_y = params["y"]
+        box_width = params["width"]
+        box_height = params["height"]
+
+        x_min, x_max = box_x, box_x + box_width
+        y_min, y_max = box_y, box_y + box_height
+
+        for comp in members:
+            fx, fy = 0.0, 0.0
+
+            if comp.x < x_min:
+                fx = stiffness * (x_min - comp.x)
+            elif comp.x > x_max:
+                fx = stiffness * (x_max - comp.x)
+
+            if comp.y < y_min:
+                fy = stiffness * (y_min - comp.y)
+            elif comp.y > y_max:
+                fy = stiffness * (y_max - comp.y)
+
+            if fx != 0.0 or fy != 0.0:
+                forces[comp.ref] = Vector2D(fx, fy)
+
+        return forces
+
+    def _constraint_force_relative_position(
+        self,
+        constraint,
+        members: list[Component],
+        stiffness: float,
+    ) -> dict[str, Vector2D]:
+        """Compute penalty force for relative_position constraint."""
+        forces = {}
+        params = constraint.parameters
+        reference_ref = params["reference"]
+        dx = params["dx"]
+        dy = params["dy"]
+
+        reference = self._component_map.get(reference_ref)
+        if not reference:
+            return forces
+
+        expected_x = reference.x + dx
+        expected_y = reference.y + dy
+
+        for comp in members:
+            if comp.ref == reference_ref:
+                continue
+
+            # Pull toward expected position
+            error_x = expected_x - comp.x
+            error_y = expected_y - comp.y
+
+            forces[comp.ref] = Vector2D(stiffness * error_x, stiffness * error_y)
+
+        return forces
+
     def compute_boundary_force(self, point: Vector2D) -> Vector2D:
         """
         Compute force keeping point inside board boundary.
@@ -798,7 +1070,15 @@ class PlacementOptimizer:
                     r = Vector2D(pin2.x, pin2.y) - comp2.position()
                     torques[comp2.ref] += r.cross(force2)
 
-        # 4. Rotation potential torque (torsion spring toward 90 deg slots)
+        # 5. Grouping constraint forces
+        if self.grouping_constraints:
+            constraint_forces = self.compute_constraint_forces()
+            for ref, force in constraint_forces.items():
+                comp = self._component_map.get(ref)
+                if comp and not comp.fixed:
+                    forces[ref] = forces[ref] + force
+
+        # 6. Rotation potential torque (torsion spring toward 90 deg slots)
         for comp in self.components:
             if not comp.fixed:
                 rot_torque = comp.compute_rotation_potential_torque(self.config.rotation_stiffness)
