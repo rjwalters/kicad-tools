@@ -96,7 +96,8 @@ def classify_thermal_properties(
     for fp in pcb.footprints:
         ref = fp.reference
         value = getattr(fp, "value", "") or ""
-        footprint_name = fp.footprint_library_id or ""
+        # Try footprint_library_id first, then fall back to name
+        footprint_name = getattr(fp, "footprint_library_id", None) or getattr(fp, "name", "") or ""
 
         # Classify based on reference prefix and value
         thermal = _classify_component(ref, value, footprint_name, fp)

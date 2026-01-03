@@ -11,6 +11,7 @@ This directory contains example projects demonstrating common workflows with kic
 | [03-drc-checking](03-drc-checking/) | Parse DRC reports, check manufacturer rules | DRC parsing, manufacturer validation |
 | [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
 | [05-end-to-end](05-end-to-end/) | Create complete designs programmatically | Circuit blocks, power rails, schematic generation |
+| [06-intelligent-placement](06-intelligent-placement/) | v0.6.0 intelligent placement for AI agents | Clustering, edge detection, thermal, sessions |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 | [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
@@ -101,6 +102,33 @@ debug = DebugHeader(sch, x=150, y=100, interface="swd")
 
 # Write output
 sch.write("output/board.kicad_sch")
+```
+
+### 06 - Intelligent Placement (v0.6.0)
+
+Use intelligent placement features designed for AI agent workflows.
+
+```python
+from kicad_tools.optim import (
+    PlacementSession,
+    detect_functional_clusters,
+    detect_edge_components,
+    classify_thermal_properties,
+)
+from kicad_tools.schema.pcb import PCB
+
+# Load PCB and create session
+pcb = PCB.load("board.kicad_pcb")
+session = PlacementSession(pcb)
+
+# Query a move before applying
+result = session.query_move("C1", 45.0, 32.0)
+if result.score_delta < 0:  # Improvement
+    session.apply_move("C1", 45.0, 32.0)
+
+# Commit changes
+session.commit()
+pcb.save("optimized.kicad_pcb")
 ```
 
 ### LLM Routing
