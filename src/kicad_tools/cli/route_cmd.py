@@ -355,6 +355,14 @@ def main(argv: list[str] | None = None) -> int:
             "(e.g., 'GND:B.Cu,+3.3V:F.Cu')"
         ),
     )
+    parser.add_argument(
+        "--edge-clearance",
+        type=float,
+        help=(
+            "Copper-to-edge clearance in mm. Blocks routing within this distance "
+            "of the board edge. Common values: 0.25-0.5mm (default: no clearance)"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -417,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.differential_pairs:
             print("DiffPair: enabled")
 
+        if args.edge_clearance:
+            print(f"Edge:     {args.edge_clearance}mm clearance")
         if args.verbose:
             print("\nDesign Rules:")
             print(f"  Grid resolution: {rules.grid_resolution}mm")
@@ -424,6 +434,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Clearance:       {rules.trace_clearance}mm")
             print(f"  Via drill:       {rules.via_drill}mm")
             print(f"  Via diameter:    {rules.via_diameter}mm")
+            if args.edge_clearance:
+                print(f"  Edge clearance:  {args.edge_clearance}mm")
 
     # Load PCB
     if not quiet:
@@ -434,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                 str(pcb_path),
                 skip_nets=skip_nets,
                 rules=rules,
+                edge_clearance=args.edge_clearance,
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)

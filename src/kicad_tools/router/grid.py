@@ -674,3 +674,118 @@ class RoutingGrid:
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):
             return False
         return self.grid[layer_index][gy][gx].is_zone
+
+    # =========================================================================
+    # BOARD EDGE CLEARANCE SUPPORT
+    # =========================================================================
+
+    def add_edge_keepout(
+        self,
+        edge_segments: list[tuple[tuple[float, float], tuple[float, float]]],
+        clearance: float,
+    ) -> int:
+        """Block cells within clearance distance of board edge segments.
+
+        This prevents routes from being placed too close to the board edge,
+        which would violate copper-to-edge clearance DRC rules.
+
+        Args:
+            edge_segments: List of (start, end) tuples defining edge line segments.
+                          Each segment is ((x1, y1), (x2, y2)) in world coordinates.
+            clearance: Edge clearance distance in mm.
+
+        Returns:
+            Number of cells blocked.
+        """
+        if clearance <= 0 or not edge_segments:
+            return 0
+
+        blocked_count = 0
+        clearance_cells = int(clearance / self.resolution) + 1
+
+        # Get all routable layer indices
+        layer_indices = self.get_routable_indices()
+
+        for (x1, y1), (x2, y2) in edge_segments:
+            # Mark cells along each edge segment with clearance buffer
+            blocked_count += self._mark_edge_segment_keepout(
+                x1, y1, x2, y2, clearance_cells, layer_indices
+            )
+
+        return blocked_count
+
+    def _mark_edge_segment_keepout(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        clearance_cells: int,
+        layer_indices: list[int],
+    ) -> int:
+        """Mark cells within clearance of a single edge segment as blocked.
+
+        Uses Bresenham's algorithm to walk along the segment and blocks all
+        cells within the clearance distance on all routable layers.
+
+        Args:
+            x1, y1: Start point in world coordinates
+            x2, y2: End point in world coordinates
+            clearance_cells: Number of grid cells for clearance buffer
+            layer_indices: Grid indices of layers to block
+
+        Returns:
+            Number of cells blocked.
+        """
+        gx1, gy1 = self.world_to_grid(x1, y1)
+        gx2, gy2 = self.world_to_grid(x2, y2)
+
+        blocked_count = 0
+        blocked_cells: set[tuple[int, int]] = set()
+
+        def mark_with_clearance(gx: int, gy: int) -> None:
+            """Mark cells within clearance radius of a point."""
+            nonlocal blocked_count
+            for dy in range(-clearance_cells, clearance_cells + 1):
+                for dx in range(-clearance_cells, clearance_cells + 1):
+                    nx, ny = gx + dx, gy + dy
+                    if (nx, ny) in blocked_cells:
+                        continue
+                    if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        # Check if within circular clearance (not square)
+                        if dx * dx + dy * dy <= clearance_cells * clearance_cells:
+                            blocked_cells.add((nx, ny))
+                            for layer_idx in layer_indices:
+                                cell = self.grid[layer_idx][ny][nx]
+                                if not cell.blocked:
+                                    cell.blocked = True
+                                    cell.is_obstacle = True
+                                    blocked_count += 1
+
+        # Walk along the segment using Bresenham's algorithm
+        if gx1 == gx2:  # Vertical line
+            for gy in range(min(gy1, gy2), max(gy1, gy2) + 1):
+                mark_with_clearance(gx1, gy)
+        elif gy1 == gy2:  # Horizontal line
+            for gx in range(min(gx1, gx2), max(gx1, gx2) + 1):
+                mark_with_clearance(gx, gy1)
+        else:  # Diagonal - use Bresenham
+            dx = abs(gx2 - gx1)
+            dy = abs(gy2 - gy1)
+            sx = 1 if gx1 < gx2 else -1
+            sy = 1 if gy1 < gy2 else -1
+            err = dx - dy
+            gx, gy = gx1, gy1
+            while True:
+                mark_with_clearance(gx, gy)
+                if gx == gx2 and gy == gy2:
+                    break
+                e2 = 2 * err
+                if e2 > -dy:
+                    err -= dy
+                    gx += sx
+                if e2 < dx:
+                    err += dx
+                    gy += sy
+
+        return blocked_count

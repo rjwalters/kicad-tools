@@ -563,6 +563,67 @@ def _extract_pad_blocks(section: str) -> list[str]:
     return pad_blocks
 
 
+def _extract_edge_segments(
+    pcb_text: str,
+) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Extract board edge segments from Edge.Cuts layer.
+
+    Parses gr_rect and gr_line elements on the Edge.Cuts layer to build
+    a list of line segments defining the board outline.
+
+    Args:
+        pcb_text: Contents of a .kicad_pcb file
+
+    Returns:
+        List of ((x1, y1), (x2, y2)) tuples for each edge segment.
+    """
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+
+    # Look for gr_rect on Edge.Cuts (simple rectangular boards)
+    for rect_match in re.finditer(
+        r"\(gr_rect\s+\(start\s+([\d.]+)\s+([\d.]+)\)\s+\(end\s+([\d.]+)\s+([\d.]+)\)"
+        r'[^)]*\(layer\s+"Edge\.Cuts"\)',
+        pcb_text,
+    ):
+        x1, y1, x2, y2 = map(float, rect_match.groups())
+        # Convert rectangle to 4 line segments
+        segments.extend(
+            [
+                ((x1, y1), (x2, y1)),  # Top
+                ((x2, y1), (x2, y2)),  # Right
+                ((x2, y2), (x1, y2)),  # Bottom
+                ((x1, y2), (x1, y1)),  # Left
+            ]
+        )
+
+    # Also handle gr_rect where layer comes before coordinates
+    for rect_match in re.finditer(
+        r'\(gr_rect[^)]*\(layer\s+"Edge\.Cuts"\)[^)]*'
+        r"\(start\s+([\d.]+)\s+([\d.]+)\)\s*\(end\s+([\d.]+)\s+([\d.]+)\)",
+        pcb_text,
+    ):
+        x1, y1, x2, y2 = map(float, rect_match.groups())
+        segments.extend(
+            [
+                ((x1, y1), (x2, y1)),
+                ((x2, y1), (x2, y2)),
+                ((x2, y2), (x1, y2)),
+                ((x1, y2), (x1, y1)),
+            ]
+        )
+
+    # Look for gr_line elements on Edge.Cuts (complex board outlines)
+    for line_match in re.finditer(
+        r"\(gr_line\s+\(start\s+([\d.-]+)\s+([\d.-]+)\)\s+"
+        r'\(end\s+([\d.-]+)\s+([\d.-]+)\)[^)]*\(layer\s+"Edge\.Cuts"\)',
+        pcb_text,
+    ):
+        x1, y1, x2, y2 = map(float, line_match.groups())
+        segments.append(((x1, y1), (x2, y2)))
+
+    return segments
+
+
 def load_pcb_for_routing(
     pcb_path: str,
     skip_nets: list[str] | None = None,
@@ -570,6 +631,7 @@ def load_pcb_for_routing(
     rules: DesignRules | None = None,
     use_pcb_rules: bool = True,
     validate_drc: bool = True,
+    edge_clearance: float | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -586,6 +648,10 @@ def load_pcb_for_routing(
                        file's setup section and use them as defaults.
         validate_drc: If True, validate grid resolution against clearance and
                       emit warnings for potential DRC issues.
+        edge_clearance: Copper-to-edge clearance in mm. If specified, blocks
+                        routing within this distance of the board edge. Common
+                        values are 0.25-0.5mm. If None, no edge clearance is
+                        applied (default for backward compatibility).
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -600,6 +666,9 @@ def load_pcb_for_routing(
         >>>
         >>> # Skip DRC validation warnings
         >>> router, nets = load_pcb_for_routing("board.kicad_pcb", validate_drc=False)
+        >>>
+        >>> # Apply 0.5mm edge clearance
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb", edge_clearance=0.5)
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
@@ -778,6 +847,14 @@ def load_pcb_for_routing(
     for comp in components:
         # Pads already have absolute positions
         router.add_component(comp["ref"], comp["pads"])
+
+    # Apply edge clearance if specified
+    if edge_clearance is not None and edge_clearance > 0:
+        edge_segments = _extract_edge_segments(pcb_text)
+        if edge_segments:
+            blocked_cells = router.grid.add_edge_keepout(edge_segments, edge_clearance)
+            if blocked_cells > 0:
+                print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
 
     return router, net_map
 
