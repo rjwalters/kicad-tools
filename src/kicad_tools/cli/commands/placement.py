@@ -70,6 +70,10 @@ def run_placement_command(args) -> int:
             sub_argv.append("--edge-detect")
         if getattr(args, "thermal", False):
             sub_argv.append("--thermal")
+        if getattr(args, "keepout", None):
+            sub_argv.extend(["--keepout", args.keepout])
+        if getattr(args, "auto_keepout", False):
+            sub_argv.append("--auto-keepout")
         if args.dry_run:
             sub_argv.append("--dry-run")
         if args.verbose:

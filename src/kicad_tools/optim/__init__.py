@@ -82,6 +82,19 @@ from kicad_tools.optim.evolutionary import (
     Individual,
 )
 from kicad_tools.optim.geometry import Polygon, Vector2D
+from kicad_tools.optim.keepout import (
+    KeepoutType,
+    KeepoutViolation,
+    KeepoutZone,
+    add_keepout_zones,
+    create_keepout_from_board_edge,
+    create_keepout_from_component,
+    create_keepout_from_mounting_hole,
+    create_keepout_polygon,
+    detect_keepout_zones,
+    load_keepout_zones_from_yaml,
+    validate_keepout_violations,
+)
 from kicad_tools.optim.placement import PlacementOptimizer
 from kicad_tools.optim.routing import FigureOfMerit, RoutingOptimizer
 from kicad_tools.optim.signal_integrity import (
@@ -154,4 +167,16 @@ __all__ = [
     "classify_thermal_properties",
     "detect_thermal_constraints",
     "get_thermal_summary",
+    # Keepout zone management
+    "KeepoutType",
+    "KeepoutZone",
+    "KeepoutViolation",
+    "create_keepout_from_component",
+    "create_keepout_from_mounting_hole",
+    "create_keepout_from_board_edge",
+    "create_keepout_polygon",
+    "detect_keepout_zones",
+    "add_keepout_zones",
+    "validate_keepout_violations",
+    "load_keepout_zones_from_yaml",
 ]
