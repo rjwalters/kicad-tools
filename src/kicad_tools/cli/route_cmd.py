@@ -670,14 +670,13 @@ def main(argv: list[str] | None = None) -> int:
             route_sexp = router.to_sexp()
 
             # Insert routes and zones before final closing parenthesis
+            # Note: KiCad's S-expression format doesn't support ; comments
             if route_sexp or zone_sexp:
                 output_content = original_content.rstrip().rstrip(")")
                 if zone_sexp:
-                    output_content += "\n  ; === COPPER ZONES ===\n"
-                    output_content += f"  {zone_sexp}\n"
+                    output_content += f"\n  {zone_sexp}\n"
                 if route_sexp:
-                    output_content += "\n  ; === AUTOROUTED TRACES ===\n"
-                    output_content += f"  {route_sexp}\n"
+                    output_content += f"\n  {route_sexp}\n"
                 output_content += ")\n"
             else:
                 output_content = original_content
