@@ -235,6 +235,9 @@ class RoutingGrid:
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.grid[layer_idx][gy][gx]
                         cell.blocked = True
+                        # Mark as pad-blocked so route rip-up won't corrupt it
+                        cell.pad_blocked = True
+                        cell.original_net = pad.net
 
                         is_metal_area = (
                             metal_gx1 <= gx <= metal_gx2 and metal_gy1 <= gy <= metal_gy2
@@ -256,7 +259,9 @@ class RoutingGrid:
 
             # Always mark the center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
-                self.grid[layer_idx][center_gy][center_gx].net = pad.net
+                center_cell = self.grid[layer_idx][center_gy][center_gx]
+                center_cell.net = pad.net
+                center_cell.original_net = pad.net
 
     def add_keepout(
         self,
@@ -317,8 +322,10 @@ class RoutingGrid:
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
                         cell = self.grid[layer_idx][ny][nx]
                         if not cell.blocked:
+                            # First time blocking - this is a route cell
                             marked_cells.add((nx, ny))
                             cell.net = seg.net
+                        # else: cell already blocked (by pad), don't change net
                         cell.blocked = True
 
         # Simple line marking
@@ -393,7 +400,10 @@ class RoutingGrid:
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
                         cell = self.grid[layer_idx][ny][nx]
-                        if cell.net == seg.net:
+                        if cell.pad_blocked:
+                            # Don't unblock pad cells, just restore original net
+                            cell.net = cell.original_net
+                        elif cell.net == seg.net:
                             cell.blocked = False
                             cell.net = 0
 
@@ -433,7 +443,10 @@ class RoutingGrid:
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
                         cell = self.grid[layer_idx][ny][nx]
-                        if cell.net == via.net:
+                        if cell.pad_blocked:
+                            # Don't unblock pad cells, just restore original net
+                            cell.net = cell.original_net
+                        elif cell.net == via.net:
                             cell.blocked = False
                             cell.net = 0
 

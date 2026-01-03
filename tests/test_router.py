@@ -124,6 +124,18 @@ class TestGridCell:
         assert cell.history_cost == 0.5
         assert cell.is_obstacle is True
 
+    def test_grid_cell_pad_ownership_fields(self):
+        """Test pad ownership tracking fields."""
+        cell = GridCell(0, 0, 0, pad_blocked=True, original_net=5)
+        assert cell.pad_blocked is True
+        assert cell.original_net == 5
+
+    def test_grid_cell_pad_ownership_defaults(self):
+        """Test pad ownership tracking field defaults."""
+        cell = GridCell(0, 0, 0)
+        assert cell.pad_blocked is False
+        assert cell.original_net == 0
+
 
 class TestVia:
     """Tests for Via class."""
@@ -886,6 +898,66 @@ class TestRoutingGrid:
         cell = grid.grid[0][gy][gx]
         # Cell should be assigned to net
         assert cell.net == 1
+
+    def test_add_pad_sets_pad_ownership(self):
+        """Test that add_pad sets pad_blocked and original_net fields."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        pad = Pad(x=5.0, y=5.0, width=0.5, height=0.5, net=3, net_name="VCC", layer=Layer.F_CU)
+        grid.add_pad(pad)
+
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        cell = grid.grid[0][gy][gx]
+
+        # Pad cells should be marked as pad-blocked with original_net set
+        assert cell.pad_blocked is True
+        assert cell.original_net == 3
+        assert cell.net == 3
+
+    def test_unmark_route_preserves_pad_cells(self):
+        """Test that unmarking a route doesn't corrupt pad cells.
+
+        This is the key bug fix from issue #294: when a route passes over a pad
+        cell and then gets ripped up, the pad cell should remain blocked with
+        its original net, not be cleared to net=0.
+        """
+        rules = DesignRules(trace_clearance=0.1, trace_width=0.2)
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        # Add a pad at (5, 5) with net=3
+        pad = Pad(x=5.0, y=5.0, width=0.5, height=0.5, net=3, net_name="VCC", layer=Layer.F_CU)
+        grid.add_pad(pad)
+
+        # Verify pad cell state before marking route
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        cell = grid.grid[0][gy][gx]
+        assert cell.pad_blocked is True
+        assert cell.original_net == 3
+        assert cell.net == 3
+        assert cell.blocked is True
+
+        # Create a route that passes through the pad area (same net)
+        route = Route(net=3, net_name="VCC")
+        route.segments.append(
+            Segment(x1=4.0, y1=5.0, x2=6.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=3)
+        )
+
+        # Mark the route
+        grid.mark_route(route)
+
+        # Cell should still be blocked with net=3
+        assert cell.blocked is True
+        assert cell.net == 3
+
+        # Now unmark (rip-up) the route
+        grid.unmark_route(route)
+
+        # BUG FIX: Pad cell should STILL be blocked with its original net
+        # Before the fix, this would have been cleared to blocked=False, net=0
+        assert cell.blocked is True, "Pad cell should remain blocked after route rip-up"
+        assert cell.net == 3, "Pad cell should retain its original net after route rip-up"
+        assert cell.pad_blocked is True, "pad_blocked flag should be preserved"
 
     def test_grid_bounds_clamping(self):
         """Test coordinate clamping at grid boundaries."""
