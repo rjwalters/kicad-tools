@@ -81,10 +81,6 @@ The complete agent PCB design workflow:
 - **API Refinements**: unified `Project` class, progress callbacks, actionable errors
 - **Examples**: end-to-end PCB design, agent integration examples
 
----
-
-## Planned Versions
-
 ### v0.6.0 - Intelligent Placement
 
 **Focus**: Help agents make better initial component placement decisions.
@@ -93,19 +89,23 @@ Placement is where agents struggle most—random placement leads to unroutable
 boards. This release adds intelligence to the placement step.
 
 **Placement Engine**
-- [ ] Functional clustering (group related components: MCU+bypass caps, USB+ESD)
-- [ ] Thermal-aware placement (power components near edges, heat spreading)
-- [ ] Signal integrity hints (keep high-speed traces short, minimize stubs)
-- [ ] Edge placement for connectors and interfaces
+- [x] Functional clustering (group related components: MCU+bypass caps, USB+ESD)
+- [x] Thermal-aware placement (power components near edges, heat spreading)
+- [x] Signal integrity hints (keep high-speed traces short, minimize stubs)
+- [x] Edge placement for connectors and interfaces
 
 **Placement Constraints**
-- [ ] Keep-out zones (mechanical, thermal, RF)
-- [ ] Component grouping rules (define which components belong together)
-- [ ] Alignment constraints (grid snap, row/column alignment)
+- [x] Keep-out zones (mechanical, thermal, RF)
+- [x] Component grouping rules (define which components belong together)
+- [x] Alignment constraints (grid snap, row/column alignment)
 
 **Agent Integration**
-- [ ] Placement suggestions with rationale (explainable to LLMs)
-- [ ] Iterative refinement API (agent can query "what if I move X here?")
+- [x] Placement suggestions with rationale (explainable to LLMs)
+- [x] Iterative refinement API (agent can query "what if I move X here?")
+
+---
+
+## Planned Versions
 
 ### v0.7.0 - Design Feedback & Iteration
 
@@ -277,3 +277,4 @@ These are explicitly **not** planned:
 | 0.3.0 | 2025-12-31 | Reasoning: LLM integration, diff pairs, zones |
 | 0.4.0 | 2025-12-31 | Libraries: symbol/footprint creation, pure Python DRC, datasheets |
 | 0.5.0 | 2026-01-02 | Workflow: circuit blocks, Project class, examples |
+| 0.6.0 | 2026-01-03 | Intelligent Placement: clustering, thermal, edge, agent API |
