@@ -2272,6 +2272,149 @@ class TestLoadPcbForRouting:
         assert ("U2", "A1") in pad_keys  # Quoted alphanumeric
         assert ("U2", "B2") in pad_keys  # Quoted alphanumeric
 
+    def test_load_pcb_multiline_pad_format(self, tmp_path):
+        """Test parsing pads in KiCad 7+ multi-line format.
+
+        KiCad 7+ formats pads across multiple lines:
+            (pad "1" smd roundrect
+              (at -0.9500 0.9000)
+              (size 0.6000 1.1000)
+              (roundrect_rratio 0.25)
+              (layers "F.Cu" "F.Paste" "F.Mask")
+              (net 2 "+5V")
+              (uuid "...")
+            )
+
+        This is different from single-line format that older versions used.
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GND")
+  (net 3 "SIG")
+  (footprint "SOT-23-5"
+    (layer "F.Cu")
+    (uuid "test-uuid-1")
+    (at 120 120 180)
+    (fp_text reference "U1"
+      (at 0 -2.05 0)
+      (layer "F.SilkS")
+    )
+    (pad "1" smd roundrect
+      (at -0.9500 0.9000)
+      (size 0.6000 1.1000)
+      (roundrect_rratio 0.25)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "+5V")
+      (uuid "pad-uuid-1")
+    )
+    (pad "2" smd roundrect
+      (at 0.0000 0.9000)
+      (size 0.6000 1.1000)
+      (roundrect_rratio 0.25)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 2 "GND")
+      (uuid "pad-uuid-2")
+    )
+    (pad "3" smd roundrect
+      (at 0.9500 0.9000)
+      (size 0.6000 1.1000)
+      (roundrect_rratio 0.25)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 3 "SIG")
+      (uuid "pad-uuid-3")
+    )
+    (pad "4" smd roundrect
+      (at 0.9500 -0.9000)
+      (size 0.6000 1.1000)
+      (roundrect_rratio 0.25)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 2 "GND")
+      (uuid "pad-uuid-4")
+    )
+    (pad "5" smd roundrect
+      (at -0.9500 -0.9000)
+      (size 0.6000 1.1000)
+      (roundrect_rratio 0.25)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "+5V")
+      (uuid "pad-uuid-5")
+    )
+  )
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x03"
+    (layer "F.Cu")
+    (uuid "test-uuid-2")
+    (at 140 120)
+    (fp_text reference "J1"
+      (at 0 -3)
+      (layer "F.SilkS")
+    )
+    (pad "1" thru_hole oval
+      (at 0 0)
+      (size 1.7 1.7)
+      (drill 1.0)
+      (layers "*.Cu")
+      (net 1 "+5V")
+      (uuid "pad-uuid-j1-1")
+    )
+    (pad "2" thru_hole oval
+      (at 0 2.54)
+      (size 1.7 1.7)
+      (drill 1.0)
+      (layers "*.Cu")
+      (net 2 "GND")
+      (uuid "pad-uuid-j1-2")
+    )
+    (pad "3" thru_hole oval
+      (at 0 5.08)
+      (size 1.7 1.7)
+      (drill 1.0)
+      (layers "*.Cu")
+      (net 3 "SIG")
+      (uuid "pad-uuid-j1-3")
+    )
+  )
+)
+"""
+        pcb_file = tmp_path / "multiline_pads.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(str(pcb_file))
+
+        # Should have found all nets
+        assert "+5V" in net_map
+        assert "GND" in net_map
+        assert "SIG" in net_map
+
+        # Should have found all 8 pads (5 from U1 + 3 from J1)
+        assert len(router.pads) == 8, f"Expected 8 pads, got {len(router.pads)}"
+
+        # Check specific pads were parsed correctly
+        pad_refs = {ref for ref, _ in router.pads.keys()}
+        assert "U1" in pad_refs
+        assert "J1" in pad_refs
+
+        # Check all pad numbers from U1 were parsed
+        u1_pads = {num for ref, num in router.pads.keys() if ref == "U1"}
+        assert u1_pads == {"1", "2", "3", "4", "5"}
+
+        # Check J1 pads
+        j1_pads = {num for ref, num in router.pads.keys() if ref == "J1"}
+        assert j1_pads == {"1", "2", "3"}
+
+        # Verify nets were assigned correctly to pads
+        # U1 pin 1 should be on +5V (net 1)
+        pad_u1_1 = router.pads.get(("U1", "1"))
+        assert pad_u1_1 is not None
+        assert pad_u1_1.net == 1  # +5V
+
 
 # =============================================================================
 # Net Class Setup and PCB Merge Tests (Issue #45 - KiCad 7+ Compatibility)
