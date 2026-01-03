@@ -194,6 +194,7 @@ def cmd_optimize(args) -> int:
 
     strategy = args.strategy
     enable_clustering = getattr(args, "cluster", False)
+    edge_detect = getattr(args, "edge_detect", False)
 
     if not quiet:
         print(f"Optimization strategy: {strategy}")
@@ -201,6 +202,8 @@ def cmd_optimize(args) -> int:
             print(f"Fixed components: {', '.join(fixed_refs)}")
         if enable_clustering:
             print("Functional clustering: enabled")
+        if edge_detect:
+            print("Edge detection: enabled")
 
     try:
         if strategy == "force-directed":
@@ -212,7 +215,7 @@ def cmd_optimize(args) -> int:
 
             with spinner("Creating optimizer from PCB...", quiet=quiet):
                 optimizer = PlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
+                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering, edge_detect=edge_detect
                 )
 
             # Add constraints if loaded
@@ -587,6 +590,11 @@ def main(argv: list[str] | None = None) -> int:
     optimize_parser.add_argument(
         "--constraints",
         help="Path to YAML file with grouping constraints",
+    )
+    optimize_parser.add_argument(
+        "--edge-detect",
+        action="store_true",
+        help="Auto-detect edge components (connectors, mounting holes, etc.)",
     )
     optimize_parser.add_argument(
         "--dry-run",

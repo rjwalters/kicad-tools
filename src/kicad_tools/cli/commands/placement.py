@@ -64,6 +64,8 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--fixed", args.fixed])
         if getattr(args, "constraints", None):
             sub_argv.extend(["--constraints", args.constraints])
+        if getattr(args, "edge_detect", False):
+            sub_argv.append("--edge-detect")
         if args.dry_run:
             sub_argv.append("--dry-run")
         if args.verbose:
