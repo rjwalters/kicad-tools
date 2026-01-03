@@ -105,7 +105,24 @@ from kicad_tools.optim.keepout import (
     validate_keepout_violations,
 )
 from kicad_tools.optim.placement import PlacementOptimizer
+from kicad_tools.optim.query import (
+    Rectangle,
+    find_best_position,
+    process_json_request,
+    query_alignment,
+    query_position,
+    query_swap,
+)
 from kicad_tools.optim.routing import FigureOfMerit, RoutingOptimizer
+from kicad_tools.optim.session import (
+    Move,
+    MoveResult,
+    PlacementSession,
+    RoutingImpact,
+    SessionState,
+    Violation,
+)
+from kicad_tools.optim.session import PlacementSuggestion as SessionPlacementSuggestion
 from kicad_tools.optim.signal_integrity import (
     NetClassification,
     SignalClass,
@@ -118,12 +135,12 @@ from kicad_tools.optim.signal_integrity import (
 from kicad_tools.optim.suggestions import (
     AlternativePosition,
     ForceContribution,
-    PlacementSuggestion,
     RationaleType,
     explain_placement,
     generate_placement_suggestions,
     suggest_improvement,
 )
+from kicad_tools.optim.suggestions import PlacementSuggestion
 from kicad_tools.optim.thermal import (
     ThermalClass,
     ThermalConfig,
@@ -148,15 +165,33 @@ __all__ = [
     "EvolutionaryPlacementOptimizer",
     "RoutingOptimizer",
     "FigureOfMerit",
+    # Session and query API
+    "PlacementSession",
+    "MoveResult",
+    "RoutingImpact",
+    "SessionPlacementSuggestion",
+    "SessionState",
+    "Move",
+    "Violation",
+    "Rectangle",
+    # Query functions
+    "query_position",
+    "query_swap",
+    "query_alignment",
+    "find_best_position",
+    "process_json_request",
+    # Geometry
     "Vector2D",
     "Polygon",
+    # Components
     "Component",
     "Spring",
     "Keepout",
+    "Pin",
+    # Config
     "PlacementConfig",
     "EvolutionaryConfig",
     "Individual",
-    "Pin",
     # Functional clustering
     "FunctionalCluster",
     "ClusterType",
