@@ -543,3 +543,130 @@ class TestLayerStackPresets:
         layer = stack.get_layer_by_name("B.Cu")
         assert layer is not None
         assert layer.index == 1
+
+
+class TestRipUpRoutePreservesPadClearance:
+    """Tests for issue #292: Pad clearance zones must not be corrupted during rip-up/reroute.
+
+    When a route's clearance zone overlaps with a pad's clearance zone, the pad's
+    cells should NOT have their net overwritten. This prevents the cells from being
+    incorrectly cleared during route rip-up.
+    """
+
+    @pytest.fixture
+    def grid(self):
+        """Create a routing grid with fine resolution for precise testing."""
+        rules = DesignRules(grid_resolution=0.1, trace_width=0.2, trace_clearance=0.2)
+        return RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    def test_segment_near_pad_preserves_pad_net_after_ripup(self, grid):
+        """Test that unmarking a segment doesn't clear pad blocking.
+
+        Scenario:
+        1. Add a pad at (5.0, 5.0) with net=1
+        2. Add a segment that passes near the pad (overlapping clearance zones)
+        3. Unmark (rip-up) the segment
+        4. Verify the pad's cells still have net=1 and are still blocked
+        """
+        # Add a pad at (5.0, 5.0)
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="PAD_NET")
+        grid.add_pad(pad)
+
+        # Get pad center position for verification
+        pad_gx, pad_gy = grid.world_to_grid(5.0, 5.0)
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+
+        # Verify pad is properly set up
+        pad_cell = grid.grid[layer_idx][pad_gy][pad_gx]
+        assert pad_cell.blocked is True, "Pad center should be blocked"
+        assert pad_cell.net == 1, "Pad center should have net=1"
+
+        # Create a segment that passes near the pad (within clearance zone)
+        # Segment runs from (4.5, 5.0) to (5.5, 5.0) - passing through pad area
+        seg = Segment(x1=4.0, y1=5.0, x2=6.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=2)
+        route = Route(net=2, net_name="ROUTE_NET", segments=[seg], vias=[])
+
+        # Mark the route (this should NOT overwrite the pad's net)
+        grid.mark_route(route)
+
+        # Now rip-up the route
+        grid.unmark_route(route)
+
+        # CRITICAL: Verify pad's cells are still blocked and have the correct net
+        pad_cell_after = grid.grid[layer_idx][pad_gy][pad_gx]
+        assert pad_cell_after.blocked is True, "Pad center should still be blocked after rip-up"
+        assert pad_cell_after.net == 1, "Pad center should still have net=1 after rip-up"
+
+    def test_via_near_pad_preserves_pad_net_after_ripup(self, grid):
+        """Test that unmarking a via doesn't clear pad blocking.
+
+        Scenario similar to segment test but with vias.
+        """
+        # Add a PTH pad at (5.0, 5.0)
+        pad = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.7,
+            height=1.7,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="PAD_NET",
+            through_hole=True,
+            drill=1.0,
+        )
+        grid.add_pad(pad)
+
+        # Get pad center position
+        pad_gx, pad_gy = grid.world_to_grid(5.0, 5.0)
+
+        # Verify pad is properly set up on all layers
+        for layer_idx in range(grid.num_layers):
+            pad_cell = grid.grid[layer_idx][pad_gy][pad_gx]
+            assert pad_cell.blocked is True
+            assert pad_cell.net == 1
+
+        # Create a via near the pad (within clearance zone)
+        via = Via(x=5.5, y=5.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2)
+        route = Route(net=2, net_name="VIA_NET", segments=[], vias=[via])
+
+        # Mark the route
+        grid.mark_route(route)
+
+        # Rip-up the route
+        grid.unmark_route(route)
+
+        # Verify pad's cells are still intact on all layers
+        for layer_idx in range(grid.num_layers):
+            pad_cell_after = grid.grid[layer_idx][pad_gy][pad_gx]
+            assert pad_cell_after.blocked is True, (
+                f"Pad should still be blocked on layer {layer_idx}"
+            )
+            assert pad_cell_after.net == 1, f"Pad should still have net=1 on layer {layer_idx}"
+
+    def test_multiple_ripup_iterations_preserve_pad(self, grid):
+        """Test that multiple rip-up/reroute cycles don't corrupt pad clearance.
+
+        This simulates the negotiated congestion routing scenario where routes
+        are repeatedly ripped up and rerouted.
+        """
+        # Add a pad
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="PAD_NET")
+        grid.add_pad(pad)
+
+        pad_gx, pad_gy = grid.world_to_grid(5.0, 5.0)
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+
+        # Simulate multiple rip-up/reroute iterations
+        for iteration in range(15):
+            seg = Segment(x1=4.0, y1=5.0, x2=6.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=2)
+            route = Route(net=2, net_name="ROUTE_NET", segments=[seg], vias=[])
+
+            grid.mark_route(route)
+            grid.unmark_route(route)
+
+            # After each iteration, pad should still be intact
+            pad_cell = grid.grid[layer_idx][pad_gy][pad_gx]
+            assert pad_cell.blocked is True, (
+                f"Pad should be blocked after iteration {iteration + 1}"
+            )
+            assert pad_cell.net == 1, f"Pad net corrupted after iteration {iteration + 1}"
