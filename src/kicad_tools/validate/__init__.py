@@ -48,6 +48,7 @@ from .checker import DRCChecker
 from .connectivity import ConnectivityIssue, ConnectivityResult, ConnectivityValidator
 from .consistency import ConsistencyIssue, ConsistencyResult, SchematicPCBChecker
 from .netlist import NetlistValidator, SyncIssue, SyncResult
+from .placement import BOMPlacementVerifier, PlacementResult, PlacementStatus
 from .violations import DRCResults, DRCViolation
 
 __all__ = [
@@ -67,4 +68,8 @@ __all__ = [
     "SchematicPCBChecker",
     "ConsistencyIssue",
     "ConsistencyResult",
+    # BOM placement validation
+    "BOMPlacementVerifier",
+    "PlacementStatus",
+    "PlacementResult",
 ]

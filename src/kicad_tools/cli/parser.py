@@ -1220,6 +1220,11 @@ def _add_validate_parser(subparsers) -> None:
         help="Check schematic-to-PCB consistency (components, nets, properties)",
     )
     validate_parser.add_argument(
+        "--placement",
+        action="store_true",
+        help="Check BOM components are placed on PCB",
+    )
+    validate_parser.add_argument(
         "--schematic",
         "-s",
         dest="validate_schematic",
