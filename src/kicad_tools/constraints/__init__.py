@@ -41,6 +41,12 @@ Classes:
     ConstraintManifest: Container for all constraints with serialization
 """
 
+from .conflict import (
+    ConflictResolution,
+    ConflictType,
+    ConstraintConflict,
+    ConstraintConflictDetector,
+)
 from .locks import (
     ComponentLock,
     LockType,
@@ -61,6 +67,11 @@ __all__ = [
     "NetRouteLock",
     "RegionConstraint",
     "RelativeConstraint",
+    # Conflict detection
+    "ConflictType",
+    "ConflictResolution",
+    "ConstraintConflict",
+    "ConstraintConflictDetector",
     # Serialization
     "ConstraintManifest",
 ]
