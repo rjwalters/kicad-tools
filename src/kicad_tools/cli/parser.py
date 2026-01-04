@@ -37,6 +37,8 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
     kicad-tools analyze <command>      - PCB analysis tools
+    kicad-tools audit <project>        - Manufacturing readiness audit
+    kicad-tools clean <project>        - Clean up old/orphaned files
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -81,6 +83,11 @@ Examples:
     kct footprint generate --list
     kct interactive
     kct interactive --project myboard.kicad_pro
+    kct audit project.kicad_pro --mfr jlcpcb
+    kct audit board.kicad_pcb --mfr jlcpcb --skip-erc
+    kct audit project.kicad_pro --format json --strict
+    kct clean project.kicad_pro
+    kct clean project.kicad_pro --deep --force
 """
 
 
@@ -137,7 +144,10 @@ def create_parser() -> argparse.ArgumentParser:
     _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
     _add_estimate_parser(subparsers)
+    _add_audit_parser(subparsers)
+    _add_suggest_parser(subparsers)
     _add_net_status_parser(subparsers)
+    _add_clean_parser(subparsers)
 
     return parser
 
@@ -1661,4 +1671,50 @@ def _add_net_status_parser(subparsers) -> None:
         dest="net_status_verbose",
         action="store_true",
         help="Show all pads with coordinates",
+    )
+
+
+def _add_clean_parser(subparsers) -> None:
+    """Add clean subcommand parser for project cleanup."""
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Clean up old/orphaned files from KiCad projects",
+    )
+    clean_parser.add_argument(
+        "clean_project",
+        metavar="project",
+        help="Path to .kicad_pro file",
+    )
+    clean_parser.add_argument(
+        "--dry-run",
+        dest="clean_dry_run",
+        action="store_true",
+        help="Show what would be cleaned without deleting (default behavior)",
+    )
+    clean_parser.add_argument(
+        "--deep",
+        dest="clean_deep",
+        action="store_true",
+        help="Also delete generated output files (gerbers, BOM exports, etc.)",
+    )
+    clean_parser.add_argument(
+        "--force",
+        "-f",
+        dest="clean_force",
+        action="store_true",
+        help="Delete files without confirmation (for CI/automation)",
+    )
+    clean_parser.add_argument(
+        "--format",
+        dest="clean_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    clean_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="clean_verbose",
+        action="store_true",
+        help="Show detailed output",
     )

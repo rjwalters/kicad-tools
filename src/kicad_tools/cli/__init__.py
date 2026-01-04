@@ -41,6 +41,7 @@ from .commands import (
     run_analyze_command,
     run_audit_command,
     run_check_command,
+    run_clean_command,
     run_config_command,
     run_constraints_command,
     run_datasheet_command,
@@ -301,6 +302,9 @@ def _dispatch_command(args) -> int:
         if hasattr(args, "net_status_verbose") and args.net_status_verbose:
             sub_argv.append("--verbose")
         return net_status_cmd(sub_argv)
+
+    elif args.command == "clean":
+        return run_clean_command(args)
 
     return 0
 

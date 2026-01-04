@@ -78,6 +78,9 @@ kicad-net-status = "kicad_tools.cli:net_status_main"
 # Manufacturer design rules
 kicad-fab-rules = "kicad_tools.cli.fab_rules_cmd:main"
 
+# Project tools
+kicad-project-clean = "kicad_tools.cli.clean_cmd:main"
+
 [project.optional-dependencies]
 # LCSC parts API access
 parts = [
