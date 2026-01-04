@@ -16,6 +16,7 @@ from kicad_tools.exceptions import (
     KiCadToolsError,
     ParseError,
     RoutingError,
+    SExpSnippetExtractor,
     SourcePosition,
     ValidationError,
     ValidationErrorGroup,
@@ -427,6 +428,276 @@ class TestErrorCodes:
         err2 = ConfigurationError("test", error_code="CONFIG_INVALID")
         assert err2.error_code == "CONFIG_INVALID"
 
+
+class TestSExpSnippetExtractor:
+    """Tests for SExpSnippetExtractor class."""
+
+    @pytest.fixture
+    def sample_sexp_file(self, tmp_path):
+        """Create a sample S-expression file for testing."""
+        content = """\
+(kicad_pcb
+  (version 20231120)
+  (generator "test")
+  (footprint "Capacitor_SMD:C_0402"
+    (at 45.2 32.1)
+    (property "Reference" "C1"
+      (at 0 -1.5 0)
+    )
+    (property "Value" "100nF"
+      (at 0 1.5 0)
+    )
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5))
+  )
+  (footprint "Resistor_SMD:R_0603"
+    (at 50.0 32.1)
+    (property "Reference" "R1"
+      (at 0 -1.5 0)
+    )
+    (property "Value" "10k"
+      (at 0 1.5 0)
+    )
+  )
+)"""
+        file_path = tmp_path / "test.kicad_pcb"
+        file_path.write_text(content)
+        return file_path
+
+    def test_extract_basic(self, sample_sexp_file):
+        """Test basic line extraction with default context."""
+        extractor = SExpSnippetExtractor()
+        snippet = extractor.extract(sample_sexp_file, line=5)
+
+        # Should contain the target line
+        assert "(at 45.2 32.1)" in snippet
+        # Should have the arrow marker on line 5
+        assert "->    5 |" in snippet
+        # Should have context lines without markers
+        assert "      4 |" in snippet
+        assert "      6 |" in snippet
+
+    def test_extract_with_custom_context(self, sample_sexp_file):
+        """Test extraction with custom context lines."""
+        extractor = SExpSnippetExtractor(context_lines=1)
+        snippet = extractor.extract(sample_sexp_file, line=5)
+
+        lines = snippet.strip().split("\n")
+        # With context_lines=1, should have 3 lines (1 before, target, 1 after)
+        assert len(lines) == 3
+
+    def test_extract_override_context(self, sample_sexp_file):
+        """Test that context_lines parameter overrides default."""
+        extractor = SExpSnippetExtractor(context_lines=1)
+        snippet = extractor.extract(sample_sexp_file, line=5, context_lines=5)
+
+        lines = snippet.strip().split("\n")
+        # Should use the override value
+        assert len(lines) > 3
+
+    def test_extract_first_line(self, sample_sexp_file):
+        """Test extraction at the first line of the file."""
+        extractor = SExpSnippetExtractor(context_lines=3)
+        snippet = extractor.extract(sample_sexp_file, line=1)
+
+        # Should start with line 1, no lines before
+        assert "->    1 |" in snippet
+        # Should have lines after
+        assert "      2 |" in snippet
+
+    def test_extract_last_line(self, sample_sexp_file):
+        """Test extraction at the last line of the file."""
+        content = sample_sexp_file.read_text()
+        total_lines = len(content.splitlines())
+
+        extractor = SExpSnippetExtractor(context_lines=3)
+        snippet = extractor.extract(sample_sexp_file, line=total_lines)
+
+        # Should have the arrow on the last line
+        assert f"-> {total_lines:4d} |" in snippet
+
+    def test_extract_custom_marker(self, sample_sexp_file):
+        """Test extraction with custom marker."""
+        extractor = SExpSnippetExtractor(marker=">>>")
+        snippet = extractor.extract(sample_sexp_file, line=5)
+
+        assert ">>>    5 |" in snippet
+
+    def test_extract_line_numbers_displayed(self, sample_sexp_file):
+        """Test that line numbers are correctly displayed."""
+        extractor = SExpSnippetExtractor()
+        snippet = extractor.extract(sample_sexp_file, line=5)
+
+        # Check line numbers are present
+        assert " 4 |" in snippet
+        assert " 5 |" in snippet
+        assert " 6 |" in snippet
+
+    def test_extract_file_not_found(self, tmp_path):
+        """Test extraction with non-existent file."""
+        extractor = SExpSnippetExtractor()
+        with pytest.raises(FileNotFoundError):
+            extractor.extract(tmp_path / "nonexistent.kicad_pcb", line=5)
+
+    def test_extract_line_out_of_range(self, sample_sexp_file):
+        """Test extraction with line number out of range."""
+        extractor = SExpSnippetExtractor()
+        with pytest.raises(ValueError) as exc_info:
+            extractor.extract(sample_sexp_file, line=1000)
+        assert "out of range" in str(exc_info.value)
+
+    def test_extract_line_zero(self, sample_sexp_file):
+        """Test extraction with line 0 (invalid)."""
+        extractor = SExpSnippetExtractor()
+        with pytest.raises(ValueError):
+            extractor.extract(sample_sexp_file, line=0)
+
+    def test_extract_element_footprint(self, sample_sexp_file):
+        """Test extracting footprint element by reference."""
+        extractor = SExpSnippetExtractor()
+        element = extractor.extract_element(sample_sexp_file, element_ref="C1")
+
+        assert element is not None
+        assert "footprint" in element
+        assert "C_0402" in element
+        assert "C1" in element
+
+    def test_extract_element_another_ref(self, sample_sexp_file):
+        """Test extracting a different footprint by reference."""
+        extractor = SExpSnippetExtractor()
+        element = extractor.extract_element(sample_sexp_file, element_ref="R1")
+
+        assert element is not None
+        assert "R_0603" in element
+        assert "R1" in element
+
+    def test_extract_element_not_found(self, sample_sexp_file):
+        """Test extracting non-existent element."""
+        extractor = SExpSnippetExtractor()
+        element = extractor.extract_element(sample_sexp_file, element_ref="U99")
+
+        assert element is None
+
+    def test_extract_element_file_not_found(self, tmp_path):
+        """Test element extraction with non-existent file."""
+        extractor = SExpSnippetExtractor()
+        with pytest.raises(FileNotFoundError):
+            extractor.extract_element(tmp_path / "nonexistent.kicad_pcb", "C1")
+
+    def test_extract_with_header(self, sample_sexp_file):
+        """Test extract_with_header includes file path and line."""
+        extractor = SExpSnippetExtractor()
+        output = extractor.extract_with_header(
+            sample_sexp_file,
+            line=5,
+            message="DRC Error: Clearance violation",
+        )
+
+        assert "DRC Error: Clearance violation" in output
+        assert str(sample_sexp_file) in output
+        assert ":5" in output
+        assert "(at 45.2 32.1)" in output
+
+    def test_extract_with_header_no_message(self, sample_sexp_file):
+        """Test extract_with_header without message."""
+        extractor = SExpSnippetExtractor()
+        output = extractor.extract_with_header(sample_sexp_file, line=5)
+
+        assert str(sample_sexp_file) in output
+        assert "(at 45.2 32.1)" in output
+
+
+class TestParseErrorSnippet:
+    """Tests for ParseError snippet integration."""
+
+    @pytest.fixture
+    def sample_file(self, tmp_path):
+        """Create a sample file for testing."""
+        content = """\
+line 1
+line 2
+line 3
+line 4 - this is the error line
+line 5
+line 6
+line 7"""
+        file_path = tmp_path / "test.txt"
+        file_path.write_text(content)
+        return file_path
+
+    def test_get_snippet(self, sample_file):
+        """Test ParseError.get_snippet() method."""
+        err = ParseError(
+            "Syntax error",
+            file_path=str(sample_file),
+            line=4,
+        )
+        snippet = err.get_snippet()
+
+        assert snippet is not None
+        assert "line 4 - this is the error line" in snippet
+        assert "->    4 |" in snippet
+
+    def test_get_snippet_no_file(self):
+        """Test get_snippet when no file in context."""
+        err = ParseError("Syntax error")
+        snippet = err.get_snippet()
+        assert snippet is None
+
+    def test_get_snippet_no_line(self, sample_file):
+        """Test get_snippet when no line in context."""
+        err = ParseError("Syntax error", file_path=str(sample_file))
+        snippet = err.get_snippet()
+        assert snippet is None
+
+    def test_get_snippet_file_not_found(self, tmp_path):
+        """Test get_snippet when file doesn't exist."""
+        err = ParseError(
+            "Syntax error",
+            file_path=str(tmp_path / "nonexistent.txt"),
+            line=4,
+        )
+        snippet = err.get_snippet()
+        assert snippet is None
+
+    def test_format_with_snippet(self, sample_file):
+        """Test ParseError.format_with_snippet() method."""
+        err = ParseError(
+            "Unexpected token",
+            file_path=str(sample_file),
+            line=4,
+            suggestions=["Check syntax", "Verify encoding"],
+        )
+        formatted = err.format_with_snippet()
+
+        assert "Unexpected token" in formatted
+        assert str(sample_file) in formatted
+        assert ":4" in formatted
+        assert "line 4 - this is the error line" in formatted
+        assert "Suggestions:" in formatted
+        assert "Check syntax" in formatted
+
+    def test_format_with_snippet_no_context(self):
+        """Test format_with_snippet when no file/line available."""
+        err = ParseError("Syntax error")
+        formatted = err.format_with_snippet()
+
+        # Should just have the message
+        assert "Syntax error" in formatted
+
+    def test_format_with_snippet_custom_context_lines(self, sample_file):
+        """Test format_with_snippet with custom context lines."""
+        err = ParseError(
+            "Error",
+            file_path=str(sample_file),
+            line=4,
+        )
+        formatted = err.format_with_snippet(context_lines=1)
+
+        lines = formatted.strip().split("\n")
+        # Should have message, file location, blank, and 3 snippet lines
+        snippet_lines = [l for l in lines if "|" in l]
+        assert len(snippet_lines) == 3  # 1 before, target, 1 after
 
 class TestSourcePosition:
     """Tests for the SourcePosition dataclass."""
