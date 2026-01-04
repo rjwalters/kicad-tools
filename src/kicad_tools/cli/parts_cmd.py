@@ -4,6 +4,7 @@ CLI commands for parts lookup and management.
 Usage:
     kct parts lookup C123456              - Look up LCSC part
     kct parts search "100nF 0402"         - Search for parts
+    kct parts availability design.kicad_sch - Check BOM availability
     kct parts import STM32F103C8T6 --library myproject.kicad_sym
     kct parts cache stats                 - Show cache statistics
     kct parts cache clear                 - Clear the cache
@@ -76,6 +77,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     import_parser.add_argument("--format", choices=["text", "json"], default="text")
 
+    # availability subcommand
+    avail_parser = subparsers.add_parser(
+        "availability", help="Check BOM part availability on LCSC"
+    )
+    avail_parser.add_argument(
+        "schematic", help="Path to .kicad_sch file or BOM CSV"
+    )
+    avail_parser.add_argument(
+        "--quantity", "-q", type=int, default=1,
+        help="Number of boards to manufacture (default: 1)"
+    )
+    avail_parser.add_argument(
+        "--format", choices=["table", "json", "summary"], default="table",
+        help="Output format (default: table)"
+    )
+    avail_parser.add_argument(
+        "--no-alternatives", action="store_true",
+        help="Don't search for alternative parts"
+    )
+    avail_parser.add_argument(
+        "--issues-only", action="store_true",
+        help="Only show parts with availability issues"
+    )
+
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
     cache_subparsers = cache_parser.add_subparsers(dest="cache_action", help="Cache commands")
@@ -96,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         return _search(args)
     elif args.action == "import":
         return _import(args)
+    elif args.action == "availability":
+        return _availability(args)
     elif args.action == "cache":
         return _cache(args)
 
@@ -396,6 +423,200 @@ def _import(args) -> int:
         importer.close()
 
     return 0 if failure_count == 0 else 1
+
+
+def _availability(args) -> int:
+    """Handle parts availability command."""
+    try:
+        from ..cost.availability import (
+            AvailabilityStatus,
+            LCSCAvailabilityChecker,
+        )
+        from ..schema.bom import extract_bom
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    schematic_path = Path(args.schematic)
+    if not schematic_path.exists():
+        print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    # Extract BOM
+    try:
+        bom = extract_bom(str(schematic_path))
+    except Exception as e:
+        print(f"Error loading schematic: {e}", file=sys.stderr)
+        return 1
+
+    if not bom.items:
+        print("No components found in schematic", file=sys.stderr)
+        return 1
+
+    # Check availability
+    checker = LCSCAvailabilityChecker(
+        find_alternatives=not args.no_alternatives,
+    )
+
+    try:
+        result = checker.check_bom(bom, quantity=args.quantity)
+    finally:
+        checker.close()
+
+    # Filter if requested
+    items = result.items
+    if args.issues_only:
+        items = [
+            item for item in items
+            if item.status != AvailabilityStatus.AVAILABLE
+        ]
+
+    # Output
+    if args.format == "json":
+        _availability_json(result, items)
+    elif args.format == "summary":
+        _availability_summary(result, schematic_path)
+    else:
+        _availability_table(result, items, schematic_path, args.quantity)
+
+    # Return error code if issues found
+    if result.out_of_stock or result.missing:
+        return 1
+    return 0
+
+
+def _availability_json(result, items) -> None:
+    """Output availability as JSON."""
+    output = result.to_dict()
+    output["items"] = [item.to_dict() for item in items]
+    print(json.dumps(output, indent=2))
+
+
+def _availability_summary(result, schematic_path: Path) -> None:
+    """Output availability summary."""
+    summary = result.summary()
+
+    print(f"Part Availability Check: {schematic_path.name}")
+    print("=" * 50)
+    print(f"Boards:        {summary['quantity_multiplier']}")
+    print(f"Total parts:   {summary['total_items']}")
+    print()
+    print(f"  ✓ Available:    {summary['available']}")
+    print(f"  ⚠ Low stock:    {summary['low_stock']}")
+    print(f"  ✗ Out of stock: {summary['out_of_stock']}")
+    print(f"  ? Missing:      {summary['missing']}")
+    print()
+
+    if summary['total_cost'] is not None:
+        print(f"Est. cost:     ${summary['total_cost']:.2f}")
+
+    if summary['all_available']:
+        print("\n✓ All parts available")
+    else:
+        print("\n✗ Some parts have availability issues")
+
+
+def _availability_table(result, items, schematic_path: Path, quantity: int) -> None:
+    """Output availability as formatted table."""
+    from ..cost.availability import AvailabilityStatus
+
+    summary = result.summary()
+
+    print()
+    print("=" * 70)
+    print("PART AVAILABILITY CHECK (LCSC)")
+    print("=" * 70)
+    print(f"Schematic: {schematic_path.name}")
+    print(f"Quantity:  {quantity} board(s)")
+    print()
+
+    # Group by status
+    available = [i for i in items if i.status == AvailabilityStatus.AVAILABLE]
+    low_stock = [i for i in items if i.status == AvailabilityStatus.LOW_STOCK]
+    out_of_stock = [i for i in items if i.status == AvailabilityStatus.OUT_OF_STOCK]
+    missing = [
+        i for i in items
+        if i.status in (AvailabilityStatus.NO_LCSC, AvailabilityStatus.NOT_FOUND)
+    ]
+
+    # Available parts (collapsed)
+    if available:
+        print(f"✓ AVAILABLE ({len(available)} parts)")
+        print()
+
+    # Low stock parts
+    if low_stock:
+        print(f"⚠ LOW STOCK ({len(low_stock)} parts):")
+        for item in low_stock:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part})")
+            print(f"    Stock: {item.quantity_available:,} (need {item.quantity_needed:,})")
+            if item.alternatives:
+                print("    Alternatives:")
+                for alt in item.alternatives:
+                    price_info = ""
+                    if alt.price_diff is not None:
+                        if alt.price_diff > 0:
+                            price_info = f", +${alt.price_diff:.4f}"
+                        elif alt.price_diff < 0:
+                            price_info = f", -${abs(alt.price_diff):.4f}"
+                    basic = " [Basic]" if alt.is_basic else ""
+                    print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
+        print()
+
+    # Out of stock parts
+    if out_of_stock:
+        print(f"✗ OUT OF STOCK ({len(out_of_stock)} parts):")
+        for item in out_of_stock:
+            print(f"  {item.reference}: {item.value} ({item.lcsc_part})")
+            if item.lead_time_days:
+                print(f"    Lead time: {item.lead_time_days} days")
+            if item.alternatives:
+                print("    Alternatives:")
+                for alt in item.alternatives:
+                    price_info = ""
+                    if alt.price_diff is not None:
+                        if alt.price_diff > 0:
+                            price_info = f", +${alt.price_diff:.4f}"
+                        elif alt.price_diff < 0:
+                            price_info = f", -${abs(alt.price_diff):.4f}"
+                    basic = " [Basic]" if alt.is_basic else ""
+                    print(f"      • {alt.lcsc_part}: {alt.stock:,} in stock{price_info}{basic}")
+            else:
+                print("    No alternatives found")
+        print()
+
+    # Missing parts (no LCSC number or not found)
+    if missing:
+        print(f"? MISSING ({len(missing)} parts):")
+        for item in missing:
+            lcsc_info = f" ({item.lcsc_part})" if item.lcsc_part else ""
+            print(f"  {item.reference}: {item.value}{lcsc_info}")
+            if item.error:
+                print(f"    {item.error}")
+        print()
+
+    # Summary
+    print("-" * 70)
+    print("Summary:")
+    print(f"  • {summary['available']}/{summary['total_items']} parts available")
+    if summary['low_stock'] > 0:
+        print(f"  • {summary['low_stock']} parts low stock")
+    if summary['out_of_stock'] > 0:
+        print(f"  • {summary['out_of_stock']} parts out of stock")
+    if summary['missing'] > 0:
+        print(f"  • {summary['missing']} parts missing LCSC number or not found")
+
+    if summary['total_cost'] is not None:
+        print(f"  • Estimated component cost: ${summary['total_cost']:.2f}")
+
+    print()
+    if summary['all_available']:
+        print("✓ All parts available for ordering")
+    elif summary['out_of_stock'] > 0:
+        print("✗ Some parts out of stock - check alternatives above")
+    else:
+        print("⚠ Low stock on some parts - order soon")
 
 
 if __name__ == "__main__":

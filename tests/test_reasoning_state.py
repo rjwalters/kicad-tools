@@ -6,7 +6,6 @@ Tests for:
 - PCBState parsing and query methods
 """
 
-
 import pytest
 
 from kicad_tools.reasoning.state import (

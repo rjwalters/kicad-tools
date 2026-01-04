@@ -81,17 +81,25 @@ def _run_cost_command(args) -> int:
 
 def _print_text_estimate(estimate, verbose: bool = False) -> None:
     """Print cost estimate in human-readable format."""
-    print(f"\nManufacturing Cost Estimate ({estimate.manufacturer.upper()}, qty: {estimate.quantity}):\n")
+    print(
+        f"\nManufacturing Cost Estimate ({estimate.manufacturer.upper()}, qty: {estimate.quantity}):\n"
+    )
 
     # PCB costs
     print(f"  PCB Fabrication:      ${estimate.pcb_cost_per_unit:.2f}/unit")
     if verbose:
         pcb = estimate.pcb
-        print(f"    Board area:         ${pcb.area_cost / estimate.quantity:.2f} ({pcb.width_mm:.0f}x{pcb.height_mm:.0f}mm)")
+        print(
+            f"    Board area:         ${pcb.area_cost / estimate.quantity:.2f} ({pcb.width_mm:.0f}x{pcb.height_mm:.0f}mm)"
+        )
         if pcb.layer_cost > 0:
-            print(f"    {pcb.layer_count} layers:           ${pcb.layer_cost / estimate.quantity:.2f}")
+            print(
+                f"    {pcb.layer_count} layers:           ${pcb.layer_cost / estimate.quantity:.2f}"
+            )
         if pcb.finish_cost > 0:
-            print(f"    {pcb.surface_finish.upper()} finish:     ${pcb.finish_cost / estimate.quantity:.2f}")
+            print(
+                f"    {pcb.surface_finish.upper()} finish:     ${pcb.finish_cost / estimate.quantity:.2f}"
+            )
         if pcb.color_cost > 0:
             print(f"    {pcb.solder_mask_color} mask:     ${pcb.color_cost:.2f}")
     print()
@@ -104,7 +112,9 @@ def _print_text_estimate(estimate, verbose: bool = False) -> None:
             sorted_comps = sorted(estimate.components, key=lambda c: c.extended_cost, reverse=True)
             for comp in sorted_comps[:5]:
                 stock_str = "in stock" if comp.in_stock else "out of stock"
-                print(f"    {comp.reference} ({comp.value}):  ${comp.extended_cost:.2f} ({stock_str})")
+                print(
+                    f"    {comp.reference} ({comp.value}):  ${comp.extended_cost:.2f} ({stock_str})"
+                )
             if len(sorted_comps) > 5:
                 other_cost = sum(c.extended_cost for c in sorted_comps[5:])
                 print(f"    Other ({len(sorted_comps) - 5}):      ${other_cost:.2f}")
@@ -116,7 +126,9 @@ def _print_text_estimate(estimate, verbose: bool = False) -> None:
         asm = estimate.assembly
         print(f"    SMT ({asm.smt_parts} parts):     ${asm.smt_cost / estimate.quantity:.2f}")
         if asm.through_hole_parts > 0:
-            print(f"    Through-hole ({asm.through_hole_parts}): ${asm.through_hole_cost / estimate.quantity:.2f}")
+            print(
+                f"    Through-hole ({asm.through_hole_parts}): ${asm.through_hole_cost / estimate.quantity:.2f}"
+            )
         if asm.bga_parts > 0:
             print(f"    BGA ({asm.bga_parts}):          ${asm.bga_cost / estimate.quantity:.2f}")
         print(f"    Setup/stencil:      ${asm.setup_cost / estimate.quantity:.2f}")
@@ -124,7 +136,9 @@ def _print_text_estimate(estimate, verbose: bool = False) -> None:
 
     # Total
     print(f"  {'=' * 40}")
-    print(f"  TOTAL:                ${estimate.total_per_unit:.2f}/unit (${estimate.total_for_quantity:.2f} for {estimate.quantity} units)")
+    print(
+        f"  TOTAL:                ${estimate.total_per_unit:.2f}/unit (${estimate.total_for_quantity:.2f} for {estimate.quantity} units)"
+    )
     print()
 
     # Cost drivers

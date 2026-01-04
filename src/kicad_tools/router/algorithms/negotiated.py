@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-
     from ..grid import RoutingGrid
     from ..pathfinder import Router
     from ..primitives import Pad, Route

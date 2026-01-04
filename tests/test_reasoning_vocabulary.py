@@ -9,7 +9,6 @@ Tests for:
 - Helper functions
 """
 
-
 from kicad_tools.reasoning.vocabulary import (
     ComponentGroup,
     NetType,

@@ -192,9 +192,7 @@ class ConstraintConflictDetector:
             for region in region_constraints:
                 conflict = self._check_keepout_vs_region(keepout, region)
                 if conflict:
-                    conflict.resolutions = self._find_keepout_region_resolutions(
-                        keepout, region
-                    )
+                    conflict.resolutions = self._find_keepout_region_resolutions(keepout, region)
                     conflicts.append(conflict)
 
         # Check grouping vs region conflicts (edge placement)
@@ -202,9 +200,7 @@ class ConstraintConflictDetector:
             for region in region_constraints:
                 conflict = self._check_grouping_vs_region(grouping, region, pcb)
                 if conflict:
-                    conflict.resolutions = self._find_grouping_region_resolutions(
-                        grouping, region
-                    )
+                    conflict.resolutions = self._find_grouping_region_resolutions(grouping, region)
                     conflicts.append(conflict)
 
         # Check grouping vs grouping conflicts
