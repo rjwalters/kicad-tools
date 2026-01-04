@@ -2,6 +2,7 @@
 
 import pytest
 
+from kicad_tools.drc.suggestions import FixAction, FixSuggestion
 from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 from kicad_tools.erc.violation import ERCViolation, ERCViolationType
 from kicad_tools.erc.violation import Severity as ERCSeverity
@@ -391,16 +392,30 @@ class TestDRCReportIntegration:
 
     def test_to_dict_includes_suggestions(self) -> None:
         """Test that to_dict includes suggestions."""
+        suggestions = [
+            FixSuggestion(
+                action=FixAction.MOVE,
+                target="U1",
+                description="Move component",
+            ),
+            FixSuggestion(
+                action=FixAction.RESIZE,
+                target="U1",
+                description="Increase spacing",
+            ),
+        ]
         violation = DRCViolation(
             type=ViolationType.CLEARANCE,
             type_str="clearance",
             severity=Severity.ERROR,
             message="Test violation",
-            suggestions=["Move component", "Increase spacing"],
+            suggestions=suggestions,
         )
         d = violation.to_dict()
         assert "suggestions" in d
-        assert d["suggestions"] == ["Move component", "Increase spacing"]
+        assert len(d["suggestions"]) == 2
+        assert d["suggestions"][0]["description"] == "Move component"
+        assert d["suggestions"][1]["description"] == "Increase spacing"
 
 
 class TestERCReportIntegration:
