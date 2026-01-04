@@ -31,6 +31,11 @@ class PadState:
     through_hole: bool = False
 
     @property
+    def name(self) -> str:
+        """Human-readable pad identifier (e.g., 'U1:1')."""
+        return f"{self.ref}:{self.number}"
+
+    @property
     def position(self) -> tuple[float, float]:
         return (self.x, self.y)
 
