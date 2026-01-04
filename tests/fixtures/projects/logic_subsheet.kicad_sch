@@ -1,0 +1,31 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "00000000-0000-0000-0000-000000000002")
+	(paper "A4")
+	(title_block
+		(title "Logic Subsheet")
+		(date "2024-12-30")
+		(rev "1.0")
+	)
+	(lib_symbols)
+	(hierarchical_label "VCC"
+		(shape input)
+		(at 50 40 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "hlabel-vcc")
+	)
+	(hierarchical_label "GND"
+		(shape input)
+		(at 50 60 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "hlabel-gnd")
+	)
+	(hierarchical_label "OUT"
+		(shape output)
+		(at 100 50 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "hlabel-out")
+	)
+)

@@ -503,3 +503,9 @@ def minimal_symbol_library(tmp_path: Path) -> Path:
     lib_file = tmp_path / "test.kicad_sym"
     lib_file.write_text(MINIMAL_SYMBOL_LIBRARY)
     return lib_file
+
+
+@pytest.fixture
+def hierarchical_schematic(fixtures_dir: Path) -> Path:
+    """Return the path to the hierarchical test schematic."""
+    return fixtures_dir / "projects" / "hierarchical_main.kicad_sch"
