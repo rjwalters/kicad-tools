@@ -22,9 +22,17 @@ import json
 import sys
 from pathlib import Path
 
-from ..drc import DRCReport, DRCViolation, check_manufacturer_rules, generate_fix_suggestions
+from ..drc import (
+    DRCReport,
+    DRCViolation,
+    check_manufacturer_rules,
+    generate_fix_suggestions,
+)
 from ..manufacturers import compare_design_rules, get_manufacturer_ids, get_profile
 from .runner import find_kicad_cli, run_drc
+
+# Default manufacturer for compatibility hints
+DEFAULT_HINT_MANUFACTURER = "jlcpcb"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -191,7 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.format == "summary":
         output_summary(violations, report)
     else:
-        output_table(violations, report, args.verbose, show_suggestions=args.suggest)
+        output_table(
+            violations, report, args.verbose, show_suggestions=args.suggest, layers=args.layers
+        )
 
     # Exit code
     error_count = sum(1 for v in violations if v.is_error)
@@ -249,6 +259,7 @@ def output_table(
     report: DRCReport,
     verbose: bool = False,
     show_suggestions: bool = False,
+    layers: int = 2,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -316,6 +327,10 @@ def output_table(
     print(f"\n{'=' * 60}")
     if errors:
         print("DRC FAILED - Fix errors before manufacturing")
+        # Show manufacturer compatibility hint if violations might pass mfr rules
+        hint = _get_manufacturer_compatibility_hint(violations, layers=layers)
+        if hint:
+            print(hint)
     else:
         print("DRC WARNING - Review warnings")
 
@@ -514,6 +529,66 @@ def print_manufacturer_rules(mfr: str, layers: int) -> None:
         print("\nAssembly: Not available (PCB only)")
 
     print(f"\n{'=' * 60}")
+
+
+def _get_manufacturer_compatibility_hint(
+    violations: list[DRCViolation],
+    layers: int = 2,
+) -> str | None:
+    """Check if DRC violations would pass common manufacturer validation.
+
+    Returns a helpful hint message if violations pass manufacturer rules,
+    helping users understand the disconnect between DRC and manufacturability.
+    """
+    # Only check if there are errors that might be manufacturer-specific
+    errors = [v for v in violations if v.is_error]
+    if not errors:
+        return None
+
+    # Create a temporary report to check manufacturer compatibility
+    temp_report = DRCReport(
+        source_file="",
+        created_at=None,
+        pcb_name="",
+        violations=errors,
+    )
+
+    try:
+        checks = check_manufacturer_rules(
+            temp_report,
+            DEFAULT_HINT_MANUFACTURER,
+            layers=layers,
+        )
+    except Exception:
+        # If manufacturer check fails, don't show hint
+        return None
+
+    if not checks:
+        return None
+
+    # Count how many violations pass manufacturer validation
+    incompatible = [c for c in checks if not c.is_compatible]
+    compatible = len(checks) - len(incompatible)
+
+    # If all checked violations pass manufacturer rules, show hint
+    if len(incompatible) == 0 and compatible > 0:
+        profile = get_profile(DEFAULT_HINT_MANUFACTURER)
+        return (
+            f"\nNote: These {compatible} violation(s) may pass {profile.name} manufacturing rules.\n"
+            f"      Your board's internal rules are stricter than the manufacturer's minimums.\n"
+            f"      Run with --mfr {DEFAULT_HINT_MANUFACTURER} to check compatibility:\n"
+            f"      kicad-drc <file> --mfr {DEFAULT_HINT_MANUFACTURER} -l {layers}"
+        )
+
+    # If some but not all pass, still suggest checking
+    if compatible > 0 and len(incompatible) < len(checks):
+        profile = get_profile(DEFAULT_HINT_MANUFACTURER)
+        return (
+            f"\nNote: {compatible} of {len(checks)} violations may pass {profile.name} rules.\n"
+            f"      Run with --mfr {DEFAULT_HINT_MANUFACTURER} to see manufacturer compatibility."
+        )
+
+    return None
 
 
 def print_comparison(layers: int) -> None:
