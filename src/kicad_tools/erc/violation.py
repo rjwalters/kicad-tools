@@ -2,8 +2,12 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from kicad_tools.core import SeverityMixin
+
+if TYPE_CHECKING:
+    from kicad_tools.exceptions import SourcePosition
 
 
 class Severity(SeverityMixin, Enum):
@@ -163,7 +167,11 @@ ERC_CATEGORIES = {
 
 @dataclass
 class ERCViolation:
-    """Represents a single ERC violation."""
+    """Represents a single ERC violation.
+
+    Includes both schematic-level position (pos_x, pos_y) and optional file-level
+    source position (file:line:column) for precise error reporting.
+    """
 
     type: ERCViolationType
     type_str: str  # Original type string from report
@@ -174,6 +182,9 @@ class ERCViolation:
     pos_y: float = 0
     items: list[str] = field(default_factory=list)
     excluded: bool = False
+
+    # Source position in KiCad file (file:line:column)
+    source_position: "SourcePosition | None" = None
 
     @property
     def is_error(self) -> bool:
@@ -218,7 +229,7 @@ class ERCViolation:
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
-        return {
+        result = {
             "type": self.type.value,
             "type_str": self.type_str,
             "type_description": self.type_description,
@@ -229,7 +240,13 @@ class ERCViolation:
             "items": self.items,
             "excluded": self.excluded,
         }
+        if self.source_position:
+            result["source_position"] = self.source_position.to_dict()
+        return result
 
     def __str__(self) -> str:
+        # Prefer file:line:col format if available
+        if self.source_position:
+            return f"{self.source_position}: [{self.type_str}] {self.description}"
         loc_str = f" at {self.location_str}" if self.location_str else ""
         return f"[{self.type_str}]: {self.description}{loc_str}"

@@ -55,9 +55,13 @@ class SExp:
         → SExp(name=None, value=123.45)
 
     Uses __slots__ for memory efficiency and faster attribute access.
+
+    Position tracking:
+        When parsed with track_positions=True, nodes include _line and _column
+        attributes (1-indexed) pointing to their start position in the source file.
     """
 
-    __slots__ = ("name", "children", "value", "_inline", "_original_str")
+    __slots__ = ("name", "children", "value", "_inline", "_original_str", "_line", "_column")
 
     def __init__(
         self,
@@ -66,6 +70,8 @@ class SExp:
         value: str | int | float | None = None,
         _inline: bool = False,
         _original_str: str | None = None,
+        _line: int = 0,
+        _column: int = 0,
     ):
         if name is not None and value is not None:
             raise ValueError("SExp cannot have both name and value")
@@ -74,6 +80,23 @@ class SExp:
         self.value = value
         self._inline = _inline
         self._original_str = _original_str
+        self._line = _line
+        self._column = _column
+
+    @property
+    def line(self) -> int:
+        """Line number (1-indexed) where this element starts. 0 if not tracked."""
+        return self._line
+
+    @property
+    def column(self) -> int:
+        """Column number (1-indexed) where this element starts. 0 if not tracked."""
+        return self._column
+
+    @property
+    def has_position(self) -> bool:
+        """Check if this node has position information."""
+        return self._line > 0 and self._column > 0
 
     @property
     def is_atom(self) -> bool:
@@ -771,6 +794,54 @@ class SExp:
                 node.children.append(cls(value=child))
         return node
 
+    def to_source_position(
+        self,
+        file_path: Path,
+        element_type: str = "",
+        element_ref: str = "",
+        position_mm: tuple[float, float] | None = None,
+        layer: str | None = None,
+    ):
+        """Create a SourcePosition from this node's location.
+
+        Requires the node to have been parsed with track_positions=True.
+
+        Args:
+            file_path: Path to the KiCad file (not stored on node)
+            element_type: Type of element (e.g., "symbol", "track")
+            element_ref: Reference designator (e.g., "U1", "net-GND")
+            position_mm: Optional board coordinates as (x, y)
+            layer: Optional layer name (e.g., "F.Cu")
+
+        Returns:
+            SourcePosition instance, or None if no position info available
+
+        Example::
+
+            doc = Document.load("board.kicad_pcb", track_positions=True)
+            symbol = doc.find("symbol")
+            if symbol.has_position:
+                pos = symbol.to_source_position(
+                    doc.path,
+                    element_type="symbol",
+                    element_ref="U1",
+                )
+        """
+        from kicad_tools.exceptions import SourcePosition
+
+        if not self.has_position:
+            return None
+
+        return SourcePosition(
+            file_path=file_path,
+            line=self._line,
+            column=self._column,
+            element_type=element_type or self.name or "",
+            element_ref=element_ref,
+            position_mm=position_mm,
+            layer=layer,
+        )
+
 
 # Pre-compiled character sets for faster parsing
 _WHITESPACE = frozenset(" \t\n\r")
@@ -786,14 +857,45 @@ class Parser:
     - Pre-compiled character sets for O(1) membership tests
     - Reduced function call overhead in hot paths
     - Efficient string building for quoted strings
+
+    Position tracking:
+        When track_positions=True, parsed nodes include line and column
+        information for error reporting and source mapping.
     """
 
-    __slots__ = ("text", "pos", "length")
+    __slots__ = ("text", "pos", "length", "_track_positions", "_line_starts")
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, track_positions: bool = False):
         self.text = text
         self.pos = 0
         self.length = len(text)
+        self._track_positions = track_positions
+        # Pre-compute line start positions for efficient line/column lookup
+        if track_positions:
+            self._line_starts = [0]
+            for i, char in enumerate(text):
+                if char == "\n":
+                    self._line_starts.append(i + 1)
+        else:
+            self._line_starts = []
+
+    def _get_position(self, pos: int) -> tuple[int, int]:
+        """Convert byte position to (line, column), both 1-indexed."""
+        if not self._track_positions:
+            return (0, 0)
+
+        # Binary search to find the line
+        line_starts = self._line_starts
+        lo, hi = 0, len(line_starts)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if line_starts[mid] <= pos:
+                lo = mid + 1
+            else:
+                hi = mid
+        line = lo  # 1-indexed line number
+        column = pos - line_starts[line - 1] + 1  # 1-indexed column
+        return (line, column)
 
     def parse(self) -> SExp:
         """Parse the entire document."""
@@ -823,14 +925,24 @@ class Parser:
         if pos >= length:
             raise ParseError("Unexpected end of input")
 
+        # Record start position for position tracking
+        start_pos = pos
         char = text[pos]
 
         if char == "(":
-            return self._parse_list()
+            node = self._parse_list()
         elif char == '"':
-            return self._parse_string_node()
+            node = self._parse_string_node()
         else:
-            return self._parse_atom()
+            node = self._parse_atom()
+
+        # Set position if tracking is enabled
+        if self._track_positions:
+            line, column = self._get_position(start_pos)
+            node._line = line
+            node._column = column
+
+        return node
 
     def _parse_list(self) -> SExp:
         """Parse a list (name children...)."""
@@ -1049,9 +1161,17 @@ class SExpSerializer:
         return sexp.to_string() + "\n"
 
 
-def parse_string(text: str) -> SExp:
-    """Parse an S-expression string."""
-    return Parser(text).parse()
+def parse_string(text: str, track_positions: bool = False) -> SExp:
+    """Parse an S-expression string.
+
+    Args:
+        text: The S-expression text to parse
+        track_positions: If True, track line/column positions for each node
+
+    Returns:
+        The parsed SExp tree
+    """
+    return Parser(text, track_positions=track_positions).parse()
 
 
 # Backward compatibility alias
@@ -1073,10 +1193,18 @@ def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:
     return sexp.to_string()
 
 
-def parse_file(path: str | Path) -> SExp:
-    """Parse an S-expression file."""
+def parse_file(path: str | Path, track_positions: bool = False) -> SExp:
+    """Parse an S-expression file.
+
+    Args:
+        path: Path to the file to parse
+        track_positions: If True, track line/column positions for each node
+
+    Returns:
+        The parsed SExp tree
+    """
     text = Path(path).read_text(encoding="utf-8")
-    return Parser(text).parse()
+    return Parser(text, track_positions=track_positions).parse()
 
 
 class Document:
@@ -1094,10 +1222,15 @@ class Document:
         self.path = Path(path) if path else None
 
     @classmethod
-    def load(cls, path: str | Path) -> Document:
-        """Load a document from file."""
+    def load(cls, path: str | Path, track_positions: bool = False) -> Document:
+        """Load a document from file.
+
+        Args:
+            path: Path to the KiCad file to load
+            track_positions: If True, track line/column positions for each node
+        """
         path = Path(path)
-        root = parse_file(path)
+        root = parse_file(path, track_positions=track_positions)
         return cls(root, path)
 
     def save(self, path: str | Path | None = None):
