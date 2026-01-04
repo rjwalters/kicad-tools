@@ -1,14 +1,20 @@
 """Tests for the cost estimation module."""
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from kicad_tools.cost import (
+    AlternativePart,
     AssemblyCost,
+    AvailabilityStatus,
+    BOMAvailabilityResult,
     ComponentCost,
     CostEstimate,
+    LCSCAvailabilityChecker,
     ManufacturingCostEstimator,
+    PartAvailabilityResult,
     PCBCost,
 )
 
@@ -497,3 +503,468 @@ class TestCostEstimateJSON:
         assert "breakdown" in data["assembly"]
         assert "specs" in data["assembly"]
         assert data["assembly"]["specs"]["smt_parts"] == 40
+
+
+# ============================================================================
+# Availability Checker Tests
+# ============================================================================
+
+
+class TestPartAvailabilityResult:
+    """Tests for PartAvailabilityResult dataclass."""
+
+    def test_basic_creation(self):
+        result = PartAvailabilityResult(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn="RC0402FR-0710KL",
+            lcsc_part="C123456",
+            quantity_needed=100,
+            quantity_available=5000,
+            status=AvailabilityStatus.AVAILABLE,
+            in_stock=True,
+            min_order_qty=10,
+            price_breaks=[(1, 0.01), (100, 0.008), (1000, 0.005)],
+        )
+        assert result.reference == "R1"
+        assert result.sufficient_stock is True
+        assert result.in_stock is True
+
+    def test_insufficient_stock(self):
+        result = PartAvailabilityResult(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn="RC0402FR-0710KL",
+            lcsc_part="C123456",
+            quantity_needed=1000,
+            quantity_available=500,
+            status=AvailabilityStatus.LOW_STOCK,
+            in_stock=True,
+        )
+        assert result.sufficient_stock is False
+        assert result.in_stock is True
+        assert result.status == AvailabilityStatus.LOW_STOCK
+
+    def test_out_of_stock(self):
+        result = PartAvailabilityResult(
+            reference="U1",
+            value="STM32F103",
+            footprint="LQFP-48",
+            mpn="STM32F103C8T6",
+            lcsc_part="C8734",
+            quantity_needed=10,
+            quantity_available=0,
+            status=AvailabilityStatus.OUT_OF_STOCK,
+            in_stock=False,
+        )
+        assert result.sufficient_stock is False
+        assert result.in_stock is False
+        assert result.status == AvailabilityStatus.OUT_OF_STOCK
+
+    def test_unit_price_calculation(self):
+        result = PartAvailabilityResult(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn=None,
+            lcsc_part="C123456",
+            quantity_needed=150,
+            quantity_available=5000,
+            status=AvailabilityStatus.AVAILABLE,
+            in_stock=True,
+            price_breaks=[(1, 0.01), (100, 0.008), (1000, 0.005)],
+        )
+        # Should use 100-qty price break for 150 units
+        assert result.unit_price == 0.008
+        assert result.extended_price == 0.008 * 150
+
+    def test_unit_price_no_breaks(self):
+        result = PartAvailabilityResult(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn=None,
+            lcsc_part="C123456",
+            quantity_needed=100,
+            quantity_available=5000,
+            status=AvailabilityStatus.AVAILABLE,
+            in_stock=True,
+            price_breaks=[],
+        )
+        assert result.unit_price is None
+        assert result.extended_price is None
+
+    def test_to_dict(self):
+        result = PartAvailabilityResult(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn="RC0402FR-0710KL",
+            lcsc_part="C123456",
+            quantity_needed=100,
+            quantity_available=5000,
+            status=AvailabilityStatus.AVAILABLE,
+            in_stock=True,
+            min_order_qty=10,
+            price_breaks=[(1, 0.01), (100, 0.008)],
+            alternatives=[
+                AlternativePart(
+                    lcsc_part="C654321",
+                    mfr_part="RC0402FR-0710KL-ALT",
+                    description="Alt part",
+                    stock=10000,
+                    price_diff=0.001,
+                    is_basic=True,
+                )
+            ],
+        )
+        data = result.to_dict()
+        assert data["reference"] == "R1"
+        assert data["status"] == "available"
+        assert data["sufficient_stock"] is True
+        assert len(data["alternatives"]) == 1
+        assert data["alternatives"][0]["lcsc_part"] == "C654321"
+
+
+class TestBOMAvailabilityResult:
+    """Tests for BOMAvailabilityResult dataclass."""
+
+    @pytest.fixture
+    def sample_results(self):
+        """Create sample availability results."""
+        return [
+            PartAvailabilityResult(
+                reference="R1",
+                value="10k",
+                footprint="0402",
+                mpn=None,
+                lcsc_part="C123456",
+                quantity_needed=100,
+                quantity_available=5000,
+                status=AvailabilityStatus.AVAILABLE,
+                in_stock=True,
+                price_breaks=[(1, 0.01)],
+            ),
+            PartAvailabilityResult(
+                reference="R2",
+                value="10k",
+                footprint="0402",
+                mpn=None,
+                lcsc_part="C123457",
+                quantity_needed=200,
+                quantity_available=100,
+                status=AvailabilityStatus.LOW_STOCK,
+                in_stock=True,
+                price_breaks=[(1, 0.01)],
+            ),
+            PartAvailabilityResult(
+                reference="U1",
+                value="STM32",
+                footprint="LQFP-48",
+                mpn=None,
+                lcsc_part="C8734",
+                quantity_needed=10,
+                quantity_available=0,
+                status=AvailabilityStatus.OUT_OF_STOCK,
+                in_stock=False,
+                price_breaks=[(1, 2.50)],
+            ),
+            PartAvailabilityResult(
+                reference="J1",
+                value="USB-C",
+                footprint="USB-C",
+                mpn=None,
+                lcsc_part=None,
+                quantity_needed=1,
+                quantity_available=0,
+                status=AvailabilityStatus.NO_LCSC,
+                in_stock=False,
+            ),
+        ]
+
+    def test_available_property(self, sample_results):
+        result = BOMAvailabilityResult(items=sample_results)
+        available = result.available
+        assert len(available) == 1
+        assert available[0].reference == "R1"
+
+    def test_low_stock_property(self, sample_results):
+        result = BOMAvailabilityResult(items=sample_results)
+        low_stock = result.low_stock
+        assert len(low_stock) == 1
+        assert low_stock[0].reference == "R2"
+
+    def test_out_of_stock_property(self, sample_results):
+        result = BOMAvailabilityResult(items=sample_results)
+        out_of_stock = result.out_of_stock
+        assert len(out_of_stock) == 1
+        assert out_of_stock[0].reference == "U1"
+
+    def test_missing_property(self, sample_results):
+        result = BOMAvailabilityResult(items=sample_results)
+        missing = result.missing
+        assert len(missing) == 1
+        assert missing[0].reference == "J1"
+
+    def test_all_available_false(self, sample_results):
+        result = BOMAvailabilityResult(items=sample_results)
+        assert result.all_available is False
+
+    def test_all_available_true(self):
+        items = [
+            PartAvailabilityResult(
+                reference="R1",
+                value="10k",
+                footprint="0402",
+                mpn=None,
+                lcsc_part="C123456",
+                quantity_needed=100,
+                quantity_available=5000,
+                status=AvailabilityStatus.AVAILABLE,
+                in_stock=True,
+            ),
+            PartAvailabilityResult(
+                reference="C1",
+                value="100nF",
+                footprint="0402",
+                mpn=None,
+                lcsc_part="C654321",
+                quantity_needed=50,
+                quantity_available=10000,
+                status=AvailabilityStatus.AVAILABLE,
+                in_stock=True,
+            ),
+        ]
+        result = BOMAvailabilityResult(items=items)
+        assert result.all_available is True
+
+    def test_total_cost(self, sample_results):
+        result = BOMAvailabilityResult(items=sample_results)
+        # R1: 100 * 0.01 = 1.00
+        # R2: 200 * 0.01 = 2.00
+        # U1: 10 * 2.50 = 25.00
+        # J1: no price
+        assert result.total_cost is None  # Missing price for J1
+
+    def test_total_cost_all_priced(self):
+        items = [
+            PartAvailabilityResult(
+                reference="R1",
+                value="10k",
+                footprint="0402",
+                mpn=None,
+                lcsc_part="C123456",
+                quantity_needed=100,
+                quantity_available=5000,
+                status=AvailabilityStatus.AVAILABLE,
+                in_stock=True,
+                price_breaks=[(1, 0.01)],
+            ),
+            PartAvailabilityResult(
+                reference="C1",
+                value="100nF",
+                footprint="0402",
+                mpn=None,
+                lcsc_part="C654321",
+                quantity_needed=50,
+                quantity_available=10000,
+                status=AvailabilityStatus.AVAILABLE,
+                in_stock=True,
+                price_breaks=[(1, 0.02)],
+            ),
+        ]
+        result = BOMAvailabilityResult(items=items)
+        # R1: 100 * 0.01 = 1.00
+        # C1: 50 * 0.02 = 1.00
+        assert result.total_cost == 2.00
+
+    def test_summary(self, sample_results):
+        result = BOMAvailabilityResult(
+            items=sample_results,
+            quantity_multiplier=10,
+        )
+        summary = result.summary()
+        assert summary["total_items"] == 4
+        assert summary["available"] == 1
+        assert summary["low_stock"] == 1
+        assert summary["out_of_stock"] == 1
+        assert summary["missing"] == 1
+        assert summary["all_available"] is False
+        assert summary["quantity_multiplier"] == 10
+
+    def test_to_dict(self, sample_results):
+        result = BOMAvailabilityResult(
+            items=sample_results,
+            checked_at=datetime(2024, 1, 15, 10, 30, 0),
+        )
+        data = result.to_dict()
+        assert "summary" in data
+        assert "items" in data
+        assert data["checked_at"] == "2024-01-15T10:30:00"
+        assert len(data["items"]) == 4
+
+
+class TestLCSCAvailabilityChecker:
+    """Tests for LCSCAvailabilityChecker class."""
+
+    def test_init_default(self):
+        checker = LCSCAvailabilityChecker()
+        assert checker.low_stock_threshold == 100
+        assert checker.find_alternatives is True
+        assert checker.max_alternatives == 3
+
+    def test_init_custom(self):
+        checker = LCSCAvailabilityChecker(
+            low_stock_threshold=500,
+            find_alternatives=False,
+            max_alternatives=5,
+        )
+        assert checker.low_stock_threshold == 500
+        assert checker.find_alternatives is False
+        assert checker.max_alternatives == 5
+
+    def test_determine_status_available(self):
+        checker = LCSCAvailabilityChecker()
+        status = checker._determine_status(stock=5000, needed=100)
+        assert status == AvailabilityStatus.AVAILABLE
+
+    def test_determine_status_out_of_stock(self):
+        checker = LCSCAvailabilityChecker()
+        status = checker._determine_status(stock=0, needed=100)
+        assert status == AvailabilityStatus.OUT_OF_STOCK
+
+    def test_determine_status_low_stock_insufficient(self):
+        checker = LCSCAvailabilityChecker()
+        status = checker._determine_status(stock=50, needed=100)
+        assert status == AvailabilityStatus.LOW_STOCK
+
+    def test_determine_status_low_stock_threshold(self):
+        checker = LCSCAvailabilityChecker(low_stock_threshold=100)
+        # Stock is enough for order but below threshold
+        status = checker._determine_status(stock=80, needed=10)
+        assert status == AvailabilityStatus.LOW_STOCK
+
+    @patch("kicad_tools.cost.availability.LCSCClient")
+    def test_check_item_no_lcsc(self, mock_client_class):
+        checker = LCSCAvailabilityChecker()
+        result = checker._check_item(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn="RC0402",
+            lcsc=None,
+            quantity_needed=100,
+            parts_map={},
+        )
+        assert result.status == AvailabilityStatus.NO_LCSC
+        assert result.error == "No LCSC part number"
+
+    @patch("kicad_tools.cost.availability.LCSCClient")
+    def test_check_item_not_found(self, mock_client_class):
+        checker = LCSCAvailabilityChecker()
+        result = checker._check_item(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn="RC0402",
+            lcsc="C999999",
+            quantity_needed=100,
+            parts_map={},  # Empty - part not found
+        )
+        assert result.status == AvailabilityStatus.NOT_FOUND
+        assert "not found" in result.error.lower()
+
+    @patch("kicad_tools.cost.availability.LCSCClient")
+    def test_check_item_available(self, mock_client_class):
+        # Create mock part
+        mock_part = MagicMock()
+        mock_part.stock = 5000
+        mock_part.min_order = 10
+        mock_part.prices = [MagicMock(quantity=1, unit_price=0.01)]
+        mock_part.mfr_part = "RC0402FR-0710KL"
+
+        checker = LCSCAvailabilityChecker()
+        result = checker._check_item(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn="RC0402",
+            lcsc="C123456",
+            quantity_needed=100,
+            parts_map={"C123456": mock_part},
+        )
+        assert result.status == AvailabilityStatus.AVAILABLE
+        assert result.in_stock is True
+        assert result.quantity_available == 5000
+
+    @patch("kicad_tools.cost.availability.LCSCClient")
+    def test_check_bom_integration(self, mock_client_class):
+        """Test check_bom with mocked LCSC client."""
+        # Create mock client
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        # Create mock part
+        mock_part = MagicMock()
+        mock_part.stock = 5000
+        mock_part.min_order = 10
+        mock_part.prices = [MagicMock(quantity=1, unit_price=0.01)]
+        mock_part.mfr_part = "RC0402FR-0710KL"
+
+        mock_client.lookup_many.return_value = {"C123456": mock_part}
+
+        # Create mock BOM
+        mock_bom = MagicMock()
+        mock_group = MagicMock()
+        mock_group.references = "R1, R2, R3"
+        mock_group.value = "10k"
+        mock_group.footprint = "0402"
+        mock_group.mpn = "RC0402"
+        mock_group.lcsc = "C123456"
+        mock_group.quantity = 3
+        mock_group.items = [MagicMock(dnp=False)]
+
+        mock_bom.grouped.return_value = [mock_group]
+
+        checker = LCSCAvailabilityChecker()
+        result = checker.check_bom(mock_bom, quantity=10)
+
+        assert len(result.items) == 1
+        assert result.items[0].reference == "R1"
+        assert result.items[0].quantity_needed == 30  # 3 parts * 10 boards
+
+    def test_context_manager(self):
+        with LCSCAvailabilityChecker() as checker:
+            assert checker is not None
+        # After exit, client should be cleaned up
+
+
+class TestAlternativePart:
+    """Tests for AlternativePart dataclass."""
+
+    def test_basic_creation(self):
+        alt = AlternativePart(
+            lcsc_part="C654321",
+            mfr_part="RC0402FR-0710KL-ALT",
+            description="Alternative 10k resistor",
+            stock=10000,
+            price_diff=0.001,
+            is_basic=True,
+        )
+        assert alt.lcsc_part == "C654321"
+        assert alt.stock == 10000
+        assert alt.price_diff == 0.001
+        assert alt.is_basic is True
+
+    def test_price_diff_none(self):
+        alt = AlternativePart(
+            lcsc_part="C654321",
+            mfr_part="RC0402FR",
+            description="Alt part",
+            stock=5000,
+            price_diff=None,
+            is_basic=False,
+        )
+        assert alt.price_diff is None

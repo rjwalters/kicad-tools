@@ -66,6 +66,7 @@ Examples:
     kct mfr compare
     kct parts lookup C123456
     kct parts search "100nF 0402" --in-stock
+    kct parts availability design.kicad_sch --quantity 100
     kct datasheet convert STM32F103.pdf --output summary.md
     kct datasheet extract-images STM32F103.pdf --output images/
     kct route board.kicad_pcb --strategy negotiated
@@ -800,6 +801,27 @@ def _add_parts_parser(subparsers) -> None:
     parts_search.add_argument("--limit", type=int, default=20, help="Max results")
     parts_search.add_argument("--in-stock", action="store_true", help="Only in-stock parts")
     parts_search.add_argument("--basic", action="store_true", help="Only JLCPCB basic parts")
+
+    # parts availability
+    parts_avail = parts_subparsers.add_parser(
+        "availability", help="Check BOM part availability on LCSC"
+    )
+    parts_avail.add_argument("schematic", help="Path to .kicad_sch file")
+    parts_avail.add_argument(
+        "--quantity", "-q", type=int, default=1,
+        help="Number of boards to manufacture (default: 1)"
+    )
+    parts_avail.add_argument(
+        "--format", choices=["table", "json", "summary"], default="table"
+    )
+    parts_avail.add_argument(
+        "--no-alternatives", action="store_true",
+        help="Don't search for alternative parts"
+    )
+    parts_avail.add_argument(
+        "--issues-only", action="store_true",
+        help="Only show parts with availability issues"
+    )
 
     # parts cache
     parts_cache = parts_subparsers.add_parser("cache", help="Cache management")
