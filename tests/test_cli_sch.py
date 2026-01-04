@@ -1006,3 +1006,270 @@ class TestSchFindUnconnected:
         if captured.out.strip():
             data = json.loads(captured.out)
             assert isinstance(data, (list, dict))
+
+
+class TestSchRenameSignal:
+    """Tests for sch_rename_signal.py CLI."""
+
+    def test_file_not_found(self, capsys):
+        """Test handling of missing file."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        result = main(["nonexistent.kicad_sch", "--from", "VCC", "--to", "VCC_3V3"])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err
+
+    def test_signal_not_found(self, minimal_schematic: Path, capsys):
+        """Test handling of signal that doesn't exist."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        result = main([str(minimal_schematic), "--from", "NONEXISTENT", "--to", "NEW_NAME"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "not found" in captured.out.lower()
+
+    def test_dry_run_finds_changes(self, tmp_path: Path, capsys):
+        """Test that dry-run mode previews changes without modifying files."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        # Create a hierarchical schematic with sheet pins
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet
+            (at 100 100)
+            (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "SubSheet" (at 100 99 0))
+            (property "Sheetfile" "subsheet.kicad_sch" (at 100 111 0))
+            (pin "DATA_IN" input (at 100 105 180)
+              (effects (font (size 1.27 1.27)))
+              (uuid "00000000-0000-0000-0000-000000000003")
+            )
+          )
+        )
+        """
+
+        child_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000010")
+          (paper "A4")
+          (lib_symbols)
+          (hierarchical_label "DATA_IN"
+            (shape input)
+            (at 50 50 0)
+            (effects (font (size 1.27 1.27)))
+            (uuid "00000000-0000-0000-0000-000000000011")
+          )
+        )
+        """
+
+        parent_file = tmp_path / "parent.kicad_sch"
+        child_file = tmp_path / "subsheet.kicad_sch"
+        parent_file.write_text(parent_sch)
+        child_file.write_text(child_sch)
+
+        # Save original content
+        original_parent = parent_file.read_text()
+        original_child = child_file.read_text()
+
+        # Run dry-run
+        result = main([str(parent_file), "--from", "DATA_IN", "--to", "SPI_MOSI", "--dry-run"])
+
+        assert result == 0
+        captured = capsys.readouterr()
+
+        # Verify changes are previewed
+        assert "DATA_IN" in captured.out
+        assert "SPI_MOSI" in captured.out
+        assert "dry run" in captured.out.lower()
+
+        # Verify files were NOT modified
+        assert parent_file.read_text() == original_parent
+        assert child_file.read_text() == original_child
+
+    def test_applies_changes_with_yes_flag(self, tmp_path: Path, capsys):
+        """Test that --yes flag applies changes without confirmation."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        # Create a hierarchical schematic with sheet pins
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet
+            (at 100 100)
+            (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "SubSheet" (at 100 99 0))
+            (property "Sheetfile" "subsheet.kicad_sch" (at 100 111 0))
+            (pin "OLD_SIGNAL" input (at 100 105 180)
+              (effects (font (size 1.27 1.27)))
+              (uuid "00000000-0000-0000-0000-000000000003")
+            )
+          )
+        )
+        """
+
+        child_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000010")
+          (paper "A4")
+          (lib_symbols)
+          (hierarchical_label "OLD_SIGNAL"
+            (shape input)
+            (at 50 50 0)
+            (effects (font (size 1.27 1.27)))
+            (uuid "00000000-0000-0000-0000-000000000011")
+          )
+        )
+        """
+
+        parent_file = tmp_path / "parent.kicad_sch"
+        child_file = tmp_path / "subsheet.kicad_sch"
+        parent_file.write_text(parent_sch)
+        child_file.write_text(child_sch)
+
+        # Run with --yes flag
+        result = main([str(parent_file), "--from", "OLD_SIGNAL", "--to", "NEW_SIGNAL", "--yes"])
+
+        assert result == 0
+
+        # Verify files WERE modified
+        new_parent = parent_file.read_text()
+        new_child = child_file.read_text()
+
+        assert "NEW_SIGNAL" in new_parent
+        assert "OLD_SIGNAL" not in new_parent
+        assert "NEW_SIGNAL" in new_child
+        assert "OLD_SIGNAL" not in new_child
+
+    def test_include_nets_option(self, tmp_path: Path, capsys):
+        """Test that --include-nets also renames net labels."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        # Create schematic with both hierarchical label and net label
+        sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (hierarchical_label "SIGNAL_A"
+            (shape input)
+            (at 50 50 0)
+            (effects (font (size 1.27 1.27)))
+            (uuid "00000000-0000-0000-0000-000000000002")
+          )
+          (label "SIGNAL_A"
+            (at 70 50 0)
+            (effects (font (size 1.27 1.27)))
+            (uuid "00000000-0000-0000-0000-000000000003")
+          )
+        )
+        """
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(sch)
+
+        # Run WITHOUT --include-nets (net label should not change)
+        result = main([str(sch_file), "--from", "SIGNAL_A", "--to", "SIGNAL_B", "--yes"])
+
+        assert result == 0
+        content = sch_file.read_text()
+
+        # Hierarchical label should be renamed
+        assert 'hierarchical_label "SIGNAL_B"' in content
+        # Net label should NOT be renamed
+        assert 'label "SIGNAL_A"' in content
+
+        # Now run WITH --include-nets
+        sch_file.write_text(content.replace("SIGNAL_B", "SIGNAL_A"))  # Reset
+
+        result = main(
+            [str(sch_file), "--from", "SIGNAL_A", "--to", "SIGNAL_B", "--include-nets", "--yes"]
+        )
+
+        assert result == 0
+        content = sch_file.read_text()
+
+        # Both should be renamed now
+        assert 'hierarchical_label "SIGNAL_B"' in content
+        assert 'label "SIGNAL_B"' in content
+
+    def test_json_output_rename_signal(self, tmp_path: Path, capsys):
+        """Test JSON format output."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        # Create a simple schematic with a sheet pin
+        sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet
+            (at 100 100)
+            (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "SubSheet" (at 100 99 0))
+            (property "Sheetfile" "subsheet.kicad_sch" (at 100 111 0))
+            (pin "TEST_SIG" input (at 100 105 180)
+              (effects (font (size 1.27 1.27)))
+              (uuid "00000000-0000-0000-0000-000000000003")
+            )
+          )
+        )
+        """
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(sch)
+
+        result = main(
+            [
+                str(sch_file),
+                "--from",
+                "TEST_SIG",
+                "--to",
+                "NEW_SIG",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+
+        data = json.loads(captured.out)
+        assert "old_name" in data
+        assert data["old_name"] == "TEST_SIG"
+        assert data["new_name"] == "NEW_SIG"
+        assert "summary" in data
+        assert data["summary"]["total_changes"] >= 1
+
+    def test_hierarchical_schematic(self, hierarchical_schematic: Path, capsys):
+        """Test with hierarchical fixture - dry run."""
+        from kicad_tools.cli.sch_rename_signal import main
+
+        # VCC is a sheet pin in the Logic subsheet
+        result = main(
+            [str(hierarchical_schematic), "--from", "VCC", "--to", "VCC_3V3", "--dry-run"]
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+
+        # Should find sheet pins and hierarchical labels
+        assert "VCC" in captured.out
+        assert "VCC_3V3" in captured.out

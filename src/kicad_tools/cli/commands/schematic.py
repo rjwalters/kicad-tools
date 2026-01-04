@@ -11,7 +11,7 @@ def run_sch_command(args) -> int:
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
         print("Commands: summary, hierarchy, labels, validate, wires, info, pins,")
-        print("          connections, unconnected, replace, sync-hierarchy")
+        print("          connections, unconnected, replace, sync-hierarchy, rename-signal")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -153,5 +153,21 @@ def run_sch_command(args) -> int:
         if args.sheet:
             sub_argv.extend(["--sheet", args.sheet])
         return sync_main(sub_argv) or 0
+
+    elif args.sch_command == "rename-signal":
+        from ..sch_rename_signal import main as rename_signal_main
+
+        sub_argv = [str(schematic_path), "--from", args.old_name, "--to", args.new_name]
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.yes:
+            sub_argv.append("--yes")
+        if args.include_nets:
+            sub_argv.append("--include-nets")
+        if args.include_globals:
+            sub_argv.append("--include-globals")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        return rename_signal_main(sub_argv) or 0
 
     return 1

@@ -478,6 +478,29 @@ def _add_sch_parser(subparsers) -> None:
     sch_sync.add_argument("--format", choices=["text", "json"], default="text")
     sch_sync.add_argument("--sheet", help="Focus on a specific sheet")
 
+    # sch rename-signal
+    sch_rename_signal = sch_subparsers.add_parser(
+        "rename-signal", help="Rename a signal across the hierarchy"
+    )
+    sch_rename_signal.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_rename_signal.add_argument(
+        "--from", dest="old_name", required=True, help="Current signal name to rename"
+    )
+    sch_rename_signal.add_argument("--to", dest="new_name", required=True, help="New signal name")
+    sch_rename_signal.add_argument(
+        "--dry-run", "-n", action="store_true", help="Preview changes without modifying files"
+    )
+    sch_rename_signal.add_argument(
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt"
+    )
+    sch_rename_signal.add_argument(
+        "--include-nets", action="store_true", help="Also rename matching net labels"
+    )
+    sch_rename_signal.add_argument(
+        "--include-globals", action="store_true", help="Also rename matching global labels"
+    )
+    sch_rename_signal.add_argument("--format", choices=["text", "json"], default="text")
+
 
 def _add_pcb_parser(subparsers) -> None:
     """Add PCB subcommand parser with its subcommands."""
