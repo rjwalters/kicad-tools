@@ -7,6 +7,7 @@ All exceptions include:
 - Suggestions for how to fix the issue
 - Error codes for programmatic handling
 - JSON serialization for CLI output
+- Rich terminal rendering for beautiful error display
 
 Example::
 
@@ -29,6 +30,11 @@ Example::
     except KiCadToolsError as e:
         print(json.dumps(e.to_dict()))
         # {"error_code": "FILE_NOT_FOUND", "message": "...", ...}
+
+    # Rich rendering for terminal output
+    from rich.console import Console
+    console = Console(stderr=True)
+    console.print(e)  # Beautiful formatted error
 """
 
 from __future__ import annotations
@@ -38,7 +44,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
+
+if TYPE_CHECKING:
+    from rich.console import Console, ConsoleOptions, RenderResult
 
 E = TypeVar("E", bound=Exception)
 
@@ -323,6 +332,78 @@ class KiCadToolsError(Exception):
             "suggestions": self.suggestions,
         }
 
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Render the exception with Rich formatting.
+
+        Provides beautiful, syntax-highlighted error output with:
+        - Bold red error header with error code
+        - Context information in a styled panel
+        - Source snippets with syntax highlighting (when available)
+        - Yellow-highlighted suggestions as bullet points
+
+        This method is called automatically when printing the exception
+        to a Rich Console.
+        """
+        from rich.panel import Panel
+        from rich.syntax import Syntax
+        from rich.text import Text
+
+        # Error header with code
+        header = Text()
+        header.append(f"[{self.error_code}] ", style="dim")
+        header.append(self.message, style="bold red")
+        yield header
+
+        # Context panel (if we have context)
+        if self.context:
+            context_text = Text()
+            for key, value in self.context.items():
+                # Skip source-related keys that we handle specially
+                if key in ("source_snippet", "highlight_line"):
+                    continue
+                context_text.append(f"{key}: ", style="cyan")
+                context_text.append(f"{value}\n")
+
+            if context_text:
+                yield Text()  # Blank line
+                yield Panel(
+                    context_text,
+                    title="Context",
+                    title_align="left",
+                    border_style="dim",
+                    padding=(0, 1),
+                )
+
+        # Source snippet with syntax highlighting (if available)
+        source_snippet = self.context.get("source_snippet")
+        if source_snippet:
+            highlight_line = self.context.get("highlight_line")
+            file_path = self.context.get("file", "source")
+            line_num = self.context.get("line", 1)
+
+            yield Text()  # Blank line
+            yield Panel(
+                Syntax(
+                    source_snippet,
+                    "lisp",  # S-expressions are Lisp-like
+                    line_numbers=True,
+                    start_line=max(1, line_num - 2),
+                    highlight_lines={highlight_line} if highlight_line else None,
+                    theme="monokai",
+                ),
+                title=f"{file_path}:{line_num}" if line_num else str(file_path),
+                title_align="left",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+
+        # Suggestions
+        if self.suggestions:
+            yield Text()  # Blank line
+            yield Text("Suggestions:", style="bold yellow")
+            for suggestion in self.suggestions:
+                yield Text(f"  \u2022 {suggestion}")
+
 
 class ParseError(KiCadToolsError):
     """
@@ -478,6 +559,44 @@ class ValidationError(KiCadToolsError):
         result = super().to_dict()
         result["errors"] = self.errors
         return result
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        """Render validation errors with Rich formatting."""
+        from rich.panel import Panel
+        from rich.text import Text
+
+        # Error header
+        header = Text()
+        header.append(f"[{self.error_code}] ", style="dim")
+        header.append(f"Validation failed with {len(self.errors)} error(s)", style="bold red")
+        yield header
+
+        # File context if available
+        if "file" in self.context:
+            yield Text(f"  File: {self.context['file']}", style="dim")
+
+        yield Text()  # Blank line
+
+        # Individual errors as numbered list
+        errors_text = Text()
+        for i, error in enumerate(self.errors, 1):
+            errors_text.append(f"{i}. ", style="bold")
+            errors_text.append(f"{error}\n", style="red")
+
+        yield Panel(
+            errors_text,
+            title="Errors",
+            title_align="left",
+            border_style="red",
+            padding=(0, 1),
+        )
+
+        # Suggestions
+        if self.suggestions:
+            yield Text()  # Blank line
+            yield Text("Suggestions:", style="bold yellow")
+            for suggestion in self.suggestions:
+                yield Text(f"  \u2022 {suggestion}")
 
 
 class FileFormatError(KiCadToolsError):

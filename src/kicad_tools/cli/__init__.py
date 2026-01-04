@@ -55,7 +55,7 @@ from .commands import (
     run_zones_command,
 )
 from .parser import create_parser
-from .utils import format_error
+from .utils import format_error, print_error
 
 __all__ = [
     "main",
@@ -65,6 +65,7 @@ __all__ = [
     "drc_main",
     "bom_main",
     "format_error",
+    "print_error",
 ]
 
 
@@ -95,10 +96,10 @@ def main(argv: list[str] | None = None) -> int:
         print("\nInterrupted", file=sys.stderr)
         return 130
     except KiCadToolsError as e:
-        print(format_error(e, verbose), file=sys.stderr)
+        print_error(e, verbose)
         return 1
     except Exception as e:
-        print(format_error(e, verbose), file=sys.stderr)
+        print_error(e, verbose)
         return 1
 
 
