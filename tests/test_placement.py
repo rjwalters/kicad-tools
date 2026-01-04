@@ -738,3 +738,146 @@ class TestDiagonalMovement:
             assert magnitude < expected_magnitude * 1.5, (
                 f"Diagonal fix magnitude {magnitude} should be close to {expected_magnitude}"
             )
+
+
+class TestApplyFixes:
+    """Tests for PlacementFixer.apply_fixes - the fix command's core functionality."""
+
+    def test_apply_fixes_modifies_positions(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that apply_fixes actually modifies component positions.
+
+        This is the core bug fix for issue #361 - fixes were being suggested
+        but the regex wasn't matching, so 0 fixes were applied.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+        assert len(conflicts) >= 1, "Should have conflicts to fix"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+        assert len(fixes) >= 1, "Should suggest fixes"
+
+        # Apply fixes to a new file
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path)
+
+        # The key assertion: fixes_applied should be > 0
+        assert result.fixes_applied > 0, (
+            f"Should apply at least one fix, but applied {result.fixes_applied}. "
+            "This was the bug in issue #361."
+        )
+
+        # Verify the output file was modified
+        original = overlapping_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Output file should be different from original"
+
+    def test_apply_fixes_changes_coordinates(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that apply_fixes changes the actual coordinate values."""
+        import re
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        # Get the component being moved
+        component_to_move = fixes[0].component
+        move_vector = fixes[0].move_vector
+
+        # Find original position
+        original = overlapping_pcb.read_text()
+
+        # Apply fixes
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path)
+
+        assert result.fixes_applied > 0
+
+        # Read modified content and verify position changed
+        modified = output_path.read_text()
+
+        # Extract positions from both files for the moved component
+        # Look for the (at X Y) pattern near the component's reference
+        def find_position(content: str, ref: str) -> tuple[float, float] | None:
+            # Find footprint with this reference and extract its position
+            pattern = rf'\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+([\d.-]+)\s+([\d.-]+)[\s\S]*?property\s+"Reference"\s+"{re.escape(ref)}"'
+            match = re.search(pattern, content)
+            if match:
+                return float(match.group(1)), float(match.group(2))
+            return None
+
+        orig_pos = find_position(original, component_to_move)
+        new_pos = find_position(modified, component_to_move)
+
+        assert orig_pos is not None, f"Should find original position for {component_to_move}"
+        assert new_pos is not None, f"Should find new position for {component_to_move}"
+
+        # Verify position changed by approximately the move vector
+        dx = new_pos[0] - orig_pos[0]
+        dy = new_pos[1] - orig_pos[1]
+
+        assert abs(dx - move_vector.x) < 0.001, (
+            f"X position change {dx} should match move vector {move_vector.x}"
+        )
+        assert abs(dy - move_vector.y) < 0.001, (
+            f"Y position change {dy} should match move vector {move_vector.y}"
+        )
+
+    def test_apply_fixes_dry_run(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that dry_run=True doesn't write changes."""
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        output_path = tmp_path / "should_not_exist.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path, dry_run=True)
+
+        # Should report fixes would be applied
+        assert result.fixes_applied > 0
+        assert "dry run" in result.message.lower()
+
+        # But file should not be created
+        assert not output_path.exists(), "Dry run should not create output file"
+
+    def test_apply_fixes_reduces_conflicts(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that applying fixes reduces the number of conflicts."""
+        analyzer = PlacementAnalyzer()
+        original_conflicts = analyzer.find_conflicts(overlapping_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(original_conflicts, analyzer)
+
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(overlapping_pcb, fixes, output_path)
+
+        assert result.fixes_applied > 0
+
+        # Re-analyze the fixed file
+        new_conflicts = analyzer.find_conflicts(output_path)
+
+        # Should have fewer or equal conflicts (ideally zero)
+        assert len(new_conflicts) <= len(original_conflicts), (
+            f"Fixed file should have fewer conflicts: "
+            f"original={len(original_conflicts)}, new={len(new_conflicts)}"
+        )
+
+    def test_cli_fix_applies_changes(self, overlapping_pcb: Path, tmp_path: Path):
+        """Test that the CLI fix command actually applies fixes (not just suggests)."""
+        from kicad_tools.cli.placement_cmd import main
+
+        output_path = tmp_path / "cli_fixed.kicad_pcb"
+
+        # Run fix command (not dry-run)
+        # Note: may return 1 if conflicts remain after fixes, but fixes should still be applied
+        main(["fix", str(overlapping_pcb), "-o", str(output_path), "--quiet"])
+
+        # Verify output file exists and is different from original
+        assert output_path.exists(), "Fix command should create output file"
+
+        original = overlapping_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Fix command should modify the file"
