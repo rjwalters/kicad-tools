@@ -244,9 +244,7 @@ class TestCongestionAnalyzer:
         reports = analyzer.analyze(pcb)
 
         # May find some low-severity areas but should not find critical/high
-        critical_high = [
-            r for r in reports if r.severity in (Severity.CRITICAL, Severity.HIGH)
-        ]
+        critical_high = [r for r in reports if r.severity in (Severity.CRITICAL, Severity.HIGH)]
         assert len(critical_high) == 0
 
     def test_analyze_reports_have_required_fields(self, congested_pcb: Path):
@@ -379,12 +377,16 @@ class TestCongestionCLI:
         from kicad_tools.cli.analyze_cmd import main
 
         # Run with critical filter - should filter out lower severity
-        result = main([
-            "congestion",
-            str(congested_pcb),
-            "--format", "json",
-            "--min-severity", "critical",
-        ])
+        result = main(
+            [
+                "congestion",
+                str(congested_pcb),
+                "--format",
+                "json",
+                "--min-severity",
+                "critical",
+            ]
+        )
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -397,12 +399,16 @@ class TestCongestionCLI:
         """Test CLI with custom grid size."""
         from kicad_tools.cli.analyze_cmd import main
 
-        result = main([
-            "congestion",
-            str(congested_pcb),
-            "--format", "json",
-            "--grid-size", "1.0",
-        ])
+        result = main(
+            [
+                "congestion",
+                str(congested_pcb),
+                "--format",
+                "json",
+                "--grid-size",
+                "1.0",
+            ]
+        )
         assert result in (0, 1, 2)
 
         captured = capsys.readouterr()
@@ -450,7 +456,6 @@ class TestSeverityClassification:
         # The congested PCB has many vias in a small area
         # Should find at least one area with elevated severity
         elevated = [
-            r for r in reports
-            if r.severity in (Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)
+            r for r in reports if r.severity in (Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)
         ]
         assert len(elevated) > 0

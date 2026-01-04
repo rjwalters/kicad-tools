@@ -321,9 +321,7 @@ class CongestionAnalyzer:
 
         return result
 
-    def _create_report(
-        self, cell: _GridCell, net_names: dict[int, str]
-    ) -> CongestionReport:
+    def _create_report(self, cell: _GridCell, net_names: dict[int, str]) -> CongestionReport:
         """Create a CongestionReport from a grid cell.
 
         Args:
@@ -367,9 +365,7 @@ class CongestionAnalyzer:
             severity=severity,
         )
 
-    def _suggest_fixes(
-        self, report: CongestionReport, board: PCB
-    ) -> list[str]:
+    def _suggest_fixes(self, report: CongestionReport, board: PCB) -> list[str]:
         """Generate suggestions to relieve congestion.
 
         Args:
@@ -386,15 +382,11 @@ class CongestionAnalyzer:
             comp_list = ", ".join(report.components[:3])
             if len(report.components) > 3:
                 comp_list += f" (and {len(report.components) - 3} more)"
-            suggestions.append(
-                f"Consider moving {comp_list} to reduce component density"
-            )
+            suggestions.append(f"Consider moving {comp_list} to reduce component density")
 
         # Suggest layer changes for high density
         if report.severity in (Severity.HIGH, Severity.CRITICAL):
-            suggestions.append(
-                "Route some nets on inner layers to reduce top/bottom congestion"
-            )
+            suggestions.append("Route some nets on inner layers to reduce top/bottom congestion")
 
         # Suggest via reduction
         if report.via_count >= 10:
@@ -404,8 +396,7 @@ class CongestionAnalyzer:
             )
         elif report.via_count >= 5:
             suggestions.append(
-                f"Consider reducing vias ({report.via_count}) by routing on "
-                "fewer layers"
+                f"Consider reducing vias ({report.via_count}) by routing on fewer layers"
             )
 
         # Suggest addressing unrouted connections
@@ -419,7 +410,9 @@ class CongestionAnalyzer:
         if len(report.nets) >= 5:
             # Find power/ground nets
             power_nets = [
-                n for n in report.nets if any(p in n.upper() for p in ["VCC", "VDD", "GND", "VSS", "PWR"])
+                n
+                for n in report.nets
+                if any(p in n.upper() for p in ["VCC", "VDD", "GND", "VSS", "PWR"])
             ]
             if power_nets:
                 suggestions.append(

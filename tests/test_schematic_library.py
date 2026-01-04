@@ -9,7 +9,6 @@ Tests for:
 - describe_symbol
 """
 
-
 import pytest
 
 from kicad_tools.schematic.library import (

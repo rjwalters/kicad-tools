@@ -744,7 +744,11 @@ class TestSchValidateHierarchy:
         issues = check_hierarchy(str(parent_file))
 
         # Should find the missing label issue
-        pin_issues = [i for i in issues if "Sheet pin" in i.message and "no matching hierarchical label" in i.message]
+        pin_issues = [
+            i
+            for i in issues
+            if "Sheet pin" in i.message and "no matching hierarchical label" in i.message
+        ]
         assert len(pin_issues) == 1
         assert pin_issues[0].severity == "error"
         assert "VCC_3V3A" in pin_issues[0].message
@@ -796,7 +800,11 @@ class TestSchValidateHierarchy:
         issues = check_hierarchy(str(parent_file))
 
         # Should find the orphan label issue
-        label_issues = [i for i in issues if "Hierarchical label" in i.message and "no matching sheet pin" in i.message]
+        label_issues = [
+            i
+            for i in issues
+            if "Hierarchical label" in i.message and "no matching sheet pin" in i.message
+        ]
         assert len(label_issues) == 1
         assert label_issues[0].severity == "warning"
         assert "ORPHAN_SIGNAL" in label_issues[0].message

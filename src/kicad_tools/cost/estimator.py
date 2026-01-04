@@ -394,11 +394,7 @@ class ManufacturingCostEstimator:
 
         # Calculate totals
         component_total = sum(c.extended_cost for c in component_costs)
-        total_per_unit = (
-            pcb_cost.cost_per_unit
-            + component_total
-            + assembly_cost.cost_per_unit
-        )
+        total_per_unit = pcb_cost.cost_per_unit + component_total + assembly_cost.cost_per_unit
 
         # Identify cost drivers
         cost_drivers = self._identify_cost_drivers(pcb_cost, component_costs, assembly_cost)
@@ -641,7 +637,9 @@ class ManufacturingCostEstimator:
         smt_cost = smt_parts * 4 * pricing.get("smt_per_joint", 0.0017) * quantity
 
         # Through-hole cost
-        through_hole_cost = through_hole_parts * pricing.get("through_hole_per_part", 0.02) * quantity
+        through_hole_cost = (
+            through_hole_parts * pricing.get("through_hole_per_part", 0.02) * quantity
+        )
 
         # Extended part fees
         extended_fee = extended_parts * pricing.get("extended_part_fee", 3.0)

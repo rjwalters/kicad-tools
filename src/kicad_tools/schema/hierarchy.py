@@ -179,7 +179,9 @@ class HierarchyNode:
     uuid: str
     children: list[HierarchyNode] = field(default_factory=list)
     sheets: list[SheetInstance] = field(default_factory=list)  # Sheet instances in this schematic
-    hierarchical_labels: list[str] = field(default_factory=list)  # Label names (for backward compat)
+    hierarchical_labels: list[str] = field(
+        default_factory=list
+    )  # Label names (for backward compat)
     hierarchical_label_info: list[HierarchicalLabelInfo] = field(
         default_factory=list
     )  # Full label details

@@ -4,6 +4,7 @@ Provides analysis subcommands:
 - `analyze congestion`: Routing congestion analysis
 - `analyze trace-lengths`: Trace length analysis for timing-critical nets
 - `analyze signal-integrity`: Signal integrity analysis (crosstalk and impedance)
+- `analyze thermal`: Thermal analysis and hotspot detection
 
 Usage:
     kicad-tools analyze congestion board.kicad_pcb
@@ -12,6 +13,8 @@ Usage:
     kicad-tools analyze trace-lengths board.kicad_pcb --net CLK
     kicad-tools analyze signal-integrity board.kicad_pcb
     kicad-tools analyze signal-integrity board.kicad_pcb --format json
+    kicad-tools analyze thermal board.kicad_pcb
+    kicad-tools analyze thermal board.kicad_pcb --format json
 """
 
 from __future__ import annotations
@@ -29,6 +32,8 @@ from kicad_tools.analysis import (
     RiskLevel,
     Severity,
     SignalIntegrityAnalyzer,
+    ThermalAnalyzer,
+    ThermalSeverity,
     TraceLengthAnalyzer,
 )
 from kicad_tools.schema.pcb import PCB
@@ -169,6 +174,42 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress informational output",
     )
 
+    # Thermal subcommand
+    thermal_parser = subparsers.add_parser(
+        "thermal",
+        help="Analyze thermal characteristics and hotspots",
+        description="Identify heat sources, estimate power dissipation, and suggest thermal improvements",
+    )
+    thermal_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    thermal_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    thermal_parser.add_argument(
+        "--cluster-radius",
+        type=float,
+        default=10.0,
+        help="Radius for clustering heat sources in mm (default: 10.0)",
+    )
+    thermal_parser.add_argument(
+        "--min-power",
+        type=float,
+        default=0.05,
+        help="Minimum power threshold in Watts (default: 0.05)",
+    )
+    thermal_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -186,6 +227,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "signal-integrity":
         return _run_signal_integrity_analysis(args)
+
+    if args.subcommand == "thermal":
+        return _run_thermal_analysis(args)
 
     return 0
 
@@ -700,6 +744,154 @@ def _print_impedance_section(console: Console, discontinuities: list) -> None:
         console.print(f"    Cause: {disc.cause.replace('_', ' ')}")
         console.print(f"    → {disc.suggestion}")
         console.print()
+
+
+# ============================================================================
+# Thermal Analysis
+# ============================================================================
+
+
+def _run_thermal_analysis(args: argparse.Namespace) -> int:
+    """Run thermal analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = ThermalAnalyzer(
+        cluster_radius=args.cluster_radius,
+        min_power_w=args.min_power,
+    )
+    hotspots = analyzer.analyze(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_thermal_json(hotspots)
+    else:
+        _output_thermal_text(hotspots, pcb_path.name, quiet=args.quiet)
+
+    # Return non-zero if critical/hot issues found
+    has_critical = any(h.severity == ThermalSeverity.CRITICAL for h in hotspots)
+    has_hot = any(h.severity == ThermalSeverity.HOT for h in hotspots)
+
+    if has_critical:
+        return 2
+    elif has_hot:
+        return 1
+    return 0
+
+
+def _output_thermal_json(hotspots: list) -> None:
+    """Output thermal hotspots as JSON."""
+    output = {
+        "hotspots": [h.to_dict() for h in hotspots],
+        "summary": {
+            "total": len(hotspots),
+            "critical": sum(1 for h in hotspots if h.severity == ThermalSeverity.CRITICAL),
+            "hot": sum(1 for h in hotspots if h.severity == ThermalSeverity.HOT),
+            "warm": sum(1 for h in hotspots if h.severity == ThermalSeverity.WARM),
+            "ok": sum(1 for h in hotspots if h.severity == ThermalSeverity.OK),
+            "total_power_w": round(sum(h.total_power_w for h in hotspots), 3),
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_thermal_text(hotspots: list, filename: str, quiet: bool = False) -> None:
+    """Output thermal hotspots as formatted text."""
+    console = Console()
+
+    if not hotspots:
+        if not quiet:
+            console.print(f"[green]No thermal concerns found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Thermal Analysis: {filename}[/bold]\n")
+
+    # Summary table
+    summary_table = Table(title="Summary", show_header=False)
+    summary_table.add_column("Metric", style="dim")
+    summary_table.add_column("Value")
+
+    critical = sum(1 for h in hotspots if h.severity == ThermalSeverity.CRITICAL)
+    hot = sum(1 for h in hotspots if h.severity == ThermalSeverity.HOT)
+    warm = sum(1 for h in hotspots if h.severity == ThermalSeverity.WARM)
+    ok = sum(1 for h in hotspots if h.severity == ThermalSeverity.OK)
+    total_power = sum(h.total_power_w for h in hotspots)
+
+    summary_table.add_row("Total hotspots", str(len(hotspots)))
+    summary_table.add_row("Total power", f"{total_power:.2f}W")
+    if critical > 0:
+        summary_table.add_row("Critical", f"[red]{critical}[/red]")
+    if hot > 0:
+        summary_table.add_row("Hot", f"[yellow]{hot}[/yellow]")
+    if warm > 0:
+        summary_table.add_row("Warm", f"[blue]{warm}[/blue]")
+    if ok > 0:
+        summary_table.add_row("OK", str(ok))
+
+    console.print(summary_table)
+    console.print()
+
+    # Detail for each hotspot
+    for i, hotspot in enumerate(hotspots, 1):
+        _print_thermal_hotspot(console, hotspot, i)
+
+
+def _print_thermal_hotspot(console: Console, hotspot, index: int) -> None:
+    """Print a single thermal hotspot."""
+    # Severity color
+    severity_colors = {
+        ThermalSeverity.CRITICAL: "red",
+        ThermalSeverity.HOT: "yellow",
+        ThermalSeverity.WARM: "blue",
+        ThermalSeverity.OK: "green",
+    }
+    color = severity_colors[hotspot.severity]
+
+    # Header
+    x, y = hotspot.position
+    console.print(
+        f"[{color}][bold]{hotspot.severity.value.upper()}[/bold][/{color}]: "
+        f"Hotspot at ({x:.1f}, {y:.1f})"
+    )
+
+    # Power and temperature
+    console.print(f"  Total power: {hotspot.total_power_w:.2f}W")
+    console.print(f"  Est. temp rise: +{hotspot.max_temp_rise_c:.0f}°C")
+
+    # Heat sources
+    if hotspot.sources:
+        sources_str = ", ".join(f"{s.reference} ({s.power_w:.2f}W)" for s in hotspot.sources[:3])
+        if len(hotspot.sources) > 3:
+            sources_str += f" (+{len(hotspot.sources) - 3} more)"
+        console.print(f"  Sources: {sources_str}")
+
+    # Thermal relief
+    console.print(f"  Copper area: {hotspot.copper_area_mm2:.0f}mm²")
+    console.print(f"  Vias: {hotspot.via_count} (thermal: {hotspot.thermal_vias})")
+
+    # Suggestions
+    if hotspot.suggestions:
+        console.print("  [dim]Suggestions:[/dim]")
+        for suggestion in hotspot.suggestions:
+            console.print(f"    • {suggestion}")
+
+    console.print()
 
 
 if __name__ == "__main__":

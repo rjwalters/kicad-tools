@@ -272,7 +272,9 @@ def cmd_labels(root: HierarchyNode, args):
                 # Show pin status
                 if info["pin"]:
                     direction = info["pin"]["direction"]
-                    dir_icon = "→" if direction == "output" else "←" if direction == "input" else "↔"
+                    dir_icon = (
+                        "→" if direction == "output" else "←" if direction == "input" else "↔"
+                    )
                     print(f"     Pin:   {info['pin']['name']} ({direction}) {dir_icon} ✓")
                 else:
                     print(f"     Pin:   {signal_name} ✗ MISSING")
@@ -284,7 +286,9 @@ def cmd_labels(root: HierarchyNode, args):
                     print(f"     Label: {signal_name} ✗ MISSING")
 
         # Summary line
-        print(f"\nSummary: {total_signals} signals, {mismatched_signals} mismatch{'es' if mismatched_signals != 1 else ''}")
+        print(
+            f"\nSummary: {total_signals} signals, {mismatched_signals} mismatch{'es' if mismatched_signals != 1 else ''}"
+        )
 
 
 def cmd_path(root: HierarchyNode, args):
