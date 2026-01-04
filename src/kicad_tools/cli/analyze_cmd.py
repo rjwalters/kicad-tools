@@ -3,12 +3,15 @@
 Provides analysis subcommands:
 - `analyze congestion`: Routing congestion analysis
 - `analyze trace-lengths`: Trace length analysis for timing-critical nets
+- `analyze signal-integrity`: Signal integrity analysis (crosstalk and impedance)
 
 Usage:
     kicad-tools analyze congestion board.kicad_pcb
     kicad-tools analyze congestion board.kicad_pcb --format json
     kicad-tools analyze trace-lengths board.kicad_pcb
     kicad-tools analyze trace-lengths board.kicad_pcb --net CLK
+    kicad-tools analyze signal-integrity board.kicad_pcb
+    kicad-tools analyze signal-integrity board.kicad_pcb --format json
 """
 
 from __future__ import annotations
@@ -21,7 +24,13 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from kicad_tools.analysis import CongestionAnalyzer, Severity, TraceLengthAnalyzer
+from kicad_tools.analysis import (
+    CongestionAnalyzer,
+    RiskLevel,
+    Severity,
+    SignalIntegrityAnalyzer,
+    TraceLengthAnalyzer,
+)
 from kicad_tools.schema.pcb import PCB
 
 
@@ -120,6 +129,46 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress informational output",
     )
 
+    # Signal-integrity subcommand
+    si_parser = subparsers.add_parser(
+        "signal-integrity",
+        help="Analyze signal integrity (crosstalk and impedance)",
+        description="Identify crosstalk risks and impedance discontinuities",
+    )
+    si_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    si_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    si_parser.add_argument(
+        "--min-risk",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Minimum risk level to report for crosstalk (default: medium)",
+    )
+    si_parser.add_argument(
+        "--crosstalk-only",
+        action="store_true",
+        help="Only analyze crosstalk, skip impedance analysis",
+    )
+    si_parser.add_argument(
+        "--impedance-only",
+        action="store_true",
+        help="Only analyze impedance, skip crosstalk analysis",
+    )
+    si_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -134,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "trace-lengths":
         return _run_trace_lengths_analysis(args)
+
+    if args.subcommand == "signal-integrity":
+        return _run_signal_integrity_analysis(args)
 
     return 0
 
@@ -473,6 +525,181 @@ def _output_trace_lengths_text(
     console.print()
     total_length = sum(r.total_length_mm for r in reports)
     console.print(f"[dim]Total: {len(reports)} nets, {total_length:.2f}mm total trace length[/dim]")
+
+
+# ============================================================================
+# Signal Integrity Analysis
+# ============================================================================
+
+
+def _run_signal_integrity_analysis(args: argparse.Namespace) -> int:
+    """Run signal integrity analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = SignalIntegrityAnalyzer()
+
+    crosstalk_risks = []
+    impedance_discs = []
+
+    if not args.impedance_only:
+        crosstalk_risks = analyzer.analyze_crosstalk(pcb)
+
+        # Filter by minimum risk level
+        risk_order = {"low": 0, "medium": 1, "high": 2}
+        min_risk = risk_order[args.min_risk]
+        crosstalk_risks = [r for r in crosstalk_risks if risk_order[r.risk_level.value] >= min_risk]
+
+    if not args.crosstalk_only:
+        impedance_discs = analyzer.analyze_impedance(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_signal_integrity_json(crosstalk_risks, impedance_discs)
+    else:
+        _output_signal_integrity_text(
+            crosstalk_risks, impedance_discs, pcb_path.name, quiet=args.quiet
+        )
+
+    # Return non-zero if high-risk issues found
+    has_high_crosstalk = any(r.risk_level == RiskLevel.HIGH for r in crosstalk_risks)
+    has_severe_mismatch = any(d.mismatch_percent >= 25 for d in impedance_discs)
+
+    if has_high_crosstalk or has_severe_mismatch:
+        return 1
+    return 0
+
+
+def _output_signal_integrity_json(crosstalk_risks: list, impedance_discs: list) -> None:
+    """Output signal integrity reports as JSON."""
+    output = {
+        "crosstalk_risks": [r.to_dict() for r in crosstalk_risks],
+        "impedance_discontinuities": [d.to_dict() for d in impedance_discs],
+        "summary": {
+            "crosstalk": {
+                "total": len(crosstalk_risks),
+                "high": sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.HIGH),
+                "medium": sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.MEDIUM),
+                "low": sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.LOW),
+            },
+            "impedance": {
+                "total": len(impedance_discs),
+                "width_changes": sum(1 for d in impedance_discs if d.cause == "width_change"),
+                "vias": sum(1 for d in impedance_discs if d.cause == "via"),
+            },
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+def _output_signal_integrity_text(
+    crosstalk_risks: list,
+    impedance_discs: list,
+    filename: str,
+    quiet: bool = False,
+) -> None:
+    """Output signal integrity reports as formatted text."""
+    console = Console()
+
+    if not crosstalk_risks and not impedance_discs:
+        if not quiet:
+            console.print(f"[green]No signal integrity issues found in {filename}[/green]")
+        return
+
+    if not quiet:
+        console.print(f"\n[bold]Signal Integrity Analysis: {filename}[/bold]\n")
+
+    # Crosstalk risks table
+    if crosstalk_risks:
+        _print_crosstalk_section(console, crosstalk_risks)
+
+    # Impedance discontinuities table
+    if impedance_discs:
+        if crosstalk_risks:
+            console.print()  # Spacing between sections
+        _print_impedance_section(console, impedance_discs)
+
+    # Summary
+    console.print()
+    console.print("[dim]Summary:[/dim]")
+    if crosstalk_risks:
+        high = sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.HIGH)
+        medium = sum(1 for r in crosstalk_risks if r.risk_level == RiskLevel.MEDIUM)
+        console.print(f"  Crosstalk: {len(crosstalk_risks)} risks ({high} high, {medium} medium)")
+    if impedance_discs:
+        severe = sum(1 for d in impedance_discs if d.mismatch_percent >= 25)
+        console.print(f"  Impedance: {len(impedance_discs)} discontinuities ({severe} severe)")
+
+
+def _print_crosstalk_section(console: Console, risks: list) -> None:
+    """Print crosstalk risks section."""
+    console.print("[bold]Crosstalk Risks:[/bold]\n")
+
+    for risk in risks:
+        # Color based on risk level
+        colors = {
+            RiskLevel.HIGH: "red",
+            RiskLevel.MEDIUM: "yellow",
+            RiskLevel.LOW: "dim",
+        }
+        color = colors[risk.risk_level]
+
+        console.print(
+            f"  [{color}][bold]{risk.risk_level.value.upper()}[/bold][/{color}]: "
+            f"{risk.aggressor_net} ↔ {risk.victim_net}"
+        )
+        console.print(
+            f"    Parallel: {risk.parallel_length_mm:.1f}mm at "
+            f"{risk.spacing_mm:.2f}mm spacing on {risk.layer}"
+        )
+        console.print(f"    Coupling: {risk.coupling_coefficient:.2f}")
+        if risk.suggestion:
+            console.print(f"    → {risk.suggestion}")
+        console.print()
+
+
+def _print_impedance_section(console: Console, discontinuities: list) -> None:
+    """Print impedance discontinuities section."""
+    console.print("[bold]Impedance Discontinuities:[/bold]\n")
+
+    for disc in discontinuities:
+        # Color based on severity
+        if disc.mismatch_percent >= 25:
+            color = "red"
+            severity = "SEVERE"
+        elif disc.mismatch_percent >= 15:
+            color = "yellow"
+            severity = "WARNING"
+        else:
+            color = "dim"
+            severity = "MINOR"
+
+        x, y = disc.position
+        console.print(
+            f"  [{color}][bold]{severity}[/bold][/{color}]: {disc.net} at ({x:.1f}, {y:.1f})"
+        )
+        console.print(
+            f"    {disc.impedance_before:.0f}Ω → {disc.impedance_after:.0f}Ω "
+            f"({disc.mismatch_percent:+.0f}% mismatch)"
+        )
+        console.print(f"    Cause: {disc.cause.replace('_', ' ')}")
+        console.print(f"    → {disc.suggestion}")
+        console.print()
 
 
 if __name__ == "__main__":
