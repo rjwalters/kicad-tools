@@ -206,25 +206,67 @@ class Autorouter:
         present_factor_increment: float = 0.5,
         history_increment: float = 1.0,
         progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
     ) -> list[Route]:
-        """Route all nets using PathFinder-style negotiated congestion."""
+        """Route all nets using PathFinder-style negotiated congestion.
+
+        Args:
+            max_iterations: Maximum number of rip-up and reroute iterations
+            initial_present_factor: Initial congestion penalty factor
+            present_factor_increment: Factor increase per iteration
+            history_increment: History cost increment per iteration
+            progress_callback: Optional callback for progress updates
+            timeout: Optional timeout in seconds. If reached, returns best partial result.
+
+        Returns:
+            List of routes (may be partial if timeout reached)
+        """
+        import time
+
+        start_time = time.time()
+
         print("\n=== Negotiated Congestion Routing ===")
         print(f"  Max iterations: {max_iterations}")
         print(f"  Present factor: {initial_present_factor} + {present_factor_increment}/iter")
+        if timeout:
+            print(f"  Timeout: {timeout}s")
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         net_order = [n for n in net_order if n != 0]
+        total_nets = len(net_order)
 
         neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
         net_routes: dict[int, list[Route]] = {}
         present_factor = initial_present_factor
+        timed_out = False
+
+        def check_timeout() -> bool:
+            """Check if timeout has been reached."""
+            if timeout is None:
+                return False
+            elapsed = time.time() - start_time
+            return elapsed >= timeout
+
+        def elapsed_str() -> str:
+            """Get formatted elapsed time."""
+            elapsed = time.time() - start_time
+            return f"{elapsed:.1f}s"
 
         print("\n--- Iteration 0: Initial routing with sharing ---")
         if progress_callback is not None:
             if not progress_callback(0.0, "Initial routing pass", True):
                 return list(self.routes)
 
-        for net in net_order:
+        for i, net in enumerate(net_order):
+            if check_timeout():
+                print(f"  ⚠ Timeout reached at net {i}/{total_nets} ({elapsed_str()})")
+                timed_out = True
+                break
+
+            # Progress output every 5 nets or for the last net
+            if i % 5 == 0 or i == total_nets - 1:
+                print(f"  Routing net {i + 1}/{total_nets}... ({elapsed_str()})")
+
             routes = self._route_net_negotiated(net, present_factor)
             if routes:
                 net_routes[net] = routes
@@ -234,59 +276,92 @@ class Autorouter:
 
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()
-        print(f"  Routed {len(net_routes)}/{len(net_order)} nets, overflow: {overflow}")
+        print(
+            f"  Routed {len(net_routes)}/{total_nets} nets, overflow: {overflow} ({elapsed_str()})"
+        )
 
-        if overflow == 0:
+        if timed_out:
+            print("  ⚠ Returning partial result due to timeout")
+        elif overflow == 0:
             print("  No conflicts - routing complete!")
             if progress_callback is not None:
                 progress_callback(1.0, "Routing complete - no conflicts", False)
             return list(self.routes)
 
-        for iteration in range(1, max_iterations + 1):
-            if progress_callback is not None:
-                progress = iteration / (max_iterations + 1)
-                if not progress_callback(
-                    progress, f"Iteration {iteration}/{max_iterations}: rip-up and reroute", True
-                ):
+        # Skip iteration loop if already timed out
+        if not timed_out:
+            for iteration in range(1, max_iterations + 1):
+                if check_timeout():
+                    print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
+                    timed_out = True
                     break
 
-            print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
-            present_factor += present_factor_increment
-            self.grid.update_history_costs(history_increment)
+                if progress_callback is not None:
+                    progress = iteration / (max_iterations + 1)
+                    if not progress_callback(
+                        progress,
+                        f"Iteration {iteration}/{max_iterations}: rip-up and reroute",
+                        True,
+                    ):
+                        break
 
-            nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
-            print(f"  Ripping up {len(nets_to_reroute)} nets with conflicts")
+                print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
+                present_factor += present_factor_increment
+                self.grid.update_history_costs(history_increment)
 
-            neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
+                nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
+                print(f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})")
 
-            rerouted_count = 0
-            for net in nets_to_reroute:
-                routes = self._route_net_negotiated(net, present_factor)
-                if routes:
-                    net_routes[net] = routes
-                    rerouted_count += 1
-                    for route in routes:
-                        self.grid.mark_route_usage(route)
-                        self.routes.append(route)
+                neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
-            overflow = self.grid.get_total_overflow()
-            overused = self.grid.find_overused_cells()
-            print(f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow}")
+                rerouted_count = 0
+                for i, net in enumerate(nets_to_reroute):
+                    if check_timeout():
+                        print(
+                            f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                        )
+                        timed_out = True
+                        break
 
-            if overflow == 0:
-                print(f"  Convergence achieved at iteration {iteration}!")
-                break
+                    routes = self._route_net_negotiated(net, present_factor)
+                    if routes:
+                        net_routes[net] = routes
+                        rerouted_count += 1
+                        for route in routes:
+                            self.grid.mark_route_usage(route)
+                            self.routes.append(route)
+
+                if timed_out:
+                    break
+
+                overflow = self.grid.get_total_overflow()
+                overused = self.grid.find_overused_cells()
+                print(
+                    f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
+                )
+
+                if overflow == 0:
+                    print(f"  Convergence achieved at iteration {iteration}!")
+                    break
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
+        total_elapsed = time.time() - start_time
         print("\n=== Negotiated Routing Complete ===")
-        print(f"  Total nets: {len(net_order)}")
+        print(f"  Total nets: {total_nets}")
         print(f"  Successful: {successful_nets}")
         print(f"  Final overflow: {overflow}")
+        print(f"  Total time: {total_elapsed:.1f}s")
+        if timed_out:
+            print("  ⚠ Stopped due to timeout - returning best partial result")
 
         if progress_callback is not None:
-            status = "converged" if overflow == 0 else f"overflow={overflow}"
+            status = (
+                "converged"
+                if overflow == 0
+                else ("timeout" if timed_out else f"overflow={overflow}")
+            )
             progress_callback(
-                1.0, f"Routing complete: {successful_nets}/{len(net_order)} nets ({status})", False
+                1.0, f"Routing complete: {successful_nets}/{total_nets} nets ({status})", False
             )
 
         return list(self.routes)

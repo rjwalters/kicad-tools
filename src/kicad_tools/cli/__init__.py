@@ -25,6 +25,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
     kicad-tools analyze <command>      - PCB analysis tools (congestion, etc.)
+    kicad-tools suggest <command>      - Part suggestions (alternatives, etc.)
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -55,6 +56,7 @@ from .commands import (
     run_reason_command,
     run_route_command,
     run_sch_command,
+    run_suggest_command,
     run_validate_command,
     run_validate_footprints_command,
     run_zones_command,
@@ -278,6 +280,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "audit":
         return run_audit_command(args)
+
+    elif args.command == "suggest":
+        return run_suggest_command(args)
 
     return 0
 

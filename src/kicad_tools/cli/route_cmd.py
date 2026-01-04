@@ -285,6 +285,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Max iterations for negotiated routing (default: 15)",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -585,23 +591,30 @@ def main(argv: list[str] | None = None) -> int:
     # Route
     if not quiet:
         print(f"\n--- Routing ({args.strategy}) ---")
+        if args.timeout:
+            print(f"  Timeout: {args.timeout}s")
     try:
-        with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
-            if args.differential_pairs and args.strategy == "basic":
-                # Use differential pair-aware routing for basic strategy
-                _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
-            elif args.bus_routing and args.strategy == "basic":
-                # Use bus-aware routing for basic strategy
-                _ = router.route_all_with_buses(bus_config)
-            elif args.strategy == "basic":
-                _ = router.route_all()
-            elif args.strategy == "negotiated":
-                _ = router.route_all_negotiated(max_iterations=args.iterations)
-            elif args.strategy == "monte-carlo":
-                _ = router.route_all_monte_carlo(
-                    num_trials=args.mc_trials,
-                    verbose=args.verbose and not quiet,
-                )
+        # Negotiated routing has its own progress output - don't use spinner
+        if args.strategy == "negotiated":
+            _ = router.route_all_negotiated(
+                max_iterations=args.iterations,
+                timeout=args.timeout,
+            )
+        else:
+            with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
+                if args.differential_pairs and args.strategy == "basic":
+                    # Use differential pair-aware routing for basic strategy
+                    _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+                elif args.bus_routing and args.strategy == "basic":
+                    # Use bus-aware routing for basic strategy
+                    _ = router.route_all_with_buses(bus_config)
+                elif args.strategy == "basic":
+                    _ = router.route_all()
+                elif args.strategy == "monte-carlo":
+                    _ = router.route_all_monte_carlo(
+                        num_trials=args.mc_trials,
+                        verbose=args.verbose and not quiet,
+                    )
     except Exception as e:
         print(f"Error during routing: {e}", file=sys.stderr)
         return 1
