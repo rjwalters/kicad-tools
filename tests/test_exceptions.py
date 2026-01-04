@@ -1,7 +1,6 @@
 """Tests for kicad_tools.exceptions module."""
 
 import json
-from pathlib import Path
 
 import pytest
 
