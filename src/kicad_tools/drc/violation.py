@@ -173,6 +173,9 @@ class DRCViolation:
     # Source position in KiCad file (file:line:column)
     source_position: "SourcePosition | None" = None
 
+    # Fix suggestions (populated by FixSuggestionGenerator)
+    suggestions: list[str] = field(default_factory=list)
+
     @property
     def is_error(self) -> bool:
         """Check if this is an error (vs warning)."""
@@ -217,6 +220,7 @@ class DRCViolation:
             "nets": self.nets,
             "required_value_mm": self.required_value_mm,
             "actual_value_mm": self.actual_value_mm,
+            "suggestions": self.suggestions,
         }
         if self.source_position:
             result["source_position"] = self.source_position.to_dict()

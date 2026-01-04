@@ -320,6 +320,10 @@ def _print_single(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
                 print(f"{indent}    -> {pos_str} {layer}")
         if v.nets:
             print(f"{indent}    Nets: {', '.join(v.nets)}")
+        if v.suggestions:
+            print(f"{indent}    Suggestions:")
+            for suggestion in v.suggestions[:3]:  # Show top 3 suggestions
+                print(f"{indent}      - {suggestion}")
 
 
 def output_json(violations: list[DRCViolation], report: DRCReport) -> None:
