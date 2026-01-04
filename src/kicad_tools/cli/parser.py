@@ -1504,6 +1504,125 @@ def _add_estimate_parser(subparsers) -> None:
     )
 
 
+def _add_audit_parser(subparsers) -> None:
+    """Add audit subcommand parser for manufacturing readiness audit."""
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Manufacturing readiness audit (ERC, DRC, connectivity, compatibility)",
+    )
+    audit_parser.add_argument(
+        "audit_project",
+        help="Path to .kicad_pro or .kicad_pcb file",
+    )
+    audit_parser.add_argument(
+        "--format",
+        dest="audit_format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    audit_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="audit_mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    audit_parser.add_argument(
+        "--layers",
+        "-l",
+        dest="audit_layers",
+        type=int,
+        help="Layer count (auto-detected if not specified)",
+    )
+    audit_parser.add_argument(
+        "--copper",
+        "-c",
+        dest="audit_copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz (default: 1.0)",
+    )
+    audit_parser.add_argument(
+        "--quantity",
+        "-q",
+        dest="audit_quantity",
+        type=int,
+        default=5,
+        help="Quantity for cost estimate (default: 5)",
+    )
+    audit_parser.add_argument(
+        "--skip-erc",
+        dest="audit_skip_erc",
+        action="store_true",
+        help="Skip ERC check (for PCB-only audits)",
+    )
+    audit_parser.add_argument(
+        "--strict",
+        dest="audit_strict",
+        action="store_true",
+        help="Exit with code 2 on warnings",
+    )
+    audit_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="audit_verbose",
+        action="store_true",
+        help="Show detailed information",
+    )
+
+
+def _add_suggest_parser(subparsers) -> None:
+    """Add suggest subcommand parser with its subcommands."""
+    suggest_parser = subparsers.add_parser("suggest", help="Part suggestions and recommendations")
+    suggest_subparsers = suggest_parser.add_subparsers(
+        dest="suggest_command", help="Suggest commands"
+    )
+
+    # suggest alternatives
+    suggest_alt = suggest_subparsers.add_parser(
+        "alternatives", help="Suggest alternative parts for unavailable or expensive components"
+    )
+    suggest_alt.add_argument(
+        "schematic",
+        help="Path to .kicad_sch file (or BOM CSV with --bom flag)",
+    )
+    suggest_alt.add_argument(
+        "--bom",
+        action="store_true",
+        help="Treat input as CSV BOM file instead of schematic",
+    )
+    suggest_alt.add_argument(
+        "--max-alternatives",
+        "-n",
+        type=int,
+        default=3,
+        help="Maximum alternatives per part (default: 3)",
+    )
+    suggest_alt.add_argument(
+        "--format",
+        "-f",
+        dest="suggest_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    suggest_alt.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass parts cache (fetch fresh data)",
+    )
+    suggest_alt.add_argument(
+        "--show-all",
+        action="store_true",
+        help="Show alternatives for all parts, not just problematic ones",
+    )
+    suggest_alt.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed information"
+    )
+
+
 def _add_net_status_parser(subparsers) -> None:
     """Add net-status subcommand parser."""
     net_status_parser = subparsers.add_parser(

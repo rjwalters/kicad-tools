@@ -148,20 +148,12 @@ class BOMAvailabilityResult:
     @property
     def low_stock(self) -> list[PartAvailabilityResult]:
         """Get items with insufficient stock (but some stock)."""
-        return [
-            item
-            for item in self.items
-            if item.in_stock and not item.sufficient_stock
-        ]
+        return [item for item in self.items if item.in_stock and not item.sufficient_stock]
 
     @property
     def out_of_stock(self) -> list[PartAvailabilityResult]:
         """Get items that are out of stock."""
-        return [
-            item
-            for item in self.items
-            if item.status == AvailabilityStatus.OUT_OF_STOCK
-        ]
+        return [item for item in self.items if item.status == AvailabilityStatus.OUT_OF_STOCK]
 
     @property
     def missing(self) -> list[PartAvailabilityResult]:
@@ -394,11 +386,7 @@ class LCSCAvailabilityChecker:
 
         # Find alternatives if not available
         alternatives = []
-        if (
-            self.find_alternatives
-            and status != AvailabilityStatus.AVAILABLE
-            and mpn
-        ):
+        if self.find_alternatives and status != AvailabilityStatus.AVAILABLE and mpn:
             alternatives = self._find_alternatives(mpn, part, quantity_needed)
 
         return PartAvailabilityResult(

@@ -28,7 +28,9 @@ from .placement import run_placement_command
 from .reasoning import run_reason_command
 from .routing import run_optimize_command, run_route_command, run_zones_command
 from .schematic import run_sch_command
+from .suggest import run_suggest_command
 from .validation import (
+    run_audit_command,
     run_check_command,
     run_constraints_command,
     run_fix_footprints_command,
@@ -72,4 +74,8 @@ __all__ = [
     "run_analyze_command",
     # Estimate
     "run_estimate_command",
+    # Audit
+    "run_audit_command",
+    # Suggest
+    "run_suggest_command",
 ]

@@ -17,8 +17,23 @@ Usage:
     checker = LCSCAvailabilityChecker()
     availability = checker.check_bom(bom, quantity=100)
     print(f"Available: {len(availability.available)}/{len(availability.items)}")
+
+Alternative Part Finding:
+    from kicad_tools.cost import AlternativePartFinder
+    from kicad_tools.parts import LCSCClient
+
+    client = LCSCClient()
+    finder = AlternativePartFinder(client)
+
+    # Find alternatives for problematic BOM items
+    suggestions = finder.suggest_for_bom(bom_items, availability)
 """
 
+from .alternatives import (
+    AlternativePartFinder,
+    AlternativeSuggestions,
+    PartAlternative,
+)
 from .availability import (
     AlternativePart,
     AvailabilityStatus,
@@ -47,4 +62,8 @@ __all__ = [
     "BOMAvailabilityResult",
     "AvailabilityStatus",
     "AlternativePart",
+    # Alternative part finding
+    "AlternativePartFinder",
+    "AlternativeSuggestions",
+    "PartAlternative",
 ]

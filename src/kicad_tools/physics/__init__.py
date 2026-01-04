@@ -54,22 +54,22 @@ from .constants import (
     COPPER_1OZ,
     COPPER_2OZ,
     COPPER_CONDUCTIVITY,
-    # Copper weights
     COPPER_HALF_OZ,
     FR4_HIGH_TG,
     FR4_STANDARD,
     ISOLA_370HR,
     ROGERS_4003C,
     ROGERS_4350B,
-    # Physical constants
     SPEED_OF_LIGHT,
     CopperWeight,
-    # Dielectric materials
     DielectricMaterial,
     copper_thickness_from_oz,
-    # Lookup functions
     get_material,
     get_material_or_default,
+)
+from .coupled_lines import (
+    CoupledLines,
+    DifferentialPairResult,
 )
 from .stackup import (
     LayerType,
@@ -107,4 +107,7 @@ __all__ = [
     # Transmission Line
     "ImpedanceResult",
     "TransmissionLine",
+    # Coupled Lines
+    "CoupledLines",
+    "DifferentialPairResult",
 ]
