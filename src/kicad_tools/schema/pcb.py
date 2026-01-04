@@ -1007,6 +1007,17 @@ class PCB:
         """All board-level graphic elements (gr_line, gr_rect, etc.)."""
         return self._graphics
 
+    @property
+    def graphic_items(self) -> Iterator[GraphicLine | GraphicArc | BoardGraphic]:
+        """All board-level graphic items (lines, arcs, rects, circles).
+
+        Yields all graphic elements from Edge.Cuts and other layers.
+        Used for board outline calculations and layer analysis.
+        """
+        yield from self._graphic_lines
+        yield from self._graphic_arcs
+        yield from self._graphics
+
     def graphics_on_layer(self, layer: str) -> Iterator[BoardGraphic]:
         """Get graphic elements on a specific layer."""
         for graphic in self._graphics:
