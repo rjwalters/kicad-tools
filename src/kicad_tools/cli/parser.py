@@ -1290,6 +1290,50 @@ def _add_analyze_parser(subparsers) -> None:
         help="Minimum severity to report (default: low)",
     )
 
+    # analyze trace-lengths
+    trace_parser = analyze_subparsers.add_parser(
+        "trace-lengths",
+        help="Analyze trace lengths for timing-critical nets",
+        description="Calculate trace lengths, identify differential pairs, and check skew",
+    )
+    trace_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    trace_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    trace_parser.add_argument(
+        "--net",
+        "-n",
+        action="append",
+        dest="analyze_nets",
+        help="Specific net(s) to analyze (can be used multiple times)",
+    )
+    trace_parser.add_argument(
+        "--all",
+        "-a",
+        dest="analyze_all",
+        action="store_true",
+        help="Analyze all nets, not just timing-critical ones",
+    )
+    trace_parser.add_argument(
+        "--diff-pairs",
+        "-d",
+        dest="analyze_diff_pairs",
+        action="store_true",
+        default=True,
+        help="Include differential pair analysis (default: True)",
+    )
+    trace_parser.add_argument(
+        "--no-diff-pairs",
+        action="store_false",
+        dest="analyze_diff_pairs",
+        help="Disable differential pair analysis",
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""
