@@ -5,7 +5,7 @@ This package contains command handler modules organized by domain:
 - pcb: pcb subcommand handlers
 - library: lib subcommand handlers
 - routing: route, zones, optimize-traces handlers
-- validation: validate, check handlers
+- validation: validate, check, constraints handlers
 - footprint: footprint generation handlers
 - parts: LCSC parts lookup handlers
 - datasheet: datasheet command handlers
@@ -27,6 +27,7 @@ from .routing import run_optimize_command, run_route_command, run_zones_command
 from .schematic import run_sch_command
 from .validation import (
     run_check_command,
+    run_constraints_command,
     run_fix_footprints_command,
     run_validate_command,
     run_validate_footprints_command,
@@ -48,6 +49,7 @@ __all__ = [
     "run_validate_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
+    "run_constraints_command",
     # Footprint
     "run_footprint_command",
     # Parts

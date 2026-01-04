@@ -37,6 +37,7 @@ from kicad_tools.exceptions import KiCadToolsError
 from .commands import (
     run_check_command,
     run_config_command,
+    run_constraints_command,
     run_datasheet_command,
     run_fix_footprints_command,
     run_footprint_command,
@@ -260,6 +261,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "validate":
         return run_validate_command(args)
+
+    elif args.command == "constraints":
+        return run_constraints_command(args)
 
     return 0
 
