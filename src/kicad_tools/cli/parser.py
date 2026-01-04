@@ -135,6 +135,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_validate_parser(subparsers)
     _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
+    _add_estimate_parser(subparsers)
 
     return parser
 
@@ -1333,4 +1334,73 @@ def _add_constraints_parser(subparsers) -> None:
         "--verbose",
         action="store_true",
         help="Show detailed conflict information",
+    )
+
+
+def _add_estimate_parser(subparsers) -> None:
+    """Add estimate subcommand parser with its subcommands."""
+    estimate_parser = subparsers.add_parser(
+        "estimate", help="Manufacturing cost estimation"
+    )
+    estimate_subparsers = estimate_parser.add_subparsers(
+        dest="estimate_command", help="Estimate commands"
+    )
+
+    # estimate cost
+    estimate_cost = estimate_subparsers.add_parser(
+        "cost", help="Estimate manufacturing costs"
+    )
+    estimate_cost.add_argument("pcb", help="Path to .kicad_pcb file")
+    estimate_cost.add_argument(
+        "--bom",
+        help="Path to BOM file (.csv) or schematic (.kicad_sch) for component costs",
+    )
+    estimate_cost.add_argument(
+        "--quantity",
+        "-q",
+        type=int,
+        default=10,
+        help="Number of boards to manufacture (default: 10)",
+    )
+    estimate_cost.add_argument(
+        "--mfr",
+        "-m",
+        choices=["jlcpcb", "pcbway", "seeed", "oshpark"],
+        default="jlcpcb",
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    estimate_cost.add_argument(
+        "--format",
+        "-f",
+        dest="estimate_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    estimate_cost.add_argument(
+        "--finish",
+        choices=["hasl", "hasl_lead_free", "enig", "osp"],
+        default="hasl",
+        help="Surface finish (default: hasl)",
+    )
+    estimate_cost.add_argument(
+        "--color",
+        choices=["green", "red", "blue", "black", "white", "yellow"],
+        default="green",
+        help="Solder mask color (default: green)",
+    )
+    estimate_cost.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        help="Layer count override (auto-detected from PCB if not specified)",
+    )
+    estimate_cost.add_argument(
+        "--thickness",
+        type=float,
+        default=1.6,
+        help="Board thickness in mm (default: 1.6)",
+    )
+    estimate_cost.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed breakdown"
     )

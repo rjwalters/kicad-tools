@@ -18,6 +18,7 @@ This package contains command handler modules organized by domain:
 from .analyze import run_analyze_command
 from .config import run_config_command, run_interactive_command
 from .datasheet import run_datasheet_command
+from .estimate import run_estimate_command
 from .footprint import run_footprint_command
 from .library import run_lib_command
 from .manufacturer import run_mfr_command
@@ -69,4 +70,6 @@ __all__ = [
     "run_mfr_command",
     # Analysis
     "run_analyze_command",
+    # Estimate
+    "run_estimate_command",
 ]

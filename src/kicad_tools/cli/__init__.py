@@ -41,6 +41,7 @@ from .commands import (
     run_config_command,
     run_constraints_command,
     run_datasheet_command,
+    run_estimate_command,
     run_fix_footprints_command,
     run_footprint_command,
     run_interactive_command,
@@ -270,6 +271,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "constraints":
         return run_constraints_command(args)
+
+    elif args.command == "estimate":
+        return run_estimate_command(args)
 
     return 0
 
