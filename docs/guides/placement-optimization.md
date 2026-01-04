@@ -196,6 +196,53 @@ print(f"Routed: {result.routed_nets}/{result.total_nets}")
 
 ---
 
+## Routability Considerations
+
+**IMPORTANT**: Placement optimization focuses on reducing wire length and improving
+component grouping, but **may not always improve routability**. A placement that
+minimizes total wire length might actually make routing harder by creating congested
+areas or blocking routing channels.
+
+### Check Routability Impact
+
+Use `--check-routability` to see how optimization affects routability:
+
+```bash
+# See routability before and after optimization
+kct placement optimize board.kicad_pcb --check-routability
+
+# Output shows:
+#   Before: 95% estimated routability (42 nets, 2 problem nets)
+#   After: 87% estimated routability (42 nets, 5 problem nets)
+#   WARNING: Routability decreased after placement optimization!
+```
+
+### Routing-Aware Mode
+
+For best results, use `--routing-aware` mode which iterates between placement and
+routing to find placements that are actually routable:
+
+```bash
+# Integrated place-route optimization
+kct placement optimize board.kicad_pcb --routing-aware
+
+# This mode:
+# 1. Optimizes placement
+# 2. Attempts routing
+# 3. Adjusts placement if routing fails
+# 4. Repeats until convergence
+```
+
+### When to Use Each Mode
+
+| Mode | Use When |
+|------|----------|
+| Default (`--strategy force-directed`) | Quick optimization, will verify routing manually |
+| `--check-routability` | Want to see routability impact before/after |
+| `--routing-aware` | Need guaranteed routable result, can wait longer |
+
+---
+
 ## Best Practices
 
 1. **Place connectors first** - They have physical constraints
@@ -203,6 +250,7 @@ print(f"Routed: {result.routed_nets}/{result.total_nets}")
 3. **Consider thermal** - Power components near edges or thermal vias
 4. **Leave routing channels** - Don't pack too tight
 5. **Iterate** - Run placement, try routing, adjust
+6. **Check routability** - Use `--check-routability` to verify impact
 
 ---
 

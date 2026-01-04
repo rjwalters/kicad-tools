@@ -722,6 +722,160 @@ def output_suggestions_text(suggestions: dict, verbose: bool = False):
     print(f"\nSummary: {high_conf} high confidence, {medium_conf} medium, {low_conf} low")
 
 
+def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, int, int]:
+    """
+    Estimate routability of a PCB by analyzing net routing difficulty.
+
+    Returns:
+        Tuple of (estimated_success_rate, total_nets, problem_nets_count)
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router.analysis import RoutabilityAnalyzer
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.schema.pcb import PCB
+
+    try:
+        with spinner("Analyzing routability...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+
+            # Detect board dimensions
+            width, height = 100.0, 100.0
+            if pcb.footprints:
+                all_x = [fp.position[0] for fp in pcb.footprints]
+                all_y = [fp.position[1] for fp in pcb.footprints]
+                width = max(all_x) - min(all_x) + 20
+                height = max(all_y) - min(all_y) + 20
+
+            # Create router for analysis
+            router = Autorouter(width=width, height=height)
+
+            # Load components into router
+            import math
+
+            from kicad_tools.router.layers import Layer
+
+            for fp in pcb.footprints:
+                ref = fp.reference
+                cx, cy = fp.position
+                rotation = fp.rotation
+                rot_rad = math.radians(-rotation)
+                cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+                pads = []
+                for pad in fp.pads:
+                    px, py = pad.position
+                    rx = px * cos_r - py * sin_r
+                    ry = px * sin_r + py * cos_r
+                    is_pth = pad.type == "thru_hole"
+
+                    pads.append(
+                        {
+                            "number": pad.number,
+                            "x": cx + rx,
+                            "y": cy + ry,
+                            "width": pad.size[0],
+                            "height": pad.size[1],
+                            "net": pad.net_number,
+                            "net_name": pad.net_name,
+                            "layer": Layer.F_CU,
+                            "through_hole": is_pth,
+                            "drill": pad.drill if is_pth else 0.0,
+                        }
+                    )
+
+                if pads:
+                    router.add_component(ref, pads)
+
+            # Analyze routability
+            analyzer = RoutabilityAnalyzer(router)
+            report = analyzer.analyze()
+
+            return (
+                report.estimated_success_rate,
+                report.total_nets,
+                len(report.problem_nets),
+            )
+
+    except Exception:
+        # If analysis fails, return neutral values
+        return (1.0, 0, 0)
+
+
+def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool) -> int:
+    """
+    Run routing-aware placement optimization.
+
+    Uses PlaceRouteOptimizer to iterate between placement and routing
+    for better overall results.
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.optimize.place_route import PlaceRouteOptimizer
+    from kicad_tools.schema.pcb import PCB
+
+    if not quiet:
+        print("Routing-aware placement optimization")
+        print("=" * 50)
+        print("This mode iterates between placement and routing")
+        print("to find placements that are actually routable.")
+        print()
+
+    # Load PCB
+    try:
+        with spinner("Loading PCB...", quiet=quiet):
+            pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Create optimizer
+    try:
+        with spinner("Creating routing-aware optimizer...", quiet=quiet):
+            optimizer = PlaceRouteOptimizer.from_pcb(
+                pcb,
+                pcb_path=pcb_path,
+                verbose=not quiet,
+            )
+    except Exception as e:
+        print(f"Error creating optimizer: {e}", file=sys.stderr)
+        return 1
+
+    # Run optimization
+    max_iterations = getattr(args, "iterations", 10)
+    try:
+        result = optimizer.optimize(
+            max_iterations=max_iterations,
+            allow_placement_changes=True,
+            skip_drc=False,
+        )
+    except Exception as e:
+        print(f"Error during optimization: {e}", file=sys.stderr)
+        return 1
+
+    # Report results
+    if not quiet:
+        print()
+        if result.success:
+            print(f"Optimization converged in {result.iterations} iterations")
+            if result.routes:
+                print(f"Successfully routed {len(result.routes)} nets")
+        else:
+            print(f"Optimization did not fully converge: {result.message}")
+
+    # Save if not dry run
+    if not args.dry_run:
+        output_path = Path(args.output) if args.output else pcb_path
+        try:
+            with spinner("Saving optimized PCB...", quiet=quiet):
+                pcb.save(str(output_path))
+            if not quiet:
+                print(f"Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+
+    return 0 if result.success else 1
+
+
 def cmd_optimize(args) -> int:
     """Optimize component placement for routability."""
     from kicad_tools.cli.progress import spinner
@@ -738,11 +892,17 @@ def cmd_optimize(args) -> int:
     from kicad_tools.schema.pcb import PCB
 
     quiet = getattr(args, "quiet", False)
+    routing_aware = getattr(args, "routing_aware", False)
+    check_routability = getattr(args, "check_routability", False)
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         print(f"Error: File not found: {pcb_path}", file=sys.stderr)
         return 1
+
+    # Handle routing-aware optimization mode
+    if routing_aware:
+        return _cmd_optimize_routing_aware(args, pcb_path, quiet)
 
     # Parse fixed components
     fixed_refs = []
@@ -826,7 +986,11 @@ def cmd_optimize(args) -> int:
 
             with spinner("Creating optimizer from PCB...", quiet=quiet):
                 optimizer = PlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering, edge_detect=edge_detect
+                    pcb,
+                    config=config,
+                    fixed_refs=fixed_refs,
+                    enable_clustering=enable_clustering,
+                    edge_detect=edge_detect,
                 )
 
             # Add constraints if loaded
@@ -1000,6 +1164,17 @@ def cmd_optimize(args) -> int:
             print(optimizer.report())
         return 0
 
+    # Check routability before saving (if requested)
+    before_rate, before_nets, before_problems = 0.0, 0, 0
+    if check_routability:
+        if not quiet:
+            print("\nChecking routability before optimization...")
+        before_rate, before_nets, before_problems = _estimate_routability(pcb_path, quiet)
+        if not quiet:
+            print(
+                f"  Before: {before_rate * 100:.0f}% estimated routability ({before_nets} nets, {before_problems} problem nets)"
+            )
+
     # Write results
     output_path = Path(args.output) if args.output else pcb_path
 
@@ -1015,6 +1190,33 @@ def cmd_optimize(args) -> int:
     except Exception as e:
         print(f"Error saving PCB: {e}", file=sys.stderr)
         return 1
+
+    # Check routability after saving (if requested)
+    if check_routability:
+        if not quiet:
+            print("\nChecking routability after optimization...")
+        after_rate, after_nets, after_problems = _estimate_routability(output_path, quiet)
+        if not quiet:
+            print(
+                f"  After: {after_rate * 100:.0f}% estimated routability ({after_nets} nets, {after_problems} problem nets)"
+            )
+
+            # Compare and warn if worse
+            if after_rate < before_rate - 0.05:  # More than 5% worse
+                print()
+                print("WARNING: Routability decreased after placement optimization!")
+                print(f"  Change: {(after_rate - before_rate) * 100:+.0f}%")
+                print("  Consider using --routing-aware mode for better results.")
+            elif after_rate > before_rate + 0.05:  # More than 5% better
+                print(f"\n  Improvement: {(after_rate - before_rate) * 100:+.0f}%")
+
+    # Print routability warning (always, unless quiet)
+    if not quiet and not check_routability:
+        print()
+        print("NOTE: Placement optimization does not verify routing.")
+        print("      Run `route` after optimization to verify routability.")
+        print("      Use --routing-aware for integrated place-route optimization.")
+        print("      Use --check-routability to see routability impact.")
 
     return 0
 
@@ -1416,6 +1618,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         dest="auto_keepout",
         help="Auto-detect keepout zones from mounting holes and connectors",
+    )
+    optimize_parser.add_argument(
+        "--routing-aware",
+        action="store_true",
+        dest="routing_aware",
+        help="Use integrated place-route optimization (iterates between placement and routing)",
+    )
+    optimize_parser.add_argument(
+        "--check-routability",
+        action="store_true",
+        dest="check_routability",
+        help="Check routability before and after optimization to show impact",
     )
     optimize_parser.add_argument(
         "--dry-run",
