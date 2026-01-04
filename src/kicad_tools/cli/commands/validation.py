@@ -1,4 +1,4 @@
-"""Validation command handlers (check, validate, validate-footprints, fix-footprints)."""
+"""Validation command handlers (check, validate, validate-footprints, fix-footprints, constraints)."""
 
 __all__ = [
     "run_check_command",
@@ -6,6 +6,7 @@ __all__ = [
     "run_validate_connectivity_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
+    "run_constraints_command",
 ]
 
 
@@ -137,3 +138,31 @@ def run_validate_connectivity_command(args) -> int:
         sub_argv.append("--verbose")
 
     return validate_connectivity_main(sub_argv)
+
+
+def run_constraints_command(args) -> int:
+    """Handle constraints command with its subcommands."""
+    if not getattr(args, "constraints_command", None):
+        print("Usage: kicad-tools constraints <command> [options]")
+        print("\nCommands:")
+        print("  check    Detect conflicts between constraints")
+        print("\nUse 'kicad-tools constraints <command> --help' for more info.")
+        return 1
+
+    if args.constraints_command == "check":
+        from ..constraints_cmd import main as constraints_main
+
+        sub_argv = [args.pcb]
+        if args.format != "table":
+            sub_argv.extend(["--format", args.format])
+        if args.keepout:
+            sub_argv.extend(["--keepout", args.keepout])
+        if getattr(args, "constraints_file", None):
+            sub_argv.extend(["--constraints", args.constraints_file])
+        if getattr(args, "auto_keepout", False):
+            sub_argv.append("--auto-keepout")
+        if args.verbose:
+            sub_argv.append("--verbose")
+        return constraints_main(sub_argv)
+
+    return 0

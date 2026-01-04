@@ -134,6 +134,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_interactive_parser(subparsers)
     _add_validate_parser(subparsers)
     _add_analyze_parser(subparsers)
+    _add_constraints_parser(subparsers)
 
     return parser
 
@@ -1287,4 +1288,49 @@ def _add_analyze_parser(subparsers) -> None:
         choices=["low", "medium", "high", "critical"],
         default="low",
         help="Minimum severity to report (default: low)",
+    )
+
+
+def _add_constraints_parser(subparsers) -> None:
+    """Add constraints subcommand parser with its subcommands."""
+    constraints_parser = subparsers.add_parser(
+        "constraints", help="Constraint conflict detection and management"
+    )
+    constraints_subparsers = constraints_parser.add_subparsers(
+        dest="constraints_command", help="Constraints commands"
+    )
+
+    # constraints check
+    constraints_check = constraints_subparsers.add_parser(
+        "check", help="Detect conflicts between constraints"
+    )
+    constraints_check.add_argument("pcb", help="Path to .kicad_pcb file")
+    constraints_check.add_argument(
+        "--format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    constraints_check.add_argument(
+        "--keepout",
+        metavar="FILE",
+        help="YAML file defining keepout zones",
+    )
+    constraints_check.add_argument(
+        "--constraints",
+        metavar="FILE",
+        dest="constraints_file",
+        help="YAML file with grouping constraints",
+    )
+    constraints_check.add_argument(
+        "--auto-keepout",
+        action="store_true",
+        dest="auto_keepout",
+        help="Auto-detect keepout zones from mounting holes and connectors",
+    )
+    constraints_check.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed conflict information",
     )
