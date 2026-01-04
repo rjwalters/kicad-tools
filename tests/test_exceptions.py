@@ -699,6 +699,7 @@ line 7"""
         snippet_lines = [l for l in lines if "|" in l]
         assert len(snippet_lines) == 3  # 1 before, target, 1 after
 
+
 class TestSourcePosition:
     """Tests for the SourcePosition dataclass."""
 
@@ -1319,3 +1320,117 @@ class TestErrorAccumulatorIntegration:
         assert isinstance(outer_acc.errors[0], ValidationErrorGroup)
         # The inner group should contain the 2 ValueError exceptions
         assert len(outer_acc.errors[0].errors) == 2
+
+
+class TestRichConsoleRendering:
+    """Tests for Rich console rendering support."""
+
+    def test_rich_console_method_exists(self):
+        """Test that __rich_console__ method exists on base class."""
+        err = KiCadToolsError("Test message")
+        assert hasattr(err, "__rich_console__")
+        assert callable(err.__rich_console__)
+
+    def test_rich_console_renders_basic_error(self):
+        """Test Rich rendering of basic error."""
+        from rich.console import Console
+        from io import StringIO
+
+        err = KiCadToolsError("Test error message")
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=80)
+        console.print(err)
+        result = output.getvalue()
+        assert "Test error message" in result
+        assert "KI_CAD_TOOLS" in result
+
+    def test_rich_console_renders_context(self):
+        """Test Rich rendering includes context."""
+        from rich.console import Console
+        from io import StringIO
+
+        err = KiCadToolsError(
+            "File error",
+            context={"file": "test.kicad_sch", "line": 42},
+        )
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=80)
+        console.print(err)
+        result = output.getvalue()
+        assert "File error" in result
+        assert "file" in result
+        assert "test.kicad_sch" in result
+        assert "line" in result
+        assert "42" in result
+
+    def test_rich_console_renders_suggestions(self):
+        """Test Rich rendering includes suggestions."""
+        from rich.console import Console
+        from io import StringIO
+
+        err = KiCadToolsError(
+            "Configuration error",
+            suggestions=["Check your config file", "Verify settings"],
+        )
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=80)
+        console.print(err)
+        result = output.getvalue()
+        assert "Configuration error" in result
+        assert "Suggestions" in result
+        assert "Check your config file" in result
+        assert "Verify settings" in result
+
+    def test_rich_console_renders_source_snippet(self):
+        """Test Rich rendering includes source snippet when available."""
+        from rich.console import Console
+        from io import StringIO
+
+        err = ParseError(
+            "Syntax error",
+            context={
+                "file": "test.kicad_sch",
+                "line": 3,
+                "source_snippet": '(kicad_sch\n  (version 20230121)\n  (bad_token here)\n)',
+                "highlight_line": 3,
+            },
+        )
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=80)
+        console.print(err)
+        result = output.getvalue()
+        assert "Syntax error" in result
+        # Source snippet should be rendered
+        assert "kicad_sch" in result or "bad_token" in result
+
+    def test_validation_error_rich_console(self):
+        """Test ValidationError has its own rich rendering."""
+        from rich.console import Console
+        from io import StringIO
+
+        err = ValidationError(
+            ["Missing field: name", "Invalid value: type"],
+            context={"file": "config.json"},
+        )
+        output = StringIO()
+        console = Console(file=output, force_terminal=True, width=80)
+        console.print(err)
+        result = output.getvalue()
+        assert "2 error" in result
+        assert "Missing field: name" in result
+        assert "Invalid value: type" in result
+
+    def test_plain_str_fallback_preserved(self):
+        """Test that plain text __str__ still works for non-TTY."""
+        err = KiCadToolsError(
+            "Test error",
+            context={"key": "value"},
+            suggestions=["Try this"],
+        )
+        # __str__ should still return plain text
+        plain = str(err)
+        assert "Test error" in plain
+        assert "Context:" in plain
+        assert "key: value" in plain
+        assert "Suggestions:" in plain
+        assert "Try this" in plain
