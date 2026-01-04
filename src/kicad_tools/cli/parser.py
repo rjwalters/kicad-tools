@@ -137,6 +137,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
     _add_estimate_parser(subparsers)
+    _add_suggest_parser(subparsers)
 
     return parser
 
@@ -1505,4 +1506,54 @@ def _add_estimate_parser(subparsers) -> None:
     )
     estimate_cost.add_argument(
         "-v", "--verbose", action="store_true", help="Show detailed breakdown"
+    )
+
+
+def _add_suggest_parser(subparsers) -> None:
+    """Add suggest subcommand parser with its subcommands."""
+    suggest_parser = subparsers.add_parser("suggest", help="Part suggestions and recommendations")
+    suggest_subparsers = suggest_parser.add_subparsers(
+        dest="suggest_command", help="Suggest commands"
+    )
+
+    # suggest alternatives
+    suggest_alt = suggest_subparsers.add_parser(
+        "alternatives", help="Suggest alternative parts for unavailable or expensive components"
+    )
+    suggest_alt.add_argument(
+        "schematic",
+        help="Path to .kicad_sch file (or BOM CSV with --bom flag)",
+    )
+    suggest_alt.add_argument(
+        "--bom",
+        action="store_true",
+        help="Treat input as CSV BOM file instead of schematic",
+    )
+    suggest_alt.add_argument(
+        "--max-alternatives",
+        "-n",
+        type=int,
+        default=3,
+        help="Maximum alternatives per part (default: 3)",
+    )
+    suggest_alt.add_argument(
+        "--format",
+        "-f",
+        dest="suggest_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    suggest_alt.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass parts cache (fetch fresh data)",
+    )
+    suggest_alt.add_argument(
+        "--show-all",
+        action="store_true",
+        help="Show alternatives for all parts, not just problematic ones",
+    )
+    suggest_alt.add_argument(
+        "-v", "--verbose", action="store_true", help="Show detailed information"
     )
