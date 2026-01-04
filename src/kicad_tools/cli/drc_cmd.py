@@ -347,6 +347,10 @@ def _print_single(
                 print(f"{indent}    -> {pos_str} {layer}")
         if v.nets:
             print(f"{indent}    Nets: {', '.join(v.nets)}")
+        if v.suggestions:
+            print(f"{indent}    Suggestions:")
+            for suggestion in v.suggestions[:3]:  # Show top 3 suggestions
+                print(f"{indent}      - {suggestion}")
 
     # Show fix suggestions
     if show_suggestions and v.suggestions:

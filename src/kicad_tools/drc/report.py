@@ -306,6 +306,9 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
             nets=nets,
         )
         _extract_values(violation.__dict__, message)
+        # Generate fix suggestions
+        from kicad_tools.feedback import generate_drc_suggestions
+        violation.suggestions = generate_drc_suggestions(violation)
         violations.append(violation)
 
     return DRCReport(
@@ -339,7 +342,9 @@ def _extract_values(data: dict, message: str) -> None:
 
 def _build_violation(data: dict) -> DRCViolation:
     """Build a DRCViolation from parsed data."""
-    return DRCViolation(
+    from kicad_tools.feedback import generate_drc_suggestions
+
+    violation = DRCViolation(
         type=ViolationType.from_string(data["type_str"]),
         type_str=data["type_str"],
         severity=data["severity"],
@@ -351,3 +356,6 @@ def _build_violation(data: dict) -> DRCViolation:
         required_value_mm=data.get("required_value_mm"),
         actual_value_mm=data.get("actual_value_mm"),
     )
+    # Generate fix suggestions
+    violation.suggestions = generate_drc_suggestions(violation)
+    return violation
