@@ -1,7 +1,7 @@
 """Transmission line impedance calculations.
 
-Provides analytical calculations for microstrip and stripline impedance
-using the Hammerstad-Jensen equations.
+Provides analytical calculations for microstrip, stripline, and CPWG impedance
+using the Hammerstad-Jensen equations and Ghione-Naldi analysis.
 
 Example::
 
@@ -20,10 +20,16 @@ Example::
     width = tl.width_for_impedance(z0_target=50, layer="F.Cu")
     print(f"50Ω requires {width:.3f}mm trace width")
 
+    # Calculate CPWG impedance
+    result = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu")
+    print(f"CPWG Z0 = {result.z0:.1f}Ω")
+
 References:
     Hammerstad & Jensen, "Accurate Models for Microstrip Computer-Aided Design",
     MTT-S International Microwave Symposium Digest, 1980.
-    IPC-2141A Section 4.2
+    Ghione & Naldi, "Analytical Formulas for Coplanar Lines in Hybrid and
+    Monolithic MICs", Electronics Letters, 1984.
+    IPC-2141A Section 4.2, 4.4
 """
 
 from __future__ import annotations
@@ -33,6 +39,39 @@ from dataclasses import dataclass
 
 from .constants import COPPER_CONDUCTIVITY, SPEED_OF_LIGHT
 from .stackup import Stackup
+
+
+def _elliptic_k(k: float, tolerance: float = 1e-12) -> float:
+    """Compute complete elliptic integral of the first kind K(k).
+
+    Uses the arithmetic-geometric mean (AGM) algorithm, which converges
+    extremely fast (typically 4-5 iterations for machine precision).
+
+    Args:
+        k: Elliptic modulus (0 <= k < 1)
+        tolerance: Convergence tolerance
+
+    Returns:
+        K(k) = integral from 0 to pi/2 of 1/sqrt(1 - k^2*sin^2(t)) dt
+
+    Note:
+        For k >= 1, returns inf. For k < 0, uses symmetry K(-k) = K(k).
+    """
+    k = abs(k)
+    if k >= 1.0:
+        return float("inf")
+    if k == 0.0:
+        return math.pi / 2
+
+    # AGM algorithm: K(k) = pi / (2 * AGM(1, k'))
+    # where k' = sqrt(1 - k^2) is the complementary modulus
+    a = 1.0
+    b = math.sqrt(1 - k * k)  # k' = sqrt(1 - k^2)
+
+    while abs(a - b) > tolerance:
+        a, b = (a + b) / 2, math.sqrt(a * b)
+
+    return math.pi / (2 * a)
 
 
 @dataclass
@@ -529,3 +568,375 @@ class TransmissionLine:
         z_diff = 2 * single.z0 * (1 - 0.347 * k)
 
         return single, z_diff
+
+    def cpwg(
+        self,
+        width_mm: float,
+        gap_mm: float,
+        layer: str,
+        frequency_ghz: float = 1.0,
+    ) -> ImpedanceResult:
+        """Calculate coplanar waveguide with ground (CPWG) impedance.
+
+        CPWG geometry::
+
+              gap   width   gap
+          ═══════╗ ═══════ ╔═══════  ← Signal trace with coplanar ground
+                 ╚═════════╝
+          ─────────────────────────  ← Ground plane below
+
+        CPWG provides better isolation than microstrip and is common
+        for RF designs. The coplanar ground conductors on either side
+        of the signal trace improve shielding and reduce crosstalk.
+
+        Uses Ghione-Naldi conformal mapping analysis for accurate
+        impedance calculation.
+
+        Args:
+            width_mm: Center conductor width in millimeters
+            gap_mm: Gap between conductor and coplanar ground in mm
+            layer: Layer name (e.g., "F.Cu", "B.Cu")
+            frequency_ghz: Frequency in GHz for loss calculation
+
+        Returns:
+            ImpedanceResult with Z0, effective epsilon, loss, and velocity
+
+        Raises:
+            ValueError: If width or gap is non-positive
+        """
+        if width_mm <= 0:
+            raise ValueError(f"Trace width must be positive, got {width_mm}")
+        if gap_mm <= 0:
+            raise ValueError(f"Gap must be positive, got {gap_mm}")
+
+        h = self.stackup.get_reference_plane_distance(layer)
+        if h <= 0:
+            raise ValueError(f"Could not determine dielectric height for layer {layer}")
+
+        er = self.stackup.get_dielectric_constant(layer)
+        t = self.stackup.get_copper_thickness(layer)
+        tan_d = self.stackup.get_loss_tangent(layer)
+
+        return self._cpwg_calc(width_mm, gap_mm, h, er, t, tan_d, frequency_ghz)
+
+    def _cpwg_calc(
+        self,
+        w: float,
+        g: float,
+        h: float,
+        er: float,
+        t: float,
+        tan_d: float,
+        freq_ghz: float,
+    ) -> ImpedanceResult:
+        """CPWG impedance using Ghione-Naldi conformal mapping.
+
+        Args:
+            w: Center conductor width in mm
+            g: Gap to coplanar ground in mm
+            h: Height to bottom ground plane in mm
+            er: Relative dielectric constant
+            t: Copper thickness in mm
+            tan_d: Dielectric loss tangent
+            freq_ghz: Frequency in GHz
+
+        Returns:
+            ImpedanceResult
+        """
+        # Effective width correction for finite copper thickness
+        # (similar to microstrip thickness correction)
+        if t > 0:
+            delta_w = (1.25 * t / math.pi) * (1 + math.log(4 * math.pi * w / t))
+            w_eff = w + delta_w
+            # Adjust gap accordingly
+            g_eff = max(g - delta_w / 2, g * 0.5)  # Don't let gap go negative
+        else:
+            w_eff = w
+            g_eff = g
+
+        # Geometry parameters for elliptic integral arguments
+        # a = w/2 (half-width of center conductor)
+        # b = w/2 + g (half-distance to edge of coplanar ground)
+        a = w_eff / 2
+        b = w_eff / 2 + g_eff
+
+        # k0: modulus for air-dielectric interface
+        # k0 = a / b
+        k0 = a / b
+        k0_prime = math.sqrt(1 - k0 * k0)
+
+        # k1: modulus accounting for bottom ground plane
+        # Uses sinh transformation for finite ground plane distance
+        try:
+            sinh_a = math.sinh(math.pi * a / (2 * h))
+            sinh_b = math.sinh(math.pi * b / (2 * h))
+            k1 = sinh_a / sinh_b if sinh_b != 0 else k0
+        except OverflowError:
+            # For very large a/h or b/h, sinh overflows
+            # In this limit, k1 approaches k0
+            k1 = k0
+        k1_prime = math.sqrt(1 - k1 * k1)
+
+        # Complete elliptic integrals
+        K_k0 = _elliptic_k(k0)
+        K_k0_prime = _elliptic_k(k0_prime)
+        K_k1 = _elliptic_k(k1)
+        K_k1_prime = _elliptic_k(k1_prime)
+
+        # Effective dielectric constant
+        # q is the filling factor based on conformal mapping
+        if K_k1_prime > 0 and K_k0 > 0:
+            q = (K_k1 * K_k0_prime) / (K_k1_prime * K_k0)
+        else:
+            q = 0.5  # Default filling factor
+        eps_eff = 1 + (er - 1) * q / 2
+
+        # Characteristic impedance
+        # Z0 = (60*pi / sqrt(eps_eff)) * 1 / (K(k0)/K(k0') + K(k1)/K(k1'))
+        if K_k0_prime > 0 and K_k1_prime > 0:
+            sum_ratios = K_k0 / K_k0_prime + K_k1 / K_k1_prime
+            if sum_ratios > 0:
+                z0 = (60 * math.pi / math.sqrt(eps_eff)) / sum_ratios
+            else:
+                z0 = 50.0  # Fallback
+        else:
+            z0 = 50.0  # Fallback
+
+        # Clamp to reasonable range
+        z0 = max(10, min(z0, 200))
+
+        # Phase velocity
+        v_p = SPEED_OF_LIGHT / math.sqrt(eps_eff)
+
+        # Loss estimation
+        loss = self._estimate_cpwg_loss(w, g, h, er, t, eps_eff, z0, tan_d, freq_ghz)
+
+        return ImpedanceResult(
+            z0=z0,
+            epsilon_eff=eps_eff,
+            loss_db_per_m=loss,
+            phase_velocity=v_p,
+        )
+
+    def _estimate_cpwg_loss(
+        self,
+        w: float,
+        g: float,
+        h: float,
+        er: float,
+        t: float,
+        eps_eff: float,
+        z0: float,
+        tan_d: float,
+        freq_ghz: float,
+    ) -> float:
+        """Estimate CPWG loss in dB/m.
+
+        CPWG has similar loss mechanisms to microstrip, but the current
+        distribution is different due to the coplanar grounds.
+
+        Args:
+            w: Trace width in mm
+            g: Gap width in mm
+            h: Dielectric height in mm
+            er: Relative dielectric constant
+            t: Copper thickness in mm
+            eps_eff: Effective dielectric constant
+            z0: Characteristic impedance
+            tan_d: Dielectric loss tangent
+            freq_ghz: Frequency in GHz
+
+        Returns:
+            Total loss in dB/m
+        """
+        freq_hz = freq_ghz * 1e9
+
+        # Conductor loss (skin effect)
+        mu0 = 4 * math.pi * 1e-7
+        rs = math.sqrt(math.pi * freq_hz * mu0 / COPPER_CONDUCTIVITY)
+
+        # For CPWG, current flows on center conductor and coplanar grounds
+        # Effective width is larger due to ground contributions
+        w_eff_m = (w + 2 * g) / 1000  # Total CPW cross-section in meters
+        if w_eff_m > 0 and z0 > 0:
+            # Approximate formula - CPWG has higher conductor loss than microstrip
+            # due to current crowding at edges
+            alpha_c = 1.5 * rs / (z0 * w_eff_m)  # Np/m, factor 1.5 for edge effects
+            alpha_c_db = alpha_c * 8.686  # dB/m
+        else:
+            alpha_c_db = 0
+
+        # Dielectric loss
+        # Similar to microstrip with filling factor
+        q = (eps_eff - 1) / (er - 1) if er > 1 else 0.5
+        alpha_d = math.pi * freq_hz * math.sqrt(eps_eff) * er * q * tan_d / SPEED_OF_LIGHT
+        alpha_d_db = alpha_d * 8.686  # Np/m to dB/m
+
+        return alpha_c_db + alpha_d_db
+
+    def cpwg_geometry_for_impedance(
+        self,
+        z0_target: float,
+        layer: str,
+        width_mm: float | None = None,
+        gap_mm: float | None = None,
+        tolerance: float = 0.01,
+        max_iterations: int = 50,
+    ) -> tuple[float, float]:
+        """Calculate CPWG geometry for target impedance.
+
+        Given a target impedance, calculate the required width and gap.
+        You can specify either width or gap, and the other will be calculated.
+        If neither is specified, optimizes for a balanced geometry.
+
+        Args:
+            z0_target: Target impedance in ohms
+            layer: Layer name (e.g., "F.Cu")
+            width_mm: If specified, calculate gap for this width
+            gap_mm: If specified, calculate width for this gap
+            tolerance: Relative tolerance for convergence
+            max_iterations: Maximum iterations for solver
+
+        Returns:
+            Tuple of (width_mm, gap_mm) that produces target impedance
+
+        Raises:
+            ValueError: If both width and gap are specified, or if target is invalid
+        """
+        if z0_target <= 0:
+            raise ValueError(f"Target impedance must be positive, got {z0_target}")
+        if width_mm is not None and gap_mm is not None:
+            raise ValueError("Specify either width_mm or gap_mm, not both")
+
+        h = self.stackup.get_reference_plane_distance(layer)
+
+        if width_mm is not None:
+            # Fixed width, solve for gap
+            if width_mm <= 0:
+                raise ValueError(f"Width must be positive, got {width_mm}")
+            return self._solve_cpwg_gap(z0_target, width_mm, layer, h, tolerance, max_iterations)
+        elif gap_mm is not None:
+            # Fixed gap, solve for width
+            if gap_mm <= 0:
+                raise ValueError(f"Gap must be positive, got {gap_mm}")
+            return self._solve_cpwg_width(z0_target, gap_mm, layer, h, tolerance, max_iterations)
+        else:
+            # Neither specified - use balanced geometry (gap ≈ width)
+            # Start with typical 50Ω CPWG dimensions and iterate
+            return self._solve_cpwg_balanced(z0_target, layer, h, tolerance, max_iterations)
+
+    def _solve_cpwg_gap(
+        self,
+        z0_target: float,
+        width_mm: float,
+        layer: str,
+        h: float,
+        tolerance: float,
+        max_iterations: int,
+    ) -> tuple[float, float]:
+        """Solve for CPWG gap given fixed width."""
+        # Gap bounds - empirical range
+        g_min = width_mm * 0.1
+        g_max = width_mm * 5.0
+
+        # Verify bounds (wider gap = higher impedance)
+        z_at_min = self.cpwg(width_mm, g_min, layer).z0
+        z_at_max = self.cpwg(width_mm, g_max, layer).z0
+
+        # Adjust bounds if needed
+        while z_at_min > z0_target and g_min > h * 0.01:
+            g_min /= 2
+            z_at_min = self.cpwg(width_mm, g_min, layer).z0
+
+        while z_at_max < z0_target and g_max < h * 10:
+            g_max *= 2
+            z_at_max = self.cpwg(width_mm, g_max, layer).z0
+
+        # Bisection
+        for _ in range(max_iterations):
+            g_mid = (g_min + g_max) / 2
+            z_mid = self.cpwg(width_mm, g_mid, layer).z0
+
+            if abs(z_mid - z0_target) / z0_target < tolerance:
+                return (width_mm, g_mid)
+
+            # Impedance increases with gap
+            if z_mid < z0_target:
+                g_min = g_mid
+            else:
+                g_max = g_mid
+
+        return (width_mm, (g_min + g_max) / 2)
+
+    def _solve_cpwg_width(
+        self,
+        z0_target: float,
+        gap_mm: float,
+        layer: str,
+        h: float,
+        tolerance: float,
+        max_iterations: int,
+    ) -> tuple[float, float]:
+        """Solve for CPWG width given fixed gap."""
+        # Width bounds - empirical range
+        w_min = gap_mm * 0.2
+        w_max = gap_mm * 10.0
+
+        # Verify bounds (wider trace = lower impedance)
+        z_at_min = self.cpwg(w_min, gap_mm, layer).z0
+        z_at_max = self.cpwg(w_max, gap_mm, layer).z0
+
+        # Adjust bounds if needed
+        while z_at_min < z0_target and w_min > h * 0.01:
+            w_min /= 2
+            z_at_min = self.cpwg(w_min, gap_mm, layer).z0
+
+        while z_at_max > z0_target and w_max < h * 10:
+            w_max *= 2
+            z_at_max = self.cpwg(w_max, gap_mm, layer).z0
+
+        # Bisection
+        for _ in range(max_iterations):
+            w_mid = (w_min + w_max) / 2
+            z_mid = self.cpwg(w_mid, gap_mm, layer).z0
+
+            if abs(z_mid - z0_target) / z0_target < tolerance:
+                return (w_mid, gap_mm)
+
+            # Impedance decreases with width
+            if z_mid > z0_target:
+                w_min = w_mid
+            else:
+                w_max = w_mid
+
+        return ((w_min + w_max) / 2, gap_mm)
+
+    def _solve_cpwg_balanced(
+        self,
+        z0_target: float,
+        layer: str,
+        h: float,
+        tolerance: float,
+        max_iterations: int,
+    ) -> tuple[float, float]:
+        """Solve for balanced CPWG geometry (gap ≈ width)."""
+        # For balanced geometry, width ≈ gap
+        # Start with rough estimate based on height
+        w_initial = h * 0.5  # Reasonable starting point
+
+        # Iterate: for each width, find gap, then adjust width toward gap
+        w = w_initial
+        for _ in range(max_iterations):
+            # Find gap for current width
+            _, g = self._solve_cpwg_gap(z0_target, w, layer, h, tolerance, max_iterations // 2)
+
+            # Check if balanced
+            if abs(w - g) / max(w, g) < tolerance:
+                return (w, g)
+
+            # Move width toward gap
+            w = (w + g) / 2
+
+        # Return last result
+        _, g = self._solve_cpwg_gap(z0_target, w, layer, h, tolerance, max_iterations // 2)
+        return (w, g)

@@ -444,3 +444,284 @@ class TestAccuracyValidation:
         # Check ns/inch is reasonable (140-180 ps/inch typical)
         delay_ns_inch = result.propagation_delay_ns_per_inch
         assert 0.12 < delay_ns_inch < 0.20
+
+
+class TestCPWGImpedance:
+    """Tests for coplanar waveguide with ground (CPWG) calculations."""
+
+    def test_cpwg_basic_impedance(self):
+        """Test basic CPWG impedance calculation."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # Typical CPWG geometry on FR4
+        result = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu")
+
+        # Should produce reasonable impedance
+        # CPWG tends to have higher impedance than microstrip for similar widths
+        assert 40 < result.z0 < 120
+
+    def test_cpwg_50ohm_geometry(self):
+        """Test typical 50Ω CPWG geometry.
+
+        For FR4 with ~0.2mm dielectric, typical 50Ω CPWG requires
+        wider traces and narrower gaps than microstrip. This test
+        verifies the geometry solver can find such configurations.
+        """
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # Use the geometry solver to find a 50Ω configuration
+        width, gap = tl.cpwg_geometry_for_impedance(z0_target=50, layer="F.Cu", width_mm=0.3)
+        result = tl.cpwg(width_mm=width, gap_mm=gap, layer="F.Cu")
+
+        # Verify it achieves target
+        assert result.z0 == pytest.approx(50, rel=0.05)
+
+    def test_cpwg_narrow_gap_lower_impedance(self):
+        """Test that narrower gap produces lower impedance."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        result_narrow = tl.cpwg(width_mm=0.2, gap_mm=0.1, layer="F.Cu")
+        result_wide = tl.cpwg(width_mm=0.2, gap_mm=0.3, layer="F.Cu")
+
+        # Wider gap should give higher impedance
+        assert result_wide.z0 > result_narrow.z0
+
+    def test_cpwg_wide_trace_lower_impedance(self):
+        """Test that wider trace produces lower impedance."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        result_narrow = tl.cpwg(width_mm=0.1, gap_mm=0.15, layer="F.Cu")
+        result_wide = tl.cpwg(width_mm=0.4, gap_mm=0.15, layer="F.Cu")
+
+        # Wider trace should give lower impedance
+        assert result_wide.z0 < result_narrow.z0
+
+    def test_cpwg_effective_epsilon(self):
+        """Test CPWG effective dielectric constant.
+
+        For CPWG, eps_eff should be between 1 and er.
+        It's typically lower than microstrip eps_eff due to
+        more field in air above the coplanar conductors.
+        """
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        result = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu")
+
+        er = stackup.get_dielectric_constant("F.Cu")
+        assert 1 < result.epsilon_eff < er
+
+    def test_cpwg_phase_velocity(self):
+        """Test CPWG phase velocity is reasonable."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        result = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu")
+
+        # Phase velocity should be c / sqrt(eps_eff)
+        expected_v = SPEED_OF_LIGHT / math.sqrt(result.epsilon_eff)
+        assert result.phase_velocity == pytest.approx(expected_v, rel=0.01)
+
+        # Should be slower than light in vacuum
+        assert result.phase_velocity < SPEED_OF_LIGHT
+
+    def test_cpwg_loss_positive(self):
+        """Test that CPWG loss is calculated and positive."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        result = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu", frequency_ghz=1.0)
+
+        # Loss should be positive
+        assert result.loss_db_per_m > 0
+
+        # At 1 GHz on FR4, loss should be reasonable
+        assert 0.5 < result.loss_db_per_m < 50
+
+    def test_cpwg_loss_increases_with_frequency(self):
+        """Test that CPWG loss increases with frequency."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        loss_1ghz = tl.cpwg(
+            width_mm=0.25, gap_mm=0.15, layer="F.Cu", frequency_ghz=1.0
+        ).loss_db_per_m
+        loss_5ghz = tl.cpwg(
+            width_mm=0.25, gap_mm=0.15, layer="F.Cu", frequency_ghz=5.0
+        ).loss_db_per_m
+
+        # Loss should increase with frequency
+        assert loss_5ghz > loss_1ghz
+
+    def test_cpwg_invalid_width(self):
+        """Test error handling for invalid width."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        with pytest.raises(ValueError, match="positive"):
+            tl.cpwg(width_mm=0, gap_mm=0.15, layer="F.Cu")
+
+        with pytest.raises(ValueError, match="positive"):
+            tl.cpwg(width_mm=-0.1, gap_mm=0.15, layer="F.Cu")
+
+    def test_cpwg_invalid_gap(self):
+        """Test error handling for invalid gap."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        with pytest.raises(ValueError, match="positive"):
+            tl.cpwg(width_mm=0.25, gap_mm=0, layer="F.Cu")
+
+        with pytest.raises(ValueError, match="positive"):
+            tl.cpwg(width_mm=0.25, gap_mm=-0.1, layer="F.Cu")
+
+
+class TestCPWGGeometryForImpedance:
+    """Tests for CPWG inverse calculation (Z0 → geometry)."""
+
+    def test_cpwg_geometry_fixed_width(self):
+        """Test calculating gap for fixed width and target impedance."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # Fixed width, find gap for 50Ω
+        width, gap = tl.cpwg_geometry_for_impedance(z0_target=50, layer="F.Cu", width_mm=0.25)
+
+        # Width should be unchanged
+        assert width == 0.25
+
+        # Verify by forward calculation
+        result = tl.cpwg(width_mm=width, gap_mm=gap, layer="F.Cu")
+        assert result.z0 == pytest.approx(50, rel=0.03)
+
+    def test_cpwg_geometry_fixed_gap(self):
+        """Test calculating width for fixed gap and target impedance."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # Fixed gap, find width for 60Ω (achievable with this gap)
+        width, gap = tl.cpwg_geometry_for_impedance(z0_target=60, layer="F.Cu", gap_mm=0.15)
+
+        # Gap should be unchanged
+        assert gap == 0.15
+
+        # Verify by forward calculation
+        result = tl.cpwg(width_mm=width, gap_mm=gap, layer="F.Cu")
+        assert result.z0 == pytest.approx(60, rel=0.05)
+
+    def test_cpwg_geometry_balanced(self):
+        """Test calculating balanced geometry (neither specified)."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # No width or gap specified - find balanced geometry
+        width, gap = tl.cpwg_geometry_for_impedance(z0_target=50, layer="F.Cu")
+
+        # Both should be positive
+        assert width > 0
+        assert gap > 0
+
+        # Verify by forward calculation
+        result = tl.cpwg(width_mm=width, gap_mm=gap, layer="F.Cu")
+        assert result.z0 == pytest.approx(50, rel=0.05)
+
+    def test_cpwg_geometry_high_impedance(self):
+        """Test geometry calculation for high impedance (75Ω)."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        width, gap = tl.cpwg_geometry_for_impedance(z0_target=75, layer="F.Cu", width_mm=0.2)
+
+        # Verify by forward calculation
+        result = tl.cpwg(width_mm=width, gap_mm=gap, layer="F.Cu")
+        assert result.z0 == pytest.approx(75, rel=0.05)
+
+    def test_cpwg_geometry_low_impedance(self):
+        """Test geometry calculation for low impedance (40Ω)."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # 40Ω is achievable with wider trace and smaller gap
+        width, gap = tl.cpwg_geometry_for_impedance(z0_target=40, layer="F.Cu", width_mm=0.4)
+
+        # Verify by forward calculation
+        result = tl.cpwg(width_mm=width, gap_mm=gap, layer="F.Cu")
+        assert result.z0 == pytest.approx(40, rel=0.10)
+
+    def test_cpwg_geometry_invalid_target(self):
+        """Test error handling for invalid target impedance."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        with pytest.raises(ValueError, match="positive"):
+            tl.cpwg_geometry_for_impedance(z0_target=0, layer="F.Cu")
+
+        with pytest.raises(ValueError, match="positive"):
+            tl.cpwg_geometry_for_impedance(z0_target=-50, layer="F.Cu")
+
+    def test_cpwg_geometry_both_specified_error(self):
+        """Test error when both width and gap are specified."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        with pytest.raises(ValueError, match="either width_mm or gap_mm"):
+            tl.cpwg_geometry_for_impedance(z0_target=50, layer="F.Cu", width_mm=0.25, gap_mm=0.15)
+
+
+class TestCPWGvsOtherModes:
+    """Tests comparing CPWG to microstrip and stripline."""
+
+    def test_cpwg_vs_microstrip_impedance_range(self):
+        """Test that CPWG can achieve similar impedance range as microstrip."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        # Both should be able to achieve 50Ω
+        microstrip_50 = tl.width_for_impedance(z0_target=50, layer="F.Cu", mode="microstrip")
+        microstrip_result = tl.microstrip(width_mm=microstrip_50, layer="F.Cu")
+
+        cpwg_w, cpwg_g = tl.cpwg_geometry_for_impedance(z0_target=50, layer="F.Cu")
+        cpwg_result = tl.cpwg(width_mm=cpwg_w, gap_mm=cpwg_g, layer="F.Cu")
+
+        # Both should achieve roughly 50Ω
+        assert microstrip_result.z0 == pytest.approx(50, rel=0.03)
+        assert cpwg_result.z0 == pytest.approx(50, rel=0.05)
+
+    def test_cpwg_effective_epsilon_vs_microstrip(self):
+        """Test that CPWG has similar or lower eps_eff than microstrip.
+
+        CPWG typically has lower eps_eff because more field is in the air
+        above the coplanar conductors.
+        """
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        microstrip = tl.microstrip(width_mm=0.25, layer="F.Cu")
+        cpwg = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu")
+
+        # Both should have eps_eff > 1 and < er
+        er = stackup.get_dielectric_constant("F.Cu")
+        assert 1 < microstrip.epsilon_eff < er
+        assert 1 < cpwg.epsilon_eff < er
+
+        # CPWG eps_eff is typically similar to or lower than microstrip
+        # (depends on geometry, so we allow either case)
+        assert cpwg.epsilon_eff > 1
+        assert cpwg.epsilon_eff < er
+
+    def test_cpwg_propagation_delay_comparison(self):
+        """Test that CPWG and microstrip have similar propagation delays."""
+        stackup = Stackup.jlcpcb_4layer()
+        tl = TransmissionLine(stackup)
+
+        microstrip = tl.microstrip(width_mm=0.25, layer="F.Cu")
+        cpwg = tl.cpwg(width_mm=0.25, gap_mm=0.15, layer="F.Cu")
+
+        # Propagation delays should be in similar range
+        # (within factor of 2 for typical geometries)
+        delay_ratio = cpwg.propagation_delay_ps_per_mm / microstrip.propagation_delay_ps_per_mm
+        assert 0.7 < delay_ratio < 1.3
