@@ -3,6 +3,25 @@
 This module provides analytical electromagnetic calculations for
 transmission line impedance, crosstalk estimation, and timing analysis.
 
+Transmission Line Impedance:
+    >>> from kicad_tools.physics import Stackup, TransmissionLine
+    >>>
+    >>> # Use manufacturer preset stackup
+    >>> stackup = Stackup.jlcpcb_4layer()
+    >>> tl = TransmissionLine(stackup)
+    >>>
+    >>> # Calculate microstrip impedance on top layer
+    >>> result = tl.microstrip(width_mm=0.2, layer="F.Cu")
+    >>> print(f"Z0 = {result.z0:.1f}Ω, εeff = {result.epsilon_eff:.2f}")
+    >>>
+    >>> # Calculate trace width for target impedance
+    >>> width = tl.width_for_impedance(z0_target=50, layer="F.Cu")
+    >>> print(f"50Ω requires {width:.3f}mm trace width")
+    >>>
+    >>> # Stripline on inner layer
+    >>> result = tl.stripline(width_mm=0.15, layer="In1.Cu")
+    >>> print(f"Stripline Z0 = {result.z0:.1f}Ω")
+
 Stackup Analysis:
     >>> from kicad_tools.physics import Stackup
     >>> from kicad_tools.schema.pcb import PCB
@@ -57,6 +76,10 @@ from .stackup import (
     Stackup,
     StackupLayer,
 )
+from .transmission_line import (
+    ImpedanceResult,
+    TransmissionLine,
+)
 
 __all__ = [
     # Constants
@@ -81,4 +104,7 @@ __all__ = [
     "LayerType",
     "StackupLayer",
     "Stackup",
+    # Transmission Line
+    "ImpedanceResult",
+    "TransmissionLine",
 ]

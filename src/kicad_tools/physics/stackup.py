@@ -791,6 +791,34 @@ class Stackup:
         """
         return self.get_dielectric_height(layer_name)
 
+    def get_stripline_geometry(self, layer_name: str) -> tuple[float, float]:
+        """Get distances to both reference planes for stripline geometry.
+
+        For inner layers, returns the distance to both the upper and lower
+        reference planes. For outer layers, returns (h, h) where h is the
+        single dielectric height.
+
+        Args:
+            layer_name: Inner copper layer name (e.g., "In1.Cu")
+
+        Returns:
+            Tuple of (h1, h2) where h1 is distance to upper plane and
+            h2 is distance to lower plane, both in mm.
+        """
+        if self.is_outer_layer(layer_name):
+            # Outer layer - return same height for both
+            h = self.get_dielectric_height(layer_name)
+            return (h, h)
+
+        # Inner layer - get both distances
+        above = self.get_dielectric_above(layer_name)
+        below = self.get_dielectric_below(layer_name)
+
+        h1 = above.thickness_mm if above else 0.2
+        h2 = below.thickness_mm if below else 0.2
+
+        return (h1, h2)
+
     def summary(self) -> dict:
         """Get a summary of the stackup.
 
@@ -816,7 +844,4 @@ class Stackup:
 
     def __repr__(self) -> str:
         """String representation."""
-        return (
-            f"Stackup(layers={self.num_copper_layers}L, "
-            f"thickness={self.board_thickness_mm}mm)"
-        )
+        return f"Stackup(layers={self.num_copper_layers}L, thickness={self.board_thickness_mm}mm)"
