@@ -193,6 +193,9 @@ def parse_json_report(content: str, source_file: str = "") -> ERCReport:
                 items=[i.get("description", "") for i in item.get("items", [])],
                 excluded=item.get("excluded", False),
             )
+            # Generate fix suggestions
+            from kicad_tools.feedback import generate_erc_suggestions
+            violation.suggestions = generate_erc_suggestions(violation)
             report.violations.append(violation)
 
     return report
@@ -278,7 +281,9 @@ def parse_text_report(content: str, source_file: str = "") -> ERCReport:
 
 def _build_violation(data: dict) -> ERCViolation:
     """Build an ERCViolation from parsed data."""
-    return ERCViolation(
+    from kicad_tools.feedback import generate_erc_suggestions
+
+    violation = ERCViolation(
         type=ERCViolationType.from_string(data["type_str"]),
         type_str=data["type_str"],
         severity=data["severity"],
@@ -289,3 +294,6 @@ def _build_violation(data: dict) -> ERCViolation:
         items=data.get("items", []),
         excluded=data.get("excluded", False),
     )
+    # Generate fix suggestions
+    violation.suggestions = generate_erc_suggestions(violation)
+    return violation

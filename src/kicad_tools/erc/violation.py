@@ -186,6 +186,9 @@ class ERCViolation:
     # Source position in KiCad file (file:line:column)
     source_position: "SourcePosition | None" = None
 
+    # Fix suggestions (populated by FixSuggestionGenerator)
+    suggestions: list[str] = field(default_factory=list)
+
     @property
     def is_error(self) -> bool:
         """Check if this is an error (vs warning)."""
@@ -239,6 +242,7 @@ class ERCViolation:
             "position": {"x": self.pos_x, "y": self.pos_y},
             "items": self.items,
             "excluded": self.excluded,
+            "suggestions": self.suggestions,
         }
         if self.source_position:
             result["source_position"] = self.source_position.to_dict()

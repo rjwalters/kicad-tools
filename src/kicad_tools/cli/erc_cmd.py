@@ -317,6 +317,10 @@ def _print_single(v: ERCViolation, verbose: bool, indent: str = "  ") -> None:
                 print(f"{indent}    -> {item}")
         if v.location_str:
             print(f"{indent}    Location: {v.location_str}")
+        if v.suggestions:
+            print(f"{indent}    Suggestions:")
+            for suggestion in v.suggestions[:3]:  # Show top 3 suggestions
+                print(f"{indent}      - {suggestion}")
 
 
 def output_json(violations: list[ERCViolation], report: ERCReport) -> None:
