@@ -55,7 +55,9 @@ def sample_labels() -> list[str]:
 class TestERCExplainer:
     """Tests for ERCExplainer class."""
 
-    def test_explain_hier_label_mismatch(self, sample_violation: ERCViolation, sample_labels: list[str]):
+    def test_explain_hier_label_mismatch(
+        self, sample_violation: ERCViolation, sample_labels: list[str]
+    ):
         """Test explanation for hierarchical label mismatch."""
         explainer = ERCExplainer(all_labels=sample_labels)
         explanation = explainer.explain(sample_violation)
@@ -102,8 +104,10 @@ class TestERCExplainer:
         explanation = explainer.explain(violation)
 
         assert "power" in explanation.summary.lower()
-        assert any("power symbol" in fix.description.lower() or "pwr_flag" in fix.description.lower()
-                   for fix in explanation.fixes)
+        assert any(
+            "power symbol" in fix.description.lower() or "pwr_flag" in fix.description.lower()
+            for fix in explanation.fixes
+        )
 
     def test_explain_similar_labels(self):
         """Test explanation for similar labels warning."""

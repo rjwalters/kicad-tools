@@ -159,9 +159,7 @@ class ERCExplainer:
         handler = handlers.get(violation.type, self._explain_generic)
         return handler(violation)
 
-    def _find_similar_labels(
-        self, target: str, threshold: float = 0.6
-    ) -> list[SimilarLabel]:
+    def _find_similar_labels(self, target: str, threshold: float = 0.6) -> list[SimilarLabel]:
         """Find labels similar to the target using fuzzy matching."""
         similar = []
         target_lower = target.lower()
@@ -231,9 +229,7 @@ class ERCExplainer:
                 return info
         return None
 
-    def _explain_hier_label_mismatch(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_hier_label_mismatch(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain hierarchical label mismatch errors."""
         label_name = self._extract_label_name(violation)
 
@@ -313,9 +309,7 @@ class ERCExplainer:
 
         return explanation
 
-    def _explain_pin_not_connected(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_pin_not_connected(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain unconnected pin errors."""
         pin_info = self._extract_pin_info(violation)
         component = pin_info.get("component", "unknown") if pin_info else "unknown"
@@ -411,9 +405,7 @@ class ERCExplainer:
 
         return explanation
 
-    def _explain_power_not_driven(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_power_not_driven(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain power input not driven errors."""
         pin_info = self._extract_pin_info(violation)
         component = pin_info.get("component", "unknown") if pin_info else "unknown"
@@ -504,9 +496,7 @@ class ERCExplainer:
 
         return explanation
 
-    def _explain_global_label_dangling(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_global_label_dangling(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain dangling global label errors."""
         label_name = self._extract_label_name(violation)
 
@@ -605,9 +595,7 @@ class ERCExplainer:
 
         return explanation
 
-    def _explain_duplicate_reference(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_duplicate_reference(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain duplicate reference designator errors."""
         # Extract references from items
         refs = []
@@ -767,9 +755,7 @@ class ERCExplainer:
 
         return explanation
 
-    def _explain_different_unit_net(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_different_unit_net(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain different unit net errors."""
         explanation = ViolationExplanation(
             violation=violation,
@@ -875,9 +861,7 @@ class ERCExplainer:
 
         return explanation
 
-    def _explain_multiple_net_names(
-        self, violation: ERCViolation
-    ) -> ViolationExplanation:
+    def _explain_multiple_net_names(self, violation: ERCViolation) -> ViolationExplanation:
         """Explain multiple net names error."""
         explanation = ViolationExplanation(
             violation=violation,
@@ -1237,8 +1221,7 @@ def main(argv: list[str] | None = None) -> int:
         violations = [
             v
             for v in violations
-            if filter_lower in v.type_str.lower()
-            or filter_lower in v.description.lower()
+            if filter_lower in v.type_str.lower() or filter_lower in v.description.lower()
         ]
 
     if not violations:
