@@ -696,6 +696,166 @@ class TestSchValidate:
             assert isinstance(data, (list, dict))
 
 
+class TestSchValidateHierarchy:
+    """Tests for hierarchy checks in sch_validate.py."""
+
+    def test_check_hierarchy_pin_without_label(self, tmp_path: Path):
+        """Test that sheet pins without matching hierarchical labels are detected."""
+        from kicad_tools.cli.sch_validate import check_hierarchy
+
+        # Create a parent schematic with a sheet that has a pin
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet
+            (at 100 100)
+            (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "SubSheet" (at 100 99 0))
+            (property "Sheetfile" "subsheet.kicad_sch" (at 100 111 0))
+            (pin "VCC_3V3A" input (at 100 105 180)
+              (effects (font (size 1.27 1.27)))
+              (uuid "00000000-0000-0000-0000-000000000003")
+            )
+          )
+        )
+        """
+
+        # Create a child schematic WITHOUT the matching hierarchical label
+        child_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000010")
+          (paper "A4")
+          (lib_symbols)
+        )
+        """
+
+        # Write the schematic files
+        parent_file = tmp_path / "parent.kicad_sch"
+        child_file = tmp_path / "subsheet.kicad_sch"
+        parent_file.write_text(parent_sch)
+        child_file.write_text(child_sch)
+
+        # Run the hierarchy check
+        issues = check_hierarchy(str(parent_file))
+
+        # Should find the missing label issue
+        pin_issues = [i for i in issues if "Sheet pin" in i.message and "no matching hierarchical label" in i.message]
+        assert len(pin_issues) == 1
+        assert pin_issues[0].severity == "error"
+        assert "VCC_3V3A" in pin_issues[0].message
+
+    def test_check_hierarchy_label_without_pin(self, tmp_path: Path):
+        """Test that hierarchical labels without matching sheet pins are detected."""
+        from kicad_tools.cli.sch_validate import check_hierarchy
+
+        # Create a parent schematic with a sheet that has NO pin
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet
+            (at 100 100)
+            (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "SubSheet" (at 100 99 0))
+            (property "Sheetfile" "subsheet.kicad_sch" (at 100 111 0))
+          )
+        )
+        """
+
+        # Create a child schematic WITH a hierarchical label but no matching pin
+        child_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000010")
+          (paper "A4")
+          (lib_symbols)
+          (hierarchical_label "ORPHAN_SIGNAL"
+            (shape input)
+            (at 50 50 0)
+            (effects (font (size 1.27 1.27)))
+            (uuid "00000000-0000-0000-0000-000000000011")
+          )
+        )
+        """
+
+        # Write the schematic files
+        parent_file = tmp_path / "parent.kicad_sch"
+        child_file = tmp_path / "subsheet.kicad_sch"
+        parent_file.write_text(parent_sch)
+        child_file.write_text(child_sch)
+
+        # Run the hierarchy check
+        issues = check_hierarchy(str(parent_file))
+
+        # Should find the orphan label issue
+        label_issues = [i for i in issues if "Hierarchical label" in i.message and "no matching sheet pin" in i.message]
+        assert len(label_issues) == 1
+        assert label_issues[0].severity == "warning"
+        assert "ORPHAN_SIGNAL" in label_issues[0].message
+
+    def test_check_hierarchy_matching_pin_and_label(self, tmp_path: Path):
+        """Test that matching pins and labels produce no issues."""
+        from kicad_tools.cli.sch_validate import check_hierarchy
+
+        # Create a parent schematic with a sheet that has a pin
+        parent_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000001")
+          (paper "A4")
+          (lib_symbols)
+          (sheet
+            (at 100 100)
+            (size 10 10)
+            (uuid "00000000-0000-0000-0000-000000000002")
+            (property "Sheetname" "SubSheet" (at 100 99 0))
+            (property "Sheetfile" "subsheet.kicad_sch" (at 100 111 0))
+            (pin "DATA_BUS" input (at 100 105 180)
+              (effects (font (size 1.27 1.27)))
+              (uuid "00000000-0000-0000-0000-000000000003")
+            )
+          )
+        )
+        """
+
+        # Create a child schematic WITH a matching hierarchical label
+        child_sch = """(kicad_sch
+          (version 20231120)
+          (generator "test")
+          (uuid "00000000-0000-0000-0000-000000000010")
+          (paper "A4")
+          (lib_symbols)
+          (hierarchical_label "DATA_BUS"
+            (shape input)
+            (at 50 50 0)
+            (effects (font (size 1.27 1.27)))
+            (uuid "00000000-0000-0000-0000-000000000011")
+          )
+        )
+        """
+
+        # Write the schematic files
+        parent_file = tmp_path / "parent.kicad_sch"
+        child_file = tmp_path / "subsheet.kicad_sch"
+        parent_file.write_text(parent_sch)
+        child_file.write_text(child_sch)
+
+        # Run the hierarchy check
+        issues = check_hierarchy(str(parent_file))
+
+        # Should find no hierarchy issues
+        hierarchy_issues = [i for i in issues if i.category == "hierarchy"]
+        assert len(hierarchy_issues) == 0
+
+
 class TestSchCheckConnections:
     """Tests for sch_check_connections.py CLI."""
 

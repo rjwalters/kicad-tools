@@ -270,6 +270,18 @@ def check_hierarchy(schematic_path: str) -> list[ValidationIssue]:
                     )
                 )
 
+            # Check for pins without matching labels
+            if types.count("pin") > 0 and types.count("label") == 0:
+                sheet_names = [loc[1] for loc in locations if loc[0] == "pin"]
+                issues.append(
+                    ValidationIssue(
+                        severity="error",
+                        category="hierarchy",
+                        message=f"Sheet pin '{name}' has no matching hierarchical label in sub-schematic",
+                        location=", ".join(sheet_names),
+                    )
+                )
+
     except Exception as e:
         issues.append(
             ValidationIssue(
