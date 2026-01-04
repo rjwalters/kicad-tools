@@ -80,6 +80,12 @@ from .stackup import (
     Stackup,
     StackupLayer,
 )
+from .timing import (
+    DifferentialPairSkew,
+    PropagationResult,
+    TimingAnalyzer,
+    TimingBudget,
+)
 from .transmission_line import (
     ImpedanceResult,
     TransmissionLine,
@@ -117,4 +123,9 @@ __all__ = [
     # Crosstalk
     "CrosstalkAnalyzer",
     "CrosstalkResult",
+    # Timing
+    "TimingAnalyzer",
+    "PropagationResult",
+    "TimingBudget",
+    "DifferentialPairSkew",
 ]
