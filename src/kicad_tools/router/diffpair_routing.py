@@ -125,16 +125,12 @@ class DiffPairRouter:
         warnings: list[LengthMismatchWarning] = []
 
         for pair in diff_pairs:
-            pair_routes, warning = self.route_differential_pair(
-                pair, diffpair_config.spacing
-            )
+            pair_routes, warning = self.route_differential_pair(pair, diffpair_config.spacing)
             all_routes.extend(pair_routes)
             if warning:
                 warnings.append(warning)
 
-        non_diff_nets = [
-            n for n in self.autorouter.nets if n not in diff_net_ids and n != 0
-        ]
+        non_diff_nets = [n for n in self.autorouter.nets if n not in diff_net_ids and n != 0]
         if non_diff_nets:
             print(f"\n--- Routing {len(non_diff_nets)} non-differential nets ---")
             if net_order:

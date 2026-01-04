@@ -18,8 +18,8 @@ from .config import OptimizationConfig, OptimizationStats
 from .geometry import (
     angle_between,
     count_corners,
-    is_connected,
     is_90_degree_corner,
+    is_connected,
     is_zigzag,
     same_direction,
     segment_direction,

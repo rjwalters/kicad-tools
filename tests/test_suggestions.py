@@ -146,7 +146,9 @@ class TestDRCSuggestions:
 
         assert len(suggestions) > 0
         # Should mention via pad size or drill
-        assert any("via" in s.lower() or "pad" in s.lower() or "drill" in s.lower() for s in suggestions)
+        assert any(
+            "via" in s.lower() or "pad" in s.lower() or "drill" in s.lower() for s in suggestions
+        )
 
     def test_silk_over_copper(self, generator: FixSuggestionGenerator) -> None:
         """Test suggestions for silk over copper violations."""
@@ -255,7 +257,10 @@ class TestERCSuggestions:
 
         assert len(suggestions) > 0
         # Should suggest driving the input
-        assert any("driver" in s.lower() or "pull" in s.lower() or "output" in s.lower() for s in suggestions)
+        assert any(
+            "driver" in s.lower() or "pull" in s.lower() or "output" in s.lower()
+            for s in suggestions
+        )
 
     def test_power_pin_not_driven(self, generator: FixSuggestionGenerator) -> None:
         """Test suggestions for power input not driven."""
@@ -297,7 +302,10 @@ class TestERCSuggestions:
 
         assert len(suggestions) > 0
         # Should suggest connecting or deleting
-        assert any("connect" in s.lower() or "wire" in s.lower() or "delete" in s.lower() for s in suggestions)
+        assert any(
+            "connect" in s.lower() or "wire" in s.lower() or "delete" in s.lower()
+            for s in suggestions
+        )
 
     def test_wire_dangling(self, generator: FixSuggestionGenerator) -> None:
         """Test suggestions for dangling wire."""
@@ -311,7 +319,10 @@ class TestERCSuggestions:
 
         assert len(suggestions) > 0
         # Should suggest extending or deleting wire
-        assert any("wire" in s.lower() or "extend" in s.lower() or "delete" in s.lower() for s in suggestions)
+        assert any(
+            "wire" in s.lower() or "extend" in s.lower() or "delete" in s.lower()
+            for s in suggestions
+        )
 
     def test_unannotated(self, generator: FixSuggestionGenerator) -> None:
         """Test suggestions for unannotated symbol."""

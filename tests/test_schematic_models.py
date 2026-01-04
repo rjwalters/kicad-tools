@@ -6,9 +6,6 @@ Tests for:
 - Schematic class (schematic.py)
 """
 
-import uuid
-from pathlib import Path
-from unittest.mock import Mock, patch
 
 import pytest
 
@@ -630,7 +627,7 @@ class TestSchematicConstruction:
     def test_schematic_sheet_path_with_parent(self):
         """Get sheet path with parent."""
         sch = Schematic(title="Test", sheet_uuid="child-uuid", parent_uuid="parent-uuid")
-        assert "/parent-uuid/child-uuid" == sch.sheet_path
+        assert sch.sheet_path == "/parent-uuid/child-uuid"
 
     def test_add_wire(self):
         """Add wire to schematic."""

@@ -237,7 +237,10 @@ class DRCViolation:
         if self.source_position:
             result["source_position"] = self.source_position.to_dict()
         if self.suggestions:
-            result["suggestions"] = [s.to_dict() for s in self.suggestions]
+            # Handle both FixSuggestion objects and plain strings
+            result["suggestions"] = [
+                s.to_dict() if hasattr(s, "to_dict") else str(s) for s in self.suggestions
+            ]
         return result
 
     def __str__(self) -> str:

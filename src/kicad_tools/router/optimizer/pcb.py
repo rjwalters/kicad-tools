@@ -166,9 +166,7 @@ def optimize_pcb(
     # Filter nets if requested
     if net_filter:
         segments_by_net = {
-            net: segs
-            for net, segs in segments_by_net.items()
-            if net_filter.lower() in net.lower()
+            net: segs for net, segs in segments_by_net.items() if net_filter.lower() in net.lower()
         }
 
     # Calculate before stats

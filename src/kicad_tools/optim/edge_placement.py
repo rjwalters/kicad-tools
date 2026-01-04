@@ -194,9 +194,7 @@ class BoardEdges:
         )
 
         if outline is None:
-            outline = Polygon.rectangle(
-                x + width / 2, y + height / 2, width, height
-            )
+            outline = Polygon.rectangle(x + width / 2, y + height / 2, width, height)
 
         return cls(top=top, bottom=bottom, left=left, right=right, outline=outline)
 

@@ -195,6 +195,7 @@ def parse_json_report(content: str, source_file: str = "") -> ERCReport:
             )
             # Generate fix suggestions
             from kicad_tools.feedback import generate_erc_suggestions
+
             violation.suggestions = generate_erc_suggestions(violation)
             report.violations.append(violation)
 

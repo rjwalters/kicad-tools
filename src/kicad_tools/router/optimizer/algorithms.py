@@ -8,7 +8,6 @@ from typing import Callable
 from ..primitives import Segment
 from .config import OptimizationConfig
 from .geometry import (
-    angle_between,
     is_90_degree_corner,
     is_connected,
     is_zigzag,
@@ -204,9 +203,7 @@ def compress_staircase(
     return result
 
 
-def _find_staircase_end(
-    segments: list[Segment], start_idx: int, config: OptimizationConfig
-) -> int:
+def _find_staircase_end(segments: list[Segment], start_idx: int, config: OptimizationConfig) -> int:
     """Find the end index of a staircase pattern starting at start_idx.
 
     A staircase is a run of segments alternating between two directions:

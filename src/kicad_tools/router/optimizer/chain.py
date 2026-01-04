@@ -6,9 +6,7 @@ from ..primitives import Segment
 from .geometry import segments_touch
 
 
-def sort_into_chains(
-    segments: list[Segment], tolerance: float = 1e-4
-) -> list[list[Segment]]:
+def sort_into_chains(segments: list[Segment], tolerance: float = 1e-4) -> list[list[Segment]]:
     """Sort segments into connected chains.
 
     Groups segments that form continuous paths. Segments that share
@@ -61,9 +59,7 @@ def sort_into_chains(
     return chains
 
 
-def sort_chain_segments(
-    segments: list[Segment], tolerance: float = 1e-4
-) -> list[Segment]:
+def sort_chain_segments(segments: list[Segment], tolerance: float = 1e-4) -> list[Segment]:
     """Sort segments within a chain into connected path order.
 
     Arranges segments so that each segment's end connects to the

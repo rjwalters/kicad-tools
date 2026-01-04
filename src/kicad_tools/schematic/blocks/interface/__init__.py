@@ -18,18 +18,18 @@ Example:
 """
 
 # Debug interfaces
+# CAN interfaces
+from .can import (
+    CANTransceiver,
+    create_can_transceiver_mcp2551,
+    create_can_transceiver_sn65hvd230,
+    create_can_transceiver_tja1050,
+)
 from .debug import (
     DebugHeader,
     create_jtag_header,
     create_swd_header,
     create_tag_connect_header,
-)
-
-# USB interfaces
-from .usb import (
-    USBConnector,
-    create_usb_micro_b,
-    create_usb_type_c,
 )
 
 # I2C interfaces
@@ -38,12 +38,11 @@ from .i2c import (
     create_i2c_pullups,
 )
 
-# CAN interfaces
-from .can import (
-    CANTransceiver,
-    create_can_transceiver_mcp2551,
-    create_can_transceiver_sn65hvd230,
-    create_can_transceiver_tja1050,
+# USB interfaces
+from .usb import (
+    USBConnector,
+    create_usb_micro_b,
+    create_usb_type_c,
 )
 
 __all__ = [

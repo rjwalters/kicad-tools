@@ -262,9 +262,7 @@ class TestComputeEdgeForce:
 
     def test_force_toward_edge(self, component, board_edges):
         constraint = EdgeConstraint(reference="J1", edge="top")
-        force, is_at_edge = compute_edge_force(
-            component, constraint, board_edges, stiffness=50.0
-        )
+        force, is_at_edge = compute_edge_force(component, constraint, board_edges, stiffness=50.0)
         # Force should pull toward top edge (negative y in KiCad coordinates)
         # Since component is at y=20 and top edge is at y=0
         assert force.y < 0 or abs(force.y) < 1e-10
@@ -273,18 +271,12 @@ class TestComputeEdgeForce:
     def test_at_edge(self, board_edges):
         component = Component(ref="J1", x=50, y=0.5, width=10, height=5)
         constraint = EdgeConstraint(reference="J1", edge="top")
-        force, is_at_edge = compute_edge_force(
-            component, constraint, board_edges, stiffness=50.0
-        )
+        force, is_at_edge = compute_edge_force(component, constraint, board_edges, stiffness=50.0)
         assert is_at_edge is True  # Within 1mm of edge
 
     def test_corner_priority_force(self, component, board_edges):
-        constraint = EdgeConstraint(
-            reference="J1", edge="any", corner_priority=True
-        )
-        force, _ = compute_edge_force(
-            component, constraint, board_edges, stiffness=50.0
-        )
+        constraint = EdgeConstraint(reference="J1", edge="any", corner_priority=True)
+        force, _ = compute_edge_force(component, constraint, board_edges, stiffness=50.0)
         # Should have some force component toward nearest corner
         assert force.magnitude() > 0
 
@@ -407,12 +399,8 @@ class TestEdgeConstraintSliding:
         opt.add_component(comp2)
 
         # Both constrained to top edge with sliding enabled
-        opt.add_edge_constraint(
-            EdgeConstraint(reference="J1", edge="top", slide=True)
-        )
-        opt.add_edge_constraint(
-            EdgeConstraint(reference="J2", edge="top", slide=True)
-        )
+        opt.add_edge_constraint(EdgeConstraint(reference="J1", edge="top", slide=True))
+        opt.add_edge_constraint(EdgeConstraint(reference="J2", edge="top", slide=True))
 
         opt.create_springs_from_nets()
 

@@ -9,11 +9,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+
     from ..grid import RoutingGrid
     from ..pathfinder import Router
     from ..primitives import Pad, Route
     from ..rules import DesignRules, NetClassRouting
-    from kicad_tools.progress import ProgressCallback
 
 
 class NegotiatedRouter:

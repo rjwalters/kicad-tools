@@ -308,6 +308,7 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
         _extract_values(violation.__dict__, message)
         # Generate fix suggestions
         from kicad_tools.feedback import generate_drc_suggestions
+
         violation.suggestions = generate_drc_suggestions(violation)
         violations.append(violation)
 

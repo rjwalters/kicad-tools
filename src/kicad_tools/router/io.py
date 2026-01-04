@@ -46,7 +46,6 @@ from .core import Autorouter
 from .layers import Layer
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
 
-
 # =============================================================================
 # DRC COMPLIANCE TYPES AND FUNCTIONS
 # =============================================================================

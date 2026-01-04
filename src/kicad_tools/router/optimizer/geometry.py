@@ -105,9 +105,7 @@ def is_90_degree_corner(s1: Segment, s2: Segment, tolerance: float = 1e-4) -> bo
     return 80 < angle < 100  # Allow some tolerance
 
 
-def is_zigzag(
-    s1: Segment, s2: Segment, s3: Segment, tolerance: float = 1e-4
-) -> bool:
+def is_zigzag(s1: Segment, s2: Segment, s3: Segment, tolerance: float = 1e-4) -> bool:
     """Check if s2 is a zigzag (backtrack) between s1 and s3."""
     # Calculate angles
     angle12 = angle_between(s1, s2, tolerance)
@@ -124,9 +122,7 @@ def segment_length(seg: Segment) -> float:
     return math.sqrt(dx * dx + dy * dy)
 
 
-def shorten_segment_end(
-    seg: Segment, amount: float, min_length: float = 0.05
-) -> Segment | None:
+def shorten_segment_end(seg: Segment, amount: float, min_length: float = 0.05) -> Segment | None:
     """Shorten a segment from its end by the given amount."""
     dx = seg.x2 - seg.x1
     dy = seg.y2 - seg.y1
@@ -152,9 +148,7 @@ def shorten_segment_end(
     )
 
 
-def shorten_segment_start(
-    seg: Segment, amount: float, min_length: float = 0.05
-) -> Segment | None:
+def shorten_segment_start(seg: Segment, amount: float, min_length: float = 0.05) -> Segment | None:
     """Shorten a segment from its start by the given amount."""
     dx = seg.x2 - seg.x1
     dy = seg.y2 - seg.y1

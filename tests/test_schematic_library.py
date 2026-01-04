@@ -9,8 +9,6 @@ Tests for:
 - describe_symbol
 """
 
-from pathlib import Path
-from unittest.mock import Mock, patch
 
 import pytest
 

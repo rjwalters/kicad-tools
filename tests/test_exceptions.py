@@ -1333,8 +1333,9 @@ class TestRichConsoleRendering:
 
     def test_rich_console_renders_basic_error(self):
         """Test Rich rendering of basic error."""
-        from rich.console import Console
         from io import StringIO
+
+        from rich.console import Console
 
         err = KiCadToolsError("Test error message")
         output = StringIO()
@@ -1346,8 +1347,9 @@ class TestRichConsoleRendering:
 
     def test_rich_console_renders_context(self):
         """Test Rich rendering includes context."""
-        from rich.console import Console
         from io import StringIO
+
+        from rich.console import Console
 
         err = KiCadToolsError(
             "File error",
@@ -1365,8 +1367,9 @@ class TestRichConsoleRendering:
 
     def test_rich_console_renders_suggestions(self):
         """Test Rich rendering includes suggestions."""
-        from rich.console import Console
         from io import StringIO
+
+        from rich.console import Console
 
         err = KiCadToolsError(
             "Configuration error",
@@ -1383,15 +1386,16 @@ class TestRichConsoleRendering:
 
     def test_rich_console_renders_source_snippet(self):
         """Test Rich rendering includes source snippet when available."""
-        from rich.console import Console
         from io import StringIO
+
+        from rich.console import Console
 
         err = ParseError(
             "Syntax error",
             context={
                 "file": "test.kicad_sch",
                 "line": 3,
-                "source_snippet": '(kicad_sch\n  (version 20230121)\n  (bad_token here)\n)',
+                "source_snippet": "(kicad_sch\n  (version 20230121)\n  (bad_token here)\n)",
                 "highlight_line": 3,
             },
         )
@@ -1405,8 +1409,9 @@ class TestRichConsoleRendering:
 
     def test_validation_error_rich_console(self):
         """Test ValidationError has its own rich rendering."""
-        from rich.console import Console
         from io import StringIO
+
+        from rich.console import Console
 
         err = ValidationError(
             ["Missing field: name", "Invalid value: type"],

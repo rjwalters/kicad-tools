@@ -19,18 +19,18 @@ from kicad_tools.sexp.builders import (
 )
 
 from ..logging import _log_info
-from .elements import PowerSymbol, Wire, Junction, Label, HierarchicalLabel
-from .symbol import SymbolDef, SymbolInstance
+from .elements import HierarchicalLabel, Junction, Label, PowerSymbol, Wire
+from .symbol import SymbolInstance
 
 if TYPE_CHECKING:
-    from .schematic import Schematic, SnapMode
+    from .schematic import Schematic
 
 
 class SchematicIOMixin:
     """Mixin providing I/O operations for Schematic class."""
 
     @classmethod
-    def load(cls, path: str | Path) -> "Schematic":
+    def load(cls, path: str | Path) -> Schematic:
         """Load a schematic from a .kicad_sch file.
 
         This enables round-trip editing: load -> modify -> save.
@@ -56,7 +56,7 @@ class SchematicIOMixin:
         return cls._from_sexp(doc)
 
     @classmethod
-    def _from_sexp(cls, doc: SExp) -> "Schematic":
+    def _from_sexp(cls, doc: SExp) -> Schematic:
         """Create a Schematic from a parsed S-expression tree.
 
         This is the internal method that does the actual parsing.

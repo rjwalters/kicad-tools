@@ -22,7 +22,7 @@ from .elements import (
 from .symbol import SymbolDef, SymbolInstance
 
 if TYPE_CHECKING:
-    from .schematic import SnapMode
+    pass
 
 
 class SchematicElementsMixin:
