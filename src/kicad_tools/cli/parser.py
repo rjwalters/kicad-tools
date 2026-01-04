@@ -41,16 +41,17 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools interactive            - Launch interactive REPL mode
 
 Schematic subcommands (kct sch <command>):
-    summary      - Quick schematic overview
-    hierarchy    - Show hierarchy tree
-    labels       - List labels
-    validate     - Run validation checks
-    wires        - List wire segments and junctions
-    info         - Show symbol details
-    pins         - Show symbol pin positions
-    connections  - Check pin connections using library positions
-    unconnected  - Find unconnected pins and issues
-    replace      - Replace a symbol's library ID
+    summary        - Quick schematic overview
+    hierarchy      - Show hierarchy tree
+    labels         - List labels
+    validate       - Run validation checks
+    wires          - List wire segments and junctions
+    info           - Show symbol details
+    pins           - Show symbol pin positions
+    connections    - Check pin connections using library positions
+    unconnected    - Find unconnected pins and issues
+    replace        - Replace a symbol's library ID
+    sync-hierarchy - Synchronize sheet pins and hierarchical labels
 
 Examples:
     kct symbols design.kicad_sch --filter "U*"
@@ -385,6 +386,36 @@ def _add_sch_parser(subparsers) -> None:
     sch_replace.add_argument("--footprint", help="New footprint")
     sch_replace.add_argument("--dry-run", action="store_true", help="Show changes without applying")
     sch_replace.add_argument("--backup", action="store_true", help="Create backup before modifying")
+
+    # sch sync-hierarchy
+    sch_sync = sch_subparsers.add_parser(
+        "sync-hierarchy", help="Synchronize sheet pins and hierarchical labels"
+    )
+    sch_sync.add_argument("schematic", help="Path to root .kicad_sch file")
+    sch_sync.add_argument(
+        "--add-labels",
+        action="store_true",
+        help="Add missing hierarchical labels to child sheets",
+    )
+    sch_sync.add_argument(
+        "--remove-orphan-pins",
+        action="store_true",
+        help="Remove sheet pins that have no matching labels",
+    )
+    sch_sync.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Interactive mode - prompt for each action",
+    )
+    sch_sync.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    sch_sync.add_argument("--format", choices=["text", "json"], default="text")
+    sch_sync.add_argument("--sheet", help="Focus on a specific sheet")
 
 
 def _add_pcb_parser(subparsers) -> None:

@@ -11,7 +11,7 @@ def run_sch_command(args) -> int:
     if not args.sch_command:
         print("Usage: kicad-tools sch <command> [options] <file>")
         print("Commands: summary, hierarchy, labels, validate, wires, info, pins,")
-        print("          connections, unconnected, replace")
+        print("          connections, unconnected, replace, sync-hierarchy")
         return 1
 
     schematic_path = Path(args.schematic)
@@ -135,5 +135,23 @@ def run_sch_command(args) -> int:
         if args.backup:
             sub_argv.append("--backup")
         return replace_main(sub_argv) or 0
+
+    elif args.sch_command == "sync-hierarchy":
+        from ..sch_sync_hierarchy import main as sync_main
+
+        sub_argv = [str(schematic_path)]
+        if args.add_labels:
+            sub_argv.append("--add-labels")
+        if args.remove_orphan_pins:
+            sub_argv.append("--remove-orphan-pins")
+        if args.interactive:
+            sub_argv.append("--interactive")
+        if args.dry_run:
+            sub_argv.append("--dry-run")
+        if args.format != "text":
+            sub_argv.extend(["--format", args.format])
+        if args.sheet:
+            sub_argv.extend(["--sheet", args.sheet])
+        return sync_main(sub_argv) or 0
 
     return 1
