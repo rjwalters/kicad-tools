@@ -64,6 +64,7 @@ kicad-bom = "kicad_tools.cli:bom_main"
 # PCB tools (not yet in unified CLI)
 kicad-pcb-query = "kicad_tools.cli.pcb_query:main"
 kicad-pcb-modify = "kicad_tools.cli.pcb_modify:main"
+kicad-pcb-stitch = "kicad_tools.cli.stitch_cmd:main"
 
 # Library tools (not yet in unified CLI)
 kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
