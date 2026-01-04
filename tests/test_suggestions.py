@@ -2,10 +2,14 @@
 
 import pytest
 
-from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
+from kicad_tools.drc.violation import DRCViolation, Severity, ViolationType
 from kicad_tools.erc.violation import ERCViolation, ERCViolationType
 from kicad_tools.erc.violation import Severity as ERCSeverity
-from kicad_tools.feedback import FixSuggestionGenerator, generate_drc_suggestions, generate_erc_suggestions
+from kicad_tools.feedback import (
+    FixSuggestionGenerator,
+    generate_drc_suggestions,
+    generate_erc_suggestions,
+)
 
 
 class TestFixSuggestionGenerator:
