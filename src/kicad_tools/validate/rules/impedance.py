@@ -23,7 +23,7 @@ Example::
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..violations import DRCResults, DRCViolation
@@ -101,9 +101,10 @@ class ImpedanceRule(DRCRule):
     name = "Impedance Control"
     description = "Verify trace widths match target impedance requirements"
 
-    # Default impedance specifications (can be overridden)
-    _default_specs: list[NetImpedanceSpec] = field(
-        default_factory=lambda: [
+    @staticmethod
+    def _get_default_specs() -> list[NetImpedanceSpec]:
+        """Return default impedance specifications for common signal types."""
+        return [
             # USB differential pairs - 90Ω differential
             NetImpedanceSpec(r"USB.*D[PM\+\-]?", target_zdiff=90.0),
             # High-speed single-ended - 50Ω
@@ -114,7 +115,6 @@ class ImpedanceRule(DRCRule):
             NetImpedanceSpec(r".*LVDS.*", target_zdiff=100.0),
             NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0),
         ]
-    )
 
     def __init__(
         self,
@@ -129,7 +129,7 @@ class ImpedanceRule(DRCRule):
             stackup: PCB stackup for impedance calculations. If not provided,
                 will try to extract from PCB during check.
         """
-        self.specs = specs if specs is not None else list(self._default_specs)
+        self.specs = specs if specs is not None else self._get_default_specs()
         self._stackup = stackup
         self._tl: TransmissionLine | None = None
 
