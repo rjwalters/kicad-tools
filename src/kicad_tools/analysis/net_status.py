@@ -459,18 +459,33 @@ class NetStatusAnalyzer:
         segments = list(self.pcb.segments_in_net(net_number))
         vias = list(self.pcb.vias_in_net(net_number))
 
-        # Get zone points if this is a plane net
+        # Get zones for this net with their layers and filled polygons
+        net_zones: list[tuple[str, list[list[tuple[float, float]]]]] = []
         zone_points: list[tuple[float, float]] = []
         for zone in self.pcb.zones:
             if zone.net_number == net_number and zone.filled_polygons:
+                net_zones.append((zone.layer, zone.filled_polygons))
                 for poly in zone.filled_polygons:
                     zone_points.extend(poly)
 
-        # Connect pads through segment chains
-        if segments:
-            graph = self._build_segment_chains(segments, pad_positions, graph)
+        # Build segment components for reuse
+        segment_components = self._build_segment_components(segments)
 
-        # Connect pads through vias
+        # Connect pads through segment chains
+        for component in segment_components:
+            component_pads: set[str] = set()
+            for seg_idx in component:
+                seg = segments[seg_idx]
+                component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+
+            pad_list = list(component_pads)
+            for i, pad in enumerate(pad_list):
+                for other in pad_list[i + 1 :]:
+                    graph[pad].add(other)
+                    graph[other].add(pad)
+
+        # Connect pads through vias (pads at same via position)
         for via in vias:
             via_pads = self._find_pads_at_point(via.position, pad_positions)
             for pad in via_pads:
@@ -478,6 +493,53 @@ class NetStatusAnalyzer:
                     if pad != other:
                         graph[pad].add(other)
                         graph[other].add(pad)
+
+        # Find zone connection points (via positions that touch zones)
+        zone_connection_points: set[tuple[float, float]] = set()
+        for zone_layer, filled_polys in net_zones:
+            for via in vias:
+                if zone_layer not in via.layers:
+                    continue
+                for poly in filled_polys:
+                    if self._point_in_polygon(via.position, poly):
+                        zone_connection_points.add(via.position)
+                        break
+
+        # Connect pads through via-to-zone connectivity
+        # A pad is zone-connected if:
+        # 1. It's directly at a zone connection point, OR
+        # 2. It's in a segment chain that touches a zone connection point
+        zone_connected_pads: set[str] = set()
+
+        # Pads directly at zone connection points
+        for zcp in zone_connection_points:
+            zone_connected_pads.update(self._find_pads_at_point(zcp, pad_positions))
+
+        # Pads connected via segment chains that touch zone connection points
+        for component in segment_components:
+            touches_zone = False
+            for seg_idx in component:
+                seg = segments[seg_idx]
+                for zcp in zone_connection_points:
+                    if self._points_close(seg.start, zcp) or self._points_close(seg.end, zcp):
+                        touches_zone = True
+                        break
+                if touches_zone:
+                    break
+
+            if touches_zone:
+                # All pads in this segment chain are connected to the zone
+                for seg_idx in component:
+                    seg = segments[seg_idx]
+                    zone_connected_pads.update(self._find_pads_at_point(seg.start, pad_positions))
+                    zone_connected_pads.update(self._find_pads_at_point(seg.end, pad_positions))
+
+        # Connect all zone-connected pads to each other
+        zone_pad_list = list(zone_connected_pads)
+        for i, pad in enumerate(zone_pad_list):
+            for other in zone_pad_list[i + 1 :]:
+                graph[pad].add(other)
+                graph[other].add(pad)
 
         # Connect pads at same copper positions (including zones)
         all_copper = [seg.start for seg in segments] + [seg.end for seg in segments]
@@ -495,24 +557,17 @@ class NetStatusAnalyzer:
 
         return graph
 
-    def _build_segment_chains(
-        self,
-        segments: list,
-        pad_positions: dict[str, tuple[float, float]],
-        graph: dict[str, set[str]],
-    ) -> dict[str, set[str]]:
-        """Build connectivity through chains of connected segments.
+    def _build_segment_components(self, segments: list) -> list[set[int]]:
+        """Build connected components of segments.
 
         Args:
             segments: List of trace segments
-            pad_positions: Mapping of pad names to positions
-            graph: Existing connectivity graph to extend
 
         Returns:
-            Updated connectivity graph
+            List of sets, each containing segment indices in a connected component
         """
         if not segments:
-            return graph
+            return []
 
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
@@ -528,7 +583,7 @@ class NetStatusAnalyzer:
                         segment_graph[i].add(j)
                         segment_graph[j].add(i)
 
-        # Find connected components of segments
+        # Find connected components
         visited: set[int] = set()
         components: list[set[int]] = []
 
@@ -546,21 +601,7 @@ class NetStatusAnalyzer:
                 queue.extend(segment_graph[seg_idx] - visited)
             components.append(component)
 
-        # Connect pads within each component
-        for component in components:
-            component_pads: set[str] = set()
-            for seg_idx in component:
-                seg = segments[seg_idx]
-                component_pads.update(self._find_pads_at_point(seg.start, pad_positions))
-                component_pads.update(self._find_pads_at_point(seg.end, pad_positions))
-
-            pad_list = list(component_pads)
-            for i, pad in enumerate(pad_list):
-                for other in pad_list[i + 1 :]:
-                    graph[pad].add(other)
-                    graph[other].add(pad)
-
-        return graph
+        return components
 
     def _find_pads_at_point(
         self,
@@ -591,6 +632,38 @@ class NetStatusAnalyzer:
         dx = p1[0] - p2[0]
         dy = p1[1] - p2[1]
         return (dx * dx + dy * dy) < (self.POSITION_TOLERANCE * self.POSITION_TOLERANCE)
+
+    def _point_in_polygon(
+        self,
+        point: tuple[float, float],
+        polygon: list[tuple[float, float]],
+    ) -> bool:
+        """Test if point is inside polygon using ray casting algorithm.
+
+        Args:
+            point: (x, y) coordinates to test
+            polygon: List of (x, y) vertices
+
+        Returns:
+            True if point is inside polygon
+        """
+        n = len(polygon)
+        if n < 3:
+            return False
+
+        x, y = point
+        inside = False
+        j = n - 1
+
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+
+            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+
+        return inside
 
     def _find_islands(
         self,
