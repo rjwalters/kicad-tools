@@ -278,3 +278,4 @@ These are explicitly **not** planned:
 | 0.4.0 | 2025-12-31 | Libraries: symbol/footprint creation, pure Python DRC, datasheets |
 | 0.5.0 | 2026-01-02 | Workflow: circuit blocks, Project class, examples |
 | 0.6.0 | 2026-01-03 | Intelligent Placement: clustering, thermal, edge, agent API |
+| 0.7.0 | 2026-01-04 | Design Feedback: rich errors, actionable suggestions, cost awareness |

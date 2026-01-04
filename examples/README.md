@@ -12,6 +12,7 @@ This directory contains example projects demonstrating common workflows with kic
 | [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
 | [05-end-to-end](05-end-to-end/) | Create complete designs programmatically | Circuit blocks, power rails, schematic generation |
 | [06-intelligent-placement](06-intelligent-placement/) | v0.6.0 intelligent placement for AI agents | Clustering, edge detection, thermal, sessions |
+| [07-design-feedback](07-design-feedback/) | v0.7.0 design feedback for AI agents | Rich errors, congestion, thermal, cost estimation |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 | [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
@@ -129,6 +130,30 @@ if result.score_delta < 0:  # Improvement
 # Commit changes
 session.commit()
 pcb.save("optimized.kicad_pcb")
+```
+
+### 07 - Design Feedback (v0.7.0)
+
+Get actionable feedback on designs for AI agent iteration.
+
+```python
+from kicad_tools.analysis import analyze_congestion, analyze_thermal
+from kicad_tools.cost import estimate_manufacturing_cost
+
+# Analyze routing congestion
+congestion = analyze_congestion(pcb, grid_size=2.0)
+for hotspot in congestion.hotspots:
+    print(f"{hotspot.severity}: {hotspot.suggestion}")
+
+# Check thermal issues
+thermal = analyze_thermal(pcb)
+for source in thermal.heat_sources:
+    if source.estimated_temp_rise > 40:
+        print(f"Warning: {source.reference} may overheat")
+
+# Estimate manufacturing costs
+cost = estimate_manufacturing_cost(pcb, bom, quantity=10)
+print(f"Per board: ${cost.per_board:.2f}")
 ```
 
 ### LLM Routing
