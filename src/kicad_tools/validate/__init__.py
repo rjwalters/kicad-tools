@@ -46,6 +46,7 @@ Difference from ``kicad_tools.drc``:
 
 from .checker import DRCChecker
 from .connectivity import ConnectivityIssue, ConnectivityResult, ConnectivityValidator
+from .consistency import ConsistencyIssue, ConsistencyResult, SchematicPCBChecker
 from .netlist import NetlistValidator, SyncIssue, SyncResult
 from .violations import DRCResults, DRCViolation
 
@@ -62,4 +63,8 @@ __all__ = [
     "ConnectivityValidator",
     "ConnectivityIssue",
     "ConnectivityResult",
+    # Schematic-PCB consistency validation
+    "SchematicPCBChecker",
+    "ConsistencyIssue",
+    "ConsistencyResult",
 ]
