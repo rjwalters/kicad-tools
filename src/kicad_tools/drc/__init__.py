@@ -9,6 +9,13 @@ Example:
     >>> print(f"Found {report.violation_count} violations")
     >>> for v in report.errors:
     ...     print(f"  {v.type}: {v.message}")
+
+With fix suggestions:
+    >>> from kicad_tools.drc import generate_fix_suggestions
+    >>> for v in report.errors:
+    ...     suggestion = generate_fix_suggestions(v)
+    ...     if suggestion:
+    ...         print(f"  Fix: {suggestion.description}")
 """
 
 from .checker import (
@@ -20,6 +27,11 @@ from .report import (
     DRCReport,
     parse_json_report,
     parse_text_report,
+)
+from .suggestions import (
+    FixAction,
+    FixSuggestion,
+    generate_fix_suggestions,
 )
 from .violation import (
     DRCViolation,
@@ -42,4 +54,8 @@ __all__ = [
     "check_manufacturer_rules",
     "ManufacturerCheck",
     "CheckResult",
+    # Fix suggestions
+    "FixSuggestion",
+    "FixAction",
+    "generate_fix_suggestions",
 ]
