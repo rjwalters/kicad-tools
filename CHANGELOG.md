@@ -5,6 +5,157 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-01-04
+
+### Added
+
+#### Rich Error Diagnostics (`kicad_tools.exceptions`)
+
+Compiler-style error reporting with actionable context:
+
+- **Source Position Tracking** (`SourcePosition`)
+  - File, line, and column tracking for all errors
+  - Element type and board coordinates for PCB errors
+  - Layer information for multi-layer issues
+
+- **S-expression Snippet Extraction** (`SExpSnippetExtractor`)
+  - Extract code context around error locations
+  - Line numbers and visual markers
+  - Complete element extraction by reference
+
+- **Error Accumulation** (`ErrorAccumulator`)
+  - Collect multiple errors instead of failing on first
+  - Batch validation for comprehensive feedback
+  - `ValidationErrorGroup` for aggregated reporting
+
+- **Rich Terminal Rendering**
+  - Syntax-highlighted error output
+  - Color-coded severity levels
+  - Visual separators for multi-error reports
+
+#### Actionable Feedback (`kicad_tools.drc`, `kicad_tools.analysis`, `kicad_tools.constraints`)
+
+Transform error codes into specific fix suggestions:
+
+- **DRC Fix Suggestions** (`drc/suggestions.py`)
+  - "Move C1 0.5mm left to clear U1 pad"
+  - Specific component and direction recommendations
+  - Clearance violation resolution strategies
+
+- **ERC Root Cause Analysis** (`cli/erc_explain_cmd.py`)
+  - Deep analysis of electrical rule violations
+  - Root cause identification
+  - Step-by-step fix instructions
+  - CLI: `kct erc explain <schematic>`
+
+- **Routing Congestion Analysis** (`analysis/congestion.py`)
+  - Grid-based density hotspot detection
+  - Track length and via count per area
+  - Unrouted connection identification
+  - Severity classification (LOW → CRITICAL)
+  - CLI: `kct analyze congestion <pcb>`
+
+- **Constraint Conflict Detection** (`constraints/conflict.py`)
+  - Detects keepout/grouping/region conflicts
+  - Conflict types: OVERLAP, CONTRADICTION, IMPOSSIBLE
+  - Multiple resolution options with trade-off analysis
+  - CLI: `kct constraints check <pcb>`
+
+#### Design Quality Metrics (`kicad_tools.analysis`)
+
+Proactive design quality analysis:
+
+- **Trace Length Reports** (`analysis/trace_length.py`)
+  - Per-net and per-segment length calculation
+  - Automatic timing-critical net detection (CLK, USB, DDR, LVDS)
+  - Differential pair skew calculation
+  - Layer change tracking
+  - Tolerance checking (actual vs target)
+  - CLI: `kct analyze trace-lengths <pcb>`
+
+- **Thermal Analysis** (`analysis/thermal.py`)
+  - Heat source identification (regulators, MOSFETs, drivers)
+  - Power dissipation estimation by package type
+  - Thermal resistance calculations
+  - Nearby heat source clustering
+  - Copper area and via effectiveness estimation
+  - Temperature rise prediction
+  - CLI: `kct analyze thermal <pcb>`
+
+- **Signal Integrity Estimates** (`analysis/signal_integrity.py`)
+  - Crosstalk risk detection between adjacent traces
+  - Impedance discontinuity analysis (width changes, vias, layer transitions)
+  - High-speed net identification (USB, LVDS, MIPI, HDMI, DDR, Ethernet)
+  - Coupling coefficient calculation
+  - Risk level classification (LOW → HIGH)
+  - CLI: `kct analyze signal-integrity <pcb>`
+
+#### Cross-Domain Validation (`kicad_tools.validate`)
+
+Consistency checks across design artifacts:
+
+- **Schematic↔PCB Consistency** (`validate/consistency.py`)
+  - Component matching between schematic and PCB
+  - Net consistency verification
+  - Reference designator, value, and footprint sync
+  - CLI: `kct validate --consistency`
+
+- **Net Connectivity Validation** (`validate/connectivity.py`)
+  - Unrouted net detection
+  - Partial connection (island) detection
+  - Isolated pad identification
+  - Actionable fix suggestions
+  - CLI: `kct validate --connectivity`, `kct net-status <pcb>`
+
+- **BOM↔Placement Verification**
+  - Component count verification
+  - Placement status for all BOM items
+  - Missing component detection
+
+#### Cost Awareness (`kicad_tools.cost`)
+
+Manufacturing cost visibility:
+
+- **Manufacturing Cost Estimation** (`cost/estimator.py`)
+  - PCB fabrication cost breakdown
+  - Component and assembly costs
+  - Quantity-based pricing tiers
+  - Manufacturer-specific costs (JLCPCB, PCBWay, OSHPark, Seeed)
+  - Surface finish and color adjustments
+  - Layer and thickness premiums
+  - CLI: `kct estimate cost <pcb>`
+
+- **Part Availability Checking** (`cost/availability.py`)
+  - LCSC stock level queries
+  - Availability status (AVAILABLE, LOW_STOCK, OUT_OF_STOCK, DISCONTINUED)
+  - Lead time reporting
+  - Minimum order quantity handling
+  - Price break calculations
+  - CLI: `kct parts availability <schematic>`
+
+- **Alternative Part Suggestions** (`cost/alternatives.py`)
+  - Suggest replacements for unavailable parts
+  - Price difference comparison
+  - Pin-compatible alternatives
+  - Basic part preferences for JLCPCB assembly
+  - CLI: `kct suggest alternatives <schematic>`
+
+#### CLI Commands
+
+New commands for v0.7.0 features:
+
+- `kct erc explain <file>` - ERC root cause analysis with fix suggestions
+- `kct analyze congestion <pcb>` - Routing congestion hotspots
+- `kct analyze trace-lengths <pcb>` - Timing-critical trace analysis
+- `kct analyze thermal <pcb>` - Thermal hotspot detection
+- `kct analyze signal-integrity <pcb>` - Crosstalk and impedance analysis
+- `kct constraints check <pcb>` - Constraint conflict detection
+- `kct validate --consistency` - Schematic↔PCB sync check
+- `kct validate --connectivity` - Net connectivity validation
+- `kct estimate cost <pcb>` - Manufacturing cost estimation
+- `kct parts availability <schematic>` - LCSC stock checking
+- `kct suggest alternatives <schematic>` - Alternative part suggestions
+
 ## [0.6.0] - 2026-01-03
 
 ### Added
@@ -389,6 +540,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.7.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.0
 [0.6.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.5.0
 [0.4.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.4.0
