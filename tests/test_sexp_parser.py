@@ -647,3 +647,177 @@ class TestRoundTrip:
         assert footprint is not None
         pad = footprint.find("pad")
         assert pad is not None
+
+
+class TestPositionTracking:
+    """Tests for source position tracking in the parser."""
+
+    def test_position_tracking_disabled_by_default(self):
+        """Position tracking is off by default."""
+        sexp = "(test value)"
+        parsed = parse_string(sexp)
+        assert parsed.line == 0
+        assert parsed.column == 0
+        assert not parsed.has_position
+
+    def test_position_tracking_enabled(self):
+        """Position tracking can be enabled."""
+        sexp = "(test value)"
+        parsed = parse_string(sexp, track_positions=True)
+        assert parsed.has_position
+        assert parsed.line == 1
+        assert parsed.column == 1
+
+    def test_multiline_positions(self):
+        """Positions are tracked correctly across lines."""
+        sexp = """(root
+  (child1 value1)
+  (child2 value2)
+)"""
+        parsed = parse_string(sexp, track_positions=True)
+
+        # Root should be at line 1, column 1
+        assert parsed.line == 1
+        assert parsed.column == 1
+
+        # child1 should be at line 2
+        child1 = parsed["child1"]
+        assert child1.line == 2
+        assert child1.column == 3  # After 2 spaces
+
+        # child2 should be at line 3
+        child2 = parsed["child2"]
+        assert child2.line == 3
+        assert child2.column == 3
+
+    def test_nested_positions(self):
+        """Nested elements have correct positions."""
+        sexp = "(outer (inner (deep value)))"
+        parsed = parse_string(sexp, track_positions=True)
+
+        outer = parsed
+        assert outer.line == 1
+        assert outer.column == 1
+
+        inner = parsed["inner"]
+        assert inner.line == 1
+        assert inner.column == 8  # After "(outer "
+
+        deep = inner["deep"]
+        assert deep.line == 1
+        assert deep.column == 15  # After "(outer (inner "
+
+    def test_atom_positions(self):
+        """Atom values have correct positions."""
+        sexp = '(list 123 "string" symbol)'
+        parsed = parse_string(sexp, track_positions=True)
+
+        atoms = parsed.children
+        # First atom: 123 at position 7
+        assert atoms[0].line == 1
+        assert atoms[0].column == 7
+
+        # Second atom: "string" at position 11
+        assert atoms[1].line == 1
+        assert atoms[1].column == 11
+
+        # Third atom: symbol at position 20
+        assert atoms[2].line == 1
+        assert atoms[2].column == 20
+
+    def test_has_position_property(self):
+        """has_position property correctly identifies tracked nodes."""
+        # Without tracking
+        parsed1 = parse_string("(test)")
+        assert not parsed1.has_position
+
+        # With tracking
+        parsed2 = parse_string("(test)", track_positions=True)
+        assert parsed2.has_position
+
+    def test_to_source_position(self, tmp_path):
+        """to_source_position creates correct SourcePosition objects."""
+        from pathlib import Path
+
+        sexp = "(symbol U1)"
+        parsed = parse_string(sexp, track_positions=True)
+
+        pos = parsed.to_source_position(
+            file_path=Path("test.kicad_sch"),
+            element_type="symbol",
+            element_ref="U1",
+            position_mm=(10.0, 20.0),
+            layer="F.Cu",
+        )
+
+        assert pos is not None
+        assert str(pos) == "test.kicad_sch:1:1"
+        assert pos.element_type == "symbol"
+        assert pos.element_ref == "U1"
+        assert pos.position_mm == (10.0, 20.0)
+        assert pos.layer == "F.Cu"
+
+    def test_to_source_position_without_tracking(self):
+        """to_source_position returns None when no position info."""
+        from pathlib import Path
+
+        sexp = "(test)"
+        parsed = parse_string(sexp)  # No track_positions
+
+        pos = parsed.to_source_position(Path("test.kicad_sch"))
+        assert pos is None
+
+    def test_parse_file_with_position_tracking(self, tmp_path):
+        """parse_file supports position tracking."""
+        test_file = tmp_path / "test.kicad_sch"
+        test_file.write_text("(kicad_sch\n  (version 20231120)\n)")
+
+        parsed = parse_file(test_file, track_positions=True)
+        assert parsed.has_position
+        assert parsed.line == 1
+        assert parsed.column == 1
+
+        version = parsed["version"]
+        assert version.line == 2
+        assert version.column == 3
+
+    def test_document_load_with_position_tracking(self, tmp_path):
+        """Document.load supports position tracking."""
+        from kicad_tools.sexp.parser import Document
+
+        test_file = tmp_path / "test.kicad_sch"
+        test_file.write_text("(kicad_sch\n  (version 20231120)\n)")
+
+        doc = Document.load(test_file, track_positions=True)
+        assert doc.root.has_position
+        assert doc.root.line == 1
+
+    def test_complex_kicad_structure(self):
+        """Position tracking works with realistic KiCad content."""
+        sexp = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (symbol
+    (lib_id "Device:R")
+    (at 100 50 0)
+    (property "Reference" "R1"
+      (at 102 48 0)
+    )
+  )
+)"""
+        parsed = parse_string(sexp, track_positions=True)
+
+        # Root is at line 1
+        assert parsed.line == 1
+
+        # version is at line 2
+        version = parsed["version"]
+        assert version.line == 2
+
+        # symbol starts at line 4
+        symbol = parsed.find("symbol")
+        assert symbol.line == 4
+
+        # Property nested in symbol
+        prop = symbol.find("property")
+        assert prop.line == 7

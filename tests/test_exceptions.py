@@ -1,21 +1,27 @@
 """Tests for kicad_tools.exceptions module."""
 
 import json
+from pathlib import Path
 
 import pytest
 
 from kicad_tools.exceptions import (
     ComponentError,
     ConfigurationError,
+    ErrorAccumulator,
     ExportError,
     FileFormatError,
     FileNotFoundError,
+    KiCadDiagnostic,
     KiCadToolsError,
     ParseError,
     RoutingError,
     SExpSnippetExtractor,
+    SourcePosition,
     ValidationError,
+    ValidationErrorGroup,
     _class_name_to_error_code,
+    accumulate,
 )
 
 
@@ -692,3 +698,624 @@ line 7"""
         # Should have message, file location, blank, and 3 snippet lines
         snippet_lines = [l for l in lines if "|" in l]
         assert len(snippet_lines) == 3  # 1 before, target, 1 after
+
+class TestSourcePosition:
+    """Tests for the SourcePosition dataclass."""
+
+    def test_basic_position(self):
+        """Test basic source position creation."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_sch"),
+            line=42,
+            column=5,
+        )
+        assert pos.file_path == Path("test.kicad_sch")
+        assert pos.line == 42
+        assert pos.column == 5
+        assert pos.element_type == ""
+        assert pos.element_ref == ""
+        assert pos.position_mm is None
+        assert pos.layer is None
+
+    def test_full_position(self):
+        """Test source position with all fields."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=100,
+            column=10,
+            element_type="track",
+            element_ref="net-GND",
+            position_mm=(25.4, 50.8),
+            layer="F.Cu",
+        )
+        assert pos.element_type == "track"
+        assert pos.element_ref == "net-GND"
+        assert pos.position_mm == (25.4, 50.8)
+        assert pos.layer == "F.Cu"
+
+    def test_str_format(self):
+        """Test string formatting as file:line:column."""
+        pos = SourcePosition(
+            file_path=Path("project.kicad_sch"),
+            line=42,
+            column=15,
+        )
+        assert str(pos) == "project.kicad_sch:42:15"
+
+    def test_repr(self):
+        """Test repr includes key fields."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=10,
+            column=5,
+            element_type="symbol",
+            element_ref="U1",
+        )
+        r = repr(pos)
+        assert "SourcePosition" in r
+        assert "board.kicad_pcb" in r
+        assert "line=10" in r
+        assert "column=5" in r
+        assert "element_type='symbol'" in r
+        assert "element_ref='U1'" in r
+
+    def test_to_dict_basic(self):
+        """Test to_dict returns correct structure."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_sch"),
+            line=42,
+            column=5,
+        )
+        result = pos.to_dict()
+        assert result["file_path"] == "test.kicad_sch"
+        assert result["line"] == 42
+        assert result["column"] == 5
+        assert "element_type" not in result  # Empty string not included
+        assert "element_ref" not in result
+        assert "position_mm" not in result
+        assert "layer" not in result
+
+    def test_to_dict_full(self):
+        """Test to_dict with all fields."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=100,
+            column=10,
+            element_type="via",
+            element_ref="VIA-1",
+            position_mm=(12.7, 25.4),
+            layer="F.Cu",
+        )
+        result = pos.to_dict()
+        assert result["element_type"] == "via"
+        assert result["element_ref"] == "VIA-1"
+        assert result["position_mm"] == {"x": 12.7, "y": 25.4}
+        assert result["layer"] == "F.Cu"
+
+    def test_to_dict_json_serializable(self):
+        """Test to_dict output is JSON-serializable."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_pcb"),
+            line=10,
+            column=20,
+            element_type="track",
+            position_mm=(1.0, 2.0),
+        )
+        json_str = json.dumps(pos.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["line"] == 10
+        assert parsed["position_mm"]["x"] == 1.0
+
+
+class TestKiCadDiagnostic:
+    """Tests for the KiCadDiagnostic exception class."""
+
+    def test_basic_message(self):
+        """Test basic diagnostic message without position."""
+        err = KiCadDiagnostic("Something went wrong")
+        assert str(err) == "Something went wrong"
+        assert err.message == "Something went wrong"
+        assert err.source is None
+        assert err.sources == []
+        assert err.suggestions == []
+
+    def test_with_source_position(self):
+        """Test diagnostic with source position."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=42,
+            column=5,
+        )
+        err = KiCadDiagnostic("Track clearance violation", source=pos)
+        msg = str(err)
+        assert "board.kicad_pcb:42:5: Track clearance violation" in msg
+        assert err.source == pos
+        assert err.location == "board.kicad_pcb:42:5"
+
+    def test_with_suggestions(self):
+        """Test diagnostic with suggestions."""
+        err = KiCadDiagnostic(
+            "Invalid spacing",
+            suggestions=["Increase clearance", "Check design rules"],
+        )
+        msg = str(err)
+        assert "Invalid spacing" in msg
+        assert "Suggestions:" in msg
+        assert "Increase clearance" in msg
+        assert "Check design rules" in msg
+
+    def test_with_related_sources(self):
+        """Test diagnostic with multiple related positions."""
+        primary = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=42,
+            column=5,
+            element_ref="net-GND",
+        )
+        related1 = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=100,
+            column=10,
+            element_ref="U1",
+        )
+        related2 = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=150,
+            column=15,
+            element_ref="C1",
+        )
+        err = KiCadDiagnostic(
+            "Clearance violation",
+            source=primary,
+            sources=[related1, related2],
+        )
+        msg = str(err)
+        assert "board.kicad_pcb:42:5: Clearance violation" in msg
+        assert "Related locations:" in msg
+        assert "board.kicad_pcb:100:10 (U1)" in msg
+        assert "board.kicad_pcb:150:15 (C1)" in msg
+
+    def test_location_property(self):
+        """Test location property."""
+        # With source
+        pos = SourcePosition(file_path=Path("test.kicad_sch"), line=10, column=5)
+        err = KiCadDiagnostic("Test", source=pos)
+        assert err.location == "test.kicad_sch:10:5"
+
+        # Without source
+        err2 = KiCadDiagnostic("Test")
+        assert err2.location == ""
+
+    def test_to_dict_basic(self):
+        """Test to_dict returns correct structure."""
+        err = KiCadDiagnostic("Test message")
+        result = err.to_dict()
+        assert result["message"] == "Test message"
+        assert result["suggestions"] == []
+        assert "source" not in result
+        assert "related_sources" not in result
+
+    def test_to_dict_with_source(self):
+        """Test to_dict with source position."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=42,
+            column=5,
+            element_type="track",
+        )
+        err = KiCadDiagnostic("Violation", source=pos, suggestions=["Fix it"])
+        result = err.to_dict()
+        assert result["message"] == "Violation"
+        assert result["suggestions"] == ["Fix it"]
+        assert result["source"]["file_path"] == "board.kicad_pcb"
+        assert result["source"]["line"] == 42
+
+    def test_to_dict_with_related_sources(self):
+        """Test to_dict with related sources."""
+        primary = SourcePosition(file_path=Path("a.kicad_pcb"), line=1, column=1)
+        related = SourcePosition(file_path=Path("b.kicad_pcb"), line=2, column=2)
+        err = KiCadDiagnostic("Test", source=primary, sources=[related])
+        result = err.to_dict()
+        assert len(result["related_sources"]) == 1
+        assert result["related_sources"][0]["file_path"] == "b.kicad_pcb"
+
+    def test_to_dict_json_serializable(self):
+        """Test to_dict output is JSON-serializable."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_pcb"),
+            line=10,
+            column=5,
+            element_type="via",
+            position_mm=(1.0, 2.0),
+        )
+        err = KiCadDiagnostic(
+            "Drill size violation",
+            source=pos,
+            suggestions=["Increase drill size"],
+        )
+        json_str = json.dumps(err.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["message"] == "Drill size violation"
+        assert parsed["source"]["line"] == 10
+
+    def test_is_exception(self):
+        """Test KiCadDiagnostic is an Exception."""
+        err = KiCadDiagnostic("Test")
+        assert isinstance(err, Exception)
+
+    def test_can_be_raised(self):
+        """Test KiCadDiagnostic can be raised and caught."""
+        with pytest.raises(KiCadDiagnostic) as exc_info:
+            raise KiCadDiagnostic("Test error")
+        assert exc_info.value.message == "Test error"
+
+
+class TestValidationErrorGroup:
+    """Tests for ValidationErrorGroup exception."""
+
+    def test_single_error_in_group(self):
+        """Test group with single error."""
+        inner = ValidationError(["Field required"])
+        group = ValidationErrorGroup([inner])
+        assert len(group.errors) == 1
+        assert "1 validation error" in str(group)
+        assert "Field required" in str(group)
+
+    def test_multiple_errors_in_group(self):
+        """Test group with multiple errors."""
+        errors = [
+            ValidationError(["Field 'name' required"]),
+            ValidationError(["Invalid format"]),
+            ParseError("Unexpected token"),
+        ]
+        group = ValidationErrorGroup(errors)
+        msg = str(group)
+        assert len(group.errors) == 3
+        assert "3 validation errors" in msg
+        assert "Field 'name' required" in msg
+        assert "Invalid format" in msg
+        assert "Unexpected token" in msg
+
+    def test_error_code(self):
+        """Test ValidationErrorGroup has correct error code."""
+        group = ValidationErrorGroup([ValidationError(["test"])])
+        assert group.error_code == "VALIDATION_ERROR_GROUP"
+
+    def test_inherits_from_base(self):
+        """Test ValidationErrorGroup inherits from KiCadToolsError."""
+        group = ValidationErrorGroup([])
+        assert isinstance(group, KiCadToolsError)
+
+    def test_with_context_and_suggestions(self):
+        """Test group with context and suggestions."""
+        group = ValidationErrorGroup(
+            [ValidationError(["Error"])],
+            context={"file": "test.json"},
+            suggestions=["Fix the errors"],
+        )
+        msg = str(group)
+        assert "file: test.json" in msg
+        assert "Fix the errors" in msg
+
+    def test_to_dict_includes_all_errors(self):
+        """Test to_dict includes all grouped errors."""
+        errors = [
+            ValidationError(["Error 1"]),
+            ValidationError(["Error 2"]),
+        ]
+        group = ValidationErrorGroup(errors, context={"batch": "test"})
+        result = group.to_dict()
+
+        assert result["error_code"] == "VALIDATION_ERROR_GROUP"
+        assert result["error_count"] == 2
+        assert len(result["errors"]) == 2
+        assert result["context"] == {"batch": "test"}
+
+    def test_to_dict_with_mixed_exceptions(self):
+        """Test to_dict handles both KiCadToolsError and other exceptions."""
+        errors = [
+            ValidationError(["Error 1"]),
+            ValueError("Standard error"),
+        ]
+        group = ValidationErrorGroup(errors)
+        result = group.to_dict()
+
+        assert len(result["errors"]) == 2
+        # First error is KiCadToolsError, should have full structure
+        assert result["errors"][0]["error_code"] == "VALIDATION"
+        # Second is ValueError, should have basic structure
+        assert result["errors"][1]["error_code"] == "VALUEERROR"
+        assert result["errors"][1]["message"] == "Standard error"
+
+    def test_to_dict_json_serializable(self):
+        """Test that to_dict output is JSON-serializable."""
+        errors = [
+            ValidationError(["Field missing"]),
+            ParseError("Syntax error", context={"line": 10}),
+        ]
+        group = ValidationErrorGroup(errors)
+        json_str = json.dumps(group.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["error_count"] == 2
+
+
+class TestErrorAccumulator:
+    """Tests for ErrorAccumulator class."""
+
+    def test_empty_accumulator(self):
+        """Test accumulator with no errors."""
+        acc = ErrorAccumulator()
+        assert not acc.has_errors()
+        assert acc.error_count == 0
+        assert acc.errors == []
+
+    def test_collect_single_error(self):
+        """Test collecting a single error."""
+        acc = ErrorAccumulator(ValueError)
+
+        with acc.collect():
+            raise ValueError("test error")
+
+        assert acc.has_errors()
+        assert acc.error_count == 1
+        assert isinstance(acc.errors[0], ValueError)
+        assert str(acc.errors[0]) == "test error"
+
+    def test_collect_multiple_errors(self):
+        """Test collecting multiple errors in a loop."""
+        acc = ErrorAccumulator(ValueError)
+
+        values = [1, "bad", 3, "also bad", 5]
+        for v in values:
+            with acc.collect():
+                if isinstance(v, str):
+                    raise ValueError(f"Not a number: {v}")
+
+        assert acc.error_count == 2
+        assert "bad" in str(acc.errors[0])
+        assert "also bad" in str(acc.errors[1])
+
+    def test_collect_ignores_non_matching_exceptions(self):
+        """Test that collect only catches specified exception type."""
+        acc = ErrorAccumulator(ValueError)
+
+        with pytest.raises(TypeError):
+            with acc.collect():
+                raise TypeError("This should propagate")
+
+        assert acc.error_count == 0
+
+    def test_collect_all_exceptions_when_no_type(self):
+        """Test accumulator catches all exceptions when no type specified."""
+        acc = ErrorAccumulator()
+
+        with acc.collect():
+            raise ValueError("first")
+
+        with acc.collect():
+            raise TypeError("second")
+
+        assert acc.error_count == 2
+
+    def test_add_error_manually(self):
+        """Test manually adding errors."""
+        acc = ErrorAccumulator()
+        acc.add_error(ValueError("manual error"))
+        assert acc.error_count == 1
+
+    def test_raise_if_errors_raises_group(self):
+        """Test raise_if_errors raises ValidationErrorGroup."""
+        acc = ErrorAccumulator()
+        acc.add_error(ValueError("error 1"))
+        acc.add_error(ValueError("error 2"))
+
+        with pytest.raises(ValidationErrorGroup) as exc_info:
+            acc.raise_if_errors()
+
+        assert len(exc_info.value.errors) == 2
+
+    def test_raise_if_errors_with_context(self):
+        """Test raise_if_errors passes context and suggestions."""
+        acc = ErrorAccumulator()
+        acc.add_error(ValueError("error"))
+
+        with pytest.raises(ValidationErrorGroup) as exc_info:
+            acc.raise_if_errors(
+                context={"operation": "validation"},
+                suggestions=["Check your input"],
+            )
+
+        assert exc_info.value.context == {"operation": "validation"}
+        assert exc_info.value.suggestions == ["Check your input"]
+
+    def test_raise_if_errors_no_errors(self):
+        """Test raise_if_errors does nothing when no errors."""
+        acc = ErrorAccumulator()
+        # Should not raise
+        acc.raise_if_errors()
+
+    def test_clear(self):
+        """Test clear removes all errors."""
+        acc = ErrorAccumulator()
+        acc.add_error(ValueError("error"))
+        assert acc.has_errors()
+
+        acc.clear()
+        assert not acc.has_errors()
+        assert acc.errors == []
+
+    def test_set_error_type(self):
+        """Test set_error_type changes the caught type."""
+        acc = ErrorAccumulator()
+
+        # Default catches everything
+        with acc.collect():
+            raise ValueError("caught")
+        assert acc.error_count == 1
+
+        acc.clear()
+        acc.set_error_type(TypeError)
+
+        # Now only catches TypeError
+        with pytest.raises(ValueError):
+            with acc.collect():
+                raise ValueError("not caught")
+
+        with acc.collect():
+            raise TypeError("caught")
+
+        assert acc.error_count == 1
+
+    def test_collect_does_not_suppress_on_success(self):
+        """Test that collect doesn't affect normal execution."""
+        acc = ErrorAccumulator()
+        result = None
+
+        with acc.collect():
+            result = 42  # No exception
+
+        assert result == 42
+        assert not acc.has_errors()
+
+
+class TestAccumulateContextManager:
+    """Tests for accumulate() convenience context manager."""
+
+    def test_accumulate_with_no_errors(self):
+        """Test accumulate with no errors raised."""
+        # Should not raise
+        with accumulate() as acc:
+            pass
+
+        assert not acc.has_errors()
+
+    def test_accumulate_collects_and_raises(self):
+        """Test accumulate collects errors and raises at end."""
+        with pytest.raises(ValidationErrorGroup) as exc_info:
+            with accumulate(ValueError) as acc:
+                with acc.collect():
+                    raise ValueError("error 1")
+                with acc.collect():
+                    raise ValueError("error 2")
+
+        assert len(exc_info.value.errors) == 2
+
+    def test_accumulate_with_error_type(self):
+        """Test accumulate with specific error type."""
+        with pytest.raises(ValidationErrorGroup):
+            with accumulate(ValueError) as acc:
+                with acc.collect():
+                    raise ValueError("caught")
+
+    def test_accumulate_propagates_unmatched_exceptions(self):
+        """Test that unmatched exceptions propagate through accumulate."""
+        with pytest.raises(TypeError):
+            with accumulate(ValueError) as acc:
+                with acc.collect():
+                    raise TypeError("not caught")
+
+    def test_real_world_validation_pattern(self):
+        """Test the real-world pattern from the issue description."""
+
+        def validate_item(item: dict) -> None:
+            if "name" not in item:
+                raise ValidationError(["Field 'name' is required"])
+            if len(item.get("name", "")) < 2:
+                raise ValidationError(["Name must be at least 2 characters"])
+
+        items = [
+            {"name": "valid"},
+            {},  # Missing name
+            {"name": "x"},  # Name too short
+            {"name": "also valid"},
+        ]
+
+        with pytest.raises(ValidationErrorGroup) as exc_info:
+            with accumulate(ValidationError) as acc:
+                for item in items:
+                    with acc.collect():
+                        validate_item(item)
+
+        # Should have collected 2 errors
+        assert len(exc_info.value.errors) == 2
+
+    def test_accumulate_json_output(self):
+        """Test that accumulated errors produce valid JSON output."""
+        errors_to_collect = [
+            ValidationError(["Error 1"], context={"field": "name"}),
+            ValidationError(["Error 2"], context={"field": "value"}),
+        ]
+
+        try:
+            with accumulate(ValidationError) as acc:
+                for err in errors_to_collect:
+                    with acc.collect():
+                        raise err
+        except ValidationErrorGroup as group:
+            result = group.to_dict()
+            json_str = json.dumps(result)
+            parsed = json.loads(json_str)
+
+            assert parsed["error_count"] == 2
+            assert len(parsed["errors"]) == 2
+
+
+class TestErrorAccumulatorIntegration:
+    """Integration tests for error accumulation patterns."""
+
+    def test_drc_style_check_pattern(self):
+        """Test pattern similar to DRC checking with multiple rules."""
+
+        class DRCError(Exception):
+            def __init__(self, rule: str, message: str):
+                self.rule = rule
+                super().__init__(f"[{rule}] {message}")
+
+        def check_clearance(value: float) -> None:
+            if value < 0.2:
+                raise DRCError("clearance", f"Clearance {value}mm < 0.2mm minimum")
+
+        def check_track_width(value: float) -> None:
+            if value < 0.1:
+                raise DRCError("track_width", f"Track {value}mm < 0.1mm minimum")
+
+        measurements = [
+            ("clearance", 0.15),  # Fail
+            ("clearance", 0.25),  # Pass
+            ("track_width", 0.08),  # Fail
+            ("track_width", 0.12),  # Pass
+        ]
+
+        acc = ErrorAccumulator(DRCError)
+        for check_type, value in measurements:
+            with acc.collect():
+                if check_type == "clearance":
+                    check_clearance(value)
+                else:
+                    check_track_width(value)
+
+        assert acc.error_count == 2
+        assert "clearance" in str(acc.errors[0])
+        assert "track_width" in str(acc.errors[1])
+
+    def test_nested_accumulation(self):
+        """Test that error accumulation works in nested contexts."""
+        # Outer catches ValidationErrorGroup (result of inner accumulation)
+        outer_acc = ErrorAccumulator(ValidationErrorGroup)
+
+        def inner_validation():
+            inner_acc = ErrorAccumulator(ValueError)
+            with inner_acc.collect():
+                raise ValueError("inner error 1")
+            with inner_acc.collect():
+                raise ValueError("inner error 2")
+            inner_acc.raise_if_errors()
+
+        with outer_acc.collect():
+            inner_validation()
+
+        # Outer should catch the ValidationErrorGroup from inner
+        assert outer_acc.error_count == 1
+        assert isinstance(outer_acc.errors[0], ValidationErrorGroup)
+        # The inner group should contain the 2 ValueError exceptions
+        assert len(outer_acc.errors[0].errors) == 2

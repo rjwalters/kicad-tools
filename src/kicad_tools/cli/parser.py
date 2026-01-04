@@ -1198,12 +1198,17 @@ def _add_validate_parser(subparsers) -> None:
     validate_parser.add_argument(
         "validate_project",
         nargs="?",
-        help="Path to .kicad_pro file",
+        help="Path to .kicad_pro or .kicad_pcb file",
     )
     validate_parser.add_argument(
         "--sync",
         action="store_true",
         help="Check schematic-to-PCB netlist synchronization",
+    )
+    validate_parser.add_argument(
+        "--connectivity",
+        action="store_true",
+        help="Check net connectivity on PCB (detect unrouted nets)",
     )
     validate_parser.add_argument(
         "--schematic",
