@@ -71,6 +71,10 @@ from .coupled_lines import (
     CoupledLines,
     DifferentialPairResult,
 )
+from .crosstalk import (
+    CrosstalkAnalyzer,
+    CrosstalkResult,
+)
 from .stackup import (
     LayerType,
     Stackup,
@@ -110,4 +114,7 @@ __all__ = [
     # Coupled Lines
     "CoupledLines",
     "DifferentialPairResult",
+    # Crosstalk
+    "CrosstalkAnalyzer",
+    "CrosstalkResult",
 ]
