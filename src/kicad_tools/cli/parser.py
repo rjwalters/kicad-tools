@@ -1215,6 +1215,11 @@ def _add_validate_parser(subparsers) -> None:
         help="Check net connectivity on PCB (detect unrouted nets)",
     )
     validate_parser.add_argument(
+        "--consistency",
+        action="store_true",
+        help="Check schematic-to-PCB consistency (components, nets, properties)",
+    )
+    validate_parser.add_argument(
         "--schematic",
         "-s",
         dest="validate_schematic",

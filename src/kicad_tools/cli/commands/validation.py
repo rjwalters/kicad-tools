@@ -4,6 +4,7 @@ __all__ = [
     "run_check_command",
     "run_validate_command",
     "run_validate_connectivity_command",
+    "run_validate_consistency_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
     "run_constraints_command",
@@ -85,13 +86,21 @@ def run_validate_command(args) -> int:
     if getattr(args, "connectivity", False):
         return run_validate_connectivity_command(args)
 
+    # Route to consistency validation if --consistency flag is set
+    if getattr(args, "consistency", False):
+        return run_validate_consistency_command(args)
+
     # Default to sync validation
     if not args.sync:
         print("Usage: kicad-tools validate --sync [options] <project>")
         print("       kicad-tools validate --connectivity [options] <pcb>")
+        print("       kicad-tools validate --consistency [options] <project>")
         print("\nOptions:")
         print("  --sync           Check schematic-to-PCB netlist synchronization")
         print("  --connectivity   Check net connectivity on PCB (detect unrouted nets)")
+        print(
+            "  --consistency    Check schematic-to-PCB consistency (components, nets, properties)"
+        )
         return 1
 
     from ..validate_sync_cmd import main as validate_sync_main
@@ -138,6 +147,30 @@ def run_validate_connectivity_command(args) -> int:
         sub_argv.append("--verbose")
 
     return validate_connectivity_main(sub_argv)
+
+
+def run_validate_consistency_command(args) -> int:
+    """Handle validate --consistency command."""
+    from ..validate_consistency_cmd import main as validate_consistency_main
+
+    sub_argv = []
+
+    if getattr(args, "validate_project", None):
+        sub_argv.append(args.validate_project)
+    if getattr(args, "validate_schematic", None):
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if getattr(args, "validate_pcb", None):
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+
+    return validate_consistency_main(sub_argv)
 
 
 def run_constraints_command(args) -> int:
