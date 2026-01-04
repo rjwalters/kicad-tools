@@ -72,6 +72,9 @@ kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
 # Hierarchy validation
 kicad-sch-hierarchy = "kicad_tools.cli.sch_hierarchy:main"
 
+# Net status reporting
+kicad-net-status = "kicad_tools.cli:net_status_main"
+
 [project.optional-dependencies]
 # LCSC parts API access
 parts = [

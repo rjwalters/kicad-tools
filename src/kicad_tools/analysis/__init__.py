@@ -10,6 +10,12 @@ This module provides analysis tools for PCB designs:
 """
 
 from .congestion import CongestionAnalyzer, CongestionReport, Severity
+from .net_status import (
+    NetStatus,
+    NetStatusAnalyzer,
+    NetStatusResult,
+    PadInfo,
+)
 from .signal_integrity import (
     CrosstalkRisk,
     ImpedanceDiscontinuity,
@@ -45,4 +51,8 @@ __all__ = [
     "ThermalSource",
     "TraceLengthAnalyzer",
     "TraceLengthReport",
+    "NetStatusAnalyzer",
+    "NetStatusResult",
+    "NetStatus",
+    "PadInfo",
 ]

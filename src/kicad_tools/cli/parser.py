@@ -37,7 +37,6 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
     kicad-tools analyze <command>      - PCB analysis tools
-    kicad-tools audit <project>        - Manufacturing readiness audit
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -82,9 +81,6 @@ Examples:
     kct footprint generate --list
     kct interactive
     kct interactive --project myboard.kicad_pro
-    kct audit project.kicad_pro --mfr jlcpcb
-    kct audit board.kicad_pcb --mfr jlcpcb --skip-erc
-    kct audit project.kicad_pro --format json --strict
 """
 
 
@@ -141,8 +137,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
     _add_estimate_parser(subparsers)
-    _add_audit_parser(subparsers)
-    _add_suggest_parser(subparsers)
+    _add_net_status_parser(subparsers)
 
     return parser
 
@@ -1625,4 +1620,45 @@ def _add_suggest_parser(subparsers) -> None:
     )
     suggest_alt.add_argument(
         "-v", "--verbose", action="store_true", help="Show detailed information"
+    )
+
+
+def _add_net_status_parser(subparsers) -> None:
+    """Add net-status subcommand parser."""
+    net_status_parser = subparsers.add_parser(
+        "net-status",
+        help="Report net connectivity status for a PCB",
+        description="Show which nets are complete, incomplete, or unrouted with details on unconnected pads",
+    )
+    net_status_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    net_status_parser.add_argument(
+        "--format",
+        dest="net_status_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    net_status_parser.add_argument(
+        "--incomplete",
+        dest="net_status_incomplete",
+        action="store_true",
+        help="Show only incomplete nets",
+    )
+    net_status_parser.add_argument(
+        "--net",
+        dest="net_status_net",
+        help="Show status for a specific net by name",
+    )
+    net_status_parser.add_argument(
+        "--by-class",
+        dest="net_status_by_class",
+        action="store_true",
+        help="Group output by net class",
+    )
+    net_status_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="net_status_verbose",
+        action="store_true",
+        help="Show all pads with coordinates",
     )
