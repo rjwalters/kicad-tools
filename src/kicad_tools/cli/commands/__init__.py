@@ -12,8 +12,10 @@ This package contains command handler modules organized by domain:
 - reasoning: reason command handler
 - config: config and interactive command handlers
 - manufacturer: mfr subcommand handlers
+- analyze: PCB analysis tools (congestion, etc.)
 """
 
+from .analyze import run_analyze_command
 from .config import run_config_command, run_interactive_command
 from .datasheet import run_datasheet_command
 from .footprint import run_footprint_command
@@ -65,4 +67,6 @@ __all__ = [
     "run_interactive_command",
     # Manufacturer
     "run_mfr_command",
+    # Analysis
+    "run_analyze_command",
 ]

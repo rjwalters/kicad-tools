@@ -36,6 +36,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
+    kicad-tools analyze <command>      - PCB analysis tools
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -132,6 +133,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_config_parser(subparsers)
     _add_interactive_parser(subparsers)
     _add_validate_parser(subparsers)
+    _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
 
     return parser
@@ -1248,6 +1250,44 @@ def _add_validate_parser(subparsers) -> None:
         dest="validate_verbose",
         action="store_true",
         help="Show detailed issue information",
+    )
+
+
+def _add_analyze_parser(subparsers) -> None:
+    """Add analyze subcommand parser with its subcommands."""
+    analyze_parser = subparsers.add_parser("analyze", help="PCB analysis tools")
+    analyze_subparsers = analyze_parser.add_subparsers(
+        dest="analyze_command", help="Analysis commands"
+    )
+
+    # analyze congestion
+    congestion_parser = analyze_subparsers.add_parser(
+        "congestion",
+        help="Analyze routing congestion",
+        description="Identify congested areas and suggest solutions",
+    )
+    congestion_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    congestion_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    congestion_parser.add_argument(
+        "--grid-size",
+        dest="analyze_grid_size",
+        type=float,
+        default=2.0,
+        help="Grid cell size in mm (default: 2.0)",
+    )
+    congestion_parser.add_argument(
+        "--min-severity",
+        dest="analyze_min_severity",
+        choices=["low", "medium", "high", "critical"],
+        default="low",
+        help="Minimum severity to report (default: low)",
     )
 
 

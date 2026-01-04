@@ -24,6 +24,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
+    kicad-tools analyze <command>      - PCB analysis tools (congestion, etc.)
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -35,6 +36,7 @@ import sys
 from kicad_tools.exceptions import KiCadToolsError
 
 from .commands import (
+    run_analyze_command,
     run_check_command,
     run_config_command,
     run_constraints_command,
@@ -261,6 +263,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "validate":
         return run_validate_command(args)
+
+    elif args.command == "analyze":
+        return run_analyze_command(args)
 
     elif args.command == "constraints":
         return run_constraints_command(args)
