@@ -44,7 +44,7 @@ Quick Start::
     # ... use with router, DRC, export functions
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # Core S-expression handling
 # Constraints - Multi-stage optimization locking
