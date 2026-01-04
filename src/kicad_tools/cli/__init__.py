@@ -70,6 +70,7 @@ __all__ = [
     "symbols_main",
     "nets_main",
     "erc_main",
+    "erc_explain_main",
     "drc_main",
     "drc_summary_main",
     "bom_main",
@@ -170,7 +171,33 @@ def _dispatch_command(args) -> int:
         return netlist_cmd(sub_argv)
 
     elif args.command == "erc":
+        # Check for subcommand
+        erc_command = getattr(args, "erc_command", None)
+
+        if erc_command == "explain":
+            from .erc_explain_cmd import main as erc_explain_cmd
+
+            sub_argv = [args.explain_input]
+            if hasattr(args, "explain_format") and args.explain_format != "text":
+                sub_argv.extend(["--format", args.explain_format])
+            if hasattr(args, "explain_errors_only") and args.explain_errors_only:
+                sub_argv.append("--errors-only")
+            if hasattr(args, "explain_filter_type") and args.explain_filter_type:
+                sub_argv.extend(["--type", args.explain_filter_type])
+            if hasattr(args, "explain_keep_report") and args.explain_keep_report:
+                sub_argv.append("--keep-report")
+            return erc_explain_cmd(sub_argv)
+
+        # Default: run standard ERC command
         from .erc_cmd import main as erc_cmd
+
+        if not args.report:
+            # No file provided, show help
+            from .parser import create_parser
+
+            parser = create_parser()
+            parser.parse_args(["erc", "--help"])
+            return 0
 
         sub_argv = [args.report]
         if args.format != "table":
@@ -322,6 +349,13 @@ def nets_main() -> int:
 def erc_main() -> int:
     """Standalone entry point for kicad-erc command."""
     from .erc_cmd import main
+
+    return main()
+
+
+def erc_explain_main() -> int:
+    """Standalone entry point for kicad-erc-explain command."""
+    from .erc_explain_cmd import main
 
     return main()
 

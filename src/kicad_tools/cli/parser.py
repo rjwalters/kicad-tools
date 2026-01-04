@@ -223,13 +223,64 @@ def _add_netlist_parser(subparsers) -> None:
 
 
 def _add_erc_parser(subparsers) -> None:
-    """Add ERC subcommand parser."""
-    erc_parser = subparsers.add_parser("erc", help="Parse ERC report")
-    erc_parser.add_argument("report", help="Path to ERC report (.json or .rpt)")
+    """Add ERC subcommand parser with subcommands."""
+    erc_parser = subparsers.add_parser(
+        "erc",
+        help="ERC validation and analysis",
+        description="Run ERC on schematics or analyze ERC reports",
+    )
+
+    erc_subparsers = erc_parser.add_subparsers(dest="erc_command", help="ERC commands")
+
+    # Default behavior when no subcommand: kct erc <file>
+    # We handle this in dispatch by checking erc_command
+
+    # For backwards compatibility, allow positional argument at erc level
+    erc_parser.add_argument(
+        "report",
+        nargs="?",
+        help="Path to schematic (.kicad_sch) or ERC report (.json or .rpt)",
+    )
     erc_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
     erc_parser.add_argument("--errors-only", action="store_true")
     erc_parser.add_argument("--type", dest="filter_type", help="Filter by violation type")
     erc_parser.add_argument("--sheet", help="Filter by sheet path")
+
+    # erc explain subcommand
+    erc_explain = erc_subparsers.add_parser(
+        "explain",
+        help="Detailed ERC error analysis with root cause and fixes",
+        description="Analyze ERC errors with detailed explanations, root causes, and fix suggestions",
+    )
+    erc_explain.add_argument(
+        "explain_input",
+        help="Path to schematic (.kicad_sch) or ERC report (.json/.rpt)",
+    )
+    erc_explain.add_argument(
+        "--format",
+        dest="explain_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    erc_explain.add_argument(
+        "--errors-only",
+        dest="explain_errors_only",
+        action="store_true",
+        help="Show only errors, not warnings",
+    )
+    erc_explain.add_argument(
+        "--type",
+        "-t",
+        dest="explain_filter_type",
+        help="Filter by violation type",
+    )
+    erc_explain.add_argument(
+        "--keep-report",
+        dest="explain_keep_report",
+        action="store_true",
+        help="Keep the ERC report file after running",
+    )
 
 
 def _add_drc_parser(subparsers) -> None:
