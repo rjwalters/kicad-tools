@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-from ..drc import DRCReport, DRCViolation, check_manufacturer_rules
+from ..drc import DRCReport, DRCViolation, check_manufacturer_rules, generate_fix_suggestions
 from ..manufacturers import compare_design_rules, get_manufacturer_ids, get_profile
 from .runner import find_kicad_cli, run_drc
 
@@ -94,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         "-v",
         action="store_true",
         help="Show detailed violation information",
+    )
+    parser.add_argument(
+        "--suggest",
+        "-s",
+        action="store_true",
+        help="Show fix suggestions for each violation",
     )
     parser.add_argument(
         "--keep-report",
@@ -172,13 +178,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.net:
         violations = [v for v in violations if args.net in v.nets]
 
+    # Generate suggestions if requested
+    if args.suggest:
+        for v in violations:
+            suggestion = generate_fix_suggestions(v)
+            if suggestion:
+                v.suggestions = [suggestion]
+
     # Output
     if args.format == "json":
-        output_json(violations, report)
+        output_json(violations, report, show_suggestions=args.suggest)
     elif args.format == "summary":
         output_summary(violations, report)
     else:
-        output_table(violations, report, args.verbose)
+        output_table(violations, report, args.verbose, show_suggestions=args.suggest)
 
     # Exit code
     error_count = sum(1 for v in violations if v.is_error)
@@ -235,6 +248,7 @@ def output_table(
     violations: list[DRCViolation],
     report: DRCReport,
     verbose: bool = False,
+    show_suggestions: bool = False,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -288,14 +302,14 @@ def output_table(
         print(f"\n{'-' * 60}")
         print("ERRORS (must fix):")
         for v in errors:
-            _print_single(v, verbose)
+            _print_single(v, verbose, show_suggestions)
 
     if warnings:
         print(f"\n{'-' * 60}")
         print("WARNINGS (review recommended):")
         display_warnings = warnings if verbose else warnings[:10]
         for v in display_warnings:
-            _print_single(v, verbose)
+            _print_single(v, verbose, show_suggestions)
         if len(warnings) > 10 and not verbose:
             print(f"\n  ... and {len(warnings) - 10} more warnings (use --verbose)")
 
@@ -306,11 +320,24 @@ def output_table(
         print("DRC WARNING - Review warnings")
 
 
-def _print_single(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
+def _print_single(
+    v: DRCViolation,
+    verbose: bool,
+    show_suggestions: bool = False,
+    indent: str = "  ",
+) -> None:
     """Print a single violation."""
     symbol = "X" if v.is_error else "!"
     print(f"\n{indent}[{symbol}] {v.type_str}")
     print(f"{indent}    {v.message}")
+
+    # Show measurement delta if available
+    if v.required_value_mm is not None and v.actual_value_mm is not None:
+        delta = v.required_value_mm - v.actual_value_mm
+        print(
+            f"{indent}    Required: {v.required_value_mm:.3f}mm, "
+            f"Actual: {v.actual_value_mm:.3f}mm (need +{delta:.3f}mm)"
+        )
 
     if verbose:
         if v.locations:
@@ -321,9 +348,28 @@ def _print_single(v: DRCViolation, verbose: bool, indent: str = "  ") -> None:
         if v.nets:
             print(f"{indent}    Nets: {', '.join(v.nets)}")
 
+    # Show fix suggestions
+    if show_suggestions and v.suggestions:
+        print(f"{indent}    FIX: {v.suggestions[0].description}")
+        if verbose and v.suggestions[0].alternatives:
+            for alt in v.suggestions[0].alternatives[:2]:
+                print(f"{indent}         or: {alt.description}")
 
-def output_json(violations: list[DRCViolation], report: DRCReport) -> None:
+
+def output_json(
+    violations: list[DRCViolation],
+    report: DRCReport,
+    show_suggestions: bool = False,
+) -> None:
     """Output violations as JSON."""
+    violations_data = []
+    for v in violations:
+        v_dict = v.to_dict()
+        # Only include suggestions if requested and available
+        if not show_suggestions and "suggestions" in v_dict:
+            del v_dict["suggestions"]
+        violations_data.append(v_dict)
+
     data = {
         "source": report.source_file,
         "pcb_name": report.pcb_name,
@@ -331,7 +377,7 @@ def output_json(violations: list[DRCViolation], report: DRCReport) -> None:
             "errors": sum(1 for v in violations if v.is_error),
             "warnings": sum(1 for v in violations if not v.is_error),
         },
-        "violations": [v.to_dict() for v in violations],
+        "violations": violations_data,
     }
     print(json.dumps(data, indent=2))
 

@@ -2,11 +2,12 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from kicad_tools.core import SeverityMixin
 
 if TYPE_CHECKING:
+    from kicad_tools.drc.suggestions import FixSuggestion
     from kicad_tools.exceptions import SourcePosition
 
 
@@ -173,6 +174,9 @@ class DRCViolation:
     # Source position in KiCad file (file:line:column)
     source_position: "SourcePosition | None" = None
 
+    # Fix suggestions (populated by generate_fix_suggestions)
+    suggestions: list["FixSuggestion"] = field(default_factory=list)
+
     @property
     def is_error(self) -> bool:
         """Check if this is an error (vs warning)."""
@@ -202,9 +206,20 @@ class DRCViolation:
             return str(self.primary_location)
         return ""
 
-    def to_dict(self) -> dict:
+    @property
+    def delta_mm(self) -> float | None:
+        """Calculate the difference between required and actual values.
+
+        For clearance violations, this is how much more clearance is needed.
+        Returns None if values are not available.
+        """
+        if self.required_value_mm is None or self.actual_value_mm is None:
+            return None
+        return self.required_value_mm - self.actual_value_mm
+
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
-        result = {
+        result: dict[str, Any] = {
             "type": self.type.value,
             "type_str": self.type_str,
             "severity": self.severity.value,
@@ -217,9 +232,12 @@ class DRCViolation:
             "nets": self.nets,
             "required_value_mm": self.required_value_mm,
             "actual_value_mm": self.actual_value_mm,
+            "delta_mm": self.delta_mm,
         }
         if self.source_position:
             result["source_position"] = self.source_position.to_dict()
+        if self.suggestions:
+            result["suggestions"] = [s.to_dict() for s in self.suggestions]
         return result
 
     def __str__(self) -> str:
