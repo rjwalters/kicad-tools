@@ -10,11 +10,13 @@ Commands:
     list        List all sheets with details
     labels      Show hierarchical label connections
     path        Show path to a specific sheet
+    validate    Validate hierarchy connections (pins vs labels)
 
 Options:
-    --format {tree,json}   Output format (default: tree)
-    --sheet <name>         Focus on a specific sheet
-    --depth <n>            Maximum depth to show
+    --format {tree,json,text}  Output format (default: tree for tree/list, text for validate)
+    --sheet <name>             Focus on a specific sheet
+    --depth <n>                Maximum depth to show
+    --fix                      Auto-fix simple issues (for validate command)
 
 Examples:
     # Show hierarchy tree
@@ -26,6 +28,12 @@ Examples:
     # Show hierarchical label connections
     python3 sch-hierarchy.py project.kicad_sch labels
 
+    # Validate hierarchy (check pins match labels)
+    python3 sch-hierarchy.py project.kicad_sch validate
+
+    # Auto-fix simple issues
+    python3 sch-hierarchy.py project.kicad_sch validate --fix
+
     # Focus on a specific sheet
     python3 sch-hierarchy.py project.kicad_sch tree --sheet Power
 """
@@ -36,6 +44,11 @@ import sys
 from pathlib import Path
 
 from kicad_tools.schema.hierarchy import HierarchyNode, build_hierarchy
+from kicad_tools.schema.hierarchy_validation import (
+    apply_fix,
+    format_validation_report,
+    validate_hierarchy,
+)
 
 
 def main(argv=None):
@@ -49,14 +62,23 @@ def main(argv=None):
         "command",
         nargs="?",
         default="tree",
-        choices=["tree", "list", "labels", "path", "stats"],
+        choices=["tree", "list", "labels", "path", "stats", "validate"],
         help="Command to run (default: tree)",
     )
-    parser.add_argument("--format", choices=["tree", "json"], default="tree", help="Output format")
+    parser.add_argument(
+        "--format", choices=["tree", "json", "text"], default="tree", help="Output format"
+    )
     parser.add_argument("--sheet", help="Focus on a specific sheet")
     parser.add_argument("--depth", type=int, help="Maximum depth to show")
+    parser.add_argument(
+        "--fix", action="store_true", help="Auto-fix simple issues (for validate command)"
+    )
 
     args = parser.parse_args(argv)
+
+    # Handle validate command separately (doesn't need full hierarchy in memory)
+    if args.command == "validate":
+        return cmd_validate(args)
 
     # Build hierarchy
     try:
@@ -345,6 +367,99 @@ def cmd_stats(root: HierarchyNode, args):
         print(f"Leaf sheets:            {leaf_sheets}")
         print(f"Hierarchical labels:    {total_labels}")
         print(f"Sheet pins:             {total_pins}")
+
+
+def cmd_validate(args) -> int:
+    """Validate hierarchy connections."""
+    try:
+        # Validate hierarchy
+        specific_sheet = None
+        if args.sheet:
+            # Convert sheet name to filename if needed
+            specific_sheet = args.sheet
+            if not specific_sheet.endswith(".kicad_sch"):
+                specific_sheet = f"{specific_sheet}.kicad_sch"
+
+        result = validate_hierarchy(args.schematic, specific_sheet=specific_sheet)
+
+    except FileNotFoundError:
+        print(f"Error: File not found: {args.schematic}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error validating hierarchy: {e}", file=sys.stderr)
+        return 1
+
+    # Apply auto-fixes if requested
+    fixes_applied = 0
+    if args.fix:
+        for issue in result.issues:
+            for suggestion in issue.suggestions:
+                if suggestion.auto_fixable:
+                    if apply_fix(suggestion):
+                        fixes_applied += 1
+                        print(f"Fixed: {suggestion.description}")
+
+        if fixes_applied > 0:
+            print(f"\nApplied {fixes_applied} automatic fix(es).")
+            # Re-validate after fixes
+            result = validate_hierarchy(args.schematic, specific_sheet=specific_sheet)
+            print("")
+
+    # Output results
+    if args.format == "json":
+        output = {
+            "schematic": result.root_schematic,
+            "sheets_checked": result.sheets_checked,
+            "pins_checked": result.pins_checked,
+            "labels_checked": result.labels_checked,
+            "error_count": result.error_count,
+            "warning_count": result.warning_count,
+            "issues": [
+                {
+                    "type": issue.issue_type.value,
+                    "severity": issue.severity,
+                    "sheet_name": issue.sheet_name,
+                    "sheet_file": issue.sheet_file,
+                    "parent_sheet": issue.parent_sheet_name,
+                    "pin_name": issue.pin_name,
+                    "label_name": issue.label_name,
+                    "message": issue.message,
+                    "pin": {
+                        "name": issue.pin.name,
+                        "direction": issue.pin.direction,
+                        "position": list(issue.pin.position),
+                        "uuid": issue.pin.uuid,
+                    }
+                    if issue.pin
+                    else None,
+                    "label": {
+                        "name": issue.label.name,
+                        "shape": issue.label.shape,
+                        "position": list(issue.label.position),
+                        "uuid": issue.label.uuid,
+                    }
+                    if issue.label
+                    else None,
+                    "suggestions": [
+                        {
+                            "type": s.fix_type.value,
+                            "description": s.description,
+                            "auto_fixable": s.auto_fixable,
+                            "file_path": s.file_path,
+                        }
+                        for s in issue.suggestions
+                    ],
+                    "possible_causes": issue.possible_causes,
+                }
+                for issue in result.issues
+            ],
+        }
+        print(json.dumps(output, indent=2))
+    else:
+        print(format_validation_report(result))
+
+    # Return exit code based on errors
+    return 1 if result.has_errors else 0
 
 
 def format_tree(

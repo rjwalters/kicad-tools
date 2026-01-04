@@ -13,6 +13,50 @@ from kicad_tools.sexp import SExp, parse_sexp
 
 
 @dataclass
+class HierarchicalLabelInfo:
+    """
+    Information about a hierarchical label in a schematic.
+
+    Hierarchical labels connect to sheet pins in the parent sheet.
+    """
+
+    name: str
+    shape: str  # "input", "output", "bidirectional", "passive"
+    position: tuple[float, float]
+    rotation: float
+    uuid: str
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> HierarchicalLabelInfo:
+        """Parse from S-expression."""
+        name = sexp.get_string(0) or ""
+
+        # Get shape (defaults to "input")
+        shape = "input"
+        if shape_node := sexp.find("shape"):
+            shape = shape_node.get_string(0) or "input"
+
+        pos = (0.0, 0.0)
+        rot = 0.0
+        uuid = ""
+
+        if at := sexp.find("at"):
+            pos = (at.get_float(0) or 0, at.get_float(1) or 0)
+            rot = at.get_float(2) or 0
+
+        if uuid_node := sexp.find("uuid"):
+            uuid = uuid_node.get_string(0) or ""
+
+        return cls(
+            name=name,
+            shape=shape,
+            position=pos,
+            rotation=rot,
+            uuid=uuid,
+        )
+
+
+@dataclass
 class SheetPin:
     """
     A hierarchical pin on a sheet symbol.
@@ -135,7 +179,10 @@ class HierarchyNode:
     uuid: str
     children: list[HierarchyNode] = field(default_factory=list)
     sheets: list[SheetInstance] = field(default_factory=list)  # Sheet instances in this schematic
-    hierarchical_labels: list[str] = field(default_factory=list)  # Labels in this sheet
+    hierarchical_labels: list[str] = field(default_factory=list)  # Label names (for backward compat)
+    hierarchical_label_info: list[HierarchicalLabelInfo] = field(
+        default_factory=list
+    )  # Full label details
     parent: HierarchyNode | None = field(default=None, repr=False)
 
     @property
@@ -249,6 +296,7 @@ class HierarchyBuilder:
                 uuid=existing.uuid,
                 sheets=[],
                 hierarchical_labels=existing.hierarchical_labels,
+                hierarchical_label_info=existing.hierarchical_label_info,
                 parent=parent,
             )
 
@@ -277,10 +325,12 @@ class HierarchyBuilder:
 
         # Parse hierarchical labels
         h_labels = []
+        h_label_info = []
         for label_sexp in sexp.find_all("hierarchical_label"):
             label_text = label_sexp.get_string(0)
             if label_text:
                 h_labels.append(label_text)
+                h_label_info.append(HierarchicalLabelInfo.from_sexp(label_sexp))
 
         # Create node
         node = HierarchyNode(
@@ -289,6 +339,7 @@ class HierarchyBuilder:
             uuid=uuid,
             sheets=sheets,
             hierarchical_labels=h_labels,
+            hierarchical_label_info=h_label_info,
             parent=parent,
         )
 

@@ -69,6 +69,9 @@ kicad-pcb-stitch = "kicad_tools.cli.stitch_cmd:main"
 # Library tools (not yet in unified CLI)
 kicad-lib-symbols = "kicad_tools.cli.lib_list_symbols:main"
 
+# Hierarchy validation
+kicad-sch-hierarchy = "kicad_tools.cli.sch_hierarchy:main"
+
 [project.optional-dependencies]
 # LCSC parts API access
 parts = [
