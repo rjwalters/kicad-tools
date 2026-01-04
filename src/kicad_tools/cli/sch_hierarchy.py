@@ -139,59 +139,130 @@ def cmd_list(root: HierarchyNode, args):
 
 
 def cmd_labels(root: HierarchyNode, args):
-    """Show hierarchical label connections."""
-    # Collect all hierarchical labels and sheet pins
-    connections: dict[str, list[dict]] = {}
+    """Show hierarchical label connections with match status."""
+    # Build a mapping from sheet name to child node for quick lookup
+    sheet_to_child: dict[str, HierarchyNode] = {}
+    for node in root.all_nodes():
+        for sheet in node.sheets:
+            # Find the child node that corresponds to this sheet
+            for child in node.children:
+                if child.name == sheet.name:
+                    sheet_to_child[f"{node.get_path_string()}/{sheet.name}"] = child
+                    break
+
+    # Collect signal data grouped by signal name, then by sheet
+    # Structure: {signal_name: {sheet_path: {"pin": pin_info, "label": bool, "child_node": node}}}
+    signals: dict[str, dict[str, dict]] = {}
 
     for node in root.all_nodes():
-        # Labels in this sheet
-        for label in node.hierarchical_labels:
-            if label not in connections:
-                connections[label] = []
-            connections[label].append(
-                {
-                    "type": "label",
-                    "sheet": node.name,
-                    "path": node.get_path_string(),
-                }
-            )
-
-        # Pins on sheets in this schematic
+        # For each sheet in this node, check pins vs labels in child
         for sheet in node.sheets:
+            sheet_path = f"{node.get_path_string()}/{sheet.name}"
+            child_key = sheet_path
+            child_node = sheet_to_child.get(child_key)
+            child_labels = set(child_node.hierarchical_labels) if child_node else set()
+
             for pin in sheet.pins:
-                if pin.name not in connections:
-                    connections[pin.name] = []
-                connections[pin.name].append(
-                    {
-                        "type": "pin",
+                if pin.name not in signals:
+                    signals[pin.name] = {}
+
+                has_label = pin.name in child_labels
+
+                signals[pin.name][sheet_path] = {
+                    "sheet_name": sheet.name,
+                    "parent_name": node.name,
+                    "pin": {
+                        "name": pin.name,
                         "direction": pin.direction,
-                        "sheet": sheet.name,
-                        "parent": node.name,
-                        "path": node.get_path_string(),
-                    }
-                )
+                    },
+                    "has_label": has_label,
+                    "matched": has_label,
+                }
+
+            # Also check for labels in child that don't have corresponding pins
+            if child_node:
+                pin_names = {p.name for p in sheet.pins}
+                for label in child_node.hierarchical_labels:
+                    if label not in pin_names:
+                        # Label exists without corresponding pin
+                        if label not in signals:
+                            signals[label] = {}
+                        signals[label][sheet_path] = {
+                            "sheet_name": sheet.name,
+                            "parent_name": node.name,
+                            "pin": None,
+                            "has_label": True,
+                            "matched": False,  # No pin for this label
+                        }
+
+    # Calculate summary statistics
+    total_signals = len(signals)
+    mismatched_signals = 0
+    for signal_name, sheet_data in signals.items():
+        for sheet_path, info in sheet_data.items():
+            if not info["matched"]:
+                mismatched_signals += 1
+                break  # Count each signal only once
 
     if args.format == "json":
-        print(json.dumps(connections, indent=2))
+        # Build JSON output with match information
+        json_output = {
+            "signals": {},
+            "summary": {
+                "total_signals": total_signals,
+                "mismatched_signals": mismatched_signals,
+                "matched_signals": total_signals - mismatched_signals,
+            },
+        }
+
+        for signal_name in sorted(signals.keys()):
+            sheet_data = signals[signal_name]
+            signal_matched = all(info["matched"] for info in sheet_data.values())
+            json_output["signals"][signal_name] = {
+                "matched": signal_matched,
+                "sheets": {},
+            }
+            for sheet_path, info in sheet_data.items():
+                json_output["signals"][signal_name]["sheets"][sheet_path] = {
+                    "sheet_name": info["sheet_name"],
+                    "parent": info["parent_name"],
+                    "has_pin": info["pin"] is not None,
+                    "pin_direction": info["pin"]["direction"] if info["pin"] else None,
+                    "has_label": info["has_label"],
+                    "matched": info["matched"],
+                }
+
+        print(json.dumps(json_output, indent=2))
     else:
         print("Hierarchical Label Connections")
         print("=" * 70)
 
-        for name in sorted(connections.keys()):
-            entries = connections[name]
-            print(f"\n⚡ {name}")
+        for signal_name in sorted(signals.keys()):
+            sheet_data = signals[signal_name]
+            signal_matched = all(info["matched"] for info in sheet_data.values())
+            status_icon = "✓" if signal_matched else "✗"
+            print(f"\n⚡ {signal_name} {status_icon}")
 
-            for entry in entries:
-                if entry["type"] == "label":
-                    print(f"   📄 Label in {entry['sheet']} ({entry['path']})")
+            for sheet_path in sorted(sheet_data.keys()):
+                info = sheet_data[sheet_path]
+                print(f"   Sheet: {info['sheet_name']}")
+
+                # Show pin status
+                if info["pin"]:
+                    direction = info["pin"]["direction"]
+                    dir_icon = "→" if direction == "output" else "←" if direction == "input" else "↔"
+                    print(f"     Pin:   {info['pin']['name']} ({direction}) {dir_icon} ✓")
                 else:
-                    direction = entry["direction"]
-                    icon = "→" if direction == "output" else "←" if direction == "input" else "↔"
-                    print(
-                        f"   {icon} Pin ({direction}) on sheet {entry['sheet']} in {entry['parent']}"
-                    )
+                    print(f"     Pin:   {signal_name} ✗ MISSING")
 
-        print(f"\nTotal: {len(connections)} unique signals")
+                # Show label status
+                if info["has_label"]:
+                    print(f"     Label: {signal_name} ✓")
+                else:
+                    print(f"     Label: {signal_name} ✗ MISSING")
+
+        # Summary line
+        print(f"\nSummary: {total_signals} signals, {mismatched_signals} mismatch{'es' if mismatched_signals != 1 else ''}")
 
 
 def cmd_path(root: HierarchyNode, args):

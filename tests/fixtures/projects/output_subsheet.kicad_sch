@@ -1,0 +1,19 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "00000000-0000-0000-0000-000000000003")
+	(paper "A4")
+	(title_block
+		(title "Output Subsheet")
+		(date "2024-12-30")
+		(rev "1.0")
+	)
+	(lib_symbols)
+	(hierarchical_label "IN"
+		(shape input)
+		(at 50 50 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "hlabel-in")
+	)
+)

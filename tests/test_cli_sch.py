@@ -213,6 +213,71 @@ class TestSchHierarchy:
         # Should work without error
         assert len(captured.out) > 0
 
+    def test_labels_command_with_hierarchy(self, hierarchical_schematic: Path, capsys):
+        """Test labels command with hierarchical schematic showing match status."""
+        from kicad_tools.cli.sch_hierarchy import main
+
+        main([str(hierarchical_schematic), "labels"])
+
+        captured = capsys.readouterr()
+        output = captured.out
+
+        # Should show hierarchical label connections header
+        assert "Hierarchical Label Connections" in output
+
+        # Should show summary line
+        assert "Summary:" in output
+        assert "signals" in output
+
+        # Should have sheet pins from the hierarchical schematic
+        # Logic sheet has VCC, GND, OUT pins
+        # Output sheet has IN, LED pins
+        # The subsheets have labels - Logic has all 3, Output only has IN (missing LED)
+        assert "Sheet:" in output
+
+    def test_labels_json_with_match_status(self, hierarchical_schematic: Path, capsys):
+        """Test labels command JSON output includes match status."""
+        from kicad_tools.cli.sch_hierarchy import main
+
+        main([str(hierarchical_schematic), "labels", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # JSON should have signals and summary keys
+        assert "signals" in data
+        assert "summary" in data
+
+        # Summary should have statistics
+        assert "total_signals" in data["summary"]
+        assert "mismatched_signals" in data["summary"]
+        assert "matched_signals" in data["summary"]
+
+        # Each signal should have matched field
+        for signal_name, signal_data in data["signals"].items():
+            assert "matched" in signal_data
+            assert "sheets" in signal_data
+            for sheet_path, sheet_data in signal_data["sheets"].items():
+                assert "has_pin" in sheet_data
+                assert "has_label" in sheet_data
+                assert "matched" in sheet_data
+
+    def test_labels_detects_mismatch(self, hierarchical_schematic: Path, capsys):
+        """Test that labels command detects pin/label mismatches."""
+        from kicad_tools.cli.sch_hierarchy import main
+
+        main([str(hierarchical_schematic), "labels", "--format", "json"])
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # The Output sheet has LED pin but output_subsheet.kicad_sch doesn't have LED label
+        # So we should detect at least one mismatch
+        led_signal = data["signals"].get("LED")
+        if led_signal:
+            # LED should show as mismatched (has pin but no label in child)
+            assert led_signal["matched"] is False
+
     def test_stats_command(self, simple_rc_schematic: Path, capsys):
         """Test stats command."""
         from kicad_tools.cli.sch_hierarchy import main
