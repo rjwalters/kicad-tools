@@ -1,6 +1,7 @@
 """Tests for kicad_tools.exceptions module."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +11,11 @@ from kicad_tools.exceptions import (
     ExportError,
     FileFormatError,
     FileNotFoundError,
+    KiCadDiagnostic,
     KiCadToolsError,
     ParseError,
     RoutingError,
+    SourcePosition,
     ValidationError,
     _class_name_to_error_code,
 )
@@ -420,3 +423,254 @@ class TestErrorCodes:
 
         err2 = ConfigurationError("test", error_code="CONFIG_INVALID")
         assert err2.error_code == "CONFIG_INVALID"
+
+
+class TestSourcePosition:
+    """Tests for the SourcePosition dataclass."""
+
+    def test_basic_position(self):
+        """Test basic source position creation."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_sch"),
+            line=42,
+            column=5,
+        )
+        assert pos.file_path == Path("test.kicad_sch")
+        assert pos.line == 42
+        assert pos.column == 5
+        assert pos.element_type == ""
+        assert pos.element_ref == ""
+        assert pos.position_mm is None
+        assert pos.layer is None
+
+    def test_full_position(self):
+        """Test source position with all fields."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=100,
+            column=10,
+            element_type="track",
+            element_ref="net-GND",
+            position_mm=(25.4, 50.8),
+            layer="F.Cu",
+        )
+        assert pos.element_type == "track"
+        assert pos.element_ref == "net-GND"
+        assert pos.position_mm == (25.4, 50.8)
+        assert pos.layer == "F.Cu"
+
+    def test_str_format(self):
+        """Test string formatting as file:line:column."""
+        pos = SourcePosition(
+            file_path=Path("project.kicad_sch"),
+            line=42,
+            column=15,
+        )
+        assert str(pos) == "project.kicad_sch:42:15"
+
+    def test_repr(self):
+        """Test repr includes key fields."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=10,
+            column=5,
+            element_type="symbol",
+            element_ref="U1",
+        )
+        r = repr(pos)
+        assert "SourcePosition" in r
+        assert "board.kicad_pcb" in r
+        assert "line=10" in r
+        assert "column=5" in r
+        assert "element_type='symbol'" in r
+        assert "element_ref='U1'" in r
+
+    def test_to_dict_basic(self):
+        """Test to_dict returns correct structure."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_sch"),
+            line=42,
+            column=5,
+        )
+        result = pos.to_dict()
+        assert result["file_path"] == "test.kicad_sch"
+        assert result["line"] == 42
+        assert result["column"] == 5
+        assert "element_type" not in result  # Empty string not included
+        assert "element_ref" not in result
+        assert "position_mm" not in result
+        assert "layer" not in result
+
+    def test_to_dict_full(self):
+        """Test to_dict with all fields."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=100,
+            column=10,
+            element_type="via",
+            element_ref="VIA-1",
+            position_mm=(12.7, 25.4),
+            layer="F.Cu",
+        )
+        result = pos.to_dict()
+        assert result["element_type"] == "via"
+        assert result["element_ref"] == "VIA-1"
+        assert result["position_mm"] == {"x": 12.7, "y": 25.4}
+        assert result["layer"] == "F.Cu"
+
+    def test_to_dict_json_serializable(self):
+        """Test to_dict output is JSON-serializable."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_pcb"),
+            line=10,
+            column=20,
+            element_type="track",
+            position_mm=(1.0, 2.0),
+        )
+        json_str = json.dumps(pos.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["line"] == 10
+        assert parsed["position_mm"]["x"] == 1.0
+
+
+class TestKiCadDiagnostic:
+    """Tests for the KiCadDiagnostic exception class."""
+
+    def test_basic_message(self):
+        """Test basic diagnostic message without position."""
+        err = KiCadDiagnostic("Something went wrong")
+        assert str(err) == "Something went wrong"
+        assert err.message == "Something went wrong"
+        assert err.source is None
+        assert err.sources == []
+        assert err.suggestions == []
+
+    def test_with_source_position(self):
+        """Test diagnostic with source position."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=42,
+            column=5,
+        )
+        err = KiCadDiagnostic("Track clearance violation", source=pos)
+        msg = str(err)
+        assert "board.kicad_pcb:42:5: Track clearance violation" in msg
+        assert err.source == pos
+        assert err.location == "board.kicad_pcb:42:5"
+
+    def test_with_suggestions(self):
+        """Test diagnostic with suggestions."""
+        err = KiCadDiagnostic(
+            "Invalid spacing",
+            suggestions=["Increase clearance", "Check design rules"],
+        )
+        msg = str(err)
+        assert "Invalid spacing" in msg
+        assert "Suggestions:" in msg
+        assert "Increase clearance" in msg
+        assert "Check design rules" in msg
+
+    def test_with_related_sources(self):
+        """Test diagnostic with multiple related positions."""
+        primary = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=42,
+            column=5,
+            element_ref="net-GND",
+        )
+        related1 = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=100,
+            column=10,
+            element_ref="U1",
+        )
+        related2 = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=150,
+            column=15,
+            element_ref="C1",
+        )
+        err = KiCadDiagnostic(
+            "Clearance violation",
+            source=primary,
+            sources=[related1, related2],
+        )
+        msg = str(err)
+        assert "board.kicad_pcb:42:5: Clearance violation" in msg
+        assert "Related locations:" in msg
+        assert "board.kicad_pcb:100:10 (U1)" in msg
+        assert "board.kicad_pcb:150:15 (C1)" in msg
+
+    def test_location_property(self):
+        """Test location property."""
+        # With source
+        pos = SourcePosition(file_path=Path("test.kicad_sch"), line=10, column=5)
+        err = KiCadDiagnostic("Test", source=pos)
+        assert err.location == "test.kicad_sch:10:5"
+
+        # Without source
+        err2 = KiCadDiagnostic("Test")
+        assert err2.location == ""
+
+    def test_to_dict_basic(self):
+        """Test to_dict returns correct structure."""
+        err = KiCadDiagnostic("Test message")
+        result = err.to_dict()
+        assert result["message"] == "Test message"
+        assert result["suggestions"] == []
+        assert "source" not in result
+        assert "related_sources" not in result
+
+    def test_to_dict_with_source(self):
+        """Test to_dict with source position."""
+        pos = SourcePosition(
+            file_path=Path("board.kicad_pcb"),
+            line=42,
+            column=5,
+            element_type="track",
+        )
+        err = KiCadDiagnostic("Violation", source=pos, suggestions=["Fix it"])
+        result = err.to_dict()
+        assert result["message"] == "Violation"
+        assert result["suggestions"] == ["Fix it"]
+        assert result["source"]["file_path"] == "board.kicad_pcb"
+        assert result["source"]["line"] == 42
+
+    def test_to_dict_with_related_sources(self):
+        """Test to_dict with related sources."""
+        primary = SourcePosition(file_path=Path("a.kicad_pcb"), line=1, column=1)
+        related = SourcePosition(file_path=Path("b.kicad_pcb"), line=2, column=2)
+        err = KiCadDiagnostic("Test", source=primary, sources=[related])
+        result = err.to_dict()
+        assert len(result["related_sources"]) == 1
+        assert result["related_sources"][0]["file_path"] == "b.kicad_pcb"
+
+    def test_to_dict_json_serializable(self):
+        """Test to_dict output is JSON-serializable."""
+        pos = SourcePosition(
+            file_path=Path("test.kicad_pcb"),
+            line=10,
+            column=5,
+            element_type="via",
+            position_mm=(1.0, 2.0),
+        )
+        err = KiCadDiagnostic(
+            "Drill size violation",
+            source=pos,
+            suggestions=["Increase drill size"],
+        )
+        json_str = json.dumps(err.to_dict())
+        parsed = json.loads(json_str)
+        assert parsed["message"] == "Drill size violation"
+        assert parsed["source"]["line"] == 10
+
+    def test_is_exception(self):
+        """Test KiCadDiagnostic is an Exception."""
+        err = KiCadDiagnostic("Test")
+        assert isinstance(err, Exception)
+
+    def test_can_be_raised(self):
+        """Test KiCadDiagnostic can be raised and caught."""
+        with pytest.raises(KiCadDiagnostic) as exc_info:
+            raise KiCadDiagnostic("Test error")
+        assert exc_info.value.message == "Test error"

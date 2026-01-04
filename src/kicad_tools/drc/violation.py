@@ -2,9 +2,12 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from kicad_tools.core import SeverityMixin
+
+if TYPE_CHECKING:
+    from kicad_tools.exceptions import SourcePosition
 
 
 class Severity(SeverityMixin, Enum):
@@ -148,7 +151,11 @@ class Location:
 
 @dataclass
 class DRCViolation:
-    """Represents a single DRC violation."""
+    """Represents a single DRC violation.
+
+    Includes both board-level location (x_mm, y_mm) and optional file-level
+    source position (file:line:column) for precise error reporting.
+    """
 
     type: ViolationType
     type_str: str  # Original type string from report
@@ -162,6 +169,9 @@ class DRCViolation:
     # Extracted numeric values (when available)
     required_value_mm: float | None = None
     actual_value_mm: float | None = None
+
+    # Source position in KiCad file (file:line:column)
+    source_position: "SourcePosition | None" = None
 
     @property
     def is_error(self) -> bool:
@@ -183,9 +193,18 @@ class DRCViolation:
         """Get the first location if available."""
         return self.locations[0] if self.locations else None
 
+    @property
+    def location_str(self) -> str:
+        """Format location as file:line:col or board coordinates."""
+        if self.source_position:
+            return str(self.source_position)
+        elif self.primary_location:
+            return str(self.primary_location)
+        return ""
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
-        return {
+        result = {
             "type": self.type.value,
             "type_str": self.type_str,
             "severity": self.severity.value,
@@ -199,8 +218,14 @@ class DRCViolation:
             "required_value_mm": self.required_value_mm,
             "actual_value_mm": self.actual_value_mm,
         }
+        if self.source_position:
+            result["source_position"] = self.source_position.to_dict()
+        return result
 
     def __str__(self) -> str:
+        # Prefer file:line:col format if available
+        if self.source_position:
+            return f"{self.source_position}: [{self.type_str}] {self.message}"
         loc_str = ""
         if self.primary_location:
             loc_str = f" at {self.primary_location}"

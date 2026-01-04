@@ -34,8 +34,181 @@ Example::
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass
+class SourcePosition:
+    """Position within a KiCad file for precise error reporting.
+
+    Enables errors to point to specific locations in KiCad schematic or PCB files,
+    allowing agents and tools to navigate directly to the source of issues.
+
+    Attributes:
+        file_path: Path to the KiCad file containing the element
+        line: Line number (1-indexed) where the element starts
+        column: Column number (1-indexed) within the line
+        element_type: Type of element (e.g., "footprint", "track", "via", "symbol")
+        element_ref: Reference designator or identifier (e.g., "C1", "R2", "net-VCC")
+        position_mm: Optional board/schematic coordinates as (x, y) tuple
+        layer: Optional layer name for PCB elements (e.g., "F.Cu", "B.SilkS")
+
+    Example::
+
+        pos = SourcePosition(
+            file_path=Path("project.kicad_pcb"),
+            line=42,
+            column=5,
+            element_type="track",
+            element_ref="net-VCC",
+            position_mm=(25.4, 50.8),
+            layer="F.Cu",
+        )
+        print(pos)  # project.kicad_pcb:42:5
+    """
+
+    file_path: Path
+    line: int
+    column: int
+    element_type: str = ""
+    element_ref: str = ""
+    position_mm: tuple[float, float] | None = None
+    layer: str | None = None
+
+    def __str__(self) -> str:
+        """Format as 'file:line:column' for IDE/editor integration."""
+        return f"{self.file_path}:{self.line}:{self.column}"
+
+    def __repr__(self) -> str:
+        parts = [f"file_path={self.file_path!r}", f"line={self.line}", f"column={self.column}"]
+        if self.element_type:
+            parts.append(f"element_type={self.element_type!r}")
+        if self.element_ref:
+            parts.append(f"element_ref={self.element_ref!r}")
+        if self.position_mm:
+            parts.append(f"position_mm={self.position_mm!r}")
+        if self.layer:
+            parts.append(f"layer={self.layer!r}")
+        return f"SourcePosition({', '.join(parts)})"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dictionary."""
+        result: dict[str, Any] = {
+            "file_path": str(self.file_path),
+            "line": self.line,
+            "column": self.column,
+        }
+        if self.element_type:
+            result["element_type"] = self.element_type
+        if self.element_ref:
+            result["element_ref"] = self.element_ref
+        if self.position_mm:
+            result["position_mm"] = {"x": self.position_mm[0], "y": self.position_mm[1]}
+        if self.layer:
+            result["layer"] = self.layer
+        return result
+
+
+class KiCadDiagnostic(Exception):
+    """Base exception with source position tracking for precise error reporting.
+
+    Provides compiler-style error messages with file:line:column format,
+    enabling IDE integration and direct navigation to error locations.
+
+    Inherits the rich context and suggestions pattern from KiCadToolsError
+    while adding source position support for KiCad file elements.
+
+    Attributes:
+        message: Human-readable error message
+        source: Optional source position in the KiCad file
+        sources: List of additional related source positions
+        suggestions: List of actionable suggestions for fixing the error
+
+    Example::
+
+        raise KiCadDiagnostic(
+            "Track clearance violation",
+            source=SourcePosition(
+                file_path=Path("board.kicad_pcb"),
+                line=142,
+                column=3,
+                element_type="track",
+                element_ref="net-GND",
+                position_mm=(25.4, 50.8),
+                layer="F.Cu",
+            ),
+            suggestions=["Increase track spacing to 0.2mm"],
+        )
+        # Output: board.kicad_pcb:142:3: Track clearance violation
+    """
+
+    def __init__(
+        self,
+        message: str,
+        source: SourcePosition | None = None,
+        sources: list[SourcePosition] | None = None,
+        suggestions: list[str] | None = None,
+    ):
+        self.message = message
+        self.source = source
+        self.sources = sources or []
+        self.suggestions = suggestions or []
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        """Format message with source position prefix."""
+        parts = []
+
+        # Primary location prefix
+        if self.source:
+            parts.append(f"{self.source}: {self.message}")
+        else:
+            parts.append(self.message)
+
+        # Additional related locations
+        if self.sources:
+            parts.append("\n\nRelated locations:")
+            for src in self.sources:
+                detail = f"  {src}"
+                if src.element_ref:
+                    detail += f" ({src.element_ref})"
+                parts.append(f"\n{detail}")
+
+        # Suggestions
+        if self.suggestions:
+            parts.append("\n\nSuggestions:")
+            for suggestion in self.suggestions:
+                parts.append(f"\n  - {suggestion}")
+
+        return "".join(parts)
+
+    def __str__(self) -> str:
+        return self._format_message()
+
+    @property
+    def location(self) -> str:
+        """Get the primary source location as file:line:col string."""
+        if self.source:
+            return str(self.source)
+        return ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to JSON-serializable dictionary.
+
+        Returns:
+            Dictionary with message, source positions, and suggestions.
+        """
+        result: dict[str, Any] = {
+            "message": self.message,
+            "suggestions": self.suggestions,
+        }
+        if self.source:
+            result["source"] = self.source.to_dict()
+        if self.sources:
+            result["related_sources"] = [s.to_dict() for s in self.sources]
+        return result
 
 
 def _class_name_to_error_code(class_name: str) -> str:
@@ -349,7 +522,12 @@ class ExportError(KiCadToolsError):
 
 # Re-export built-in exceptions that we want to wrap
 __all__ = [
+    # Source position tracking
+    "SourcePosition",
+    "KiCadDiagnostic",
+    # Base exception
     "KiCadToolsError",
+    # Specific exceptions
     "ParseError",
     "ValidationError",
     "FileFormatError",
