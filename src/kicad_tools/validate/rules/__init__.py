@@ -8,6 +8,7 @@ from .base import DRCRule
 from .clearance import ClearanceRule
 from .dimensions import DimensionRules
 from .edge import EdgeClearanceRule
+from .impedance import ImpedanceRule, NetImpedanceSpec
 from .silkscreen import (
     check_all_silkscreen,
     check_silkscreen_line_width,
@@ -20,6 +21,8 @@ __all__ = [
     "ClearanceRule",
     "DimensionRules",
     "EdgeClearanceRule",
+    "ImpedanceRule",
+    "NetImpedanceSpec",
     "check_all_silkscreen",
     "check_silkscreen_line_width",
     "check_silkscreen_over_pads",

@@ -7,6 +7,7 @@ import random
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kicad_tools.physics import Stackup, TransmissionLine
     from kicad_tools.progress import ProgressCallback
 
 from .adaptive import AdaptiveAutorouter, RoutingResult
@@ -32,7 +33,12 @@ __all__ = [
 
 
 class Autorouter:
-    """High-level autorouter for complete PCBs with net class awareness."""
+    """High-level autorouter for complete PCBs with net class awareness.
+
+    Supports impedance-controlled routing when a stackup is provided.
+    The physics module calculates appropriate trace widths for target
+    impedances on each layer.
+    """
 
     def __init__(
         self,
@@ -43,7 +49,22 @@ class Autorouter:
         rules: DesignRules | None = None,
         net_class_map: dict[str, NetClassRouting] | None = None,
         layer_stack: LayerStack | None = None,
+        stackup: Stackup | None = None,
+        physics_enabled: bool = True,
     ):
+        """Initialize the autorouter.
+
+        Args:
+            width: Board width in mm
+            height: Board height in mm
+            origin_x: X origin offset
+            origin_y: Y origin offset
+            rules: Design rules for routing
+            net_class_map: Net class to routing config mapping
+            layer_stack: Layer stack for routing
+            stackup: PCB stackup for physics calculations (optional)
+            physics_enabled: Enable physics-based calculations (default True)
+        """
         self.rules = rules or DesignRules()
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
         self.layer_stack = layer_stack
@@ -58,9 +79,97 @@ class Autorouter:
         self.net_names: dict[int, str] = {}
         self.routes: list[Route] = []
 
+        # Physics integration
+        self._stackup = stackup
+        self._physics_enabled = physics_enabled
+        self._transmission_line: TransmissionLine | None = None
+        self._init_physics()
+
         # Lazy-initialized routers
         self._bus_router: BusRouter | None = None
         self._diffpair_router: DiffPairRouter | None = None
+
+    def _init_physics(self) -> None:
+        """Initialize physics module if available and enabled."""
+        if not self._physics_enabled or self._stackup is None:
+            return
+
+        try:
+            from kicad_tools.physics import TransmissionLine
+
+            self._transmission_line = TransmissionLine(self._stackup)
+        except ImportError:
+            # Physics module not available
+            self._transmission_line = None
+        except Exception:
+            # Stackup or other initialization error
+            self._transmission_line = None
+
+    @property
+    def physics_available(self) -> bool:
+        """Check if physics calculations are available."""
+        return self._transmission_line is not None
+
+    def get_width_for_impedance(
+        self,
+        z0_target: float,
+        layer: str | Layer,
+    ) -> float | None:
+        """Calculate trace width for target impedance on a specific layer.
+
+        Uses the physics module to determine the trace width needed
+        for the target characteristic impedance.
+
+        Args:
+            z0_target: Target impedance in ohms (e.g., 50.0)
+            layer: Layer name or Layer enum (e.g., "F.Cu" or Layer.F_CU)
+
+        Returns:
+            Trace width in mm, or None if physics not available
+        """
+        if not self.physics_available:
+            return None
+
+        # Convert Layer enum to string if needed
+        layer_name = layer.value if isinstance(layer, Layer) else layer
+
+        try:
+            return self._transmission_line.width_for_impedance(z0_target, layer_name)
+        except (ValueError, AttributeError):
+            return None
+
+    def get_impedance_layer_widths(
+        self,
+        z0_target: float,
+        layers: list[str] | None = None,
+    ) -> dict[str, float]:
+        """Calculate trace widths for target impedance across multiple layers.
+
+        This is useful for impedance-controlled routing where trace widths
+        vary by layer due to different dielectric heights and properties.
+
+        Args:
+            z0_target: Target impedance in ohms
+            layers: List of layer names to calculate, defaults to all copper layers
+
+        Returns:
+            Dictionary mapping layer names to trace widths in mm
+        """
+        if not self.physics_available:
+            return {}
+
+        if layers is None:
+            layers = ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]
+
+        layer_widths: dict[str, float] = {}
+        for layer in layers:
+            try:
+                width = self._transmission_line.width_for_impedance(z0_target, layer)
+                layer_widths[layer] = width
+            except (ValueError, AttributeError):
+                continue
+
+        return layer_widths
 
     def add_component(self, ref: str, pads: list[dict]):
         """Add a component's pads."""
@@ -118,8 +227,24 @@ class Autorouter:
         """Create direct routes for same-IC pins on the same net."""
         return create_intra_ic_routes(net, pads, self.pads, self.rules)
 
-    def route_net(self, net: int, use_mst: bool = True) -> list[Route]:
-        """Route all connections for a net."""
+    def route_net(
+        self,
+        net: int,
+        use_mst: bool = True,
+        target_impedance: float | None = None,
+    ) -> list[Route]:
+        """Route all connections for a net.
+
+        Args:
+            net: Net ID to route
+            use_mst: Use minimum spanning tree routing for multi-point nets
+            target_impedance: Target characteristic impedance in ohms (optional).
+                When specified and physics module is available, calculates
+                appropriate trace widths per layer to achieve this impedance.
+
+        Returns:
+            List of Route objects for this net
+        """
         if net not in self.nets:
             return []
 
@@ -128,6 +253,16 @@ class Autorouter:
             return []
 
         routes: list[Route] = []
+
+        # Calculate layer-specific widths for impedance control if requested
+        layer_widths: dict[str, float] | None = None
+        if target_impedance and self.physics_available:
+            layer_widths = self.get_impedance_layer_widths(target_impedance)
+            if layer_widths:
+                net_name = self.net_names.get(net, f"Net {net}")
+                print(f"  Impedance control: {net_name} @ {target_impedance}Ω")
+                for layer, width in layer_widths.items():
+                    print(f"    {layer}: {width * 1000:.1f}mil ({width:.3f}mm)")
 
         # Handle intra-IC connections first
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)

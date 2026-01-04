@@ -5,12 +5,16 @@ Provides net classification, signal integrity analysis, and placement hints
 to help minimize trace lengths for high-speed signals and reduce crosstalk
 risk between sensitive nets.
 
+When the physics module is available, uses calculated crosstalk values
+instead of heuristic distance-based estimates.
+
 Example::
 
     from kicad_tools.optim.signal_integrity import (
         classify_nets,
         analyze_placement_for_si,
         get_si_score,
+        SignalIntegrityAnalyzer,
     )
     from kicad_tools.schema.pcb import PCB
 
@@ -27,6 +31,12 @@ Example::
     # Get overall SI score
     score = get_si_score(pcb, classifications)
     print(f"Signal integrity score: {score:.1f}/100")
+
+    # Use physics-aware analyzer for more accurate crosstalk
+    analyzer = SignalIntegrityAnalyzer(pcb)
+    if analyzer.physics_available:
+        risk = analyzer.get_crosstalk_risk("CLK", "ADC_IN")
+        print(f"Crosstalk risk: {risk}")
 """
 
 from __future__ import annotations
@@ -39,12 +49,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_tools.optim.placement import PlacementOptimizer
+    from kicad_tools.physics import CrosstalkAnalyzer, Stackup, TransmissionLine
     from kicad_tools.schema.pcb import PCB
 
 __all__ = [
     "SignalClass",
     "NetClassification",
     "SignalIntegrityHint",
+    "CrosstalkRisk",
+    "SignalIntegrityAnalyzer",
     "classify_nets",
     "analyze_placement_for_si",
     "get_si_score",
@@ -100,6 +113,362 @@ class SignalIntegrityHint:
         """Human-readable hint representation."""
         severity_icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(self.severity, "⚪")
         return f"{severity_icon} [{self.hint_type}] {self.description}\n   → {self.suggestion}"
+
+
+@dataclass
+class CrosstalkRisk:
+    """Result of crosstalk risk analysis between two nets.
+
+    Provides both physics-based calculations (when available) and
+    heuristic fallback values.
+    """
+
+    aggressor_net: str
+    victim_net: str
+    parallel_length_mm: float  # Estimated parallel routing length
+    spacing_mm: float  # Minimum spacing between nets
+    coupling_coefficient: float  # Estimated coupling (0-1)
+    next_percent: float  # Near-end crosstalk percentage
+    fext_percent: float  # Far-end crosstalk percentage
+    risk_level: str  # "acceptable", "marginal", "excessive"
+    suggestion: str | None  # Recommendation if not acceptable
+    calculated: bool = False  # True if physics-calculated, False if heuristic
+
+    def __str__(self) -> str:
+        """Human-readable representation."""
+        mode = "calculated" if self.calculated else "estimated"
+        return (
+            f"CrosstalkRisk({self.aggressor_net} → {self.victim_net}): "
+            f"NEXT={self.next_percent:.1f}%, FEXT={self.fext_percent:.1f}% "
+            f"({mode}, {self.risk_level})"
+        )
+
+
+class SignalIntegrityAnalyzer:
+    """Physics-aware signal integrity analyzer.
+
+    Uses the physics module for accurate crosstalk and impedance
+    calculations when a PCB stackup is available. Falls back to
+    heuristic estimates when physics is not available.
+
+    Example::
+
+        from kicad_tools.optim.signal_integrity import SignalIntegrityAnalyzer
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load("board.kicad_pcb")
+        analyzer = SignalIntegrityAnalyzer(pcb)
+
+        if analyzer.physics_available:
+            print("Using physics-based analysis")
+        else:
+            print("Using heuristic analysis")
+
+        risk = analyzer.get_crosstalk_risk("CLK", "ADC_IN")
+        print(f"Crosstalk: {risk}")
+    """
+
+    def __init__(self, pcb: PCB) -> None:
+        """Initialize the analyzer.
+
+        Args:
+            pcb: Loaded PCB object with stackup information
+        """
+        self.pcb = pcb
+        self._stackup: Stackup | None = None
+        self._tl: TransmissionLine | None = None
+        self._xt: CrosstalkAnalyzer | None = None
+        self._init_physics()
+
+    def _init_physics(self) -> None:
+        """Initialize physics module if available."""
+        try:
+            from kicad_tools.physics import (
+                CrosstalkAnalyzer,
+                Stackup,
+                TransmissionLine,
+            )
+
+            self._stackup = Stackup.from_pcb(self.pcb)
+            self._tl = TransmissionLine(self._stackup)
+            self._xt = CrosstalkAnalyzer(self._stackup)
+        except ImportError:
+            # Physics module not available
+            pass
+        except Exception:
+            # PCB doesn't have stackup or other initialization error
+            pass
+
+    @property
+    def physics_available(self) -> bool:
+        """Check if physics-based calculations are available."""
+        return self._xt is not None
+
+    @property
+    def stackup(self) -> Stackup | None:
+        """Get the PCB stackup if available."""
+        return self._stackup
+
+    def get_crosstalk_risk(
+        self,
+        aggressor_net: str,
+        victim_net: str,
+        layer: str = "F.Cu",
+        rise_time_ns: float = 1.0,
+    ) -> CrosstalkRisk:
+        """Analyze crosstalk risk between two nets.
+
+        Uses physics calculations when available, otherwise falls back
+        to heuristic distance-based estimation.
+
+        Args:
+            aggressor_net: Name of the aggressor net (noise source)
+            victim_net: Name of the victim net (sensitive signal)
+            layer: Layer to analyze (default "F.Cu")
+            rise_time_ns: Signal rise time in nanoseconds
+
+        Returns:
+            CrosstalkRisk with analysis results
+        """
+        if self.physics_available:
+            return self._physics_crosstalk(aggressor_net, victim_net, layer, rise_time_ns)
+        else:
+            return self._heuristic_crosstalk(aggressor_net, victim_net)
+
+    def _physics_crosstalk(
+        self,
+        aggressor_net: str,
+        victim_net: str,
+        layer: str,
+        rise_time_ns: float,
+    ) -> CrosstalkRisk:
+        """Calculate crosstalk using physics module.
+
+        Args:
+            aggressor_net: Aggressor net name
+            victim_net: Victim net name
+            layer: Layer to analyze
+            rise_time_ns: Signal rise time
+
+        Returns:
+            CrosstalkRisk with physics-based values
+        """
+        # Estimate geometry from net positions
+        spacing, parallel_length = self._estimate_net_geometry(aggressor_net, victim_net)
+
+        # Use default trace width (could be enhanced to read from net class)
+        width_mm = 0.2
+
+        try:
+            result = self._xt.analyze(
+                aggressor_width_mm=width_mm,
+                victim_width_mm=width_mm,
+                spacing_mm=max(spacing, 0.1),  # Minimum spacing
+                parallel_length_mm=max(parallel_length, 1.0),  # Minimum length
+                layer=layer,
+                rise_time_ns=rise_time_ns,
+            )
+
+            return CrosstalkRisk(
+                aggressor_net=aggressor_net,
+                victim_net=victim_net,
+                parallel_length_mm=parallel_length,
+                spacing_mm=spacing,
+                coupling_coefficient=result.next_coefficient,
+                next_percent=result.next_percent,
+                fext_percent=result.fext_percent,
+                risk_level=result.severity,
+                suggestion=result.recommendation,
+                calculated=True,
+            )
+        except (ValueError, AttributeError):
+            # Fall back to heuristic if calculation fails
+            return self._heuristic_crosstalk(aggressor_net, victim_net)
+
+    def _heuristic_crosstalk(
+        self,
+        aggressor_net: str,
+        victim_net: str,
+    ) -> CrosstalkRisk:
+        """Estimate crosstalk using heuristic rules.
+
+        Uses distance-based approximation when physics module is unavailable.
+
+        Args:
+            aggressor_net: Aggressor net name
+            victim_net: Victim net name
+
+        Returns:
+            CrosstalkRisk with heuristic estimates
+        """
+        spacing, parallel_length = self._estimate_net_geometry(aggressor_net, victim_net)
+
+        # Heuristic coupling estimate based on "3W rule"
+        # Coupling drops approximately as spacing/width ratio increases
+        assumed_width = 0.2  # mm
+        spacing_ratio = spacing / assumed_width if assumed_width > 0 else 10
+
+        # Rough coupling coefficient estimate
+        # At 3W spacing, coupling is typically <1%
+        if spacing_ratio >= 3:
+            coupling = 0.01
+        elif spacing_ratio >= 2:
+            coupling = 0.03
+        elif spacing_ratio >= 1:
+            coupling = 0.08
+        else:
+            coupling = 0.15
+
+        # Estimate NEXT and FEXT (rough approximation)
+        next_pct = coupling * 50  # Saturated NEXT ≈ k/2 * 100
+        fext_pct = coupling * (parallel_length / 50) * 100  # FEXT scales with length
+
+        # Clamp values
+        next_pct = min(next_pct, 20)
+        fext_pct = min(fext_pct, 20)
+
+        # Determine risk level
+        max_xt = max(next_pct, fext_pct)
+        if max_xt < 3:
+            risk_level = "acceptable"
+            suggestion = None
+        elif max_xt < 10:
+            risk_level = "marginal"
+            suggestion = f"Increase spacing between {aggressor_net} and {victim_net}"
+        else:
+            risk_level = "excessive"
+            suggestion = (
+                f"Increase spacing to at least {assumed_width * 3:.2f}mm "
+                f"or route on different layers"
+            )
+
+        return CrosstalkRisk(
+            aggressor_net=aggressor_net,
+            victim_net=victim_net,
+            parallel_length_mm=parallel_length,
+            spacing_mm=spacing,
+            coupling_coefficient=coupling,
+            next_percent=next_pct,
+            fext_percent=fext_pct,
+            risk_level=risk_level,
+            suggestion=suggestion,
+            calculated=False,
+        )
+
+    def _estimate_net_geometry(
+        self,
+        net1: str,
+        net2: str,
+    ) -> tuple[float, float]:
+        """Estimate spacing and parallel length between two nets.
+
+        Uses component and pad positions as approximation.
+
+        Args:
+            net1: First net name
+            net2: Second net name
+
+        Returns:
+            Tuple of (minimum_spacing_mm, estimated_parallel_length_mm)
+        """
+        # Collect positions for each net
+        positions1: list[tuple[float, float]] = []
+        positions2: list[tuple[float, float]] = []
+
+        for fp in self.pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_name == net1:
+                    px = fp.position[0] + pad.position[0]
+                    py = fp.position[1] + pad.position[1]
+                    positions1.append((px, py))
+                elif pad.net_name == net2:
+                    px = fp.position[0] + pad.position[0]
+                    py = fp.position[1] + pad.position[1]
+                    positions2.append((px, py))
+
+        if not positions1 or not positions2:
+            # No overlap - return default "safe" values
+            return (10.0, 0.0)
+
+        # Find minimum distance between any two positions
+        min_spacing = float("inf")
+        for p1 in positions1:
+            for p2 in positions2:
+                dx = p1[0] - p2[0]
+                dy = p1[1] - p2[1]
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist < min_spacing:
+                    min_spacing = dist
+
+        # Estimate parallel length from bounding box overlap
+        x1_min = min(p[0] for p in positions1)
+        x1_max = max(p[0] for p in positions1)
+        y1_min = min(p[1] for p in positions1)
+        y1_max = max(p[1] for p in positions1)
+
+        x2_min = min(p[0] for p in positions2)
+        x2_max = max(p[0] for p in positions2)
+        y2_min = min(p[1] for p in positions2)
+        y2_max = max(p[1] for p in positions2)
+
+        # Calculate overlap
+        x_overlap = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
+        y_overlap = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
+
+        # Parallel length is approximated by the larger overlap dimension
+        parallel_length = max(x_overlap, y_overlap)
+
+        return (min_spacing, parallel_length)
+
+    def get_impedance_for_net(
+        self,
+        net_name: str,
+        layer: str = "F.Cu",
+        width_mm: float = 0.2,
+    ) -> float | None:
+        """Calculate trace impedance for a net.
+
+        Args:
+            net_name: Net name (for reference)
+            layer: Layer to calculate for
+            width_mm: Trace width in mm
+
+        Returns:
+            Impedance in ohms, or None if physics not available
+        """
+        if not self.physics_available:
+            return None
+
+        try:
+            if self._stackup.is_outer_layer(layer):
+                result = self._tl.microstrip(width_mm, layer)
+            else:
+                result = self._tl.stripline(width_mm, layer)
+            return result.z0
+        except (ValueError, AttributeError):
+            return None
+
+    def get_width_for_impedance(
+        self,
+        z0_target: float,
+        layer: str = "F.Cu",
+    ) -> float | None:
+        """Calculate trace width for target impedance.
+
+        Args:
+            z0_target: Target impedance in ohms
+            layer: Layer to calculate for
+
+        Returns:
+            Width in mm, or None if physics not available
+        """
+        if not self.physics_available:
+            return None
+
+        try:
+            return self._tl.width_for_impedance(z0_target, layer)
+        except (ValueError, AttributeError):
+            return None
 
 
 # Net name patterns for auto-detection
