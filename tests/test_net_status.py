@@ -107,6 +107,56 @@ INCOMPLETE_PCB = """(kicad_pcb
 """
 
 
+# PCB with via-to-zone connectivity (Issue #419)
+# Tests that pads connected to zones via vias are recognized as connected
+VIA_ZONE_CONNECTIVITY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 150 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (segment (start 100 100) (end 105 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg1"))
+  (segment (start 150 100) (end 145 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg2"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "In1.Cu") (net 1) (uuid "via1"))
+  (via (at 145 100) (size 0.8) (drill 0.4) (layers "F.Cu" "In1.Cu") (net 1) (uuid "via2"))
+  (zone (net 1) (net_name "GND") (layer "In1.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.3))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 90) (xy 160 90) (xy 160 110) (xy 90 110)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 90 90) (xy 160 90) (xy 160 110) (xy 90 110)))
+  )
+)
+"""
+
+
 # PCB with zone (plane net)
 ZONE_PCB = """(kicad_pcb
   (version 20240108)
@@ -176,6 +226,14 @@ def zone_pcb(tmp_path: Path) -> Path:
     """Create a PCB with zones for testing."""
     pcb_file = tmp_path / "zone.kicad_pcb"
     pcb_file.write_text(ZONE_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def via_zone_connectivity_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with via-to-zone connectivity for testing (Issue #419)."""
+    pcb_file = tmp_path / "via_zone.kicad_pcb"
+    pcb_file.write_text(VIA_ZONE_CONNECTIVITY_PCB)
     return pcb_file
 
 
@@ -440,6 +498,35 @@ class TestNetStatusAnalyzer:
             assert pad.position is not None
             assert isinstance(pad.position, tuple)
             assert len(pad.position) == 2
+
+    def test_via_zone_connectivity(self, via_zone_connectivity_pcb: Path):
+        """Test that pads connected to zones via vias are recognized as connected.
+
+        Issue #419: net-status doesn't detect via connectivity to planes.
+
+        This test creates a PCB with:
+        - Two pads on F.Cu (R1.1 at 100,100 and R2.1 at 150,100)
+        - Traces from each pad to vias
+        - Vias spanning F.Cu to In1.Cu
+        - A GND zone on In1.Cu covering both via positions
+
+        Both pads should be recognized as connected because they both connect
+        to the zone via their respective vias (stitching vias pattern).
+        """
+        analyzer = NetStatusAnalyzer(via_zone_connectivity_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None, "GND net should exist"
+        assert gnd.is_plane_net is True, "GND should be identified as plane net"
+        assert gnd.status == "complete", (
+            f"GND should be complete (pads connected via zone), "
+            f"but found {gnd.unconnected_count} unconnected pads: "
+            f"{[p.full_name for p in gnd.unconnected_pads]}"
+        )
+        assert gnd.total_pads == 2, "GND should have 2 pads"
+        assert gnd.connected_count == 2, "Both pads should be connected via zone"
+        assert gnd.unconnected_count == 0, "No pads should be unconnected"
 
 
 class TestNetStatusCLI:
