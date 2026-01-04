@@ -491,31 +491,29 @@ class PlacementFixer:
         """
         import re
 
-        # Find the footprint for this component
-        # Pattern: (footprint "..." ... (property "Reference" "REF") ... (at X Y [R]))
-        # This is a simplified approach - a proper implementation would parse S-expressions
-
-        # Build pattern to find this specific footprint
-        # Look for footprint containing this reference
         ref = fix.component
 
-        # Find position of this component's footprint and update the (at x y) line
-        # This regex approach is fragile but works for simple cases
-
-        # Pattern to match the footprint block with this reference
-        fp_pattern = rf'(\(footprint\s+[^\)]+\s+\(layer\s+"[^"]+"\)\s+[^\)]*\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\).*?property\s+"Reference"\s+"{re.escape(ref)}")'
+        # Pattern to match the footprint block with this reference.
+        # Key fixes:
+        # 1. Use "[^"]+" for quoted footprint name (not [^\)]+)
+        # 2. Use [\s\S]*? for lazy match across nested S-expressions (not [^\)]*)
+        # 3. The suffix includes the closing ), so don't add another in replacement
+        #
+        # Structure: (footprint "name" (layer "...") ... (at X Y [R]) ... property "Reference" "REF" ...)
+        fp_pattern = rf'(\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\)[\s\S]*?property\s+"Reference"\s+"{re.escape(ref)}")'
 
         def update_position(match):
             prefix = match.group(1)
             old_x = float(match.group(2))
             old_y = float(match.group(3))
             rotation = match.group(4) or ""
-            suffix = match.group(5)
+            suffix = match.group(5)  # Already includes closing )
 
             new_x = old_x + fix.move_vector.x
             new_y = old_y + fix.move_vector.y
 
-            return f"{prefix}{new_x:.4f} {new_y:.4f}{rotation}){suffix}"
+            # Note: suffix starts with ) so don't add another
+            return f"{prefix}{new_x:.4f} {new_y:.4f}{rotation}{suffix}"
 
         new_content = re.sub(fp_pattern, update_position, content, flags=re.DOTALL)
 
