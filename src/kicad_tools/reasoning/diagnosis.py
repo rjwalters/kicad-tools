@@ -5,16 +5,28 @@ When routing or placement fails, the diagnosis engine:
 1. Identifies WHY it failed (blocked, clearance, congestion)
 2. Analyzes the local area for context
 3. Suggests alternative approaches
+4. Provides physics-based guidance for impedance-controlled routing
 
 This provides the LLM with actionable feedback to revise its strategy.
+
+When the physics module is available, the diagnosis engine can also:
+- Calculate correct trace widths for target impedance
+- Analyze crosstalk risks between nets
+- Suggest layer-specific routing strategies
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from .commands import CommandResult
 from .state import PCBState, ViolationState
 from .vocabulary import SpatialRegion
+
+if TYPE_CHECKING:
+    from kicad_tools.physics import Stackup, TransmissionLine
 
 
 class FailureReason(Enum):
@@ -69,6 +81,38 @@ class Alternative:
         if self.trade_offs:
             parts.append(f"trade-offs: {', '.join(self.trade_offs)}")
         return " - ".join(parts)
+
+
+@dataclass
+class ImpedanceGuide:
+    """Physics-based routing guidance for impedance control.
+
+    Provides calculated trace widths for target impedance on different
+    layers, allowing layer-specific routing decisions.
+    """
+
+    target_z0: float  # Target impedance in ohms
+    layer_widths: dict[str, float] = field(default_factory=dict)  # layer -> width in mm
+    recommended_layer: str | None = None  # Best layer for this impedance
+    notes: list[str] = field(default_factory=list)  # Additional guidance
+
+    def to_prompt(self) -> str:
+        """Generate prompt-friendly guidance."""
+        lines = [f"Target impedance: {self.target_z0}Ω"]
+
+        if self.layer_widths:
+            lines.append("Required trace widths by layer:")
+            for layer, width in sorted(self.layer_widths.items()):
+                mil = width * 39.37  # Convert mm to mil
+                lines.append(f"  {layer}: {width:.3f}mm ({mil:.1f}mil)")
+
+        if self.recommended_layer:
+            lines.append(f"Recommended: Route on {self.recommended_layer}")
+
+        for note in self.notes:
+            lines.append(f"Note: {note}")
+
+        return "\n".join(lines)
 
 
 @dataclass
@@ -179,12 +223,168 @@ class PlacementDiagnosis:
 
 
 class DiagnosisEngine:
-    """Engine for analyzing failures and suggesting alternatives."""
+    """Engine for analyzing failures and suggesting alternatives.
 
-    def __init__(self, state: PCBState, regions: list[SpatialRegion] | None = None):
+    When initialized with a stackup, provides physics-based guidance
+    for impedance-controlled routing and crosstalk analysis.
+    """
+
+    def __init__(
+        self,
+        state: PCBState,
+        regions: list[SpatialRegion] | None = None,
+        stackup: Stackup | None = None,
+    ):
+        """Initialize the diagnosis engine.
+
+        Args:
+            state: Current PCB state
+            regions: Spatial regions for context
+            stackup: PCB stackup for physics calculations (optional)
+        """
         self.state = state
         self.regions = regions or []
         self.region_map = {r.name: r for r in self.regions}
+
+        # Physics integration
+        self._stackup = stackup
+        self._tl: TransmissionLine | None = None
+        self._init_physics()
+
+    def _init_physics(self) -> None:
+        """Initialize physics module if stackup is provided."""
+        if self._stackup is None:
+            return
+
+        try:
+            from kicad_tools.physics import TransmissionLine
+
+            self._tl = TransmissionLine(self._stackup)
+        except ImportError:
+            self._tl = None
+        except Exception:
+            self._tl = None
+
+    @property
+    def physics_available(self) -> bool:
+        """Check if physics calculations are available."""
+        return self._tl is not None
+
+    def get_impedance_guide(
+        self,
+        target_z0: float,
+        layers: list[str] | None = None,
+    ) -> ImpedanceGuide | None:
+        """Generate impedance routing guidance.
+
+        Calculates required trace widths for the target impedance
+        on each layer.
+
+        Args:
+            target_z0: Target impedance in ohms (e.g., 50.0)
+            layers: Layers to calculate for (defaults to common copper layers)
+
+        Returns:
+            ImpedanceGuide with layer-specific widths, or None if physics unavailable
+        """
+        if not self.physics_available:
+            return None
+
+        if layers is None:
+            layers = ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]
+
+        layer_widths: dict[str, float] = {}
+        notes: list[str] = []
+        min_width = float("inf")
+        min_layer = None
+
+        for layer in layers:
+            try:
+                width = self._tl.width_for_impedance(target_z0, layer)
+                layer_widths[layer] = width
+
+                # Track which layer gives smallest width (often preferred)
+                if width < min_width:
+                    min_width = width
+                    min_layer = layer
+            except (ValueError, AttributeError):
+                continue
+
+        if not layer_widths:
+            return None
+
+        # Determine recommended layer
+        recommended = None
+        if min_layer:
+            recommended = min_layer
+            notes.append(f"{min_layer} gives narrowest trace ({min_width:.3f}mm)")
+
+        # Add notes about inner vs outer layers
+        outer_layers = [l for l in layer_widths if l in ("F.Cu", "B.Cu")]
+        inner_layers = [l for l in layer_widths if l not in ("F.Cu", "B.Cu")]
+
+        if outer_layers and inner_layers:
+            outer_width = sum(layer_widths[l] for l in outer_layers) / len(outer_layers)
+            inner_width = sum(layer_widths[l] for l in inner_layers) / len(inner_layers)
+
+            if inner_width < outer_width * 0.8:
+                notes.append("Inner layers require narrower traces due to stripline geometry")
+
+        return ImpedanceGuide(
+            target_z0=target_z0,
+            layer_widths=layer_widths,
+            recommended_layer=recommended,
+            notes=notes,
+        )
+
+    def get_crosstalk_guidance(
+        self,
+        aggressor_net: str,
+        victim_net: str,
+        spacing_mm: float,
+        parallel_mm: float,
+        layer: str = "F.Cu",
+    ) -> str | None:
+        """Get crosstalk analysis and mitigation guidance.
+
+        Args:
+            aggressor_net: Name of noise source net
+            victim_net: Name of sensitive net
+            spacing_mm: Edge-to-edge spacing
+            parallel_mm: Parallel routing length
+            layer: Layer being analyzed
+
+        Returns:
+            Guidance text, or None if physics unavailable
+        """
+        if not self.physics_available:
+            return None
+
+        try:
+            from kicad_tools.physics import CrosstalkAnalyzer
+
+            xt = CrosstalkAnalyzer(self._stackup)
+            result = xt.analyze(
+                aggressor_width_mm=0.2,
+                victim_width_mm=0.2,
+                spacing_mm=spacing_mm,
+                parallel_length_mm=parallel_mm,
+                layer=layer,
+            )
+
+            lines = [
+                f"Crosstalk Analysis: {aggressor_net} → {victim_net}",
+                f"  Spacing: {spacing_mm:.2f}mm, Parallel: {parallel_mm:.1f}mm",
+                f"  NEXT: {result.next_percent:.1f}%, FEXT: {result.fext_percent:.1f}%",
+                f"  Risk: {result.severity}",
+            ]
+
+            if result.recommendation:
+                lines.append(f"  Recommendation: {result.recommendation}")
+
+            return "\n".join(lines)
+        except (ImportError, AttributeError, ValueError):
+            return None
 
     def diagnose_routing(
         self,
