@@ -37,6 +37,7 @@ from kicad_tools.exceptions import KiCadToolsError
 
 from .commands import (
     run_analyze_command,
+    run_audit_command,
     run_check_command,
     run_config_command,
     run_constraints_command,
@@ -274,6 +275,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "estimate":
         return run_estimate_command(args)
+
+    elif args.command == "audit":
+        return run_audit_command(args)
 
     return 0
 
