@@ -78,27 +78,22 @@ def main(argv: list[str] | None = None) -> int:
     import_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     # availability subcommand
-    avail_parser = subparsers.add_parser(
-        "availability", help="Check BOM part availability on LCSC"
+    avail_parser = subparsers.add_parser("availability", help="Check BOM part availability on LCSC")
+    avail_parser.add_argument("schematic", help="Path to .kicad_sch file or BOM CSV")
+    avail_parser.add_argument(
+        "--quantity", "-q", type=int, default=1, help="Number of boards to manufacture (default: 1)"
     )
     avail_parser.add_argument(
-        "schematic", help="Path to .kicad_sch file or BOM CSV"
+        "--format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
     )
     avail_parser.add_argument(
-        "--quantity", "-q", type=int, default=1,
-        help="Number of boards to manufacture (default: 1)"
+        "--no-alternatives", action="store_true", help="Don't search for alternative parts"
     )
     avail_parser.add_argument(
-        "--format", choices=["table", "json", "summary"], default="table",
-        help="Output format (default: table)"
-    )
-    avail_parser.add_argument(
-        "--no-alternatives", action="store_true",
-        help="Don't search for alternative parts"
-    )
-    avail_parser.add_argument(
-        "--issues-only", action="store_true",
-        help="Only show parts with availability issues"
+        "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
 
     # cache subcommand
@@ -467,10 +462,7 @@ def _availability(args) -> int:
     # Filter if requested
     items = result.items
     if args.issues_only:
-        items = [
-            item for item in items
-            if item.status != AvailabilityStatus.AVAILABLE
-        ]
+        items = [item for item in items if item.status != AvailabilityStatus.AVAILABLE]
 
     # Output
     if args.format == "json":
@@ -508,10 +500,10 @@ def _availability_summary(result, schematic_path: Path) -> None:
     print(f"  ? Missing:      {summary['missing']}")
     print()
 
-    if summary['total_cost'] is not None:
+    if summary["total_cost"] is not None:
         print(f"Est. cost:     ${summary['total_cost']:.2f}")
 
-    if summary['all_available']:
+    if summary["all_available"]:
         print("\n✓ All parts available")
     else:
         print("\n✗ Some parts have availability issues")
@@ -536,8 +528,7 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     low_stock = [i for i in items if i.status == AvailabilityStatus.LOW_STOCK]
     out_of_stock = [i for i in items if i.status == AvailabilityStatus.OUT_OF_STOCK]
     missing = [
-        i for i in items
-        if i.status in (AvailabilityStatus.NO_LCSC, AvailabilityStatus.NOT_FOUND)
+        i for i in items if i.status in (AvailabilityStatus.NO_LCSC, AvailabilityStatus.NOT_FOUND)
     ]
 
     # Available parts (collapsed)
@@ -600,20 +591,20 @@ def _availability_table(result, items, schematic_path: Path, quantity: int) -> N
     print("-" * 70)
     print("Summary:")
     print(f"  • {summary['available']}/{summary['total_items']} parts available")
-    if summary['low_stock'] > 0:
+    if summary["low_stock"] > 0:
         print(f"  • {summary['low_stock']} parts low stock")
-    if summary['out_of_stock'] > 0:
+    if summary["out_of_stock"] > 0:
         print(f"  • {summary['out_of_stock']} parts out of stock")
-    if summary['missing'] > 0:
+    if summary["missing"] > 0:
         print(f"  • {summary['missing']} parts missing LCSC number or not found")
 
-    if summary['total_cost'] is not None:
+    if summary["total_cost"] is not None:
         print(f"  • Estimated component cost: ${summary['total_cost']:.2f}")
 
     print()
-    if summary['all_available']:
+    if summary["all_available"]:
         print("✓ All parts available for ordering")
-    elif summary['out_of_stock'] > 0:
+    elif summary["out_of_stock"] > 0:
         print("✗ Some parts out of stock - check alternatives above")
     else:
         print("⚠ Low stock on some parts - order soon")

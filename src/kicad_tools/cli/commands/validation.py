@@ -9,6 +9,7 @@ __all__ = [
     "run_validate_footprints_command",
     "run_fix_footprints_command",
     "run_constraints_command",
+    "run_audit_command",
 ]
 
 
@@ -230,3 +231,29 @@ def run_constraints_command(args) -> int:
         return constraints_main(sub_argv)
 
     return 0
+
+
+def run_audit_command(args) -> int:
+    """Handle audit command for manufacturing readiness."""
+    from ..audit_cmd import main as audit_main
+
+    sub_argv = [args.audit_project]
+
+    if getattr(args, "audit_format", "table") != "table":
+        sub_argv.extend(["--format", args.audit_format])
+    if getattr(args, "audit_mfr", "jlcpcb") != "jlcpcb":
+        sub_argv.extend(["--mfr", args.audit_mfr])
+    if getattr(args, "audit_layers", None):
+        sub_argv.extend(["--layers", str(args.audit_layers)])
+    if getattr(args, "audit_copper", 1.0) != 1.0:
+        sub_argv.extend(["--copper", str(args.audit_copper)])
+    if getattr(args, "audit_quantity", 5) != 5:
+        sub_argv.extend(["--quantity", str(args.audit_quantity)])
+    if getattr(args, "audit_skip_erc", False):
+        sub_argv.append("--skip-erc")
+    if getattr(args, "audit_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "audit_verbose", False):
+        sub_argv.append("--verbose")
+
+    return audit_main(sub_argv)

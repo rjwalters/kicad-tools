@@ -37,6 +37,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
     kicad-tools analyze <command>      - PCB analysis tools
+    kicad-tools audit <project>        - Manufacturing readiness audit
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -81,6 +82,9 @@ Examples:
     kct footprint generate --list
     kct interactive
     kct interactive --project myboard.kicad_pro
+    kct audit project.kicad_pro --mfr jlcpcb
+    kct audit board.kicad_pcb --mfr jlcpcb --skip-erc
+    kct audit project.kicad_pro --format json --strict
 """
 
 
@@ -137,6 +141,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
     _add_estimate_parser(subparsers)
+    _add_audit_parser(subparsers)
     _add_suggest_parser(subparsers)
 
     return parser
@@ -809,19 +814,14 @@ def _add_parts_parser(subparsers) -> None:
     )
     parts_avail.add_argument("schematic", help="Path to .kicad_sch file")
     parts_avail.add_argument(
-        "--quantity", "-q", type=int, default=1,
-        help="Number of boards to manufacture (default: 1)"
+        "--quantity", "-q", type=int, default=1, help="Number of boards to manufacture (default: 1)"
+    )
+    parts_avail.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    parts_avail.add_argument(
+        "--no-alternatives", action="store_true", help="Don't search for alternative parts"
     )
     parts_avail.add_argument(
-        "--format", choices=["table", "json", "summary"], default="table"
-    )
-    parts_avail.add_argument(
-        "--no-alternatives", action="store_true",
-        help="Don't search for alternative parts"
-    )
-    parts_avail.add_argument(
-        "--issues-only", action="store_true",
-        help="Only show parts with availability issues"
+        "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
 
     # parts cache
@@ -1506,6 +1506,75 @@ def _add_estimate_parser(subparsers) -> None:
     )
     estimate_cost.add_argument(
         "-v", "--verbose", action="store_true", help="Show detailed breakdown"
+    )
+
+
+def _add_audit_parser(subparsers) -> None:
+    """Add audit subcommand parser for manufacturing readiness audit."""
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="Manufacturing readiness audit (ERC, DRC, connectivity, compatibility)",
+    )
+    audit_parser.add_argument(
+        "audit_project",
+        help="Path to .kicad_pro or .kicad_pcb file",
+    )
+    audit_parser.add_argument(
+        "--format",
+        dest="audit_format",
+        choices=["table", "json", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    audit_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="audit_mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    audit_parser.add_argument(
+        "--layers",
+        "-l",
+        dest="audit_layers",
+        type=int,
+        help="Layer count (auto-detected if not specified)",
+    )
+    audit_parser.add_argument(
+        "--copper",
+        "-c",
+        dest="audit_copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz (default: 1.0)",
+    )
+    audit_parser.add_argument(
+        "--quantity",
+        "-q",
+        dest="audit_quantity",
+        type=int,
+        default=5,
+        help="Quantity for cost estimate (default: 5)",
+    )
+    audit_parser.add_argument(
+        "--skip-erc",
+        dest="audit_skip_erc",
+        action="store_true",
+        help="Skip ERC check (for PCB-only audits)",
+    )
+    audit_parser.add_argument(
+        "--strict",
+        dest="audit_strict",
+        action="store_true",
+        help="Exit with code 2 on warnings",
+    )
+    audit_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="audit_verbose",
+        action="store_true",
+        help="Show detailed information",
     )
 
 
