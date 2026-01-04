@@ -20,6 +20,7 @@ from .config import run_config_command, run_interactive_command
 from .datasheet import run_datasheet_command
 from .estimate import run_estimate_command
 from .footprint import run_footprint_command
+from .impedance import run_impedance_command
 from .library import run_lib_command
 from .manufacturer import run_mfr_command
 from .parts import run_parts_command
@@ -81,4 +82,6 @@ __all__ = [
     "run_suggest_command",
     # Project
     "run_clean_command",
+    # Impedance
+    "run_impedance_command",
 ]

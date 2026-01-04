@@ -48,6 +48,7 @@ from .commands import (
     run_estimate_command,
     run_fix_footprints_command,
     run_footprint_command,
+    run_impedance_command,
     run_interactive_command,
     run_lib_command,
     run_mfr_command,
@@ -332,6 +333,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "clean":
         return run_clean_command(args)
+
+    elif args.command == "impedance":
+        return run_impedance_command(args)
 
     return 0
 

@@ -149,6 +149,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_suggest_parser(subparsers)
     _add_net_status_parser(subparsers)
     _add_clean_parser(subparsers)
+    _add_impedance_parser(subparsers)
 
     return parser
 
@@ -1799,4 +1800,214 @@ def _add_clean_parser(subparsers) -> None:
         dest="clean_verbose",
         action="store_true",
         help="Show detailed output",
+    )
+
+
+def _add_impedance_parser(subparsers) -> None:
+    """Add impedance subcommand parser with its subcommands."""
+    impedance_parser = subparsers.add_parser(
+        "impedance",
+        help="Transmission line impedance calculations",
+        description=(
+            "Calculate trace impedance, width for target impedance, "
+            "differential pair parameters, and crosstalk estimation"
+        ),
+    )
+    impedance_subparsers = impedance_parser.add_subparsers(
+        dest="impedance_command", help="Impedance commands"
+    )
+
+    # Common arguments function
+    def add_common_args(parser, require_board=False):
+        """Add common arguments shared by impedance subcommands."""
+        if require_board:
+            parser.add_argument("pcb", nargs="?", help="Path to .kicad_pcb file")
+        else:
+            parser.add_argument(
+                "pcb", nargs="?", help="Path to .kicad_pcb file (optional if --preset used)"
+            )
+        parser.add_argument(
+            "--preset",
+            "-p",
+            dest="impedance_preset",
+            choices=["jlcpcb-4", "oshpark-4", "generic-2", "generic-4", "generic-6"],
+            help="Use a preset stackup instead of reading from PCB",
+        )
+        parser.add_argument(
+            "--format",
+            "-f",
+            dest="impedance_format",
+            choices=["text", "json"],
+            default="text",
+            help="Output format (default: text)",
+        )
+
+    # impedance stackup - Display board stackup
+    stackup_parser = impedance_subparsers.add_parser(
+        "stackup",
+        help="Display parsed board stackup",
+        description="Show layer stackup extracted from PCB or from preset",
+    )
+    add_common_args(stackup_parser)
+
+    # impedance width - Calculate trace width for target impedance
+    width_parser = impedance_subparsers.add_parser(
+        "width",
+        help="Calculate trace width for target impedance",
+        description="Find trace width needed to achieve a target characteristic impedance",
+    )
+    add_common_args(width_parser)
+    width_parser.add_argument(
+        "--target",
+        "-z",
+        dest="impedance_target",
+        type=float,
+        required=True,
+        help="Target characteristic impedance in ohms (e.g., 50)",
+    )
+    width_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    width_parser.add_argument(
+        "--mode",
+        "-m",
+        dest="impedance_mode",
+        choices=["auto", "microstrip", "stripline"],
+        default="auto",
+        help="Transmission line mode (default: auto-detect from layer position)",
+    )
+
+    # impedance calculate - Forward impedance calculation
+    calc_parser = impedance_subparsers.add_parser(
+        "calculate",
+        help="Calculate impedance for given geometry",
+        description="Forward calculation: given trace width, compute impedance",
+    )
+    add_common_args(calc_parser)
+    calc_parser.add_argument(
+        "--width",
+        "-w",
+        dest="impedance_width",
+        type=float,
+        required=True,
+        help="Trace width in mm",
+    )
+    calc_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    calc_parser.add_argument(
+        "--mode",
+        "-m",
+        dest="impedance_mode",
+        choices=["auto", "microstrip", "stripline", "cpwg"],
+        default="auto",
+        help="Transmission line mode (default: auto-detect)",
+    )
+    calc_parser.add_argument(
+        "--gap",
+        "-g",
+        dest="impedance_gap",
+        type=float,
+        help="Gap to ground for CPWG mode in mm",
+    )
+    calc_parser.add_argument(
+        "--frequency",
+        dest="impedance_frequency",
+        type=float,
+        default=1.0,
+        help="Signal frequency in GHz for loss calculation (default: 1.0)",
+    )
+
+    # impedance diffpair - Differential pair analysis
+    diffpair_parser = impedance_subparsers.add_parser(
+        "diffpair",
+        help="Analyze differential pair",
+        description="Calculate differential and common mode impedances for coupled lines",
+    )
+    add_common_args(diffpair_parser)
+    diffpair_parser.add_argument(
+        "--width",
+        "-w",
+        dest="impedance_width",
+        type=float,
+        required=True,
+        help="Trace width in mm (each trace)",
+    )
+    diffpair_parser.add_argument(
+        "--gap",
+        "-g",
+        dest="impedance_gap",
+        type=float,
+        required=True,
+        help="Edge-to-edge gap between traces in mm",
+    )
+    diffpair_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    diffpair_parser.add_argument(
+        "--target",
+        "-z",
+        dest="impedance_target",
+        type=float,
+        help="Target differential impedance (e.g., 90, 100) for verification",
+    )
+
+    # impedance crosstalk - Crosstalk estimation
+    crosstalk_parser = impedance_subparsers.add_parser(
+        "crosstalk",
+        help="Estimate crosstalk between parallel traces",
+        description="Calculate NEXT/FEXT crosstalk, or find spacing for budget",
+    )
+    add_common_args(crosstalk_parser)
+    crosstalk_parser.add_argument(
+        "--layer",
+        "-l",
+        dest="impedance_layer",
+        required=True,
+        help="Layer name (e.g., F.Cu, In1.Cu)",
+    )
+    crosstalk_parser.add_argument(
+        "--width",
+        "-w",
+        dest="impedance_width",
+        type=float,
+        help="Trace width in mm (both traces)",
+    )
+    crosstalk_parser.add_argument(
+        "--spacing",
+        "-s",
+        dest="impedance_spacing",
+        type=float,
+        help="Edge-to-edge spacing in mm (for analysis mode)",
+    )
+    crosstalk_parser.add_argument(
+        "--length",
+        dest="impedance_length",
+        type=float,
+        help="Parallel run length in mm",
+    )
+    crosstalk_parser.add_argument(
+        "--rise-time",
+        dest="impedance_rise_time",
+        type=float,
+        default=1.0,
+        help="Signal rise time in nanoseconds (default: 1.0)",
+    )
+    crosstalk_parser.add_argument(
+        "--max-percent",
+        dest="impedance_max_percent",
+        type=float,
+        help="Maximum crosstalk %% (for spacing calculation mode)",
     )
