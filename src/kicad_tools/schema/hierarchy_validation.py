@@ -154,7 +154,9 @@ def _find_similar_name(target: str, candidates: list[str], threshold: float = 0.
     return best_match
 
 
-def validate_hierarchy(root_schematic: str, *, specific_sheet: str | None = None) -> ValidationResult:
+def validate_hierarchy(
+    root_schematic: str, *, specific_sheet: str | None = None
+) -> ValidationResult:
     """
     Validate schematic hierarchy connections.
 
@@ -227,7 +229,10 @@ def validate_hierarchy(root_schematic: str, *, specific_sheet: str | None = None
                                     description=f"Change label shape to '{pin.direction}'",
                                     file_path=child.path,
                                     auto_fixable=True,
-                                    details={"new_direction": pin.direction, "label_uuid": label.uuid},
+                                    details={
+                                        "new_direction": pin.direction,
+                                        "label_uuid": label.uuid,
+                                    },
                                 )
                             ],
                             possible_causes=[
@@ -264,11 +269,13 @@ def validate_hierarchy(root_schematic: str, *, specific_sheet: str | None = None
                         )
                     )
 
-                    causes.extend([
-                        "Label was deleted from child sheet",
-                        "Sheet was replaced with different version",
-                        "Pin was added to parent without corresponding label",
-                    ])
+                    causes.extend(
+                        [
+                            "Label was deleted from child sheet",
+                            "Sheet was replaced with different version",
+                            "Pin was added to parent without corresponding label",
+                        ]
+                    )
 
                     issue = ValidationIssue(
                         issue_type=ValidationIssueType.MISSING_LABEL,
@@ -306,11 +313,13 @@ def validate_hierarchy(root_schematic: str, *, specific_sheet: str | None = None
                         )
                         causes.append(f'Possible typo: found similar pin "{similar}"')
 
-                    causes.extend([
-                        "Pin was removed from parent sheet",
-                        "Label was added without corresponding pin",
-                        "Sheet structure was reorganized",
-                    ])
+                    causes.extend(
+                        [
+                            "Pin was removed from parent sheet",
+                            "Label was added without corresponding pin",
+                            "Sheet structure was reorganized",
+                        ]
+                    )
 
                     issue = ValidationIssue(
                         issue_type=ValidationIssueType.MISSING_PIN,
@@ -450,7 +459,7 @@ def format_validation_report(result: ValidationResult, *, show_tree: bool = Fals
 
     sheets_with_issues: dict[str, list[ValidationIssue]] = {}
     for issue in result.issues:
-        key = f'{issue.sheet_name} ({issue.sheet_file})'
+        key = f"{issue.sheet_name} ({issue.sheet_file})"
         if key not in sheets_with_issues:
             sheets_with_issues[key] = []
         sheets_with_issues[key].append(issue)
@@ -467,13 +476,13 @@ def format_validation_report(result: ValidationResult, *, show_tree: bool = Fals
 
             if issue.pin:
                 lines.append(
-                    f"    Pin: \"{issue.pin.name}\" ({issue.pin.direction}) "
+                    f'    Pin: "{issue.pin.name}" ({issue.pin.direction}) '
                     f"@ ({issue.pin.position[0]:.2f}, {issue.pin.position[1]:.2f})"
                 )
 
             if issue.label:
                 lines.append(
-                    f"    Label: \"{issue.label.name}\" ({issue.label.shape}) "
+                    f'    Label: "{issue.label.name}" ({issue.label.shape}) '
                     f"@ ({issue.label.position[0]:.2f}, {issue.label.position[1]:.2f})"
                 )
 

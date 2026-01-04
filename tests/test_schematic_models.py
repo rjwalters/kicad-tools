@@ -6,7 +6,6 @@ Tests for:
 - Schematic class (schematic.py)
 """
 
-
 import pytest
 
 from kicad_tools.schematic.models.elements import (

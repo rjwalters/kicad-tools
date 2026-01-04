@@ -230,8 +230,10 @@ def _print_conflict(index: int, conflict: ConstraintConflict, verbose: bool) -> 
     """Print a single conflict."""
     symbol = "!" if conflict.conflict_type.value == "overlap" else "X"
     print(f"\n  [{symbol}] Conflict #{index}: {conflict.conflict_type.value.upper()}")
-    print(f"      {conflict.constraint1_type}:{conflict.constraint1_name} vs "
-          f"{conflict.constraint2_type}:{conflict.constraint2_name}")
+    print(
+        f"      {conflict.constraint1_type}:{conflict.constraint1_name} vs "
+        f"{conflict.constraint2_type}:{conflict.constraint2_name}"
+    )
     print(f"      {conflict.description}")
 
     if conflict.location:

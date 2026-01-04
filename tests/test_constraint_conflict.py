@@ -1,6 +1,5 @@
 """Tests for constraint conflict detection."""
 
-
 from kicad_tools.constraints.conflict import (
     ConflictResolution,
     ConflictType,

@@ -1423,17 +1423,13 @@ def _add_constraints_parser(subparsers) -> None:
 
 def _add_estimate_parser(subparsers) -> None:
     """Add estimate subcommand parser with its subcommands."""
-    estimate_parser = subparsers.add_parser(
-        "estimate", help="Manufacturing cost estimation"
-    )
+    estimate_parser = subparsers.add_parser("estimate", help="Manufacturing cost estimation")
     estimate_subparsers = estimate_parser.add_subparsers(
         dest="estimate_command", help="Estimate commands"
     )
 
     # estimate cost
-    estimate_cost = estimate_subparsers.add_parser(
-        "cost", help="Estimate manufacturing costs"
-    )
+    estimate_cost = estimate_subparsers.add_parser("cost", help="Estimate manufacturing costs")
     estimate_cost.add_argument("pcb", help="Path to .kicad_pcb file")
     estimate_cost.add_argument(
         "--bom",
