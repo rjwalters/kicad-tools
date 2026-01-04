@@ -75,6 +75,9 @@ kicad-sch-hierarchy = "kicad_tools.cli.sch_hierarchy:main"
 # Net status reporting
 kicad-net-status = "kicad_tools.cli:net_status_main"
 
+# Manufacturer design rules
+kicad-fab-rules = "kicad_tools.cli.fab_rules_cmd:main"
+
 [project.optional-dependencies]
 # LCSC parts API access
 parts = [
