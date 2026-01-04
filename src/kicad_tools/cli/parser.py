@@ -137,6 +137,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_analyze_parser(subparsers)
     _add_constraints_parser(subparsers)
     _add_estimate_parser(subparsers)
+    _add_net_status_parser(subparsers)
 
     return parser
 
@@ -808,19 +809,14 @@ def _add_parts_parser(subparsers) -> None:
     )
     parts_avail.add_argument("schematic", help="Path to .kicad_sch file")
     parts_avail.add_argument(
-        "--quantity", "-q", type=int, default=1,
-        help="Number of boards to manufacture (default: 1)"
+        "--quantity", "-q", type=int, default=1, help="Number of boards to manufacture (default: 1)"
+    )
+    parts_avail.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    parts_avail.add_argument(
+        "--no-alternatives", action="store_true", help="Don't search for alternative parts"
     )
     parts_avail.add_argument(
-        "--format", choices=["table", "json", "summary"], default="table"
-    )
-    parts_avail.add_argument(
-        "--no-alternatives", action="store_true",
-        help="Don't search for alternative parts"
-    )
-    parts_avail.add_argument(
-        "--issues-only", action="store_true",
-        help="Only show parts with availability issues"
+        "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
 
     # parts cache
@@ -1505,4 +1501,45 @@ def _add_estimate_parser(subparsers) -> None:
     )
     estimate_cost.add_argument(
         "-v", "--verbose", action="store_true", help="Show detailed breakdown"
+    )
+
+
+def _add_net_status_parser(subparsers) -> None:
+    """Add net-status subcommand parser."""
+    net_status_parser = subparsers.add_parser(
+        "net-status",
+        help="Report net connectivity status for a PCB",
+        description="Show which nets are complete, incomplete, or unrouted with details on unconnected pads",
+    )
+    net_status_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    net_status_parser.add_argument(
+        "--format",
+        dest="net_status_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    net_status_parser.add_argument(
+        "--incomplete",
+        dest="net_status_incomplete",
+        action="store_true",
+        help="Show only incomplete nets",
+    )
+    net_status_parser.add_argument(
+        "--net",
+        dest="net_status_net",
+        help="Show status for a specific net by name",
+    )
+    net_status_parser.add_argument(
+        "--by-class",
+        dest="net_status_by_class",
+        action="store_true",
+        help="Group output by net class",
+    )
+    net_status_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="net_status_verbose",
+        action="store_true",
+        help="Show all pads with coordinates",
     )

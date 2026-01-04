@@ -27,6 +27,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools analyze <command>      - PCB analysis tools (congestion, etc.)
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
+    kicad-tools net-status <pcb>       - Report net connectivity status
 
 See `kicad-tools --help` for complete documentation.
 """
@@ -69,6 +70,7 @@ __all__ = [
     "drc_main",
     "drc_summary_main",
     "bom_main",
+    "net_status_main",
     "format_error",
     "print_error",
 ]
@@ -275,6 +277,22 @@ def _dispatch_command(args) -> int:
     elif args.command == "estimate":
         return run_estimate_command(args)
 
+    elif args.command == "net-status":
+        from .net_status_cmd import main as net_status_cmd
+
+        sub_argv = [args.pcb]
+        if hasattr(args, "net_status_format") and args.net_status_format != "text":
+            sub_argv.extend(["--format", args.net_status_format])
+        if hasattr(args, "net_status_incomplete") and args.net_status_incomplete:
+            sub_argv.append("--incomplete")
+        if hasattr(args, "net_status_net") and args.net_status_net:
+            sub_argv.extend(["--net", args.net_status_net])
+        if hasattr(args, "net_status_by_class") and args.net_status_by_class:
+            sub_argv.append("--by-class")
+        if hasattr(args, "net_status_verbose") and args.net_status_verbose:
+            sub_argv.append("--verbose")
+        return net_status_cmd(sub_argv)
+
     return 0
 
 
@@ -316,6 +334,13 @@ def bom_main() -> int:
 def drc_summary_main() -> int:
     """Standalone entry point for kicad-drc-summary command."""
     from .drc_summary import main
+
+    return main()
+
+
+def net_status_main() -> int:
+    """Standalone entry point for kicad-net-status command."""
+    from .net_status_cmd import main
 
     return main()
 
