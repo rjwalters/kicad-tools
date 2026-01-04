@@ -82,9 +82,7 @@ class MonteCarloRouter:
 
         total_vias = sum(len(r.vias) for r in routes)
         total_length = sum(
-            math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-            for r in routes
-            for s in r.segments
+            math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) for r in routes for s in r.segments
         )
 
         # Completion rate is most important (1000x weight)

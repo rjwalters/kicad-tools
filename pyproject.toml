@@ -58,6 +58,7 @@ kicad-symbols = "kicad_tools.cli:symbols_main"
 kicad-nets = "kicad_tools.cli:nets_main"
 kicad-erc = "kicad_tools.cli:erc_main"
 kicad-drc = "kicad_tools.cli:drc_main"
+kicad-drc-summary = "kicad_tools.cli:drc_summary_main"
 kicad-bom = "kicad_tools.cli:bom_main"
 
 # PCB tools (not yet in unified CLI)

@@ -1,9 +1,6 @@
 """Tests for the reasoning/agent module."""
 
-from datetime import datetime
-from unittest.mock import MagicMock, PropertyMock, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from kicad_tools.reasoning.agent import (
     AgentProgress,
@@ -19,16 +16,9 @@ from kicad_tools.reasoning.commands import (
     RouteNetCommand,
 )
 from kicad_tools.reasoning.state import (
-    BoardOutline,
-    ComponentState,
-    NetState,
-    PadState,
     PCBState,
-    TraceState,
     ViolationState,
 )
-from kicad_tools.reasoning.vocabulary import SpatialRegion
-
 
 # =============================================================================
 # Helper Functions

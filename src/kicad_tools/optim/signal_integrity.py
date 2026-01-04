@@ -98,9 +98,7 @@ class SignalIntegrityHint:
 
     def __str__(self) -> str:
         """Human-readable hint representation."""
-        severity_icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(
-            self.severity, "⚪"
-        )
+        severity_icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(self.severity, "⚪")
         return f"{severity_icon} [{self.hint_type}] {self.description}\n   → {self.suggestion}"
 
 
@@ -285,8 +283,7 @@ def classify_nets(pcb: PCB) -> dict[str, NetClassification]:
             keep_away = [
                 n
                 for n in net_names
-                if _match_patterns(n, _CLOCK_PATTERNS)
-                or _match_patterns(n, _HIGH_SPEED_PATTERNS)
+                if _match_patterns(n, _CLOCK_PATTERNS) or _match_patterns(n, _HIGH_SPEED_PATTERNS)
             ]
         elif _match_patterns(net_name, _HIGH_SPEED_PATTERNS):
             signal_class = SignalClass.HIGH_SPEED_DATA

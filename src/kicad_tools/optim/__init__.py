@@ -135,12 +135,12 @@ from kicad_tools.optim.signal_integrity import (
 from kicad_tools.optim.suggestions import (
     AlternativePosition,
     ForceContribution,
+    PlacementSuggestion,
     RationaleType,
     explain_placement,
     generate_placement_suggestions,
     suggest_improvement,
 )
-from kicad_tools.optim.suggestions import PlacementSuggestion
 from kicad_tools.optim.thermal import (
     ThermalClass,
     ThermalConfig,

@@ -6,7 +6,6 @@ Tests for:
 - PCBState parsing and query methods
 """
 
-from pathlib import Path
 
 import pytest
 

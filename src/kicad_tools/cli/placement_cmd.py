@@ -826,7 +826,11 @@ def cmd_optimize(args) -> int:
 
             with spinner("Creating optimizer from PCB...", quiet=quiet):
                 optimizer = PlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering, edge_detect=edge_detect
+                    pcb,
+                    config=config,
+                    fixed_refs=fixed_refs,
+                    enable_clustering=enable_clustering,
+                    edge_detect=edge_detect,
                 )
 
             # Add constraints if loaded

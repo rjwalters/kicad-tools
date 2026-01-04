@@ -2495,7 +2495,6 @@ class TestLoadPcbForRouting:
 import warnings
 
 from kicad_tools.router.io import (
-    ClearanceViolation,
     PCBDesignRules,
     parse_pcb_design_rules,
     validate_grid_resolution,

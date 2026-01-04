@@ -437,11 +437,7 @@ class PlacementOptimizer:
     @property
     def edge_constrained_components(self) -> list[Component]:
         """Get list of components with edge constraints."""
-        return [
-            comp
-            for comp in self.components
-            if comp.ref in self._edge_constraints
-        ]
+        return [comp for comp in self.components if comp.ref in self._edge_constraints]
 
     def create_springs_from_nets(self):
         """Create springs connecting all pins on the same net."""

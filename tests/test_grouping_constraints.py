@@ -8,7 +8,6 @@ import pytest
 from kicad_tools.optim import (
     Component,
     ConstraintType,
-    ConstraintViolation,
     GroupingConstraint,
     PlacementOptimizer,
     Polygon,

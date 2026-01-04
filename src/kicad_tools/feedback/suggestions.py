@@ -125,13 +125,17 @@ class FixSuggestionGenerator:
             )
 
         # Check for specific element types in items
-        involves_track = any("track" in item.lower() or "segment" in item.lower() for item in violation.items)
+        involves_track = any(
+            "track" in item.lower() or "segment" in item.lower() for item in violation.items
+        )
         involves_via = any("via" in item.lower() for item in violation.items)
         involves_pad = any("pad" in item.lower() for item in violation.items)
 
         if involves_track:
             if violation.nets:
-                net_name = violation.nets[0] if len(violation.nets) == 1 else "/".join(violation.nets)
+                net_name = (
+                    violation.nets[0] if len(violation.nets) == 1 else "/".join(violation.nets)
+                )
                 suggestions.append(f"Reroute net '{net_name}' around the obstruction")
             else:
                 suggestions.append("Reroute the track to increase spacing")
@@ -167,12 +171,14 @@ class FixSuggestionGenerator:
                 f"(required: {violation.required_value_mm:.2f}mm)"
             )
 
-        suggestions.extend([
-            "Move affected tracks/pads away from the board edge",
-            "Extend the board outline if the current size is not critical",
-            "Check Edge.Cuts layer for correct board boundary definition",
-            "Verify manufacturer edge clearance requirements (typically 0.25-0.5mm)",
-        ])
+        suggestions.extend(
+            [
+                "Move affected tracks/pads away from the board edge",
+                "Extend the board outline if the current size is not critical",
+                "Check Edge.Cuts layer for correct board boundary definition",
+                "Verify manufacturer edge clearance requirements (typically 0.25-0.5mm)",
+            ]
+        )
 
         return suggestions
 
@@ -184,16 +190,16 @@ class FixSuggestionGenerator:
         components = [item for item in violation.items if any(c.isalpha() for c in item)]
 
         if len(components) >= 2:
-            suggestions.append(
-                f"Move {components[0]} or {components[1]} to eliminate overlap"
-            )
+            suggestions.append(f"Move {components[0]} or {components[1]} to eliminate overlap")
 
-        suggestions.extend([
-            "Increase spacing between components to clear courtyards",
-            "Check if components can be rotated to reduce overlap area",
-            "Consider using tighter courtyard footprint variants if available",
-            "Verify the courtyard outline is correctly defined in footprint editor",
-        ])
+        suggestions.extend(
+            [
+                "Increase spacing between components to clear courtyards",
+                "Check if components can be rotated to reduce overlap area",
+                "Consider using tighter courtyard footprint variants if available",
+                "Verify the courtyard outline is correctly defined in footprint editor",
+            ]
+        )
 
         return suggestions
 
@@ -215,11 +221,13 @@ class FixSuggestionGenerator:
             suggestions.append("Refill copper zones to regenerate connections")
             suggestions.append("Check zone priority and clearance settings")
 
-        suggestions.extend([
-            "Run the autorouter for incomplete connections",
-            "Verify netlist is up-to-date (update PCB from schematic)",
-            "Check for broken or missing net ties",
-        ])
+        suggestions.extend(
+            [
+                "Run the autorouter for incomplete connections",
+                "Verify netlist is up-to-date (update PCB from schematic)",
+                "Check for broken or missing net ties",
+            ]
+        )
 
         return suggestions
 
@@ -229,19 +237,19 @@ class FixSuggestionGenerator:
 
         if len(violation.nets) >= 2:
             net1, net2 = violation.nets[0], violation.nets[1]
-            suggestions.append(
-                f"Remove the connection between '{net1}' and '{net2}'"
-            )
+            suggestions.append(f"Remove the connection between '{net1}' and '{net2}'")
             suggestions.append(
                 f"Reroute one of the traces for '{net1}' or '{net2}' to eliminate overlap"
             )
 
-        suggestions.extend([
-            "Delete the offending trace segment or via causing the short",
-            "Move the conflicting copper elements to different layers",
-            "Check for accidental copper pour connections",
-            "Verify zone settings and net assignments",
-        ])
+        suggestions.extend(
+            [
+                "Delete the offending trace segment or via causing the short",
+                "Move the conflicting copper elements to different layers",
+                "Check for accidental copper pour connections",
+                "Verify zone settings and net assignments",
+            ]
+        )
 
         return suggestions
 
@@ -259,12 +267,14 @@ class FixSuggestionGenerator:
             net_name = violation.nets[0]
             suggestions.append(f"Update net class for '{net_name}' to set proper track width")
 
-        suggestions.extend([
-            "Check design rules in Board Setup > Design Rules > Net Classes",
-            "Edit track properties to increase width (select and press 'E')",
-            "Consider using a different net class for power/signal nets",
-            "Verify manufacturer minimum track width capability",
-        ])
+        suggestions.extend(
+            [
+                "Check design rules in Board Setup > Design Rules > Net Classes",
+                "Edit track properties to increase width (select and press 'E')",
+                "Consider using a different net class for power/signal nets",
+                "Verify manufacturer minimum track width capability",
+            ]
+        )
 
         return suggestions
 
@@ -278,12 +288,14 @@ class FixSuggestionGenerator:
                 f"Increase via pad size by {diff * 2:.3f}mm to meet annular ring requirement"
             )
 
-        suggestions.extend([
-            "Use a larger via pad size in Board Setup > Design Rules > Via",
-            "Use a smaller drill size while keeping the same pad size",
-            "Check manufacturer minimum annular ring requirement (typically 0.1-0.15mm)",
-            "Switch to a different via size preset that meets requirements",
-        ])
+        suggestions.extend(
+            [
+                "Use a larger via pad size in Board Setup > Design Rules > Via",
+                "Use a smaller drill size while keeping the same pad size",
+                "Check manufacturer minimum annular ring requirement (typically 0.1-0.15mm)",
+                "Switch to a different via size preset that meets requirements",
+            ]
+        )
 
         return suggestions
 
@@ -306,12 +318,14 @@ class FixSuggestionGenerator:
                 f"{violation.required_value_mm:.3f}mm"
             )
 
-        suggestions.extend([
-            "Check manufacturer minimum drill size capability",
-            "Update via or pad drill settings in Board Setup",
-            "Consider using a different manufacturer with smaller drill capability",
-            "For vias, use laser-drilled microvias if available",
-        ])
+        suggestions.extend(
+            [
+                "Check manufacturer minimum drill size capability",
+                "Update via or pad drill settings in Board Setup",
+                "Consider using a different manufacturer with smaller drill capability",
+                "For vias, use laser-drilled microvias if available",
+            ]
+        )
 
         return suggestions
 
@@ -345,12 +359,14 @@ class FixSuggestionGenerator:
                 f"{violation.required_value_mm:.3f}mm"
             )
 
-        suggestions.extend([
-            "Adjust solder mask clearance in Board Setup > Board Stackup",
-            "Reduce pad sizes if electrically acceptable",
-            "Increase spacing between pads/tracks",
-            "Check manufacturer solder mask bridge capability (typically 0.1mm)",
-        ])
+        suggestions.extend(
+            [
+                "Adjust solder mask clearance in Board Setup > Board Stackup",
+                "Reduce pad sizes if electrically acceptable",
+                "Increase spacing between pads/tracks",
+                "Check manufacturer solder mask bridge capability (typically 0.1mm)",
+            ]
+        )
 
         return suggestions
 
@@ -402,12 +418,14 @@ class FixSuggestionGenerator:
                 f"Move holes apart by at least {gap:.2f}mm to meet spacing requirement"
             )
 
-        suggestions.extend([
-            "Relocate vias or mounting holes to increase spacing",
-            "Use smaller drill sizes if design permits",
-            "Check manufacturer hole-to-hole spacing requirements",
-            "Consider using slot instead of multiple close holes",
-        ])
+        suggestions.extend(
+            [
+                "Relocate vias or mounting holes to increase spacing",
+                "Use smaller drill sizes if design permits",
+                "Check manufacturer hole-to-hole spacing requirements",
+                "Consider using slot instead of multiple close holes",
+            ]
+        )
 
         return suggestions
 
@@ -420,7 +438,9 @@ class FixSuggestionGenerator:
         ]
 
         if violation.nets:
-            suggestions.append(f"Check net class settings for affected nets: {', '.join(violation.nets)}")
+            suggestions.append(
+                f"Check net class settings for affected nets: {', '.join(violation.nets)}"
+            )
 
         if violation.locations:
             loc = violation.locations[0]
@@ -443,12 +463,14 @@ class FixSuggestionGenerator:
                     suggestions.append(f"Add wire to connect {item}")
                     break
 
-        suggestions.extend([
-            "Connect the pin to the appropriate net",
-            "Add a No-Connect (X) flag if the pin is intentionally unconnected",
-            "Check if the symbol pin configuration matches the datasheet",
-            "Verify the wire endpoint connects to the pin",
-        ])
+        suggestions.extend(
+            [
+                "Connect the pin to the appropriate net",
+                "Add a No-Connect (X) flag if the pin is intentionally unconnected",
+                "Check if the symbol pin configuration matches the datasheet",
+                "Verify the wire endpoint connects to the pin",
+            ]
+        )
 
         return suggestions
 

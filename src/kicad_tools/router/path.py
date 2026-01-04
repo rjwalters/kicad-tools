@@ -60,9 +60,7 @@ def create_intra_ic_routes(
         # Connect all pads on this component with short stubs
         # Use chain topology: pad0 -> pad1 -> pad2 -> ...
         # Sort by position to get sensible ordering
-        sorted_pairs = sorted(
-            zip(indices, pad_objs, strict=False), key=lambda p: (p[1].x, p[1].y)
-        )
+        sorted_pairs = sorted(zip(indices, pad_objs, strict=False), key=lambda p: (p[1].x, p[1].y))
 
         for j in range(len(sorted_pairs) - 1):
             idx1, pad1 = sorted_pairs[j][:2]
@@ -94,9 +92,7 @@ def create_intra_ic_routes(
             connected_indices.add(idx1)
             connected_indices.add(idx2)
 
-            print(
-                f"  Intra-IC route: {ref} pins {pads[idx1][1]}->{pads[idx2][1]} ({dist:.2f}mm)"
-            )
+            print(f"  Intra-IC route: {ref} pins {pads[idx1][1]}->{pads[idx2][1]} ({dist:.2f}mm)")
 
     return routes, connected_indices
 
@@ -170,9 +166,7 @@ def calculate_total_wirelength(routes: list[Route]) -> float:
         Total wirelength in mm
     """
     return sum(
-        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-        for r in routes
-        for s in r.segments
+        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) for r in routes for s in r.segments
     )
 
 

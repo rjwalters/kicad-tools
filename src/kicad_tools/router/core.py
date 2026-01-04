@@ -367,7 +367,9 @@ class Autorouter:
 
         for trial in range(num_trials):
             if progress_callback is not None:
-                if not progress_callback(trial / num_trials, f"Trial {trial + 1}/{num_trials}", True):
+                if not progress_callback(
+                    trial / num_trials, f"Trial {trial + 1}/{num_trials}", True
+                ):
                     break
 
             self._reset_for_new_trial()
@@ -377,8 +379,10 @@ class Autorouter:
 
             if verbose:
                 status = "NEW BEST" if score > best_score else ""
-                print(f"  Trial {trial + 1}: {len({r.net for r in routes})}/{len(base_order)} nets, "
-                      f"{sum(len(r.vias) for r in routes)} vias, score={score:.2f} {status}")
+                print(
+                    f"  Trial {trial + 1}: {len({r.net for r in routes})}/{len(base_order)} nets, "
+                    f"{sum(len(r.vias) for r in routes)} vias, score={score:.2f} {status}"
+                )
 
             if score > best_score:
                 best_score, best_routes, best_trial = score, routes.copy(), trial
@@ -389,7 +393,9 @@ class Autorouter:
         self.routes = best_routes if best_routes else []
         if progress_callback is not None:
             routed = len({r.net for r in self.routes}) if self.routes else 0
-            progress_callback(1.0, f"Best: trial {best_trial + 1}, {routed}/{len(base_order)} nets", False)
+            progress_callback(
+                1.0, f"Best: trial {best_trial + 1}, {routed}/{len(base_order)} nets", False
+            )
 
         return self.routes
 
@@ -401,7 +407,9 @@ class Autorouter:
     ) -> list[Route]:
         """Unified entry point for advanced routing strategies."""
         if monte_carlo_trials > 0:
-            return self.route_all_monte_carlo(monte_carlo_trials, use_negotiated, progress_callback=progress_callback)
+            return self.route_all_monte_carlo(
+                monte_carlo_trials, use_negotiated, progress_callback=progress_callback
+            )
         elif use_negotiated:
             return self.route_all_negotiated(progress_callback=progress_callback)
         return self.route_all(progress_callback=progress_callback)
@@ -414,7 +422,8 @@ class Autorouter:
         """Get routing statistics including congestion metrics."""
         total_length = sum(
             math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-            for r in self.routes for s in r.segments
+            for r in self.routes
+            for s in r.segments
         )
         congestion_stats = self.grid.get_congestion_map()
 

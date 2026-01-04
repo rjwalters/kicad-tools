@@ -72,9 +72,7 @@ class BusRouter:
 
         return routes
 
-    def _route_bus_parallel(
-        self, net_ids: list[int], bus_name: str, spacing: float
-    ) -> list[Route]:
+    def _route_bus_parallel(self, net_ids: list[int], bus_name: str, spacing: float) -> list[Route]:
         """Route bus signals in parallel with consistent spacing."""
         routes: list[Route] = []
         if not net_ids:
@@ -147,9 +145,7 @@ class BusRouter:
             bus_routes = self.route_bus_group(group, bus_config.mode, spacing)
             all_routes.extend(bus_routes)
 
-        non_bus_nets = [
-            n for n in self.autorouter.nets if n not in bus_net_ids and n != 0
-        ]
+        non_bus_nets = [n for n in self.autorouter.nets if n not in bus_net_ids and n != 0]
         if non_bus_nets:
             print(f"\n--- Routing {len(non_bus_nets)} non-bus nets ---")
             if net_order:

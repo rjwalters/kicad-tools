@@ -14,7 +14,6 @@ from kicad_tools.reasoning.diagnosis import (
 from kicad_tools.reasoning.state import (
     BoardOutline,
     ComponentState,
-    NetState,
     PadState,
     PCBState,
     TraceState,

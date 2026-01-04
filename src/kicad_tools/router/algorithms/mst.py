@@ -67,9 +67,7 @@ class MSTRouter:
             for i in connected:
                 for j in unconnected:
                     # Manhattan distance
-                    dist = abs(pad_objs[i].x - pad_objs[j].x) + abs(
-                        pad_objs[i].y - pad_objs[j].y
-                    )
+                    dist = abs(pad_objs[i].x - pad_objs[j].x) + abs(pad_objs[i].y - pad_objs[j].y)
                     if dist < best_dist:
                         best_dist = dist
                         best_edge = (i, j)

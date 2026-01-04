@@ -63,6 +63,7 @@ __all__ = [
     "nets_main",
     "erc_main",
     "drc_main",
+    "drc_summary_main",
     "bom_main",
     "format_error",
     "print_error",
@@ -295,6 +296,13 @@ def drc_main() -> int:
 def bom_main() -> int:
     """Standalone entry point for kicad-bom command."""
     from .bom_cmd import main
+
+    return main()
+
+
+def drc_summary_main() -> int:
+    """Standalone entry point for kicad-drc-summary command."""
+    from .drc_summary import main
 
     return main()
 

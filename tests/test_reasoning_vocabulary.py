@@ -9,7 +9,6 @@ Tests for:
 - Helper functions
 """
 
-import pytest
 
 from kicad_tools.reasoning.vocabulary import (
     ComponentGroup,
