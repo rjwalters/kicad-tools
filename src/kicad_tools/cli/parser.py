@@ -1345,6 +1345,36 @@ def _add_analyze_parser(subparsers) -> None:
         help="Disable differential pair analysis",
     )
 
+    # analyze thermal
+    thermal_parser = analyze_subparsers.add_parser(
+        "thermal",
+        help="Analyze thermal characteristics and hotspots",
+        description="Identify heat sources, estimate power dissipation, and suggest thermal improvements",
+    )
+    thermal_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    thermal_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    thermal_parser.add_argument(
+        "--cluster-radius",
+        dest="analyze_cluster_radius",
+        type=float,
+        default=10.0,
+        help="Radius for clustering heat sources in mm (default: 10.0)",
+    )
+    thermal_parser.add_argument(
+        "--min-power",
+        dest="analyze_min_power",
+        type=float,
+        default=0.05,
+        help="Minimum power threshold in Watts (default: 0.05)",
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""
