@@ -10,6 +10,7 @@ Examples:
     kicad-bom design.kicad_sch --group --exclude "TP*"
     kicad-bom design.kicad_sch --check-availability
     kicad-bom design.kicad_sch --check-availability --quantity 5
+    kicad-bom design.kicad_sch --validate
 """
 
 import argparse
@@ -19,7 +20,40 @@ import io
 import json
 import sys
 
-from ..schema.bom import BOMItem, extract_bom
+from ..schema.bom import BOM, BOMItem, extract_bom
+
+
+def run_validation(bom: BOM, quantity: int, output_format: str) -> int:
+    """Run BOM validation against JLCPCB/LCSC parts library."""
+    try:
+        from ..assembly.validation import AssemblyValidator
+    except ImportError as e:
+        print(
+            f"Error: Assembly validation requires the 'requests' library.\n"
+            f"Install with: pip install kicad-tools[parts]\n"
+            f"Details: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Validating BOM against JLCPCB/LCSC parts library...", file=sys.stderr)
+
+    try:
+        with AssemblyValidator() as validator:
+            result = validator.validate_bom(bom, quantity)
+    except Exception as e:
+        print(f"Error during validation: {e}", file=sys.stderr)
+        return 1
+
+    # Output results based on format
+    if output_format == "json":
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        # Table format (default for validation)
+        print(result.format_table())
+
+    # Return non-zero exit code if not assembly-ready
+    return 0 if result.assembly_ready else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,10 +99,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Check stock availability from LCSC/JLCPCB",
     )
     parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate BOM against JLCPCB/LCSC parts library for assembly",
+    )
+    parser.add_argument(
         "--quantity",
         type=int,
         default=1,
-        help="Number of boards (multiplies BOM quantities for availability check)",
+        help="Number of boards (for availability check or validation)",
     )
 
     args = parser.parse_args(argv)
@@ -81,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"Error loading schematic: {e}", file=sys.stderr)
         return 1
+
+    # Run validation if requested
+    if args.validate:
+        return run_validation(bom, args.quantity, args.format)
 
     # Apply filters
     items = list(bom.items)

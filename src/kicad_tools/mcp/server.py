@@ -17,7 +17,12 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
 from kicad_tools.mcp.tools.analysis import measure_clearance
-from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
+from kicad_tools.mcp.tools.export import (
+    export_assembly,
+    export_bom,
+    export_gerbers,
+    validate_assembly_bom,
+)
 from kicad_tools.mcp.tools.placement import placement_analyze
 from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
 from kicad_tools.mcp.tools.session import (
@@ -69,6 +74,33 @@ class MCPServer:
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
+        self.tools["validate_assembly_bom"] = ToolDefinition(
+            name="validate_assembly_bom",
+            description=(
+                "Validate a BOM for JLCPCB assembly. Checks all components against the "
+                "LCSC/JLCPCB parts library and categorizes them by tier (Basic/Extended), "
+                "stock status, and availability. Returns a summary of parts that are "
+                "available, out of stock, or missing LCSC part numbers. Use this to "
+                "verify assembly readiness before ordering."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "schematic_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_sch file",
+                    },
+                    "quantity": {
+                        "type": "integer",
+                        "description": "Number of boards (multiplies component quantities)",
+                        "default": 1,
+                    },
+                },
+                "required": ["schematic_path"],
+            },
+            handler=self._handle_validate_assembly_bom,
+        )
+
         self.tools["export_gerbers"] = ToolDefinition(
             name="export_gerbers",
             description=(
@@ -150,6 +182,13 @@ class MCPServer:
                 "required": ["schematic_path"],
             },
             handler=self._handle_export_bom,
+        )
+
+    def _handle_validate_assembly_bom(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle validate_assembly_bom tool call."""
+        return validate_assembly_bom(
+            schematic_path=params["schematic_path"],
+            quantity=params.get("quantity", 1),
         )
 
     def _handle_export_bom(self, params: dict[str, Any]) -> dict[str, Any]:
