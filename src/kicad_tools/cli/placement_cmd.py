@@ -894,11 +894,41 @@ def cmd_optimize(args) -> int:
     quiet = getattr(args, "quiet", False)
     routing_aware = getattr(args, "routing_aware", False)
     check_routability = getattr(args, "check_routability", False)
+    output_format = getattr(args, "format", "text")
+
+    # For JSON output, suppress text output
+    if output_format == "json":
+        quiet = True
+
+    # Result dictionary for JSON output
+    result: dict = {
+        "success": False,
+        "strategy": args.strategy,
+        "components": 0,
+        "iterations": 0,
+        "wire_length_mm": 0.0,
+        "energy": 0.0,
+        "components_updated": 0,
+        "constraint_violations": [],
+        "routability": None,
+        "output_path": None,
+        "message": "",
+    }
+
+    def output_result(success: bool = False, message: str = "") -> int:
+        """Output result in appropriate format and return exit code."""
+        result["success"] = success
+        if message:
+            result["message"] = message
+        if output_format == "json":
+            print(json.dumps(result, indent=2))
+        return 0 if success else 1
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
-        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
-        return 1
+        if output_format != "json":
+            print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return output_result(False, f"File not found: {pcb_path}")
 
     # Handle routing-aware optimization mode
     if routing_aware:
@@ -914,40 +944,45 @@ def cmd_optimize(args) -> int:
     if args.constraints:
         constraints_path = Path(args.constraints)
         if not constraints_path.exists():
-            print(f"Error: Constraint file not found: {constraints_path}", file=sys.stderr)
-            return 1
+            if output_format != "json":
+                print(f"Error: Constraint file not found: {constraints_path}", file=sys.stderr)
+            return output_result(False, f"Constraint file not found: {constraints_path}")
         try:
             with spinner("Loading constraints...", quiet=quiet):
                 constraints = load_constraints_from_yaml(constraints_path)
             if not quiet:
                 print(f"Loaded {len(constraints)} grouping constraints")
         except Exception as e:
-            print(f"Error loading constraints: {e}", file=sys.stderr)
-            return 1
+            if output_format != "json":
+                print(f"Error loading constraints: {e}", file=sys.stderr)
+            return output_result(False, f"Error loading constraints: {e}")
 
     # Load PCB
     try:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        if output_format != "json":
+            print(f"Error loading PCB: {e}", file=sys.stderr)
+        return output_result(False, f"Error loading PCB: {e}")
 
     # Load keepout zones
     keepout_zones = []
     if getattr(args, "keepout", None):
         keepout_path = Path(args.keepout)
         if not keepout_path.exists():
-            print(f"Error: Keepout file not found: {keepout_path}", file=sys.stderr)
-            return 1
+            if output_format != "json":
+                print(f"Error: Keepout file not found: {keepout_path}", file=sys.stderr)
+            return output_result(False, f"Keepout file not found: {keepout_path}")
         try:
             with spinner("Loading keepout zones...", quiet=quiet):
                 keepout_zones = load_keepout_zones_from_yaml(str(keepout_path))
             if not quiet:
                 print(f"Loaded {len(keepout_zones)} keepout zones from {keepout_path}")
         except Exception as e:
-            print(f"Error loading keepout file: {e}", file=sys.stderr)
-            return 1
+            if output_format != "json":
+                print(f"Error loading keepout file: {e}", file=sys.stderr)
+            return output_result(False, f"Error loading keepout file: {e}")
 
     # Auto-detect keepout zones if requested
     if getattr(args, "auto_keepout", False):
@@ -1032,6 +1067,8 @@ def cmd_optimize(args) -> int:
                     iterations=args.iterations, callback=callback if args.verbose else None
                 )
 
+            result["iterations"] = iterations_run
+
             # Snap to grid
             if args.grid > 0:
                 optimizer.snap_to_grid(args.grid, 90.0)
@@ -1092,6 +1129,8 @@ def cmd_optimize(args) -> int:
                     callback=callback if args.verbose else None,
                 )
 
+            result["iterations"] = args.generations
+
             if not quiet:
                 print(f"\nBest fitness: {best.fitness:.2f}")
                 print(optimizer.report())
@@ -1141,28 +1180,43 @@ def cmd_optimize(args) -> int:
                     callback=callback if args.verbose else None,
                 )
 
+            result["iterations"] = args.generations + args.iterations
+
             if not quiet:
                 print(f"\nTotal wire length: {optimizer.total_wire_length():.2f} mm")
                 print(f"System energy: {optimizer.compute_energy():.4f}")
 
         else:
-            print(f"Error: Unknown strategy '{strategy}'", file=sys.stderr)
-            return 1
+            if output_format != "json":
+                print(f"Error: Unknown strategy '{strategy}'", file=sys.stderr)
+            return output_result(False, f"Unknown strategy: {strategy}")
 
     except Exception as e:
-        print(f"Error during optimization: {e}", file=sys.stderr)
-        if args.verbose:
-            import traceback
+        if output_format != "json":
+            print(f"Error during optimization: {e}", file=sys.stderr)
+            if args.verbose:
+                import traceback
 
-            traceback.print_exc()
-        return 1
+                traceback.print_exc()
+        return output_result(False, f"Error during optimization: {e}")
+
+    # Populate result with optimization metrics
+    result["components"] = len(optimizer.components)
+    result["wire_length_mm"] = round(optimizer.total_wire_length(), 2)
+    result["energy"] = round(optimizer.compute_energy(), 4)
+
+    # Get constraint violations if any
+    if constraints and hasattr(optimizer, "validate_constraints"):
+        violations = optimizer.validate_constraints()
+        result["constraint_violations"] = violations if violations else []
 
     # Dry run - just report
     if args.dry_run:
         if not quiet:
             print("\n(Dry run - no changes made)")
             print(optimizer.report())
-        return 0
+        result["message"] = "Dry run - no changes made"
+        return output_result(True)
 
     # Check routability before saving (if requested)
     before_rate, before_nets, before_problems = 0.0, 0, 0
@@ -1183,19 +1237,39 @@ def cmd_optimize(args) -> int:
             updated = optimizer.write_to_pcb(pcb)
             pcb.save(str(output_path))
 
+        result["components_updated"] = updated
+        result["output_path"] = str(output_path)
+
         if not quiet:
             print(f"\nUpdated {updated} component positions")
             print(f"Saved to: {output_path}")
 
     except Exception as e:
-        print(f"Error saving PCB: {e}", file=sys.stderr)
-        return 1
+        if output_format != "json":
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+        return output_result(False, f"Error saving PCB: {e}")
 
     # Check routability after saving (if requested)
     if check_routability:
         if not quiet:
             print("\nChecking routability after optimization...")
         after_rate, after_nets, after_problems = _estimate_routability(output_path, quiet)
+
+        # Add routability info to result
+        result["routability"] = {
+            "before": {
+                "rate": round(before_rate, 3),
+                "nets": before_nets,
+                "problem_nets": before_problems,
+            },
+            "after": {
+                "rate": round(after_rate, 3),
+                "nets": after_nets,
+                "problem_nets": after_problems,
+            },
+            "change": round(after_rate - before_rate, 3),
+        }
+
         if not quiet:
             print(
                 f"  After: {after_rate * 100:.0f}% estimated routability ({after_nets} nets, {after_problems} problem nets)"
@@ -1218,7 +1292,8 @@ def cmd_optimize(args) -> int:
         print("      Use --routing-aware for integrated place-route optimization.")
         print("      Use --check-routability to see routability impact.")
 
-    return 0
+    result["message"] = "Optimization completed successfully"
+    return output_result(True)
 
 
 def output_table(conflicts: list[Conflict], verbose: bool = False):
@@ -1635,6 +1710,12 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="Preview optimization without saving",
+    )
+    optimize_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
     )
     optimize_parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     optimize_parser.add_argument(

@@ -78,6 +78,8 @@ def run_placement_command(args) -> int:
             sub_argv.append("--auto-keepout")
         if args.dry_run:
             sub_argv.append("--dry-run")
+        if getattr(args, "format", "text") != "text":
+            sub_argv.extend(["--format", args.format])
         if args.verbose:
             sub_argv.append("--verbose")
         # Use command-level quiet or global quiet
