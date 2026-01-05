@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-01-04
+
+### Added
+
+- `--format json` flag for `kct placement optimize` command (#449)
+
+### Fixed
+
+- Handle empty reference in BOM `grouped()` to prevent IndexError (#452)
+- Net-status now correctly detects pad-to-zone connectivity (#451)
+- Estimate cost reads components from PCB footprints (#448)
+
+## [0.7.1] - 2026-01-04
+
+### Added
+
+- `--layers` option to autorouter for multi-layer board support (#426)
+- Positional argument support to `validate --sync` command (#422)
+- Auto-detect target layer from zones in stitch command (#417)
+- `name` property to PadState for state export (#430)
+- `graphic_items` property to PCB schema (#427)
+- pyyaml added to required dependencies (#419)
+
+### Fixed
+
+- Reason agent reporting incorrect board size and layer count (#425)
+- Parts availability command silent exit (#424)
+- Net-status via-to-zone connectivity detection (#418)
+- Router `--grid` and `--clearance` parameters being ignored (#423)
+
 ## [0.7.0] - 2026-01-04
 
 ### Added
@@ -540,6 +570,8 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.7.2]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.2
+[0.7.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.1
 [0.7.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.0
 [0.6.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.5.0
