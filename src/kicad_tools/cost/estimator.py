@@ -384,6 +384,11 @@ class ManufacturingCostEstimator:
         component_costs: list[ComponentCost] = []
         if bom is not None:
             component_costs = self._estimate_component_costs(bom, quantity)
+        elif pcb is not None:
+            # Extract components from PCB footprints when no BOM provided
+            bom = self._bom_from_pcb(pcb)
+            if bom is not None:
+                component_costs = self._estimate_component_costs(bom, quantity)
 
         # Estimate assembly costs
         assembly_cost = self._estimate_assembly_cost(
@@ -418,6 +423,56 @@ class ManufacturingCostEstimator:
             optimization_suggestions=suggestions,
             manufacturer=self.manufacturer,
         )
+
+    def _bom_from_pcb(self, pcb: PCB) -> BOM | None:
+        """Extract BOM from PCB footprints when no schematic BOM is provided.
+
+        Creates a synthetic BOM from the footprints present on the PCB board.
+        This allows component counting for cost estimation even without a
+        schematic file.
+
+        Args:
+            pcb: PCB object with footprints
+
+        Returns:
+            BOM object with items extracted from footprints, or None if no footprints
+        """
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        if not pcb.footprints:
+            return None
+
+        items: list[BOMItem] = []
+        for fp in pcb.footprints:
+            # Skip footprints without reference (mounting holes, logos, etc.)
+            if not fp.reference or fp.reference.startswith("#"):
+                continue
+
+            # Create BOM item from footprint
+            item = BOMItem(
+                reference=fp.reference,
+                value=fp.value or "",
+                footprint=fp.name,
+                lib_id="",  # Not available from PCB
+                dnp=False,
+                in_bom=True,
+            )
+
+            # Try to extract LCSC part number from footprint properties
+            # KiCad stores custom properties in the footprint
+            for text in fp.texts:
+                if text.text_type == "user":
+                    text_lower = text.text.lower()
+                    # Look for LCSC part pattern (C followed by digits)
+                    if text_lower.startswith("c") and text_lower[1:].isdigit():
+                        item.lcsc = text.text
+
+            items.append(item)
+
+        if not items:
+            return None
+
+        return BOM(items=items, source="pcb")
 
     def _get_pcb_dimensions(self, pcb: PCB) -> dict[str, float]:
         """Extract board dimensions from PCB outline."""
