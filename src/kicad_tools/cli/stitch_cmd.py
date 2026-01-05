@@ -62,6 +62,10 @@ class StitchResult:
     vias_added: list[ViaPlacement] = field(default_factory=list)
     pads_skipped: list[tuple[PadInfo, str]] = field(default_factory=list)  # (pad, reason)
     already_connected: int = 0
+    # Per-net detected layers: {net_name: layer} for auto-detected layers
+    detected_layers: dict[str, str] = field(default_factory=dict)
+    # Nets that fell back to default B.Cu (no zone found)
+    fallback_nets: list[str] = field(default_factory=list)
 
 
 def get_net_map(sexp: SExp) -> dict[int, str]:
@@ -84,6 +88,38 @@ def get_net_number(sexp: SExp, net_name: str) -> int | None:
             if name == net_name:
                 return child.get_int(0)
     return None
+
+
+def find_zones_for_net(sexp: SExp, net_name: str) -> list[str]:
+    """Find zones matching a net name and return their layers.
+
+    Args:
+        sexp: PCB S-expression
+        net_name: Net name to find zones for
+
+    Returns:
+        List of layer names where zones exist for this net (e.g., ["In1.Cu", "In2.Cu"])
+    """
+    layers = []
+    for child in sexp.iter_children():
+        if child.tag == "zone":
+            zone_net_name = None
+            zone_layer = None
+
+            # Get net_name from zone
+            net_name_node = child.find_child("net_name")
+            if net_name_node:
+                zone_net_name = net_name_node.get_string(0)
+
+            # Get layer from zone
+            layer_node = child.find_child("layer")
+            if layer_node:
+                zone_layer = layer_node.get_string(0)
+
+            if zone_net_name == net_name and zone_layer:
+                layers.append(zone_layer)
+
+    return layers
 
 
 def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
@@ -357,7 +393,7 @@ def run_stitch(
         drill: Via drill size in mm
         clearance: Minimum clearance from existing copper
         offset: Maximum distance from pad center for via placement
-        target_layer: Target plane layer (auto-detect if None)
+        target_layer: Target plane layer (auto-detect from zones if None)
         dry_run: If True, don't modify the file
 
     Returns:
@@ -369,6 +405,24 @@ def run_stitch(
         pcb_name=pcb_path.name,
         target_nets=net_names,
     )
+
+    # Auto-detect target layers per net if not specified
+    net_target_layers: dict[str, str | None] = {}
+    if target_layer is None:
+        for net_name in net_names:
+            zone_layers = find_zones_for_net(sexp, net_name)
+            if zone_layers:
+                # Use first zone layer found (typically there's only one per net)
+                net_target_layers[net_name] = zone_layers[0]
+                result.detected_layers[net_name] = zone_layers[0]
+            else:
+                # No zone found, will fall back to B.Cu
+                net_target_layers[net_name] = None
+                result.fallback_nets.append(net_name)
+    else:
+        # Use explicit target layer for all nets
+        for net_name in net_names:
+            net_target_layers[net_name] = target_layer
 
     # Find pads on target nets
     net_name_set = set(net_names)
@@ -404,8 +458,9 @@ def run_stitch(
             result.pads_skipped.append((pad, "no valid via location"))
             continue
 
-        # Determine via layers
-        layers = get_via_layers(pad.layer, target_layer)
+        # Determine via layers using per-net target layer
+        pad_target_layer = net_target_layers.get(pad.net_name)
+        layers = get_via_layers(pad.layer, pad_target_layer)
 
         placement = ViaPlacement(
             pad=pad,
@@ -432,8 +487,24 @@ def run_stitch(
 
 def output_result(result: StitchResult, dry_run: bool = False) -> None:
     """Output the stitching result."""
+    import sys
+
     print(f"\nStitching vias for {result.pcb_name}")
     print("=" * 60)
+
+    # Show warning for nets with no zone found (falling back to B.Cu)
+    if result.fallback_nets:
+        for net_name in result.fallback_nets:
+            print(
+                f"\nWarning: No zone found for net '{net_name}', defaulting to B.Cu",
+                file=sys.stderr,
+            )
+
+    # Show detected layers
+    if result.detected_layers:
+        print("\nAuto-detected target layers from zones:")
+        for net_name, layer in sorted(result.detected_layers.items()):
+            print(f"  {net_name} -> {layer}")
 
     if not result.vias_added and not result.pads_skipped:
         if result.already_connected > 0:

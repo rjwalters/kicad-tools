@@ -519,3 +519,227 @@ class TestEdgeCases:
 
         # The existing via connects the GND pad
         assert result.already_connected >= 1
+
+
+# PCB with zones for auto-detection testing
+STITCH_ZONE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "VCC")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000200")
+    (at 120 110)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c2"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu") (uuid "zone-gnd-uuid")
+    (name "GND_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "In2.Cu") (uuid "zone-3v3-uuid")
+    (name "3V3_plane")
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 140 100) (xy 140 130) (xy 100 130)))
+  )
+)
+"""
+
+
+@pytest.fixture
+def stitch_zone_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file with zones for testing auto-detection."""
+    pcb_file = tmp_path / "stitch_zone.kicad_pcb"
+    pcb_file.write_text(STITCH_ZONE_PCB)
+    return pcb_file
+
+
+class TestZoneAutoDetection:
+    """Tests for zone-based target layer auto-detection."""
+
+    def test_find_zones_for_net(self, stitch_zone_pcb: Path):
+        """Should find zones matching a net name."""
+        from kicad_tools.cli.stitch_cmd import find_zones_for_net
+        from kicad_tools.core.sexp_file import load_pcb
+
+        sexp = load_pcb(stitch_zone_pcb)
+
+        # GND zone is on In1.Cu
+        gnd_layers = find_zones_for_net(sexp, "GND")
+        assert gnd_layers == ["In1.Cu"]
+
+        # +3.3V zone is on In2.Cu
+        v33_layers = find_zones_for_net(sexp, "+3.3V")
+        assert v33_layers == ["In2.Cu"]
+
+        # VCC has no zone
+        vcc_layers = find_zones_for_net(sexp, "VCC")
+        assert vcc_layers == []
+
+    def test_auto_detect_target_layer_from_zone(self, stitch_zone_pcb: Path):
+        """Should auto-detect target layer from zones when not specified."""
+        result = run_stitch(
+            pcb_path=stitch_zone_pcb,
+            net_names=["GND"],
+            target_layer=None,  # Auto-detect
+            dry_run=True,
+        )
+
+        # Should detect In1.Cu from GND zone
+        assert "GND" in result.detected_layers
+        assert result.detected_layers["GND"] == "In1.Cu"
+        assert len(result.fallback_nets) == 0
+
+        # Vias should target In1.Cu
+        assert len(result.vias_added) > 0
+        for via in result.vias_added:
+            assert via.layers[1] == "In1.Cu"
+
+    def test_auto_detect_multiple_nets(self, stitch_zone_pcb: Path):
+        """Should auto-detect target layers for multiple nets with zones."""
+        result = run_stitch(
+            pcb_path=stitch_zone_pcb,
+            net_names=["GND", "+3.3V"],
+            target_layer=None,  # Auto-detect
+            dry_run=True,
+        )
+
+        # Should detect layers for both nets
+        assert result.detected_layers.get("GND") == "In1.Cu"
+        assert result.detected_layers.get("+3.3V") == "In2.Cu"
+        assert len(result.fallback_nets) == 0
+
+        # Check vias target correct layers
+        gnd_vias = [v for v in result.vias_added if v.pad.net_name == "GND"]
+        v33_vias = [v for v in result.vias_added if v.pad.net_name == "+3.3V"]
+
+        for via in gnd_vias:
+            assert via.layers[1] == "In1.Cu"
+        for via in v33_vias:
+            assert via.layers[1] == "In2.Cu"
+
+    def test_fallback_to_bcu_when_no_zone(self, stitch_zone_pcb: Path):
+        """Should fall back to B.Cu when no zone found for net."""
+        result = run_stitch(
+            pcb_path=stitch_zone_pcb,
+            net_names=["VCC"],  # VCC has no zone
+            target_layer=None,  # Auto-detect
+            dry_run=True,
+        )
+
+        # Should record VCC as fallback
+        assert "VCC" in result.fallback_nets
+        assert "VCC" not in result.detected_layers
+
+        # VCC vias should target B.Cu (default)
+        vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
+        for via in vcc_vias:
+            assert via.layers[1] == "B.Cu"
+
+    def test_mixed_zone_and_no_zone_nets(self, stitch_zone_pcb: Path):
+        """Should handle mix of nets with and without zones."""
+        result = run_stitch(
+            pcb_path=stitch_zone_pcb,
+            net_names=["GND", "VCC"],  # GND has zone, VCC doesn't
+            target_layer=None,
+            dry_run=True,
+        )
+
+        # GND detected from zone
+        assert result.detected_layers.get("GND") == "In1.Cu"
+
+        # VCC falls back to B.Cu
+        assert "VCC" in result.fallback_nets
+
+        # Check layers match
+        gnd_vias = [v for v in result.vias_added if v.pad.net_name == "GND"]
+        vcc_vias = [v for v in result.vias_added if v.pad.net_name == "VCC"]
+
+        for via in gnd_vias:
+            assert via.layers[1] == "In1.Cu"
+        for via in vcc_vias:
+            assert via.layers[1] == "B.Cu"
+
+    def test_explicit_target_overrides_zone(self, stitch_zone_pcb: Path):
+        """Explicit target layer should override zone auto-detection."""
+        result = run_stitch(
+            pcb_path=stitch_zone_pcb,
+            net_names=["GND"],
+            target_layer="In2.Cu",  # Override the In1.Cu zone
+            dry_run=True,
+        )
+
+        # Should not auto-detect when explicit
+        assert len(result.detected_layers) == 0
+        assert len(result.fallback_nets) == 0
+
+        # All vias should use the explicit layer
+        for via in result.vias_added:
+            assert via.layers[1] == "In2.Cu"
+
+    def test_no_zone_without_explicit_target(self, stitch_test_pcb: Path):
+        """PCB without zones should fall back to B.Cu for all nets."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            target_layer=None,  # Auto-detect
+            dry_run=True,
+        )
+
+        # GND should fall back (no zones in test PCB)
+        assert "GND" in result.fallback_nets
+        assert len(result.detected_layers) == 0
+
+        # Vias should target B.Cu
+        for via in result.vias_added:
+            assert via.layers[1] == "B.Cu"
+
+
+class TestCLIOutputWithZones:
+    """Tests for CLI output with zone auto-detection."""
+
+    def test_output_shows_detected_layers(self, stitch_zone_pcb: Path, capsys):
+        """CLI should show detected layers in output."""
+        exit_code = main([str(stitch_zone_pcb), "--net", "GND", "--dry-run"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Auto-detected target layers" in captured.out
+        assert "GND -> In1.Cu" in captured.out
+
+    def test_output_shows_fallback_warning(self, stitch_zone_pcb: Path, capsys):
+        """CLI should show warning when falling back to B.Cu."""
+        exit_code = main([str(stitch_zone_pcb), "--net", "VCC", "--dry-run"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Warning" in captured.err
+        assert "VCC" in captured.err
+        assert "B.Cu" in captured.err
