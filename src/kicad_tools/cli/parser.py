@@ -150,6 +150,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_net_status_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
+    _add_mcp_parser(subparsers)
 
     return parser
 
@@ -2091,4 +2092,44 @@ def _add_impedance_parser(subparsers) -> None:
         dest="impedance_max_percent",
         type=float,
         help="Maximum crosstalk %% (for spacing calculation mode)",
+    )
+
+
+def _add_mcp_parser(subparsers) -> None:
+    """Add MCP server subcommand parser."""
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="MCP (Model Context Protocol) server for AI agents",
+        description="Start an MCP server for AI agent integration with KiCad tools.",
+    )
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", help="MCP subcommands")
+
+    # mcp serve subcommand
+    serve_parser = mcp_subparsers.add_parser(
+        "serve",
+        help="Start the MCP server",
+        description=(
+            "Start the MCP server with the specified transport. "
+            "Use stdio (default) for Claude Desktop integration, "
+            "or http for web-based integrations."
+        ),
+    )
+    serve_parser.add_argument(
+        "--transport",
+        "-t",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport mode (default: stdio)",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="localhost",
+        help="Host address for HTTP mode (default: localhost)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8080,
+        help="Port for HTTP mode (default: 8080)",
     )
