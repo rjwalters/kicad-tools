@@ -295,14 +295,23 @@ class PCBState:
                     priority=priority,
                 )
 
-        # Parse layers
+        # Parse layers from (layers ...) block
+        # KiCad format: (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) ...)
+        # Each layer node has: name=layer_number, atoms=[layer_name, type, ...]
         layers = []
-        for layer_node in doc.find_all("layer"):
-            atoms = layer_node.get_atoms()
-            if len(atoms) >= 2:
-                layer_name = str(atoms[1])
-                if "Cu" in layer_name:
-                    layers.append(layer_name)
+        layers_block = doc.get("layers")
+        if layers_block:
+            for child in layers_block.children:
+                if not child.is_atom:
+                    # Each layer is like (0 "F.Cu" signal) or (31 "B.Cu" signal)
+                    # The layer name is the first atom (e.g., "F.Cu")
+                    atoms = child.get_atoms()
+                    if len(atoms) >= 1:
+                        layer_name = str(atoms[0])
+                        # Copper layers end with ".Cu" (e.g., F.Cu, B.Cu, In1.Cu)
+                        # Must use endswith to avoid matching Edge.Cuts
+                        if layer_name.endswith(".Cu"):
+                            layers.append(layer_name)
 
         if not layers:
             layers = ["F.Cu", "B.Cu"]  # Default 2-layer
@@ -645,9 +654,35 @@ class PCBState:
 
     @classmethod
     def _parse_outline(cls, doc: SExp) -> BoardOutline:
-        """Parse board outline from Edge.Cuts layer."""
-        points = []
+        """Parse board outline from Edge.Cuts layer.
 
+        Handles both gr_line and gr_rect elements on the Edge.Cuts layer.
+        """
+        points: list[tuple[float, float]] = []
+
+        # Handle gr_rect elements (common for rectangular boards)
+        for gr_rect in doc.find_all("gr_rect"):
+            layer_node = gr_rect.find("layer")
+            if layer_node and str(layer_node.get_first_atom()) == "Edge.Cuts":
+                start = gr_rect.find("start")
+                end = gr_rect.find("end")
+                if start and end:
+                    s_atoms = start.get_atoms()
+                    e_atoms = end.get_atoms()
+                    if len(s_atoms) >= 2 and len(e_atoms) >= 2:
+                        x1, y1 = float(s_atoms[0]), float(s_atoms[1])
+                        x2, y2 = float(e_atoms[0]), float(e_atoms[1])
+                        # Add all 4 corners of the rectangle
+                        points.extend(
+                            [
+                                (x1, y1),
+                                (x2, y1),
+                                (x2, y2),
+                                (x1, y2),
+                            ]
+                        )
+
+        # Handle gr_line elements (for non-rectangular or complex outlines)
         for gr_line in doc.find_all("gr_line"):
             layer_node = gr_line.find("layer")
             if layer_node and str(layer_node.get_first_atom()) == "Edge.Cuts":
