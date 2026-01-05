@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
 from .core import Autorouter
-from .layers import Layer, LayerStack
+from .layers import Layer, LayerDefinition, LayerStack, LayerType
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
 
 # =============================================================================
@@ -393,6 +393,119 @@ def _point_to_segment_distance(
     closest_y = y1 + t * dy
 
     return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+
+def detect_layer_stack(pcb_text: str) -> LayerStack:
+    """Auto-detect layer stack configuration from a KiCad PCB file.
+
+    Parses the PCB file to determine:
+    1. How many copper layers exist (from the (layers ...) section)
+    2. Which inner layers have zone fills (likely planes)
+
+    For inner layers with power/ground zones, they are marked as PLANE layers
+    and excluded from signal routing. This allows proper handling of common
+    4-layer configurations where In1.Cu and In2.Cu are GND/PWR planes.
+
+    Args:
+        pcb_text: Contents of a .kicad_pcb file
+
+    Returns:
+        LayerStack configured for the detected layer count and plane assignments.
+
+    Example:
+        >>> pcb_text = Path("board.kicad_pcb").read_text()
+        >>> stack = detect_layer_stack(pcb_text)
+        >>> print(f"Detected: {stack.name} ({stack.num_layers} layers)")
+    """
+    # Parse the (layers ...) section to find copper layers
+    copper_layers: list[tuple[int, str]] = []
+
+    layers_match = re.search(r"\(layers\s+(.*?)\n\s*\)", pcb_text, re.DOTALL)
+    if layers_match:
+        layers_text = layers_match.group(1)
+        # Match layer definitions like: (0 "F.Cu" signal) or (31 "B.Cu" signal)
+        for layer_match in re.finditer(r'\((\d+)\s+"([^"]+\.Cu)"\s+(\w+)', layers_text):
+            layer_num = int(layer_match.group(1))
+            layer_name = layer_match.group(2)
+            # Only include copper layers (*.Cu)
+            copper_layers.append((layer_num, layer_name))
+
+    # Sort by layer number to get correct order
+    copper_layers.sort(key=lambda x: x[0])
+    num_copper = len(copper_layers)
+
+    if num_copper == 0:
+        # Fallback to 2-layer if no layers found
+        return LayerStack.two_layer()
+
+    # Detect which layers have zone fills (likely planes)
+    zone_layers: dict[str, str] = {}  # layer_name -> net_name
+
+    # Parse zone definitions to find layers with fills
+    for zone_match in re.finditer(
+        r'\(zone\s+.*?\(net_name\s+"([^"]+)"\).*?\(layer\s+"([^"]+)"\)',
+        pcb_text,
+        re.DOTALL,
+    ):
+        net_name = zone_match.group(1)
+        layer_name = zone_match.group(2)
+        # Track the net for this layer (prefer GND/power nets as plane indicators)
+        if layer_name.endswith(".Cu"):
+            # If multiple zones on same layer, prefer power/GND nets
+            existing = zone_layers.get(layer_name, "")
+            if not existing or net_name.upper() in ("GND", "GNDA", "GNDD"):
+                zone_layers[layer_name] = net_name
+            elif existing.upper() not in ("GND", "GNDA", "GNDD") and any(
+                c in net_name.upper() for c in ["+", "V", "PWR", "VCC", "VDD"]
+            ):
+                zone_layers[layer_name] = net_name
+
+    # Build layer definitions based on detected configuration
+    if num_copper <= 2:
+        return LayerStack.two_layer()
+
+    elif num_copper == 4:
+        # 4-layer board - check if inner layers are planes
+        inner_layers = [name for _, name in copper_layers if name not in ("F.Cu", "B.Cu")]
+
+        # Check if inner layers have zones (power/ground planes)
+        inner_zones = {name: zone_layers.get(name, "") for name in inner_layers}
+        has_inner_planes = any(inner_zones.values())
+
+        if has_inner_planes:
+            # Inner layers are planes - use SIG-GND-PWR-SIG configuration
+            layers = [
+                LayerDefinition(
+                    "F.Cu", 0, LayerType.SIGNAL, is_outer=True, reference_plane="In1.Cu"
+                ),
+            ]
+            # Add inner layers as planes with detected net names
+            in1_net = inner_zones.get("In1.Cu", "GND")
+            in2_net = inner_zones.get("In2.Cu", "+3.3V")
+            layers.append(LayerDefinition("In1.Cu", 1, LayerType.PLANE, plane_net=in1_net))
+            layers.append(LayerDefinition("In2.Cu", 2, LayerType.PLANE, plane_net=in2_net))
+            layers.append(
+                LayerDefinition(
+                    "B.Cu", 3, LayerType.SIGNAL, is_outer=True, reference_plane="In2.Cu"
+                )
+            )
+
+            return LayerStack(
+                name="4-Layer (auto-detected)",
+                description="4-layer with inner planes (auto-detected from PCB zones)",
+                layers=layers,
+            )
+        else:
+            # No zones on inner layers - treat all as signal layers
+            return LayerStack.four_layer_sig_sig_gnd_pwr()
+
+    elif num_copper == 6:
+        return LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()
+
+    else:
+        # Unsupported layer count - fall back to 2-layer
+        # Could be extended to support 8+ layers in the future
+        return LayerStack.two_layer()
 
 
 def route_pcb(

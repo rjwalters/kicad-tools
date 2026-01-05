@@ -396,16 +396,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--layers",
-        choices=["2", "4", "4-sig", "6"],
-        default="2",
+        choices=["auto", "2", "4", "4-sig", "6"],
+        default="auto",
         help=(
             "Layer stack configuration for routing: "
+            "'auto' = auto-detect from PCB file (default); "
             "'2' = 2-layer (F.Cu, B.Cu); "
             "'4' = 4-layer with GND/PWR planes (F.Cu, In1=GND, In2=PWR, B.Cu); "
             "'4-sig' = 4-layer with 2 signal layers (F.Cu, In1=signal, In2=GND, B.Cu); "
             "'6' = 6-layer with 4 signal layers. "
-            "Default: 2. For 4-layer boards with inner planes, signals route on "
-            "outer layers with vias for layer transitions."
+            "Auto-detection parses the PCB's layer definitions and zones to "
+            "determine the appropriate layer stack."
         ),
     )
 
@@ -441,15 +442,21 @@ def main(argv: list[str] | None = None) -> int:
         RoutabilityAnalyzer,
         load_pcb_for_routing,
     )
+    from kicad_tools.router.io import detect_layer_stack
 
-    # Create layer stack from --layers argument
-    layer_stack_map = {
-        "2": LayerStack.two_layer(),
-        "4": LayerStack.four_layer_sig_gnd_pwr_sig(),
-        "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr(),
-        "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
-    }
-    layer_stack = layer_stack_map[args.layers]
+    # Create layer stack from --layers argument (or auto-detect)
+    if args.layers == "auto":
+        # Auto-detect layer stack from PCB file
+        pcb_text = pcb_path.read_text()
+        layer_stack = detect_layer_stack(pcb_text)
+    else:
+        layer_stack_map = {
+            "2": LayerStack.two_layer(),
+            "4": LayerStack.four_layer_sig_gnd_pwr_sig(),
+            "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr(),
+            "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
+        }
+        layer_stack = layer_stack_map[args.layers]
 
     # Configure design rules
     rules = DesignRules(
