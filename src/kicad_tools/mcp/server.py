@@ -11,10 +11,23 @@ import json
 import logging
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from kicad_tools.mcp.tools.export import export_assembly, export_gerbers
-from kicad_tools.mcp.tools.session import query_move, start_session
+if TYPE_CHECKING:
+    from mcp.server.fastmcp import FastMCP
+
+from kicad_tools.mcp.tools.analysis import measure_clearance
+from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
+from kicad_tools.mcp.tools.placement import placement_analyze
+from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
+from kicad_tools.mcp.tools.session import (
+    apply_move,
+    commit_session,
+    query_move,
+    rollback_session,
+    start_session,
+    undo_move,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +62,10 @@ class MCPServer:
         """Register default tools."""
         self._register_export_tools()
         self._register_assembly_tools()
+        self._register_placement_tools()
         self._register_session_tools()
+        self._register_clearance_tools()
+        self._register_routing_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -92,6 +108,60 @@ class MCPServer:
             },
             handler=self._handle_export_gerbers,
         )
+
+        self.tools["export_bom"] = ToolDefinition(
+            name="export_bom",
+            description=(
+                "Export Bill of Materials (BOM) from a KiCad schematic file. "
+                "Generates a component list with quantities, values, footprints, and "
+                "part numbers. Supports multiple output formats including CSV, JSON, "
+                "and manufacturer-specific formats (JLCPCB, PCBWay, Seeed). "
+                "Automatically extracts LCSC part numbers from component fields."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "schematic_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_sch file",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional - omit for data-only response)",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format",
+                        "enum": ["csv", "json", "jlcpcb", "pcbway", "seeed"],
+                        "default": "csv",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Component grouping strategy",
+                        "enum": ["value", "footprint", "value+footprint", "mpn", "none"],
+                        "default": "value+footprint",
+                    },
+                    "include_dnp": {
+                        "type": "boolean",
+                        "description": "Include Do Not Place components",
+                        "default": False,
+                    },
+                },
+                "required": ["schematic_path"],
+            },
+            handler=self._handle_export_bom,
+        )
+
+    def _handle_export_bom(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle export_bom tool call."""
+        result = export_bom(
+            schematic_path=params["schematic_path"],
+            output_path=params.get("output_path"),
+            format=params.get("format", "csv"),
+            group_by=params.get("group_by", "value+footprint"),
+            include_dnp=params.get("include_dnp", False),
+        )
+        return result.to_dict()
 
     def _handle_export_gerbers(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle export_gerbers tool call."""
@@ -151,15 +221,63 @@ class MCPServer:
         )
         return result.to_dict()
 
+    def _register_placement_tools(self) -> None:
+        """Register placement analysis tools."""
+        self.tools["placement_analyze"] = ToolDefinition(
+            name="placement_analyze",
+            description=(
+                "Analyze current component placement quality. Evaluates placement with "
+                "metrics for wire length, congestion, thermal characteristics, signal "
+                "integrity, and manufacturing concerns. Returns an overall score, "
+                "category scores, identified issues with suggestions, detected functional "
+                "clusters, and routing difficulty estimates."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "check_thermal": {
+                        "type": "boolean",
+                        "description": "Include thermal analysis (power components, heat spreading)",
+                        "default": True,
+                    },
+                    "check_signal_integrity": {
+                        "type": "boolean",
+                        "description": "Include signal integrity hints (high-speed nets, crosstalk)",
+                        "default": True,
+                    },
+                    "check_manufacturing": {
+                        "type": "boolean",
+                        "description": "Include DFM checks (clearances, assembly)",
+                        "default": True,
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_placement_analyze,
+        )
+
+    def _handle_placement_analyze(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle placement_analyze tool call."""
+        result = placement_analyze(
+            pcb_path=params["pcb_path"],
+            check_thermal=params.get("check_thermal", True),
+            check_signal_integrity=params.get("check_signal_integrity", True),
+            check_manufacturing=params.get("check_manufacturing", True),
+        )
+        return result.to_dict()
+
     def _register_session_tools(self) -> None:
-        """Register session management tools."""
+        """Register session management tools for placement refinement."""
         self.tools["start_session"] = ToolDefinition(
             name="start_session",
             description=(
-                "Start an interactive placement refinement session. Creates a session "
-                "for exploring component placement changes using query-before-commit "
-                "semantics. Returns a session ID and initial component positions. "
-                "Sessions expire after 30 minutes of inactivity."
+                "Start a new placement refinement session. Creates a stateful session "
+                "for interactively refining component placement through query-before-commit "
+                "operations. Returns a session ID used for subsequent operations."
             ),
             parameters={
                 "type": "object",
@@ -171,10 +289,7 @@ class MCPServer:
                     "fixed_refs": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": (
-                            "Component references that should not be moved "
-                            "(e.g., connectors with fixed mechanical positions)"
-                        ),
+                        "description": "Component references to keep fixed (optional)",
                     },
                 },
                 "required": ["pcb_path"],
@@ -185,10 +300,9 @@ class MCPServer:
         self.tools["query_move"] = ToolDefinition(
             name="query_move",
             description=(
-                "Evaluate a hypothetical component move without applying it. "
-                "Returns impact analysis including score change, new/resolved "
-                "violations, affected components, and routing impact estimate. "
-                "Use this to explore placement changes before committing them."
+                "Query the impact of a hypothetical component move without applying it. "
+                "Returns score changes, new/resolved violations, and routing impact. "
+                "Use this to evaluate moves before applying them."
             ),
             parameters={
                 "type": "object",
@@ -199,7 +313,43 @@ class MCPServer:
                     },
                     "ref": {
                         "type": "string",
-                        "description": "Component reference designator (e.g., 'C1', 'U3')",
+                        "description": "Component reference designator (e.g., 'C1', 'R5')",
+                    },
+                    "x": {
+                        "type": "number",
+                        "description": "Target X position in millimeters",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Target Y position in millimeters",
+                    },
+                    "rotation": {
+                        "type": "number",
+                        "description": "Target rotation in degrees (optional, keeps current if not specified)",
+                    },
+                },
+                "required": ["session_id", "ref", "x", "y"],
+            },
+            handler=self._handle_query_move,
+        )
+
+        self.tools["apply_move"] = ToolDefinition(
+            name="apply_move",
+            description=(
+                "Apply a component move within the session. The move can be undone with "
+                "undo_move and is not written to disk until commit_session is called. "
+                "Returns updated component position and score delta."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "ref": {
+                        "type": "string",
+                        "description": "Component reference designator",
                     },
                     "x": {
                         "type": "number",
@@ -211,12 +361,75 @@ class MCPServer:
                     },
                     "rotation": {
                         "type": "number",
-                        "description": "New rotation in degrees (optional, keep current if not specified)",
+                        "description": "New rotation in degrees (optional)",
                     },
                 },
                 "required": ["session_id", "ref", "x", "y"],
             },
-            handler=self._handle_query_move,
+            handler=self._handle_apply_move,
+        )
+
+        self.tools["undo_move"] = ToolDefinition(
+            name="undo_move",
+            description=(
+                "Undo the last applied move in the session. Restores the component "
+                "to its previous position. Can be called multiple times to undo "
+                "multiple moves."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_undo_move,
+        )
+
+        self.tools["commit_session"] = ToolDefinition(
+            name="commit_session",
+            description=(
+                "Commit all pending moves to the PCB file and close the session. "
+                "Writes changes to disk. Optionally specify output_path to save to "
+                "a different file instead of overwriting the original."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional, overwrites original if not specified)",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_commit_session,
+        )
+
+        self.tools["rollback_session"] = ToolDefinition(
+            name="rollback_session",
+            description=(
+                "Discard all pending moves and close the session. No changes are "
+                "written to disk. Use this to abandon a session without saving."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_rollback_session,
         )
 
     def _handle_start_session(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -235,6 +448,164 @@ class MCPServer:
             x=params["x"],
             y=params["y"],
             rotation=params.get("rotation"),
+        )
+        return result.to_dict()
+
+    def _handle_apply_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle apply_move tool call."""
+        result = apply_move(
+            session_id=params["session_id"],
+            ref=params["ref"],
+            x=params["x"],
+            y=params["y"],
+            rotation=params.get("rotation"),
+        )
+        return result.to_dict()
+
+    def _handle_undo_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle undo_move tool call."""
+        result = undo_move(session_id=params["session_id"])
+        return result.to_dict()
+
+    def _handle_commit_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle commit_session tool call."""
+        result = commit_session(
+            session_id=params["session_id"],
+            output_path=params.get("output_path"),
+        )
+        return result.to_dict()
+
+    def _handle_rollback_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle rollback_session tool call."""
+        result = rollback_session(session_id=params["session_id"])
+        return result.to_dict()
+
+    def _register_clearance_tools(self) -> None:
+        """Register clearance measurement tools."""
+        self.tools["measure_clearance"] = ToolDefinition(
+            name="measure_clearance",
+            description=(
+                "Measure clearance between items on the PCB. Measures the minimum "
+                "edge-to-edge clearance between two items (components or nets) on the PCB. "
+                "If item2 is not specified, finds the nearest neighbor to item1. "
+                "Returns detailed measurements and design rule pass/fail status."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "item1": {
+                        "type": "string",
+                        "description": "Component reference (e.g., 'U1') or net name (e.g., 'GND')",
+                    },
+                    "item2": {
+                        "type": "string",
+                        "description": "Second item, or omit for nearest neighbor search",
+                    },
+                    "layer": {
+                        "type": "string",
+                        "description": "Specific layer to check (e.g., 'F.Cu'), or omit for all layers",
+                    },
+                },
+                "required": ["pcb_path", "item1"],
+            },
+            handler=self._handle_measure_clearance,
+        )
+
+    def _handle_measure_clearance(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle measure_clearance tool call."""
+        result = measure_clearance(
+            pcb_path=params["pcb_path"],
+            item1=params["item1"],
+            item2=params.get("item2"),
+            layer=params.get("layer"),
+        )
+        return result.to_dict()
+
+    def _register_routing_tools(self) -> None:
+        """Register routing-related tools."""
+        self.tools["get_unrouted_nets"] = ToolDefinition(
+            name="get_unrouted_nets",
+            description=(
+                "List nets that need routing. Analyzes a PCB file to identify nets "
+                "that are unrouted or partially routed. Provides difficulty estimates "
+                "and routing recommendations for AI-driven routing workflows."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "include_partial": {
+                        "type": "boolean",
+                        "description": "Include partially routed nets in results",
+                        "default": True,
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_get_unrouted_nets,
+        )
+
+        self.tools["route_net"] = ToolDefinition(
+            name="route_net",
+            description=(
+                "Route a specific net. Attempts to route all unconnected pads on the "
+                "specified net using the autorouter. Returns routing details including "
+                "success status, trace length, vias used, and suggestions if routing failed."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "net_name": {
+                        "type": "string",
+                        "description": "Name of the net to route (e.g., 'GND', 'SPI_CLK')",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional, overwrites original if not specified)",
+                    },
+                    "strategy": {
+                        "type": "string",
+                        "description": "Routing strategy",
+                        "enum": ["auto", "shortest", "avoid_vias"],
+                        "default": "auto",
+                    },
+                    "layer_preference": {
+                        "type": "string",
+                        "description": "Preferred layer for routing (e.g., 'F.Cu', 'B.Cu')",
+                    },
+                },
+                "required": ["pcb_path", "net_name"],
+            },
+            handler=self._handle_route_net,
+        )
+
+    def _handle_get_unrouted_nets(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle get_unrouted_nets tool call."""
+        result = get_unrouted_nets(
+            pcb_path=params["pcb_path"],
+            include_partial=params.get("include_partial", True),
+        )
+        return result.to_dict()
+
+    def _handle_route_net(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle route_net tool call."""
+        result = route_net(
+            pcb_path=params["pcb_path"],
+            net_name=params["net_name"],
+            output_path=params.get("output_path"),
+            strategy=params.get("strategy", "auto"),
+            layer_preference=params.get("layer_preference"),
         )
         return result.to_dict()
 
@@ -284,6 +655,7 @@ class MCPServer:
         request_id = request.get("id")
 
         try:
+            result: dict[str, Any]
             if method == "initialize":
                 result = {
                     "protocolVersion": "2024-11-05",
@@ -377,8 +749,422 @@ def create_server() -> MCPServer:
     return MCPServer()
 
 
+def create_fastmcp_server(http_mode: bool = False) -> FastMCP:
+    """Create a FastMCP server with all tools registered.
+
+    Args:
+        http_mode: If True, creates server in stateless HTTP mode.
+
+    Returns:
+        Configured FastMCP server instance.
+
+    Raises:
+        ImportError: If fastmcp is not installed.
+    """
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as e:
+        raise ImportError(
+            "FastMCP is required for HTTP transport. Install with: pip install 'kicad-tools[mcp]'"
+        ) from e
+
+    mcp = FastMCP("kicad-tools", stateless_http=http_mode)
+
+    # Register export tools
+    @mcp.tool()
+    def export_gerbers(
+        pcb_path: str,
+        output_dir: str,
+        manufacturer: str = "generic",
+        include_drill: bool = True,
+        zip_output: bool = True,
+    ) -> dict:
+        """Export Gerber files for PCB manufacturing.
+
+        Generates all required Gerber layers (copper, soldermask, silkscreen, outline)
+        and optionally drill files. Supports manufacturer presets for JLCPCB, OSHPark,
+        PCBWay, and Seeed.
+
+        Args:
+            pcb_path: Path to .kicad_pcb file
+            output_dir: Directory for output files
+            manufacturer: Manufacturer preset (generic, jlcpcb, pcbway, oshpark, seeed)
+            include_drill: Include drill files (Excellon format)
+            zip_output: Create zip archive of all files
+
+        Returns:
+            Export result with file paths and status.
+        """
+        from kicad_tools.mcp.tools.export import export_gerbers as _export_gerbers
+
+        result = _export_gerbers(
+            pcb_path=pcb_path,
+            output_dir=output_dir,
+            manufacturer=manufacturer,
+            include_drill=include_drill,
+            zip_output=zip_output,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def export_bom(
+        schematic_path: str,
+        output_path: str | None = None,
+        format: str = "csv",
+        group_by: str = "value+footprint",
+        include_dnp: bool = False,
+    ) -> dict:
+        """Export Bill of Materials (BOM) from a KiCad schematic file.
+
+        Generates a component list with quantities, values, footprints, and
+        part numbers. Supports multiple output formats including CSV, JSON,
+        and manufacturer-specific formats (JLCPCB, PCBWay, Seeed).
+
+        Args:
+            schematic_path: Path to .kicad_sch file
+            output_path: Output file path (optional)
+            format: Output format (csv, json, jlcpcb, pcbway, seeed)
+            group_by: Component grouping strategy
+            include_dnp: Include Do Not Place components
+
+        Returns:
+            BOM export result with components and file path.
+        """
+        from kicad_tools.mcp.tools.export import export_bom as _export_bom
+
+        result = _export_bom(
+            schematic_path=schematic_path,
+            output_path=output_path,
+            format=format,
+            group_by=group_by,
+            include_dnp=include_dnp,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def export_assembly(
+        pcb_path: str,
+        schematic_path: str,
+        output_dir: str,
+        manufacturer: str = "jlcpcb",
+    ) -> dict:
+        """Generate complete assembly package for manufacturing.
+
+        Creates Gerber files, bill of materials (BOM), and pick-and-place (PnP/CPL)
+        files tailored to specific manufacturers.
+
+        Args:
+            pcb_path: Path to .kicad_pcb file
+            schematic_path: Path to .kicad_sch file
+            output_dir: Directory for output files
+            manufacturer: Target manufacturer (jlcpcb, pcbway, seeed, generic)
+
+        Returns:
+            Assembly export result with file paths.
+        """
+        from kicad_tools.mcp.tools.export import export_assembly as _export_assembly
+
+        result = _export_assembly(
+            pcb_path=pcb_path,
+            schematic_path=schematic_path,
+            output_dir=output_dir,
+            manufacturer=manufacturer,
+        )
+        return result.to_dict()
+
+    # Register placement tools
+    @mcp.tool()
+    def placement_analyze(
+        pcb_path: str,
+        check_thermal: bool = True,
+        check_signal_integrity: bool = True,
+        check_manufacturing: bool = True,
+    ) -> dict:
+        """Analyze current component placement quality.
+
+        Evaluates placement with metrics for wire length, congestion, thermal
+        characteristics, signal integrity, and manufacturing concerns.
+
+        Args:
+            pcb_path: Path to .kicad_pcb file
+            check_thermal: Include thermal analysis
+            check_signal_integrity: Include signal integrity hints
+            check_manufacturing: Include DFM checks
+
+        Returns:
+            Analysis result with scores and suggestions.
+        """
+        from kicad_tools.mcp.tools.placement import (
+            placement_analyze as _placement_analyze,
+        )
+
+        result = _placement_analyze(
+            pcb_path=pcb_path,
+            check_thermal=check_thermal,
+            check_signal_integrity=check_signal_integrity,
+            check_manufacturing=check_manufacturing,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def placement_suggestions(
+        pcb_path: str,
+        component: str | None = None,
+        max_suggestions: int = 10,
+        strategy: str = "balanced",
+    ) -> dict:
+        """Get AI-friendly placement improvement suggestions for a PCB.
+
+        Analyzes component placement and returns actionable recommendations
+        ranked by priority.
+
+        Args:
+            pcb_path: Path to .kicad_pcb file
+            component: Specific component reference to analyze (optional)
+            max_suggestions: Maximum number of suggestions (1-50)
+            strategy: Optimization strategy (balanced, wire_length, thermal, si)
+
+        Returns:
+            Suggestions with rankings and expected improvements.
+        """
+        from kicad_tools.mcp.tools.placement import (
+            placement_suggestions as _placement_suggestions,
+        )
+
+        result = _placement_suggestions(
+            pcb_path=pcb_path,
+            component=component,
+            max_suggestions=max_suggestions,
+            strategy=strategy,
+        )
+        return result.to_dict()
+
+    # Register session tools
+    @mcp.tool()
+    def start_session(
+        pcb_path: str,
+        fixed_refs: list[str] | None = None,
+    ) -> dict:
+        """Start a new placement refinement session.
+
+        Creates a stateful session for interactively refining component placement
+        through query-before-commit operations.
+
+        Args:
+            pcb_path: Absolute path to .kicad_pcb file
+            fixed_refs: Component references to keep fixed (optional)
+
+        Returns:
+            Session info with session_id for subsequent operations.
+        """
+        from kicad_tools.mcp.tools.session import start_session as _start_session
+
+        result = _start_session(
+            pcb_path=pcb_path,
+            fixed_refs=fixed_refs,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def query_move(
+        session_id: str,
+        ref: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+    ) -> dict:
+        """Query the impact of a hypothetical component move without applying it.
+
+        Returns score changes, new/resolved violations, and routing impact.
+        Use this to evaluate moves before applying them.
+
+        Args:
+            session_id: Session ID from start_session
+            ref: Component reference designator (e.g., 'C1', 'R5')
+            x: Target X position in millimeters
+            y: Target Y position in millimeters
+            rotation: Target rotation in degrees (optional)
+
+        Returns:
+            Move impact analysis with score delta and violations.
+        """
+        from kicad_tools.mcp.tools.session import query_move as _query_move
+
+        result = _query_move(
+            session_id=session_id,
+            ref=ref,
+            x=x,
+            y=y,
+            rotation=rotation,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def apply_move(
+        session_id: str,
+        ref: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+    ) -> dict:
+        """Apply a component move within the session.
+
+        The move can be undone with undo_move and is not written to disk
+        until commit_session is called.
+
+        Args:
+            session_id: Session ID from start_session
+            ref: Component reference designator
+            x: New X position in millimeters
+            y: New Y position in millimeters
+            rotation: New rotation in degrees (optional)
+
+        Returns:
+            Updated component position and score delta.
+        """
+        from kicad_tools.mcp.tools.session import apply_move as _apply_move
+
+        result = _apply_move(
+            session_id=session_id,
+            ref=ref,
+            x=x,
+            y=y,
+            rotation=rotation,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def undo_move(session_id: str) -> dict:
+        """Undo the last applied move in the session.
+
+        Restores the component to its previous position.
+
+        Args:
+            session_id: Session ID from start_session
+
+        Returns:
+            Undo result with restored position.
+        """
+        from kicad_tools.mcp.tools.session import undo_move as _undo_move
+
+        result = _undo_move(session_id=session_id)
+        return result.to_dict()
+
+    @mcp.tool()
+    def commit_session(
+        session_id: str,
+        output_path: str | None = None,
+    ) -> dict:
+        """Commit all pending moves to the PCB file and close the session.
+
+        Writes changes to disk. Optionally specify output_path to save to
+        a different file instead of overwriting the original.
+
+        Args:
+            session_id: Session ID from start_session
+            output_path: Output file path (optional)
+
+        Returns:
+            Commit result with file path and statistics.
+        """
+        from kicad_tools.mcp.tools.session import commit_session as _commit_session
+
+        result = _commit_session(
+            session_id=session_id,
+            output_path=output_path,
+        )
+        return result.to_dict()
+
+    @mcp.tool()
+    def rollback_session(session_id: str) -> dict:
+        """Discard all pending moves and close the session.
+
+        No changes are written to disk.
+
+        Args:
+            session_id: Session ID from start_session
+
+        Returns:
+            Rollback confirmation.
+        """
+        from kicad_tools.mcp.tools.session import rollback_session as _rollback_session
+
+        result = _rollback_session(session_id=session_id)
+        return result.to_dict()
+
+    # Register clearance tool
+    @mcp.tool()
+    def measure_clearance(
+        pcb_path: str,
+        item1: str,
+        item2: str | None = None,
+        layer: str | None = None,
+    ) -> dict:
+        """Measure clearance between items on the PCB.
+
+        Measures the minimum edge-to-edge clearance between two items
+        (components or nets) on the PCB. If item2 is not specified,
+        finds the nearest neighbor to item1.
+
+        Args:
+            pcb_path: Path to .kicad_pcb file
+            item1: Component reference (e.g., 'U1') or net name (e.g., 'GND')
+            item2: Second item, or omit for nearest neighbor search
+            layer: Specific layer to check (e.g., 'F.Cu'), or omit for all
+
+        Returns:
+            Clearance measurement with distance and pass/fail status.
+        """
+        from kicad_tools.mcp.tools.analysis import measure_clearance as _measure_clearance
+
+        result = _measure_clearance(
+            pcb_path=pcb_path,
+            item1=item1,
+            item2=item2,
+            layer=layer,
+        )
+        return result.to_dict()
+
+    return mcp
+
+
+def run_server(
+    transport: str = "stdio",
+    host: str = "localhost",
+    port: int = 8080,
+) -> None:
+    """Run the MCP server with the specified transport.
+
+    Args:
+        transport: Transport mode - 'stdio' or 'http'
+        host: Host address for HTTP mode (default: localhost)
+        port: Port for HTTP mode (default: 8080)
+
+    Raises:
+        ValueError: If transport is not 'stdio' or 'http'
+        ImportError: If fastmcp is not installed for HTTP mode
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+
+    if transport == "stdio":
+        # Use existing MCPServer for stdio (backward compatible)
+        server = create_server()
+        server.run()
+    elif transport == "http":
+        # Use FastMCP for HTTP transport
+        mcp = create_fastmcp_server(http_mode=True)
+        logger.info(f"Starting HTTP MCP server on {host}:{port}")
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        raise ValueError(f"Unknown transport: {transport}. Use 'stdio' or 'http'.")
+
+
 def main() -> None:
-    """Entry point for MCP server."""
+    """Entry point for MCP server (stdio mode by default)."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

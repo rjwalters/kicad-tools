@@ -439,6 +439,49 @@ class DRCResult:
 
 
 # =============================================================================
+# Session Management Types
+# =============================================================================
+
+
+@dataclass
+class SessionInfo:
+    """Information about an active placement session.
+
+    Provides metadata and statistics about a placement session
+    for monitoring and debugging purposes.
+
+    Attributes:
+        id: Unique session identifier (8-character UUID prefix).
+        pcb_path: Path to the PCB file being edited.
+        created_at: ISO 8601 timestamp when session was created.
+        last_accessed: ISO 8601 timestamp when session was last accessed.
+        pending_moves: Number of uncommitted component moves.
+        components: Total number of components in the session.
+        current_score: Current placement quality score (lower is better).
+    """
+
+    id: str
+    pcb_path: str
+    created_at: str  # ISO 8601 timestamp
+    last_accessed: str  # ISO 8601 timestamp
+    pending_moves: int
+    components: int
+    current_score: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "pcb_path": self.pcb_path,
+            "created_at": self.created_at,
+            "last_accessed": self.last_accessed,
+            "pending_moves": self.pending_moves,
+            "components": self.components,
+            "current_score": round(self.current_score, 4),
+        }
+
+
+# =============================================================================
 # Gerber Export Types (continued)
 # =============================================================================
 
@@ -496,6 +539,90 @@ class BOMExportResult:
             "component_count": self.component_count,
             "unique_parts": self.unique_parts,
             "missing_lcsc": self.missing_lcsc,
+        }
+
+
+@dataclass
+class BOMItemResult:
+    """A single item or group in standalone BOM export.
+
+    Used by export_bom tool to provide detailed component information.
+
+    Attributes:
+        reference: Reference designator(s), comma-separated when grouped
+        value: Component value (e.g., "10k", "100nF")
+        footprint: Footprint name
+        quantity: Number of components in this group
+        lcsc_part: LCSC part number if available
+        description: Component description if available
+        manufacturer: Manufacturer name if available
+        mpn: Manufacturer Part Number if available
+    """
+
+    reference: str
+    value: str
+    footprint: str
+    quantity: int
+    lcsc_part: str | None = None
+    description: str | None = None
+    manufacturer: str | None = None
+    mpn: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "reference": self.reference,
+            "value": self.value,
+            "footprint": self.footprint,
+            "quantity": self.quantity,
+            "lcsc_part": self.lcsc_part,
+            "description": self.description,
+            "manufacturer": self.manufacturer,
+            "mpn": self.mpn,
+        }
+
+
+@dataclass
+class BOMGenerationResult:
+    """Result of standalone BOM generation via export_bom tool.
+
+    More comprehensive than BOMExportResult, includes full item details
+    and supports data-only mode (no file output).
+
+    Attributes:
+        success: Whether the export completed successfully
+        total_parts: Total number of component instances
+        unique_parts: Number of unique part types (groups)
+        output_path: Path to exported file (None if data-only)
+        missing_lcsc: List of references missing LCSC part numbers
+        items: List of BOM items with full details
+        format: Export format used
+        warnings: Any warnings encountered
+        error: Error message if success is False
+    """
+
+    success: bool
+    total_parts: int = 0
+    unique_parts: int = 0
+    output_path: str | None = None
+    missing_lcsc: list[str] = field(default_factory=list)
+    items: list[BOMItemResult] = field(default_factory=list)
+    format: str = "csv"
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "success": self.success,
+            "total_parts": self.total_parts,
+            "unique_parts": self.unique_parts,
+            "output_path": self.output_path,
+            "missing_lcsc": self.missing_lcsc,
+            "items": [item.to_dict() for item in self.items],
+            "format": self.format,
+            "warnings": self.warnings,
+            "error": self.error,
         }
 
 
@@ -599,87 +726,319 @@ class AssemblyExportResult:
 
 
 # =============================================================================
+# Placement Analysis Types
+# =============================================================================
+
+
+@dataclass
+class PlacementScores:
+    """Placement quality scores by category.
+
+    Attributes:
+        wire_length: Wire length score (lower is better, 0-100 normalized).
+        congestion: Congestion score (lower is better, 0-100 normalized).
+        thermal: Thermal quality score (higher is better, proper heat spreading).
+        signal_integrity: Signal integrity score (higher is better).
+        manufacturing: Manufacturing/DFM score (higher is better).
+    """
+
+    wire_length: float
+    congestion: float
+    thermal: float
+    signal_integrity: float
+    manufacturing: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "wire_length": round(self.wire_length, 1),
+            "congestion": round(self.congestion, 1),
+            "thermal": round(self.thermal, 1),
+            "signal_integrity": round(self.signal_integrity, 1),
+            "manufacturing": round(self.manufacturing, 1),
+        }
+
+
+@dataclass
+class PlacementIssue:
+    """A placement issue or recommendation.
+
+    Attributes:
+        severity: Issue severity ("critical", "warning", "suggestion").
+        category: Issue category ("thermal", "routing", "si", "dfm").
+        description: Human-readable description of the issue.
+        affected_components: List of component reference designators involved.
+        suggestion: Actionable suggestion to fix the issue.
+        location: Optional (x, y) location in mm.
+    """
+
+    severity: str
+    category: str
+    description: str
+    affected_components: list[str]
+    suggestion: str
+    location: tuple[float, float] | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        result: dict = {
+            "severity": self.severity,
+            "category": self.category,
+            "description": self.description,
+            "affected_components": self.affected_components,
+            "suggestion": self.suggestion,
+        }
+        if self.location is not None:
+            result["location"] = {"x": round(self.location[0], 2), "y": round(self.location[1], 2)}
+        return result
+
+
+@dataclass
+class PlacementCluster:
+    """A detected functional cluster of components.
+
+    Attributes:
+        name: Cluster name (e.g., "mcu_cluster", "power_section").
+        components: List of component reference designators in the cluster.
+        centroid: Cluster center position (x, y) in mm.
+        compactness_score: How compact the cluster is (0-100, higher is better).
+    """
+
+    name: str
+    components: list[str]
+    centroid: tuple[float, float]
+    compactness_score: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "name": self.name,
+            "components": self.components,
+            "centroid": {"x": round(self.centroid[0], 2), "y": round(self.centroid[1], 2)},
+            "compactness_score": round(self.compactness_score, 1),
+        }
+
+
+@dataclass
+class RoutingEstimate:
+    """Estimated routing difficulty based on placement.
+
+    Attributes:
+        estimated_routability: Routability score (0-100, higher is easier to route).
+        congestion_hotspots: List of (x, y) positions with high congestion.
+        difficult_nets: List of net names that will be difficult to route.
+    """
+
+    estimated_routability: float
+    congestion_hotspots: list[tuple[float, float]] = field(default_factory=list)
+    difficult_nets: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "estimated_routability": round(self.estimated_routability, 1),
+            "congestion_hotspots": [
+                {"x": round(x, 2), "y": round(y, 2)} for x, y in self.congestion_hotspots
+            ],
+            "difficult_nets": self.difficult_nets,
+        }
+
+
+@dataclass
+class PlacementAnalysis:
+    """Complete placement quality analysis.
+
+    This is the main result type returned by placement_analyze().
+    Contains comprehensive information about placement quality including
+    scores by category, identified issues, functional clusters, and
+    routing difficulty estimate.
+
+    Attributes:
+        file_path: Absolute path to the analyzed PCB file.
+        overall_score: Overall placement quality score (0-100).
+        categories: Scores broken down by category.
+        issues: List of identified placement issues.
+        clusters: Detected functional clusters.
+        routing_estimate: Estimated routing difficulty.
+    """
+
+    file_path: str
+    overall_score: float
+    categories: PlacementScores
+    issues: list[PlacementIssue] = field(default_factory=list)
+    clusters: list[PlacementCluster] = field(default_factory=list)
+    routing_estimate: RoutingEstimate = field(
+        default_factory=lambda: RoutingEstimate(estimated_routability=0.0)
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "file_path": self.file_path,
+            "overall_score": round(self.overall_score, 1),
+            "categories": self.categories.to_dict(),
+            "issues": [i.to_dict() for i in self.issues],
+            "clusters": [c.to_dict() for c in self.clusters],
+            "routing_estimate": self.routing_estimate.to_dict(),
+        }
+
+
+# =============================================================================
+# Clearance Measurement Types
+# =============================================================================
+
+
+@dataclass
+class ClearanceMeasurement:
+    """A single clearance measurement between two copper elements.
+
+    Attributes:
+        from_item: Reference of the first item (e.g., "U1-1", "Track-abc123")
+        from_type: Type of the first item ("pad", "track", "via")
+        to_item: Reference of the second item
+        to_type: Type of the second item
+        clearance_mm: Edge-to-edge clearance in millimeters
+        location: (x, y) location where the minimum clearance was measured
+        layer: PCB layer where the clearance was measured
+    """
+
+    from_item: str
+    from_type: str
+    to_item: str
+    to_type: str
+    clearance_mm: float
+    location: tuple[float, float]
+    layer: str
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "from_item": self.from_item,
+            "from_type": self.from_type,
+            "to_item": self.to_item,
+            "to_type": self.to_type,
+            "clearance_mm": round(self.clearance_mm, 4),
+            "location": {"x": self.location[0], "y": self.location[1]},
+            "layer": self.layer,
+        }
+
+
+@dataclass
+class ClearanceResult:
+    """Result of a clearance measurement between items.
+
+    Attributes:
+        item1: First item identifier (component ref or net name)
+        item2: Second item identifier (component ref or net name)
+        min_clearance_mm: Minimum clearance found between items
+        location: (x, y) position where minimum clearance occurs
+        layer: Layer where minimum clearance was found
+        clearances: List of all individual clearance measurements
+        passes_rules: Whether the clearance meets design rules
+        required_clearance_mm: Required minimum clearance from design rules
+    """
+
+    item1: str
+    item2: str
+    min_clearance_mm: float
+    location: tuple[float, float]
+    layer: str
+    clearances: list[ClearanceMeasurement] = field(default_factory=list)
+    passes_rules: bool = True
+    required_clearance_mm: float | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "item1": self.item1,
+            "item2": self.item2,
+            "min_clearance_mm": round(self.min_clearance_mm, 4),
+            "location": {"x": self.location[0], "y": self.location[1]},
+            "layer": self.layer,
+            "clearances": [c.to_dict() for c in self.clearances],
+            "passes_rules": self.passes_rules,
+            "required_clearance_mm": self.required_clearance_mm,
+        }
+
+    def summary(self) -> str:
+        """Generate a human-readable summary of the clearance result."""
+        status = "PASSES" if self.passes_rules else "FAILS"
+        summary = f"Clearance between {self.item1} and {self.item2}: {self.min_clearance_mm:.4f} mm [{status}]"
+        if self.required_clearance_mm is not None:
+            summary += f" (required: {self.required_clearance_mm:.4f} mm)"
+        summary += (
+            f"\nLocation: ({self.location[0]:.3f}, {self.location[1]:.3f}) mm on {self.layer}"
+        )
+        return summary
+
+
+# =============================================================================
 # Session Management Types
 # =============================================================================
 
 
 @dataclass
 class ComponentPosition:
-    """Position and metadata for a component in a placement session.
+    """Position information for a component.
 
     Attributes:
-        ref: Component reference designator (e.g., "C1", "U3")
+        ref: Component reference designator (e.g., "C1", "R5")
         x: X position in millimeters
         y: Y position in millimeters
-        rotation: Rotation in degrees (0-360)
-        fixed: Whether the component is locked from movement
-        width: Component width in millimeters
-        height: Component height in millimeters
+        rotation: Rotation in degrees
+        fixed: Whether component is fixed/locked
     """
 
     ref: str
     x: float
     y: float
     rotation: float
-    fixed: bool
-    width: float
-    height: float
+    fixed: bool = False
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for serialization."""
         return {
             "ref": self.ref,
             "x": round(self.x, 3),
             "y": round(self.y, 3),
             "rotation": round(self.rotation, 1),
             "fixed": self.fixed,
-            "width": round(self.width, 3),
-            "height": round(self.height, 3),
         }
 
 
 @dataclass
-class SessionStartResult:
-    """Result of starting a placement session.
+class RoutingImpactInfo:
+    """Routing impact information for a move.
 
     Attributes:
-        session_id: Unique session identifier
-        pcb_path: Path to the PCB file
-        components: List of all component positions
-        initial_score: Initial placement score (lower is better)
-        fixed_refs: List of component references marked as fixed
-        expires_at: ISO timestamp when session will expire
+        affected_nets: List of nets affected by the move
+        estimated_length_change_mm: Estimated change in routing length
+        crossing_changes: Change in net crossing count
     """
 
-    session_id: str
-    pcb_path: str
-    components: list[ComponentPosition]
-    initial_score: float
-    fixed_refs: list[str]
-    expires_at: str  # ISO format datetime string
+    affected_nets: list[str] = field(default_factory=list)
+    estimated_length_change_mm: float = 0.0
+    crossing_changes: int = 0
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for serialization."""
         return {
-            "session_id": self.session_id,
-            "pcb_path": self.pcb_path,
-            "components": [c.to_dict() for c in self.components],
-            "initial_score": round(self.initial_score, 4),
-            "fixed_refs": self.fixed_refs,
-            "expires_at": self.expires_at,
+            "affected_nets": self.affected_nets,
+            "estimated_length_change_mm": round(self.estimated_length_change_mm, 3),
+            "crossing_changes": self.crossing_changes,
         }
 
 
 @dataclass
-class SessionViolation:
-    """A placement constraint violation in session context.
+class ViolationInfo:
+    """Information about a placement constraint violation.
 
     Attributes:
         type: Violation type (e.g., "clearance", "overlap", "boundary")
         description: Human-readable description
         severity: Severity level ("error", "warning", "info")
         component: Component reference if applicable
-        location: (x, y) coordinates if applicable
+        location: (x, y) location if applicable
     """
 
     type: str
@@ -689,7 +1048,7 @@ class SessionViolation:
     location: tuple[float, float] | None = None
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for serialization."""
         return {
             "type": self.type,
             "description": self.description,
@@ -700,64 +1059,322 @@ class SessionViolation:
 
 
 @dataclass
-class SessionRoutingImpact:
-    """Impact of a component move on routing.
+class StartSessionResult:
+    """Result of starting a placement session.
 
     Attributes:
-        affected_nets: List of net names affected by the move
-        estimated_length_change_mm: Estimated change in total wire length
-        new_congestion_areas: New potential congestion points
-        crossing_changes: Change in net crossing count
+        success: Whether session was started successfully
+        session_id: Unique session identifier
+        component_count: Number of components in the session
+        fixed_count: Number of fixed (unmovable) components
+        initial_score: Initial placement score
+        error_message: Error message if success is False
     """
 
-    affected_nets: list[str] = field(default_factory=list)
-    estimated_length_change_mm: float = 0.0
-    new_congestion_areas: list[tuple[float, float]] = field(default_factory=list)
-    crossing_changes: int = 0
+    success: bool
+    session_id: str = ""
+    component_count: int = 0
+    fixed_count: int = 0
+    initial_score: float = 0.0
+    error_message: str | None = None
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for serialization."""
         return {
-            "affected_nets": self.affected_nets,
-            "estimated_length_change_mm": round(self.estimated_length_change_mm, 3),
-            "new_congestion_areas": [list(c) for c in self.new_congestion_areas],
-            "crossing_changes": self.crossing_changes,
+            "success": self.success,
+            "session_id": self.session_id,
+            "component_count": self.component_count,
+            "fixed_count": self.fixed_count,
+            "initial_score": round(self.initial_score, 4),
+            "error_message": self.error_message,
         }
 
 
 @dataclass
-class MoveQueryResult:
-    """Result of evaluating a hypothetical component move.
+class QueryMoveResult:
+    """Result of querying a hypothetical move.
 
     Attributes:
-        valid: Whether the move is valid
+        success: Whether the query was successful
+        would_succeed: Whether applying this move would succeed
         score_delta: Change in placement score (negative = improvement)
-        new_violations: Violations created by this move
-        resolved_violations: Violations fixed by this move
-        affected_components: Other components affected by the move
+        new_violations: New violations that would be created
+        resolved_violations: Existing violations that would be resolved
+        affected_components: Components that share nets with moved component
         routing_impact: Impact on routing
-        warnings: Warning messages about the move
-        error_message: Error message if move is invalid
+        warnings: Any warnings about the move
+        error_message: Error message if success is False
     """
 
-    valid: bool
+    success: bool
+    would_succeed: bool = False
     score_delta: float = 0.0
-    new_violations: list[SessionViolation] = field(default_factory=list)
-    resolved_violations: list[SessionViolation] = field(default_factory=list)
+    new_violations: list[ViolationInfo] = field(default_factory=list)
+    resolved_violations: list[ViolationInfo] = field(default_factory=list)
     affected_components: list[str] = field(default_factory=list)
-    routing_impact: SessionRoutingImpact = field(default_factory=SessionRoutingImpact)
+    routing_impact: RoutingImpactInfo | None = None
     warnings: list[str] = field(default_factory=list)
     error_message: str | None = None
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for serialization."""
         return {
-            "valid": self.valid,
+            "success": self.success,
+            "would_succeed": self.would_succeed,
             "score_delta": round(self.score_delta, 4),
             "new_violations": [v.to_dict() for v in self.new_violations],
             "resolved_violations": [v.to_dict() for v in self.resolved_violations],
             "affected_components": self.affected_components,
-            "routing_impact": self.routing_impact.to_dict(),
+            "routing_impact": self.routing_impact.to_dict() if self.routing_impact else None,
             "warnings": self.warnings,
             "error_message": self.error_message,
+        }
+
+
+@dataclass
+class ApplyMoveResult:
+    """Result of applying a move within a session.
+
+    Attributes:
+        success: Whether the move was applied successfully
+        move_id: Index of this move for potential undo
+        component: Updated component position
+        new_score: New placement score after move
+        score_delta: Change in placement score
+        pending_moves: Total number of pending moves in session
+        error_message: Error message if success is False
+    """
+
+    success: bool
+    move_id: int = 0
+    component: ComponentPosition | None = None
+    new_score: float = 0.0
+    score_delta: float = 0.0
+    pending_moves: int = 0
+    error_message: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "success": self.success,
+            "move_id": self.move_id,
+            "component": self.component.to_dict() if self.component else None,
+            "new_score": round(self.new_score, 4),
+            "score_delta": round(self.score_delta, 4),
+            "pending_moves": self.pending_moves,
+            "error_message": self.error_message,
+        }
+
+
+@dataclass
+class CommitResult:
+    """Result of committing session changes to PCB file.
+
+    Attributes:
+        success: Whether changes were committed successfully
+        output_path: Path to the saved PCB file
+        moves_applied: Number of moves that were applied
+        initial_score: Score at session start
+        final_score: Score after all moves
+        score_improvement: Total score improvement (positive = better)
+        components_moved: List of component references that were moved
+        session_closed: Whether the session was closed
+        error_message: Error message if success is False
+    """
+
+    success: bool
+    output_path: str = ""
+    moves_applied: int = 0
+    initial_score: float = 0.0
+    final_score: float = 0.0
+    score_improvement: float = 0.0
+    components_moved: list[str] = field(default_factory=list)
+    session_closed: bool = False
+    error_message: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "success": self.success,
+            "output_path": self.output_path,
+            "moves_applied": self.moves_applied,
+            "initial_score": round(self.initial_score, 4),
+            "final_score": round(self.final_score, 4),
+            "score_improvement": round(self.score_improvement, 4),
+            "components_moved": self.components_moved,
+            "session_closed": self.session_closed,
+            "error_message": self.error_message,
+        }
+
+
+@dataclass
+class RollbackResult:
+    """Result of rolling back session changes.
+
+    Attributes:
+        success: Whether rollback was successful
+        moves_discarded: Number of moves that were discarded
+        session_closed: Whether the session was closed
+        error_message: Error message if success is False
+    """
+
+    success: bool
+    moves_discarded: int = 0
+    session_closed: bool = False
+    error_message: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "success": self.success,
+            "moves_discarded": self.moves_discarded,
+            "session_closed": self.session_closed,
+            "error_message": self.error_message,
+        }
+
+
+@dataclass
+class UndoResult:
+    """Result of undoing the last move.
+
+    Attributes:
+        success: Whether undo was successful
+        restored_component: Position of restored component
+        pending_moves: Remaining pending moves
+        current_score: Score after undo
+        error_message: Error message if success is False
+    """
+
+    success: bool
+    restored_component: ComponentPosition | None = None
+    pending_moves: int = 0
+    current_score: float = 0.0
+    error_message: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "success": self.success,
+            "restored_component": (
+                self.restored_component.to_dict() if self.restored_component else None
+            ),
+            "pending_moves": self.pending_moves,
+            "current_score": round(self.current_score, 4),
+            "error_message": self.error_message,
+        }
+
+
+# =============================================================================
+# Routing Types
+# =============================================================================
+
+
+@dataclass
+class NetRoutingStatus:
+    """Routing status for a single net.
+
+    Attributes:
+        name: Net name (e.g., "GND", "SPI_CLK")
+        status: Routing status ("unrouted", "partial", "complete")
+        pins: Number of pads/pins on this net
+        routed_connections: Number of connections already routed
+        total_connections: Total number of connections needed (pins - 1 for tree)
+        estimated_length_mm: Estimated routing length in millimeters
+        difficulty: Estimated routing difficulty ("easy", "medium", "hard")
+        reason: Explanation of difficulty rating if not easy
+    """
+
+    name: str
+    status: str  # "unrouted", "partial", "complete"
+    pins: int
+    routed_connections: int
+    total_connections: int
+    estimated_length_mm: float
+    difficulty: str  # "easy", "medium", "hard"
+    reason: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "name": self.name,
+            "status": self.status,
+            "pins": self.pins,
+            "routed_connections": self.routed_connections,
+            "total_connections": self.total_connections,
+            "estimated_length_mm": round(self.estimated_length_mm, 2),
+            "difficulty": self.difficulty,
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class UnroutedNetsResult:
+    """Result of get_unrouted_nets operation.
+
+    Attributes:
+        total_nets: Total number of nets in the design
+        unrouted_count: Number of completely unrouted nets
+        partial_count: Number of partially routed nets
+        complete_count: Number of fully routed nets
+        nets: List of nets needing routing (unrouted and partial)
+    """
+
+    total_nets: int
+    unrouted_count: int
+    partial_count: int
+    complete_count: int
+    nets: list[NetRoutingStatus] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "total_nets": self.total_nets,
+            "unrouted_count": self.unrouted_count,
+            "partial_count": self.partial_count,
+            "complete_count": self.complete_count,
+            "nets": [n.to_dict() for n in self.nets],
+        }
+
+
+@dataclass
+class RouteNetResult:
+    """Result of route_net operation.
+
+    Attributes:
+        success: Whether the routing operation succeeded
+        net_name: Name of the net that was routed
+        routed_connections: Number of connections successfully routed
+        total_connections: Total connections that needed routing
+        trace_length_mm: Total trace length in millimeters
+        vias_used: Number of vias placed
+        layers_used: List of layer names used for routing
+        output_path: Path where the result was saved
+        error_message: Error message if success is False
+        suggestions: Suggestions if routing failed or was incomplete
+    """
+
+    success: bool
+    net_name: str
+    routed_connections: int = 0
+    total_connections: int = 0
+    trace_length_mm: float = 0.0
+    vias_used: int = 0
+    layers_used: list[str] = field(default_factory=list)
+    output_path: str | None = None
+    error_message: str | None = None
+    suggestions: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "success": self.success,
+            "net_name": self.net_name,
+            "routed_connections": self.routed_connections,
+            "total_connections": self.total_connections,
+            "trace_length_mm": round(self.trace_length_mm, 2),
+            "vias_used": self.vias_used,
+            "layers_used": self.layers_used,
+            "output_path": self.output_path,
+            "error_message": self.error_message,
+            "suggestions": self.suggestions,
         }

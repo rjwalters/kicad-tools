@@ -23,6 +23,7 @@ from .footprint import run_footprint_command
 from .impedance import run_impedance_command
 from .library import run_lib_command
 from .manufacturer import run_mfr_command
+from .mcp import run_mcp_command
 from .parts import run_parts_command
 from .pcb import run_pcb_command
 from .placement import run_placement_command
@@ -84,4 +85,6 @@ __all__ = [
     "run_clean_command",
     # Impedance
     "run_impedance_command",
+    # MCP
+    "run_mcp_command",
 ]

@@ -11,6 +11,12 @@ import zipfile
 from pathlib import Path
 
 from kicad_tools.export.assembly import AssemblyPackage
+from kicad_tools.export.bom_formats import (
+    BOMExportConfig,
+)
+from kicad_tools.export.bom_formats import (
+    export_bom as export_bom_formatted,
+)
 from kicad_tools.export.gerber import (
     MANUFACTURER_PRESETS,
     GerberConfig,
@@ -19,11 +25,14 @@ from kicad_tools.export.gerber import (
 from kicad_tools.mcp.types import (
     AssemblyExportResult,
     BOMExportResult,
+    BOMGenerationResult,
+    BOMItemResult,
     GerberExportResult,
     GerberFile,
     PnPExportResult,
     get_file_type,
 )
+from kicad_tools.schema.bom import extract_bom
 
 logger = logging.getLogger(__name__)
 
@@ -491,3 +500,182 @@ def _create_assembly_zip(
     except Exception as e:
         logger.warning(f"Failed to create assembly zip: {e}")
         return None
+
+
+# =============================================================================
+# Standalone BOM Export
+# =============================================================================
+
+# Supported BOM formats
+SUPPORTED_BOM_FORMATS = ["csv", "json", "jlcpcb", "pcbway", "seeed"]
+
+# Supported grouping strategies
+SUPPORTED_GROUP_BY = ["value", "footprint", "value+footprint", "mpn", "none"]
+
+
+def export_bom(
+    schematic_path: str,
+    output_path: str | None = None,
+    format: str = "csv",
+    group_by: str = "value+footprint",
+    include_dnp: bool = False,
+) -> BOMGenerationResult:
+    """
+    Export Bill of Materials from a schematic file.
+
+    Generates a BOM from the schematic, with support for different manufacturer
+    formats (JLCPCB, PCBWay, Seeed) and grouping strategies. Automatically
+    extracts LCSC part numbers from component fields.
+
+    Args:
+        schematic_path: Path to .kicad_sch file
+        output_path: Output file path (None = return data only, no file written)
+        format: Output format - "csv", "json", "jlcpcb", "pcbway", "seeed"
+        group_by: Grouping strategy - "value", "footprint", "value+footprint", "mpn", "none"
+        include_dnp: Include Do Not Place components in the output
+
+    Returns:
+        BOMGenerationResult with BOM data, statistics, and file path if written.
+
+    Example:
+        >>> result = export_bom(
+        ...     "/path/to/board.kicad_sch",
+        ...     format="jlcpcb",
+        ... )
+        >>> if result.success:
+        ...     print(f"Generated BOM with {result.unique_parts} unique parts")
+        ...     print(f"Total components: {result.total_parts}")
+        ...     if result.missing_lcsc:
+        ...         print(f"Missing LCSC: {', '.join(result.missing_lcsc)}")
+    """
+    sch_file = Path(schematic_path)
+    warnings: list[str] = []
+
+    # Validate schematic path
+    if not sch_file.exists():
+        return BOMGenerationResult(
+            success=False,
+            error=f"Schematic file not found: {schematic_path}",
+        )
+
+    if sch_file.suffix != ".kicad_sch":
+        warnings.append(f"Unusual file extension: {sch_file.suffix} (expected .kicad_sch)")
+
+    # Validate format
+    format_lower = format.lower()
+    if format_lower not in SUPPORTED_BOM_FORMATS:
+        return BOMGenerationResult(
+            success=False,
+            error=f"Unknown format: {format}. Supported: {', '.join(SUPPORTED_BOM_FORMATS)}",
+            warnings=warnings,
+        )
+
+    # Validate group_by
+    group_by_lower = group_by.lower()
+    if group_by_lower not in SUPPORTED_GROUP_BY:
+        return BOMGenerationResult(
+            success=False,
+            error=f"Unknown group_by: {group_by}. Supported: {', '.join(SUPPORTED_GROUP_BY)}",
+            warnings=warnings,
+        )
+
+    try:
+        # Extract BOM from schematic (handles hierarchical schematics automatically)
+        bom = extract_bom(str(sch_file), hierarchical=True)
+
+        # Filter BOM based on include_dnp setting
+        filtered_bom = bom.filter(include_dnp=include_dnp)
+
+        # Filter out items without valid references (library definitions, not real components)
+        from kicad_tools.schema.bom import BOM
+
+        valid_items = [item for item in filtered_bom.items if item.reference.strip()]
+        filtered_bom = BOM(items=valid_items, source=filtered_bom.source)
+
+        # Group items
+        if group_by_lower == "none":
+            # No grouping - each item is its own group
+            groups = []
+            for item in filtered_bom.items:
+                from kicad_tools.schema.bom import BOMGroup
+
+                group = BOMGroup(value=item.value, footprint=item.footprint)
+                group.items.append(item)
+                groups.append(group)
+        else:
+            groups = filtered_bom.grouped(by=group_by_lower)
+
+        # Build result items and track missing LCSC
+        items: list[BOMItemResult] = []
+        missing_lcsc: list[str] = []
+        total_parts = 0
+
+        for group in groups:
+            item_result = BOMItemResult(
+                reference=group.references,
+                value=group.value,
+                footprint=group.footprint,
+                quantity=group.quantity,
+                lcsc_part=group.lcsc or None,
+                description=group.description or None,
+                manufacturer=group.items[0].manufacturer if group.items else None,
+                mpn=group.mpn or None,
+            )
+            items.append(item_result)
+            total_parts += group.quantity
+
+            # Track parts missing LCSC numbers
+            if not group.lcsc:
+                missing_lcsc.append(group.references)
+
+        # Write output file if requested
+        output_file_path: str | None = None
+        if output_path:
+            out_path = Path(output_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if format_lower == "json":
+                # JSON output
+                import json
+
+                json_data = {
+                    "schematic": str(sch_file),
+                    "total_parts": total_parts,
+                    "unique_parts": len(groups),
+                    "items": [item.to_dict() for item in items],
+                }
+                out_path.write_text(json.dumps(json_data, indent=2))
+            else:
+                # CSV-based formats (csv, jlcpcb, pcbway, seeed)
+                manufacturer = (
+                    format_lower if format_lower in ["jlcpcb", "pcbway", "seeed"] else "generic"
+                )
+
+                config = BOMExportConfig(
+                    include_dnp=include_dnp,
+                    group_by_value=(group_by_lower != "none"),
+                )
+
+                csv_content = export_bom_formatted(filtered_bom.items, manufacturer, config)
+                out_path.write_text(csv_content)
+
+            output_file_path = str(out_path)
+
+        return BOMGenerationResult(
+            success=True,
+            total_parts=total_parts,
+            unique_parts=len(groups),
+            output_path=output_file_path,
+            missing_lcsc=missing_lcsc,
+            items=items,
+            format=format_lower,
+            warnings=warnings,
+        )
+
+    except Exception as e:
+        logger.exception("BOM export failed")
+        return BOMGenerationResult(
+            success=False,
+            error=str(e),
+            warnings=warnings,
+        )

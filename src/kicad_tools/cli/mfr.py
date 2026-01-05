@@ -8,10 +8,10 @@ KiCad projects for specific manufacturers.
 Usage:
     python3 scripts/kicad/mfr.py list                    # List manufacturers
     python3 scripts/kicad/mfr.py info jlcpcb             # Show manufacturer details
-    python3 scripts/kicad/mfr.py rules jlcpcb            # Show design rules
-    python3 scripts/kicad/mfr.py rules jlcpcb --layers 2 # 2-layer rules
-    python3 scripts/kicad/mfr.py compare                 # Compare all manufacturers
-    python3 scripts/kicad/mfr.py compare --layers 6      # Compare 6-layer rules
+    python3 scripts/kicad/mfr.py rules jlcpcb            # Show 2-layer rules (default)
+    python3 scripts/kicad/mfr.py rules jlcpcb --layers 4 # Show 4-layer rules
+    python3 scripts/kicad/mfr.py compare                 # Compare all manufacturers (2-layer)
+    python3 scripts/kicad/mfr.py compare --layers 4      # Compare 4-layer rules
     python3 scripts/kicad/mfr.py export-dru jlcpcb       # Export KiCad DRC rules
     python3 scripts/kicad/mfr.py apply-rules proj.kicad_pro jlcpcb  # Apply rules
     python3 scripts/kicad/mfr.py validate board.kicad_pcb jlcpcb    # Validate design
@@ -618,8 +618,9 @@ def main(argv=None):
 Examples:
   mfr.py list                       List all manufacturers
   mfr.py info jlcpcb                Show JLCPCB details
+  mfr.py rules jlcpcb               Show 2-layer rules (default)
   mfr.py rules seeed --layers 4     Seeed 4-layer rules
-  mfr.py compare                    Compare all manufacturers
+  mfr.py compare                    Compare 2-layer rules (default)
   mfr.py find --trace 5 --via 0.3   Find compatible manufacturers
   mfr.py export-dru jlcpcb          Export KiCad DRC rules
         """,
@@ -639,14 +640,14 @@ Examples:
     # rules
     p_rules = subparsers.add_parser("rules", help="Show design rules")
     p_rules.add_argument("manufacturer", help="Manufacturer ID")
-    p_rules.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_rules.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_rules.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_rules.add_argument("--json", action="store_true", help="Include JSON output")
     p_rules.set_defaults(func=cmd_rules)
 
     # compare
     p_compare = subparsers.add_parser("compare", help="Compare manufacturers")
-    p_compare.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_compare.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_compare.set_defaults(func=cmd_compare)
 
@@ -655,14 +656,14 @@ Examples:
     p_find.add_argument("--trace", type=float, default=5.0, help="Min trace width (mil)")
     p_find.add_argument("--clearance", type=float, default=5.0, help="Min clearance (mil)")
     p_find.add_argument("--via", type=float, default=0.3, help="Min via drill (mm)")
-    p_find.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_find.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_find.add_argument("--assembly", action="store_true", help="Require assembly")
     p_find.set_defaults(func=cmd_find)
 
     # export-dru
     p_dru = subparsers.add_parser("export-dru", help="Export KiCad DRC rules")
     p_dru.add_argument("manufacturer", help="Manufacturer ID")
-    p_dru.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    p_dru.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     p_dru.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
     p_dru.add_argument("-o", "--output", type=Path, help="Output path")
     p_dru.set_defaults(func=cmd_export_dru)
