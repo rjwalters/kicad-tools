@@ -121,14 +121,18 @@ class TestNetMapper:
 
     def test_exact_match(self):
         """Test detection of exact net name matches."""
-        old = self._create_netlist([
-            ("GND", [("R1", "1"), ("C1", "2")]),
-            ("VCC", [("U1", "1")]),
-        ])
-        new = self._create_netlist([
-            ("GND", [("R1", "1"), ("C1", "2")]),
-            ("VCC", [("U1", "1")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("GND", [("R1", "1"), ("C1", "2")]),
+                ("VCC", [("U1", "1")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("GND", [("R1", "1"), ("C1", "2")]),
+                ("VCC", [("U1", "1")]),
+            ]
+        )
 
         mapper = NetMapper(old, new)
         mappings = mapper.compute_mappings()
@@ -139,12 +143,16 @@ class TestNetMapper:
 
     def test_renamed_net_detection(self):
         """Test detection of renamed nets via connectivity."""
-        old = self._create_netlist([
-            ("Net-U1-Pad5", [("U1", "5"), ("R1", "1")]),
-        ])
-        new = self._create_netlist([
-            ("MCU_TX", [("U1", "5"), ("R1", "1")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("Net-U1-Pad5", [("U1", "5"), ("R1", "1")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("MCU_TX", [("U1", "5"), ("R1", "1")]),
+            ]
+        )
 
         mapper = NetMapper(old, new)
         mappings = mapper.compute_mappings()
@@ -159,13 +167,17 @@ class TestNetMapper:
 
     def test_removed_net_detection(self):
         """Test detection of removed nets."""
-        old = self._create_netlist([
-            ("GND", [("R1", "1")]),
-            ("unused_net", [("R2", "1")]),
-        ])
-        new = self._create_netlist([
-            ("GND", [("R1", "1")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("GND", [("R1", "1")]),
+                ("unused_net", [("R2", "1")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("GND", [("R1", "1")]),
+            ]
+        )
 
         mapper = NetMapper(old, new)
         mappings = mapper.compute_mappings()
@@ -180,13 +192,17 @@ class TestNetMapper:
 
     def test_new_net_detection(self):
         """Test detection of new nets."""
-        old = self._create_netlist([
-            ("GND", [("R1", "1")]),
-        ])
-        new = self._create_netlist([
-            ("GND", [("R1", "1")]),
-            ("VCC", [("U1", "1")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("GND", [("R1", "1")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("GND", [("R1", "1")]),
+                ("VCC", [("U1", "1")]),
+            ]
+        )
 
         mapper = NetMapper(old, new)
         new_nets = mapper.get_new_nets()
@@ -197,12 +213,16 @@ class TestNetMapper:
     def test_partial_connectivity_match(self):
         """Test connectivity matching with partial overlap."""
         # Old net has 3 pins, new net has 2 of those pins + 1 new
-        old = self._create_netlist([
-            ("NET1", [("U1", "1"), ("R1", "1"), ("R2", "1")]),
-        ])
-        new = self._create_netlist([
-            ("NET1_RENAMED", [("U1", "1"), ("R1", "1"), ("C1", "1")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("NET1", [("U1", "1"), ("R1", "1"), ("R2", "1")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("NET1_RENAMED", [("U1", "1"), ("R1", "1"), ("C1", "1")]),
+            ]
+        )
 
         mapper = NetMapper(old, new, min_confidence=0.4)
         mappings = mapper.compute_mappings()
@@ -217,14 +237,18 @@ class TestNetMapper:
     def test_split_net_handling(self):
         """Test handling of net split (one old -> multiple new)."""
         # Original net with 4 pins
-        old = self._create_netlist([
-            ("BIG_NET", [("U1", "1"), ("U1", "2"), ("R1", "1"), ("R2", "1")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("BIG_NET", [("U1", "1"), ("U1", "2"), ("R1", "1"), ("R2", "1")]),
+            ]
+        )
         # Split into two nets (first two pins and last two pins)
-        new = self._create_netlist([
-            ("NET_A", [("U1", "1"), ("U1", "2")]),
-            ("NET_B", [("R1", "1"), ("R2", "1")]),
-        ])
+        new = self._create_netlist(
+            [
+                ("NET_A", [("U1", "1"), ("U1", "2")]),
+                ("NET_B", [("R1", "1"), ("R2", "1")]),
+            ]
+        )
 
         mapper = NetMapper(old, new)
         mappings = mapper.compute_mappings()
@@ -238,13 +262,17 @@ class TestNetMapper:
 
     def test_merged_net_handling(self):
         """Test handling of merged nets (multiple old -> one new)."""
-        old = self._create_netlist([
-            ("NET_A", [("U1", "1")]),
-            ("NET_B", [("U1", "2")]),
-        ])
-        new = self._create_netlist([
-            ("MERGED_NET", [("U1", "1"), ("U1", "2")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("NET_A", [("U1", "1")]),
+                ("NET_B", [("U1", "2")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("MERGED_NET", [("U1", "1"), ("U1", "2")]),
+            ]
+        )
 
         mapper = NetMapper(old, new)
         mappings = mapper.compute_mappings()
@@ -259,12 +287,16 @@ class TestNetMapper:
 
     def test_low_confidence_threshold(self):
         """Test that low confidence matches are rejected."""
-        old = self._create_netlist([
-            ("NET1", [("U1", "1"), ("U1", "2"), ("U1", "3"), ("U1", "4")]),
-        ])
-        new = self._create_netlist([
-            ("NET2", [("U1", "1")]),  # Only 1 of 4 pins match
-        ])
+        old = self._create_netlist(
+            [
+                ("NET1", [("U1", "1"), ("U1", "2"), ("U1", "3"), ("U1", "4")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("NET2", [("U1", "1")]),  # Only 1 of 4 pins match
+            ]
+        )
 
         # Default threshold is 0.5, but Jaccard would be 1/4 = 0.25
         mapper = NetMapper(old, new, min_confidence=0.5)
@@ -275,13 +307,17 @@ class TestNetMapper:
 
     def test_ambiguous_match(self):
         """Test detection of ambiguous matches."""
-        old = self._create_netlist([
-            ("NET1", [("U1", "1"), ("U1", "2")]),
-        ])
-        new = self._create_netlist([
-            ("NET_A", [("U1", "1")]),
-            ("NET_B", [("U1", "2")]),
-        ])
+        old = self._create_netlist(
+            [
+                ("NET1", [("U1", "1"), ("U1", "2")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("NET_A", [("U1", "1")]),
+                ("NET_B", [("U1", "2")]),
+            ]
+        )
 
         mapper = NetMapper(old, new, min_confidence=0.3)
         mappings = mapper.compute_mappings()
@@ -294,15 +330,19 @@ class TestNetMapper:
 
     def test_get_removed_nets(self):
         """Test get_removed_nets helper."""
-        old = self._create_netlist([
-            ("GND", [("R1", "1")]),
-            ("REMOVED1", [("R2", "1")]),
-            ("RENAMED", [("U1", "1")]),
-        ])
-        new = self._create_netlist([
-            ("GND", [("R1", "1")]),
-            ("NEW_NAME", [("U1", "1")]),  # Same pins as RENAMED
-        ])
+        old = self._create_netlist(
+            [
+                ("GND", [("R1", "1")]),
+                ("REMOVED1", [("R2", "1")]),
+                ("RENAMED", [("U1", "1")]),
+            ]
+        )
+        new = self._create_netlist(
+            [
+                ("GND", [("R1", "1")]),
+                ("NEW_NAME", [("U1", "1")]),  # Same pins as RENAMED
+            ]
+        )
 
         mapper = NetMapper(old, new)
         removed = mapper.get_removed_nets()
@@ -427,33 +467,57 @@ class TestIntegration:
         # Create old netlist
         old_netlist = Netlist()
         old_netlist.nets = [
-            NetlistNet(code=1, name="GND", nodes=[
-                NetNode(reference="R1", pin="1"),
-                NetNode(reference="C1", pin="2"),
-            ]),
-            NetlistNet(code=2, name="Net-U1-Pad5", nodes=[
-                NetNode(reference="U1", pin="5"),
-                NetNode(reference="R2", pin="1"),
-            ]),
-            NetlistNet(code=3, name="UNUSED", nodes=[
-                NetNode(reference="R3", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="GND",
+                nodes=[
+                    NetNode(reference="R1", pin="1"),
+                    NetNode(reference="C1", pin="2"),
+                ],
+            ),
+            NetlistNet(
+                code=2,
+                name="Net-U1-Pad5",
+                nodes=[
+                    NetNode(reference="U1", pin="5"),
+                    NetNode(reference="R2", pin="1"),
+                ],
+            ),
+            NetlistNet(
+                code=3,
+                name="UNUSED",
+                nodes=[
+                    NetNode(reference="R3", pin="1"),
+                ],
+            ),
         ]
 
         # Create new netlist with changes
         new_netlist = Netlist()
         new_netlist.nets = [
-            NetlistNet(code=1, name="GND", nodes=[
-                NetNode(reference="R1", pin="1"),
-                NetNode(reference="C1", pin="2"),
-            ]),
-            NetlistNet(code=2, name="MCU_TX", nodes=[  # Renamed
-                NetNode(reference="U1", pin="5"),
-                NetNode(reference="R2", pin="1"),
-            ]),
-            NetlistNet(code=4, name="NEW_SIGNAL", nodes=[  # New net
-                NetNode(reference="U2", pin="1"),
-            ]),
+            NetlistNet(
+                code=1,
+                name="GND",
+                nodes=[
+                    NetNode(reference="R1", pin="1"),
+                    NetNode(reference="C1", pin="2"),
+                ],
+            ),
+            NetlistNet(
+                code=2,
+                name="MCU_TX",
+                nodes=[  # Renamed
+                    NetNode(reference="U1", pin="5"),
+                    NetNode(reference="R2", pin="1"),
+                ],
+            ),
+            NetlistNet(
+                code=4,
+                name="NEW_SIGNAL",
+                nodes=[  # New net
+                    NetNode(reference="U2", pin="1"),
+                ],
+            ),
         ]
 
         # Compute mappings

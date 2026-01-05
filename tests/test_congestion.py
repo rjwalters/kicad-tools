@@ -8,7 +8,6 @@ import pytest
 from kicad_tools.analysis import CongestionAnalyzer, CongestionReport, Severity
 from kicad_tools.schema.pcb import PCB
 
-
 # PCB with multiple traces and vias in a small area (congested)
 CONGESTED_PCB = """(kicad_pcb
   (version 20240108)

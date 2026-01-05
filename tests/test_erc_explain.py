@@ -13,7 +13,7 @@ from kicad_tools.cli.erc_explain_cmd import (
     ViolationExplanation,
     main,
 )
-from kicad_tools.erc import ERCReport, ERCViolation, ERCViolationType, Severity
+from kicad_tools.erc import ERCViolation, ERCViolationType, Severity
 
 
 @pytest.fixture

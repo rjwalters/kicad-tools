@@ -966,7 +966,9 @@ class ClearanceResult:
         summary = f"Clearance between {self.item1} and {self.item2}: {self.min_clearance_mm:.4f} mm [{status}]"
         if self.required_clearance_mm is not None:
             summary += f" (required: {self.required_clearance_mm:.4f} mm)"
-        summary += f"\nLocation: ({self.location[0]:.3f}, {self.location[1]:.3f}) mm on {self.layer}"
+        summary += (
+            f"\nLocation: ({self.location[0]:.3f}, {self.location[1]:.3f}) mm on {self.layer}"
+        )
         return summary
 
 

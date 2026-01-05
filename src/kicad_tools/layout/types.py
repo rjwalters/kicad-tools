@@ -426,9 +426,7 @@ class SubcircuitLayout:
             (anchor_rot + offset.rotation_delta) % 360,
         )
 
-    def with_anchor_position(
-        self, new_position: tuple[float, float, float]
-    ) -> SubcircuitLayout:
+    def with_anchor_position(self, new_position: tuple[float, float, float]) -> SubcircuitLayout:
         """Create a copy of this layout with a new anchor position.
 
         Args:

@@ -9,8 +9,8 @@ part availability from LCSC.
 from pathlib import Path
 
 from kicad_tools.cost import (
-    estimate_manufacturing_cost,
     check_availability,
+    estimate_manufacturing_cost,
     suggest_alternatives,
 )
 from kicad_tools.schema.pcb import PCB
@@ -30,7 +30,7 @@ def main():
         show_synthetic_example()
         return
 
-    print(f"Loading project...")
+    print("Loading project...")
     print(f"  PCB: {pcb_path.name}")
     print(f"  Schematic: {sch_path.name}")
     print()
@@ -45,9 +45,7 @@ def main():
     print()
 
     for qty in [5, 10, 50, 100]:
-        result = estimate_manufacturing_cost(
-            pcb, sch, quantity=qty, manufacturer="jlcpcb"
-        )
+        result = estimate_manufacturing_cost(pcb, sch, quantity=qty, manufacturer="jlcpcb")
 
         print(f"Quantity: {qty} boards")
         print("-" * 40)
@@ -55,7 +53,7 @@ def main():
         print(f"  Components:       ${result.component_cost:.2f}")
         print(f"  Assembly:         ${result.assembly_cost:.2f}")
         print(f"  Shipping (est):   ${result.shipping_estimate:.2f}")
-        print(f"  ---")
+        print("  ---")
         print(f"  Total:            ${result.total:.2f}")
         print(f"  Per board:        ${result.per_board:.2f}")
         print()
@@ -105,7 +103,7 @@ def main():
         for suggestion in alternatives.suggestions[:5]:
             print(f"{suggestion.reference}: {suggestion.original_value}")
             print(f"  Issue: {suggestion.reason}")
-            print(f"  Alternatives:")
+            print("  Alternatives:")
             for alt in suggestion.alternatives[:3]:
                 savings = ""
                 if alt.price_diff < 0:

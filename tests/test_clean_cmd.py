@@ -8,7 +8,6 @@ import pytest
 from kicad_tools.cli.clean_cmd import (
     CleanableFile,
     CleanResult,
-    ProtectedFile,
     delete_files,
     find_cleanable_files,
     format_output_json,
