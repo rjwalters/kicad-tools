@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
 from .core import Autorouter
-from .layers import Layer
+from .layers import Layer, LayerStack
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
 
 # =============================================================================
@@ -635,6 +635,7 @@ def load_pcb_for_routing(
     use_pcb_rules: bool = True,
     validate_drc: bool = True,
     edge_clearance: float | None = None,
+    layer_stack: LayerStack | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -655,6 +656,12 @@ def load_pcb_for_routing(
                         routing within this distance of the board edge. Common
                         values are 0.25-0.5mm. If None, no edge clearance is
                         applied (default for backward compatibility).
+        layer_stack: Layer stack configuration for routing. Controls how many
+                     layers are available for routing and which layers are
+                     planes vs signal layers. If None, defaults to 2-layer.
+                     Use LayerStack.four_layer_sig_gnd_pwr_sig() for 4-layer
+                     boards with GND/PWR planes, which routes signals on outer
+                     layers (F.Cu, B.Cu) with vias for layer transitions.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -672,6 +679,11 @@ def load_pcb_for_routing(
         >>>
         >>> # Apply 0.5mm edge clearance
         >>> router, nets = load_pcb_for_routing("board.kicad_pcb", edge_clearance=0.5)
+        >>>
+        >>> # Use 4-layer stack with GND/PWR planes
+        >>> from kicad_tools.router import LayerStack
+        >>> stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb", layer_stack=stack)
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
@@ -844,6 +856,7 @@ def load_pcb_for_routing(
         origin_y=origin_y,
         rules=rules,
         net_class_map=DEFAULT_NET_CLASS_MAP,
+        layer_stack=layer_stack,
     )
 
     # Add all components

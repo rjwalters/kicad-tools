@@ -6,6 +6,31 @@ Provides command-line access to the autorouter:
     kicad-tools route board.kicad_pcb
     kicad-tools route board.kicad_pcb -o board_routed.kicad_pcb
     kicad-tools route board.kicad_pcb --skip-nets GND,VCC --strategy negotiated
+
+Layer Stack Configuration:
+
+    By default, the autorouter uses a 2-layer configuration (F.Cu, B.Cu).
+    For multi-layer boards, use the --layers option:
+
+    # 4-layer board with GND/PWR planes (typical for Pi HAT, Arduino shields)
+    kicad-tools route board.kicad_pcb --layers 4
+
+    # 4-layer with 2 signal layers (for high-density routing)
+    kicad-tools route board.kicad_pcb --layers 4-sig
+
+    # 6-layer with 4 signal layers
+    kicad-tools route board.kicad_pcb --layers 6
+
+    Layer stack configurations:
+    - '2': F.Cu (signal), B.Cu (signal)
+    - '4': F.Cu (signal), In1.Cu (GND plane), In2.Cu (PWR plane), B.Cu (signal)
+    - '4-sig': F.Cu (signal), In1.Cu (signal), In2.Cu (GND plane), B.Cu (mixed)
+    - '6': F.Cu, In1.Cu (GND), In2.Cu (signal), In3.Cu (signal), In4.Cu (PWR), B.Cu
+
+    For 4-layer boards with inner planes (--layers 4), signals are routed on
+    the outer layers (F.Cu and B.Cu) with vias providing layer transitions
+    through the planes. This is the most common configuration for hobby/small
+    production boards.
 """
 
 import argparse
@@ -369,6 +394,20 @@ def main(argv: list[str] | None = None) -> int:
             "of the board edge. Common values: 0.25-0.5mm (default: no clearance)"
         ),
     )
+    parser.add_argument(
+        "--layers",
+        choices=["2", "4", "4-sig", "6"],
+        default="2",
+        help=(
+            "Layer stack configuration for routing: "
+            "'2' = 2-layer (F.Cu, B.Cu); "
+            "'4' = 4-layer with GND/PWR planes (F.Cu, In1=GND, In2=PWR, B.Cu); "
+            "'4-sig' = 4-layer with 2 signal layers (F.Cu, In1=signal, In2=GND, B.Cu); "
+            "'6' = 6-layer with 4 signal layers. "
+            "Default: 2. For 4-layer boards with inner planes, signals route on "
+            "outer layers with vias for layer transitions."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -398,9 +437,19 @@ def main(argv: list[str] | None = None) -> int:
         BusRoutingMode,
         DesignRules,
         DifferentialPairConfig,
+        LayerStack,
         RoutabilityAnalyzer,
         load_pcb_for_routing,
     )
+
+    # Create layer stack from --layers argument
+    layer_stack_map = {
+        "2": LayerStack.two_layer(),
+        "4": LayerStack.four_layer_sig_gnd_pwr_sig(),
+        "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr(),
+        "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
+    }
+    layer_stack = layer_stack_map[args.layers]
 
     # Configure design rules
     rules = DesignRules(
@@ -424,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Input:    {pcb_path}")
         print(f"Output:   {output_path}")
         print(f"Strategy: {args.strategy}")
+        print(f"Layers:   {layer_stack.name} ({layer_stack.num_layers} layers)")
         if skip_nets:
             print(f"Skip:     {', '.join(skip_nets)}")
         if args.bus_routing:
@@ -443,6 +493,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.edge_clearance:
                 print(f"  Edge clearance:  {args.edge_clearance}mm")
 
+            print(f"\nLayer Stack ({layer_stack.name}):")
+            signal_layers = [lyr.name for lyr in layer_stack.signal_layers]
+            plane_layers = [f"{lyr.name} ({lyr.plane_net})" for lyr in layer_stack.plane_layers]
+            print(f"  Signal layers:  {', '.join(signal_layers)}")
+            if plane_layers:
+                print(f"  Plane layers:   {', '.join(plane_layers)}")
+
     # Load PCB
     if not quiet:
         print("\n--- Loading PCB ---")
@@ -453,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,
+                layer_stack=layer_stack,
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
