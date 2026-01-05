@@ -12,7 +12,6 @@ from kicad_tools.analysis.net_status import (
     PadInfo,
 )
 
-
 # PCB with fully routed nets
 FULLY_ROUTED_PCB = """(kicad_pcb
   (version 20240108)
@@ -543,7 +542,9 @@ class TestNetStatusResult:
         """Test summary string generation."""
         result = NetStatusResult(
             nets=[
-                NetStatus(1, "VCC", total_pads=2, connected_pads=[PadInfo("R1", "1", (0, 0), True)]),
+                NetStatus(
+                    1, "VCC", total_pads=2, connected_pads=[PadInfo("R1", "1", (0, 0), True)]
+                ),
             ],
             total_nets=1,
         )

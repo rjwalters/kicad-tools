@@ -55,7 +55,7 @@ def _run_cost_command(args) -> int:
                 print(f"Error loading schematic: {e}", file=sys.stderr)
                 return 1
         else:
-            print(f"Warning: CSV BOM import not yet implemented, using PCB only")
+            print("Warning: CSV BOM import not yet implemented, using PCB only")
 
     # Create estimator
     estimator = ManufacturingCostEstimator(manufacturer=args.mfr)

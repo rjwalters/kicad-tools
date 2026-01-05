@@ -409,9 +409,7 @@ class LCSCAvailabilityChecker:
         """Determine availability status based on stock levels."""
         if stock == 0:
             return AvailabilityStatus.OUT_OF_STOCK
-        elif stock < needed:
-            return AvailabilityStatus.LOW_STOCK
-        elif stock < max(needed * 2, self.low_stock_threshold):
+        elif stock < needed or stock < max(needed * 2, self.low_stock_threshold):
             return AvailabilityStatus.LOW_STOCK
         else:
             return AvailabilityStatus.AVAILABLE

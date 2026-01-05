@@ -752,8 +752,7 @@ def _point_to_segment_distance(
 
 
 def _segment_to_segment_distance(
-    x1: float, y1: float, x2: float, y2: float,
-    x3: float, y3: float, x4: float, y4: float
+    x1: float, y1: float, x2: float, y2: float, x3: float, y3: float, x4: float, y4: float
 ) -> float:
     """Calculate minimum distance between two line segments."""
     d1 = _point_to_segment_distance(x1, y1, x3, y3, x4, y4)
@@ -814,9 +813,7 @@ def _segment_circle_clearance(
     return clearance, cx, cy
 
 
-def _circle_circle_clearance(
-    c1: _CopperElement, c2: _CopperElement
-) -> tuple[float, float, float]:
+def _circle_circle_clearance(c1: _CopperElement, c2: _CopperElement) -> tuple[float, float, float]:
     """Calculate clearance between two circles (pad/via)."""
     x1, y1, w1, h1 = c1.geometry
     x2, y2, w2, h2 = c2.geometry
@@ -876,9 +873,7 @@ def _collect_elements(pcb: PCB, layer: str | None = None) -> list[_CopperElement
     return elements
 
 
-def _get_elements_for_item(
-    pcb: PCB, item: str, layer: str | None = None
-) -> list[_CopperElement]:
+def _get_elements_for_item(pcb: PCB, item: str, layer: str | None = None) -> list[_CopperElement]:
     """Get all copper elements belonging to an item.
 
     Args:
@@ -994,7 +989,9 @@ def measure_clearance(
                     nearest_item2 = e2.reference.split("-")[0]
 
     if not measurements:
-        raise ValueError(f"No clearance measurements possible between '{item1}' and '{item2 or 'neighbors'}'")
+        raise ValueError(
+            f"No clearance measurements possible between '{item1}' and '{item2 or 'neighbors'}'"
+        )
 
     # Get design rules clearance
     required_clearance = _get_design_rules_clearance(pcb)

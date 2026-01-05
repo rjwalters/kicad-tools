@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.layout import (
-    ComponentInfo,
     ComponentOffset,
     SubcircuitExtractor,
     SubcircuitLayout,

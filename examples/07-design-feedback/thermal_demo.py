@@ -9,7 +9,6 @@ guidance on heat management for PCB designs.
 from pathlib import Path
 
 from kicad_tools.analysis.thermal import (
-    ThermalAnalyzer,
     analyze_thermal,
 )
 from kicad_tools.schema.pcb import PCB

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from .types import ComponentOffset, SubcircuitLayout
 
 if TYPE_CHECKING:
-    from kicad_tools.schema.pcb import Footprint, PCB
+    from kicad_tools.schema.pcb import PCB, Footprint
 
 
 @dataclass
@@ -198,18 +198,14 @@ class SubcircuitExtractor:
             ValueError: If no components match the pattern
         """
         regex = re.compile(pattern)
-        matching_refs = [
-            fp.reference for fp in pcb.footprints if regex.match(fp.reference)
-        ]
+        matching_refs = [fp.reference for fp in pcb.footprints if regex.match(fp.reference)]
 
         if not matching_refs:
             raise ValueError(f"No components match pattern: {pattern}")
 
         return self.extract(pcb, matching_refs, subcircuit_path)
 
-    def _default_anchor_selector(
-        self, components: Sequence[ComponentInfo]
-    ) -> ComponentInfo:
+    def _default_anchor_selector(self, components: Sequence[ComponentInfo]) -> ComponentInfo:
         """Select anchor component using default priority rules.
 
         Priority:

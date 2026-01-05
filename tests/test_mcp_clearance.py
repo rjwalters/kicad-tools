@@ -286,6 +286,7 @@ class TestMCPTools:
             def wrapper(func):
                 custom_called.append(func.__name__)
                 return func
+
             return wrapper
 
         @tools.register(decorator=custom_decorator)

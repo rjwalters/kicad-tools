@@ -9,7 +9,6 @@ and provides actionable suggestions for improving routability.
 from pathlib import Path
 
 from kicad_tools.analysis.congestion import (
-    CongestionAnalyzer,
     Severity,
     analyze_congestion,
 )
@@ -65,9 +64,7 @@ def main():
             continue
 
         hotspots = by_severity[severity]
-        icon = {"CRITICAL": "!!!", "HIGH": "!!", "MEDIUM": "!", "LOW": "."}.get(
-            severity.name, "?"
-        )
+        icon = {"CRITICAL": "!!!", "HIGH": "!!", "MEDIUM": "!", "LOW": "."}.get(severity.name, "?")
 
         print(f"{icon} {severity.name} Severity ({len(hotspots)} areas)")
         print("-" * 40)

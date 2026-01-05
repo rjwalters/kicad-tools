@@ -39,9 +39,7 @@ class MCPTools:
         """Initialize an empty tool registry."""
         self._tools: dict[Callable, MCP_DECORATOR] = {}
 
-    def register(
-        self, decorator: MCP_DECORATOR | None = None
-    ) -> Callable[[Callable], Callable]:
+    def register(self, decorator: MCP_DECORATOR | None = None) -> Callable[[Callable], Callable]:
         """Register a function as an MCP tool.
 
         Args:
@@ -51,6 +49,7 @@ class MCPTools:
         Returns:
             A decorator that registers the function.
         """
+
         def default_decorator(mcp: FastMCP) -> Callable:
             return mcp.tool()
 
