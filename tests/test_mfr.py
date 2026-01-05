@@ -111,6 +111,20 @@ class TestDesignRules:
         assert "min_trace_width_mm" in d
         assert "min_clearance_mm" in d
         assert "min_via_drill_mm" in d
+        assert "max_board_width_mm" in d
+        assert "max_board_height_mm" in d
+
+    def test_max_board_dimensions(self):
+        """Test max board dimensions are available in design rules."""
+        profile = get_profile("jlcpcb")
+        rules = profile.get_design_rules(layers=2)
+
+        # Max board dimensions should have sensible defaults
+        assert rules.max_board_width_mm > 0
+        assert rules.max_board_height_mm > 0
+        # Default values are 400x500mm
+        assert rules.max_board_width_mm == 400.0
+        assert rules.max_board_height_mm == 500.0
 
     def test_compare_design_rules(self):
         """Test comparing design rules across manufacturers."""

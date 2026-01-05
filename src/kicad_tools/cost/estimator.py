@@ -39,6 +39,15 @@ class ComponentCost:
 
 
 @dataclass
+class SimplePCBCostResult:
+    """Simple PCB cost result for audit integration."""
+
+    total: float  # Total cost for the order
+    cost_per_unit: float  # Per-board cost in USD
+    quantity: int
+
+
+@dataclass
 class PCBCost:
     """PCB fabrication cost breakdown."""
 
@@ -422,6 +431,50 @@ class ManufacturingCostEstimator:
             cost_drivers=cost_drivers,
             optimization_suggestions=suggestions,
             manufacturer=self.manufacturer,
+        )
+
+    def estimate_pcb(
+        self,
+        width_mm: float,
+        height_mm: float,
+        layers: int = 2,
+        quantity: int = 5,
+        surface_finish: str = "hasl",
+        solder_mask_color: str = "green",
+        board_thickness_mm: float = 1.6,
+    ) -> SimplePCBCostResult:
+        """
+        Estimate PCB fabrication cost only (no components or assembly).
+
+        This is a simplified method for use by the audit command and other
+        callers that only need PCB fabrication cost.
+
+        Args:
+            width_mm: Board width in mm
+            height_mm: Board height in mm
+            layers: Number of copper layers
+            quantity: Number of boards to manufacture
+            surface_finish: Surface finish type (hasl, enig, etc.)
+            solder_mask_color: Solder mask color
+            board_thickness_mm: Board thickness in mm
+
+        Returns:
+            SimplePCBCostResult with total cost and per-unit cost
+        """
+        pcb_cost = self._estimate_pcb_cost(
+            width_mm=width_mm,
+            height_mm=height_mm,
+            layer_count=layers,
+            surface_finish=surface_finish,
+            solder_mask_color=solder_mask_color,
+            board_thickness_mm=board_thickness_mm,
+            quantity=quantity,
+        )
+
+        return SimplePCBCostResult(
+            total=pcb_cost.total_cost,
+            cost_per_unit=pcb_cost.cost_per_unit,
+            quantity=quantity,
         )
 
     def _bom_from_pcb(self, pcb: PCB) -> BOM | None:
