@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from kicad_tools.mcp.tools.analysis import measure_clearance
 from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
 from kicad_tools.mcp.tools.placement import placement_analyze
 from kicad_tools.mcp.tools.session import (
@@ -59,6 +60,7 @@ class MCPServer:
         self._register_assembly_tools()
         self._register_placement_tools()
         self._register_session_tools()
+        self._register_clearance_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -473,6 +475,51 @@ class MCPServer:
         result = rollback_session(session_id=params["session_id"])
         return result.to_dict()
 
+    def _register_clearance_tools(self) -> None:
+        """Register clearance measurement tools."""
+        self.tools["measure_clearance"] = ToolDefinition(
+            name="measure_clearance",
+            description=(
+                "Measure clearance between items on the PCB. Measures the minimum "
+                "edge-to-edge clearance between two items (components or nets) on the PCB. "
+                "If item2 is not specified, finds the nearest neighbor to item1. "
+                "Returns detailed measurements and design rule pass/fail status."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "item1": {
+                        "type": "string",
+                        "description": "Component reference (e.g., 'U1') or net name (e.g., 'GND')",
+                    },
+                    "item2": {
+                        "type": "string",
+                        "description": "Second item, or omit for nearest neighbor search",
+                    },
+                    "layer": {
+                        "type": "string",
+                        "description": "Specific layer to check (e.g., 'F.Cu'), or omit for all layers",
+                    },
+                },
+                "required": ["pcb_path", "item1"],
+            },
+            handler=self._handle_measure_clearance,
+        )
+
+    def _handle_measure_clearance(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle measure_clearance tool call."""
+        result = measure_clearance(
+            pcb_path=params["pcb_path"],
+            item1=params["item1"],
+            item2=params.get("item2"),
+            layer=params.get("layer"),
+        )
+        return result.to_dict()
+
     def get_tools_list(self) -> list[dict[str, Any]]:
         """Get list of available tools for MCP discovery."""
         return [
@@ -519,6 +566,7 @@ class MCPServer:
         request_id = request.get("id")
 
         try:
+            result: dict[str, Any]
             if method == "initialize":
                 result = {
                     "protocolVersion": "2024-11-05",

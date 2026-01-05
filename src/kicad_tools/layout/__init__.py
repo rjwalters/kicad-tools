@@ -3,6 +3,7 @@
 This module provides tools for preserving and applying component layouts
 within subcircuits, enabling:
 
+- Hierarchical component addressing (ComponentAddress, AddressRegistry)
 - Extraction of relative positions within a group of components
 - Application of layouts to new positions while preserving relationships
 - Support for rotating subcircuits (90, 180, 270 degrees)
@@ -32,15 +33,18 @@ Usage:
     pcb.save("board_modified.kicad_pcb")
 """
 
+from .addressing import AddressRegistry
 from .subcircuit import (
     ComponentInfo,
     SubcircuitExtractor,
     apply_subcircuit,
     rotate_point,
 )
-from .types import ComponentOffset, SubcircuitLayout
+from .types import ComponentAddress, ComponentOffset, SubcircuitLayout
 
 __all__ = [
+    "AddressRegistry",
+    "ComponentAddress",
     "ComponentInfo",
     "ComponentOffset",
     "SubcircuitExtractor",
