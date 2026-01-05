@@ -1,19 +1,19 @@
-"""
-Types for layout preservation module.
+"""Layout preservation type definitions.
 
-Defines data structures for:
-- ComponentAddress: hierarchical component identification
-- ComponentLayout: component placement data
-- TraceSegment: PCB trace routing data
-- ViaLayout: via placement data
-- ZoneLayout: copper pour zone data
-- LayoutSnapshot: complete PCB layout state
+Provides data structures for:
+- Hierarchical component addressing (ComponentAddress)
+- Component layout capture and restoration (ComponentLayout, LayoutSnapshot)
+- Trace, via, and zone layout data (TraceSegment, ViaLayout, ZoneLayout)
+- Subcircuit layout extraction and application (SubcircuitLayout, ComponentOffset)
+- Net mapping and remapping results (NetMapping, RemapResult)
 """
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -104,6 +104,11 @@ class ComponentAddress:
 
     def __repr__(self) -> str:
         return f"ComponentAddress({self.full_path!r}, uuid={self.uuid!r})"
+
+
+# =============================================================================
+# Layout Snapshot Types (for full PCB preservation)
+# =============================================================================
 
 
 @dataclass
@@ -294,4 +299,310 @@ class LayoutSnapshot:
             "vias": self.via_count,
             "timestamp": self.timestamp.isoformat(),
             "pcb_path": self.pcb_path,
+        }
+
+
+# =============================================================================
+# Subcircuit Types (for subcircuit-level preservation)
+# =============================================================================
+
+
+@dataclass
+class ComponentOffset:
+    """Offset of a component relative to a subcircuit's anchor.
+
+    Stores position and rotation relative to the anchor component,
+    allowing the subcircuit to be placed at any position while
+    preserving internal component relationships.
+
+    Attributes:
+        ref: Local reference designator (e.g., "C1", "R2")
+        dx: X offset from anchor position in mm
+        dy: Y offset from anchor position in mm
+        rotation_delta: Rotation relative to anchor in degrees
+    """
+
+    ref: str
+    dx: float
+    dy: float
+    rotation_delta: float = 0.0
+
+    def rotated(self, angle_deg: float) -> tuple[float, float]:
+        """Get offset rotated by given angle.
+
+        Args:
+            angle_deg: Rotation angle in degrees
+
+        Returns:
+            Tuple of (rotated_dx, rotated_dy)
+        """
+        import math
+
+        if angle_deg == 0:
+            return self.dx, self.dy
+
+        rad = math.radians(angle_deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        rotated_dx = self.dx * cos_a - self.dy * sin_a
+        rotated_dy = self.dx * sin_a + self.dy * cos_a
+
+        return rotated_dx, rotated_dy
+
+
+@dataclass
+class SubcircuitLayout:
+    """Layout of a subcircuit with anchor-relative positioning.
+
+    Represents the spatial arrangement of components within a subcircuit,
+    using an anchor component as the reference point. All other components
+    are stored as offsets from this anchor.
+
+    This allows subcircuits to be:
+    - Moved to new locations while preserving internal layout
+    - Rotated as a unit (90, 180, 270 degrees)
+    - Instantiated multiple times with consistent spacing
+
+    Attributes:
+        path: Hierarchical path to the subcircuit (e.g., "power.ldo")
+        anchor_ref: Reference of the anchor component (e.g., "U1")
+        anchor_position: Tuple of (x, y, rotation) for the anchor
+        offsets: Dictionary mapping local refs to their ComponentOffset
+        layer: PCB layer the subcircuit is on (e.g., "F.Cu")
+
+    Example:
+        >>> layout = SubcircuitLayout(
+        ...     path="power.ldo",
+        ...     anchor_ref="U3",
+        ...     anchor_position=(50.0, 30.0, 0.0),
+        ...     offsets={
+        ...         "C1": ComponentOffset("C1", -2.0, -1.5, 0.0),
+        ...         "C2": ComponentOffset("C2", 2.0, -1.5, 0.0),
+        ...     }
+        ... )
+    """
+
+    path: str
+    anchor_ref: str
+    anchor_position: tuple[float, float, float]  # x, y, rotation
+    offsets: dict[str, ComponentOffset] = field(default_factory=dict)
+    layer: str = "F.Cu"
+
+    @property
+    def component_count(self) -> int:
+        """Total number of components (anchor + offsets)."""
+        return 1 + len(self.offsets)
+
+    @property
+    def component_refs(self) -> list[str]:
+        """List of all component references in the subcircuit."""
+        return [self.anchor_ref] + list(self.offsets.keys())
+
+    def get_position(self, ref: str) -> tuple[float, float, float] | None:
+        """Get absolute position for a component in this layout.
+
+        Args:
+            ref: Local reference designator
+
+        Returns:
+            Tuple of (x, y, rotation) or None if not found
+        """
+        if ref == self.anchor_ref:
+            return self.anchor_position
+
+        offset = self.offsets.get(ref)
+        if offset is None:
+            return None
+
+        anchor_x, anchor_y, anchor_rot = self.anchor_position
+
+        # Rotate offset by anchor rotation
+        rotated_dx, rotated_dy = offset.rotated(anchor_rot)
+
+        return (
+            anchor_x + rotated_dx,
+            anchor_y + rotated_dy,
+            (anchor_rot + offset.rotation_delta) % 360,
+        )
+
+    def with_anchor_position(
+        self, new_position: tuple[float, float, float]
+    ) -> SubcircuitLayout:
+        """Create a copy of this layout with a new anchor position.
+
+        Args:
+            new_position: New (x, y, rotation) for the anchor
+
+        Returns:
+            New SubcircuitLayout with updated anchor position
+        """
+        return SubcircuitLayout(
+            path=self.path,
+            anchor_ref=self.anchor_ref,
+            anchor_position=new_position,
+            offsets=dict(self.offsets),
+            layer=self.layer,
+        )
+
+    def get_all_positions(self) -> dict[str, tuple[float, float, float]]:
+        """Get absolute positions for all components.
+
+        Returns:
+            Dictionary mapping refs to (x, y, rotation) tuples
+        """
+        positions: dict[str, tuple[float, float, float]] = {}
+
+        for ref in self.component_refs:
+            pos = self.get_position(ref)
+            if pos is not None:
+                positions[ref] = pos
+
+        return positions
+
+
+# =============================================================================
+# Net Mapping Types
+# =============================================================================
+
+
+class MatchReason(str, Enum):
+    """Reason for net name matching."""
+
+    EXACT = "exact"
+    CONNECTIVITY = "connectivity"
+    REMOVED = "removed"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass
+class NetMapping:
+    """
+    Mapping from old net name to new net name.
+
+    Attributes:
+        old_name: The net name in the old netlist.
+        new_name: The net name in the new netlist, or None if removed.
+        confidence: Confidence score for the mapping (0.0-1.0).
+        match_reason: Why this mapping was detected.
+        shared_pins: Number of shared pin connections (for connectivity matches).
+    """
+
+    old_name: str
+    new_name: str | None
+    confidence: float
+    match_reason: MatchReason | str
+    shared_pins: int = 0
+
+    def __post_init__(self):
+        """Convert string match_reason to enum if needed."""
+        if isinstance(self.match_reason, str):
+            with contextlib.suppress(ValueError):
+                self.match_reason = MatchReason(self.match_reason)
+
+    @property
+    def is_exact(self) -> bool:
+        """Check if this is an exact name match."""
+        return self.match_reason == MatchReason.EXACT
+
+    @property
+    def is_removed(self) -> bool:
+        """Check if the net was removed."""
+        return self.new_name is None or self.match_reason == MatchReason.REMOVED
+
+    @property
+    def is_renamed(self) -> bool:
+        """Check if the net was renamed (different name, same connectivity)."""
+        return (
+            self.new_name is not None
+            and self.old_name != self.new_name
+            and self.match_reason == MatchReason.CONNECTIVITY
+        )
+
+
+@dataclass
+class SegmentRemap:
+    """
+    Record of a remapped trace segment.
+
+    Attributes:
+        segment_uuid: UUID of the segment.
+        old_net_name: Original net name.
+        new_net_name: New net name.
+        old_net_id: Original net ID.
+        new_net_id: New net ID.
+    """
+
+    segment_uuid: str
+    old_net_name: str
+    new_net_name: str
+    old_net_id: int
+    new_net_id: int
+
+
+@dataclass
+class OrphanedSegment:
+    """
+    A trace segment that could not be remapped.
+
+    Attributes:
+        segment_uuid: UUID of the segment.
+        net_name: Original net name.
+        net_id: Original net ID.
+        reason: Why the segment couldn't be remapped.
+    """
+
+    segment_uuid: str
+    net_name: str
+    net_id: int
+    reason: str
+
+
+@dataclass
+class RemapResult:
+    """
+    Result of remapping trace net assignments.
+
+    Attributes:
+        remapped_segments: List of successfully remapped segments.
+        orphaned_segments: List of segments that couldn't be remapped.
+        net_mappings: The net mappings used for remapping.
+        new_nets: List of nets that are new (not in old design).
+    """
+
+    remapped_segments: list[SegmentRemap] = field(default_factory=list)
+    orphaned_segments: list[OrphanedSegment] = field(default_factory=list)
+    net_mappings: list[NetMapping] = field(default_factory=list)
+    new_nets: list[str] = field(default_factory=list)
+
+    @property
+    def remapped_count(self) -> int:
+        """Number of successfully remapped segments."""
+        return len(self.remapped_segments)
+
+    @property
+    def orphaned_count(self) -> int:
+        """Number of orphaned segments (need re-routing)."""
+        return len(self.orphaned_segments)
+
+    @property
+    def renamed_nets(self) -> list[NetMapping]:
+        """Get mappings where nets were renamed (not exact match)."""
+        return [m for m in self.net_mappings if m.is_renamed]
+
+    @property
+    def removed_nets(self) -> list[NetMapping]:
+        """Get mappings where nets were removed."""
+        return [m for m in self.net_mappings if m.is_removed]
+
+    def summary(self) -> dict:
+        """Get a summary of the remapping results."""
+        return {
+            "remapped_segments": self.remapped_count,
+            "orphaned_segments": self.orphaned_count,
+            "total_mappings": len(self.net_mappings),
+            "exact_matches": sum(1 for m in self.net_mappings if m.is_exact),
+            "renamed_nets": len(self.renamed_nets),
+            "removed_nets": len(self.removed_nets),
+            "new_nets": len(self.new_nets),
         }

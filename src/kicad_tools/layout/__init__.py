@@ -1,8 +1,12 @@
-"""
-Layout preservation and component addressing for KiCad designs.
+"""Layout preservation for KiCad PCBs.
 
-This module provides hierarchical address-based component matching
-to preserve layout when regenerating PCB from schematic changes.
+This module provides tools for preserving and applying component layouts
+when regenerating PCB from schematic changes:
+
+- Hierarchical component addressing (ComponentAddress, AddressRegistry)
+- Layout snapshot capture and restoration (LayoutPreserver, SnapshotCapture)
+- Subcircuit extraction and positioning (SubcircuitExtractor, SubcircuitLayout)
+- Net name change detection and trace remapping (NetMapper)
 
 Example usage:
     >>> from kicad_tools.layout import LayoutPreserver, capture_layout
@@ -16,12 +20,26 @@ Example usage:
 """
 
 from .addressing import AddressRegistry
+from .net_mapping import NetMapper, remap_traces
 from .preservation import LayoutPreserver, PreservationResult, preserve_layout
 from .snapshot import SnapshotCapture, capture_layout
+from .subcircuit import (
+    ComponentInfo,
+    SubcircuitExtractor,
+    apply_subcircuit,
+    rotate_point,
+)
 from .types import (
     ComponentAddress,
     ComponentLayout,
+    ComponentOffset,
     LayoutSnapshot,
+    MatchReason,
+    NetMapping,
+    OrphanedSegment,
+    RemapResult,
+    SegmentRemap,
+    SubcircuitLayout,
     TraceSegment,
     ViaLayout,
     ZoneLayout,
@@ -31,17 +49,31 @@ __all__ = [
     # Addressing
     "AddressRegistry",
     "ComponentAddress",
-    # Snapshot
+    # Snapshot & Preservation
     "SnapshotCapture",
     "capture_layout",
     "LayoutSnapshot",
-    # Preservation
     "LayoutPreserver",
     "PreservationResult",
     "preserve_layout",
-    # Types
+    # Layout Types
     "ComponentLayout",
     "TraceSegment",
     "ViaLayout",
     "ZoneLayout",
+    # Subcircuit
+    "ComponentInfo",
+    "ComponentOffset",
+    "SubcircuitExtractor",
+    "SubcircuitLayout",
+    "apply_subcircuit",
+    "rotate_point",
+    # Net Mapping
+    "MatchReason",
+    "NetMapper",
+    "NetMapping",
+    "OrphanedSegment",
+    "RemapResult",
+    "SegmentRemap",
+    "remap_traces",
 ]
