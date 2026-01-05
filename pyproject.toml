@@ -97,6 +97,11 @@ datasheet = [
 constraints = [
     "pyyaml>=6.0",
 ]
+# MCP server for AI agent integration
+mcp = [
+    "fastmcp>=2.0,<3",
+    "pydantic>=2.0",
+]
 # All optional features
 all = [
     "requests>=2.28",
@@ -104,6 +109,8 @@ all = [
     "pdfplumber>=0.10.0",
     "PyMuPDF>=1.23.0",
     "pyyaml>=6.0",
+    "fastmcp>=2.0,<3",
+    "pydantic>=2.0",
 ]
 # Development dependencies
 dev = [
@@ -115,6 +122,8 @@ dev = [
     "requests>=2.28",
     "responses>=0.23.0",
     "pyyaml>=6.0",
+    "fastmcp>=2.0,<3",
+    "pydantic>=2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
