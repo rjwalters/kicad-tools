@@ -462,14 +462,23 @@ class NetStatusAnalyzer:
         segments = list(self.pcb.segments_in_net(net_number))
         vias = list(self.pcb.vias_in_net(net_number))
 
-        # Get zones for this net with their layers and filled polygons
+        # Get zones for this net with their layers, filled polygons, and boundaries
+        # We track both filled_polygons (actual copper) AND boundary polygon (zone outline)
+        # because vias at pad positions may be in thermal clearance cutouts of filled
+        # polygons but still within the zone boundary (and thus connected to the zone).
         net_zones: list[tuple[str, list[list[tuple[float, float]]]]] = []
+        zone_boundaries: list[tuple[str, list[tuple[float, float]]]] = []
         zone_points: list[tuple[float, float]] = []
         for zone in self.pcb.zones:
-            if zone.net_number == net_number and zone.filled_polygons:
-                net_zones.append((zone.layer, zone.filled_polygons))
-                for poly in zone.filled_polygons:
-                    zone_points.extend(poly)
+            if zone.net_number == net_number:
+                # Collect boundary polygon (zone outline) for via-in-zone checking
+                if zone.polygon:
+                    zone_boundaries.append((zone.layer, zone.polygon))
+                # Collect filled polygons for sampling and backward compatibility
+                if zone.filled_polygons:
+                    net_zones.append((zone.layer, zone.filled_polygons))
+                    for poly in zone.filled_polygons:
+                        zone_points.extend(poly)
 
         # Build segment components for reuse
         segment_components = self._build_segment_components(segments)
@@ -498,7 +507,22 @@ class NetStatusAnalyzer:
                         graph[other].add(pad)
 
         # Find zone connection points (via positions that touch zones)
+        # Check BOTH filled polygons AND zone boundaries because:
+        # - Filled polygons have thermal clearance cutouts around pads
+        # - Stitching vias are placed at pad positions (inside those cutouts)
+        # - But they ARE still within the zone boundary and thus connected
         zone_connection_points: set[tuple[float, float]] = set()
+
+        # Check vias against zone boundaries (Issue #479 fix)
+        # This catches vias in thermal clearance cutouts that are still in the zone
+        for zone_layer, boundary in zone_boundaries:
+            for via in vias:
+                if zone_layer not in via.layers:
+                    continue
+                if self._point_in_polygon(via.position, boundary):
+                    zone_connection_points.add(via.position)
+
+        # Also check vias against filled polygons (original behavior)
         for zone_layer, filled_polys in net_zones:
             for via in vias:
                 if zone_layer not in via.layers:
@@ -518,10 +542,19 @@ class NetStatusAnalyzer:
         for zcp in zone_connection_points:
             zone_connected_pads.update(self._find_pads_at_point(zcp, pad_positions))
 
-        # Pads that directly overlap with zone filled polygons (Issue #441)
+        # Pads that directly overlap with zone boundaries or filled polygons (Issue #441, #479)
         # This handles through-hole pads that connect to inner layer zones
+        # Check boundaries first (catches pads in thermal clearance cutouts)
         for pad_id, pad_pos in pad_positions.items():
             layers = pad_layers.get(pad_id, [])
+            # Check zone boundaries (Issue #479 fix)
+            for zone_layer, boundary in zone_boundaries:
+                if not self._pad_layer_matches_zone(layers, zone_layer):
+                    continue
+                if self._point_in_polygon(pad_pos, boundary):
+                    zone_connected_pads.add(pad_id)
+                    break
+            # Also check filled polygons (original behavior)
             for zone_layer, filled_polys in net_zones:
                 if not self._pad_layer_matches_zone(layers, zone_layer):
                     continue
