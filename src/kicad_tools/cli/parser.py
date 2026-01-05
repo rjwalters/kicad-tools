@@ -1334,9 +1334,9 @@ def _add_validate_parser(subparsers) -> None:
     """Add validate subcommand parser."""
     validate_parser = subparsers.add_parser("validate", help="Validation tools")
     validate_parser.add_argument(
-        "validate_project",
-        nargs="?",
-        help="Path to .kicad_pro or .kicad_pcb file",
+        "validate_files",
+        nargs="*",
+        help="Path(s) to project/schematic/PCB files. Accepts: .kicad_pro, .kicad_sch, .kicad_pcb",
     )
     validate_parser.add_argument(
         "--sync",

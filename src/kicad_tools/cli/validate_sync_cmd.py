@@ -5,6 +5,7 @@ Checks if schematic and PCB netlists are in sync, reporting mismatches clearly.
 
 Usage:
     kct validate --sync project.kicad_pro
+    kct validate --sync design.kicad_sch design.kicad_pcb
     kct validate --sync --schematic design.kicad_sch --pcb design.kicad_pcb
     kct validate --sync project.kicad_pro --format json
 
@@ -23,6 +24,18 @@ from kicad_tools.project import Project
 from kicad_tools.validate.netlist import NetlistValidator, SyncIssue, SyncResult
 
 
+def _classify_file(filepath: str) -> str | None:
+    """Classify a file by extension. Returns 'project', 'schematic', 'pcb', or None."""
+    lower = filepath.lower()
+    if lower.endswith(".kicad_pro"):
+        return "project"
+    elif lower.endswith(".kicad_sch"):
+        return "schematic"
+    elif lower.endswith(".kicad_pcb"):
+        return "pcb"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for validate --sync command."""
     parser = argparse.ArgumentParser(
@@ -32,19 +45,19 @@ def main(argv: list[str] | None = None) -> int:
         epilog=__doc__,
     )
     parser.add_argument(
-        "project",
-        nargs="?",
-        help="Path to .kicad_pro file (auto-finds schematic and PCB)",
+        "files",
+        nargs="*",
+        help="Path(s) to .kicad_pro, .kicad_sch, or .kicad_pcb files",
     )
     parser.add_argument(
         "--schematic",
         "-s",
-        help="Path to .kicad_sch file (required if no project file)",
+        help="Path to .kicad_sch file (explicit override)",
     )
     parser.add_argument(
         "--pcb",
         "-p",
-        help="Path to .kicad_pcb file (required if no project file)",
+        help="Path to .kicad_pcb file (explicit override)",
     )
     parser.add_argument(
         "--format",
@@ -71,28 +84,46 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Determine schematic and PCB paths
+    # Determine schematic and PCB paths from positional args and flags
     schematic_path: Path | None = None
     pcb_path: Path | None = None
+    project_path: Path | None = None
 
-    if args.project:
-        project_path = Path(args.project)
+    # Classify positional files by extension
+    for filepath in args.files or []:
+        file_type = _classify_file(filepath)
+        if file_type == "project":
+            project_path = Path(filepath)
+        elif file_type == "schematic":
+            schematic_path = Path(filepath)
+        elif file_type == "pcb":
+            pcb_path = Path(filepath)
+        else:
+            print(
+                f"Error: Unrecognized file type: {filepath}\n"
+                f"Expected .kicad_pro, .kicad_sch, or .kicad_pcb",
+                file=sys.stderr,
+            )
+            return 1
+
+    # If project file given, load it to find schematic and PCB
+    if project_path:
         if not project_path.exists():
             print(f"Error: Project file not found: {project_path}", file=sys.stderr)
             return 1
 
-        # Load project to find schematic and PCB
         try:
             project = Project.load(project_path)
-            if project._schematic_path:
+            # Only use project paths if not already specified via positional args
+            if not schematic_path and project._schematic_path:
                 schematic_path = project._schematic_path
-            if project._pcb_path:
+            if not pcb_path and project._pcb_path:
                 pcb_path = project._pcb_path
         except Exception as e:
             print(f"Error loading project: {e}", file=sys.stderr)
             return 1
 
-    # Allow overrides
+    # Allow explicit flag overrides
     if args.schematic:
         schematic_path = Path(args.schematic)
     if args.pcb:
@@ -100,16 +131,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # Validate we have both files
     if not schematic_path or not pcb_path:
-        if not args.project:
+        if not project_path and not args.files:
             print(
-                "Error: Must provide either project file or both --schematic and --pcb",
+                "Error: Must provide either:\n"
+                "  - A project file: kct validate --sync project.kicad_pro\n"
+                "  - Schematic and PCB: kct validate --sync design.kicad_sch design.kicad_pcb\n"
+                "  - Explicit flags: kct validate --sync -s design.kicad_sch -p design.kicad_pcb",
                 file=sys.stderr,
             )
         else:
             if not schematic_path:
-                print("Error: Could not find schematic file in project", file=sys.stderr)
+                print("Error: Could not find schematic file", file=sys.stderr)
             if not pcb_path:
-                print("Error: Could not find PCB file in project", file=sys.stderr)
+                print("Error: Could not find PCB file", file=sys.stderr)
         return 1
 
     if not schematic_path.exists():

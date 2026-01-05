@@ -99,6 +99,7 @@ def run_validate_command(args) -> int:
     # Default to sync validation
     if not args.sync:
         print("Usage: kicad-tools validate --sync [options] <project>")
+        print("       kicad-tools validate --sync [options] <schematic> <pcb>")
         print("       kicad-tools validate --connectivity [options] <pcb>")
         print("       kicad-tools validate --consistency [options] <project>")
         print("       kicad-tools validate --placement [options] <project>")
@@ -114,19 +115,24 @@ def run_validate_command(args) -> int:
     from ..validate_sync_cmd import main as validate_sync_main
 
     sub_argv = []
-    if args.validate_project:
-        sub_argv.append(args.validate_project)
-    if args.validate_schematic:
+
+    # Handle positional file arguments (validate_files is a list)
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
+    # Also pass explicit flags if provided
+    if getattr(args, "validate_schematic", None):
         sub_argv.extend(["--schematic", args.validate_schematic])
-    if args.validate_pcb:
+    if getattr(args, "validate_pcb", None):
         sub_argv.extend(["--pcb", args.validate_pcb])
-    if args.validate_format != "table":
+    if getattr(args, "validate_format", "table") != "table":
         sub_argv.extend(["--format", args.validate_format])
-    if args.validate_errors_only:
+    if getattr(args, "validate_errors_only", False):
         sub_argv.append("--errors-only")
-    if args.validate_strict:
+    if getattr(args, "validate_strict", False):
         sub_argv.append("--strict")
-    if args.validate_verbose:
+    if getattr(args, "validate_verbose", False):
         sub_argv.append("--verbose")
     return validate_sync_main(sub_argv)
 
@@ -137,8 +143,21 @@ def run_validate_connectivity_command(args) -> int:
 
     sub_argv = []
 
-    # Get PCB path from project or --pcb flag
-    pcb_path = getattr(args, "validate_pcb", None) or getattr(args, "validate_project", None)
+    # Get PCB path from validate_files or --pcb flag
+    validate_files = getattr(args, "validate_files", []) or []
+    pcb_path = getattr(args, "validate_pcb", None)
+
+    # Try to find PCB from positional files
+    if not pcb_path:
+        for f in validate_files:
+            if f.lower().endswith(".kicad_pcb"):
+                pcb_path = f
+                break
+            elif f.lower().endswith(".kicad_pro"):
+                # Project file - just pass it through
+                pcb_path = f
+                break
+
     if not pcb_path:
         print("Error: PCB file required. Use --pcb or provide a .kicad_pcb file.")
         return 1
@@ -163,8 +182,11 @@ def run_validate_consistency_command(args) -> int:
 
     sub_argv = []
 
-    if getattr(args, "validate_project", None):
-        sub_argv.append(args.validate_project)
+    # Handle positional file arguments
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
     if getattr(args, "validate_schematic", None):
         sub_argv.extend(["--schematic", args.validate_schematic])
     if getattr(args, "validate_pcb", None):
@@ -187,8 +209,11 @@ def run_validate_placement_command(args) -> int:
 
     sub_argv = []
 
-    if getattr(args, "validate_project", None):
-        sub_argv.append(args.validate_project)
+    # Handle positional file arguments
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
     if getattr(args, "validate_schematic", None):
         sub_argv.extend(["--schematic", args.validate_schematic])
     if getattr(args, "validate_pcb", None):
