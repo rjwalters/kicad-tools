@@ -801,7 +801,7 @@ def _estimate_routability(pcb_path: Path, quiet: bool = False) -> tuple[float, i
         return (1.0, 0, 0)
 
 
-def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool) -> int:
+def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool, output_format: str) -> int:
     """
     Run routing-aware placement optimization.
 
@@ -811,6 +811,30 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool) -> int:
     from kicad_tools.cli.progress import spinner
     from kicad_tools.optimize.place_route import PlaceRouteOptimizer
     from kicad_tools.schema.pcb import PCB
+
+    # For JSON output, suppress text output
+    if output_format == "json":
+        quiet = True
+
+    # Result dictionary for JSON output
+    result: dict = {
+        "success": False,
+        "strategy": "routing-aware",
+        "iterations": 0,
+        "routes_completed": 0,
+        "converged": False,
+        "output_path": None,
+        "message": "",
+    }
+
+    def output_result(success: bool = False, message: str = "") -> int:
+        """Output result in appropriate format and return exit code."""
+        result["success"] = success
+        if message:
+            result["message"] = message
+        if output_format == "json":
+            print(json.dumps(result, indent=2))
+        return 0 if success else 1
 
     if not quiet:
         print("Routing-aware placement optimization")
@@ -824,8 +848,9 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             pcb = PCB.load(str(pcb_path))
     except Exception as e:
-        print(f"Error loading PCB: {e}", file=sys.stderr)
-        return 1
+        if output_format != "json":
+            print(f"Error loading PCB: {e}", file=sys.stderr)
+        return output_result(False, f"Error loading PCB: {e}")
 
     # Create optimizer
     try:
@@ -836,30 +861,37 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool) -> int:
                 verbose=not quiet,
             )
     except Exception as e:
-        print(f"Error creating optimizer: {e}", file=sys.stderr)
-        return 1
+        if output_format != "json":
+            print(f"Error creating optimizer: {e}", file=sys.stderr)
+        return output_result(False, f"Error creating optimizer: {e}")
 
     # Run optimization
     max_iterations = getattr(args, "iterations", 10)
     try:
-        result = optimizer.optimize(
+        opt_result = optimizer.optimize(
             max_iterations=max_iterations,
             allow_placement_changes=True,
             skip_drc=False,
         )
     except Exception as e:
-        print(f"Error during optimization: {e}", file=sys.stderr)
-        return 1
+        if output_format != "json":
+            print(f"Error during optimization: {e}", file=sys.stderr)
+        return output_result(False, f"Error during optimization: {e}")
+
+    # Populate result with optimization metrics
+    result["iterations"] = opt_result.iterations
+    result["converged"] = opt_result.success
+    result["routes_completed"] = len(opt_result.routes) if opt_result.routes else 0
 
     # Report results
     if not quiet:
         print()
-        if result.success:
-            print(f"Optimization converged in {result.iterations} iterations")
-            if result.routes:
-                print(f"Successfully routed {len(result.routes)} nets")
+        if opt_result.success:
+            print(f"Optimization converged in {opt_result.iterations} iterations")
+            if opt_result.routes:
+                print(f"Successfully routed {len(opt_result.routes)} nets")
         else:
-            print(f"Optimization did not fully converge: {result.message}")
+            print(f"Optimization did not fully converge: {opt_result.message}")
 
     # Save if not dry run
     if not args.dry_run:
@@ -867,13 +899,17 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool) -> int:
         try:
             with spinner("Saving optimized PCB...", quiet=quiet):
                 pcb.save(str(output_path))
+            result["output_path"] = str(output_path)
             if not quiet:
                 print(f"Saved to: {output_path}")
         except Exception as e:
-            print(f"Error saving PCB: {e}", file=sys.stderr)
-            return 1
+            if output_format != "json":
+                print(f"Error saving PCB: {e}", file=sys.stderr)
+            return output_result(False, f"Error saving PCB: {e}")
+    else:
+        result["message"] = "Dry run - no changes made"
 
-    return 0 if result.success else 1
+    return output_result(opt_result.success, opt_result.message if not opt_result.success else "Optimization completed successfully")
 
 
 def cmd_optimize(args) -> int:
@@ -932,7 +968,7 @@ def cmd_optimize(args) -> int:
 
     # Handle routing-aware optimization mode
     if routing_aware:
-        return _cmd_optimize_routing_aware(args, pcb_path, quiet)
+        return _cmd_optimize_routing_aware(args, pcb_path, quiet, output_format)
 
     # Parse fixed components
     fixed_refs = []
