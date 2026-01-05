@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
+from kicad_tools.mcp.tools.placement import placement_analyze
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class MCPServer:
         """Register default tools."""
         self._register_export_tools()
         self._register_assembly_tools()
+        self._register_placement_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -200,6 +202,55 @@ class MCPServer:
             schematic_path=params["schematic_path"],
             output_dir=params["output_dir"],
             manufacturer=params.get("manufacturer", "jlcpcb"),
+        )
+        return result.to_dict()
+
+    def _register_placement_tools(self) -> None:
+        """Register placement analysis tools."""
+        self.tools["placement_analyze"] = ToolDefinition(
+            name="placement_analyze",
+            description=(
+                "Analyze current component placement quality. Evaluates placement with "
+                "metrics for wire length, congestion, thermal characteristics, signal "
+                "integrity, and manufacturing concerns. Returns an overall score, "
+                "category scores, identified issues with suggestions, detected functional "
+                "clusters, and routing difficulty estimates."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "check_thermal": {
+                        "type": "boolean",
+                        "description": "Include thermal analysis (power components, heat spreading)",
+                        "default": True,
+                    },
+                    "check_signal_integrity": {
+                        "type": "boolean",
+                        "description": "Include signal integrity hints (high-speed nets, crosstalk)",
+                        "default": True,
+                    },
+                    "check_manufacturing": {
+                        "type": "boolean",
+                        "description": "Include DFM checks (clearances, assembly)",
+                        "default": True,
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_placement_analyze,
+        )
+
+    def _handle_placement_analyze(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle placement_analyze tool call."""
+        result = placement_analyze(
+            pcb_path=params["pcb_path"],
+            check_thermal=params.get("check_thermal", True),
+            check_signal_integrity=params.get("check_signal_integrity", True),
+            check_manufacturing=params.get("check_manufacturing", True),
         )
         return result.to_dict()
 
