@@ -439,6 +439,49 @@ class DRCResult:
 
 
 # =============================================================================
+# Session Management Types
+# =============================================================================
+
+
+@dataclass
+class SessionInfo:
+    """Information about an active placement session.
+
+    Provides metadata and statistics about a placement session
+    for monitoring and debugging purposes.
+
+    Attributes:
+        id: Unique session identifier (8-character UUID prefix).
+        pcb_path: Path to the PCB file being edited.
+        created_at: ISO 8601 timestamp when session was created.
+        last_accessed: ISO 8601 timestamp when session was last accessed.
+        pending_moves: Number of uncommitted component moves.
+        components: Total number of components in the session.
+        current_score: Current placement quality score (lower is better).
+    """
+
+    id: str
+    pcb_path: str
+    created_at: str  # ISO 8601 timestamp
+    last_accessed: str  # ISO 8601 timestamp
+    pending_moves: int
+    components: int
+    current_score: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "pcb_path": self.pcb_path,
+            "created_at": self.created_at,
+            "last_accessed": self.last_accessed,
+            "pending_moves": self.pending_moves,
+            "components": self.components,
+            "current_score": round(self.current_score, 4),
+        }
+
+
+# =============================================================================
 # Gerber Export Types (continued)
 # =============================================================================
 
