@@ -7,6 +7,7 @@ when regenerating PCB from schematic changes:
 - Layout snapshot capture and restoration (LayoutPreserver, SnapshotCapture)
 - Subcircuit extraction and positioning (SubcircuitExtractor, SubcircuitLayout)
 - Net name change detection and trace remapping (NetMapper)
+- Incremental layout updates (ChangeDetector, IncrementalUpdater)
 
 Example usage:
     >>> from kicad_tools.layout import LayoutPreserver, capture_layout
@@ -20,6 +21,13 @@ Example usage:
 """
 
 from .addressing import AddressRegistry
+from .incremental import (
+    ChangeDetector,
+    IncrementalUpdater,
+    SnapshotBuilder,
+    apply_incremental_update,
+    detect_layout_changes,
+)
 from .net_mapping import NetMapper, remap_traces
 from .preservation import LayoutPreserver, PreservationResult, preserve_layout
 from .snapshot import SnapshotCapture, capture_layout
@@ -30,9 +38,12 @@ from .subcircuit import (
     rotate_point,
 )
 from .types import (
+    ChangeType,
     ComponentAddress,
     ComponentLayout,
     ComponentOffset,
+    ComponentState,
+    LayoutChange,
     LayoutSnapshot,
     MatchReason,
     NetMapping,
@@ -41,6 +52,7 @@ from .types import (
     SegmentRemap,
     SubcircuitLayout,
     TraceSegment,
+    UpdateResult,
     ViaLayout,
     ZoneLayout,
 )
@@ -48,6 +60,8 @@ from .types import (
 __all__ = [
     # Addressing
     "AddressRegistry",
+    "ChangeDetector",
+    "ChangeType",
     "ComponentAddress",
     # Snapshot & Preservation
     "SnapshotCapture",
@@ -64,6 +78,9 @@ __all__ = [
     # Subcircuit
     "ComponentInfo",
     "ComponentOffset",
+    "ComponentState",
+    "IncrementalUpdater",
+    "LayoutChange",
     "SubcircuitExtractor",
     "SubcircuitLayout",
     "apply_subcircuit",
@@ -75,5 +92,9 @@ __all__ = [
     "OrphanedSegment",
     "RemapResult",
     "SegmentRemap",
+    "SnapshotBuilder",
+    "UpdateResult",
+    "apply_incremental_update",
+    "detect_layout_changes",
     "remap_traces",
 ]
