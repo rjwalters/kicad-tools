@@ -96,6 +96,8 @@ def run_route_command(args) -> int:
         sub_argv.append("--quiet")
     if getattr(args, "power_nets", None):
         sub_argv.extend(["--power-nets", args.power_nets])
+    if getattr(args, "layers", "auto") != "auto":
+        sub_argv.extend(["--layers", args.layers])
     return route_main(sub_argv)
 
 
