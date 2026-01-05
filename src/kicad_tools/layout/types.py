@@ -222,9 +222,7 @@ class SubcircuitLayout:
             (anchor_rot + offset.rotation_delta) % 360,
         )
 
-    def with_anchor_position(
-        self, new_position: tuple[float, float, float]
-    ) -> SubcircuitLayout:
+    def with_anchor_position(self, new_position: tuple[float, float, float]) -> SubcircuitLayout:
         """Create a copy of this layout with a new anchor position.
 
         Args:
@@ -401,4 +399,232 @@ class RemapResult:
             "renamed_nets": len(self.renamed_nets),
             "removed_nets": len(self.removed_nets),
             "new_nets": len(self.new_nets),
+        }
+
+
+# =============================================================================
+# Incremental Update Types
+# =============================================================================
+
+
+class ChangeType(str, Enum):
+    """Type of change detected for a component."""
+
+    ADDED = "added"
+    REMOVED = "removed"
+    MODIFIED = "modified"
+    UNCHANGED = "unchanged"
+
+
+@dataclass
+class ComponentState:
+    """
+    State of a component in a layout.
+
+    Captures position, rotation, and layer information for
+    comparison and preservation during incremental updates.
+
+    Attributes:
+        reference: Reference designator (e.g., "U1", "C3")
+        address: Hierarchical address (e.g., "power.ldo.U1")
+        position: Tuple of (x, y) position in mm
+        rotation: Rotation in degrees
+        layer: PCB layer (e.g., "F.Cu", "B.Cu")
+        footprint: Footprint name/library
+        uuid: Component UUID
+    """
+
+    reference: str
+    address: str
+    position: tuple[float, float]
+    rotation: float
+    layer: str
+    footprint: str = ""
+    uuid: str = ""
+
+    @property
+    def position_tuple(self) -> tuple[float, float, float]:
+        """Get position as (x, y, rotation) tuple."""
+        return (self.position[0], self.position[1], self.rotation)
+
+
+@dataclass
+class LayoutChange:
+    """
+    Describes a change detected between old and new design state.
+
+    Used by ChangeDetector to report what changed and by
+    IncrementalUpdater to determine what actions to take.
+
+    Attributes:
+        change_type: Type of change (added, removed, modified, unchanged)
+        component_address: Hierarchical address of the component
+        old_state: Component state in old layout (None if added)
+        new_state: Component state in new design (None if removed)
+        affected_nets: List of net names connected to this component
+    """
+
+    change_type: ChangeType | str
+    component_address: str
+    old_state: ComponentState | None = None
+    new_state: ComponentState | None = None
+    affected_nets: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Convert string change_type to enum if needed."""
+        if isinstance(self.change_type, str):
+            with contextlib.suppress(ValueError):
+                self.change_type = ChangeType(self.change_type)
+
+    @property
+    def is_added(self) -> bool:
+        """Check if component was added."""
+        return self.change_type == ChangeType.ADDED
+
+    @property
+    def is_removed(self) -> bool:
+        """Check if component was removed."""
+        return self.change_type == ChangeType.REMOVED
+
+    @property
+    def is_modified(self) -> bool:
+        """Check if component was modified."""
+        return self.change_type == ChangeType.MODIFIED
+
+    @property
+    def is_unchanged(self) -> bool:
+        """Check if component was unchanged."""
+        return self.change_type == ChangeType.UNCHANGED
+
+
+@dataclass
+class LayoutSnapshot:
+    """
+    Snapshot of component positions in a PCB layout.
+
+    Captures the state of all components for later comparison
+    when detecting changes for incremental updates.
+
+    Attributes:
+        component_states: Dictionary mapping addresses to ComponentState
+        net_connections: Dictionary mapping component addresses to their nets
+        created_at: Timestamp when snapshot was taken (ISO format)
+    """
+
+    component_states: dict[str, ComponentState] = field(default_factory=dict)
+    net_connections: dict[str, list[str]] = field(default_factory=dict)
+    created_at: str = ""
+
+    def __post_init__(self):
+        """Set timestamp if not provided."""
+        if not self.created_at:
+            from datetime import datetime, timezone
+
+            self.created_at = datetime.now(timezone.utc).isoformat()
+
+    @property
+    def component_count(self) -> int:
+        """Number of components in snapshot."""
+        return len(self.component_states)
+
+    def get_state(self, address: str) -> ComponentState | None:
+        """Get component state by address."""
+        return self.component_states.get(address)
+
+    def get_nets(self, address: str) -> list[str]:
+        """Get nets connected to a component."""
+        return self.net_connections.get(address, [])
+
+    def addresses(self) -> set[str]:
+        """Get all component addresses."""
+        return set(self.component_states.keys())
+
+    def to_dict(self) -> dict:
+        """Convert to serializable dictionary."""
+        return {
+            "component_states": {
+                addr: {
+                    "reference": state.reference,
+                    "address": state.address,
+                    "position": list(state.position),
+                    "rotation": state.rotation,
+                    "layer": state.layer,
+                    "footprint": state.footprint,
+                    "uuid": state.uuid,
+                }
+                for addr, state in self.component_states.items()
+            },
+            "net_connections": dict(self.net_connections),
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> LayoutSnapshot:
+        """Create from serialized dictionary."""
+        component_states = {}
+        for addr, state_data in data.get("component_states", {}).items():
+            pos = state_data.get("position", [0, 0])
+            component_states[addr] = ComponentState(
+                reference=state_data.get("reference", ""),
+                address=state_data.get("address", addr),
+                position=(pos[0], pos[1]),
+                rotation=state_data.get("rotation", 0.0),
+                layer=state_data.get("layer", "F.Cu"),
+                footprint=state_data.get("footprint", ""),
+                uuid=state_data.get("uuid", ""),
+            )
+
+        return cls(
+            component_states=component_states,
+            net_connections=data.get("net_connections", {}),
+            created_at=data.get("created_at", ""),
+        )
+
+
+@dataclass
+class UpdateResult:
+    """
+    Result of applying incremental layout updates.
+
+    Provides summary of what was updated, preserved, and what
+    needs additional attention (routing, placement).
+
+    Attributes:
+        added_components: List of addresses for newly added components
+        removed_components: List of addresses for removed components
+        updated_components: List of addresses for modified components
+        preserved_components: Count of components with preserved positions
+        affected_nets: List of net names that need re-routing
+        errors: List of any errors encountered during update
+    """
+
+    added_components: list[str] = field(default_factory=list)
+    removed_components: list[str] = field(default_factory=list)
+    updated_components: list[str] = field(default_factory=list)
+    preserved_components: int = 0
+    affected_nets: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def total_changes(self) -> int:
+        """Total number of components changed (added + removed + updated)."""
+        return (
+            len(self.added_components) + len(self.removed_components) + len(self.updated_components)
+        )
+
+    @property
+    def has_errors(self) -> bool:
+        """Check if any errors occurred."""
+        return len(self.errors) > 0
+
+    def summary(self) -> dict:
+        """Get a summary of the update results."""
+        return {
+            "added": len(self.added_components),
+            "removed": len(self.removed_components),
+            "updated": len(self.updated_components),
+            "preserved": self.preserved_components,
+            "total_changes": self.total_changes,
+            "affected_nets": len(self.affected_nets),
+            "errors": len(self.errors),
         }
