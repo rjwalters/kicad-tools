@@ -500,6 +500,90 @@ class BOMExportResult:
 
 
 @dataclass
+class BOMItemResult:
+    """A single item or group in standalone BOM export.
+
+    Used by export_bom tool to provide detailed component information.
+
+    Attributes:
+        reference: Reference designator(s), comma-separated when grouped
+        value: Component value (e.g., "10k", "100nF")
+        footprint: Footprint name
+        quantity: Number of components in this group
+        lcsc_part: LCSC part number if available
+        description: Component description if available
+        manufacturer: Manufacturer name if available
+        mpn: Manufacturer Part Number if available
+    """
+
+    reference: str
+    value: str
+    footprint: str
+    quantity: int
+    lcsc_part: str | None = None
+    description: str | None = None
+    manufacturer: str | None = None
+    mpn: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "reference": self.reference,
+            "value": self.value,
+            "footprint": self.footprint,
+            "quantity": self.quantity,
+            "lcsc_part": self.lcsc_part,
+            "description": self.description,
+            "manufacturer": self.manufacturer,
+            "mpn": self.mpn,
+        }
+
+
+@dataclass
+class BOMGenerationResult:
+    """Result of standalone BOM generation via export_bom tool.
+
+    More comprehensive than BOMExportResult, includes full item details
+    and supports data-only mode (no file output).
+
+    Attributes:
+        success: Whether the export completed successfully
+        total_parts: Total number of component instances
+        unique_parts: Number of unique part types (groups)
+        output_path: Path to exported file (None if data-only)
+        missing_lcsc: List of references missing LCSC part numbers
+        items: List of BOM items with full details
+        format: Export format used
+        warnings: Any warnings encountered
+        error: Error message if success is False
+    """
+
+    success: bool
+    total_parts: int = 0
+    unique_parts: int = 0
+    output_path: str | None = None
+    missing_lcsc: list[str] = field(default_factory=list)
+    items: list[BOMItemResult] = field(default_factory=list)
+    format: str = "csv"
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "success": self.success,
+            "total_parts": self.total_parts,
+            "unique_parts": self.unique_parts,
+            "output_path": self.output_path,
+            "missing_lcsc": self.missing_lcsc,
+            "items": [item.to_dict() for item in self.items],
+            "format": self.format,
+            "warnings": self.warnings,
+            "error": self.error,
+        }
+
+
+@dataclass
 class PnPExportResult:
     """Result of pick-and-place export operation.
 
@@ -597,6 +681,163 @@ class AssemblyExportResult:
             "error": self.error,
         }
 
+
+# =============================================================================
+# Placement Analysis Types
+# =============================================================================
+
+
+@dataclass
+class PlacementScores:
+    """Placement quality scores by category.
+
+    Attributes:
+        wire_length: Wire length score (lower is better, 0-100 normalized).
+        congestion: Congestion score (lower is better, 0-100 normalized).
+        thermal: Thermal quality score (higher is better, proper heat spreading).
+        signal_integrity: Signal integrity score (higher is better).
+        manufacturing: Manufacturing/DFM score (higher is better).
+    """
+
+    wire_length: float
+    congestion: float
+    thermal: float
+    signal_integrity: float
+    manufacturing: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "wire_length": round(self.wire_length, 1),
+            "congestion": round(self.congestion, 1),
+            "thermal": round(self.thermal, 1),
+            "signal_integrity": round(self.signal_integrity, 1),
+            "manufacturing": round(self.manufacturing, 1),
+        }
+
+
+@dataclass
+class PlacementIssue:
+    """A placement issue or recommendation.
+
+    Attributes:
+        severity: Issue severity ("critical", "warning", "suggestion").
+        category: Issue category ("thermal", "routing", "si", "dfm").
+        description: Human-readable description of the issue.
+        affected_components: List of component reference designators involved.
+        suggestion: Actionable suggestion to fix the issue.
+        location: Optional (x, y) location in mm.
+    """
+
+    severity: str
+    category: str
+    description: str
+    affected_components: list[str]
+    suggestion: str
+    location: tuple[float, float] | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        result: dict = {
+            "severity": self.severity,
+            "category": self.category,
+            "description": self.description,
+            "affected_components": self.affected_components,
+            "suggestion": self.suggestion,
+        }
+        if self.location is not None:
+            result["location"] = {"x": round(self.location[0], 2), "y": round(self.location[1], 2)}
+        return result
+
+
+@dataclass
+class PlacementCluster:
+    """A detected functional cluster of components.
+
+    Attributes:
+        name: Cluster name (e.g., "mcu_cluster", "power_section").
+        components: List of component reference designators in the cluster.
+        centroid: Cluster center position (x, y) in mm.
+        compactness_score: How compact the cluster is (0-100, higher is better).
+    """
+
+    name: str
+    components: list[str]
+    centroid: tuple[float, float]
+    compactness_score: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "name": self.name,
+            "components": self.components,
+            "centroid": {"x": round(self.centroid[0], 2), "y": round(self.centroid[1], 2)},
+            "compactness_score": round(self.compactness_score, 1),
+        }
+
+
+@dataclass
+class RoutingEstimate:
+    """Estimated routing difficulty based on placement.
+
+    Attributes:
+        estimated_routability: Routability score (0-100, higher is easier to route).
+        congestion_hotspots: List of (x, y) positions with high congestion.
+        difficult_nets: List of net names that will be difficult to route.
+    """
+
+    estimated_routability: float
+    congestion_hotspots: list[tuple[float, float]] = field(default_factory=list)
+    difficult_nets: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "estimated_routability": round(self.estimated_routability, 1),
+            "congestion_hotspots": [
+                {"x": round(x, 2), "y": round(y, 2)} for x, y in self.congestion_hotspots
+            ],
+            "difficult_nets": self.difficult_nets,
+        }
+
+
+@dataclass
+class PlacementAnalysis:
+    """Complete placement quality analysis.
+
+    This is the main result type returned by placement_analyze().
+    Contains comprehensive information about placement quality including
+    scores by category, identified issues, functional clusters, and
+    routing difficulty estimate.
+
+    Attributes:
+        file_path: Absolute path to the analyzed PCB file.
+        overall_score: Overall placement quality score (0-100).
+        categories: Scores broken down by category.
+        issues: List of identified placement issues.
+        clusters: Detected functional clusters.
+        routing_estimate: Estimated routing difficulty.
+    """
+
+    file_path: str
+    overall_score: float
+    categories: PlacementScores
+    issues: list[PlacementIssue] = field(default_factory=list)
+    clusters: list[PlacementCluster] = field(default_factory=list)
+    routing_estimate: RoutingEstimate = field(
+        default_factory=lambda: RoutingEstimate(estimated_routability=0.0)
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "file_path": self.file_path,
+            "overall_score": round(self.overall_score, 1),
+            "categories": self.categories.to_dict(),
+            "issues": [i.to_dict() for i in self.issues],
+            "clusters": [c.to_dict() for c in self.clusters],
+            "routing_estimate": self.routing_estimate.to_dict(),
+        }
 
 # =============================================================================
 # Session Management Types

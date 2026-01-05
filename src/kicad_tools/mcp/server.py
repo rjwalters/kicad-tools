@@ -13,7 +13,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from kicad_tools.mcp.tools.export import export_assembly, export_gerbers
+from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
+from kicad_tools.mcp.tools.placement import placement_analyze
 from kicad_tools.mcp.tools.session import (
     apply_move,
     commit_session,
@@ -56,6 +57,7 @@ class MCPServer:
         """Register default tools."""
         self._register_export_tools()
         self._register_assembly_tools()
+        self._register_placement_tools()
         self._register_session_tools()
 
     def _register_export_tools(self) -> None:
@@ -99,6 +101,60 @@ class MCPServer:
             },
             handler=self._handle_export_gerbers,
         )
+
+        self.tools["export_bom"] = ToolDefinition(
+            name="export_bom",
+            description=(
+                "Export Bill of Materials (BOM) from a KiCad schematic file. "
+                "Generates a component list with quantities, values, footprints, and "
+                "part numbers. Supports multiple output formats including CSV, JSON, "
+                "and manufacturer-specific formats (JLCPCB, PCBWay, Seeed). "
+                "Automatically extracts LCSC part numbers from component fields."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "schematic_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_sch file",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional - omit for data-only response)",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format",
+                        "enum": ["csv", "json", "jlcpcb", "pcbway", "seeed"],
+                        "default": "csv",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Component grouping strategy",
+                        "enum": ["value", "footprint", "value+footprint", "mpn", "none"],
+                        "default": "value+footprint",
+                    },
+                    "include_dnp": {
+                        "type": "boolean",
+                        "description": "Include Do Not Place components",
+                        "default": False,
+                    },
+                },
+                "required": ["schematic_path"],
+            },
+            handler=self._handle_export_bom,
+        )
+
+    def _handle_export_bom(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle export_bom tool call."""
+        result = export_bom(
+            schematic_path=params["schematic_path"],
+            output_path=params.get("output_path"),
+            format=params.get("format", "csv"),
+            group_by=params.get("group_by", "value+footprint"),
+            include_dnp=params.get("include_dnp", False),
+        )
+        return result.to_dict()
 
     def _handle_export_gerbers(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle export_gerbers tool call."""
@@ -155,6 +211,55 @@ class MCPServer:
             schematic_path=params["schematic_path"],
             output_dir=params["output_dir"],
             manufacturer=params.get("manufacturer", "jlcpcb"),
+        )
+        return result.to_dict()
+
+    def _register_placement_tools(self) -> None:
+        """Register placement analysis tools."""
+        self.tools["placement_analyze"] = ToolDefinition(
+            name="placement_analyze",
+            description=(
+                "Analyze current component placement quality. Evaluates placement with "
+                "metrics for wire length, congestion, thermal characteristics, signal "
+                "integrity, and manufacturing concerns. Returns an overall score, "
+                "category scores, identified issues with suggestions, detected functional "
+                "clusters, and routing difficulty estimates."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "check_thermal": {
+                        "type": "boolean",
+                        "description": "Include thermal analysis (power components, heat spreading)",
+                        "default": True,
+                    },
+                    "check_signal_integrity": {
+                        "type": "boolean",
+                        "description": "Include signal integrity hints (high-speed nets, crosstalk)",
+                        "default": True,
+                    },
+                    "check_manufacturing": {
+                        "type": "boolean",
+                        "description": "Include DFM checks (clearances, assembly)",
+                        "default": True,
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_placement_analyze,
+        )
+
+    def _handle_placement_analyze(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle placement_analyze tool call."""
+        result = placement_analyze(
+            pcb_path=params["pcb_path"],
+            check_thermal=params.get("check_thermal", True),
+            check_signal_integrity=params.get("check_signal_integrity", True),
+            check_manufacturing=params.get("check_manufacturing", True),
         )
         return result.to_dict()
 
