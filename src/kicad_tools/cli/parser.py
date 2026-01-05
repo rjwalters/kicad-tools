@@ -1485,6 +1485,41 @@ def _add_analyze_parser(subparsers) -> None:
         help="Disable differential pair analysis",
     )
 
+    # analyze signal-integrity
+    si_parser = analyze_subparsers.add_parser(
+        "signal-integrity",
+        help="Analyze signal integrity (crosstalk and impedance)",
+        description="Identify crosstalk risks and impedance discontinuities",
+    )
+    si_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    si_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    si_parser.add_argument(
+        "--min-risk",
+        dest="analyze_min_risk",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help="Minimum risk level to report for crosstalk (default: medium)",
+    )
+    si_parser.add_argument(
+        "--crosstalk-only",
+        dest="analyze_crosstalk_only",
+        action="store_true",
+        help="Only analyze crosstalk, skip impedance analysis",
+    )
+    si_parser.add_argument(
+        "--impedance-only",
+        dest="analyze_impedance_only",
+        action="store_true",
+        help="Only analyze impedance, skip crosstalk analysis",
+    )
+
     # analyze thermal
     thermal_parser = analyze_subparsers.add_parser(
         "thermal",
