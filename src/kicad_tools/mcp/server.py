@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from kicad_tools.mcp.tools.export import export_assembly, export_gerbers
+from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
 from kicad_tools.mcp.tools.placement import placement_analyze
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,60 @@ class MCPServer:
             },
             handler=self._handle_export_gerbers,
         )
+
+        self.tools["export_bom"] = ToolDefinition(
+            name="export_bom",
+            description=(
+                "Export Bill of Materials (BOM) from a KiCad schematic file. "
+                "Generates a component list with quantities, values, footprints, and "
+                "part numbers. Supports multiple output formats including CSV, JSON, "
+                "and manufacturer-specific formats (JLCPCB, PCBWay, Seeed). "
+                "Automatically extracts LCSC part numbers from component fields."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "schematic_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_sch file",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional - omit for data-only response)",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format",
+                        "enum": ["csv", "json", "jlcpcb", "pcbway", "seeed"],
+                        "default": "csv",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Component grouping strategy",
+                        "enum": ["value", "footprint", "value+footprint", "mpn", "none"],
+                        "default": "value+footprint",
+                    },
+                    "include_dnp": {
+                        "type": "boolean",
+                        "description": "Include Do Not Place components",
+                        "default": False,
+                    },
+                },
+                "required": ["schematic_path"],
+            },
+            handler=self._handle_export_bom,
+        )
+
+    def _handle_export_bom(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle export_bom tool call."""
+        result = export_bom(
+            schematic_path=params["schematic_path"],
+            output_path=params.get("output_path"),
+            format=params.get("format", "csv"),
+            group_by=params.get("group_by", "value+footprint"),
+            include_dnp=params.get("include_dnp", False),
+        )
+        return result.to_dict()
 
     def _handle_export_gerbers(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle export_gerbers tool call."""

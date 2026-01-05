@@ -500,6 +500,90 @@ class BOMExportResult:
 
 
 @dataclass
+class BOMItemResult:
+    """A single item or group in standalone BOM export.
+
+    Used by export_bom tool to provide detailed component information.
+
+    Attributes:
+        reference: Reference designator(s), comma-separated when grouped
+        value: Component value (e.g., "10k", "100nF")
+        footprint: Footprint name
+        quantity: Number of components in this group
+        lcsc_part: LCSC part number if available
+        description: Component description if available
+        manufacturer: Manufacturer name if available
+        mpn: Manufacturer Part Number if available
+    """
+
+    reference: str
+    value: str
+    footprint: str
+    quantity: int
+    lcsc_part: str | None = None
+    description: str | None = None
+    manufacturer: str | None = None
+    mpn: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "reference": self.reference,
+            "value": self.value,
+            "footprint": self.footprint,
+            "quantity": self.quantity,
+            "lcsc_part": self.lcsc_part,
+            "description": self.description,
+            "manufacturer": self.manufacturer,
+            "mpn": self.mpn,
+        }
+
+
+@dataclass
+class BOMGenerationResult:
+    """Result of standalone BOM generation via export_bom tool.
+
+    More comprehensive than BOMExportResult, includes full item details
+    and supports data-only mode (no file output).
+
+    Attributes:
+        success: Whether the export completed successfully
+        total_parts: Total number of component instances
+        unique_parts: Number of unique part types (groups)
+        output_path: Path to exported file (None if data-only)
+        missing_lcsc: List of references missing LCSC part numbers
+        items: List of BOM items with full details
+        format: Export format used
+        warnings: Any warnings encountered
+        error: Error message if success is False
+    """
+
+    success: bool
+    total_parts: int = 0
+    unique_parts: int = 0
+    output_path: str | None = None
+    missing_lcsc: list[str] = field(default_factory=list)
+    items: list[BOMItemResult] = field(default_factory=list)
+    format: str = "csv"
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "success": self.success,
+            "total_parts": self.total_parts,
+            "unique_parts": self.unique_parts,
+            "output_path": self.output_path,
+            "missing_lcsc": self.missing_lcsc,
+            "items": [item.to_dict() for item in self.items],
+            "format": self.format,
+            "warnings": self.warnings,
+            "error": self.error,
+        }
+
+
+@dataclass
 class PnPExportResult:
     """Result of pick-and-place export operation.
 
