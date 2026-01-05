@@ -14,6 +14,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from kicad_tools.mcp.tools.export import export_assembly, export_gerbers
+from kicad_tools.mcp.tools.session import (
+    apply_move,
+    commit_session,
+    query_move,
+    rollback_session,
+    start_session,
+    undo_move,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,7 @@ class MCPServer:
         """Register default tools."""
         self._register_export_tools()
         self._register_assembly_tools()
+        self._register_session_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -147,6 +156,216 @@ class MCPServer:
             output_dir=params["output_dir"],
             manufacturer=params.get("manufacturer", "jlcpcb"),
         )
+        return result.to_dict()
+
+    def _register_session_tools(self) -> None:
+        """Register session management tools for placement refinement."""
+        self.tools["start_session"] = ToolDefinition(
+            name="start_session",
+            description=(
+                "Start a new placement refinement session. Creates a stateful session "
+                "for interactively refining component placement through query-before-commit "
+                "operations. Returns a session ID used for subsequent operations."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Absolute path to .kicad_pcb file",
+                    },
+                    "fixed_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Component references to keep fixed (optional)",
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_start_session,
+        )
+
+        self.tools["query_move"] = ToolDefinition(
+            name="query_move",
+            description=(
+                "Query the impact of a hypothetical component move without applying it. "
+                "Returns score changes, new/resolved violations, and routing impact. "
+                "Use this to evaluate moves before applying them."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "ref": {
+                        "type": "string",
+                        "description": "Component reference designator (e.g., 'C1', 'R5')",
+                    },
+                    "x": {
+                        "type": "number",
+                        "description": "Target X position in millimeters",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Target Y position in millimeters",
+                    },
+                    "rotation": {
+                        "type": "number",
+                        "description": "Target rotation in degrees (optional, keeps current if not specified)",
+                    },
+                },
+                "required": ["session_id", "ref", "x", "y"],
+            },
+            handler=self._handle_query_move,
+        )
+
+        self.tools["apply_move"] = ToolDefinition(
+            name="apply_move",
+            description=(
+                "Apply a component move within the session. The move can be undone with "
+                "undo_move and is not written to disk until commit_session is called. "
+                "Returns updated component position and score delta."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "ref": {
+                        "type": "string",
+                        "description": "Component reference designator",
+                    },
+                    "x": {
+                        "type": "number",
+                        "description": "New X position in millimeters",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "New Y position in millimeters",
+                    },
+                    "rotation": {
+                        "type": "number",
+                        "description": "New rotation in degrees (optional)",
+                    },
+                },
+                "required": ["session_id", "ref", "x", "y"],
+            },
+            handler=self._handle_apply_move,
+        )
+
+        self.tools["undo_move"] = ToolDefinition(
+            name="undo_move",
+            description=(
+                "Undo the last applied move in the session. Restores the component "
+                "to its previous position. Can be called multiple times to undo "
+                "multiple moves."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_undo_move,
+        )
+
+        self.tools["commit_session"] = ToolDefinition(
+            name="commit_session",
+            description=(
+                "Commit all pending moves to the PCB file and close the session. "
+                "Writes changes to disk. Optionally specify output_path to save to "
+                "a different file instead of overwriting the original."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional, overwrites original if not specified)",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_commit_session,
+        )
+
+        self.tools["rollback_session"] = ToolDefinition(
+            name="rollback_session",
+            description=(
+                "Discard all pending moves and close the session. No changes are "
+                "written to disk. Use this to abandon a session without saving."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_rollback_session,
+        )
+
+    def _handle_start_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle start_session tool call."""
+        result = start_session(
+            pcb_path=params["pcb_path"],
+            fixed_refs=params.get("fixed_refs"),
+        )
+        return result.to_dict()
+
+    def _handle_query_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle query_move tool call."""
+        result = query_move(
+            session_id=params["session_id"],
+            ref=params["ref"],
+            x=params["x"],
+            y=params["y"],
+            rotation=params.get("rotation"),
+        )
+        return result.to_dict()
+
+    def _handle_apply_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle apply_move tool call."""
+        result = apply_move(
+            session_id=params["session_id"],
+            ref=params["ref"],
+            x=params["x"],
+            y=params["y"],
+            rotation=params.get("rotation"),
+        )
+        return result.to_dict()
+
+    def _handle_undo_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle undo_move tool call."""
+        result = undo_move(session_id=params["session_id"])
+        return result.to_dict()
+
+    def _handle_commit_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle commit_session tool call."""
+        result = commit_session(
+            session_id=params["session_id"],
+            output_path=params.get("output_path"),
+        )
+        return result.to_dict()
+
+    def _handle_rollback_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle rollback_session tool call."""
+        result = rollback_session(session_id=params["session_id"])
         return result.to_dict()
 
     def get_tools_list(self) -> list[dict[str, Any]]:
