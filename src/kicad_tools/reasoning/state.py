@@ -656,7 +656,8 @@ class PCBState:
     def _parse_outline(cls, doc: SExp) -> BoardOutline:
         """Parse board outline from Edge.Cuts layer.
 
-        Handles both gr_line and gr_rect elements on the Edge.Cuts layer.
+        Handles gr_rect, gr_line, and gr_poly elements on the Edge.Cuts layer.
+        Falls back to estimating bounds from component positions if no outline found.
         """
         points: list[tuple[float, float]] = []
 
@@ -696,10 +697,85 @@ class PCBState:
                     if len(e_atoms) >= 2:
                         points.append((float(e_atoms[0]), float(e_atoms[1])))
 
-        # Deduplicate and sort
+        # Handle gr_poly elements (polygon outlines)
+        for gr_poly in doc.find_all("gr_poly"):
+            layer_node = gr_poly.find("layer")
+            if layer_node and str(layer_node.get_first_atom()) == "Edge.Cuts":
+                pts = gr_poly.find("pts")
+                if pts:
+                    for xy in pts.find_all("xy"):
+                        atoms = xy.get_atoms()
+                        if len(atoms) >= 2:
+                            points.append((float(atoms[0]), float(atoms[1])))
+
+        # Handle gr_arc elements (arc outlines - extract start/mid/end points)
+        for gr_arc in doc.find_all("gr_arc"):
+            layer_node = gr_arc.find("layer")
+            if layer_node and str(layer_node.get_first_atom()) == "Edge.Cuts":
+                for node_name in ["start", "mid", "end"]:
+                    node = gr_arc.find(node_name)
+                    if node:
+                        atoms = node.get_atoms()
+                        if len(atoms) >= 2:
+                            points.append((float(atoms[0]), float(atoms[1])))
+
+        # Deduplicate points
         unique_points = list(set(points))
 
+        # If no outline elements found, estimate from component positions
+        if not unique_points:
+            unique_points = cls._estimate_bounds_from_components(doc)
+
         return BoardOutline.from_points(unique_points)
+
+    @classmethod
+    def _estimate_bounds_from_components(cls, doc: SExp) -> list[tuple[float, float]]:
+        """Estimate board bounds from component positions when no outline is defined.
+
+        Adds a 5mm margin around the component bounding box.
+        """
+        xs: list[float] = []
+        ys: list[float] = []
+
+        for fp_node in doc.find_all("footprint"):
+            at_node = fp_node.get("at")
+            if at_node:
+                atoms = at_node.get_atoms()
+                if len(atoms) >= 2:
+                    xs.append(float(atoms[0]))
+                    ys.append(float(atoms[1]))
+
+            # Also include pad positions for more accurate bounds
+            for pad_node in fp_node.find_all("pad"):
+                pad_at = pad_node.find("at")
+                if pad_at:
+                    pad_atoms = pad_at.get_atoms()
+                    if len(pad_atoms) >= 2:
+                        # Pad positions are relative to footprint, so we need
+                        # the footprint position to calculate absolute position
+                        if at_node:
+                            fp_atoms = at_node.get_atoms()
+                            if len(fp_atoms) >= 2:
+                                fp_x, fp_y = float(fp_atoms[0]), float(fp_atoms[1])
+                                pad_rel_x, pad_rel_y = (
+                                    float(pad_atoms[0]),
+                                    float(pad_atoms[1]),
+                                )
+                                xs.append(fp_x + pad_rel_x)
+                                ys.append(fp_y + pad_rel_y)
+
+        if xs and ys:
+            margin = 5.0  # 5mm margin around components
+            min_x, max_x = min(xs) - margin, max(xs) + margin
+            min_y, max_y = min(ys) - margin, max(ys) + margin
+            return [
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+            ]
+
+        return []
 
     # =========================================================================
     # Query Methods
