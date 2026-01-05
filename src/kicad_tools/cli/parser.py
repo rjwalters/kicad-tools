@@ -766,6 +766,19 @@ def _add_route_parser(subparsers) -> None:
         "--power-nets",
         help="Generate zones: 'NET:LAYER,...' (e.g., 'GND:B.Cu,+3.3V:F.Cu')",
     )
+    route_parser.add_argument(
+        "--layers",
+        choices=["auto", "2", "4", "4-sig", "6"],
+        default="auto",
+        help=(
+            "Layer stack configuration: "
+            "'auto' = auto-detect (default); "
+            "'2' = 2-layer; "
+            "'4' = 4-layer with GND/PWR planes; "
+            "'4-sig' = 4-layer with 2 signal layers; "
+            "'6' = 6-layer"
+        ),
+    )
 
 
 def _add_reason_parser(subparsers) -> None:
