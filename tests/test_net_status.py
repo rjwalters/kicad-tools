@@ -157,6 +157,55 @@ VIA_ZONE_CONNECTIVITY_PCB = """(kicad_pcb
 """
 
 
+# PCB with through-hole pads overlapping zone (Issue #441)
+# Tests that THT pads are recognized as zone-connected via direct overlap
+THT_PAD_ZONE_CONNECTIVITY_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 120 120)
+    (property "Reference" "J1" (at 0 -3 0) (layer "F.SilkS") (uuid "ref1"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0)
+      (layers "*.Cu" "*.Mask") (net 1 "GND"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0)
+      (layers "*.Cu" "*.Mask") (net 1 "GND"))
+  )
+  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 150 120)
+    (property "Reference" "J2" (at 0 -3 0) (layer "F.SilkS") (uuid "ref2"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0)
+      (layers "*.Cu" "*.Mask") (net 1 "GND"))
+    (pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1.0)
+      (layers "*.Cu" "*.Mask") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "In1.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.3))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 100 100) (xy 170 100) (xy 170 140) (xy 100 140)))
+    (filled_polygon (layer "In1.Cu") (pts (xy 100 100) (xy 170 100) (xy 170 140) (xy 100 140)))
+  )
+)
+"""
+
+
 # PCB with zone (plane net)
 ZONE_PCB = """(kicad_pcb
   (version 20240108)
@@ -234,6 +283,14 @@ def via_zone_connectivity_pcb(tmp_path: Path) -> Path:
     """Create a PCB with via-to-zone connectivity for testing (Issue #419)."""
     pcb_file = tmp_path / "via_zone.kicad_pcb"
     pcb_file.write_text(VIA_ZONE_CONNECTIVITY_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def tht_pad_zone_connectivity_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with THT pads overlapping zone for testing (Issue #441)."""
+    pcb_file = tmp_path / "tht_pad_zone.kicad_pcb"
+    pcb_file.write_text(THT_PAD_ZONE_CONNECTIVITY_PCB)
     return pcb_file
 
 
@@ -526,6 +583,34 @@ class TestNetStatusAnalyzer:
         )
         assert gnd.total_pads == 2, "GND should have 2 pads"
         assert gnd.connected_count == 2, "Both pads should be connected via zone"
+        assert gnd.unconnected_count == 0, "No pads should be unconnected"
+
+    def test_tht_pad_zone_connectivity(self, tht_pad_zone_connectivity_pcb: Path):
+        """Test that through-hole pads overlapping zones are recognized as connected.
+
+        Issue #441: net-status doesn't detect via-to-zone connectivity.
+
+        This test creates a PCB with:
+        - Four THT pads (J1.1, J1.2, J2.1, J2.2) with layers "*.Cu" (all copper)
+        - No traces or vias connecting the pads
+        - A GND zone on In1.Cu covering all pad positions
+
+        All pads should be recognized as connected because they all overlap
+        the zone on In1.Cu layer (THT pads exist on all copper layers).
+        """
+        analyzer = NetStatusAnalyzer(tht_pad_zone_connectivity_pcb)
+        result = analyzer.analyze()
+
+        gnd = result.get_net("GND")
+        assert gnd is not None, "GND net should exist"
+        assert gnd.is_plane_net is True, "GND should be identified as plane net"
+        assert gnd.total_pads == 4, "GND should have 4 pads"
+        assert gnd.status == "complete", (
+            f"GND should be complete (THT pads connected via zone overlap), "
+            f"but found {gnd.unconnected_count} unconnected pads: "
+            f"{[p.full_name for p in gnd.unconnected_pads]}"
+        )
+        assert gnd.connected_count == 4, "All 4 pads should be connected via zone"
         assert gnd.unconnected_count == 0, "No pads should be unconnected"
 
 

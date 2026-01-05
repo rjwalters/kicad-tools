@@ -35,6 +35,7 @@ class PadInfo:
     pad_number: str  # Pad number (e.g., "2")
     position: tuple[float, float]  # Board coordinates (x, y)
     is_connected: bool  # Whether pad is connected to main routing
+    layers: list[str] = field(default_factory=list)  # Layers pad exists on
 
     @property
     def full_name(self) -> str:
@@ -406,6 +407,7 @@ class NetStatusAnalyzer:
                             pad_number=pad.number,
                             position=board_pos,
                             is_connected=False,
+                            layers=pad.layers,
                         )
                     )
         return pads
@@ -454,6 +456,7 @@ class NetStatusAnalyzer:
         """
         graph: dict[str, set[str]] = defaultdict(set)
         pad_positions = {p.full_name: p.position for p in pad_infos}
+        pad_layers = {p.full_name: p.layers for p in pad_infos}
 
         # Get segments and vias for this net
         segments = list(self.pcb.segments_in_net(net_number))
@@ -514,6 +517,18 @@ class NetStatusAnalyzer:
         # Pads directly at zone connection points
         for zcp in zone_connection_points:
             zone_connected_pads.update(self._find_pads_at_point(zcp, pad_positions))
+
+        # Pads that directly overlap with zone filled polygons (Issue #441)
+        # This handles through-hole pads that connect to inner layer zones
+        for pad_id, pad_pos in pad_positions.items():
+            layers = pad_layers.get(pad_id, [])
+            for zone_layer, filled_polys in net_zones:
+                if not self._pad_layer_matches_zone(layers, zone_layer):
+                    continue
+                for poly in filled_polys:
+                    if self._point_in_polygon(pad_pos, poly):
+                        zone_connected_pads.add(pad_id)
+                        break
 
         # Pads connected via segment chains that touch zone connection points
         for component in segment_components:
@@ -632,6 +647,34 @@ class NetStatusAnalyzer:
         dx = p1[0] - p2[0]
         dy = p1[1] - p2[1]
         return (dx * dx + dy * dy) < (self.POSITION_TOLERANCE * self.POSITION_TOLERANCE)
+
+    def _pad_layer_matches_zone(
+        self,
+        pad_layers: list[str],
+        zone_layer: str,
+    ) -> bool:
+        """Check if a pad exists on the same layer as a zone.
+
+        Handles wildcard layers like "*.Cu" which match any copper layer.
+
+        Args:
+            pad_layers: List of layers the pad exists on
+            zone_layer: Layer the zone is on (e.g., "In1.Cu", "B.Cu")
+
+        Returns:
+            True if the pad and zone share a layer
+        """
+        for pad_layer in pad_layers:
+            # Exact match
+            if pad_layer == zone_layer:
+                return True
+            # Wildcard match: "*.Cu" matches any copper layer
+            if pad_layer == "*.Cu" and zone_layer.endswith(".Cu"):
+                return True
+            # Also handle "*.Mask" style wildcards
+            if pad_layer.startswith("*.") and zone_layer.endswith(pad_layer[1:]):
+                return True
+        return False
 
     def _point_in_polygon(
         self,
