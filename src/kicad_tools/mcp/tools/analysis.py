@@ -1,29 +1,39 @@
 """MCP tool for analyzing KiCad PCB files.
 
 Provides the analyze_board function that returns comprehensive
-board metadata for AI agent consumption.
+board metadata for AI agent consumption, and get_drc_violations
+for design rule checking.
 """
 
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+import uuid
+from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Literal
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.mcp.types import (
+    AffectedItem,
     BoardAnalysis,
     BoardDimensions,
     ComponentSummary,
+    DRCResult,
+    DRCViolation,
     LayerInfo,
     NetFanout,
     NetSummary,
     RoutingStatus,
+    ViolationLocation,
     ZoneInfo,
 )
 from kicad_tools.schema.pcb import PCB
+
+# Supported manufacturer presets for DRC
+MANUFACTURER_PRESETS = ("jlcpcb", "oshpark", "pcbway", "seeed")
 
 
 def analyze_board(pcb_path: str) -> BoardAnalysis:
@@ -412,4 +422,198 @@ def _compute_routing_status(pcb: PCB) -> RoutingStatus:
         total_airwires=total_airwires,
         total_trace_length_mm=total_trace_length,
         via_count=via_count,
+    )
+
+
+# =============================================================================
+# DRC Analysis Functions
+# =============================================================================
+
+
+def _generate_fix_suggestion(
+    rule_id: str,
+    required_value: float | None,
+    actual_value: float | None,
+) -> str | None:
+    """Generate a fix suggestion for a violation.
+
+    Args:
+        rule_id: The rule that was violated
+        required_value: The required value (if applicable)
+        actual_value: The actual measured value (if applicable)
+
+    Returns:
+        Human-readable fix suggestion, or None
+    """
+    if required_value is None or actual_value is None:
+        return None
+
+    delta = required_value - actual_value
+
+    if "clearance" in rule_id.lower():
+        return f"Increase spacing by at least {delta:.3f}mm to meet minimum clearance"
+
+    if "trace" in rule_id.lower() or "track" in rule_id.lower():
+        return f"Increase track width to at least {required_value:.3f}mm"
+
+    if "via" in rule_id.lower():
+        if "drill" in rule_id.lower():
+            return f"Increase via drill size to at least {required_value:.3f}mm"
+        if "annular" in rule_id.lower():
+            return "Increase via pad size to improve annular ring"
+        return f"Increase via size to meet {required_value:.3f}mm minimum"
+
+    if "edge" in rule_id.lower():
+        return f"Move copper at least {required_value:.3f}mm from board edge"
+
+    if "silk" in rule_id.lower():
+        return "Move silkscreen element away from pads/copper"
+
+    return f"Adjust to meet minimum of {required_value:.3f}mm"
+
+
+def _convert_violation(
+    violation,  # DRCViolation from validate.violations
+    index: int,
+) -> DRCViolation:
+    """Convert internal DRCViolation to MCP DRCViolation.
+
+    Args:
+        violation: Internal DRCViolation object
+        index: Index for generating unique ID
+
+    Returns:
+        MCP DRCViolation model
+    """
+    # Extract location
+    location = ViolationLocation(x_mm=0.0, y_mm=0.0, layer="")
+    if violation.location:
+        location = ViolationLocation(
+            x_mm=violation.location[0],
+            y_mm=violation.location[1],
+            layer=violation.layer or "",
+        )
+
+    # Extract affected items
+    affected_items = []
+    for item in violation.items:
+        affected_items.append(
+            AffectedItem(
+                item_type="component",
+                reference=item,
+                net=None,
+            )
+        )
+
+    # Generate fix suggestion
+    fix_suggestion = _generate_fix_suggestion(
+        violation.rule_id,
+        violation.required_value,
+        violation.actual_value,
+    )
+
+    return DRCViolation(
+        id=f"drc-{index:04d}-{uuid.uuid4().hex[:8]}",
+        type=violation.rule_id,
+        severity=violation.severity,
+        message=violation.message,
+        location=location,
+        affected_items=affected_items,
+        fix_suggestion=fix_suggestion,
+        required_value_mm=violation.required_value,
+        actual_value_mm=violation.actual_value,
+    )
+
+
+def get_drc_violations(
+    pcb_path: str,
+    rules: str | None = None,
+    severity_filter: Literal["all", "error", "warning"] = "all",
+    layers: int = 4,
+) -> DRCResult:
+    """Run design rule check on PCB and return violations.
+
+    Validates a PCB design against manufacturer-specific design rules
+    and returns detailed violation information with locations and
+    fix suggestions.
+
+    Args:
+        pcb_path: Absolute path to .kicad_pcb file
+        rules: Manufacturer preset ("jlcpcb", "oshpark", "pcbway", "seeed")
+               or path to custom rules file. Defaults to "jlcpcb".
+        severity_filter: Filter by severity level:
+                        "all" - return all violations
+                        "error" - return only errors
+                        "warning" - return only warnings
+        layers: Number of PCB layers (2, 4, 6, etc.)
+
+    Returns:
+        DRCResult with violations, summary, and pass/fail status
+
+    Raises:
+        FileNotFoundError: If PCB file doesn't exist
+        ParseError: If PCB file cannot be parsed
+        ValueError: If manufacturer preset is not recognized
+
+    Example:
+        >>> result = get_drc_violations(
+        ...     "/path/to/board.kicad_pcb",
+        ...     rules="jlcpcb"
+        ... )
+        >>> if not result.passed:
+        ...     for v in result.violations:
+        ...         print(f"{v.type}: {v.message}")
+    """
+    # Validate path
+    path = Path(pcb_path)
+    if not path.exists():
+        raise KiCadFileNotFoundError(f"PCB file not found: {pcb_path}")
+
+    if path.suffix != ".kicad_pcb":
+        raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
+
+    # Determine manufacturer
+    manufacturer = rules or "jlcpcb"
+    if manufacturer in MANUFACTURER_PRESETS:
+        pass  # Use as-is
+    elif Path(manufacturer).exists():
+        # Custom rules file - not yet supported
+        raise NotImplementedError("Custom rules files not yet supported")
+    else:
+        available = ", ".join(MANUFACTURER_PRESETS)
+        raise ValueError(f"Unknown manufacturer preset: {manufacturer!r}. Available: {available}")
+
+    # Load PCB
+    pcb = PCB.load(path)
+
+    # Run DRC
+    from kicad_tools.validate import DRCChecker
+
+    checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers)
+    results = checker.check_all()
+
+    # Convert violations to MCP format
+    violations: list[DRCViolation] = []
+    type_counts: Counter[str] = Counter()
+
+    for i, v in enumerate(results.violations):
+        # Apply severity filter
+        if severity_filter == "error" and not v.is_error:
+            continue
+        if severity_filter == "warning" and v.is_error:
+            continue
+
+        mcp_violation = _convert_violation(v, i)
+        violations.append(mcp_violation)
+        type_counts[v.rule_id] += 1
+
+    return DRCResult(
+        passed=results.passed,
+        violation_count=len(violations),
+        error_count=results.error_count if severity_filter != "warning" else 0,
+        warning_count=results.warning_count if severity_filter != "error" else 0,
+        violations=violations,
+        summary_by_type=dict(type_counts),
+        manufacturer=manufacturer,
+        layers=layers,
     )
