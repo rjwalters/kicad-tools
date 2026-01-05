@@ -960,6 +960,15 @@ class ClearanceResult:
             "required_clearance_mm": self.required_clearance_mm,
         }
 
+    def summary(self) -> str:
+        """Generate a human-readable summary of the clearance result."""
+        status = "PASSES" if self.passes_rules else "FAILS"
+        summary = f"Clearance between {self.item1} and {self.item2}: {self.min_clearance_mm:.4f} mm [{status}]"
+        if self.required_clearance_mm is not None:
+            summary += f" (required: {self.required_clearance_mm:.4f} mm)"
+        summary += f"\nLocation: ({self.location[0]:.3f}, {self.location[1]:.3f}) mm on {self.layer}"
+        return summary
+
 
 # =============================================================================
 # Session Management Types

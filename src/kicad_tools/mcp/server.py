@@ -566,6 +566,7 @@ class MCPServer:
         request_id = request.get("id")
 
         try:
+            result: dict[str, Any]
             if method == "initialize":
                 result = {
                     "protocolVersion": "2024-11-05",

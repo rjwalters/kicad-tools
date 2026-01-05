@@ -593,7 +593,7 @@ def get_drc_violations(
         raise ValueError(f"Unknown manufacturer preset: {manufacturer!r}. Available: {available}")
 
     # Load PCB
-    pcb = PCB.load(path)
+    pcb = PCB.load(str(path))
 
     # Run DRC
     from kicad_tools.validate import DRCChecker
