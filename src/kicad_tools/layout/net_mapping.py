@@ -7,7 +7,6 @@ remapping for PCB trace assignments.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 
 from kicad_tools.layout.types import (

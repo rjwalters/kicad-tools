@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from kicad_tools.layout import NetMapper, NetMapping, RemapResult, remap_traces
 from kicad_tools.layout.types import MatchReason, OrphanedSegment, SegmentRemap
 from kicad_tools.operations.netlist import Netlist, NetlistNet, NetNode
