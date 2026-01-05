@@ -364,6 +364,38 @@ class TestManufacturingCostEstimator:
         # Should suggest optimizations
         assert len(estimate.optimization_suggestions) > 0
 
+    def test_estimate_pcb_method(self):
+        """Test the estimate_pcb method for audit integration."""
+        estimator = ManufacturingCostEstimator()
+        result = estimator.estimate_pcb(
+            width_mm=50.0,
+            height_mm=40.0,
+            layers=2,
+            quantity=10,
+        )
+        # Should return SimplePCBCostResult with expected attributes
+        assert result.quantity == 10
+        assert result.total > 0
+        assert result.cost_per_unit > 0
+        assert result.total == result.cost_per_unit * 10
+
+    def test_estimate_pcb_with_all_options(self):
+        """Test estimate_pcb with all optional parameters."""
+        estimator = ManufacturingCostEstimator()
+        result = estimator.estimate_pcb(
+            width_mm=100.0,
+            height_mm=80.0,
+            layers=4,
+            quantity=50,
+            surface_finish="enig",
+            solder_mask_color="black",
+            board_thickness_mm=1.6,
+        )
+        # Should return valid cost estimate
+        assert result.quantity == 50
+        assert result.total > 0
+        assert result.cost_per_unit > 0
+
 
 class TestManufacturingCostEstimatorWithMockPCB:
     """Tests for ManufacturingCostEstimator with mocked PCB."""

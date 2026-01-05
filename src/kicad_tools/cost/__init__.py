@@ -47,6 +47,7 @@ from .estimator import (
     CostEstimate,
     ManufacturingCostEstimator,
     PCBCost,
+    SimplePCBCostResult,
 )
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "ManufacturingCostEstimator",
     "CostEstimate",
     "PCBCost",
+    "SimplePCBCostResult",
     "ComponentCost",
     "AssemblyCost",
     # Availability checking

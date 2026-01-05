@@ -88,6 +88,10 @@ class DesignRules:
     outer_copper_oz: float = 1.0
     inner_copper_oz: float = 0.5
 
+    # Maximum board dimensions (defaults based on common manufacturer limits)
+    max_board_width_mm: float = 400.0
+    max_board_height_mm: float = 500.0
+
     @property
     def min_trace_width_mil(self) -> float:
         """Trace width in mils (thousandths of an inch)."""
@@ -116,6 +120,8 @@ class DesignRules:
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
             "inner_copper_oz": self.inner_copper_oz,
+            "max_board_width_mm": self.max_board_width_mm,
+            "max_board_height_mm": self.max_board_height_mm,
         }
 
 
