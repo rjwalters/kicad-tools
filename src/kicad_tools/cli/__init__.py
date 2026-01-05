@@ -29,6 +29,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
     kicad-tools net-status <pcb>       - Report net connectivity status
+    kicad-tools mcp serve              - Start MCP server for AI agent integration
 
 See `kicad-tools --help` for complete documentation.
 """
@@ -51,6 +52,7 @@ from .commands import (
     run_impedance_command,
     run_interactive_command,
     run_lib_command,
+    run_mcp_command,
     run_mfr_command,
     run_optimize_command,
     run_parts_command,
@@ -343,6 +345,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "impedance":
         return run_impedance_command(args)
+
+    elif args.command == "mcp":
+        return run_mcp_command(args)
 
     return 0
 

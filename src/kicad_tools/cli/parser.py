@@ -150,6 +150,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_net_status_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
+    _add_mcp_parser(subparsers)
 
     return parser
 
@@ -2078,4 +2079,40 @@ def _add_impedance_parser(subparsers) -> None:
         dest="impedance_max_percent",
         type=float,
         help="Maximum crosstalk %% (for spacing calculation mode)",
+    )
+
+
+def _add_mcp_parser(subparsers) -> None:
+    """Add mcp subcommand parser for MCP server."""
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="MCP server for AI agent integration",
+        description="Start the MCP (Model Context Protocol) server for AI agent integration",
+    )
+    mcp_subparsers = mcp_parser.add_subparsers(dest="mcp_command", help="MCP commands")
+
+    # mcp serve
+    serve_parser = mcp_subparsers.add_parser(
+        "serve",
+        help="Start the MCP server",
+        description="Start the MCP server for Claude Desktop or HTTP clients",
+    )
+    serve_parser.add_argument(
+        "--http",
+        dest="mcp_http",
+        action="store_true",
+        help="Use HTTP transport instead of stdio",
+    )
+    serve_parser.add_argument(
+        "--port",
+        dest="mcp_port",
+        type=int,
+        default=8000,
+        help="Port for HTTP transport (default: 8000)",
+    )
+    serve_parser.add_argument(
+        "--debug",
+        dest="mcp_debug",
+        action="store_true",
+        help="Enable debug logging to file",
     )

@@ -97,6 +97,10 @@ datasheet = [
 constraints = [
     "pyyaml>=6.0",
 ]
+# MCP server for AI agent integration
+mcp = [
+    "mcp>=1.0.0,<2",
+]
 # All optional features
 all = [
     "requests>=2.28",
@@ -104,6 +108,7 @@ all = [
     "pdfplumber>=0.10.0",
     "PyMuPDF>=1.23.0",
     "pyyaml>=6.0",
+    "mcp>=1.0.0,<2",
 ]
 # Development dependencies
 dev = [
