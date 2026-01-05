@@ -466,3 +466,133 @@ LAYER_FILE_TYPES: dict[str, str] = {
 def get_file_type(layer: str) -> str:
     """Get the file type for a given layer name."""
     return LAYER_FILE_TYPES.get(layer, "other")
+
+
+# =============================================================================
+# Assembly Export Types
+# =============================================================================
+
+
+@dataclass
+class BOMExportResult:
+    """Result of BOM export operation.
+
+    Attributes:
+        output_path: Path to the generated BOM file
+        component_count: Total number of components in BOM
+        unique_parts: Number of unique part numbers
+        missing_lcsc: Number of parts missing LCSC part numbers
+    """
+
+    output_path: str
+    component_count: int
+    unique_parts: int
+    missing_lcsc: int = 0
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "output_path": self.output_path,
+            "component_count": self.component_count,
+            "unique_parts": self.unique_parts,
+            "missing_lcsc": self.missing_lcsc,
+        }
+
+
+@dataclass
+class PnPExportResult:
+    """Result of pick-and-place export operation.
+
+    Attributes:
+        output_path: Path to the generated PnP/CPL file
+        component_count: Total number of placed components
+        layers: Layers with components (["top"], ["bottom"], or ["top", "bottom"])
+        rotation_corrections: Number of components with rotation corrections applied
+    """
+
+    output_path: str
+    component_count: int
+    layers: list[str] = field(default_factory=list)
+    rotation_corrections: int = 0
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "output_path": self.output_path,
+            "component_count": self.component_count,
+            "layers": self.layers,
+            "rotation_corrections": self.rotation_corrections,
+        }
+
+
+@dataclass
+class CostEstimate:
+    """Estimated manufacturing costs.
+
+    Attributes:
+        pcb_cost_usd: Estimated PCB fabrication cost in USD
+        assembly_cost_usd: Estimated assembly labor cost in USD
+        parts_cost_usd: Estimated component parts cost in USD
+        total_usd: Total estimated cost in USD
+        notes: Additional notes about the estimate
+    """
+
+    pcb_cost_usd: float | None = None
+    assembly_cost_usd: float | None = None
+    parts_cost_usd: float | None = None
+    total_usd: float | None = None
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "pcb_cost_usd": self.pcb_cost_usd,
+            "assembly_cost_usd": self.assembly_cost_usd,
+            "parts_cost_usd": self.parts_cost_usd,
+            "total_usd": self.total_usd,
+            "notes": self.notes,
+        }
+
+
+@dataclass
+class AssemblyExportResult:
+    """Result of a complete assembly package export.
+
+    Attributes:
+        success: Whether the export completed successfully
+        output_dir: Directory containing all exported files
+        manufacturer: Target manufacturer (jlcpcb, pcbway, seeed, generic)
+        gerbers: Gerber export results if included
+        bom: BOM export results if included
+        pnp: Pick-and-place export results if included
+        zip_file: Path to combined zip archive ready for upload
+        warnings: Any warnings encountered during export
+        cost_estimate: Optional cost estimate for manufacturing
+        error: Error message if success is False
+    """
+
+    success: bool
+    output_dir: str
+    manufacturer: str
+    gerbers: GerberExportResult | None = None
+    bom: BOMExportResult | None = None
+    pnp: PnPExportResult | None = None
+    zip_file: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    cost_estimate: CostEstimate | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "success": self.success,
+            "output_dir": self.output_dir,
+            "manufacturer": self.manufacturer,
+            "gerbers": self.gerbers.to_dict() if self.gerbers else None,
+            "bom": self.bom.to_dict() if self.bom else None,
+            "pnp": self.pnp.to_dict() if self.pnp else None,
+            "zip_file": self.zip_file,
+            "warnings": self.warnings,
+            "cost_estimate": self.cost_estimate.to_dict() if self.cost_estimate else None,
+            "error": self.error,
+        }

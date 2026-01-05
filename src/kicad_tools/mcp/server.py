@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from kicad_tools.mcp.tools.export import export_gerbers
+from kicad_tools.mcp.tools.export import export_assembly, export_gerbers
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class MCPServer:
     def __post_init__(self) -> None:
         """Register default tools."""
         self._register_export_tools()
+        self._register_assembly_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -98,6 +99,53 @@ class MCPServer:
             manufacturer=params.get("manufacturer", "generic"),
             include_drill=params.get("include_drill", True),
             zip_output=params.get("zip_output", True),
+        )
+        return result.to_dict()
+
+    def _register_assembly_tools(self) -> None:
+        """Register assembly-related tools."""
+        self.tools["export_assembly"] = ToolDefinition(
+            name="export_assembly",
+            description=(
+                "Generate complete assembly package for manufacturing. Creates Gerber files, "
+                "bill of materials (BOM), and pick-and-place (PnP/CPL) files tailored to "
+                "specific manufacturers. Outputs a single zip file ready for upload to "
+                "JLCPCB, PCBWay, Seeed, or generic assembly services."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "schematic_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_sch file",
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Directory for output files",
+                    },
+                    "manufacturer": {
+                        "type": "string",
+                        "description": "Target manufacturer for assembly",
+                        "enum": ["jlcpcb", "pcbway", "seeed", "generic"],
+                        "default": "jlcpcb",
+                    },
+                },
+                "required": ["pcb_path", "schematic_path", "output_dir"],
+            },
+            handler=self._handle_export_assembly,
+        )
+
+    def _handle_export_assembly(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle export_assembly tool call."""
+        result = export_assembly(
+            pcb_path=params["pcb_path"],
+            schematic_path=params["schematic_path"],
+            output_dir=params["output_dir"],
+            manufacturer=params.get("manufacturer", "jlcpcb"),
         )
         return result.to_dict()
 
