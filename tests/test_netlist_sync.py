@@ -774,3 +774,153 @@ class TestProjectCheckSync:
         result = project.check_sync()
 
         assert isinstance(result, SyncResult)
+
+
+class TestValidateSyncCLI:
+    """Tests for validate --sync CLI positional arguments."""
+
+    def test_classify_file_project(self):
+        """Test file classification for project files."""
+        from kicad_tools.cli.validate_sync_cmd import _classify_file
+
+        assert _classify_file("test.kicad_pro") == "project"
+        assert _classify_file("TEST.KICAD_PRO") == "project"
+        assert _classify_file("/path/to/test.kicad_pro") == "project"
+
+    def test_classify_file_schematic(self):
+        """Test file classification for schematic files."""
+        from kicad_tools.cli.validate_sync_cmd import _classify_file
+
+        assert _classify_file("test.kicad_sch") == "schematic"
+        assert _classify_file("TEST.KICAD_SCH") == "schematic"
+        assert _classify_file("/path/to/test.kicad_sch") == "schematic"
+
+    def test_classify_file_pcb(self):
+        """Test file classification for PCB files."""
+        from kicad_tools.cli.validate_sync_cmd import _classify_file
+
+        assert _classify_file("test.kicad_pcb") == "pcb"
+        assert _classify_file("TEST.KICAD_PCB") == "pcb"
+        assert _classify_file("/path/to/test.kicad_pcb") == "pcb"
+
+    def test_classify_file_unknown(self):
+        """Test file classification for unknown files."""
+        from kicad_tools.cli.validate_sync_cmd import _classify_file
+
+        assert _classify_file("test.txt") is None
+        assert _classify_file("test.sch") is None
+        assert _classify_file("test") is None
+
+    def test_cli_with_two_positional_args(self, tmp_path):
+        """Test validate --sync with schematic and PCB positional args."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        # Create test files
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(MINIMAL_PCB_MATCHING)
+
+        # Both orders should work - files are classified by extension
+        result = main([str(sch_file), str(pcb_file)])
+        assert result == 0  # Success
+
+        result = main([str(pcb_file), str(sch_file)])
+        assert result == 0  # Order doesn't matter
+
+    def test_cli_with_project_file(self, tmp_path):
+        """Test validate --sync with project file."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        # Create test files
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+        proj_file = tmp_path / "test.kicad_pro"
+
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(MINIMAL_PCB_MATCHING)
+        proj_file.write_text("{}")  # Minimal project file
+
+        result = main([str(proj_file)])
+        assert result == 0  # Success
+
+    def test_cli_with_explicit_flags(self, tmp_path):
+        """Test validate --sync with explicit --schematic and --pcb flags."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        # Create test files
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(MINIMAL_PCB_MATCHING)
+
+        result = main(["--schematic", str(sch_file), "--pcb", str(pcb_file)])
+        assert result == 0  # Success
+
+    def test_cli_missing_files_error(self, tmp_path):
+        """Test error when only one file is provided."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+
+        # Should fail - only schematic provided, no PCB
+        result = main([str(sch_file)])
+        assert result == 1
+
+    def test_cli_no_files_error(self):
+        """Test error when no files are provided."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        result = main([])
+        assert result == 1
+
+    def test_cli_unrecognized_file_type_error(self, tmp_path):
+        """Test error for unrecognized file types."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        txt_file = tmp_path / "test.txt"
+        txt_file.write_text("not a kicad file")
+
+        result = main([str(txt_file)])
+        assert result == 1
+
+    def test_cli_mixed_positional_and_flags(self, tmp_path):
+        """Test mixing positional args with explicit flags."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        # Create test files
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(MINIMAL_PCB_MATCHING)
+
+        # Positional schematic + flag PCB
+        result = main([str(sch_file), "--pcb", str(pcb_file)])
+        assert result == 0
+
+    def test_cli_with_format_option(self, tmp_path, capsys):
+        """Test --format option with positional args."""
+        from kicad_tools.cli.validate_sync_cmd import main
+
+        # Create test files
+        sch_file = tmp_path / "test.kicad_sch"
+        pcb_file = tmp_path / "test.kicad_pcb"
+
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+        pcb_file.write_text(MINIMAL_PCB_MATCHING)
+
+        result = main([str(sch_file), str(pcb_file), "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        # JSON output should contain expected keys
+        import json
+
+        output = json.loads(captured.out)
+        assert "in_sync" in output
+        assert "schematic" in output
+        assert "pcb" in output
