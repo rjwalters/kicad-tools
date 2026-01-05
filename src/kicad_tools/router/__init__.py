@@ -70,6 +70,7 @@ from .heuristics import (
 from .io import (
     ClearanceViolation,
     PCBDesignRules,
+    detect_layer_stack,
     generate_netclass_setup,
     load_pcb_for_routing,
     merge_routes_into_pcb,
@@ -181,6 +182,7 @@ __all__ = [
     # I/O
     "route_pcb",
     "load_pcb_for_routing",
+    "detect_layer_stack",
     "generate_netclass_setup",
     "merge_routes_into_pcb",
     # Optimizer

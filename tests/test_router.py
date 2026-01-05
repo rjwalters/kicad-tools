@@ -474,6 +474,84 @@ class TestLayerStack:
         assert "2-Layer" in s
 
 
+class TestDetectLayerStack:
+    """Tests for detect_layer_stack function."""
+
+    def test_detect_2_layer_board(self):
+        """Test detecting a 2-layer board."""
+        from kicad_tools.router.io import detect_layer_stack
+
+        pcb_text = """
+        (kicad_pcb
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+        )
+        """
+        stack = detect_layer_stack(pcb_text)
+        assert stack.num_layers == 2
+        assert "2-Layer" in stack.name
+
+    def test_detect_4_layer_board_with_planes(self):
+        """Test detecting a 4-layer board with inner planes."""
+        from kicad_tools.router.io import detect_layer_stack
+
+        pcb_text = """
+        (kicad_pcb
+            (layers
+                (0 "F.Cu" signal)
+                (1 "In1.Cu" signal)
+                (2 "In2.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+            (zone
+                (net 1)
+                (net_name "GND")
+                (layer "In1.Cu")
+            )
+            (zone
+                (net 2)
+                (net_name "+3V3")
+                (layer "In2.Cu")
+            )
+        )
+        """
+        stack = detect_layer_stack(pcb_text)
+        assert stack.num_layers == 4
+        assert "4-Layer" in stack.name
+        # Inner layers should be planes
+        assert len(stack.plane_layers) == 2
+        assert len(stack.signal_layers) == 2
+
+    def test_detect_4_layer_board_no_zones(self):
+        """Test detecting a 4-layer board without zones."""
+        from kicad_tools.router.io import detect_layer_stack
+
+        pcb_text = """
+        (kicad_pcb
+            (layers
+                (0 "F.Cu" signal)
+                (1 "In1.Cu" signal)
+                (2 "In2.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+        )
+        """
+        stack = detect_layer_stack(pcb_text)
+        assert stack.num_layers == 4
+        # Without zones, should use signal configuration
+
+    def test_detect_no_layers_fallback(self):
+        """Test fallback when no layers section found."""
+        from kicad_tools.router.io import detect_layer_stack
+
+        pcb_text = "(kicad_pcb )"
+        stack = detect_layer_stack(pcb_text)
+        # Should fall back to 2-layer
+        assert stack.num_layers == 2
+
+
 class TestViaType:
     """Tests for ViaType enum."""
 
