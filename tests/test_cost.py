@@ -990,7 +990,7 @@ class TestLCSCAvailabilityChecker:
         status = checker._determine_status(stock=80, needed=10)
         assert status == AvailabilityStatus.LOW_STOCK
 
-    @patch("kicad_tools.cost.availability.LCSCClient")
+    @patch("kicad_tools.parts.LCSCClient")
     def test_check_item_no_lcsc(self, mock_client_class):
         checker = LCSCAvailabilityChecker()
         result = checker._check_item(
@@ -1005,7 +1005,7 @@ class TestLCSCAvailabilityChecker:
         assert result.status == AvailabilityStatus.NO_LCSC
         assert result.error == "No LCSC part number"
 
-    @patch("kicad_tools.cost.availability.LCSCClient")
+    @patch("kicad_tools.parts.LCSCClient")
     def test_check_item_not_found(self, mock_client_class):
         checker = LCSCAvailabilityChecker()
         result = checker._check_item(
@@ -1020,7 +1020,7 @@ class TestLCSCAvailabilityChecker:
         assert result.status == AvailabilityStatus.NOT_FOUND
         assert "not found" in result.error.lower()
 
-    @patch("kicad_tools.cost.availability.LCSCClient")
+    @patch("kicad_tools.parts.LCSCClient")
     def test_check_item_available(self, mock_client_class):
         # Create mock part
         mock_part = MagicMock()
@@ -1043,7 +1043,7 @@ class TestLCSCAvailabilityChecker:
         assert result.in_stock is True
         assert result.quantity_available == 5000
 
-    @patch("kicad_tools.cost.availability.LCSCClient")
+    @patch("kicad_tools.parts.LCSCClient")
     def test_check_bom_integration(self, mock_client_class):
         """Test check_bom with mocked LCSC client."""
         # Create mock client

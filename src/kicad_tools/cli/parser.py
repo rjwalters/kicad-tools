@@ -242,21 +242,25 @@ def _add_erc_parser(subparsers) -> None:
         description="Run ERC on schematics or analyze ERC reports",
     )
 
-    erc_subparsers = erc_parser.add_subparsers(dest="erc_command", help="ERC commands")
+    erc_subparsers = erc_parser.add_subparsers(
+        dest="erc_command", help="ERC commands", required=True
+    )
 
-    # Default behavior when no subcommand: kct erc <file>
-    # We handle this in dispatch by checking erc_command
-
-    # For backwards compatibility, allow positional argument at erc level
-    erc_parser.add_argument(
+    # erc parse subcommand (default behavior for backwards compatibility)
+    # Usage: kct erc parse <file> OR kct erc <file> (auto-inserted by main)
+    erc_parse = erc_subparsers.add_parser(
+        "parse",
+        help="Parse ERC report (default command)",
+        description="Parse and display ERC report from schematic or JSON file",
+    )
+    erc_parse.add_argument(
         "report",
-        nargs="?",
         help="Path to schematic (.kicad_sch) or ERC report (.json or .rpt)",
     )
-    erc_parser.add_argument("--format", choices=["table", "json", "summary"], default="table")
-    erc_parser.add_argument("--errors-only", action="store_true")
-    erc_parser.add_argument("--type", dest="filter_type", help="Filter by violation type")
-    erc_parser.add_argument("--sheet", help="Filter by sheet path")
+    erc_parse.add_argument("--format", choices=["table", "json", "summary"], default="table")
+    erc_parse.add_argument("--errors-only", action="store_true")
+    erc_parse.add_argument("--type", dest="filter_type", help="Filter by violation type")
+    erc_parse.add_argument("--sheet", help="Filter by sheet path")
 
     # erc explain subcommand
     erc_explain = erc_subparsers.add_parser(

@@ -94,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
 
         return generate_main(argv[2:]) or 0
 
+    # Handle erc backwards compatibility: kct erc <file> -> kct erc parse <file>
+    # Insert "parse" subcommand if the first arg after "erc" isn't a known subcommand
+    argv = list(argv)  # Make a copy to avoid mutating the original
+    if len(argv) >= 2 and argv[0] == "erc" and argv[1] not in ("parse", "explain", "-h", "--help"):
+        argv.insert(1, "parse")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -190,27 +196,28 @@ def _dispatch_command(args) -> int:
                 sub_argv.append("--keep-report")
             return erc_explain_cmd(sub_argv)
 
-        # Default: run standard ERC command
-        from .erc_cmd import main as erc_cmd
+        elif erc_command == "parse":
+            # Parse subcommand (default behavior)
+            from .erc_cmd import main as erc_cmd
 
-        if not args.report:
-            # No file provided, show help
+            sub_argv = [args.report]
+            if args.format != "table":
+                sub_argv.extend(["--format", args.format])
+            if args.errors_only:
+                sub_argv.append("--errors-only")
+            if args.filter_type:
+                sub_argv.extend(["--type", args.filter_type])
+            if args.sheet:
+                sub_argv.extend(["--sheet", args.sheet])
+            return erc_cmd(sub_argv)
+
+        else:
+            # No subcommand provided, show help
             from .parser import create_parser
 
             parser = create_parser()
             parser.parse_args(["erc", "--help"])
             return 0
-
-        sub_argv = [args.report]
-        if args.format != "table":
-            sub_argv.extend(["--format", args.format])
-        if args.errors_only:
-            sub_argv.append("--errors-only")
-        if args.filter_type:
-            sub_argv.extend(["--type", args.filter_type])
-        if args.sheet:
-            sub_argv.extend(["--sheet", args.sheet])
-        return erc_cmd(sub_argv)
 
     elif args.command == "drc":
         from .drc_cmd import main as drc_cmd
