@@ -150,7 +150,7 @@ class BOM:
         return sorted(
             groups.values(),
             key=lambda g: (
-                g.items[0].reference[0] if g.items else "",
+                g.items[0].reference[0] if g.items and g.items[0].reference else "",
                 g.value,
             ),
         )
