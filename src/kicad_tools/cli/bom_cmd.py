@@ -8,6 +8,8 @@ Examples:
     kicad-bom design.kicad_sch
     kicad-bom design.kicad_sch --format csv > bom.csv
     kicad-bom design.kicad_sch --group --exclude "TP*"
+    kicad-bom design.kicad_sch --check-availability
+    kicad-bom design.kicad_sch --check-availability --quantity 5
 """
 
 import argparse
@@ -57,6 +59,17 @@ def main(argv: list[str] | None = None) -> int:
         default="reference",
         help="Sort order",
     )
+    parser.add_argument(
+        "--check-availability",
+        action="store_true",
+        help="Check stock availability from LCSC/JLCPCB",
+    )
+    parser.add_argument(
+        "--quantity",
+        type=int,
+        default=1,
+        help="Number of boards (multiplies BOM quantities for availability check)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -91,6 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     # Group if requested
     if args.group:
         items = group_items(items)
+
+    # Check availability if requested
+    if args.check_availability:
+        return check_availability(bom, args.quantity, args.format)
 
     # Output
     if args.format == "csv":
@@ -234,6 +251,154 @@ def output_json(items, grouped: bool) -> None:
         }
 
     print(json.dumps(data, indent=2))
+
+
+def check_availability(bom, quantity: int, output_format: str) -> int:
+    """Check availability for BOM items and output results."""
+    try:
+        from ..cost.availability import LCSCAvailabilityChecker
+    except ImportError:
+        print(
+            "Error: Availability checking requires the 'requests' library.\n"
+            "Install with: pip install kicad-tools[parts]",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Checking availability for {quantity} board(s)...", file=sys.stderr)
+
+    try:
+        with LCSCAvailabilityChecker() as checker:
+            result = checker.check_bom(bom, quantity=quantity)
+    except Exception as e:
+        print(f"Error checking availability: {e}", file=sys.stderr)
+        return 1
+
+    # Output results
+    if output_format == "csv":
+        output_availability_csv(result)
+    elif output_format == "json":
+        output_availability_json(result)
+    else:
+        output_availability_table(result)
+
+    # Return non-zero if any items are unavailable
+    if not result.all_available:
+        return 2
+
+    return 0
+
+
+def output_availability_table(result) -> None:
+    """Output availability results as formatted table."""
+    from ..cost.availability import AvailabilityStatus
+
+    if not result.items:
+        print("No components to check.")
+        return
+
+    # Status symbols
+    status_symbols = {
+        AvailabilityStatus.AVAILABLE: "\u2713",  # checkmark
+        AvailabilityStatus.LOW_STOCK: "!",
+        AvailabilityStatus.OUT_OF_STOCK: "\u2717",  # X
+        AvailabilityStatus.DISCONTINUED: "D",
+        AvailabilityStatus.UNKNOWN: "?",
+        AvailabilityStatus.NO_LCSC: "-",
+        AvailabilityStatus.NOT_FOUND: "?",
+    }
+
+    # Calculate column widths
+    ref_width = max(len(item.reference) for item in result.items)
+    ref_width = max(ref_width, 3)
+    val_width = max(len(item.value) for item in result.items)
+    val_width = max(val_width, 5)
+    lcsc_width = max(len(item.lcsc_part or "-") for item in result.items)
+    lcsc_width = max(lcsc_width, 4)
+
+    # Header
+    print(
+        f"{'Ref':<{ref_width}}  {'Value':<{val_width}}  "
+        f"{'LCSC':<{lcsc_width}}  {'Needed':>6}  {'Stock':>8}  Status"
+    )
+    print("-" * (ref_width + val_width + lcsc_width + 40))
+
+    # Rows
+    for item in result.items:
+        symbol = status_symbols.get(item.status, "?")
+        lcsc = item.lcsc_part or "-"
+        stock_str = str(item.quantity_available) if item.quantity_available > 0 else "-"
+
+        print(
+            f"{item.reference:<{ref_width}}  {item.value:<{val_width}}  "
+            f"{lcsc:<{lcsc_width}}  {item.quantity_needed:>6}  {stock_str:>8}  "
+            f"{symbol} {item.status.value}"
+        )
+
+    # Summary
+    summary = result.summary()
+    print()
+    print(f"Summary: {summary['total_items']} items checked")
+    print(f"  Available:    {summary['available']}")
+    print(f"  Low stock:    {summary['low_stock']}")
+    print(f"  Out of stock: {summary['out_of_stock']}")
+    print(f"  Missing/No LCSC: {summary['missing']}")
+
+    if summary["total_cost"] is not None:
+        print(f"  Estimated cost: ${summary['total_cost']:.2f}")
+
+    if not summary["all_available"]:
+        print("\nWarning: Some parts are not available or have insufficient stock.")
+
+
+def output_availability_csv(result) -> None:
+    """Output availability results as CSV."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(
+        [
+            "Reference",
+            "Value",
+            "Footprint",
+            "MPN",
+            "LCSC",
+            "Quantity Needed",
+            "Quantity Available",
+            "Status",
+            "In Stock",
+            "Sufficient Stock",
+            "Unit Price",
+            "Extended Price",
+            "Error",
+        ]
+    )
+
+    for item in result.items:
+        writer.writerow(
+            [
+                item.reference,
+                item.value,
+                item.footprint,
+                item.mpn or "",
+                item.lcsc_part or "",
+                item.quantity_needed,
+                item.quantity_available,
+                item.status.value,
+                item.in_stock,
+                item.sufficient_stock,
+                item.unit_price or "",
+                item.extended_price or "",
+                item.error or "",
+            ]
+        )
+
+    print(output.getvalue(), end="")
+
+
+def output_availability_json(result) -> None:
+    """Output availability results as JSON."""
+    print(json.dumps(result.to_dict(), indent=2))
 
 
 if __name__ == "__main__":
