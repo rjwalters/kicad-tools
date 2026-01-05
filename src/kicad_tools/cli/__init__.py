@@ -51,6 +51,7 @@ from .commands import (
     run_impedance_command,
     run_interactive_command,
     run_lib_command,
+    run_mcp_command,
     run_mfr_command,
     run_optimize_command,
     run_parts_command,
@@ -343,6 +344,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "impedance":
         return run_impedance_command(args)
+
+    elif args.command == "mcp":
+        return run_mcp_command(args)
 
     return 0
 
