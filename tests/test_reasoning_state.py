@@ -693,3 +693,31 @@ class TestPCBStateParsing:
 
         assert len(state.components) >= 2
         assert len(state.nets) >= 2
+
+    def test_from_pcb_multilayer_board(self):
+        """Parse multilayer PCB file with gr_rect outline.
+
+        Regression test for issue #425: Reason agent reports wrong board size
+        and layer count. The board uses gr_rect for the outline (not gr_line)
+        and has 4 copper layers.
+        """
+        from pathlib import Path
+
+        pcb_path = Path(__file__).parent / "fixtures/projects/multilayer_zones.kicad_pcb"
+        state = PCBState.from_pcb(pcb_path)
+
+        # Board dimensions from gr_rect: (start 100 100) (end 180 160) = 80x60mm
+        assert state.outline.width == 80.0
+        assert state.outline.height == 60.0
+
+        # Should find 4 copper layers: F.Cu, In1.Cu, In2.Cu, B.Cu
+        assert len(state.layers) == 4
+        assert "F.Cu" in state.layers
+        assert "In1.Cu" in state.layers
+        assert "In2.Cu" in state.layers
+        assert "B.Cu" in state.layers
+
+        # Verify summary reports correct values
+        summary = state.summary()
+        assert summary["board_size"] == "80.0 x 60.0 mm"
+        assert summary["layers"] == 4
