@@ -554,6 +554,21 @@ class TestBOM:
         assert len(groups) == 1
         assert groups[0].items[0].reference == "R1"
 
+    def test_bom_grouped_with_empty_reference(self):
+        """Test that grouped() handles items with empty reference (issue #439)."""
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+        # This should not raise IndexError even with empty reference
+        groups = bom.grouped()
+        # Should group the two 10k resistors together (even with empty reference)
+        # and the capacitor separately
+        assert len(groups) == 2
+
     def test_bom_unique_parts(self):
         """Test unique parts count."""
         bom = BOM(
