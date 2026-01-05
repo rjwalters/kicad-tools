@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-01-05
+
+### Added
+
+#### MCP Server for AI Agent Integration (`kicad_tools.mcp`)
+
+FastMCP-based server enabling AI agents like Claude to interact with KiCad designs:
+
+- **Core Infrastructure** (`mcp/server.py`)
+  - FastMCP server implementation with stdio and HTTP transports
+  - Comprehensive error handling with actionable MCP responses
+  - Session management for stateful operations
+  - CLI: `kct mcp serve` (stdio), `kct mcp serve --http` (HTTP transport)
+
+- **Analysis Tools** (`mcp/tools/analysis.py`)
+  - `analyze_board` - Get board summary (layers, components, nets, dimensions)
+  - `get_drc_violations` - Run DRC and return violations with locations
+  - `measure_clearance` - Check clearance between components/nets
+
+- **Export Tools** (`mcp/tools/export.py`)
+  - `export_gerbers` - Generate Gerber files for manufacturing
+  - `export_bom` - Generate bill of materials in various formats
+  - `export_assembly` - Generate complete manufacturing package (BOM + pick-and-place)
+
+- **Placement Tools** (`mcp/tools/placement.py`)
+  - `placement_analyze` - Analyze current placement quality with metrics
+  - `placement_suggestions` - Get AI-friendly placement recommendations
+
+- **Session Tools** (`mcp/tools/session.py`)
+  - `start_session` - Begin a placement refinement session
+  - `query_move` - Preview effect of moving a component
+  - `apply_move` - Apply a component move within session
+  - `commit` - Commit session changes to file
+  - `rollback` - Discard session changes
+
+- **Routing Tools** (`mcp/tools/routing.py`)
+  - `route_net` - Route a specific net with configurable strategy
+  - `get_unrouted_nets` - List nets that need routing
+
+#### Layout Preservation System (`kicad_tools.layout`)
+
+Preserve component placement and routing when regenerating PCB from schematic:
+
+- **Hierarchical Address Matching** - Match components by hierarchical path (e.g., `power.ldo.C1`)
+- **Anchor-Based Positioning** - Calculate subcircuit offsets from anchor components
+- **Net Remapping** - Handle net name changes during regeneration
+- **Incremental Updates** - Only touch changed components, preserve manual adjustments
+
+#### BOM Command Enhancements
+
+- **Availability Checking** (`--check-availability` flag)
+  - Check LCSC/JLCPCB stock availability for BOM parts
+  - `--quantity` flag to specify board count (multiplies quantities)
+  - Exit code 2 when parts are unavailable
+  - CLI: `kicad-bom design.kicad_sch --check-availability --quantity 5`
+
+- **JLCPCB Assembly Validation** (#510)
+  - Validate BOM compatibility with JLCPCB assembly service
+  - Check for missing LCSC part numbers
+  - Verify part availability and assembly category
+  - CLI: `kicad-bom design.kicad_sch --validate-jlcpcb`
+
+#### Documentation
+
+- **MCP Server Setup Guide** - Configuration for Claude Desktop and other MCP clients
+- **Example Workflows** - End-to-end agent-driven PCB design examples
+
+### Dependencies
+
+- `fastmcp>=2.0,<3` - MCP server framework (optional, in `[mcp]` extra)
+- `pydantic>=2.0` - Request/response validation (optional, in `[mcp]` extra)
+
 ## [0.7.2] - 2026-01-04
 
 ### Added
@@ -570,6 +642,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.8.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.8.0
 [0.7.2]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.2
 [0.7.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.1
 [0.7.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.0
