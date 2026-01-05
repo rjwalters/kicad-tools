@@ -3,11 +3,14 @@
 Provides data structures for:
 - Hierarchical component addressing (ComponentAddress)
 - Subcircuit layout extraction and application (SubcircuitLayout, ComponentOffset)
+- Net mapping and remapping results (NetMapping, RemapResult)
 """
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -252,3 +255,150 @@ class SubcircuitLayout:
                 positions[ref] = pos
 
         return positions
+
+
+# =============================================================================
+# Net Mapping Types
+# =============================================================================
+
+
+class MatchReason(str, Enum):
+    """Reason for net name matching."""
+
+    EXACT = "exact"
+    CONNECTIVITY = "connectivity"
+    REMOVED = "removed"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass
+class NetMapping:
+    """
+    Mapping from old net name to new net name.
+
+    Attributes:
+        old_name: The net name in the old netlist.
+        new_name: The net name in the new netlist, or None if removed.
+        confidence: Confidence score for the mapping (0.0-1.0).
+        match_reason: Why this mapping was detected.
+        shared_pins: Number of shared pin connections (for connectivity matches).
+    """
+
+    old_name: str
+    new_name: str | None
+    confidence: float
+    match_reason: MatchReason | str
+    shared_pins: int = 0
+
+    def __post_init__(self):
+        """Convert string match_reason to enum if needed."""
+        if isinstance(self.match_reason, str):
+            with contextlib.suppress(ValueError):
+                self.match_reason = MatchReason(self.match_reason)
+
+    @property
+    def is_exact(self) -> bool:
+        """Check if this is an exact name match."""
+        return self.match_reason == MatchReason.EXACT
+
+    @property
+    def is_removed(self) -> bool:
+        """Check if the net was removed."""
+        return self.new_name is None or self.match_reason == MatchReason.REMOVED
+
+    @property
+    def is_renamed(self) -> bool:
+        """Check if the net was renamed (different name, same connectivity)."""
+        return (
+            self.new_name is not None
+            and self.old_name != self.new_name
+            and self.match_reason == MatchReason.CONNECTIVITY
+        )
+
+
+@dataclass
+class SegmentRemap:
+    """
+    Record of a remapped trace segment.
+
+    Attributes:
+        segment_uuid: UUID of the segment.
+        old_net_name: Original net name.
+        new_net_name: New net name.
+        old_net_id: Original net ID.
+        new_net_id: New net ID.
+    """
+
+    segment_uuid: str
+    old_net_name: str
+    new_net_name: str
+    old_net_id: int
+    new_net_id: int
+
+
+@dataclass
+class OrphanedSegment:
+    """
+    A trace segment that could not be remapped.
+
+    Attributes:
+        segment_uuid: UUID of the segment.
+        net_name: Original net name.
+        net_id: Original net ID.
+        reason: Why the segment couldn't be remapped.
+    """
+
+    segment_uuid: str
+    net_name: str
+    net_id: int
+    reason: str
+
+
+@dataclass
+class RemapResult:
+    """
+    Result of remapping trace net assignments.
+
+    Attributes:
+        remapped_segments: List of successfully remapped segments.
+        orphaned_segments: List of segments that couldn't be remapped.
+        net_mappings: The net mappings used for remapping.
+        new_nets: List of nets that are new (not in old design).
+    """
+
+    remapped_segments: list[SegmentRemap] = field(default_factory=list)
+    orphaned_segments: list[OrphanedSegment] = field(default_factory=list)
+    net_mappings: list[NetMapping] = field(default_factory=list)
+    new_nets: list[str] = field(default_factory=list)
+
+    @property
+    def remapped_count(self) -> int:
+        """Number of successfully remapped segments."""
+        return len(self.remapped_segments)
+
+    @property
+    def orphaned_count(self) -> int:
+        """Number of orphaned segments (need re-routing)."""
+        return len(self.orphaned_segments)
+
+    @property
+    def renamed_nets(self) -> list[NetMapping]:
+        """Get mappings where nets were renamed (not exact match)."""
+        return [m for m in self.net_mappings if m.is_renamed]
+
+    @property
+    def removed_nets(self) -> list[NetMapping]:
+        """Get mappings where nets were removed."""
+        return [m for m in self.net_mappings if m.is_removed]
+
+    def summary(self) -> dict:
+        """Get a summary of the remapping results."""
+        return {
+            "remapped_segments": self.remapped_count,
+            "orphaned_segments": self.orphaned_count,
+            "total_mappings": len(self.net_mappings),
+            "exact_matches": sum(1 for m in self.net_mappings if m.is_exact),
+            "renamed_nets": len(self.renamed_nets),
+            "removed_nets": len(self.removed_nets),
+            "new_nets": len(self.new_nets),
+        }
