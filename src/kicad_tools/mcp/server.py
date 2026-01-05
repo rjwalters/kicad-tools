@@ -16,6 +16,7 @@ from typing import Any, Callable
 from kicad_tools.mcp.tools.analysis import measure_clearance
 from kicad_tools.mcp.tools.export import export_assembly, export_bom, export_gerbers
 from kicad_tools.mcp.tools.placement import placement_analyze
+from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
 from kicad_tools.mcp.tools.session import (
     apply_move,
     commit_session,
@@ -61,6 +62,7 @@ class MCPServer:
         self._register_placement_tools()
         self._register_session_tools()
         self._register_clearance_tools()
+        self._register_routing_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -517,6 +519,90 @@ class MCPServer:
             item1=params["item1"],
             item2=params.get("item2"),
             layer=params.get("layer"),
+        )
+        return result.to_dict()
+
+    def _register_routing_tools(self) -> None:
+        """Register routing-related tools."""
+        self.tools["get_unrouted_nets"] = ToolDefinition(
+            name="get_unrouted_nets",
+            description=(
+                "List nets that need routing. Analyzes a PCB file to identify nets "
+                "that are unrouted or partially routed. Provides difficulty estimates "
+                "and routing recommendations for AI-driven routing workflows."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "include_partial": {
+                        "type": "boolean",
+                        "description": "Include partially routed nets in results",
+                        "default": True,
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_get_unrouted_nets,
+        )
+
+        self.tools["route_net"] = ToolDefinition(
+            name="route_net",
+            description=(
+                "Route a specific net. Attempts to route all unconnected pads on the "
+                "specified net using the autorouter. Returns routing details including "
+                "success status, trace length, vias used, and suggestions if routing failed."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file",
+                    },
+                    "net_name": {
+                        "type": "string",
+                        "description": "Name of the net to route (e.g., 'GND', 'SPI_CLK')",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "Output file path (optional, overwrites original if not specified)",
+                    },
+                    "strategy": {
+                        "type": "string",
+                        "description": "Routing strategy",
+                        "enum": ["auto", "shortest", "avoid_vias"],
+                        "default": "auto",
+                    },
+                    "layer_preference": {
+                        "type": "string",
+                        "description": "Preferred layer for routing (e.g., 'F.Cu', 'B.Cu')",
+                    },
+                },
+                "required": ["pcb_path", "net_name"],
+            },
+            handler=self._handle_route_net,
+        )
+
+    def _handle_get_unrouted_nets(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle get_unrouted_nets tool call."""
+        result = get_unrouted_nets(
+            pcb_path=params["pcb_path"],
+            include_partial=params.get("include_partial", True),
+        )
+        return result.to_dict()
+
+    def _handle_route_net(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle route_net tool call."""
+        result = route_net(
+            pcb_path=params["pcb_path"],
+            net_name=params["net_name"],
+            output_path=params.get("output_path"),
+            strategy=params.get("strategy", "auto"),
+            layer_preference=params.get("layer_preference"),
         )
         return result.to_dict()
 
