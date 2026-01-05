@@ -421,6 +421,118 @@ class TestManufacturingCostEstimatorWithMockPCB:
         assert dims["width"] > 30.0  # 40 - 10 = 30 + 2*margin
         assert dims["height"] > 20.0  # 30 - 10 = 20 + 2*margin
 
+    def test_bom_from_pcb_footprints(self, mock_pcb):
+        """Test that components are extracted from PCB footprints."""
+        # Create mock footprints
+        fp1 = MagicMock()
+        fp1.reference = "R1"
+        fp1.value = "10k"
+        fp1.name = "Resistor_SMD:R_0402"
+        fp1.texts = []
+
+        fp2 = MagicMock()
+        fp2.reference = "C1"
+        fp2.value = "100nF"
+        fp2.name = "Capacitor_SMD:C_0402"
+        fp2.texts = []
+
+        fp3 = MagicMock()
+        fp3.reference = "U1"
+        fp3.value = "STM32F103"
+        fp3.name = "Package_QFP:LQFP-48"
+        fp3.texts = []
+
+        mock_pcb.footprints = [fp1, fp2, fp3]
+
+        estimator = ManufacturingCostEstimator()
+        bom = estimator._bom_from_pcb(mock_pcb)
+
+        assert bom is not None
+        assert len(bom.items) == 3
+        assert bom.items[0].reference == "R1"
+        assert bom.items[0].value == "10k"
+        assert bom.items[1].reference == "C1"
+        assert bom.items[2].reference == "U1"
+
+    def test_bom_from_pcb_skips_invalid(self, mock_pcb):
+        """Test that footprints without references are skipped."""
+        fp1 = MagicMock()
+        fp1.reference = "R1"
+        fp1.value = "10k"
+        fp1.name = "R_0402"
+        fp1.texts = []
+
+        fp2 = MagicMock()
+        fp2.reference = ""  # No reference
+        fp2.value = "Logo"
+        fp2.name = "Logo"
+        fp2.texts = []
+
+        fp3 = MagicMock()
+        fp3.reference = "#PWR01"  # Power symbol placeholder
+        fp3.value = "GND"
+        fp3.name = "Power"
+        fp3.texts = []
+
+        mock_pcb.footprints = [fp1, fp2, fp3]
+
+        estimator = ManufacturingCostEstimator()
+        bom = estimator._bom_from_pcb(mock_pcb)
+
+        assert bom is not None
+        assert len(bom.items) == 1
+        assert bom.items[0].reference == "R1"
+
+    def test_estimate_with_pcb_footprints_no_bom(self, mock_pcb):
+        """Test that estimate uses PCB footprints when no BOM provided."""
+        # Create mock footprints with proper structure
+        fp1 = MagicMock()
+        fp1.reference = "R1"
+        fp1.value = "10k"
+        fp1.name = "Resistor_SMD:R_0402"
+        fp1.texts = []
+        fp1.position = (10.0, 10.0)
+        fp1.layer = "F.Cu"
+
+        fp2 = MagicMock()
+        fp2.reference = "R2"
+        fp2.value = "10k"
+        fp2.name = "Resistor_SMD:R_0402"
+        fp2.texts = []
+        fp2.position = (20.0, 10.0)
+        fp2.layer = "F.Cu"
+
+        fp3 = MagicMock()
+        fp3.reference = "C1"
+        fp3.value = "100nF"
+        fp3.name = "Capacitor_SMD:C_0402"
+        fp3.texts = []
+        fp3.position = (30.0, 10.0)
+        fp3.layer = "F.Cu"
+
+        mock_pcb.footprints = [fp1, fp2, fp3]
+        mock_pcb.footprints_on_layer.return_value = []
+
+        estimator = ManufacturingCostEstimator()
+        estimate = estimator.estimate(pcb=mock_pcb, quantity=10)
+
+        # Should have detected 3 components
+        assert len(estimate.components) == 2  # Grouped by value+footprint
+        assert estimate.assembly.smt_parts == 3
+        assert estimate.assembly.unique_parts == 2
+
+    def test_estimate_with_empty_pcb_no_bom(self, mock_pcb):
+        """Test that estimate handles empty PCB gracefully."""
+        mock_pcb.footprints = []
+        mock_pcb.footprints_on_layer.return_value = []
+
+        estimator = ManufacturingCostEstimator()
+        estimate = estimator.estimate(pcb=mock_pcb, quantity=10)
+
+        # Should work but have no components
+        assert len(estimate.components) == 0
+        assert estimate.component_cost_per_unit == 0
+
 
 class TestCostEstimateJSON:
     """Tests for JSON output of cost estimates."""
