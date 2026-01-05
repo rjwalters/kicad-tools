@@ -105,6 +105,38 @@ class TestPadState:
         )
         assert pad.through_hole is False
 
+    def test_pad_name_property(self):
+        """Pad name property returns 'ref:number' format.
+
+        Regression test for issue #444: PadState missing 'name' attribute.
+        """
+        pad = PadState(
+            ref="U1",
+            number="1",
+            x=10.0,
+            y=20.0,
+            net="VCC",
+            net_id=1,
+            layer="F.Cu",
+            width=0.5,
+            height=0.5,
+        )
+        assert pad.name == "U1:1"
+
+        # Test with alphanumeric pad number (BGA-style)
+        pad_bga = PadState(
+            ref="U2",
+            number="A1",
+            x=20.0,
+            y=30.0,
+            net="GND",
+            net_id=2,
+            layer="F.Cu",
+            width=0.5,
+            height=0.5,
+        )
+        assert pad_bga.name == "U2:A1"
+
 
 class TestComponentState:
     """Tests for ComponentState dataclass."""
@@ -721,3 +753,167 @@ class TestPCBStateParsing:
         summary = state.summary()
         assert summary["board_size"] == "80.0 x 60.0 mm"
         assert summary["layers"] == 4
+
+
+class TestBoardOutlineParsing:
+    """Tests for board outline parsing edge cases.
+
+    Regression tests for issue #444: wrong board size reported.
+    """
+
+    def test_gr_poly_outline_parsing(self, tmp_path):
+        """Parse board outline from gr_poly element.
+
+        Tests gr_poly support which was missing before issue #444.
+        """
+        pcb_content = """(kicad_pcb
+            (version 20240108)
+            (generator "test")
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+            (net 0 "")
+            (gr_poly
+                (pts
+                    (xy 10 10)
+                    (xy 60 10)
+                    (xy 60 50)
+                    (xy 10 50)
+                )
+                (layer "Edge.Cuts")
+            )
+        )"""
+
+        pcb_file = tmp_path / "poly_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        state = PCBState.from_pcb(pcb_file)
+
+        # Polygon defines 50x40mm board
+        assert state.outline.width == 50.0
+        assert state.outline.height == 40.0
+
+    def test_gr_arc_outline_parsing(self, tmp_path):
+        """Parse board outline from gr_arc elements.
+
+        gr_arc is used for rounded corners - we extract the bounding points.
+        """
+        pcb_content = """(kicad_pcb
+            (version 20240108)
+            (generator "test")
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+            (net 0 "")
+            (gr_arc
+                (start 100 100)
+                (mid 105 95)
+                (end 110 100)
+                (layer "Edge.Cuts")
+            )
+            (gr_line
+                (start 110 100)
+                (end 110 150)
+                (layer "Edge.Cuts")
+            )
+            (gr_line
+                (start 110 150)
+                (end 100 150)
+                (layer "Edge.Cuts")
+            )
+            (gr_line
+                (start 100 150)
+                (end 100 100)
+                (layer "Edge.Cuts")
+            )
+        )"""
+
+        pcb_file = tmp_path / "arc_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        state = PCBState.from_pcb(pcb_file)
+
+        # Arc mid-point (105, 95) extends the bounds
+        assert state.outline.width >= 10.0
+        assert state.outline.height >= 50.0
+
+    def test_component_fallback_when_no_outline(self, tmp_path):
+        """Fallback to component bounds when no outline elements exist.
+
+        Regression test for issue #444: board size 0x0 when outline missing.
+        """
+        pcb_content = """(kicad_pcb
+            (version 20240108)
+            (generator "test")
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+            (net 0 "")
+            (net 1 "VCC")
+            (footprint "Package_SO:SOIC-8"
+                (layer "F.Cu")
+                (at 50 50)
+                (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+                (pad "1" smd rect (at -2 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+                (pad "2" smd rect (at 2 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            )
+            (footprint "Resistor:R_0402"
+                (layer "F.Cu")
+                (at 80 70)
+                (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))
+                (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            )
+        )"""
+
+        pcb_file = tmp_path / "no_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        state = PCBState.from_pcb(pcb_file)
+
+        # Board size should be estimated from components + 5mm margin
+        # Components span from x=48 to x=80.5, y=50 to y=70
+        # With 5mm margin: width ~= 32.5 + 10 = 42.5, height = 20 + 10 = 30
+        assert state.outline.width > 0, "Board width should be non-zero"
+        assert state.outline.height > 0, "Board height should be non-zero"
+        # Approximate bounds check (allowing for margin calculation)
+        assert 30 <= state.outline.width <= 50
+        assert 20 <= state.outline.height <= 40
+
+    def test_export_state_with_pad_names(self, tmp_path):
+        """Test that state export includes pad names correctly.
+
+        Regression test for issue #444: AttributeError 'PadState' has no 'name'.
+        """
+        pcb_content = """(kicad_pcb
+            (version 20240108)
+            (generator "test")
+            (layers
+                (0 "F.Cu" signal)
+                (31 "B.Cu" signal)
+            )
+            (net 0 "")
+            (net 1 "VCC")
+            (gr_rect (start 0 0) (end 100 100) (layer "Edge.Cuts"))
+            (footprint "Package_SO:SOIC-8"
+                (layer "F.Cu")
+                (at 50 50)
+                (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+                (pad "1" smd rect (at -2 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+                (pad "A1" smd rect (at 2 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "VCC"))
+            )
+        )"""
+
+        pcb_file = tmp_path / "pad_names.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        state = PCBState.from_pcb(pcb_file)
+
+        # Verify we can access pad.name for all pads (this would fail before fix)
+        for ref, comp in state.components.items():
+            for pad in comp.pads:
+                name = pad.name  # This should not raise AttributeError
+                assert ":" in name
+                assert name.startswith(ref)
