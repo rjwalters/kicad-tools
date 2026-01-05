@@ -1,7 +1,12 @@
-"""MCP tool implementations for KiCad analysis and manipulation."""
+"""MCP tools for kicad-tools.
 
-from .analysis import analyze_board
+Each tool module provides specific functionality for AI agents.
+"""
+
+from kicad_tools.mcp.tools.analysis import analyze_board
+from kicad_tools.mcp.tools.export import export_gerbers
 
 __all__ = [
     "analyze_board",
+    "export_gerbers",
 ]
