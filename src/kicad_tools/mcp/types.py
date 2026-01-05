@@ -596,3 +596,168 @@ class AssemblyExportResult:
             "cost_estimate": self.cost_estimate.to_dict() if self.cost_estimate else None,
             "error": self.error,
         }
+
+
+# =============================================================================
+# Session Management Types
+# =============================================================================
+
+
+@dataclass
+class ComponentPosition:
+    """Position and metadata for a component in a placement session.
+
+    Attributes:
+        ref: Component reference designator (e.g., "C1", "U3")
+        x: X position in millimeters
+        y: Y position in millimeters
+        rotation: Rotation in degrees (0-360)
+        fixed: Whether the component is locked from movement
+        width: Component width in millimeters
+        height: Component height in millimeters
+    """
+
+    ref: str
+    x: float
+    y: float
+    rotation: float
+    fixed: bool
+    width: float
+    height: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "ref": self.ref,
+            "x": round(self.x, 3),
+            "y": round(self.y, 3),
+            "rotation": round(self.rotation, 1),
+            "fixed": self.fixed,
+            "width": round(self.width, 3),
+            "height": round(self.height, 3),
+        }
+
+
+@dataclass
+class SessionStartResult:
+    """Result of starting a placement session.
+
+    Attributes:
+        session_id: Unique session identifier
+        pcb_path: Path to the PCB file
+        components: List of all component positions
+        initial_score: Initial placement score (lower is better)
+        fixed_refs: List of component references marked as fixed
+        expires_at: ISO timestamp when session will expire
+    """
+
+    session_id: str
+    pcb_path: str
+    components: list[ComponentPosition]
+    initial_score: float
+    fixed_refs: list[str]
+    expires_at: str  # ISO format datetime string
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "session_id": self.session_id,
+            "pcb_path": self.pcb_path,
+            "components": [c.to_dict() for c in self.components],
+            "initial_score": round(self.initial_score, 4),
+            "fixed_refs": self.fixed_refs,
+            "expires_at": self.expires_at,
+        }
+
+
+@dataclass
+class SessionViolation:
+    """A placement constraint violation in session context.
+
+    Attributes:
+        type: Violation type (e.g., "clearance", "overlap", "boundary")
+        description: Human-readable description
+        severity: Severity level ("error", "warning", "info")
+        component: Component reference if applicable
+        location: (x, y) coordinates if applicable
+    """
+
+    type: str
+    description: str
+    severity: str = "error"
+    component: str = ""
+    location: tuple[float, float] | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "type": self.type,
+            "description": self.description,
+            "severity": self.severity,
+            "component": self.component,
+            "location": list(self.location) if self.location else None,
+        }
+
+
+@dataclass
+class SessionRoutingImpact:
+    """Impact of a component move on routing.
+
+    Attributes:
+        affected_nets: List of net names affected by the move
+        estimated_length_change_mm: Estimated change in total wire length
+        new_congestion_areas: New potential congestion points
+        crossing_changes: Change in net crossing count
+    """
+
+    affected_nets: list[str] = field(default_factory=list)
+    estimated_length_change_mm: float = 0.0
+    new_congestion_areas: list[tuple[float, float]] = field(default_factory=list)
+    crossing_changes: int = 0
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "affected_nets": self.affected_nets,
+            "estimated_length_change_mm": round(self.estimated_length_change_mm, 3),
+            "new_congestion_areas": [list(c) for c in self.new_congestion_areas],
+            "crossing_changes": self.crossing_changes,
+        }
+
+
+@dataclass
+class MoveQueryResult:
+    """Result of evaluating a hypothetical component move.
+
+    Attributes:
+        valid: Whether the move is valid
+        score_delta: Change in placement score (negative = improvement)
+        new_violations: Violations created by this move
+        resolved_violations: Violations fixed by this move
+        affected_components: Other components affected by the move
+        routing_impact: Impact on routing
+        warnings: Warning messages about the move
+        error_message: Error message if move is invalid
+    """
+
+    valid: bool
+    score_delta: float = 0.0
+    new_violations: list[SessionViolation] = field(default_factory=list)
+    resolved_violations: list[SessionViolation] = field(default_factory=list)
+    affected_components: list[str] = field(default_factory=list)
+    routing_impact: SessionRoutingImpact = field(default_factory=SessionRoutingImpact)
+    warnings: list[str] = field(default_factory=list)
+    error_message: str | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "valid": self.valid,
+            "score_delta": round(self.score_delta, 4),
+            "new_violations": [v.to_dict() for v in self.new_violations],
+            "resolved_violations": [v.to_dict() for v in self.resolved_violations],
+            "affected_components": self.affected_components,
+            "routing_impact": self.routing_impact.to_dict(),
+            "warnings": self.warnings,
+            "error_message": self.error_message,
+        }

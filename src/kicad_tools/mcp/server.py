@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from kicad_tools.mcp.tools.export import export_assembly, export_gerbers
+from kicad_tools.mcp.tools.session import query_move, start_session
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class MCPServer:
         """Register default tools."""
         self._register_export_tools()
         self._register_assembly_tools()
+        self._register_session_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -146,6 +148,93 @@ class MCPServer:
             schematic_path=params["schematic_path"],
             output_dir=params["output_dir"],
             manufacturer=params.get("manufacturer", "jlcpcb"),
+        )
+        return result.to_dict()
+
+    def _register_session_tools(self) -> None:
+        """Register session management tools."""
+        self.tools["start_session"] = ToolDefinition(
+            name="start_session",
+            description=(
+                "Start an interactive placement refinement session. Creates a session "
+                "for exploring component placement changes using query-before-commit "
+                "semantics. Returns a session ID and initial component positions. "
+                "Sessions expire after 30 minutes of inactivity."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Absolute path to .kicad_pcb file",
+                    },
+                    "fixed_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Component references that should not be moved "
+                            "(e.g., connectors with fixed mechanical positions)"
+                        ),
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_start_session,
+        )
+
+        self.tools["query_move"] = ToolDefinition(
+            name="query_move",
+            description=(
+                "Evaluate a hypothetical component move without applying it. "
+                "Returns impact analysis including score change, new/resolved "
+                "violations, affected components, and routing impact estimate. "
+                "Use this to explore placement changes before committing them."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "ref": {
+                        "type": "string",
+                        "description": "Component reference designator (e.g., 'C1', 'U3')",
+                    },
+                    "x": {
+                        "type": "number",
+                        "description": "New X position in millimeters",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "New Y position in millimeters",
+                    },
+                    "rotation": {
+                        "type": "number",
+                        "description": "New rotation in degrees (optional, keep current if not specified)",
+                    },
+                },
+                "required": ["session_id", "ref", "x", "y"],
+            },
+            handler=self._handle_query_move,
+        )
+
+    def _handle_start_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle start_session tool call."""
+        result = start_session(
+            pcb_path=params["pcb_path"],
+            fixed_refs=params.get("fixed_refs"),
+        )
+        return result.to_dict()
+
+    def _handle_query_move(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle query_move tool call."""
+        result = query_move(
+            session_id=params["session_id"],
+            ref=params["ref"],
+            x=params["x"],
+            y=params["y"],
+            rotation=params.get("rotation"),
         )
         return result.to_dict()
 
