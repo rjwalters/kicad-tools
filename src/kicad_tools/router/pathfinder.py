@@ -102,8 +102,7 @@ class Router:
         self._trace_half_width_cells = max(
             1,
             math.ceil(
-                (self.rules.trace_width / 2 + self.rules.trace_clearance)
-                / self.grid.resolution
+                (self.rules.trace_width / 2 + self.rules.trace_clearance) / self.grid.resolution
             ),
         )
 

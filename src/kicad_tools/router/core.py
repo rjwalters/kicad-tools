@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +33,113 @@ __all__ = [
     "AdaptiveAutorouter",
     "RoutingResult",
 ]
+
+
+def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
+    """Run a single Monte Carlo trial in a worker process.
+
+    This is a module-level function to be picklable for ProcessPoolExecutor.
+    Creates its own Autorouter instance with the provided configuration.
+
+    Args:
+        config: Dictionary containing:
+            - trial_num: Trial number
+            - seed: Random seed for this trial
+            - base_order: Base net ordering
+            - use_negotiated: Whether to use negotiated routing
+            - width, height, origin_x, origin_y: Grid dimensions
+            - rules_dict: Serialized design rules
+            - net_class_map: Net class configuration
+            - pads_data: List of pad dictionaries
+            - nets: Net to pad mapping
+            - net_names: Net ID to name mapping
+
+    Returns:
+        Tuple of (routes, score, trial_num)
+    """
+    # Import inside worker to avoid issues with multiprocessing
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.rules import DesignRules
+
+    trial_num = config["trial_num"]
+    seed = config["seed"]
+    base_order = config["base_order"]
+    use_negotiated = config["use_negotiated"]
+
+    # Set random seed for reproducibility
+    random.seed(seed)
+
+    # Recreate design rules
+    rules_dict = config.get("rules_dict", {})
+    rules = DesignRules(**rules_dict) if rules_dict else DesignRules()
+
+    # Create new Autorouter instance
+    router = Autorouter(
+        width=config["width"],
+        height=config["height"],
+        origin_x=config["origin_x"],
+        origin_y=config["origin_y"],
+        rules=rules,
+        net_class_map=config.get("net_class_map"),
+        physics_enabled=False,  # Skip physics in workers for simplicity
+    )
+
+    # Add pads from serialized data
+    for pad_data in config["pads_data"]:
+        ref = pad_data["ref"]
+        pad_info = {
+            "number": pad_data["number"],
+            "x": pad_data["x"],
+            "y": pad_data["y"],
+            "width": pad_data["width"],
+            "height": pad_data["height"],
+            "net": pad_data["net"],
+            "net_name": pad_data["net_name"],
+            "layer": Layer(pad_data["layer"])
+            if isinstance(pad_data["layer"], str)
+            else pad_data["layer"],
+            "through_hole": pad_data.get("through_hole", False),
+            "drill": pad_data.get("drill", 0.0),
+        }
+        # Add directly to avoid component grouping overhead
+        from kicad_tools.router.primitives import Pad
+
+        pad = Pad(
+            x=pad_info["x"],
+            y=pad_info["y"],
+            width=pad_info["width"],
+            height=pad_info["height"],
+            net=pad_info["net"],
+            net_name=pad_info["net_name"],
+            layer=pad_info["layer"],
+            ref=ref,
+            through_hole=pad_info["through_hole"],
+            drill=pad_info["drill"],
+        )
+        key = (ref, str(pad_info["number"]))
+        router.pads[key] = pad
+        router.grid.add_pad(pad)
+
+    # Restore nets and net_names
+    router.nets = {int(k): v for k, v in config["nets"].items()}
+    router.net_names = {int(k): v for k, v in config["net_names"].items()}
+
+    # Shuffle net order (first trial uses base order)
+    if trial_num == 0:
+        net_order = base_order.copy()
+    else:
+        net_order = router._shuffle_within_tiers(base_order)
+
+    # Run routing
+    if use_negotiated:
+        routes = router.route_all_negotiated()
+    else:
+        routes = router.route_all(net_order)
+
+    score = router._evaluate_solution(routes)
+
+    return routes, score, trial_num
 
 
 class Autorouter:
@@ -557,6 +666,56 @@ class Autorouter:
         mc_router = MonteCarloRouter(len([n for n in self.nets if n != 0]))
         return mc_router.evaluate_solution(routes)
 
+    def _serialize_for_parallel(self) -> dict:
+        """Serialize router state for parallel worker processes.
+
+        Returns:
+            Dictionary with all state needed to recreate an Autorouter.
+        """
+        from dataclasses import asdict
+
+        # Serialize pads data
+        pads_data = []
+        for (ref, num), pad in self.pads.items():
+            pads_data.append(
+                {
+                    "ref": ref,
+                    "number": num,
+                    "x": pad.x,
+                    "y": pad.y,
+                    "width": pad.width,
+                    "height": pad.height,
+                    "net": pad.net,
+                    "net_name": pad.net_name,
+                    "layer": pad.layer.value if hasattr(pad.layer, "value") else str(pad.layer),
+                    "through_hole": pad.through_hole,
+                    "drill": pad.drill,
+                }
+            )
+
+        # Serialize rules (handle nested dataclasses)
+        try:
+            rules_dict = asdict(self.rules)
+            # Convert Layer enums to strings
+            if "preferred_layer" in rules_dict:
+                rules_dict["preferred_layer"] = self.rules.preferred_layer.value
+            if "alternate_layer" in rules_dict:
+                rules_dict["alternate_layer"] = self.rules.alternate_layer.value
+        except Exception:
+            rules_dict = {}
+
+        return {
+            "width": self.grid.width,
+            "height": self.grid.height,
+            "origin_x": self.grid.origin_x,
+            "origin_y": self.grid.origin_y,
+            "rules_dict": rules_dict,
+            "net_class_map": self.net_class_map,
+            "pads_data": pads_data,
+            "nets": {str(k): v for k, v in self.nets.items()},
+            "net_names": {str(k): v for k, v in self.net_names.items()},
+        }
+
     def route_all_monte_carlo(
         self,
         num_trials: int = 10,
@@ -564,14 +723,35 @@ class Autorouter:
         seed: int | None = None,
         verbose: bool = True,
         progress_callback: ProgressCallback | None = None,
+        num_workers: int | None = None,
     ) -> list[Route]:
-        """Route using Monte Carlo multi-start with randomized net orderings."""
-        if seed is not None:
-            random.seed(seed)
+        """Route using Monte Carlo multi-start with randomized net orderings.
+
+        Args:
+            num_trials: Number of routing trials to run
+            use_negotiated: Whether to use negotiated congestion routing
+            seed: Random seed for reproducibility
+            verbose: Whether to print progress information
+            progress_callback: Optional callback for progress updates
+            num_workers: Number of parallel workers. None or 0 for auto-detection
+                based on CPU count. 1 for sequential execution.
+
+        Returns:
+            List of routes from the best trial
+        """
+        base_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
+        random.seed(base_seed)
+
+        # Determine number of workers
+        if num_workers is None or num_workers <= 0:
+            num_workers = min(num_trials, os.cpu_count() or 4)
+        num_workers = min(num_workers, num_trials)
 
         if verbose:
             print("\n=== Monte Carlo Multi-Start Routing ===")
             print(f"  Trials: {num_trials}, Negotiated: {use_negotiated}")
+            if num_workers > 1:
+                print(f"  Parallel workers: {num_workers}")
 
         base_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         base_order = [n for n in base_order if n != 0]
@@ -579,27 +759,53 @@ class Autorouter:
         best_routes: list[Route] | None = None
         best_score, best_trial = float("-inf"), -1
 
-        for trial in range(num_trials):
-            if progress_callback is not None:
-                if not progress_callback(
-                    trial / num_trials, f"Trial {trial + 1}/{num_trials}", True
-                ):
-                    break
-
-            self._reset_for_new_trial()
-            net_order = base_order.copy() if trial == 0 else self._shuffle_within_tiers(base_order)
-            routes = self.route_all_negotiated() if use_negotiated else self.route_all(net_order)
-            score = self._evaluate_solution(routes)
-
-            if verbose:
-                status = "NEW BEST" if score > best_score else ""
-                print(
-                    f"  Trial {trial + 1}: {len({r.net for r in routes})}/{len(base_order)} nets, "
-                    f"{sum(len(r.vias) for r in routes)} vias, score={score:.2f} {status}"
+        # Use parallel execution if num_workers > 1
+        if num_workers > 1:
+            try:
+                best_routes, best_score, best_trial = self._run_parallel_monte_carlo(
+                    num_trials=num_trials,
+                    use_negotiated=use_negotiated,
+                    base_seed=base_seed,
+                    base_order=base_order,
+                    num_workers=num_workers,
+                    verbose=verbose,
+                    progress_callback=progress_callback,
                 )
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠ Parallel execution failed: {e}")
+                    print("  Falling back to sequential execution...")
+                # Fall back to sequential execution
+                num_workers = 1
 
-            if score > best_score:
-                best_score, best_routes, best_trial = score, routes.copy(), trial
+        # Sequential execution (num_workers == 1 or fallback)
+        if num_workers == 1:
+            for trial in range(num_trials):
+                if progress_callback is not None:
+                    if not progress_callback(
+                        trial / num_trials, f"Trial {trial + 1}/{num_trials}", True
+                    ):
+                        break
+
+                random.seed(base_seed + trial)
+                self._reset_for_new_trial()
+                net_order = (
+                    base_order.copy() if trial == 0 else self._shuffle_within_tiers(base_order)
+                )
+                routes = (
+                    self.route_all_negotiated() if use_negotiated else self.route_all(net_order)
+                )
+                score = self._evaluate_solution(routes)
+
+                if verbose:
+                    status = "NEW BEST" if score > best_score else ""
+                    print(
+                        f"  Trial {trial + 1}: {len({r.net for r in routes})}/{len(base_order)} nets, "
+                        f"{sum(len(r.vias) for r in routes)} vias, score={score:.2f} {status}"
+                    )
+
+                if score > best_score:
+                    best_score, best_routes, best_trial = score, routes.copy(), trial
 
         if verbose:
             print(f"\n  Best: Trial {best_trial + 1} (score={best_score:.2f})")
@@ -612,6 +818,99 @@ class Autorouter:
             )
 
         return self.routes
+
+    def _run_parallel_monte_carlo(
+        self,
+        num_trials: int,
+        use_negotiated: bool,
+        base_seed: int,
+        base_order: list[int],
+        num_workers: int,
+        verbose: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> tuple[list[Route] | None, float, int]:
+        """Run Monte Carlo trials in parallel using ProcessPoolExecutor.
+
+        Args:
+            num_trials: Total number of trials to run
+            use_negotiated: Whether to use negotiated routing
+            base_seed: Base random seed
+            base_order: Base net ordering
+            num_workers: Number of parallel workers
+            verbose: Whether to print progress
+            progress_callback: Optional progress callback
+
+        Returns:
+            Tuple of (best_routes, best_score, best_trial)
+        """
+        # Serialize current state for workers
+        base_config = self._serialize_for_parallel()
+
+        # Create configs for each trial
+        trial_configs = []
+        for trial in range(num_trials):
+            config = base_config.copy()
+            config.update(
+                {
+                    "trial_num": trial,
+                    "seed": base_seed + trial,
+                    "base_order": base_order,
+                    "use_negotiated": use_negotiated,
+                }
+            )
+            trial_configs.append(config)
+
+        best_routes: list[Route] | None = None
+        best_score = float("-inf")
+        best_trial = -1
+        completed = 0
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(_run_monte_carlo_trial, config): config["trial_num"]
+                for config in trial_configs
+            }
+
+            # Process results as they complete
+            for future in as_completed(futures):
+                trial_num = futures[future]
+                try:
+                    routes, score, _ = future.result()
+                    completed += 1
+
+                    if progress_callback is not None:
+                        if not progress_callback(
+                            completed / num_trials,
+                            f"Completed {completed}/{num_trials} trials",
+                            True,
+                        ):
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            break
+
+                    is_new_best = score > best_score
+                    if is_new_best:
+                        best_score = score
+                        best_routes = routes
+                        best_trial = trial_num
+
+                    if verbose:
+                        status = "NEW BEST" if is_new_best else ""
+                        net_count = len({r.net for r in routes}) if routes else 0
+                        via_count = sum(len(r.vias) for r in routes) if routes else 0
+                        print(
+                            f"  Trial {trial_num + 1}: {net_count}/{len(base_order)} nets, "
+                            f"{via_count} vias, score={score:.2f} {status}"
+                        )
+
+                except Exception as e:
+                    if verbose:
+                        print(f"  Trial {trial_num + 1}: FAILED - {e}")
+                    completed += 1
+
+        return best_routes, best_score, best_trial
 
     def route_all_advanced(
         self,

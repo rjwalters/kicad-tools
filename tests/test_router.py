@@ -1883,9 +1883,7 @@ class TestRouterPathfinder:
 
         # Expected: ceil((0.15/2 + 0.127) / 0.1) = ceil((0.075 + 0.127) / 0.1)
         #         = ceil(0.202 / 0.1) = ceil(2.02) = 3
-        expected_cells = max(
-            1, math.ceil((trace_width / 2 + trace_clearance) / grid_resolution)
-        )
+        expected_cells = max(1, math.ceil((trace_width / 2 + trace_clearance) / grid_resolution))
 
         assert router._trace_half_width_cells == expected_cells
         assert router._trace_half_width_cells == 3  # Explicit check
@@ -1894,7 +1892,9 @@ class TestRouterPathfinder:
         # ceil(0.15/2 / 0.1) = ceil(0.75) = 1
         # Verify we're NOT using the old formula
         old_buggy_cells = max(1, math.ceil((trace_width / 2) / grid_resolution))
-        assert router._trace_half_width_cells != old_buggy_cells or expected_cells == old_buggy_cells
+        assert (
+            router._trace_half_width_cells != old_buggy_cells or expected_cells == old_buggy_cells
+        )
 
     def test_trace_clearance_prevents_drc_violations(self):
         """Test that router respects clearance when routing near obstacles.
@@ -1952,9 +1952,9 @@ class TestRouterPathfinder:
                     # If segment crosses the obstacle x-range
                     if x_min < 16.0 + clearance and x_max > 14.0 - clearance:
                         # This would be a clearance violation - fail
-                        assert (
-                            y_dist >= min_safe_distance
-                        ), f"Segment at y={seg.y1} too close to obstacle"
+                        assert y_dist >= min_safe_distance, (
+                            f"Segment at y={seg.y1} too close to obstacle"
+                        )
 
 
 # =============================================================================
