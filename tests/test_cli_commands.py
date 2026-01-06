@@ -171,6 +171,17 @@ class TestBomCmdMain:
         data = json.loads(captured.out)
         assert "items" in data
 
+    def test_main_jlcpcb_format(self, simple_rc_schematic, capsys):
+        """Main with JLCPCB assembly format."""
+        result = bom_cmd.main([str(simple_rc_schematic), "--format", "jlcpcb"])
+        assert result == 0
+        captured = capsys.readouterr()
+        # Should have JLCPCB headers
+        assert "Comment" in captured.out
+        assert "Designator" in captured.out
+        assert "Footprint" in captured.out
+        assert "LCSC Part #" in captured.out
+
     def test_main_grouped(self, simple_rc_schematic, capsys):
         """Main with grouping enabled."""
         result = bom_cmd.main([str(simple_rc_schematic), "--group"])
