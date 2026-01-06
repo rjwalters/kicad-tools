@@ -49,6 +49,14 @@ from .estimator import (
     PCBCost,
     SimplePCBCostResult,
 )
+from .suggest import (
+    PartSuggester,
+    PartSuggestion,
+    SuggestedPart,
+    SuggestionResult,
+    extract_package_from_footprint,
+    parse_component_value,
+)
 
 __all__ = [
     # Cost estimation
@@ -68,4 +76,11 @@ __all__ = [
     "AlternativePartFinder",
     "AlternativeSuggestions",
     "PartAlternative",
+    # Part suggestion
+    "PartSuggester",
+    "PartSuggestion",
+    "SuggestedPart",
+    "SuggestionResult",
+    "extract_package_from_footprint",
+    "parse_component_value",
 ]
