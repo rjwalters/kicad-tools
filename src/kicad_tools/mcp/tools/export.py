@@ -36,6 +36,78 @@ from kicad_tools.schema.bom import extract_bom
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Assembly Validation
+# =============================================================================
+
+
+def validate_assembly_bom(
+    schematic_path: str,
+    quantity: int = 1,
+) -> dict:
+    """
+    Validate a BOM for JLCPCB assembly.
+
+    Checks all components against the LCSC/JLCPCB parts library and categorizes
+    them by tier (Basic/Extended), stock status, and availability.
+
+    Args:
+        schematic_path: Path to .kicad_sch file
+        quantity: Number of boards (multiplies component quantities)
+
+    Returns:
+        Dictionary with validation results including:
+        - summary: Statistics on parts by tier and status
+        - items: Detailed validation results for each BOM item
+        - assembly_ready: Whether all parts are available
+
+    Example:
+        >>> result = validate_assembly_bom("/path/to/board.kicad_sch")
+        >>> if result["summary"]["assembly_ready"]:
+        ...     print("All parts available for assembly!")
+        >>> else:
+        ...     print(f"Missing/OOS: {result['summary']['out_of_stock']}")
+    """
+    from pathlib import Path
+
+    sch_file = Path(schematic_path)
+
+    # Validate schematic path
+    if not sch_file.exists():
+        return {
+            "success": False,
+            "error": f"Schematic file not found: {schematic_path}",
+        }
+
+    if sch_file.suffix != ".kicad_sch":
+        pass  # Allow but could warn
+
+    try:
+        from kicad_tools.assembly.validation import AssemblyValidator
+
+        bom = extract_bom(str(sch_file), hierarchical=True)
+
+        with AssemblyValidator() as validator:
+            result = validator.validate_bom(bom, quantity)
+
+        # Return as dict with success flag
+        output = result.to_dict()
+        output["success"] = True
+        return output
+
+    except ImportError as e:
+        return {
+            "success": False,
+            "error": f"Assembly validation requires 'requests' library: {e}",
+        }
+    except Exception as e:
+        logger.exception("Assembly validation failed")
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
 # Supported manufacturers
 SUPPORTED_MANUFACTURERS = ["generic", "jlcpcb", "pcbway", "oshpark", "seeed"]
 
