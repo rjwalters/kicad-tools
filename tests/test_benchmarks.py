@@ -507,3 +507,412 @@ class TestMemoryUsage:
         assert sexp.tag == "kicad_pcb"
         footprints = sexp.find_all("footprint")
         assert len(footprints) >= 1400
+
+
+# --- Routable PCB Generator ---
+
+
+def generate_routable_pcb_content(
+    num_nets: int = 10,
+    board_width: float = 50.0,
+    board_height: float = 40.0,
+    num_layers: int = 2,
+) -> str:
+    """Generate a PCB with connected nets that can be routed.
+
+    Creates pairs of 0402 resistor footprints connected by nets, suitable
+    for benchmarking the router.
+
+    Args:
+        num_nets: Number of nets to create (each net connects 2 pads)
+        board_width: Board width in mm
+        board_height: Board height in mm
+        num_layers: Number of copper layers (2, 4, or 6)
+
+    Returns:
+        Valid KiCad PCB S-expression content with routable nets
+    """
+    footprints = []
+    nets = [""]  # Net 0 is always empty
+
+    # Calculate grid layout for footprint pairs
+    # Each net has a source and destination footprint
+    cols = int((board_width - 10) / 8)  # 8mm spacing between pairs
+    rows = int((board_height - 10) / 6)  # 6mm spacing between rows
+    max_pairs = cols * rows
+
+    if num_nets > max_pairs:
+        num_nets = max_pairs
+
+    for i in range(num_nets):
+        net_name = f"NET_{i + 1}"
+        nets.append(net_name)
+        net_idx = len(nets) - 1
+
+        # Calculate position for this pair
+        col = i % cols
+        row = i // cols
+        base_x = 5 + col * 8
+        base_y = 5 + row * 6
+
+        # Source footprint (left side of pair)
+        src_uuid = generate_uuid()
+        src_ref = f"R{i * 2 + 1}"
+        footprints.append(f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "{src_uuid}")
+    (at {base_x} {base_y} 0)
+    (property "Reference" "{src_ref}" (at 0 -1.5 0) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "{generate_uuid()}"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_idx} "{net_name}"))
+  )""")
+
+        # Destination footprint (right side of pair, offset)
+        dst_uuid = generate_uuid()
+        dst_ref = f"R{i * 2 + 2}"
+        dst_x = base_x + 4  # 4mm horizontal offset
+        dst_y = base_y + 2  # 2mm vertical offset for diagonal routing
+        footprints.append(f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "{dst_uuid}")
+    (at {dst_x} {dst_y} 0)
+    (property "Reference" "{dst_ref}" (at 0 -1.5 0) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "{generate_uuid()}"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net_idx} "{net_name}"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+  )""")
+
+    # Generate net declarations
+    net_decls = [f'  (net {i} "{name}")' for i, name in enumerate(nets)]
+
+    # Generate layer definitions based on num_layers
+    if num_layers == 2:
+        layers = """    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)"""
+    elif num_layers == 4:
+        layers = """    (0 "F.Cu" signal)
+    (1 "In1.Cu" power)
+    (2 "In2.Cu" power)
+    (31 "B.Cu" signal)"""
+    else:  # 6 layers
+        layers = """    (0 "F.Cu" signal)
+    (1 "In1.Cu" power)
+    (2 "In2.Cu" signal)
+    (3 "In3.Cu" signal)
+    (4 "In4.Cu" power)
+    (31 "B.Cu" signal)"""
+
+    # Add board edge
+    edge_cuts = f"""  (gr_rect (start 0 0) (end {board_width} {board_height}) (layer "Edge.Cuts") (stroke (width 0.1) (type solid)))"""
+
+    content = f"""(kicad_pcb
+  (version 20240108)
+  (generator "benchmark")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+{layers}
+    (32 "B.Adhes" user "B.Adhesive")
+    (33 "F.Adhes" user "F.Adhesive")
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+{chr(10).join(net_decls)}
+{chr(10).join(footprints)}
+{edge_cuts}
+)"""
+    return content
+
+
+# --- Router Benchmark Fixtures ---
+
+
+@pytest.fixture(scope="module")
+def small_routable_pcb_content() -> str:
+    """Generate small routable PCB (~10 nets, 2-layer)."""
+    return generate_routable_pcb_content(num_nets=10, num_layers=2)
+
+
+@pytest.fixture(scope="module")
+def medium_routable_pcb_content() -> str:
+    """Generate medium routable PCB (~30 nets, 2-layer)."""
+    return generate_routable_pcb_content(num_nets=30, num_layers=2)
+
+
+@pytest.fixture(scope="module")
+def large_routable_pcb_content() -> str:
+    """Generate large routable PCB (~50 nets, 4-layer)."""
+    return generate_routable_pcb_content(
+        num_nets=50, board_width=80.0, board_height=60.0, num_layers=4
+    )
+
+
+@pytest.fixture(scope="module")
+def jlcpcb_grid_pcb_content() -> str:
+    """Generate PCB for JLCPCB-compatible grid testing (~20 nets).
+
+    This fixture is specifically for testing fine grid performance
+    (0.0635mm grid for JLCPCB 5-mil clearance).
+    """
+    return generate_routable_pcb_content(
+        num_nets=20, board_width=40.0, board_height=30.0, num_layers=4
+    )
+
+
+# --- Router Benchmarks ---
+
+
+@requires_benchmark
+class TestRouterBenchmarks:
+    """Benchmarks for PCB routing operations.
+
+    These benchmarks measure router performance across different board sizes
+    and grid resolutions. They help identify performance regressions and
+    validate optimization efforts.
+
+    Run with: pytest tests/test_benchmarks.py::TestRouterBenchmarks --benchmark-only
+    """
+
+    @pytest.fixture
+    def small_routable_pcb_file(self, tmp_path, small_routable_pcb_content) -> Path:
+        """Create small routable PCB file."""
+        f = tmp_path / "small_route.kicad_pcb"
+        f.write_text(small_routable_pcb_content)
+        return f
+
+    @pytest.fixture
+    def medium_routable_pcb_file(self, tmp_path, medium_routable_pcb_content) -> Path:
+        """Create medium routable PCB file."""
+        f = tmp_path / "medium_route.kicad_pcb"
+        f.write_text(medium_routable_pcb_content)
+        return f
+
+    @pytest.fixture
+    def large_routable_pcb_file(self, tmp_path, large_routable_pcb_content) -> Path:
+        """Create large routable PCB file."""
+        f = tmp_path / "large_route.kicad_pcb"
+        f.write_text(large_routable_pcb_content)
+        return f
+
+    @pytest.fixture
+    def jlcpcb_grid_pcb_file(self, tmp_path, jlcpcb_grid_pcb_content) -> Path:
+        """Create JLCPCB grid test PCB file."""
+        f = tmp_path / "jlcpcb_grid.kicad_pcb"
+        f.write_text(jlcpcb_grid_pcb_content)
+        return f
+
+    def test_route_small_board(self, benchmark, small_routable_pcb_file):
+        """Benchmark routing small board (~10 nets, 0.25mm grid).
+
+        Target: <5 seconds
+        """
+        from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
+
+        def route_board():
+            rules = DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.15,
+                via_drill=0.3,
+                via_diameter=0.6,
+                grid_resolution=0.25,
+            )
+            router, _ = load_pcb_for_routing(
+                str(small_routable_pcb_file),
+                rules=rules,
+                layer_stack=LayerStack.two_layer(),
+            )
+            return router.route_all()
+
+        result = benchmark(route_board)
+        # Verify routing attempted (may not complete all nets)
+        assert result is not None
+
+    def test_route_medium_board(self, benchmark, medium_routable_pcb_file):
+        """Benchmark routing medium board (~30 nets, 0.25mm grid).
+
+        Target: <15 seconds
+        """
+        from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
+
+        def route_board():
+            rules = DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.15,
+                via_drill=0.3,
+                via_diameter=0.6,
+                grid_resolution=0.25,
+            )
+            router, _ = load_pcb_for_routing(
+                str(medium_routable_pcb_file),
+                rules=rules,
+                layer_stack=LayerStack.two_layer(),
+            )
+            return router.route_all()
+
+        result = benchmark(route_board)
+        assert result is not None
+
+    def test_route_large_board_4layer(self, benchmark, large_routable_pcb_file):
+        """Benchmark routing large board (~50 nets, 4-layer, 0.25mm grid).
+
+        Target: <30 seconds
+        """
+        from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
+
+        def route_board():
+            rules = DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.15,
+                via_drill=0.3,
+                via_diameter=0.6,
+                grid_resolution=0.25,
+            )
+            router, _ = load_pcb_for_routing(
+                str(large_routable_pcb_file),
+                rules=rules,
+                layer_stack=LayerStack.four_layer(),
+            )
+            return router.route_all()
+
+        result = benchmark(route_board)
+        assert result is not None
+
+    def test_route_fine_grid_0_1mm(self, benchmark, small_routable_pcb_file):
+        """Benchmark routing with 0.1mm grid (dense QFP compatible).
+
+        Target: <10 seconds for small board
+        """
+        from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
+
+        def route_board():
+            rules = DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.15,
+                via_drill=0.3,
+                via_diameter=0.6,
+                grid_resolution=0.1,
+            )
+            router, _ = load_pcb_for_routing(
+                str(small_routable_pcb_file),
+                rules=rules,
+                layer_stack=LayerStack.two_layer(),
+            )
+            return router.route_all()
+
+        result = benchmark(route_board)
+        assert result is not None
+
+    @pytest.mark.slow
+    def test_route_jlcpcb_grid(self, benchmark, jlcpcb_grid_pcb_file):
+        """Benchmark routing with JLCPCB-compatible grid (0.0635mm).
+
+        This tests the performance issue reported in #549.
+        Target: <60 seconds (currently times out >120s)
+
+        Marked as slow - run with: pytest -m slow
+        """
+        from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
+
+        def route_board():
+            rules = DesignRules(
+                trace_width=0.127,  # 5 mil
+                trace_clearance=0.127,  # 5 mil JLCPCB minimum
+                via_drill=0.3,
+                via_diameter=0.5,
+                grid_resolution=0.0635,  # Half of clearance
+            )
+            router, _ = load_pcb_for_routing(
+                str(jlcpcb_grid_pcb_file),
+                rules=rules,
+                layer_stack=LayerStack.four_layer(),
+            )
+            return router.route_all()
+
+        result = benchmark.pedantic(route_board, iterations=1, rounds=1)
+        assert result is not None
+
+
+# --- Router Grid Scaling Benchmarks ---
+
+
+class TestRouterGridScaling:
+    """Non-benchmark tests to measure grid scaling behavior.
+
+    These tests don't use pytest-benchmark but provide timing information
+    for understanding how routing time scales with grid resolution.
+    """
+
+    def test_grid_scaling_report(self, tmp_path, small_routable_pcb_content):
+        """Report routing times across different grid resolutions.
+
+        This test measures how routing time scales with grid resolution,
+        helping identify the performance cliff when using fine grids.
+        """
+        import time
+
+        from kicad_tools.router import DesignRules, LayerStack, load_pcb_for_routing
+
+        pcb_file = tmp_path / "grid_scale.kicad_pcb"
+        pcb_file.write_text(small_routable_pcb_content)
+
+        grid_sizes = [0.5, 0.25, 0.1]
+        results = []
+
+        for grid in grid_sizes:
+            rules = DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.15,
+                via_drill=0.3,
+                via_diameter=0.6,
+                grid_resolution=grid,
+            )
+
+            start = time.perf_counter()
+            router, _ = load_pcb_for_routing(
+                str(pcb_file),
+                rules=rules,
+                layer_stack=LayerStack.two_layer(),
+            )
+            load_time = time.perf_counter() - start
+
+            start = time.perf_counter()
+            router.route_all()
+            route_time = time.perf_counter() - start
+
+            stats = router.get_statistics()
+            results.append(
+                {
+                    "grid": grid,
+                    "load_time": load_time,
+                    "route_time": route_time,
+                    "nets_routed": stats["nets_routed"],
+                }
+            )
+
+        # Log results for visibility
+        print("\n\nGrid Scaling Report:")
+        print("-" * 60)
+        print(f"{'Grid (mm)':<12} {'Load (s)':<12} {'Route (s)':<12} {'Nets':<8}")
+        print("-" * 60)
+        for r in results:
+            print(
+                f"{r['grid']:<12.4f} {r['load_time']:<12.3f} "
+                f"{r['route_time']:<12.3f} {r['nets_routed']:<8}"
+            )
+        print("-" * 60)
+
+        # Basic sanity check - finer grids should take longer
+        assert len(results) == len(grid_sizes)

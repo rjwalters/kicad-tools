@@ -7,6 +7,22 @@ Provides command-line access to the autorouter:
     kicad-tools route board.kicad_pcb -o board_routed.kicad_pcb
     kicad-tools route board.kicad_pcb --skip-nets GND,VCC --strategy negotiated
 
+Performance Profiling:
+
+    Use --profile to measure routing performance and identify bottlenecks:
+
+    # Profile routing and save results
+    kicad-tools route board.kicad_pcb --profile
+
+    # Specify custom output file
+    kicad-tools route board.kicad_pcb --profile --profile-output my_profile.prof
+
+    # Analyze results with pstats
+    python -m pstats route_profile.prof
+
+    # Visualize with snakeviz (pip install snakeviz)
+    snakeviz route_profile.prof
+
 Layer Stack Configuration:
 
     By default, the autorouter uses a 2-layer configuration (F.Cu, B.Cu).
@@ -490,6 +506,23 @@ def main(argv: list[str] | None = None) -> int:
             "prevent DRC violations. Use with caution."
         ),
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Enable profiling to measure performance. Outputs a cProfile "
+            "stats file that can be analyzed with pstats or visualization tools."
+        ),
+    )
+    parser.add_argument(
+        "--profile-output",
+        metavar="FILE",
+        help=(
+            "Output file for profile data (default: route_profile.prof). "
+            "Analyze with: python -m pstats route_profile.prof, or "
+            "visualize with: snakeviz route_profile.prof"
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -768,28 +801,61 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n--- Routing ({args.strategy}) ---")
         if args.timeout:
             print(f"  Timeout: {args.timeout}s")
-    try:
-        # Negotiated routing has its own progress output - don't use spinner
+        if args.profile:
+            profile_output = args.profile_output or "route_profile.prof"
+            print(f"  Profiling enabled: {profile_output}")
+
+    # Define routing function for profiling
+    def do_routing():
+        nonlocal diffpair_warnings
         if args.strategy == "negotiated":
-            _ = router.route_all_negotiated(
+            return router.route_all_negotiated(
                 max_iterations=args.iterations,
                 timeout=args.timeout,
             )
+        elif args.differential_pairs and args.strategy == "basic":
+            result, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+            return result
+        elif args.bus_routing and args.strategy == "basic":
+            return router.route_all_with_buses(bus_config)
+        elif args.strategy == "basic":
+            return router.route_all()
+        elif args.strategy == "monte-carlo":
+            return router.route_all_monte_carlo(
+                num_trials=args.mc_trials,
+                verbose=args.verbose and not quiet,
+            )
+        return None
+
+    try:
+        if args.profile:
+            # Profile the routing operation
+            import cProfile
+            import pstats
+
+            profile_output = args.profile_output or "route_profile.prof"
+            profiler = cProfile.Profile()
+            profiler.enable()
+            try:
+                _ = do_routing()
+            finally:
+                profiler.disable()
+                # Save profile data
+                profiler.dump_stats(profile_output)
+                if not quiet:
+                    print(f"\n  Profile saved to: {profile_output}")
+                    # Print top 20 functions by cumulative time
+                    print("\n--- Profile Summary (top 20 by cumulative time) ---")
+                    stats = pstats.Stats(profiler)
+                    stats.strip_dirs().sort_stats("cumulative").print_stats(20)
         else:
-            with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
-                if args.differential_pairs and args.strategy == "basic":
-                    # Use differential pair-aware routing for basic strategy
-                    _, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
-                elif args.bus_routing and args.strategy == "basic":
-                    # Use bus-aware routing for basic strategy
-                    _ = router.route_all_with_buses(bus_config)
-                elif args.strategy == "basic":
-                    _ = router.route_all()
-                elif args.strategy == "monte-carlo":
-                    _ = router.route_all_monte_carlo(
-                        num_trials=args.mc_trials,
-                        verbose=args.verbose and not quiet,
-                    )
+            # Normal routing without profiling
+            if args.strategy == "negotiated":
+                # Negotiated routing has its own progress output - don't use spinner
+                _ = do_routing()
+            else:
+                with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
+                    _ = do_routing()
     except KeyboardInterrupt:
         # Handle any KeyboardInterrupt that wasn't caught by signal handler
         _interrupt_state["interrupted"] = True
