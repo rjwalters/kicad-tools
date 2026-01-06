@@ -188,3 +188,110 @@ class TestRouteCommandDefaultConsistency:
         # Verify the defaults in help text
         assert "default: 0.25" in help_text, "route_cmd --grid default should be 0.25"
         assert "default: 0.15" in help_text, "route_cmd --clearance default should be 0.15"
+
+
+class TestRouteCommandGridClearanceValidation:
+    """Tests for grid vs clearance validation (issue #529).
+
+    When grid resolution exceeds clearance, the router will create DRC violations.
+    The route command should fail unless --force is specified.
+    """
+
+    def test_grid_exceeds_clearance_fails_without_force(self, tmp_path):
+        """Route command fails when grid > clearance without --force."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        # Create a minimal test PCB file
+        pcb_content = """(kicad_pcb (version 20240101) (generator "test"))"""
+        test_pcb = tmp_path / "test.kicad_pcb"
+        test_pcb.write_text(pcb_content)
+
+        # grid=0.25, clearance=0.127 → grid > clearance → should fail
+        result = route_main(
+            [
+                str(test_pcb),
+                "--grid",
+                "0.25",
+                "--clearance",
+                "0.127",
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        assert result == 1, "Should return 1 (error) when grid > clearance"
+
+    def test_grid_exceeds_clearance_succeeds_with_force(self, tmp_path):
+        """Route command continues when grid > clearance with --force."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        # Create a minimal test PCB file
+        pcb_content = """(kicad_pcb (version 20240101) (generator "test"))"""
+        test_pcb = tmp_path / "test.kicad_pcb"
+        test_pcb.write_text(pcb_content)
+
+        # grid=0.25, clearance=0.127 with --force → should continue
+        # Note: May still fail for other reasons (empty PCB), but should pass validation
+        result = route_main(
+            [
+                str(test_pcb),
+                "--grid",
+                "0.25",
+                "--clearance",
+                "0.127",
+                "--force",
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        # With --force, it should pass the validation step.
+        # It may fail later due to empty PCB, but error code won't be 1
+        # (validation error). We check it gets past validation.
+        # A minimal PCB with no nets will return 0 with dry-run
+        assert result != 1 or result == 0, "Should pass grid/clearance validation with --force"
+
+    def test_grid_within_clearance_succeeds_without_force(self, tmp_path):
+        """Route command succeeds when grid <= clearance without --force."""
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        # Create a minimal test PCB file
+        pcb_content = """(kicad_pcb (version 20240101) (generator "test"))"""
+        test_pcb = tmp_path / "test.kicad_pcb"
+        test_pcb.write_text(pcb_content)
+
+        # grid=0.1, clearance=0.15 → grid < clearance → should succeed
+        result = route_main(
+            [
+                str(test_pcb),
+                "--grid",
+                "0.1",
+                "--clearance",
+                "0.15",
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        # Should not fail due to grid/clearance validation
+        # (may have other issues with minimal PCB, but won't be validation error)
+        assert result == 0, "Should succeed when grid <= clearance"
+
+    def test_force_flag_in_help(self):
+        """Verify --force flag is documented in help text."""
+        import contextlib
+        import sys
+        from io import StringIO
+        from unittest.mock import patch
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        help_output = StringIO()
+        with patch.object(sys, "stdout", help_output):
+            with contextlib.suppress(SystemExit):
+                route_main(["--help"])
+
+        help_text = help_output.getvalue()
+
+        assert "--force" in help_text, "Help text should document --force flag"
+        assert "clearance" in help_text.lower(), "Help text should mention clearance"
