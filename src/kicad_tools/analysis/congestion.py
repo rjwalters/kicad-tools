@@ -19,6 +19,8 @@ Example:
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -111,6 +113,8 @@ class CongestionAnalyzer:
     Args:
         grid_size: Size of each grid cell in mm. Default 2.0mm.
         merge_radius: Radius for merging adjacent hotspots in mm. Default 5.0mm.
+        max_workers: Maximum number of worker threads for parallel grid
+            processing. Defaults to CPU count. Set to 1 to disable parallelism.
     """
 
     # Density thresholds for severity classification (mm track per mm² area)
@@ -125,15 +129,26 @@ class CongestionAnalyzer:
     VIA_HIGH = 8
     VIA_CRITICAL = 12
 
-    def __init__(self, grid_size: float = 2.0, merge_radius: float = 5.0):
+    # Minimum number of cells to benefit from parallelism
+    _PARALLEL_THRESHOLD = 100
+
+    def __init__(
+        self,
+        grid_size: float = 2.0,
+        merge_radius: float = 5.0,
+        max_workers: int | None = None,
+    ):
         """Initialize the analyzer.
 
         Args:
             grid_size: Size of each grid cell in mm.
             merge_radius: Radius for merging adjacent hotspots in mm.
+            max_workers: Maximum number of worker threads for parallel grid
+                processing. Defaults to CPU count. Set to 1 to disable parallelism.
         """
         self.grid_size = grid_size
         self.merge_radius = merge_radius
+        self.max_workers = max_workers if max_workers is not None else (os.cpu_count() or 1)
 
     def analyze(self, board: PCB) -> list[CongestionReport]:
         """Find congested areas on the board.
@@ -248,27 +263,95 @@ class CongestionAnalyzer:
     def _find_hotspots(self, grid: dict[tuple[int, int], _GridCell]) -> list[_GridCell]:
         """Find cells with significant congestion.
 
+        Uses parallel processing for large grids to improve performance.
+
         Args:
             grid: Grid of density cells.
 
         Returns:
             List of cells that exceed congestion thresholds.
         """
-        hotspots = []
+        cells = list(grid.values())
+        num_cells = len(cells)
+
+        # Use sequential processing for small grids or when parallelism disabled
+        if self.max_workers <= 1 or num_cells < self._PARALLEL_THRESHOLD:
+            return self._find_hotspots_sequential(cells)
+
+        return self._find_hotspots_parallel(cells)
+
+    def _is_hotspot(self, cell: _GridCell) -> bool:
+        """Check if a single cell qualifies as a hotspot.
+
+        This method is designed to be called in parallel - it only reads
+        cell data and class constants, doesn't modify any state.
+
+        Args:
+            cell: Grid cell to evaluate.
+
+        Returns:
+            True if the cell exceeds congestion thresholds.
+        """
         cell_area = self.grid_size * self.grid_size
+        density = cell.track_length / cell_area
 
-        for cell in grid.values():
-            density = cell.track_length / cell_area
+        return (
+            density >= self.DENSITY_LOW
+            or cell.via_count >= self.VIA_LOW
+            or (cell.pad_count > 0 and cell.connected_pads < cell.pad_count)
+        )
 
-            # Check if this cell is a hotspot
-            is_hotspot = (
-                density >= self.DENSITY_LOW
-                or cell.via_count >= self.VIA_LOW
-                or (cell.pad_count > 0 and cell.connected_pads < cell.pad_count)
-            )
+    def _find_hotspots_sequential(self, cells: list[_GridCell]) -> list[_GridCell]:
+        """Find hotspots using sequential processing.
 
-            if is_hotspot:
-                hotspots.append(cell)
+        Args:
+            cells: List of grid cells to check.
+
+        Returns:
+            List of cells that exceed congestion thresholds.
+        """
+        return [cell for cell in cells if self._is_hotspot(cell)]
+
+    def _check_cell_chunk(self, chunk: list[_GridCell]) -> list[_GridCell]:
+        """Check a chunk of cells for hotspots.
+
+        Args:
+            chunk: List of cells to check.
+
+        Returns:
+            List of cells from the chunk that are hotspots.
+        """
+        return [cell for cell in chunk if self._is_hotspot(cell)]
+
+    def _find_hotspots_parallel(self, cells: list[_GridCell]) -> list[_GridCell]:
+        """Find hotspots using parallel processing.
+
+        Divides cells into chunks and processes them in parallel using
+        ThreadPoolExecutor.
+
+        Args:
+            cells: List of grid cells to check.
+
+        Returns:
+            List of cells that exceed congestion thresholds.
+        """
+        # Calculate optimal chunk size: balance between parallelism and overhead
+        # Use approximately 4 chunks per worker for good load balancing
+        num_chunks = self.max_workers * 4
+        chunk_size = max(1, len(cells) // num_chunks)
+
+        # Create chunks
+        chunks = [cells[i : i + chunk_size] for i in range(0, len(cells), chunk_size)]
+
+        # Process chunks in parallel
+        hotspots: list[_GridCell] = []
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            chunk_results = executor.map(self._check_cell_chunk, chunks)
+
+            # Flatten results
+            for chunk_hotspots in chunk_results:
+                hotspots.extend(chunk_hotspots)
 
         return hotspots
 
