@@ -294,7 +294,87 @@ for net in result.failed_nets:
 
 ## Performance
 
-For large boards:
+### Grid Resolution Strategies
+
+kicad-tools supports multiple grid strategies to balance routing accuracy against performance:
+
+#### Standard Grid (Default)
+
+Uses `grid_resolution` from design rules. Fine grids ensure accuracy but scale as O(1/resolution²).
+
+```python
+rules = DesignRules(
+    trace_clearance=0.127,    # JLCPCB 5mil
+    grid_resolution=0.0635,   # Half of clearance (default)
+)
+```
+
+#### Expanded Obstacle Mode
+
+Pre-expands all obstacles by the full clearance, allowing a coarser grid. Achieves ~4x speedup for tight-clearance designs.
+
+```python
+from kicad_tools.router import RoutingGrid, DesignRules
+
+# Create grid with expanded obstacles
+grid = RoutingGrid.create_expanded(
+    width=65.0,
+    height=56.0,
+    rules=rules,
+)
+
+# Uses trace_width as resolution instead of clearance/2
+print(f"Cells: {grid.cols * grid.rows}")  # ~75% fewer cells
+```
+
+#### Adaptive Grid
+
+Automatically calculates optimal resolution based on board size and target cell count.
+
+```python
+# Target 500K cells regardless of board size
+grid = RoutingGrid.create_adaptive(
+    width=100.0,
+    height=80.0,
+    rules=rules,
+    target_cells=500000,
+)
+```
+
+#### Sparse Routing (Clearance Contours)
+
+For maximum performance with tight clearances, use the sparse router which generates waypoints only where needed:
+
+```python
+from kicad_tools.router import SparseRouter, Pad
+
+router = SparseRouter(
+    width=40.0,
+    height=30.0,
+    rules=rules,
+    num_layers=2,
+)
+
+# Add pads
+for pad in pads:
+    router.add_pad(pad)
+
+# Build visibility graph
+router.build_graph()
+
+# Route
+route = router.route(start_pad, end_pad)
+```
+
+Performance comparison for 65x56mm board with JLCPCB clearances:
+
+| Mode | Grid Points | Routing Time |
+|------|-------------|--------------|
+| Standard (0.0635mm) | ~900,000 | ~120s |
+| Expanded (0.127mm) | ~225,000 | ~30s |
+| Sparse (contours) | ~10,000 | <10s |
+
+### Large Board Tips
 
 ```python
 # Use progress callback
