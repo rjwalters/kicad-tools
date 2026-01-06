@@ -108,3 +108,7 @@ __all__ = [
     "validate_intent",
     "create_intent_declaration",
 ]
+
+# Import interface specifications to trigger auto-registration
+# This must be at the end after REGISTRY is defined
+from . import interfaces as _interfaces  # noqa: F401, E402
