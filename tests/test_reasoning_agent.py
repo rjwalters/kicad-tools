@@ -1050,3 +1050,109 @@ class TestPCBReasoningAgentFromPCB:
         )
 
         mock_drc_load.assert_called_once_with("/test/board.rpt")
+
+
+class TestUpdateViolationsFromChecker:
+    """Tests for update_violations_from_checker method."""
+
+    @patch("kicad_tools.reasoning.agent.PCBState.from_pcb")
+    @patch("kicad_tools.reasoning.agent.CommandInterpreter")
+    @patch("kicad_tools.reasoning.agent.DiagnosisEngine")
+    def test_update_violations_from_checker(self, mock_diag, mock_interp, mock_from_pcb):
+        """Test updating violations from pure Python DRCChecker results."""
+        # Create a real list for violations (not a mock) so we can verify clearing/appending
+        violations_list = []
+        mock_state = create_mock_pcb_state(violations=violations_list)
+        mock_from_pcb.return_value = mock_state
+        # Use a real list for violations
+        mock_state.violations = violations_list
+
+        agent = PCBReasoningAgent(pcb_path="/test/board.kicad_pcb", state=mock_state)
+
+        # Create mock DRCResults from kicad_tools.validate
+        mock_drc_results = MagicMock()
+        mock_violation = MagicMock()
+        mock_violation.rule_id = "clearance_trace_pad"
+        mock_violation.severity = "error"
+        mock_violation.message = "Clearance violation between trace and pad"
+        mock_violation.location = (10.5, 20.3)
+        mock_violation.layer = "F.Cu"
+        mock_violation.items = ("U1:1", "segment")
+        mock_drc_results.violations = [mock_violation]
+
+        # Call the new method
+        agent.update_violations_from_checker(mock_drc_results)
+
+        # Verify violations were updated
+        assert len(agent.state.violations) == 1
+        v = agent.state.violations[0]
+        assert v.type == "clearance_trace_pad"
+        assert v.severity == "error"
+        assert v.message == "Clearance violation between trace and pad"
+        assert v.x == 10.5
+        assert v.y == 20.3
+        assert v.layer == "F.Cu"
+        assert v.items == ["U1:1", "segment"]
+
+    @patch("kicad_tools.reasoning.agent.PCBState.from_pcb")
+    @patch("kicad_tools.reasoning.agent.CommandInterpreter")
+    @patch("kicad_tools.reasoning.agent.DiagnosisEngine")
+    def test_update_violations_from_checker_clears_existing(
+        self, mock_diag, mock_interp, mock_from_pcb
+    ):
+        """Test that update_violations_from_checker clears existing violations."""
+        # Start with some existing violations
+        existing_violation = ViolationState(
+            type="old_violation",
+            severity="warning",
+            message="Old",
+            x=0,
+            y=0,
+        )
+        violations_list = [existing_violation]
+        mock_state = create_mock_pcb_state(violations=violations_list)
+        mock_from_pcb.return_value = mock_state
+        mock_state.violations = violations_list
+
+        agent = PCBReasoningAgent(pcb_path="/test/board.kicad_pcb", state=mock_state)
+
+        # Empty DRC results
+        mock_drc_results = MagicMock()
+        mock_drc_results.violations = []
+
+        agent.update_violations_from_checker(mock_drc_results)
+
+        # Existing violations should be cleared
+        assert len(agent.state.violations) == 0
+
+    @patch("kicad_tools.reasoning.agent.PCBState.from_pcb")
+    @patch("kicad_tools.reasoning.agent.CommandInterpreter")
+    @patch("kicad_tools.reasoning.agent.DiagnosisEngine")
+    def test_update_violations_from_checker_handles_no_location(
+        self, mock_diag, mock_interp, mock_from_pcb
+    ):
+        """Test handling violations without location."""
+        violations_list = []
+        mock_state = create_mock_pcb_state(violations=violations_list)
+        mock_from_pcb.return_value = mock_state
+        mock_state.violations = violations_list
+
+        agent = PCBReasoningAgent(pcb_path="/test/board.kicad_pcb", state=mock_state)
+
+        mock_drc_results = MagicMock()
+        mock_violation = MagicMock()
+        mock_violation.rule_id = "dimension_trace_width"
+        mock_violation.severity = "warning"
+        mock_violation.message = "Trace too narrow"
+        mock_violation.location = None  # No location
+        mock_violation.layer = None  # No layer
+        mock_violation.items = ()
+        mock_drc_results.violations = [mock_violation]
+
+        agent.update_violations_from_checker(mock_drc_results)
+
+        assert len(agent.state.violations) == 1
+        v = agent.state.violations[0]
+        assert v.x == 0
+        assert v.y == 0
+        assert v.layer == ""
