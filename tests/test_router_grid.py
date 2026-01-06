@@ -670,3 +670,207 @@ class TestRipUpRoutePreservesPadClearance:
                 f"Pad should be blocked after iteration {iteration + 1}"
             )
             assert pad_cell.net == 1, f"Pad net corrupted after iteration {iteration + 1}"
+
+
+class TestRoutingGridThreadSafety:
+    """Tests for thread-safe grid operations (issue #573).
+
+    These tests verify that the optional thread-safe mode works correctly
+    and that concurrent access to the grid doesn't cause race conditions.
+    """
+
+    @pytest.fixture
+    def thread_safe_grid(self):
+        """Create a thread-safe routing grid."""
+        rules = DesignRules(grid_resolution=0.1)
+        return RoutingGrid(width=10.0, height=10.0, rules=rules, thread_safe=True)
+
+    @pytest.fixture
+    def non_thread_safe_grid(self):
+        """Create a non-thread-safe routing grid (default)."""
+        rules = DesignRules(grid_resolution=0.1)
+        return RoutingGrid(width=10.0, height=10.0, rules=rules, thread_safe=False)
+
+    def test_thread_safe_property(self, thread_safe_grid, non_thread_safe_grid):
+        """Test thread_safe property reflects initialization."""
+        assert thread_safe_grid.thread_safe is True
+        assert non_thread_safe_grid.thread_safe is False
+
+    def test_thread_safe_grid_has_lock(self, thread_safe_grid):
+        """Test that thread-safe grid creates an RLock."""
+        assert thread_safe_grid._lock is not None
+        import threading
+
+        assert isinstance(thread_safe_grid._lock, type(threading.RLock()))
+
+    def test_non_thread_safe_grid_no_lock(self, non_thread_safe_grid):
+        """Test that non-thread-safe grid doesn't create a lock."""
+        assert non_thread_safe_grid._lock is None
+
+    def test_locked_context_manager_thread_safe(self, thread_safe_grid):
+        """Test locked() context manager works with thread-safe grid."""
+        with thread_safe_grid.locked() as grid:
+            assert grid is thread_safe_grid
+            # Should be able to perform operations
+            seg = Segment(x1=1.0, y1=1.0, x2=2.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=1)
+            route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+            grid.mark_route(route)
+
+    def test_locked_context_manager_non_thread_safe(self, non_thread_safe_grid):
+        """Test locked() context manager works with non-thread-safe grid (no-op)."""
+        with non_thread_safe_grid.locked() as grid:
+            assert grid is non_thread_safe_grid
+            # Should be able to perform operations
+            seg = Segment(x1=1.0, y1=1.0, x2=2.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=1)
+            route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+            grid.mark_route(route)
+
+    def test_concurrent_mark_route(self, thread_safe_grid):
+        """Test concurrent marking of routes doesn't cause race conditions.
+
+        This test creates multiple routes and marks them concurrently from
+        multiple threads. The grid should remain consistent after all
+        operations complete.
+        """
+        import threading
+
+        routes = []
+        # Create routes at different locations to avoid overlap
+        for i in range(10):
+            seg = Segment(
+                x1=float(i),
+                y1=float(i),
+                x2=float(i) + 0.5,
+                y2=float(i),
+                width=0.2,
+                layer=Layer.F_CU,
+                net=i + 1,
+            )
+            routes.append(Route(net=i + 1, net_name=f"NET{i + 1}", segments=[seg], vias=[]))
+
+        errors = []
+
+        def mark_route(route):
+            try:
+                thread_safe_grid.mark_route(route)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=mark_route, args=(route,)) for route in routes]
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors during concurrent mark_route: {errors}"
+        assert len(thread_safe_grid.routes) == 10, "All routes should be marked"
+
+    def test_concurrent_mark_and_unmark(self, thread_safe_grid):
+        """Test concurrent mark and unmark operations.
+
+        This simulates the negotiated congestion routing scenario where
+        routes are repeatedly marked and unmarked.
+        """
+        import threading
+
+        # Create initial routes
+        routes = []
+        for i in range(5):
+            seg = Segment(
+                x1=float(i),
+                y1=5.0,
+                x2=float(i) + 0.5,
+                y2=5.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=i + 1,
+            )
+            routes.append(Route(net=i + 1, net_name=f"NET{i + 1}", segments=[seg], vias=[]))
+            thread_safe_grid.mark_route(routes[-1])
+
+        errors = []
+        iterations_per_thread = 20
+
+        def mark_unmark_cycle(route, iterations):
+            try:
+                for _ in range(iterations):
+                    thread_safe_grid.unmark_route(route)
+                    thread_safe_grid.mark_route(route)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=mark_unmark_cycle, args=(route, iterations_per_thread))
+            for route in routes
+        ]
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors during concurrent operations: {errors}"
+        # All routes should still be marked after mark/unmark cycles
+        assert len(thread_safe_grid.routes) == 5
+
+    def test_concurrent_usage_tracking(self, thread_safe_grid):
+        """Test concurrent route usage tracking operations."""
+        import threading
+
+        routes = []
+        for i in range(8):
+            seg = Segment(
+                x1=float(i),
+                y1=float(i),
+                x2=float(i) + 0.3,
+                y2=float(i),
+                width=0.2,
+                layer=Layer.F_CU,
+                net=i + 1,
+            )
+            routes.append(Route(net=i + 1, net_name=f"NET{i + 1}", segments=[seg], vias=[]))
+
+        errors = []
+
+        def mark_usage(route):
+            try:
+                thread_safe_grid.mark_route_usage(route)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=mark_usage, args=(route,)) for route in routes]
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(errors) == 0, f"Errors during concurrent usage tracking: {errors}"
+
+    def test_statistics_include_thread_safe(self, thread_safe_grid, non_thread_safe_grid):
+        """Test that get_grid_statistics includes thread_safe info."""
+        stats_safe = thread_safe_grid.get_grid_statistics()
+        stats_unsafe = non_thread_safe_grid.get_grid_statistics()
+
+        assert "thread_safe" in stats_safe
+        assert stats_safe["thread_safe"] is True
+        assert stats_unsafe["thread_safe"] is False
+
+    def test_default_is_not_thread_safe(self):
+        """Test that the default grid is not thread-safe (for performance)."""
+        rules = DesignRules()
+        grid = RoutingGrid(width=10.0, height=10.0, rules=rules)
+        assert grid.thread_safe is False
+        assert grid._lock is None
+
+    def test_reentrant_lock_allows_nested_calls(self, thread_safe_grid):
+        """Test that RLock allows nested locking (reentrant behavior)."""
+        # This should not deadlock because we use RLock
+        with thread_safe_grid.locked():
+            with thread_safe_grid.locked():
+                seg = Segment(x1=1.0, y1=1.0, x2=2.0, y2=1.0, width=0.2, layer=Layer.F_CU, net=1)
+                route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+                thread_safe_grid.mark_route(route)
+
+        assert len(thread_safe_grid.routes) == 1
