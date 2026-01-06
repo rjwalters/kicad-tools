@@ -141,6 +141,29 @@ print(f"Layers: {len(pcb.layers)}")
 print(f"Nets: {len(pcb.nets)}")
 ```
 
+## For AI Agent Integration
+
+If you're using AI assistants like Claude to work with KiCad designs, install with MCP support:
+
+```bash
+pip install "kicad-tools[mcp]"
+```
+
+Configure Claude Desktop to use kicad-tools:
+
+```json
+{
+  "mcpServers": {
+    "kicad-tools": {
+      "command": "python",
+      "args": ["-m", "kicad_tools.mcp.server"]
+    }
+  }
+}
+```
+
+See the [MCP Documentation](mcp/README.md) for full setup instructions.
+
 ## Next Steps
 
 Now that you have kicad-tools installed, explore these guides:

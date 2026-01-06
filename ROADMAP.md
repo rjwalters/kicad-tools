@@ -24,15 +24,21 @@ The complete agent PCB design workflow:
 | Parse datasheets | `datasheet` module | v0.4.0 |
 | Create symbols/footprints | `library` module, generators | v0.4.0 |
 | Design schematic | `Schematic`, circuit blocks | v0.5.0 |
-| Place components | `PCBEditor`, placement optimization | v0.2.0 |
+| Place components | `PCBEditor`, placement optimization | v0.6.0 |
 | Route traces | `Autorouter`, diff pairs, zones | v0.3.0 |
-| Validate design | Pure Python DRC | v0.4.0 |
+| Validate design | Pure Python DRC, rich feedback | v0.7.0 |
 | Export for manufacturing | `AssemblyPackage` (via kicad-cli) | v0.2.0 |
+| AI agent integration | MCP server, sessions | v0.8.0 |
 
-**Current gaps** (addressed in planned versions):
-- Intelligent initial placement based on circuit function
-- Actionable feedback when designs fail validation
-- Design quality metrics beyond pass/fail
+**Core challenges for agents** (addressed in planned versions):
+
+| Challenge | Description | Solution |
+|-----------|-------------|----------|
+| Incomplete Information | Tools don't understand design intent | Design Intent System (v0.9) |
+| Combinatorial Explosion | Huge placement/routing solution space | Pattern Library (v0.10) |
+| Feedback Latency | Problems discovered late in process | Continuous Validation (v0.9) |
+| Knowledge Gap | Agents lack PCB design expertise | Patterns + Explanations (v0.10) |
+| Communication Overhead | Verbose state, repeated context | Context Persistence (v0.9) |
 
 ---
 
@@ -103,10 +109,6 @@ boards. This release adds intelligence to the placement step.
 - [x] Placement suggestions with rationale (explainable to LLMs)
 - [x] Iterative refinement API (agent can query "what if I move X here?")
 
----
-
-## Planned Versions
-
 ### v0.7.0 - Design Feedback & Iteration
 
 **Focus**: Help agents understand failures and improve designs.
@@ -115,31 +117,31 @@ When DRC fails or routing is congested, agents need actionable guidance—not
 just error codes. This release makes the feedback loop agent-friendly.
 
 **Rich Error Diagnostics** *(inspired by atopile)*
-- [ ] Source-attached exceptions with file:line:position tracking
-- [ ] Rich terminal rendering with syntax highlighting (via Rich library)
-- [ ] Error accumulation for batch validation (report ALL DRC violations)
-- [ ] S-expression snippet extraction for error context
-- [ ] Fix suggestions for common errors
+- [x] Source-attached exceptions with file:line:position tracking
+- [x] Rich terminal rendering with syntax highlighting (via Rich library)
+- [x] Error accumulation for batch validation (report ALL DRC violations)
+- [x] S-expression snippet extraction for error context
+- [x] Fix suggestions for common errors
 
 **Actionable Feedback**
-- [ ] DRC errors with specific fix suggestions ("move C1 0.5mm left")
-- [ ] Routing congestion analysis ("area around U1 pins 4-7 is congested")
-- [ ] Constraint conflict detection ("keepout overlaps required via")
+- [x] DRC errors with specific fix suggestions ("move C1 0.5mm left")
+- [x] Routing congestion analysis ("area around U1 pins 4-7 is congested")
+- [x] Constraint conflict detection ("keepout overlaps required via")
 
 **Design Quality Metrics**
-- [ ] Trace length reports (for timing-critical nets)
-- [ ] Thermal analysis hints (identify hot spots)
-- [ ] Signal integrity estimates (crosstalk risk, impedance discontinuities)
+- [x] Trace length reports (for timing-critical nets)
+- [x] Thermal analysis hints (identify hot spots)
+- [x] Signal integrity estimates (crosstalk risk, impedance discontinuities)
 
 **Cross-Domain Validation**
-- [ ] Schematic↔PCB consistency checks
-- [ ] BOM↔placement verification (all parts placed?)
-- [ ] Net connectivity validation
+- [x] Schematic↔PCB consistency checks
+- [x] BOM↔placement verification (all parts placed?)
+- [x] Net connectivity validation
 
 **Cost Awareness**
-- [ ] Manufacturing cost estimation (board + assembly)
-- [ ] Part availability checking (LCSC stock levels)
-- [ ] Alternative part suggestions
+- [x] Manufacturing cost estimation (board + assembly)
+- [x] Part availability checking (LCSC stock levels)
+- [x] Alternative part suggestions
 
 ### v0.8.0 - AI Agent Integration
 
@@ -148,10 +150,10 @@ just error codes. This release makes the feedback loop agent-friendly.
 *(Inspired by atopile's MCP server architecture)*
 
 **MCP Server**
-- [ ] FastMCP server exposing kicad-tools functionality
-- [ ] Two-tier tool design: discovery (read-only) + action (mutations)
-- [ ] Session management for stateful placement refinement
-- [ ] Support stdio and HTTP transports
+- [x] FastMCP server exposing kicad-tools functionality
+- [x] Two-tier tool design: discovery (read-only) + action (mutations)
+- [x] Session management for stateful placement refinement
+- [x] Support stdio and HTTP transports
 
 **MCP Tools**
 | Category | Tools | State |
@@ -159,17 +161,142 @@ just error codes. This release makes the feedback loop agent-friendly.
 | Analysis | `analyze_board`, `get_drc_violations`, `measure_clearance` | Stateless |
 | Export | `export_gerbers`, `export_bom`, `export_assembly` | Stateless |
 | Placement | `placement_analyze`, `placement_suggestions` | Stateless |
-| Placement Session | `start_session`, `query_move`, `apply_move`, `commit` | Stateful |
+| Placement Session | `start_session`, `query_move`, `apply_move`, `commit`, `rollback` | Stateful |
 | Routing | `route_net`, `get_unrouted_nets` | Stateless |
 
 **Layout Preservation** *(inspired by atopile)*
-- [ ] Hierarchical address-based component matching (`power.ldo.package`)
-- [ ] Preserve placement/routing when regenerating PCB from schematic
-- [ ] Anchor-based offset calculation for subcircuit layouts
-- [ ] Net remapping for name changes
-- [ ] Incremental layout updates (only touch changed components)
+- [x] Hierarchical address-based component matching (`power.ldo.package`)
+- [x] Preserve placement/routing when regenerating PCB from schematic
+- [x] Anchor-based offset calculation for subcircuit layouts
+- [x] Net remapping for name changes
+- [x] Incremental layout updates (only touch changed components)
 
-### v0.9.0 - Typed Interfaces & Constraints
+**BOM Enhancements**
+- [x] Availability checking with `--check-availability` flag
+- [x] JLCPCB assembly validation with `--validate-jlcpcb` flag
+
+---
+
+## Planned Versions
+
+### v0.9.0 - Design Intent & Continuous Feedback
+
+**Focus**: Help agents understand design intent and get real-time feedback.
+
+The biggest gap in agent-driven PCB design is that tools don't understand WHAT
+the agent is trying to achieve. When an agent says "route USB_D+" the tools
+don't know it's a high-speed differential pair needing impedance control. This
+release adds a design intent layer that captures requirements and provides
+continuous feedback.
+
+**Design Intent System**
+- [ ] Interface declarations with automatic constraint derivation
+  ```python
+  # Declare intent - system derives constraints automatically
+  design.declare_interface("USB_D+", "USB_D-", type="usb2_high_speed")
+  # System now enforces: 90Ω diff impedance, length matching, diff pair routing
+  ```
+- [ ] Built-in interface types: `USB2`, `USB3`, `SPI`, `I2C`, `LVDS`, `DDR`, `Ethernet`
+- [ ] Intent-aware validation ("violates USB 2.0 spec" vs "clearance too small")
+- [ ] Intent-aware suggestions ("USB traces should be shorter for high-speed")
+- [ ] Custom interface definitions for project-specific needs
+
+**Continuous Validation**
+- [ ] Real-time DRC during placement sessions (not just at end)
+- [ ] Predictive warnings based on current trajectory
+  ```python
+  session.apply_move("C1", x=45, y=32)
+  # Response includes:
+  # {"warnings": [{"type": "predictive",
+  #   "message": "This position may make routing USB_D+ difficult",
+  #   "suggestion": "Consider moving 2mm left"}]}
+  ```
+- [ ] Routing difficulty estimation before routing
+- [ ] Incremental validation (only check affected areas)
+- [ ] "What-if" analysis API for evaluating changes without committing
+
+**Intelligent Failure Recovery**
+- [ ] Root cause analysis for routing/placement failures
+- [ ] Multiple resolution strategies with trade-offs
+  ```python
+  result = router.route_net("CLK")
+  # On failure, returns:
+  # {"resolution_strategies": [
+  #   {"strategy": "move_component", "target": "C3", "difficulty": "easy"},
+  #   {"strategy": "add_via", "position": [44, 30], "difficulty": "medium"},
+  #   {"strategy": "reroute_blocking_net", "net": "SPI_MOSI", "difficulty": "hard"}
+  # ]}
+  ```
+- [ ] Similar problem pattern matching ("this looks like bypass_cap_blocking")
+- [ ] Difficulty estimation for each fix option
+
+**Context Persistence**
+- [ ] Persistent design context across MCP calls
+- [ ] Decision history with rationale tracking
+- [ ] Learned preferences from agent behavior
+- [ ] Efficient state encoding (reduce token overhead)
+
+### v0.10.0 - Pattern Library & Explanations
+
+**Focus**: Encode expert PCB design knowledge for agent use.
+
+Agents shouldn't solve USB layout from first principles every time. A curated
+library of validated design patterns accelerates iteration and improves quality.
+
+**Design Pattern Library**
+- [ ] Pattern schema with placement rules and constraints
+  ```python
+  from kicad_tools.patterns import USBDevicePattern
+
+  pattern = USBDevicePattern(
+      speed="high_speed",
+      connector="type_c",
+      esd_protection=True
+  )
+  placements = pattern.get_placements(connector_at=(10, 50))
+  # Returns validated placement meeting USB spec
+  ```
+- [ ] Core patterns:
+  - Power: LDO, buck converter, battery charging, reverse polarity
+  - Interfaces: USB 2.0/3.0, SPI, I2C, UART, Ethernet, HDMI
+  - MCU: Bypass caps, crystal, debug header, reset circuit
+  - Analog: ADC filtering, op-amp configs, sensor interfaces
+  - Protection: ESD, TVS, overcurrent, thermal shutdown
+- [ ] Pattern validation (verify instantiated pattern meets specs)
+- [ ] Pattern adaptation (customize for specific components)
+- [ ] User-defined patterns with validation rules
+
+**Explanation System**
+- [ ] Queryable explanations for DRC rules
+  ```python
+  explain("trace_length", net="USB_D+")
+  # Returns: {"explanation": "USB 2.0 high-speed signals require...",
+  #           "spec_reference": "USB 2.0 section 7.1.5",
+  #           "current_value": 45.2, "target_range": [40, 50]}
+  ```
+- [ ] Design decision rationale tracking
+- [ ] Spec references for all constraints
+- [ ] Common mistake detection with explanations
+- [ ] Learning resources for unfamiliar patterns
+
+**Multi-Resolution Abstraction**
+- [ ] High-level operations for common tasks
+  ```python
+  # High level - declarative
+  design.add_subsystem("power_supply",
+      components=["U_REG", "C_IN", "C_OUT", "L1"],
+      near_edge="left", optimize_for="thermal")
+
+  # Medium level - guided
+  optimizer.group_components(refs, strategy="power_supply", anchor="U_REG")
+
+  # Low level - explicit (existing API)
+  session.apply_move("U_REG", x=10, y=50)
+  ```
+- [ ] Automatic decomposition of high-level commands
+- [ ] Consistent results across abstraction levels
+
+### v0.11.0 - Typed Interfaces & Constraints
 
 **Focus**: Type-safe circuit blocks and parametric part selection.
 
@@ -201,41 +328,18 @@ ldo = LDOBlock(sch, ref="U1",
 # System auto-selects LDO and caps from LCSC
 ```
 
-### v0.10.0 - IDE Integration
-
-**Focus**: Language Server Protocol for KiCad files in VS Code.
-
-*(Inspired by atopile's LSP implementation)*
-
-**LSP Server**
-- [ ] pygls-based server for `.kicad_sch` and `.kicad_pcb` files
-- [ ] Full document sync with 2-second debounce
-- [ ] In-memory graph storage for quick queries
-
-**LSP Features**
-| Feature | Description |
-|---------|-------------|
-| Diagnostics | Real-time DRC/ERC squiggly underlines |
-| Hover | Component details, net info, pad specs |
-| Go-to-Definition | Navigate net references, schematic↔PCB linking |
-| Completion | Component refs, net names, library items |
-
-**VS Code Extension**
-- [ ] Extension packaging and distribution
-- [ ] Syntax highlighting for S-expression files
-- [ ] Custom commands for kicad-tools operations
-
 ### v1.0.0 - Production Ready
 
-**Focus**: API stability and production deployment.
+**Focus**: API stability, performance, and production deployment.
 
 - [ ] API stability guarantees (semantic versioning)
-- [ ] Comprehensive documentation
+- [ ] Comprehensive documentation with examples
 - [ ] Performance optimization for large boards (1000+ components)
 - [ ] Robust error handling across all modules
 - [ ] CI/CD integration examples
+- [ ] Benchmark suite for regression testing
 
-### Beyond v1.0 - Ecosystem
+### Beyond v1.0 - Ecosystem & IDE
 
 **Package Registry** *(inspired by atopile)*
 - [ ] Package manifest format for circuit blocks
@@ -243,6 +347,19 @@ ldo = LDOBlock(sch, ref="U1",
 - [ ] Git/registry/file dependency types
 - [ ] Publishing workflow via GitHub Actions
 - [ ] Community block ecosystem
+
+**IDE Integration**
+- [ ] LSP server for `.kicad_sch` and `.kicad_pcb` files
+- [ ] Real-time DRC/ERC diagnostics in VS Code
+- [ ] Hover for component details, net info
+- [ ] Go-to-definition for net references
+- [ ] Syntax highlighting for S-expression files
+
+**Simulation Integration**
+- [ ] Basic power consumption estimation
+- [ ] Thermal estimation without full simulation
+- [ ] Signal integrity preview (crosstalk, impedance)
+- [ ] Integration hooks for external simulators
 
 ---
 
@@ -279,3 +396,4 @@ These are explicitly **not** planned:
 | 0.5.0 | 2026-01-02 | Workflow: circuit blocks, Project class, examples |
 | 0.6.0 | 2026-01-03 | Intelligent Placement: clustering, thermal, edge, agent API |
 | 0.7.0 | 2026-01-04 | Design Feedback: rich errors, actionable suggestions, cost awareness |
+| 0.8.0 | 2026-01-05 | AI Agent Integration: MCP server, layout preservation, BOM validation |

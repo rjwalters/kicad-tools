@@ -23,6 +23,7 @@ Step-by-step guides for common tasks:
 | [Query API](guides/query-api.md) | Fluent interface for finding components |
 | [Placement Optimization](guides/placement-optimization.md) | Optimize component placement |
 | [Routing](guides/routing.md) | Autoroute PCBs with the A* router |
+| [MCP Server](mcp/README.md) | Enable AI agents to interact via Model Context Protocol |
 
 ### Reference
 Detailed reference documentation:
@@ -58,6 +59,8 @@ kicad_tools/
 ├── datasheet/     # PDF parsing, pin extraction
 ├── export/        # Manufacturing export
 ├── reasoning/     # LLM-driven PCB layout
+├── mcp/           # MCP server for AI agent integration
+├── layout/        # Layout preservation for PCB regeneration
 └── cli/           # Command-line interface
 ```
 

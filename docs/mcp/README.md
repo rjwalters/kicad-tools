@@ -42,16 +42,19 @@ pip install "kicad-tools[mcp]"
 
 ## Available Tools
 
-The MCP server provides 11 tools organized into four categories:
+The MCP server provides 16 tools organized into five categories:
+
+### Analysis Tools
+- **analyze_board** - Get board summary (layers, components, nets, dimensions)
+- **get_drc_violations** - Run DRC and return violations with locations
+- **placement_analyze** - Analyze component placement quality
+- **placement_suggestions** - Get AI-friendly placement recommendations
+- **measure_clearance** - Measure clearance between items
 
 ### Export Tools
 - **export_gerbers** - Export Gerber files for PCB manufacturing
 - **export_bom** - Export Bill of Materials from schematic
 - **export_assembly** - Generate complete assembly package (Gerbers + BOM + PnP)
-
-### Analysis Tools
-- **placement_analyze** - Analyze component placement quality
-- **measure_clearance** - Measure clearance between items
 
 ### Session Tools (Interactive Placement)
 - **start_session** - Start a placement refinement session
@@ -60,6 +63,10 @@ The MCP server provides 11 tools organized into four categories:
 - **undo_move** - Undo the last applied move
 - **commit_session** - Write changes to file
 - **rollback_session** - Discard all changes
+
+### Routing Tools
+- **route_net** - Route a specific net
+- **get_unrouted_nets** - List nets that need routing
 
 ## Example Conversations
 

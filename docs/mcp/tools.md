@@ -131,6 +131,82 @@ Generate complete assembly package for manufacturing.
 
 ## Analysis Tools
 
+### analyze_board
+
+Get board summary including layers, components, nets, and dimensions.
+
+**Description**: Returns comprehensive information about a PCB file including layer stack, component count, net count, and board dimensions.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "file_path": "/path/to/board.kicad_pcb",
+  "layers": {
+    "count": 4,
+    "copper_layers": ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+  },
+  "dimensions": {
+    "width_mm": 100.0,
+    "height_mm": 80.0,
+    "area_mm2": 8000.0
+  },
+  "components": {
+    "total": 127,
+    "smd": 115,
+    "tht": 12
+  },
+  "nets": {
+    "count": 89,
+    "power_nets": ["VCC", "GND", "3V3"]
+  }
+}
+```
+
+---
+
+### get_drc_violations
+
+Run design rule check and return violations.
+
+**Description**: Executes pure Python DRC against the board and returns all violations with locations and severity.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `manufacturer` | string | No | `"generic"` | Manufacturer rules: `"jlcpcb"`, `"pcbway"`, `"oshpark"` |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "passed": false,
+  "violation_count": 3,
+  "violations": [
+    {
+      "type": "clearance",
+      "severity": "error",
+      "message": "Clearance violation: 0.10mm < 0.15mm minimum",
+      "location": [45.2, 32.1],
+      "layer": "F.Cu",
+      "items": ["U1-pad1", "R3-pad2"]
+    }
+  ]
+}
+```
+
+---
+
 ### placement_analyze
 
 Analyze current component placement quality.
@@ -420,6 +496,108 @@ Discard all pending moves and close the session.
   "success": true,
   "moves_discarded": 5,
   "session_closed": true
+}
+```
+
+---
+
+### placement_suggestions
+
+Get AI-friendly placement improvement recommendations.
+
+**Description**: Analyzes current placement and returns specific suggestions for component moves that would improve placement quality. Each suggestion includes rationale explaining why the move would help.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `max_suggestions` | number | No | 10 | Maximum number of suggestions to return |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "suggestions": [
+    {
+      "component": "C1",
+      "current_position": [43.0, 30.5],
+      "suggested_position": [45.2, 32.1],
+      "rationale": "Move bypass capacitor closer to U1 VDD pin for better decoupling",
+      "expected_improvement": 2.5,
+      "category": "signal_integrity"
+    }
+  ],
+  "current_score": 78.5
+}
+```
+
+---
+
+## Routing Tools
+
+### route_net
+
+Route a specific net with configurable strategy.
+
+**Description**: Attempts to route a single net using the A* autorouter. Returns the routing result including path details and any issues encountered.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+| `net_name` | string | Yes | - | Name of the net to route |
+| `layer` | string | No | - | Preferred routing layer (e.g., `"F.Cu"`) |
+| `width` | number | No | - | Trace width in mm (uses default if not specified) |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "net": "SPI_CLK",
+  "routed": true,
+  "path": {
+    "length_mm": 12.5,
+    "via_count": 1,
+    "layers_used": ["F.Cu", "B.Cu"]
+  },
+  "warnings": []
+}
+```
+
+---
+
+### get_unrouted_nets
+
+List nets that still need routing.
+
+**Description**: Returns a list of all nets that have not been fully routed, including partial routing information.
+
+**Parameters**:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `pcb_path` | string | Yes | - | Path to .kicad_pcb file |
+
+**Response**:
+
+```json
+{
+  "success": true,
+  "unrouted_count": 12,
+  "total_nets": 89,
+  "completion_percent": 86.5,
+  "unrouted_nets": [
+    {
+      "name": "SPI_CLK",
+      "pin_count": 3,
+      "connections_needed": 2,
+      "estimated_difficulty": "medium"
+    }
+  ]
 }
 ```
 

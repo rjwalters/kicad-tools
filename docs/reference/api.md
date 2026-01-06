@@ -310,8 +310,126 @@ project.export_assembly("output/", progress=callback)
 
 ---
 
+## MCP Server API
+
+### Running the MCP Server
+
+```python
+# The MCP server is typically run via CLI
+# kct mcp serve
+
+# Or programmatically
+from kicad_tools.mcp import create_server
+
+server = create_server()
+server.run()
+```
+
+### MCP Tools
+
+The MCP server exposes these tools to AI agents:
+
+| Tool | Description |
+|------|-------------|
+| `analyze_board` | Get board summary (layers, components, nets) |
+| `get_drc_violations` | Run DRC and return violations |
+| `measure_clearance` | Check clearance between items |
+| `export_gerbers` | Generate Gerber files |
+| `export_bom` | Generate bill of materials |
+| `export_assembly` | Generate complete manufacturing package |
+| `placement_analyze` | Analyze placement quality |
+| `placement_suggestions` | Get AI-friendly placement recommendations |
+| `start_session` | Begin placement refinement session |
+| `query_move` | Preview effect of moving a component |
+| `apply_move` | Apply a component move |
+| `commit` | Commit session changes to file |
+| `rollback` | Discard session changes |
+| `route_net` | Route a specific net |
+| `get_unrouted_nets` | List nets that need routing |
+
+See [MCP Tool Reference](../mcp/tools.md) for detailed documentation.
+
+---
+
+## Layout Preservation API
+
+Preserve component placement when regenerating PCB from schematic:
+
+```python
+from kicad_tools.layout import LayoutPreserver
+
+# Create preserver from existing PCB
+preserver = LayoutPreserver.from_pcb("board.kicad_pcb")
+
+# Regenerate PCB from updated schematic
+# (placement is preserved for matching components)
+preserver.apply_to("new_board.kicad_pcb")
+```
+
+---
+
+## Analysis API (v0.7)
+
+### Congestion Analysis
+
+```python
+from kicad_tools.analysis import analyze_congestion
+
+result = analyze_congestion("board.kicad_pcb")
+for hotspot in result.hotspots:
+    print(f"Congestion at ({hotspot.x}, {hotspot.y}): {hotspot.severity}")
+```
+
+### Thermal Analysis
+
+```python
+from kicad_tools.analysis import analyze_thermal
+
+result = analyze_thermal("board.kicad_pcb")
+for source in result.heat_sources:
+    print(f"{source.ref}: {source.estimated_power}W")
+```
+
+### Signal Integrity
+
+```python
+from kicad_tools.analysis import analyze_signal_integrity
+
+result = analyze_signal_integrity("board.kicad_pcb")
+for risk in result.crosstalk_risks:
+    print(f"Crosstalk risk: {risk.net1} <-> {risk.net2}")
+```
+
+---
+
+## Cost API (v0.7)
+
+### Manufacturing Cost Estimation
+
+```python
+from kicad_tools.cost import estimate_cost
+
+result = estimate_cost("board.kicad_pcb", manufacturer="jlcpcb", quantity=10)
+print(f"PCB: ${result.pcb_cost}")
+print(f"Assembly: ${result.assembly_cost}")
+print(f"Total: ${result.total_cost}")
+```
+
+### Parts Availability
+
+```python
+from kicad_tools.cost import check_availability
+
+result = check_availability("schematic.kicad_sch")
+for part in result.unavailable:
+    print(f"{part.reference}: {part.status}")
+```
+
+---
+
 ## See Also
 
 - [Architecture Overview](../architecture.md) - How modules fit together
 - [CLI Reference](cli.md) - Command-line interface
+- [MCP Documentation](../mcp/README.md) - MCP server setup and usage
 - [Examples](https://github.com/rjwalters/kicad-tools/tree/main/examples)

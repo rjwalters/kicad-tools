@@ -40,6 +40,17 @@ kct [--help] [--version] <command> [options]
 | | `placement` | Detect and fix placement conflicts |
 | | `optimize-traces` | Optimize PCB traces |
 | **AI Integration** | `reason` | LLM-driven PCB layout reasoning |
+| | `mcp` | MCP server for AI agent integration |
+| **Analysis (v0.7)** | `analyze congestion` | Routing congestion hotspots |
+| | `analyze trace-lengths` | Timing-critical trace analysis |
+| | `analyze thermal` | Thermal hotspot detection |
+| | `analyze signal-integrity` | Crosstalk and impedance analysis |
+| | `erc explain` | ERC root cause analysis |
+| | `constraints check` | Constraint conflict detection |
+| | `net-status` | Net connectivity validation |
+| **Cost (v0.7)** | `estimate cost` | Manufacturing cost estimation |
+| | `parts availability` | LCSC stock checking |
+| | `suggest alternatives` | Alternative part suggestions |
 | **Utilities** | `config` | View/manage configuration |
 | | `interactive` | Launch interactive REPL mode |
 
@@ -502,6 +513,183 @@ kct reason board.kicad_pcb --interactive
 kct reason board.kicad_pcb --export-state > state.json
 kct reason board.kicad_pcb --auto-route -o routed.kicad_pcb
 ```
+
+---
+
+### `mcp`
+
+MCP server for AI agent integration.
+
+```bash
+kct mcp serve [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--http` | Use HTTP transport instead of stdio |
+| `--port PORT` | HTTP port (default: 8080) |
+
+**Examples:**
+```bash
+# Start stdio server (for Claude Desktop)
+kct mcp serve
+
+# Start HTTP server
+kct mcp serve --http --port 8080
+```
+
+See [MCP Documentation](../mcp/README.md) for configuration details.
+
+---
+
+## Analysis Commands (v0.7)
+
+### `analyze congestion`
+
+Detect routing congestion hotspots.
+
+```bash
+kct analyze congestion <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--threshold FLOAT` | Congestion threshold (0-1) |
+
+---
+
+### `analyze trace-lengths`
+
+Analyze timing-critical trace lengths.
+
+```bash
+kct analyze trace-lengths <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--net NET` | Analyze specific net |
+| `--diff-pairs` | Show differential pair skew |
+
+---
+
+### `analyze thermal`
+
+Detect thermal hotspots and heat sources.
+
+```bash
+kct analyze thermal <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `analyze signal-integrity`
+
+Analyze crosstalk risk and impedance discontinuities.
+
+```bash
+kct analyze signal-integrity <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `erc explain`
+
+ERC root cause analysis with fix suggestions.
+
+```bash
+kct erc explain <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `constraints check`
+
+Detect constraint conflicts (keepout/grouping/region).
+
+```bash
+kct constraints check <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+
+---
+
+### `net-status`
+
+Validate net connectivity (unrouted, islands, isolated pads).
+
+```bash
+kct net-status <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--net NET` | Check specific net |
+
+---
+
+## Cost Commands (v0.7)
+
+### `estimate cost`
+
+Estimate manufacturing cost.
+
+```bash
+kct estimate cost <pcb_file> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--mfr {jlcpcb,pcbway,oshpark,seeed}` | Manufacturer |
+| `--quantity N` | Board quantity |
+
+---
+
+### `parts availability`
+
+Check LCSC stock availability.
+
+```bash
+kct parts availability <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
+| `--quantity N` | Required quantity |
+
+---
+
+### `suggest alternatives`
+
+Suggest alternative parts for unavailable components.
+
+```bash
+kct suggest alternatives <schematic> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--format {table,json}` | Output format |
 
 ---
 

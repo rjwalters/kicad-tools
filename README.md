@@ -130,6 +130,40 @@ kct reason board.kicad_pcb --auto-route
 
 See `examples/llm-routing/` for complete examples.
 
+### MCP Server for AI Agents
+
+Enable AI assistants like Claude to interact with KiCad designs via the Model Context Protocol:
+
+```bash
+# Install with MCP support
+pip install "kicad-tools[mcp]"
+
+# Run the MCP server
+kct mcp serve
+```
+
+Configure Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "kicad-tools": {
+      "command": "python",
+      "args": ["-m", "kicad_tools.mcp.server"]
+    }
+  }
+}
+```
+
+Available MCP tools:
+- **Analysis**: `analyze_board`, `get_drc_violations`, `measure_clearance`
+- **Export**: `export_gerbers`, `export_bom`, `export_assembly`
+- **Placement**: `placement_analyze`, `placement_suggestions`
+- **Sessions**: `start_session`, `query_move`, `apply_move`, `commit`, `rollback`
+- **Routing**: `route_net`, `get_unrouted_nets`
+
+See `docs/mcp/` for complete documentation.
+
 ### Circuit Blocks
 
 Build schematics using reusable, tested circuit blocks:
@@ -415,6 +449,7 @@ for table in tables:
 | `kct placement <pcb>` | Detect and optimize component placement |
 | `kct optimize-traces <pcb>` | Optimize routed traces |
 | `kct datasheet <subcommand>` | Search, download, parse datasheets |
+| `kct mcp serve` | Start MCP server for AI agent integration |
 
 All commands support `--format json` for machine-readable output.
 
@@ -454,6 +489,8 @@ All commands support `--format json` for machine-readable output.
 | `reasoning` | LLM-driven PCB layout with chain-of-thought reasoning |
 | `progress` | Progress callbacks for long-running operations |
 | `datasheet` | Datasheet search, download, and PDF parsing |
+| `mcp` | MCP server for AI agent integration |
+| `layout` | Layout preservation for PCB regeneration |
 
 ## Features
 

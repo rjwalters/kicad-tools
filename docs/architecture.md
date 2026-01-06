@@ -64,6 +64,13 @@ This document describes the high-level architecture of kicad-tools and how its m
 │  │   PCBState - Board state representation for LLMs                 │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │                         MCP Layer                                │    │
+│  │   MCP Server - FastMCP server for AI agent integration           │    │
+│  │   Tools - analyze, export, placement, session, routing           │    │
+│  │   Layout - Preserve placement across PCB regeneration            │    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
 └────────────────────────────────┬────────────────────────────────────────┘
                                  │
 ┌────────────────────────────────▼────────────────────────────────────────┐
@@ -134,6 +141,15 @@ bottom = pcb.footprints.filter(layer="B.Cu")
 | `reasoning/` | LLM-driven PCB layout | `PCBReasoningAgent`, `PCBState` |
 
 The reasoning module enables LLMs to make strategic decisions while tools handle geometric execution:
+
+### MCP Layer
+
+| Module | Purpose | Key Classes |
+|--------|---------|-------------|
+| `mcp/` | MCP server for AI agents | `MCPServer`, tools modules |
+| `layout/` | Layout preservation | `LayoutPreserver`, `HierarchicalMatcher` |
+
+The MCP layer enables AI assistants like Claude to interact with KiCad designs via the Model Context Protocol:
 
 ```python
 agent = PCBReasoningAgent.from_pcb("board.kicad_pcb")
