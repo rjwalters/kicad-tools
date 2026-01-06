@@ -299,6 +299,11 @@ def _dispatch_command(args) -> int:
     elif args.command == "fix-footprints":
         return run_fix_footprints_command(args)
 
+    elif args.command == "fix-vias":
+        from .commands import run_fix_vias_command
+
+        return run_fix_vias_command(args)
+
     elif args.command == "config":
         return run_config_command(args)
 

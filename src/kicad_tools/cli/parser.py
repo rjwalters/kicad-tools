@@ -136,6 +136,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_optimize_parser(subparsers)
     _add_validate_footprints_parser(subparsers)
     _add_fix_footprints_parser(subparsers)
+    _add_fix_vias_parser(subparsers)
     _add_parts_parser(subparsers)
     _add_datasheet_parser(subparsers)
     _add_placement_parser(subparsers)
@@ -920,6 +921,58 @@ def _add_fix_footprints_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Show what would be changed without applying",
+    )
+
+
+def _add_fix_vias_parser(subparsers) -> None:
+    """Add fix-vias subcommand parser."""
+    fix_vias_parser = subparsers.add_parser(
+        "fix-vias", help="Fix vias to meet manufacturer specifications"
+    )
+    fix_vias_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_vias_parser.add_argument(
+        "--mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Manufacturer to use for design rules (default: jlcpcb)",
+    )
+    fix_vias_parser.add_argument(
+        "--layers",
+        type=int,
+        default=2,
+        help="Number of PCB layers (default: 2)",
+    )
+    fix_vias_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Outer copper weight in oz (default: 1.0)",
+    )
+    fix_vias_parser.add_argument(
+        "--drill",
+        type=float,
+        help="Target drill diameter in mm (overrides manufacturer rules)",
+    )
+    fix_vias_parser.add_argument(
+        "--diameter",
+        type=float,
+        help="Target via diameter in mm (overrides manufacturer rules)",
+    )
+    fix_vias_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    fix_vias_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_vias_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
     )
 
 

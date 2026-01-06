@@ -8,6 +8,7 @@ __all__ = [
     "run_validate_placement_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
+    "run_fix_vias_command",
     "run_constraints_command",
     "run_audit_command",
 ]
@@ -54,6 +55,33 @@ def run_fix_footprints_command(args) -> int:
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return main_fix(sub_argv)
+
+
+def run_fix_vias_command(args) -> int:
+    """Handle fix-vias command."""
+    from ..fix_vias_cmd import main as fix_vias_main
+
+    sub_argv = [args.pcb]
+    if args.mfr != "jlcpcb":
+        sub_argv.extend(["--mfr", args.mfr])
+    if args.layers != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if args.copper != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if args.drill:
+        sub_argv.extend(["--drill", str(args.drill)])
+    if args.diameter:
+        sub_argv.extend(["--diameter", str(args.diameter)])
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_vias_main(sub_argv)
 
 
 def run_check_command(args) -> int:
