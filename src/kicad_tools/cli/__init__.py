@@ -41,6 +41,7 @@ from kicad_tools.exceptions import KiCadToolsError
 from .commands import (
     run_analyze_command,
     run_audit_command,
+    run_build_native_command,
     run_check_command,
     run_clean_command,
     run_config_command,
@@ -357,6 +358,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "init":
         return run_init_command(args)
+
+    elif args.command == "build-native":
+        return run_build_native_command(args)
 
     return 0
 

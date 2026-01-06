@@ -24,6 +24,7 @@ from .impedance import run_impedance_command
 from .library import run_lib_command
 from .manufacturer import run_mfr_command
 from .mcp import run_mcp_command
+from .native import run_build_native_command
 from .parts import run_parts_command
 from .pcb import run_pcb_command
 from .placement import run_placement_command
@@ -90,4 +91,6 @@ __all__ = [
     "run_impedance_command",
     # MCP
     "run_mcp_command",
+    # Native build
+    "run_build_native_command",
 ]

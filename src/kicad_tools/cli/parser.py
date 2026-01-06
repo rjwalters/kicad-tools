@@ -156,6 +156,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
     _add_init_parser(subparsers)
+    _add_build_native_parser(subparsers)
 
     return parser
 
@@ -2280,4 +2281,52 @@ def _add_init_parser(subparsers) -> None:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+
+def _add_build_native_parser(subparsers) -> None:
+    """Add build-native subcommand parser for building C++ router backend."""
+    build_native_parser = subparsers.add_parser(
+        "build-native",
+        help="Build C++ router backend for 10-100x faster routing",
+        description=(
+            "Build and install the C++ router extension for significantly faster routing. "
+            "This command handles all the build steps automatically: checking prerequisites, "
+            "installing nanobind, configuring cmake, and building the extension."
+        ),
+    )
+    build_native_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="build_native_verbose",
+        action="store_true",
+        help="Show detailed build output",
+    )
+    build_native_parser.add_argument(
+        "-f",
+        "--force",
+        dest="build_native_force",
+        action="store_true",
+        help="Force rebuild even if already installed",
+    )
+    build_native_parser.add_argument(
+        "-j",
+        "--jobs",
+        dest="build_native_jobs",
+        type=int,
+        default=None,
+        help="Number of parallel build jobs (default: auto)",
+    )
+    build_native_parser.add_argument(
+        "--format",
+        dest="build_native_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    build_native_parser.add_argument(
+        "--check",
+        dest="build_native_check",
+        action="store_true",
+        help="Just check if C++ backend is available, don't build",
     )
