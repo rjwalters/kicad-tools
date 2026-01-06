@@ -37,6 +37,7 @@ from .validation import (
     run_check_command,
     run_constraints_command,
     run_fix_footprints_command,
+    run_fix_vias_command,
     run_validate_command,
     run_validate_footprints_command,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "run_validate_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
+    "run_fix_vias_command",
     "run_constraints_command",
     # Footprint
     "run_footprint_command",
