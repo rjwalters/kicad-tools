@@ -124,9 +124,7 @@ class NetMapper:
 
         return mappings
 
-    def _find_by_connectivity(
-        self, old_name: str, used_new_nets: set[str]
-    ) -> NetMapping | None:
+    def _find_by_connectivity(self, old_name: str, used_new_nets: set[str]) -> NetMapping | None:
         """
         Find new net with matching pin connections.
 

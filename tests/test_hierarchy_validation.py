@@ -1,17 +1,12 @@
 """Tests for hierarchy validation module."""
 
 import json
-import tempfile
 from pathlib import Path
-
-import pytest
 
 from kicad_tools.schema.hierarchy import (
     HierarchicalLabelInfo,
     HierarchyNode,
-    SheetInstance,
     SheetPin,
-    build_hierarchy,
 )
 from kicad_tools.schema.hierarchy_validation import (
     FixSuggestion,
@@ -21,7 +16,6 @@ from kicad_tools.schema.hierarchy_validation import (
     ValidationResult,
     _directions_compatible,
     _find_similar_name,
-    apply_fix,
     format_validation_report,
     validate_hierarchy,
 )

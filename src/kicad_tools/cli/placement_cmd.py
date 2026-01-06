@@ -909,7 +909,10 @@ def _cmd_optimize_routing_aware(args, pcb_path: Path, quiet: bool, output_format
     else:
         result["message"] = "Dry run - no changes made"
 
-    return output_result(opt_result.success, opt_result.message if not opt_result.success else "Optimization completed successfully")
+    return output_result(
+        opt_result.success,
+        opt_result.message if not opt_result.success else "Optimization completed successfully",
+    )
 
 
 def cmd_optimize(args) -> int:

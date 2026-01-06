@@ -283,7 +283,11 @@ def route_net(
 
                 # Determine layer from pad layers
                 pad_layer = Layer.F_CU
-                if layer_preference == "B.Cu" or "B.Cu" in (pad.layers or []) and "F.Cu" not in (pad.layers or []):
+                if (
+                    layer_preference == "B.Cu"
+                    or "B.Cu" in (pad.layers or [])
+                    and "F.Cu" not in (pad.layers or [])
+                ):
                     pad_layer = Layer.B_CU
 
                 # Check if through-hole

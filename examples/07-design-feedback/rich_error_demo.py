@@ -6,7 +6,6 @@ Demonstrates how kicad-tools v0.7.0 provides compiler-style error reporting
 with source positions, code snippets, and actionable fix suggestions.
 """
 
-from pathlib import Path
 
 from kicad_tools.exceptions import (
     ErrorAccumulator,
@@ -14,7 +13,6 @@ from kicad_tools.exceptions import (
     KiCadToolsError,
     SExpSnippetExtractor,
     SourcePosition,
-    ValidationErrorGroup,
 )
 
 
@@ -65,7 +63,9 @@ def demo_source_positions():
     )
 
     print(f"Error location: {diag.position.file}:{diag.position.line}:{diag.position.column}")
-    print(f"Board coords: ({diag.position.board_x}, {diag.position.board_y})mm on {diag.position.layer}")
+    print(
+        f"Board coords: ({diag.position.board_x}, {diag.position.board_y})mm on {diag.position.layer}"
+    )
     print(f"Component: {diag.position.reference} ({diag.position.element_type})")
     print()
     print(f"[{diag.code}] {diag.message}")
@@ -80,7 +80,7 @@ def demo_snippet_extraction():
     print()
 
     # Example S-expression content (simplified KiCad format)
-    content = '''(kicad_pcb (version 20230101)
+    content = """(kicad_pcb (version 20230101)
   (general (thickness 1.6))
   (footprint "Package_SO:SOIC-8"
     (at 45.5 32.0)
@@ -91,7 +91,7 @@ def demo_snippet_extraction():
       (layers "F.Cu" "F.Paste" "F.Mask")
     )
   )
-)'''
+)"""
 
     extractor = SExpSnippetExtractor(content)
 
@@ -170,7 +170,7 @@ def demo_rich_output():
     print("    \033[36m--> my_board.kicad_pcb:1234:15\033[0m")
     print("       |")
     print("  1233 |   (pad 1 smd rect (at -2.7 0) (size 1.5 0.6)")
-    print("  \033[1;31m1234\033[0m | \033[1;31m    (layers \"F.Cu\" \"F.Paste\" \"F.Mask\")\033[0m")
+    print('  \033[1;31m1234\033[0m | \033[1;31m    (layers "F.Cu" "F.Paste" "F.Mask")\033[0m')
     print("       | \033[1;31m              ^^^^^\033[0m")
     print("  1235 |   )")
     print("       |")

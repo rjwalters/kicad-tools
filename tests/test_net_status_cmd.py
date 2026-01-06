@@ -7,7 +7,6 @@ import pytest
 
 from kicad_tools.cli.net_status_cmd import main
 
-
 # PCB with fully connected nets
 CONNECTED_PCB = """(kicad_pcb
   (version 20240108)
@@ -262,7 +261,11 @@ class TestNetStatusCLI:
 
         captured = capsys.readouterr()
         # Should show net class grouping
-        assert "Net Class:" in captured.out or "Default" in captured.out or "class" in captured.out.lower()
+        assert (
+            "Net Class:" in captured.out
+            or "Default" in captured.out
+            or "class" in captured.out.lower()
+        )
 
     def test_verbose_option(self, incomplete_pcb: Path, capsys):
         """Test --verbose option shows more details."""
@@ -311,7 +314,9 @@ class TestNetStatusSummary:
         unrouted = summary["unrouted"]
 
         # Counts should be consistent
-        assert complete + incomplete + unrouted == total or total >= complete + incomplete + unrouted
+        assert (
+            complete + incomplete + unrouted == total or total >= complete + incomplete + unrouted
+        )
 
     def test_unconnected_pads_count(self, unrouted_pcb: Path, capsys):
         """Test that unconnected pads are counted."""
