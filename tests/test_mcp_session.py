@@ -15,6 +15,7 @@ from kicad_tools.mcp.tools.session import (
     query_move,
     reset_session_manager,
     rollback_session,
+    session_status,
     start_session,
     undo_move,
 )
@@ -663,3 +664,253 @@ class TestResultSerialization:
         assert "current_score" in d
 
         rollback_session(session_result.session_id)
+
+
+class TestDRCDeltaInQueryMove:
+    """Tests for DRC delta preview in query_move responses (issue #518)."""
+
+    def test_query_move_includes_drc_preview(self, session_pcb_path: str) -> None:
+        """Test that query_move response includes drc_preview field."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = query_move(session_id, "R1", 25.0, 25.0)
+
+        assert result.success is True
+        # DRC preview should be present
+        assert hasattr(result, "drc_preview")
+        assert hasattr(result, "net_drc_change")
+        assert hasattr(result, "recommendation")
+
+        rollback_session(session_id)
+
+    def test_query_move_drc_preview_structure(self, session_pcb_path: str) -> None:
+        """Test DRC preview has expected structure."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = query_move(session_id, "R1", 25.0, 25.0)
+
+        # If DRC preview is present, check its structure
+        if result.drc_preview:
+            d = result.drc_preview.to_dict()
+            assert "new_violations" in d
+            assert "resolved_violations" in d
+            assert "total_violations" in d
+            assert "delta" in d
+            assert "check_time_ms" in d
+
+        rollback_session(session_id)
+
+    def test_query_move_recommendation_present(self, session_pcb_path: str) -> None:
+        """Test that recommendation field provides actionable guidance."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = query_move(session_id, "R1", 25.0, 25.0)
+
+        # Recommendation should be non-empty
+        assert isinstance(result.recommendation, str)
+        # Should contain keywords like RECOMMEND, CAUTION, or NEUTRAL
+        assert any(
+            keyword in result.recommendation for keyword in ["RECOMMEND", "CAUTION", "NEUTRAL"]
+        )
+
+        rollback_session(session_id)
+
+    def test_query_move_serialization_includes_drc(self, session_pcb_path: str) -> None:
+        """Test QueryMoveResult serialization includes DRC fields."""
+        session_result = start_session(session_pcb_path)
+        result = query_move(session_result.session_id, "R1", 25.0, 25.0)
+        d = result.to_dict()
+
+        assert "drc_preview" in d
+        assert "net_drc_change" in d
+        assert "recommendation" in d
+
+        rollback_session(session_result.session_id)
+
+
+class TestDRCDeltaInApplyMove:
+    """Tests for DRC delta in apply_move responses (issue #518)."""
+
+    def test_apply_move_includes_drc_delta(self, session_pcb_path: str) -> None:
+        """Test that apply_move response includes drc field."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = apply_move(session_id, "R1", 25.0, 25.0)
+
+        assert result.success is True
+        assert hasattr(result, "drc")
+
+        rollback_session(session_id)
+
+    def test_apply_move_drc_structure(self, session_pcb_path: str) -> None:
+        """Test DRC delta has expected structure."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = apply_move(session_id, "R1", 25.0, 25.0)
+
+        # If DRC is present, check its structure
+        if result.drc:
+            d = result.drc.to_dict()
+            assert "new_violations" in d
+            assert "resolved_violations" in d
+            assert "total_violations" in d
+            assert "delta" in d
+            assert "check_time_ms" in d
+
+        rollback_session(session_id)
+
+    def test_apply_move_serialization_includes_drc(self, session_pcb_path: str) -> None:
+        """Test ApplyMoveResult serialization includes DRC field."""
+        session_result = start_session(session_pcb_path)
+        result = apply_move(session_result.session_id, "R1", 25.0, 25.0)
+        d = result.to_dict()
+
+        assert "drc" in d
+
+        rollback_session(session_result.session_id)
+
+
+class TestSessionStatus:
+    """Tests for session_status function with DRC summary (issue #518)."""
+
+    def test_session_status_success(self, session_pcb_path: str) -> None:
+        """Test successful session status query."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = session_status(session_id)
+
+        assert result.success is True
+        assert result.session_id == session_id
+        assert result.error_message is None
+
+        rollback_session(session_id)
+
+    def test_session_status_includes_drc_summary(self, session_pcb_path: str) -> None:
+        """Test that session status includes DRC summary."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = session_status(session_id)
+
+        assert result.drc_summary is not None
+        assert hasattr(result.drc_summary, "total_violations")
+        assert hasattr(result.drc_summary, "by_severity")
+        assert hasattr(result.drc_summary, "by_type")
+        assert hasattr(result.drc_summary, "trend")
+        assert hasattr(result.drc_summary, "session_delta")
+
+        rollback_session(session_id)
+
+    def test_session_status_drc_summary_structure(self, session_pcb_path: str) -> None:
+        """Test DRC summary has expected structure."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = session_status(session_id)
+        d = result.drc_summary.to_dict()
+
+        assert "total_violations" in d
+        assert "by_severity" in d
+        assert "by_type" in d
+        assert "trend" in d
+        assert "session_delta" in d
+        assert isinstance(d["by_severity"], dict)
+        assert isinstance(d["by_type"], dict)
+
+        rollback_session(session_id)
+
+    def test_session_status_invalid_session(self) -> None:
+        """Test error handling for invalid session."""
+        result = session_status("invalid-session-id")
+
+        assert result.success is False
+        assert "not found" in result.error_message.lower()
+
+    def test_session_status_updates_after_move(self, session_pcb_path: str) -> None:
+        """Test that session status updates after applying moves."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        # Get initial status
+        status1 = session_status(session_id)
+        initial_score = status1.current_score
+
+        # Apply a move
+        apply_move(session_id, "R1", 25.0, 25.0)
+
+        # Get updated status
+        status2 = session_status(session_id)
+
+        assert status2.pending_moves == 1
+        # Score should have changed (may be better or worse)
+        assert status2.current_score != initial_score or status2.score_delta != 0
+
+        rollback_session(session_id)
+
+    def test_session_status_serialization(self, session_pcb_path: str) -> None:
+        """Test SessionStatusResult serialization."""
+        session_result = start_session(session_pcb_path)
+        result = session_status(session_result.session_id)
+        d = result.to_dict()
+
+        assert "success" in d
+        assert "session_id" in d
+        assert "pending_moves" in d
+        assert "current_score" in d
+        assert "initial_score" in d
+        assert "score_delta" in d
+        assert "drc_summary" in d
+
+        rollback_session(session_result.session_id)
+
+
+class TestDRCDeltaWorkflow:
+    """End-to-end tests for DRC delta workflow (issue #518)."""
+
+    def test_drc_delta_workflow_query_then_apply(self, session_pcb_path: str) -> None:
+        """Test that DRC info is consistent between query and apply."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        # Query first
+        query_result = query_move(session_id, "R1", 25.0, 25.0)
+        query_net_change = query_result.net_drc_change
+
+        # Apply same move
+        apply_result = apply_move(session_id, "R1", 25.0, 25.0)
+
+        # DRC info should be present in both
+        assert query_result.drc_preview is not None or apply_result.drc is not None
+
+        # If both have DRC info, net change direction should match
+        if query_result.drc_preview and apply_result.drc:
+            apply_net_change = len(apply_result.drc.new_violations) - len(
+                apply_result.drc.resolved_violations
+            )
+            # Direction should be same (both positive, both negative, or both zero)
+            if query_net_change != 0:
+                assert (query_net_change > 0) == (apply_net_change > 0) or apply_net_change == 0
+
+        rollback_session(session_id)
+
+    def test_drc_delta_response_time(self, session_pcb_path: str) -> None:
+        """Test that DRC check time is reported and reasonable (<20ms target)."""
+        session_result = start_session(session_pcb_path)
+        session_id = session_result.session_id
+
+        result = query_move(session_id, "R1", 25.0, 25.0)
+
+        if result.drc_preview:
+            # Check time should be reported
+            assert result.drc_preview.check_time_ms >= 0
+            # For this simple board, should be well under 20ms
+            # (using 100ms as a generous upper bound for test reliability)
+            assert result.drc_preview.check_time_ms < 100
+
+        rollback_session(session_id)
