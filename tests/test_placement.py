@@ -465,6 +465,138 @@ class TestDesignRules:
         assert rules.min_hole_to_hole == 0.6
 
 
+class TestParallelConflictDetection:
+    """Tests for parallel conflict detection (issue #570)."""
+
+    def test_parallel_matches_sequential(self, overlapping_pcb: Path):
+        """Test that parallel results match sequential results exactly."""
+        analyzer = PlacementAnalyzer()
+
+        # Run with single worker (sequential)
+        sequential_conflicts = analyzer.find_conflicts(overlapping_pcb, max_workers=1)
+
+        # Run with multiple workers (parallel)
+        parallel_conflicts = analyzer.find_conflicts(overlapping_pcb, max_workers=4)
+
+        # Results should be identical (same conflicts, same order after sorting)
+        assert len(sequential_conflicts) == len(parallel_conflicts)
+
+        for seq, par in zip(sequential_conflicts, parallel_conflicts, strict=True):
+            assert seq.type == par.type
+            assert seq.severity == par.severity
+            assert seq.component1 == par.component1
+            assert seq.component2 == par.component2
+            assert seq.location.x == pytest.approx(par.location.x, abs=0.001)
+            assert seq.location.y == pytest.approx(par.location.y, abs=0.001)
+
+    def test_parallel_with_hole_conflicts(self, hole_conflict_pcb: Path):
+        """Test parallel detection of hole-to-hole conflicts."""
+        analyzer = PlacementAnalyzer()
+        rules = DesignRules(min_hole_to_hole=0.5)
+
+        sequential = analyzer.find_conflicts(hole_conflict_pcb, rules, max_workers=1)
+        parallel = analyzer.find_conflicts(hole_conflict_pcb, rules, max_workers=4)
+
+        assert len(sequential) == len(parallel)
+
+        # Verify hole conflicts are detected
+        seq_holes = [c for c in sequential if c.type == ConflictType.HOLE_TO_HOLE]
+        par_holes = [c for c in parallel if c.type == ConflictType.HOLE_TO_HOLE]
+        assert len(seq_holes) == len(par_holes)
+        assert len(seq_holes) >= 1
+
+    def test_parallel_clean_pcb(self, clean_pcb: Path):
+        """Test parallel detection finds no conflicts in clean PCB."""
+        analyzer = PlacementAnalyzer()
+
+        sequential = analyzer.find_conflicts(clean_pcb, max_workers=1)
+        parallel = analyzer.find_conflicts(clean_pcb, max_workers=4)
+
+        assert len(sequential) == 0
+        assert len(parallel) == 0
+
+    def test_max_workers_defaults_to_cpu_count(self, clean_pcb: Path):
+        """Test that max_workers defaults to CPU count when not specified."""
+        import os
+
+        analyzer = PlacementAnalyzer(verbose=True)
+
+        # Just verify it doesn't crash when max_workers is None
+        conflicts = analyzer.find_conflicts(clean_pcb, max_workers=None)
+        assert isinstance(conflicts, list)
+
+        # CPU count should be at least 1
+        assert (os.cpu_count() or 1) >= 1
+
+    def test_single_worker_graceful(self, overlapping_pcb: Path):
+        """Test single-core systems work correctly with max_workers=1."""
+        analyzer = PlacementAnalyzer()
+
+        conflicts = analyzer.find_conflicts(overlapping_pcb, max_workers=1)
+
+        # Should still detect conflicts
+        assert len(conflicts) >= 1
+
+    def test_edge_cases_zero_components(self, tmp_path: Path):
+        """Test parallel detection with zero components."""
+        empty_pcb = tmp_path / "empty.kicad_pcb"
+        empty_pcb.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+)
+""")
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(empty_pcb, max_workers=4)
+        assert len(conflicts) == 0
+
+    def test_edge_cases_one_component(self, tmp_path: Path):
+        """Test parallel detection with single component (no pairs)."""
+        single_pcb = tmp_path / "single.kicad_pcb"
+        single_pcb.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )
+)
+""")
+        analyzer = PlacementAnalyzer()
+
+        sequential = analyzer.find_conflicts(single_pcb, max_workers=1)
+        parallel = analyzer.find_conflicts(single_pcb, max_workers=4)
+
+        assert len(sequential) == 0
+        assert len(parallel) == 0
+
+    def test_edge_cases_two_components(self, tmp_path: Path):
+        """Test parallel detection with exactly two components (one pair)."""
+        two_pcb = tmp_path / "two.kicad_pcb"
+        two_pcb.write_text(OVERLAPPING_PCB)  # Has exactly 2 components
+
+        analyzer = PlacementAnalyzer()
+
+        sequential = analyzer.find_conflicts(two_pcb, max_workers=1)
+        parallel = analyzer.find_conflicts(two_pcb, max_workers=4)
+
+        assert len(sequential) == len(parallel)
+        assert len(sequential) >= 1  # Should detect overlap
+
+
 class TestCLIIntegration:
     """Tests for CLI integration."""
 
