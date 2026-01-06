@@ -1,0 +1,87 @@
+# FlashPCB Design Rules Configuration
+# Source: https://www.flashpcb.com/capabilities
+#
+# All measurements in millimeters unless otherwise noted.
+# Note: FlashPCB is a USA-based PCB fabrication and assembly house.
+# This configuration covers the instant quote tier only.
+
+design_rules:
+  # 2-layer 1oz copper
+  2layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.2           # 8 mil
+    min_via_diameter_mm: 0.45       # ~18 mil (8 mil drill + 5 mil annular ring each side)
+    min_annular_ring_mm: 0.127      # 5 mil
+    min_hole_diameter_mm: 0.2       # 8 mil
+    max_hole_diameter_mm: 6.35      # 250 mil
+    min_copper_to_edge_mm: 0.254    # 10 mil
+    min_hole_to_edge_mm: 0.254      # 10 mil
+    min_silkscreen_width_mm: 0.127  # 5 mil
+    min_silkscreen_height_mm: 0.8   # ~32 mil
+    min_solder_mask_dam_mm: 0.102   # 4 mil
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.0            # No inner layers
+    max_board_width_mm: 254.0       # 10 inches
+    max_board_height_mm: 254.0      # 10 inches
+
+  # 2-layer 2oz copper
+  2layer_2oz:
+    min_trace_width_mm: 0.2032      # 8 mil (wider for 2oz)
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.2           # 8 mil
+    min_via_diameter_mm: 0.45       # ~18 mil
+    min_annular_ring_mm: 0.127      # 5 mil
+    min_hole_diameter_mm: 0.2       # 8 mil
+    max_hole_diameter_mm: 6.35      # 250 mil
+    min_copper_to_edge_mm: 0.254    # 10 mil
+    min_hole_to_edge_mm: 0.254      # 10 mil
+    min_silkscreen_width_mm: 0.127  # 5 mil
+    min_silkscreen_height_mm: 0.8   # ~32 mil
+    min_solder_mask_dam_mm: 0.102   # 4 mil
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 0.0
+    max_board_width_mm: 254.0
+    max_board_height_mm: 254.0
+
+  # 4-layer 1oz outer copper (0.5oz inner)
+  4layer_1oz:
+    min_trace_width_mm: 0.127       # 5 mil
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.2           # 8 mil
+    min_via_diameter_mm: 0.45       # ~18 mil
+    min_annular_ring_mm: 0.127      # 5 mil
+    min_hole_diameter_mm: 0.2       # 8 mil
+    max_hole_diameter_mm: 6.35      # 250 mil
+    min_copper_to_edge_mm: 0.254    # 10 mil
+    min_hole_to_edge_mm: 0.254      # 10 mil
+    min_silkscreen_width_mm: 0.127  # 5 mil
+    min_silkscreen_height_mm: 0.8   # ~32 mil
+    min_solder_mask_dam_mm: 0.102   # 4 mil
+    board_thickness_mm: 1.6
+    outer_copper_oz: 1.0
+    inner_copper_oz: 0.5
+    max_board_width_mm: 254.0
+    max_board_height_mm: 254.0
+
+  # 4-layer 2oz outer copper (1oz inner)
+  4layer_2oz:
+    min_trace_width_mm: 0.2032      # 8 mil (wider for 2oz)
+    min_clearance_mm: 0.127         # 5 mil
+    min_via_drill_mm: 0.2           # 8 mil
+    min_via_diameter_mm: 0.45       # ~18 mil
+    min_annular_ring_mm: 0.127      # 5 mil
+    min_hole_diameter_mm: 0.2       # 8 mil
+    max_hole_diameter_mm: 6.35      # 250 mil
+    min_copper_to_edge_mm: 0.254    # 10 mil
+    min_hole_to_edge_mm: 0.254      # 10 mil
+    min_silkscreen_width_mm: 0.127  # 5 mil
+    min_silkscreen_height_mm: 0.8   # ~32 mil
+    min_solder_mask_dam_mm: 0.102   # 4 mil
+    board_thickness_mm: 1.6
+    outer_copper_oz: 2.0
+    inner_copper_oz: 1.0
+    max_board_width_mm: 254.0
+    max_board_height_mm: 254.0

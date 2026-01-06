@@ -9,6 +9,7 @@ Supported manufacturers:
 - Seeed Fusion (seeed) - Chinese fab with OPL parts library
 - PCBWay (pcbway) - Chinese fab with global sourcing
 - OSHPark (oshpark) - US fab, PCB only, per-sq-inch pricing
+- FlashPCB (flashpcb) - US fab with assembly services
 
 Usage:
     from manufacturers import get_profile, list_manufacturers
@@ -29,6 +30,7 @@ from .base import (
     PartsLibrary,
     load_design_rules_from_yaml,
 )
+from .flashpcb import FLASHPCB_PROFILE
 from .jlcpcb import JLCPCB_PROFILE
 from .oshpark import OSHPARK_PROFILE
 from .pcbway import PCBWAY_PROFILE
@@ -46,6 +48,7 @@ __all__ = [
     "get_manufacturer_ids",
     "load_design_rules_from_yaml",
     # Profiles (for direct access)
+    "FLASHPCB_PROFILE",
     "JLCPCB_PROFILE",
     "SEEED_PROFILE",
     "PCBWAY_PROFILE",
@@ -54,6 +57,7 @@ __all__ = [
 
 # Registry of all manufacturer profiles
 _PROFILES: dict[str, ManufacturerProfile] = {
+    "flashpcb": FLASHPCB_PROFILE,
     "jlcpcb": JLCPCB_PROFILE,
     "seeed": SEEED_PROFILE,
     "pcbway": PCBWAY_PROFILE,
@@ -62,6 +66,7 @@ _PROFILES: dict[str, ManufacturerProfile] = {
 
 # Aliases for convenience
 _ALIASES: dict[str, str] = {
+    "flash": "flashpcb",
     "jlc": "jlcpcb",
     "lcsc": "jlcpcb",
     "seeed_fusion": "seeed",
