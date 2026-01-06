@@ -320,7 +320,12 @@ def _add_bom_parser(subparsers) -> None:
     """Add BOM subcommand parser."""
     bom_parser = subparsers.add_parser("bom", help="Generate bill of materials")
     bom_parser.add_argument("schematic", help="Path to .kicad_sch file")
-    bom_parser.add_argument("--format", choices=["table", "csv", "json"], default="table")
+    bom_parser.add_argument(
+        "--format",
+        choices=["table", "csv", "json", "jlcpcb"],
+        default="table",
+        help="Output format (jlcpcb: JLCPCB assembly BOM)",
+    )
     bom_parser.add_argument("--group", action="store_true", help="Group identical components")
     bom_parser.add_argument(
         "--exclude", action="append", default=[], help="Exclude references matching pattern"

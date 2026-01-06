@@ -335,6 +335,23 @@ class TestBOMCommand:
         data = json.loads(captured.out)
         assert isinstance(data, (list, dict))
 
+    def test_bom_jlcpcb_format(self, simple_rc_schematic: Path, capsys):
+        """Test bom command with JLCPCB assembly format."""
+        from kicad_tools.cli import main
+
+        result = main(["bom", str(simple_rc_schematic), "--format", "jlcpcb"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        # Should have JLCPCB headers
+        lines = captured.out.strip().split("\n")
+        assert len(lines) >= 1  # At least header
+        header = lines[0]
+        assert "Comment" in header
+        assert "Designator" in header
+        assert "Footprint" in header
+        assert "LCSC" in header
+
     def test_bom_group(self, simple_rc_schematic: Path, capsys):
         """Test bom command with grouping."""
         from kicad_tools.cli import main

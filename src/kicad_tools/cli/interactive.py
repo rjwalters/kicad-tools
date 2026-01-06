@@ -196,7 +196,7 @@ Type 'help' for available commands, 'quit' to exit.
     def do_bom(self, arg: str) -> None:
         """Generate bill of materials from loaded schematic.
 
-        Usage: bom [--format table|csv|json] [--group]
+        Usage: bom [--format table|csv|json|jlcpcb] [--group]
 
         Requires a schematic to be loaded first.
         """

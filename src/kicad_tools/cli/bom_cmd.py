@@ -67,9 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("schematic", help="Path to .kicad_sch file")
     parser.add_argument(
         "--format",
-        choices=["table", "csv", "json"],
+        choices=["table", "csv", "json", "jlcpcb"],
         default="table",
-        help="Output format",
+        help="Output format (jlcpcb: JLCPCB assembly BOM)",
     )
     parser.add_argument(
         "--group",
@@ -157,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         output_csv(items, args.group)
     elif args.format == "json":
         output_json(items, args.group)
+    elif args.format == "jlcpcb":
+        output_jlcpcb(bom)
     else:
         output_table(items, args.group)
 
@@ -294,6 +296,24 @@ def output_json(items, grouped: bool) -> None:
         }
 
     print(json.dumps(data, indent=2))
+
+
+def output_jlcpcb(bom: BOM) -> None:
+    """Output BOM in JLCPCB assembly format.
+
+    JLCPCB format:
+    - Comment: Component value
+    - Designator: Reference designator(s), comma-separated for groups
+    - Footprint: Package/footprint name
+    - LCSC Part #: LCSC part number for ordering
+    """
+    from ..export.bom_formats import JLCPCBBOMFormatter
+
+    # Filter out virtual components and DNP
+    items = [item for item in bom.items if not item.is_virtual and not item.dnp]
+
+    formatter = JLCPCBBOMFormatter()
+    print(formatter.format(items), end="")
 
 
 def check_availability(bom, quantity: int, output_format: str) -> int:
