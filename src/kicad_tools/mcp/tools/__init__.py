@@ -8,6 +8,15 @@ from kicad_tools.mcp.tools.analysis import (
     get_drc_violations,
     measure_clearance,
 )
+from kicad_tools.mcp.tools.context import (
+    annotate_decision,
+    create_checkpoint,
+    get_decision_history,
+    get_session_context,
+    get_session_summary,
+    record_decision,
+    restore_checkpoint,
+)
 from kicad_tools.mcp.tools.export import export_gerbers
 from kicad_tools.mcp.tools.routing import (
     get_unrouted_nets,
@@ -16,9 +25,16 @@ from kicad_tools.mcp.tools.routing import (
 
 __all__ = [
     "analyze_board",
+    "annotate_decision",
+    "create_checkpoint",
     "export_gerbers",
+    "get_decision_history",
     "get_drc_violations",
+    "get_session_context",
+    "get_session_summary",
     "get_unrouted_nets",
     "measure_clearance",
+    "record_decision",
+    "restore_checkpoint",
     "route_net",
 ]

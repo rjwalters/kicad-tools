@@ -17,6 +17,15 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
 from kicad_tools.mcp.tools.analysis import measure_clearance
+from kicad_tools.mcp.tools.context import (
+    annotate_decision,
+    create_checkpoint,
+    get_decision_history,
+    get_session_context,
+    get_session_summary,
+    record_decision,
+    restore_checkpoint,
+)
 from kicad_tools.mcp.tools.export import (
     export_assembly,
     export_bom,
@@ -69,6 +78,7 @@ class MCPServer:
         self._register_assembly_tools()
         self._register_placement_tools()
         self._register_session_tools()
+        self._register_context_tools()
         self._register_clearance_tools()
         self._register_routing_tools()
 
@@ -517,6 +527,283 @@ class MCPServer:
     def _handle_rollback_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle rollback_session tool call."""
         result = rollback_session(session_id=params["session_id"])
+        return result.to_dict()
+
+    def _register_context_tools(self) -> None:
+        """Register context persistence and decision tracking tools."""
+        self.tools["record_decision"] = ToolDefinition(
+            name="record_decision",
+            description=(
+                "Record a design decision with rationale. Creates a permanent record "
+                "of a design decision, including reasoning and alternatives considered. "
+                "Use this to build a decision history for learning and context."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Action type (e.g., 'move', 'route', 'place')",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target of action (component ref, net name, etc.)",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this decision was made (optional)",
+                    },
+                    "alternatives": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Other options considered (optional)",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Agent confidence in decision (0.0-1.0)",
+                        "default": 0.8,
+                    },
+                },
+                "required": ["session_id", "action", "target"],
+            },
+            handler=self._handle_record_decision,
+        )
+
+        self.tools["get_decision_history"] = ToolDefinition(
+            name="get_decision_history",
+            description=(
+                "Get recent decisions in session. Returns decision history with "
+                "detected patterns. Optionally filter by action type."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum decisions to return",
+                        "default": 20,
+                    },
+                    "filter_action": {
+                        "type": "string",
+                        "description": "Filter by action type (optional)",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_get_decision_history,
+        )
+
+        self.tools["annotate_decision"] = ToolDefinition(
+            name="annotate_decision",
+            description=(
+                "Add feedback to a past decision. Updates the decision record "
+                "with feedback and optionally changes its outcome status."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "decision_id": {
+                        "type": "string",
+                        "description": "ID of the decision to annotate",
+                    },
+                    "feedback": {
+                        "type": "string",
+                        "description": "Feedback text to add",
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["success", "partial", "reverted", "pending"],
+                        "description": "New outcome status (optional)",
+                    },
+                },
+                "required": ["session_id", "decision_id", "feedback"],
+            },
+            handler=self._handle_annotate_decision,
+        )
+
+        self.tools["get_session_context"] = ToolDefinition(
+            name="get_session_context",
+            description=(
+                "Get session context at specified detail level. Returns session "
+                "state including decisions, preferences, and patterns. Detail levels: "
+                "'summary' for quick overview, 'detailed' for recent decisions and "
+                "patterns, 'full' for complete state dump."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "detail_level": {
+                        "type": "string",
+                        "enum": ["summary", "detailed", "full"],
+                        "description": "Level of detail",
+                        "default": "summary",
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_get_session_context,
+        )
+
+        self.tools["create_checkpoint"] = ToolDefinition(
+            name="create_checkpoint",
+            description=(
+                "Create named checkpoint for potential rollback. Saves current "
+                "session state that can be restored later using restore_checkpoint."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable checkpoint name (optional)",
+                    },
+                    "drc_violation_count": {
+                        "type": "integer",
+                        "description": "Current DRC violation count",
+                        "default": 0,
+                    },
+                    "score": {
+                        "type": "number",
+                        "description": "Current placement score",
+                        "default": 0.0,
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_create_checkpoint,
+        )
+
+        self.tools["restore_checkpoint"] = ToolDefinition(
+            name="restore_checkpoint",
+            description=(
+                "Restore session to checkpoint state. Retrieves the saved state "
+                "associated with a checkpoint for restoration."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "checkpoint_id": {
+                        "type": "string",
+                        "description": "ID of the checkpoint to restore",
+                    },
+                },
+                "required": ["session_id", "checkpoint_id"],
+            },
+            handler=self._handle_restore_checkpoint,
+        )
+
+        self.tools["get_session_summary"] = ToolDefinition(
+            name="get_session_summary",
+            description=(
+                "Get token-efficient session summary for LLM context. Returns "
+                "a compact representation focusing on recent changes and "
+                "important decisions, optimized to fit within token budgets."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID from start_session",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Approximate maximum tokens for summary",
+                        "default": 500,
+                    },
+                },
+                "required": ["session_id"],
+            },
+            handler=self._handle_get_session_summary,
+        )
+
+    def _handle_record_decision(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle record_decision tool call."""
+        result = record_decision(
+            session_id=params["session_id"],
+            action=params["action"],
+            target=params["target"],
+            rationale=params.get("rationale"),
+            alternatives=params.get("alternatives"),
+            confidence=params.get("confidence", 0.8),
+        )
+        return result.to_dict()
+
+    def _handle_get_decision_history(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle get_decision_history tool call."""
+        result = get_decision_history(
+            session_id=params["session_id"],
+            limit=params.get("limit", 20),
+            filter_action=params.get("filter_action"),
+        )
+        return result.to_dict()
+
+    def _handle_annotate_decision(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle annotate_decision tool call."""
+        result = annotate_decision(
+            session_id=params["session_id"],
+            decision_id=params["decision_id"],
+            feedback=params["feedback"],
+            outcome=params.get("outcome"),
+        )
+        return result.to_dict()
+
+    def _handle_get_session_context(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle get_session_context tool call."""
+        result = get_session_context(
+            session_id=params["session_id"],
+            detail_level=params.get("detail_level", "summary"),
+        )
+        return result.to_dict()
+
+    def _handle_create_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle create_checkpoint tool call."""
+        result = create_checkpoint(
+            session_id=params["session_id"],
+            name=params.get("name"),
+            drc_violation_count=params.get("drc_violation_count", 0),
+            score=params.get("score", 0.0),
+        )
+        return result.to_dict()
+
+    def _handle_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle restore_checkpoint tool call."""
+        result = restore_checkpoint(
+            session_id=params["session_id"],
+            checkpoint_id=params["checkpoint_id"],
+        )
+        return result.to_dict()
+
+    def _handle_get_session_summary(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle get_session_summary tool call."""
+        result = get_session_summary(
+            session_id=params["session_id"],
+            max_tokens=params.get("max_tokens", 500),
+        )
         return result.to_dict()
 
     def _register_clearance_tools(self) -> None:
