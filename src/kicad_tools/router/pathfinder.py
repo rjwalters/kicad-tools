@@ -92,11 +92,19 @@ class Router:
                 ]
             )
 
-        # Pre-calculate trace body radius in grid cells
-        # Only trace_width/2 - clearance is already in pad blocking
-        # Add 1 cell minimum to ensure blocking check works
+        # Pre-calculate trace clearance radius in grid cells
+        # This is the total radius from trace centerline that must be clear:
+        # - trace_width/2: half-width of the trace copper
+        # - trace_clearance: required clearance from trace edge to obstacles
+        # This enforces clearance as a hard constraint during routing.
+        # Issue #553: Previously only checked trace_width/2, causing DRC violations
+        # when traces were placed too close to obstacles.
         self._trace_half_width_cells = max(
-            1, math.ceil((self.rules.trace_width / 2) / self.grid.resolution)
+            1,
+            math.ceil(
+                (self.rules.trace_width / 2 + self.rules.trace_clearance)
+                / self.grid.resolution
+            ),
         )
 
         # Pre-calculate via blocking radius in grid cells

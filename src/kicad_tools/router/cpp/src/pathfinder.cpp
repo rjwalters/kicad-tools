@@ -30,9 +30,16 @@ Pathfinder::Pathfinder(Grid3D& grid, const DesignRules& rules, bool diagonal_rou
         neighbors_2d_.push_back({-1, -1, 0, 1.414f}); // Up-Left
     }
 
-    // Pre-compute trace half-width in grid cells
+    // Pre-compute trace clearance radius in grid cells
+    // This is the total radius from trace centerline that must be clear:
+    // - trace_width/2: half-width of the trace copper
+    // - trace_clearance: required clearance from trace edge to obstacles
+    // This enforces clearance as a hard constraint during routing.
+    // Issue #553: Previously only checked trace_width/2, causing DRC violations
+    // when traces were placed too close to obstacles.
     trace_half_width_cells_ = std::max(
-        1, static_cast<int>(std::ceil((rules.trace_width / 2) / grid.resolution())));
+        1, static_cast<int>(std::ceil(
+            (rules.trace_width / 2 + rules.trace_clearance) / grid.resolution())));
 
     // Pre-compute via blocking radius in grid cells
     via_half_cells_ = std::max(
