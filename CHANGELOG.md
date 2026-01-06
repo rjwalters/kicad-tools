@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-01-06
+
+### Added
+
+#### Parallel Processing Infrastructure
+
+- **Thread-Safe Grid** (`router/grid.py`) (#584)
+  - Optional `thread_safe=True` parameter for `RoutingGrid`
+  - RLock-based synchronization for concurrent grid access
+  - `locked()` context manager for atomic multi-operation sequences
+  - Zero overhead when disabled (default)
+
+- **Parallel Routing Operations**
+  - Parallelize Monte Carlo routing trials (#576)
+  - Parallel fitness evaluation in evolutionary optimizer (#578)
+  - Parallelize placement conflict detection (#577)
+  - Parallelize congestion grid processing (#582)
+
+- **C++ Backend Integration** (`router/core.py`) (#581)
+  - Autorouter class now automatically uses C++ backend when available
+  - Seamless fallback to Python implementation
+
+#### New Commands
+
+- **`kct build-native`** (`cli/__init__.py`) (#580)
+  - Install C++ backend for ~100x performance boost
+  - Automatic compilation with nanobind
+  - `kct build-native --check` to verify installation
+
+#### Configurable Units
+
+- **Unit System** (`units.py`) (#574)
+  - Configurable output units: millimeters (default) or mils
+  - `kct config units mm|mils` to set preference
+  - Affects all CLI output (congestion, spacing, dimensions)
+
+### Fixed
+
+- **mfr compare --layers** (#568) - Fix `--layers` flag being ignored in manufacturer comparison
+
 ## [0.9.1] - 2026-01-06
 
 ### Added
