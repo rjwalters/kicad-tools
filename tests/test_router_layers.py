@@ -157,9 +157,7 @@ class TestLayerStackLayerEnums:
             ("B.Cu", 3, Layer.B_CU),  # Critical: index 3 but Layer.B_CU (value 5)
         ]
 
-        for layer_def, (name, index, expected_enum) in zip(
-            stack.layers, expected, strict=True
-        ):
+        for layer_def, (name, index, expected_enum) in zip(stack.layers, expected, strict=True):
             assert layer_def.name == name
             assert layer_def.index == index
             assert layer_def.layer_enum == expected_enum
@@ -188,9 +186,7 @@ class TestLayerStackLayerEnums:
             ("B.Cu", 5, Layer.B_CU),
         ]
 
-        for layer_def, (name, index, expected_enum) in zip(
-            stack.layers, expected, strict=True
-        ):
+        for layer_def, (name, index, expected_enum) in zip(stack.layers, expected, strict=True):
             assert layer_def.name == name
             assert layer_def.index == index
             assert layer_def.layer_enum == expected_enum
