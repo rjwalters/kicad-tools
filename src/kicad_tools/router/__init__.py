@@ -35,14 +35,6 @@ from .analysis import (
     RoutingSeverity,
     analyze_routing_failure,
 )
-from .failure_analysis import (
-    BlockingElement,
-    CongestionMap,
-    FailureAnalysis,
-    FailureCause,
-    PathAttempt,
-    RootCauseAnalyzer,
-)
 from .bus import (
     BusGroup,
     BusRoutingConfig,
@@ -64,6 +56,14 @@ from .diffpair import (
     detect_differential_pairs,
     detect_differential_signals,
     group_differential_pairs,
+)
+from .failure_analysis import (
+    BlockingElement,
+    CongestionMap,
+    FailureAnalysis,
+    FailureCause,
+    PathAttempt,
+    RootCauseAnalyzer,
 )
 from .grid import RoutingGrid
 from .heuristics import (
@@ -111,6 +111,7 @@ from .rules import (
     ZoneRules,
     create_net_class_map,
 )
+from .sparse import SparseRouter, SparseRoutingGraph, Waypoint
 from .zones import (
     ConnectionType,
     FilledZone,
@@ -147,6 +148,10 @@ __all__ = [
     "group_differential_pairs",
     # Grid
     "RoutingGrid",
+    # Sparse routing (performance optimizations)
+    "SparseRouter",
+    "SparseRoutingGraph",
+    "Waypoint",
     # Pathfinding
     "Router",
     "AStarNode",
