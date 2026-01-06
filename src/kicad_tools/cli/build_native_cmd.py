@@ -244,9 +244,15 @@ def build_native(
         print(f"  nanobind cmake: {nanobind_cmake}")
 
     # Step 3: Find source directory
+    # Try to find root CMakeLists.txt first (development checkout)
     project_root = _get_project_root()
-    if not project_root:
-        # Fallback: try to use package's cpp directory directly
+    source_dir: Path
+
+    if project_root:
+        # Development checkout - use root CMakeLists.txt
+        source_dir = project_root
+    else:
+        # Pip-installed package - use cpp directory's CMakeLists.txt directly
         cpp_dir = _get_cpp_source_dir()
         if not cpp_dir:
             result.error_message = (
@@ -254,17 +260,15 @@ def build_native(
                 "Try reinstalling from source: pip install -e .[native]"
             )
             return result
-        project_root = (
-            cpp_dir.parent.parent.parent.parent
-        )  # router/cpp -> router -> kicad_tools -> src -> root
+        source_dir = cpp_dir
 
-    cmake_file = project_root / "CMakeLists.txt"
+    cmake_file = source_dir / "CMakeLists.txt"
     if not cmake_file.exists():
-        result.error_message = f"CMakeLists.txt not found in {project_root}"
+        result.error_message = f"CMakeLists.txt not found in {source_dir}"
         return result
-    result.steps_completed.append(f"Source found: {project_root}")
+    result.steps_completed.append(f"Source found: {source_dir}")
     if verbose:
-        print(f"  Source directory: {project_root}")
+        print(f"  Source directory: {source_dir}")
 
     # Step 4: Configure with cmake
     if verbose:
@@ -277,7 +281,7 @@ def build_native(
             "-B",
             str(build_dir),
             "-S",
-            str(project_root),
+            str(source_dir),
             f"-DPython_EXECUTABLE={sys.executable}",
             f"-Dnanobind_DIR={nanobind_cmake}",
             "-DCMAKE_BUILD_TYPE=Release",
@@ -288,7 +292,7 @@ def build_native(
             capture_output=not verbose,
             text=True,
             timeout=120,
-            cwd=str(project_root),
+            cwd=str(source_dir),
         )
         if configure_result.returncode != 0:
             error = configure_result.stderr if not verbose else "See output above"
