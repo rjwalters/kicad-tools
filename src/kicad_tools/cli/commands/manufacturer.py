@@ -23,18 +23,16 @@ def run_mfr_command(args) -> int:
 
     elif args.mfr_command == "rules":
         sub_argv = ["rules", args.manufacturer]
-        if args.layers != 4:
-            sub_argv.extend(["--layers", str(args.layers)])
-        if args.copper != 1.0:
-            sub_argv.extend(["--copper", str(args.copper)])
+        # Always pass layers and copper to ensure inner command uses correct values
+        sub_argv.extend(["--layers", str(args.layers)])
+        sub_argv.extend(["--copper", str(args.copper)])
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "compare":
         sub_argv = ["compare"]
-        if args.layers != 4:
-            sub_argv.extend(["--layers", str(args.layers)])
-        if args.copper != 1.0:
-            sub_argv.extend(["--copper", str(args.copper)])
+        # Always pass layers and copper to ensure inner command uses correct values
+        sub_argv.extend(["--layers", str(args.layers)])
+        sub_argv.extend(["--copper", str(args.copper)])
         return mfr_main(sub_argv) or 0
 
     elif args.mfr_command == "apply-rules":
