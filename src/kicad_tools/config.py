@@ -31,6 +31,7 @@ USER_CONFIG_PATH = Path.home() / ".config" / "kicad-tools" / "config.toml"
 # All known config keys for validation
 KNOWN_KEYS = {
     "defaults": {"format", "manufacturer", "verbose", "quiet"},
+    "display": {"units", "precision_mm", "precision_mils"},
     "drc": {"strict", "layers"},
     "export": {"output_dir", "include_dnp"},
     "route": {
@@ -58,6 +59,18 @@ class DefaultsConfig:
     manufacturer: str | None = None
     verbose: bool = False
     quiet: bool = False
+
+
+@dataclass
+class DisplayConfig:
+    """Display configuration for CLI output."""
+
+    # Unit system for output: "mm" or "mils"
+    units: str = "mm"
+    # Decimal precision for mm values
+    precision_mm: int = 3
+    # Decimal precision for mils values
+    precision_mils: int = 1
 
 
 @dataclass
@@ -110,6 +123,7 @@ class Config:
     """Merged configuration from all sources."""
 
     defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
+    display: DisplayConfig = field(default_factory=DisplayConfig)
     drc: DrcConfig = field(default_factory=DrcConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     route: RouteConfig = field(default_factory=RouteConfig)
@@ -263,6 +277,21 @@ def _merge_config(
             config.defaults.quiet = defaults_data["quiet"]
             sources["defaults.quiet"] = source
 
+    # Merge display section
+    if "display" in data:
+        display_data = data["display"]
+        _warn_unknown_keys(display_data, KNOWN_KEYS["display"], "display", source)
+
+        if "units" in display_data:
+            config.display.units = display_data["units"]
+            sources["display.units"] = source
+        if "precision_mm" in display_data:
+            config.display.precision_mm = display_data["precision_mm"]
+            sources["display.precision_mm"] = source
+        if "precision_mils" in display_data:
+            config.display.precision_mils = display_data["precision_mils"]
+            sources["display.precision_mils"] = source
+
     # Merge drc section
     if "drc" in data:
         drc_data = data["drc"]
@@ -370,6 +399,16 @@ def generate_template() -> str:
 
 # Enable quiet mode by default
 # quiet = false
+
+[display]
+# Unit system for output: "mm" or "mils"
+# units = "mm"
+
+# Decimal precision for mm values (default: 3)
+# precision_mm = 3
+
+# Decimal precision for mils values (default: 1)
+# precision_mils = 1
 
 [drc]
 # Use strict DRC checking

@@ -36,7 +36,9 @@ See `kicad-tools --help` for complete documentation.
 
 import sys
 
+from kicad_tools.config import Config
 from kicad_tools.exceptions import KiCadToolsError
+from kicad_tools.units import get_unit_formatter, set_current_formatter
 
 from .commands import (
     run_analyze_command,
@@ -112,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Get global verbose flag (use getattr for backwards compatibility)
     verbose = getattr(args, "global_verbose", False)
+
+    # Initialize unit formatter with CLI > env > config precedence
+    cli_units = getattr(args, "global_units", None)
+    config = Config.load()
+    formatter = get_unit_formatter(cli_units=cli_units, config=config)
+    set_current_formatter(formatter)
 
     try:
         return _dispatch_command(args)

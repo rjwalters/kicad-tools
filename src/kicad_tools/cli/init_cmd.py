@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.table import Table
 
 from kicad_tools.manufacturers import DesignRules, get_manufacturer_ids, get_profile
+from kicad_tools.units import get_current_formatter
 
 console = Console()
 err_console = Console(stderr=True)
@@ -111,8 +112,10 @@ def print_init_summary(
         created_project: Whether a new project was created
         created_dru: Whether DRU file was created/updated
     """
+    fmt = get_current_formatter()
     console.print(f"\n[bold green]✓[/bold green] Initialized project for {profile.name}")
-    console.print(f"  Configuration: {layers}-layer, {copper}oz copper\n")
+    console.print(f"  Configuration: {layers}-layer, {copper}oz copper")
+    console.print(f"  Units: {fmt.unit_name}\n")
 
     # Design rules table
     table = Table(title="Design Rules Applied", show_header=True, header_style="bold cyan")
@@ -122,33 +125,33 @@ def print_init_summary(
 
     table.add_row(
         "Via drill",
-        f"{rules.min_via_drill_mm:.2f} mm",
-        "0.20 mm" if created_project else "-",
+        fmt.format(rules.min_via_drill_mm),
+        fmt.format(0.20) if created_project else "-",
     )
     table.add_row(
         "Via diameter",
-        f"{rules.min_via_diameter_mm:.2f} mm",
-        "0.45 mm" if created_project else "-",
+        fmt.format(rules.min_via_diameter_mm),
+        fmt.format(0.45) if created_project else "-",
     )
     table.add_row(
         "Min clearance",
-        f"{rules.min_clearance_mm:.3f} mm ({rules.min_clearance_mil:.1f} mil)",
-        "0.20 mm" if created_project else "-",
+        fmt.format(rules.min_clearance_mm),
+        fmt.format(0.20) if created_project else "-",
     )
     table.add_row(
         "Min trace width",
-        f"{rules.min_trace_width_mm:.3f} mm ({rules.min_trace_width_mil:.1f} mil)",
-        "0.25 mm" if created_project else "-",
+        fmt.format(rules.min_trace_width_mm),
+        fmt.format(0.25) if created_project else "-",
     )
     table.add_row(
         "Annular ring",
-        f"{rules.min_annular_ring_mm:.2f} mm",
-        "0.13 mm" if created_project else "-",
+        fmt.format(rules.min_annular_ring_mm),
+        fmt.format(0.13) if created_project else "-",
     )
     table.add_row(
         "Copper to edge",
-        f"{rules.min_copper_to_edge_mm:.2f} mm",
-        "0.30 mm" if created_project else "-",
+        fmt.format(rules.min_copper_to_edge_mm),
+        fmt.format(0.30) if created_project else "-",
     )
 
     console.print(table)

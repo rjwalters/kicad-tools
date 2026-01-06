@@ -117,6 +117,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Suppress progress output (for scripting)",
         dest="global_quiet",
     )
+    parser.add_argument(
+        "--units",
+        choices=["mm", "mils"],
+        default=None,
+        help="Unit system for output (mm or mils). Overrides config and env var.",
+        dest="global_units",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
