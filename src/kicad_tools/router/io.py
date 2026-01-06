@@ -32,6 +32,7 @@ DRC Compliance (v0.5.1):
 
 from __future__ import annotations
 
+import contextlib
 import math
 import re
 import warnings
@@ -902,6 +903,22 @@ def load_pcb_for_routing(
             drill_match = re.search(r"\(drill\s+([\d.]+)", pad_block)
             drill_size = float(drill_match.group(1)) if drill_match else 0.0
 
+            # Extract copper layer from pad layers
+            # KiCad pads have: (layers "F.Cu" "F.Paste" "F.Mask") or (layers "B.Cu" ...)
+            # For thru-hole pads: (layers "*.Cu" "*.Paste" "*.Mask") - means all copper layers
+            # We need to find the copper layer name (*.Cu pattern)
+            pad_layer = Layer.F_CU  # Default to top layer
+            layers_match = re.search(r"\(layers\s+([^)]+)\)", pad_block)
+            if layers_match:
+                layers_str = layers_match.group(1)
+                # Find copper layer names (ending with .Cu)
+                copper_layers = re.findall(r'"([^"]+\.Cu)"', layers_str)
+                if copper_layers:
+                    # Check for wildcard (*.Cu means all copper layers - thru-hole)
+                    if copper_layers[0] != "*.Cu":
+                        with contextlib.suppress(ValueError):
+                            pad_layer = Layer.from_kicad_name(copper_layers[0])
+
             # Override with netlist if provided
             if netlist:
                 pad_key = f"{ref}.{pad_num}"
@@ -936,6 +953,7 @@ def load_pcb_for_routing(
                     "net_name": net_name,
                     "through_hole": pad_type == "thru_hole",
                     "drill": drill_size,
+                    "layer": pad_layer,
                 }
             )
 

@@ -88,6 +88,23 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     # Add pads from serialized data
     for pad_data in config["pads_data"]:
         ref = pad_data["ref"]
+        # Convert layer data to Layer enum
+        layer_data = pad_data["layer"]
+        if isinstance(layer_data, int):
+            # Serialized as Layer enum value (integer)
+            pad_layer = Layer(layer_data)
+        elif isinstance(layer_data, str):
+            # Serialized as KiCad layer name (string)
+            try:
+                pad_layer = Layer.from_kicad_name(layer_data)
+            except ValueError:
+                pad_layer = Layer.F_CU  # Default for unknown layers
+        elif isinstance(layer_data, Layer):
+            # Already a Layer enum
+            pad_layer = layer_data
+        else:
+            pad_layer = Layer.F_CU  # Default fallback
+
         pad_info = {
             "number": pad_data["number"],
             "x": pad_data["x"],
@@ -96,9 +113,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             "height": pad_data["height"],
             "net": pad_data["net"],
             "net_name": pad_data["net_name"],
-            "layer": Layer(pad_data["layer"])
-            if isinstance(pad_data["layer"], str)
-            else pad_data["layer"],
+            "layer": pad_layer,
             "through_hole": pad_data.get("through_hole", False),
             "drill": pad_data.get("drill", 0.0),
         }
