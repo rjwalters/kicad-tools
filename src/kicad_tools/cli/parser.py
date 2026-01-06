@@ -669,7 +669,7 @@ def _add_mfr_parser(subparsers) -> None:
 
     # mfr compare
     mfr_compare = mfr_subparsers.add_parser("compare", help="Compare manufacturers")
-    mfr_compare.add_argument("-l", "--layers", type=int, default=4, help="Layer count")
+    mfr_compare.add_argument("-l", "--layers", type=int, default=2, help="Layer count (default: 2)")
     mfr_compare.add_argument("-c", "--copper", type=float, default=1.0, help="Copper weight (oz)")
 
     # mfr apply-rules
