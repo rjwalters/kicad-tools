@@ -35,8 +35,80 @@ Layer Stack Configuration:
 
 import argparse
 import math
+import signal
 import sys
 from pathlib import Path
+
+# Global state for Ctrl+C handling
+_interrupt_state = {
+    "interrupted": False,
+    "router": None,
+    "output_path": None,
+    "pcb_path": None,
+    "quiet": False,
+}
+
+
+def _handle_interrupt(signum, frame):
+    """Handle Ctrl+C by setting the interrupted flag and saving partial results."""
+    _interrupt_state["interrupted"] = True
+    if not _interrupt_state["quiet"]:
+        print("\n\n⚠ Interrupt received! Saving partial results...")
+    # Save partial results immediately
+    saved = _save_partial_results()
+    # Exit with code 2 to indicate interruption
+    sys.exit(2 if saved else 130)  # 130 = 128 + SIGINT (2)
+
+
+def _save_partial_results() -> bool:
+    """Save partial routing results if interrupted.
+
+    Returns:
+        True if partial results were saved, False otherwise.
+    """
+    router = _interrupt_state["router"]
+    output_path = _interrupt_state["output_path"]
+    pcb_path = _interrupt_state["pcb_path"]
+    quiet = _interrupt_state["quiet"]
+
+    if router is None or output_path is None or pcb_path is None:
+        return False
+
+    if not router.routes:
+        if not quiet:
+            print("  No routes to save.")
+        return False
+
+    try:
+        # Read original PCB content
+        original_content = pcb_path.read_text()
+
+        # Get partial route S-expressions
+        route_sexp = router.to_sexp()
+
+        if route_sexp:
+            # Create partial output filename
+            partial_path = output_path.with_stem(output_path.stem + "_partial")
+
+            # Insert routes before final closing parenthesis
+            output_content = original_content.rstrip().rstrip(")")
+            output_content += f"\n  {route_sexp}\n"
+            output_content += ")\n"
+
+            partial_path.write_text(output_content)
+
+            if not quiet:
+                stats = router.get_statistics()
+                print(f"\n  Partial results saved to: {partial_path}")
+                print(f"    Nets routed: {stats['nets_routed']}")
+                print(f"    Segments: {stats['segments']}")
+                print(f"    Vias: {stats['vias']}")
+            return True
+    except Exception as e:
+        if not quiet:
+            print(f"  Error saving partial results: {e}")
+
+    return False
 
 
 def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> str:
@@ -523,6 +595,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Set up Ctrl+C handling to save partial results
+    _interrupt_state["router"] = router
+    _interrupt_state["output_path"] = output_path
+    _interrupt_state["pcb_path"] = pcb_path
+    _interrupt_state["quiet"] = quiet
+    _interrupt_state["interrupted"] = False
+    signal.signal(signal.SIGINT, _handle_interrupt)
+
     nets_to_route = len([n for n in router.nets if n > 0])
 
     if not quiet:
@@ -680,9 +760,22 @@ def main(argv: list[str] | None = None) -> int:
                         num_trials=args.mc_trials,
                         verbose=args.verbose and not quiet,
                     )
+    except KeyboardInterrupt:
+        # Handle any KeyboardInterrupt that wasn't caught by signal handler
+        _interrupt_state["interrupted"] = True
+        if not quiet:
+            print("\n\n⚠ Routing interrupted!")
     except Exception as e:
         print(f"Error during routing: {e}", file=sys.stderr)
+        # Still try to save partial results on error
+        if router.routes:
+            _save_partial_results()
         return 1
+
+    # Check if interrupted and save partial results
+    if _interrupt_state["interrupted"]:
+        _save_partial_results()
+        return 2  # Exit code 2 indicates interruption with partial results saved
 
     # Get statistics
     stats = router.get_statistics()

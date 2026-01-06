@@ -398,9 +398,12 @@ class Autorouter:
                 timed_out = True
                 break
 
-            # Progress output every 5 nets or for the last net
-            if i % 5 == 0 or i == total_nets - 1:
-                print(f"  Routing net {i + 1}/{total_nets}... ({elapsed_str()})")
+            # Progress output for every net with percentage
+            net_name = self.net_names.get(net, f"Net {net}")
+            pct = (i / total_nets * 100) if total_nets > 0 else 0
+            print(
+                f"  [{pct:5.1f}%] Routing net {i + 1}/{total_nets}: {net_name}... ({elapsed_str()})"
+            )
 
             routes = self._route_net_negotiated(net, present_factor)
             if routes:
