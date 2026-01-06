@@ -424,7 +424,8 @@ class RoutingGrid:
         Thread-safe when thread_safe=True.
         """
         with self._acquire_lock():
-            clearance = obs.clearance + self.rules.trace_clearance
+            # Include trace half-width so trace edges maintain clearance from obstacle
+            clearance = obs.clearance + self.rules.trace_clearance + self.rules.trace_width / 2
 
             # Calculate affected grid region
             x1 = obs.x - obs.width / 2 - clearance
@@ -452,10 +453,13 @@ class RoutingGrid:
 
     def _add_pad_unsafe(self, pad: Pad) -> None:
         """Internal pad addition without locking."""
-        # Clearance model: only trace clearance from pad edge
-        # The trace itself doesn't need additional margin since we're measuring
-        # from pad edge to trace edge, not center to center
-        clearance = self.rules.trace_clearance
+        # Clearance model: trace clearance + trace half-width from pad edge.
+        # The pathfinder checks if the trace CENTER can be placed at a cell,
+        # so we must block cells where the trace edge would violate clearance.
+        # If we only blocked trace_clearance, a trace center placed at the boundary
+        # would have its edge at (trace_clearance - trace_width/2) from the pad,
+        # violating the required clearance.
+        clearance = self.rules.trace_clearance + self.rules.trace_width / 2
 
         if pad.through_hole:
             if pad.width > 0 and pad.height > 0:
@@ -636,7 +640,11 @@ class RoutingGrid:
     def _mark_via(self, via: Via) -> None:
         """Mark cells around a via as blocked on ALL layers (through-hole via)."""
         gx, gy = self.world_to_grid(via.x, via.y)
-        radius = int((via.diameter / 2 + self.rules.via_clearance) / self.resolution)
+        # Include trace half-width so trace edges maintain via_clearance from via edge
+        radius = int(
+            (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+            / self.resolution
+        )
 
         for layer_idx in range(self.num_layers):
             for dy in range(-radius, radius + 1):
@@ -714,7 +722,11 @@ class RoutingGrid:
     def _unmark_via(self, via: Via) -> None:
         """Unmark cells around a via on ALL layers."""
         gx, gy = self.world_to_grid(via.x, via.y)
-        radius = int((via.diameter / 2 + self.rules.via_clearance) / self.resolution)
+        # Include trace half-width to match _mark_via calculation
+        radius = int(
+            (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+            / self.resolution
+        )
 
         for layer_idx in range(self.num_layers):
             for dy in range(-radius, radius + 1):
@@ -1217,13 +1229,10 @@ class RoutingGrid:
 
     def _add_pad_vectorized_unsafe(self, pad: Pad) -> None:
         """Internal vectorized pad addition without locking."""
-        # Calculate effective clearance
-        if self.expanded_obstacles:
-            # Full clearance + trace margin baked into obstacle
-            clearance = self.rules.trace_clearance + self.rules.trace_width / 2
-        else:
-            # Standard clearance only
-            clearance = self.rules.trace_clearance
+        # Clearance model: trace clearance + trace half-width from pad edge.
+        # The pathfinder checks if the trace CENTER can be placed at a cell,
+        # so we must block cells where the trace edge would violate clearance.
+        clearance = self.rules.trace_clearance + self.rules.trace_width / 2
 
         # Determine effective dimensions
         if pad.through_hole:
