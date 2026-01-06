@@ -43,6 +43,30 @@ class Layer(Enum):
         """Check if this is an outer (component) layer."""
         return self in (Layer.F_CU, Layer.B_CU)
 
+    @classmethod
+    def from_kicad_name(cls, name: str) -> "Layer":
+        """Convert a KiCad layer name to a Layer enum.
+
+        Args:
+            name: KiCad layer name like "F.Cu", "B.Cu", "In1.Cu", etc.
+
+        Returns:
+            The corresponding Layer enum member.
+
+        Raises:
+            ValueError: If the name doesn't match any known copper layer.
+
+        Example:
+            >>> Layer.from_kicad_name("B.Cu")
+            <Layer.B_CU: 5>
+            >>> Layer.from_kicad_name("F.Cu")
+            <Layer.F_CU: 0>
+        """
+        for layer in cls:
+            if layer.kicad_name == name:
+                return layer
+        raise ValueError(f"Unknown KiCad copper layer name: {name}")
+
 
 class LayerType(Enum):
     """Layer function type."""
@@ -66,8 +90,18 @@ class LayerDefinition:
 
     @property
     def layer_enum(self) -> Layer:
-        """Get corresponding Layer enum value."""
-        return Layer(self.index)
+        """Get corresponding Layer enum value.
+
+        Maps the layer name to the correct Layer enum member.
+        This is important because the LayerDefinition index represents
+        the physical stack position (0-based), which differs from the
+        Layer enum values (e.g., B_CU=5, not the stack index).
+        """
+        for layer in Layer:
+            if layer.kicad_name == self.name:
+                return layer
+        # Fallback to F_CU if no match (shouldn't happen for valid definitions)
+        return Layer.F_CU
 
     @property
     def is_routable(self) -> bool:

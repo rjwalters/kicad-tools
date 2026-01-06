@@ -67,11 +67,10 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
         net_name = net_names.get(net, f"Net{net}")
 
         # Convert layer name to Layer enum
-        layer = Layer.F_CU  # Default
-        for l in Layer:
-            if l.kicad_name == layer_name:
-                layer = l
-                break
+        try:
+            layer = Layer.from_kicad_name(layer_name)
+        except ValueError:
+            layer = Layer.F_CU  # Default for unknown layers
 
         seg = Segment(
             x1=x1,
