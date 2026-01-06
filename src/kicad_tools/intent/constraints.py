@@ -144,8 +144,7 @@ def create_intent_declaration(
         errors = validate_intent(interface_type, nets, registry)
         if errors:
             raise ValueError(
-                f"Invalid intent declaration for '{interface_type}': "
-                + "; ".join(errors)
+                f"Invalid intent declaration for '{interface_type}': " + "; ".join(errors)
             )
 
     constraints = derive_constraints(interface_type, nets, params, registry)

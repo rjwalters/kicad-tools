@@ -1108,6 +1108,7 @@ class QueryMoveResult:
         drc_preview: DRC delta preview (what would change)
         net_drc_change: Net change in DRC violations (-1 = improves DRC)
         recommendation: AI-friendly recommendation about the move
+        predictions: Predictive warnings about potential future problems
     """
 
     success: bool
@@ -1123,6 +1124,7 @@ class QueryMoveResult:
     drc_preview: DRCDeltaInfo | None = None
     net_drc_change: int = 0
     recommendation: str = ""
+    predictions: list[PredictiveWarningInfo] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -1139,6 +1141,7 @@ class QueryMoveResult:
             "drc_preview": self.drc_preview.to_dict() if self.drc_preview else None,
             "net_drc_change": self.net_drc_change,
             "recommendation": self.recommendation,
+            "predictions": [p.to_dict() for p in self.predictions],
         }
         if self.intent_status is not None:
             result["intent_status"] = self.intent_status.to_dict()
@@ -1159,6 +1162,7 @@ class ApplyMoveResult:
         error_message: Error message if success is False
         intent_status: Intent-aware status (if intents are declared)
         drc: DRC delta showing new/resolved violations
+        predictions: Predictive warnings about potential future problems
     """
 
     success: bool
@@ -1170,6 +1174,7 @@ class ApplyMoveResult:
     error_message: str | None = None
     intent_status: IntentStatus | None = None
     drc: DRCDeltaInfo | None = None
+    predictions: list[PredictiveWarningInfo] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -1182,6 +1187,7 @@ class ApplyMoveResult:
             "pending_moves": self.pending_moves,
             "error_message": self.error_message,
             "drc": self.drc.to_dict() if self.drc else None,
+            "predictions": [p.to_dict() for p in self.predictions],
         }
         if self.intent_status is not None:
             result["intent_status"] = self.intent_status.to_dict()
@@ -1778,3 +1784,50 @@ class IntentStatus:
             "warnings": self.warnings,
             "affected_intents": self.affected_intents,
         }
+
+
+# =============================================================================
+# Predictive Warning Types
+# =============================================================================
+
+
+@dataclass
+class PredictiveWarningInfo:
+    """A predictive warning about potential future problems.
+
+    Predictive warnings anticipate issues that may arise from a component
+    move, such as routing difficulties, congestion, or intent risks.
+
+    Attributes:
+        type: Warning type:
+            - "routing_difficulty": Move makes routing harder
+            - "congestion": Area becoming too dense
+            - "thermal": Thermal management concerns
+            - "intent_risk": May violate declared design intents
+        message: Human-readable description of the warning
+        confidence: Confidence level from 0.0 to 1.0
+        suggestion: Optional suggestion to avoid the problem
+        affected_nets: Net names affected by this warning
+        location: (x, y) position where issue may occur
+    """
+
+    type: str
+    message: str
+    confidence: float
+    suggestion: str | None = None
+    affected_nets: list[str] = field(default_factory=list)
+    location: tuple[float, float] | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        result: dict = {
+            "type": self.type,
+            "message": self.message,
+            "confidence": round(self.confidence, 2),
+            "affected_nets": self.affected_nets,
+        }
+        if self.suggestion:
+            result["suggestion"] = self.suggestion
+        if self.location:
+            result["location"] = {"x": round(self.location[0], 3), "y": round(self.location[1], 3)}
+        return result

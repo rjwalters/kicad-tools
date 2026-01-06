@@ -6,7 +6,6 @@ Demonstrates how kicad-tools v0.7.0 provides compiler-style error reporting
 with source positions, code snippets, and actionable fix suggestions.
 """
 
-
 from kicad_tools.exceptions import (
     ErrorAccumulator,
     KiCadDiagnostic,

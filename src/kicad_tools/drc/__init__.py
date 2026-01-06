@@ -31,6 +31,7 @@ from .incremental import (
 )
 from .incremental import Rectangle as DRCRectangle
 from .incremental import Violation as IncrementalViolation
+from .predictive import PredictiveAnalyzer, PredictiveWarning
 from .report import (
     DRCReport,
     parse_json_report,
@@ -73,4 +74,7 @@ __all__ = [
     "SpatialIndex",
     "DRCRectangle",
     "IncrementalViolation",
+    # Predictive analysis
+    "PredictiveAnalyzer",
+    "PredictiveWarning",
 ]

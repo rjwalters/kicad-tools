@@ -255,9 +255,7 @@ class AssemblyValidationResult:
         )
 
         if summary["out_of_stock"] > 0:
-            lines.append(
-                f"  Out of Stock: {summary['out_of_stock']} parts (requires consignment)"
-            )
+            lines.append(f"  Out of Stock: {summary['out_of_stock']} parts (requires consignment)")
         if summary["missing_lcsc"] > 0:
             lines.append(f"  Missing LCSC: {summary['missing_lcsc']} parts (needs part number)")
         if summary["not_found"] > 0:
