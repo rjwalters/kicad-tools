@@ -832,9 +832,11 @@ wheels = [
 
 [[package]]
 name = "kicad-tools"
-version = "0.8.0"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyyaml" },
     { name = "rich" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
@@ -844,6 +846,8 @@ dependencies = [
 all = [
     { name = "fastmcp" },
     { name = "markitdown" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pdfplumber" },
     { name = "pydantic" },
     { name = "pymupdf" },
@@ -862,6 +866,8 @@ datasheet = [
 dev = [
     { name = "fastmcp" },
     { name = "mypy" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
@@ -891,6 +897,9 @@ requires-dist = [
     { name = "markitdown", marker = "extra == 'all'", specifier = ">=0.1.0" },
     { name = "markitdown", marker = "extra == 'datasheet'", specifier = ">=0.1.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "numpy", marker = "extra == 'all'", specifier = ">=1.24" },
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.24" },
     { name = "pdfplumber", marker = "extra == 'all'", specifier = ">=0.10.0" },
     { name = "pdfplumber", marker = "extra == 'datasheet'", specifier = ">=0.10.0" },
     { name = "pydantic", marker = "extra == 'all'", specifier = ">=2.0" },

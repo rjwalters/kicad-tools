@@ -3,9 +3,16 @@ Routing grid for PCB autorouting.
 
 This module provides:
 - RoutingGrid: 3D grid for routing with obstacle tracking and congestion awareness
+
+Performance optimizations:
+- NumPy arrays for cell attributes (blocked, net, usage_count, etc.)
+- Vectorized operations for bulk cell updates
+- Pre-computed clearance masks for obstacle marking
 """
 
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import Zone
@@ -13,12 +20,158 @@ if TYPE_CHECKING:
 from kicad_tools.exceptions import RoutingError
 
 from .layers import Layer, LayerStack
-from .primitives import GridCell, Obstacle, Pad, Route, Segment, Via
+from .primitives import Obstacle, Pad, Route, Segment, Via
 from .rules import DesignRules
 
 
+class _CellView:
+    """Lightweight view into grid arrays, providing GridCell-like interface."""
+
+    __slots__ = ("_grid", "_x", "_y", "_layer")
+
+    def __init__(self, grid: "RoutingGrid", x: int, y: int, layer: int):
+        self._grid = grid
+        self._x = x
+        self._y = y
+        self._layer = layer
+
+    @property
+    def x(self) -> int:
+        return self._x
+
+    @property
+    def y(self) -> int:
+        return self._y
+
+    @property
+    def layer(self) -> int:
+        return self._layer
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self._grid._blocked[self._layer, self._y, self._x])
+
+    @blocked.setter
+    def blocked(self, value: bool) -> None:
+        self._grid._blocked[self._layer, self._y, self._x] = value
+
+    @property
+    def net(self) -> int:
+        return int(self._grid._net[self._layer, self._y, self._x])
+
+    @net.setter
+    def net(self, value: int) -> None:
+        self._grid._net[self._layer, self._y, self._x] = value
+
+    @property
+    def cost(self) -> float:
+        return 1.0  # Default cost, not stored in arrays
+
+    @property
+    def usage_count(self) -> int:
+        return int(self._grid._usage_count[self._layer, self._y, self._x])
+
+    @usage_count.setter
+    def usage_count(self, value: int) -> None:
+        self._grid._usage_count[self._layer, self._y, self._x] = value
+
+    @property
+    def history_cost(self) -> float:
+        return float(self._grid._history_cost[self._layer, self._y, self._x])
+
+    @history_cost.setter
+    def history_cost(self, value: float) -> None:
+        self._grid._history_cost[self._layer, self._y, self._x] = value
+
+    @property
+    def is_obstacle(self) -> bool:
+        return bool(self._grid._is_obstacle[self._layer, self._y, self._x])
+
+    @is_obstacle.setter
+    def is_obstacle(self, value: bool) -> None:
+        self._grid._is_obstacle[self._layer, self._y, self._x] = value
+
+    @property
+    def is_zone(self) -> bool:
+        return bool(self._grid._is_zone[self._layer, self._y, self._x])
+
+    @is_zone.setter
+    def is_zone(self, value: bool) -> None:
+        self._grid._is_zone[self._layer, self._y, self._x] = value
+
+    @property
+    def zone_id(self) -> str | None:
+        return self._grid._zone_ids.get((self._layer, self._y, self._x))
+
+    @zone_id.setter
+    def zone_id(self, value: str | None) -> None:
+        key = (self._layer, self._y, self._x)
+        if value is None:
+            self._grid._zone_ids.pop(key, None)
+        else:
+            self._grid._zone_ids[key] = value
+
+    @property
+    def pad_blocked(self) -> bool:
+        return bool(self._grid._pad_blocked[self._layer, self._y, self._x])
+
+    @pad_blocked.setter
+    def pad_blocked(self, value: bool) -> None:
+        self._grid._pad_blocked[self._layer, self._y, self._x] = value
+
+    @property
+    def original_net(self) -> int:
+        return int(self._grid._original_net[self._layer, self._y, self._x])
+
+    @original_net.setter
+    def original_net(self, value: int) -> None:
+        self._grid._original_net[self._layer, self._y, self._x] = value
+
+
+class _LayerView:
+    """View into a single layer of the grid."""
+
+    __slots__ = ("_grid", "_layer")
+
+    def __init__(self, grid: "RoutingGrid", layer: int):
+        self._grid = grid
+        self._layer = layer
+
+    def __getitem__(self, y: int) -> "_RowView":
+        return _RowView(self._grid, self._layer, y)
+
+
+class _RowView:
+    """View into a single row of the grid."""
+
+    __slots__ = ("_grid", "_layer", "_y")
+
+    def __init__(self, grid: "RoutingGrid", layer: int, y: int):
+        self._grid = grid
+        self._layer = layer
+        self._y = y
+
+    def __getitem__(self, x: int) -> _CellView:
+        return _CellView(self._grid, x, self._y, self._layer)
+
+
+class _GridView:
+    """Provides backward-compatible grid[layer][y][x] access to NumPy arrays."""
+
+    __slots__ = ("_grid",)
+
+    def __init__(self, grid: "RoutingGrid"):
+        self._grid = grid
+
+    def __getitem__(self, layer: int) -> _LayerView:
+        return _LayerView(self._grid, layer)
+
+
 class RoutingGrid:
-    """3D grid for routing with obstacle tracking and congestion awareness."""
+    """3D grid for routing with obstacle tracking and congestion awareness.
+
+    Uses NumPy arrays for high-performance cell access and vectorized operations.
+    """
 
     def __init__(
         self,
@@ -54,28 +207,54 @@ class RoutingGrid:
         self.cols = int(width / self.resolution) + 1
         self.rows = int(height / self.resolution) + 1
 
-        # 3D grid: [layer][y][x]
-        self.grid: list[list[list[GridCell]]] = [
-            [[GridCell(x, y, layer) for x in range(self.cols)] for y in range(self.rows)]
-            for layer in range(self.num_layers)
-        ]
+        # NumPy arrays for cell attributes: [layer, y, x]
+        grid_shape = (self.num_layers, self.rows, self.cols)
+        self._blocked = np.zeros(grid_shape, dtype=np.bool_)
+        self._net = np.zeros(grid_shape, dtype=np.int32)
+        self._usage_count = np.zeros(grid_shape, dtype=np.int16)
+        self._history_cost = np.zeros(grid_shape, dtype=np.float32)
+        self._is_obstacle = np.zeros(grid_shape, dtype=np.bool_)
+        self._is_zone = np.zeros(grid_shape, dtype=np.bool_)
+        self._pad_blocked = np.zeros(grid_shape, dtype=np.bool_)
+        self._original_net = np.zeros(grid_shape, dtype=np.int32)
+
+        # Sparse storage for zone IDs (most cells don't have zones)
+        self._zone_ids: dict[tuple[int, int, int], str] = {}
+
+        # Backward-compatible grid accessor
+        self.grid = _GridView(self)
 
         # Congestion tracking: coarser grid for density
         self.congestion_size = rules.congestion_grid_size
         self.congestion_cols = max(1, self.cols // self.congestion_size)
         self.congestion_rows = max(1, self.rows // self.congestion_size)
 
-        # Congestion counts: [layer][cy][cx] = number of blocked cells
-        self.congestion: list[list[list[int]]] = [
-            [[0 for _ in range(self.congestion_cols)] for _ in range(self.congestion_rows)]
-            for _ in range(self.num_layers)
-        ]
+        # Congestion counts using NumPy: [layer, cy, cx]
+        self._congestion = np.zeros(
+            (self.num_layers, self.congestion_rows, self.congestion_cols), dtype=np.int32
+        )
 
         # Track placed routes for net assignment
         self.routes: list[Route] = []
 
         # Alias for backward compatibility
         self.layers = self.num_layers
+
+        # Pre-computed clearance masks for common radii
+        self._clearance_masks: dict[int, np.ndarray] = {}
+
+    @property
+    def congestion(self) -> np.ndarray:
+        """Return congestion array (backward compatible)."""
+        return self._congestion
+
+    def _get_clearance_mask(self, radius: int) -> np.ndarray:
+        """Get or create a circular clearance mask for given radius."""
+        if radius not in self._clearance_masks:
+            y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
+            mask = x * x + y * y <= radius * radius
+            self._clearance_masks[radius] = mask
+        return self._clearance_masks[radius]
 
     def layer_to_index(self, layer_enum_value: int) -> int:
         """Map Layer enum value to grid index."""
@@ -110,40 +289,26 @@ class RoutingGrid:
         """Update congestion count for the region containing (gx, gy)."""
         cx = min(gx // self.congestion_size, self.congestion_cols - 1)
         cy = min(gy // self.congestion_size, self.congestion_rows - 1)
-        self.congestion[layer][cy][cx] += delta
+        self._congestion[layer, cy, cx] += delta
 
     def get_congestion(self, gx: int, gy: int, layer: int) -> float:
         """Get congestion level [0, 1] for a grid cell's region."""
         cx = min(gx // self.congestion_size, self.congestion_cols - 1)
         cy = min(gy // self.congestion_size, self.congestion_rows - 1)
-        count = self.congestion[layer][cy][cx]
+        count = self._congestion[layer, cy, cx]
         max_cells = self.congestion_size * self.congestion_size
         return min(1.0, count / max_cells)
 
     def get_congestion_map(self) -> dict[str, float]:
-        """Get congestion statistics for all regions."""
-        stats: dict[str, float] = {
-            "max_congestion": 0.0,
-            "avg_congestion": 0.0,
-            "congested_regions": 0,
-        }
-
-        total = 0.0
-        count = 0
+        """Get congestion statistics for all regions using vectorized operations."""
         max_cells = self.congestion_size * self.congestion_size
+        density = self._congestion / max_cells
 
-        for layer in range(self.layers):
-            for cy in range(self.congestion_rows):
-                for cx in range(self.congestion_cols):
-                    density = self.congestion[layer][cy][cx] / max_cells
-                    total += density
-                    count += 1
-                    stats["max_congestion"] = max(stats["max_congestion"], density)
-                    if density > self.rules.congestion_threshold:
-                        stats["congested_regions"] += 1
-
-        stats["avg_congestion"] = total / count if count > 0 else 0.0
-        return stats
+        return {
+            "max_congestion": float(np.max(density)),
+            "avg_congestion": float(np.mean(density)),
+            "congested_regions": int(np.sum(density > self.rules.congestion_threshold)),
+        }
 
     def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
         """Convert world coordinates to grid indices.
@@ -456,10 +621,7 @@ class RoutingGrid:
 
     def reset_route_usage(self) -> None:
         """Reset all usage counts (start of new negotiation iteration)."""
-        for layer_idx in range(self.layers):
-            for gy in range(self.rows):
-                for gx in range(self.cols):
-                    self.grid[layer_idx][gy][gx].usage_count = 0
+        self._usage_count.fill(0)
 
     def mark_route_usage(
         self, route: Route, net_cells: dict[int, set] | None = None
@@ -549,23 +711,23 @@ class RoutingGrid:
 
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts)."""
+        # Find all overused cells using NumPy
+        overused_mask = self._usage_count > 1
+        layer_indices, y_indices, x_indices = np.where(overused_mask)
+
+        # Build result list with usage counts
         overused = []
-        for layer_idx in range(self.layers):
-            for gy in range(self.rows):
-                for gx in range(self.cols):
-                    cell = self.grid[layer_idx][gy][gx]
-                    if cell.usage_count > 1:
-                        overused.append((gx, gy, layer_idx, cell.usage_count))
+        for layer_idx, gy, gx in zip(layer_indices, y_indices, x_indices, strict=True):
+            usage = int(self._usage_count[layer_idx, gy, gx])
+            overused.append((int(gx), int(gy), int(layer_idx), usage))
         return overused
 
     def update_history_costs(self, history_increment: float = 1.0) -> None:
         """Increase history cost for overused cells (PathFinder-style)."""
-        for layer_idx in range(self.layers):
-            for gy in range(self.rows):
-                for gx in range(self.cols):
-                    cell = self.grid[layer_idx][gy][gx]
-                    if cell.usage_count > 1:
-                        cell.history_cost += history_increment * (cell.usage_count - 1)
+        # Vectorized update: add increment * (usage_count - 1) where usage_count > 1
+        overused_mask = self._usage_count > 1
+        increment = history_increment * (self._usage_count.astype(np.float32) - 1)
+        self._history_cost += np.where(overused_mask, increment, 0)
 
     def get_negotiated_cost(
         self, gx: int, gy: int, layer: int, present_cost_factor: float = 1.0
@@ -586,14 +748,9 @@ class RoutingGrid:
 
     def get_total_overflow(self) -> int:
         """Get total overflow (sum of usage_count - 1 for overused cells)."""
-        overflow = 0
-        for layer_idx in range(self.layers):
-            for gy in range(self.rows):
-                for gx in range(self.cols):
-                    usage = self.grid[layer_idx][gy][gx].usage_count
-                    if usage > 1:
-                        overflow += usage - 1
-        return overflow
+        # Vectorized calculation: sum of (usage - 1) where usage > 1
+        overused = self._usage_count > 1
+        return int(np.sum(np.where(overused, self._usage_count - 1, 0)))
 
     # =========================================================================
     # ZONE (COPPER POUR) SUPPORT
@@ -628,18 +785,26 @@ class RoutingGrid:
         Args:
             layer_index: If specified, only clear this layer. Otherwise clear all.
         """
-        layers_to_clear = [layer_index] if layer_index is not None else range(self.num_layers)
+        if layer_index is not None:
+            layers_to_clear = [layer_index]
+        else:
+            layers_to_clear = list(range(self.num_layers))
 
         for layer_idx in layers_to_clear:
-            for gy in range(self.rows):
-                for gx in range(self.cols):
-                    cell = self.grid[layer_idx][gy][gx]
-                    if cell.is_zone:
-                        cell.is_zone = False
-                        cell.zone_id = None
-                        # Only clear net if it was set by zone (not by a pad)
-                        if not cell.is_obstacle and not cell.blocked:
-                            cell.net = 0
+            # Find zone cells that should have net cleared
+            zone_mask = self._is_zone[layer_idx]
+            clear_net_mask = zone_mask & ~self._is_obstacle[layer_idx] & ~self._blocked[layer_idx]
+
+            # Clear nets where applicable
+            self._net[layer_idx] = np.where(clear_net_mask, 0, self._net[layer_idx])
+
+            # Clear zone flags
+            self._is_zone[layer_idx] = False
+
+            # Clear zone IDs for this layer from sparse storage
+            keys_to_remove = [k for k in self._zone_ids if k[0] == layer_idx]
+            for key in keys_to_remove:
+                del self._zone_ids[key]
 
     def get_zone_cells(self, layer_index: int, zone_id: str | None = None) -> set[tuple[int, int]]:
         """Get all cells belonging to zones on a layer.
@@ -651,15 +816,17 @@ class RoutingGrid:
         Returns:
             Set of (gx, gy) coordinates
         """
-        cells: set[tuple[int, int]] = set()
-
-        for gy in range(self.rows):
-            for gx in range(self.cols):
-                cell = self.grid[layer_index][gy][gx]
-                if cell.is_zone and (zone_id is None or cell.zone_id == zone_id):
-                    cells.add((gx, gy))
-
-        return cells
+        if zone_id is None:
+            # Get all zone cells using NumPy
+            y_indices, x_indices = np.where(self._is_zone[layer_index])
+            return {(int(x), int(y)) for x, y in zip(x_indices, y_indices, strict=True)}
+        else:
+            # Filter by zone_id using sparse storage
+            return {
+                (k[2], k[1])
+                for k, v in self._zone_ids.items()
+                if k[0] == layer_index and v == zone_id
+            }
 
     def is_zone_cell(self, gx: int, gy: int, layer_index: int) -> bool:
         """Check if a cell is part of a zone.
@@ -673,7 +840,7 @@ class RoutingGrid:
         """
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):
             return False
-        return self.grid[layer_index][gy][gx].is_zone
+        return bool(self._is_zone[layer_index, gy, gx])
 
     # =========================================================================
     # BOARD EDGE CLEARANCE SUPPORT
