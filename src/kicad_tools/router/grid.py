@@ -14,9 +14,16 @@ Grid Resolution Strategies:
 - Fine grid (clearance/2): Maximum accuracy, highest memory/time cost
 - Standard grid (trace_width): Good balance for most boards
 - Expanded obstacles: Pre-expand obstacles, use coarser grid (~4x faster)
+
+Thread Safety:
+- Optional thread-safe mode for parallel routing operations
+- RLock-based synchronization to prevent race conditions
+- Minimal overhead when disabled (default)
 """
 
-from typing import TYPE_CHECKING
+import threading
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
 
@@ -198,6 +205,7 @@ class RoutingGrid:
         layer_stack: LayerStack | None = None,
         expanded_obstacles: bool = False,
         resolution_override: float | None = None,
+        thread_safe: bool = False,
     ):
         """Initialize routing grid.
 
@@ -209,6 +217,8 @@ class RoutingGrid:
             expanded_obstacles: If True, pre-expand obstacles by clearance
                                and allow coarser grid resolution
             resolution_override: Override grid resolution (None = auto from rules)
+            thread_safe: If True, enable thread-safe mode with locking for
+                        concurrent access. Disabled by default for performance.
         """
         self.width = width
         self.height = height
@@ -281,10 +291,52 @@ class RoutingGrid:
         # Pre-computed clearance masks for common radii
         self._clearance_masks: dict[int, np.ndarray] = {}
 
+        # Thread safety support
+        self._thread_safe = thread_safe
+        self._lock: threading.RLock | None = threading.RLock() if thread_safe else None
+
     @property
     def congestion(self) -> np.ndarray:
         """Return congestion array (backward compatible)."""
         return self._congestion
+
+    @property
+    def thread_safe(self) -> bool:
+        """Return whether thread-safe mode is enabled."""
+        return self._thread_safe
+
+    @contextmanager
+    def locked(self) -> Iterator["RoutingGrid"]:
+        """Context manager for exclusive grid access.
+
+        Use this when performing multiple grid operations that must be atomic.
+        In non-thread-safe mode, this is a no-op that yields immediately.
+
+        Example:
+            with grid.locked():
+                grid.mark_route(route1)
+                grid.mark_route(route2)
+
+        Yields:
+            self: The grid instance for method chaining
+        """
+        if self._lock is not None:
+            with self._lock:
+                yield self
+        else:
+            yield self
+
+    @contextmanager
+    def _acquire_lock(self) -> Iterator[None]:
+        """Internal context manager for acquiring lock if thread-safe mode is enabled.
+
+        This is used internally by grid methods that modify state.
+        """
+        if self._lock is not None:
+            with self._lock:
+                yield
+        else:
+            yield
 
     def _get_clearance_mask(self, radius: int) -> np.ndarray:
         """Get or create a circular clearance mask for given radius."""
@@ -367,27 +419,39 @@ class RoutingGrid:
         )
 
     def add_obstacle(self, obs: Obstacle) -> None:
-        """Mark grid cells as blocked by an obstacle."""
-        clearance = obs.clearance + self.rules.trace_clearance
+        """Mark grid cells as blocked by an obstacle.
 
-        # Calculate affected grid region
-        x1 = obs.x - obs.width / 2 - clearance
-        y1 = obs.y - obs.height / 2 - clearance
-        x2 = obs.x + obs.width / 2 + clearance
-        y2 = obs.y + obs.height / 2 + clearance
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            clearance = obs.clearance + self.rules.trace_clearance
 
-        gx1, gy1 = self.world_to_grid(x1, y1)
-        gx2, gy2 = self.world_to_grid(x2, y2)
+            # Calculate affected grid region
+            x1 = obs.x - obs.width / 2 - clearance
+            y1 = obs.y - obs.height / 2 - clearance
+            x2 = obs.x + obs.width / 2 + clearance
+            y2 = obs.y + obs.height / 2 + clearance
 
-        layer_idx = self.layer_to_index(obs.layer.value)
+            gx1, gy1 = self.world_to_grid(x1, y1)
+            gx2, gy2 = self.world_to_grid(x2, y2)
 
-        for gy in range(gy1, gy2 + 1):
-            for gx in range(gx1, gx2 + 1):
-                if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                    self.grid[layer_idx][gy][gx].blocked = True
+            layer_idx = self.layer_to_index(obs.layer.value)
+
+            for gy in range(gy1, gy2 + 1):
+                for gx in range(gx1, gx2 + 1):
+                    if 0 <= gx < self.cols and 0 <= gy < self.rows:
+                        self.grid[layer_idx][gy][gx].blocked = True
 
     def add_pad(self, pad: Pad) -> None:
-        """Add a pad as an obstacle (except for its own net)."""
+        """Add a pad as an obstacle (except for its own net).
+
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            self._add_pad_unsafe(pad)
+
+    def _add_pad_unsafe(self, pad: Pad) -> None:
+        """Internal pad addition without locking."""
         # Clearance model: only trace clearance from pad edge
         # The trace itself doesn't need additional margin since we're measuring
         # from pad edge to trace edge, not center to center
@@ -474,20 +538,24 @@ class RoutingGrid:
         y2: float,
         layers: list[Layer] | None = None,
     ) -> None:
-        """Add a keepout region."""
-        if layers is None:
-            layer_indices = self.get_routable_indices()
-        else:
-            layer_indices = [self.layer_to_index(layer.value) for layer in layers]
+        """Add a keepout region.
 
-        gx1, gy1 = self.world_to_grid(x1, y1)
-        gx2, gy2 = self.world_to_grid(x2, y2)
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            if layers is None:
+                layer_indices = self.get_routable_indices()
+            else:
+                layer_indices = [self.layer_to_index(layer.value) for layer in layers]
 
-        for layer_idx in layer_indices:
-            for gy in range(gy1, gy2 + 1):
-                for gx in range(gx1, gx2 + 1):
-                    if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                        self.grid[layer_idx][gy][gx].blocked = True
+            gx1, gy1 = self.world_to_grid(x1, y1)
+            gx2, gy2 = self.world_to_grid(x2, y2)
+
+            for layer_idx in layer_indices:
+                for gy in range(gy1, gy2 + 1):
+                    for gx in range(gx1, gx2 + 1):
+                        if 0 <= gx < self.cols and 0 <= gy < self.rows:
+                            self.grid[layer_idx][gy][gx].blocked = True
 
     def is_blocked(self, gx: int, gy: int, layer: Layer, net: int = 0) -> bool:
         """Check if a cell is blocked for routing."""
@@ -500,15 +568,19 @@ class RoutingGrid:
         return False
 
     def mark_route(self, route: Route) -> None:
-        """Mark a route's cells as used."""
-        total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
-        clearance_cells = int(total_clearance / self.resolution) + 1
+        """Mark a route's cells as used.
 
-        for seg in route.segments:
-            self._mark_segment(seg, clearance_cells=clearance_cells)
-        for via in route.vias:
-            self._mark_via(via)
-        self.routes.append(route)
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
+            clearance_cells = int(total_clearance / self.resolution) + 1
+
+            for seg in route.segments:
+                self._mark_segment(seg, clearance_cells=clearance_cells)
+            for via in route.vias:
+                self._mark_via(via)
+            self.routes.append(route)
 
     def _mark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Mark cells along a segment as blocked (with clearance buffer)."""
@@ -578,17 +650,21 @@ class RoutingGrid:
                         cell.blocked = True
 
     def unmark_route(self, route: Route) -> None:
-        """Unmark a route's cells (rip-up). Reverses mark_route()."""
-        total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
-        clearance_cells = int(total_clearance / self.resolution) + 1
+        """Unmark a route's cells (rip-up). Reverses mark_route().
 
-        for seg in route.segments:
-            self._unmark_segment(seg, clearance_cells=clearance_cells)
-        for via in route.vias:
-            self._unmark_via(via)
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
+            clearance_cells = int(total_clearance / self.resolution) + 1
 
-        if route in self.routes:
-            self.routes.remove(route)
+            for seg in route.segments:
+                self._unmark_segment(seg, clearance_cells=clearance_cells)
+            for via in route.vias:
+                self._unmark_via(via)
+
+            if route in self.routes:
+                self.routes.remove(route)
 
     def _unmark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Unmark cells along a segment (clear blocked status and net)."""
@@ -658,53 +734,65 @@ class RoutingGrid:
     # =========================================================================
 
     def reset_route_usage(self) -> None:
-        """Reset all usage counts (start of new negotiation iteration)."""
-        self._usage_count.fill(0)
+        """Reset all usage counts (start of new negotiation iteration).
+
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            self._usage_count.fill(0)
 
     def mark_route_usage(
         self, route: Route, net_cells: dict[int, set] | None = None
     ) -> set[tuple[int, int, int]]:
-        """Mark cells used by a route, incrementing usage count."""
-        cells_used: set[tuple[int, int, int]] = set()
+        """Mark cells used by a route, incrementing usage count.
 
-        for seg in route.segments:
-            seg_cells = self._get_segment_cells(seg)
-            cells_used.update(seg_cells)
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            cells_used: set[tuple[int, int, int]] = set()
 
-        for via in route.vias:
-            via_cells = self._get_via_cells(via)
-            cells_used.update(via_cells)
+            for seg in route.segments:
+                seg_cells = self._get_segment_cells(seg)
+                cells_used.update(seg_cells)
 
-        for gx, gy, layer_idx in cells_used:
-            if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                self.grid[layer_idx][gy][gx].usage_count += 1
+            for via in route.vias:
+                via_cells = self._get_via_cells(via)
+                cells_used.update(via_cells)
 
-        if net_cells is not None:
-            if route.net not in net_cells:
-                net_cells[route.net] = set()
-            net_cells[route.net].update(cells_used)
+            for gx, gy, layer_idx in cells_used:
+                if 0 <= gx < self.cols and 0 <= gy < self.rows:
+                    self.grid[layer_idx][gy][gx].usage_count += 1
 
-        return cells_used
+            if net_cells is not None:
+                if route.net not in net_cells:
+                    net_cells[route.net] = set()
+                net_cells[route.net].update(cells_used)
+
+            return cells_used
 
     def unmark_route_usage(self, route: Route, net_cells: dict[int, set] | None = None) -> None:
-        """Remove a route's usage (rip-up), decrementing usage count."""
-        cells_used: set[tuple[int, int, int]] = set()
+        """Remove a route's usage (rip-up), decrementing usage count.
 
-        for seg in route.segments:
-            seg_cells = self._get_segment_cells(seg)
-            cells_used.update(seg_cells)
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            cells_used: set[tuple[int, int, int]] = set()
 
-        for via in route.vias:
-            via_cells = self._get_via_cells(via)
-            cells_used.update(via_cells)
+            for seg in route.segments:
+                seg_cells = self._get_segment_cells(seg)
+                cells_used.update(seg_cells)
 
-        for gx, gy, layer_idx in cells_used:
-            if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                cell = self.grid[layer_idx][gy][gx]
-                cell.usage_count = max(0, cell.usage_count - 1)
+            for via in route.vias:
+                via_cells = self._get_via_cells(via)
+                cells_used.update(via_cells)
 
-        if net_cells is not None and route.net in net_cells:
-            net_cells[route.net] -= cells_used
+            for gx, gy, layer_idx in cells_used:
+                if 0 <= gx < self.cols and 0 <= gy < self.rows:
+                    cell = self.grid[layer_idx][gy][gx]
+                    cell.usage_count = max(0, cell.usage_count - 1)
+
+            if net_cells is not None and route.net in net_cells:
+                net_cells[route.net] -= cells_used
 
     def _get_segment_cells(self, seg: Segment) -> set[tuple[int, int, int]]:
         """Get all grid cells occupied by a segment."""
@@ -761,11 +849,15 @@ class RoutingGrid:
         return overused
 
     def update_history_costs(self, history_increment: float = 1.0) -> None:
-        """Increase history cost for overused cells (PathFinder-style)."""
-        # Vectorized update: add increment * (usage_count - 1) where usage_count > 1
-        overused_mask = self._usage_count > 1
-        increment = history_increment * (self._usage_count.astype(np.float32) - 1)
-        self._history_cost += np.where(overused_mask, increment, 0)
+        """Increase history cost for overused cells (PathFinder-style).
+
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            # Vectorized update: add increment * (usage_count - 1) where usage_count > 1
+            overused_mask = self._usage_count > 1
+            increment = history_increment * (self._usage_count.astype(np.float32) - 1)
+            self._history_cost += np.where(overused_mask, increment, 0)
 
     def get_negotiated_cost(
         self, gx: int, gy: int, layer: int, present_cost_factor: float = 1.0
@@ -802,6 +894,8 @@ class RoutingGrid:
     ) -> None:
         """Mark grid cells as belonging to a zone.
 
+        Thread-safe when thread_safe=True.
+
         Args:
             zone: Zone definition (for net and uuid)
             filled_cells: Set of (gx, gy) grid coordinates to mark
@@ -809,40 +903,46 @@ class RoutingGrid:
         """
         from kicad_tools.schema.pcb import Zone as ZoneType  # noqa: F401
 
-        for gx, gy in filled_cells:
-            if 0 <= gx < self.cols and 0 <= gy < self.rows:
-                cell = self.grid[layer_index][gy][gx]
-                cell.is_zone = True
-                cell.zone_id = zone.uuid
-                cell.net = zone.net_number
-                # Zone copper is not an obstacle - routes can pass through same-net zones
+        with self._acquire_lock():
+            for gx, gy in filled_cells:
+                if 0 <= gx < self.cols and 0 <= gy < self.rows:
+                    cell = self.grid[layer_index][gy][gx]
+                    cell.is_zone = True
+                    cell.zone_id = zone.uuid
+                    cell.net = zone.net_number
+                    # Zone copper is not an obstacle - routes can pass through same-net zones
 
     def clear_zones(self, layer_index: int | None = None) -> None:
         """Remove all zone markings from the grid.
 
+        Thread-safe when thread_safe=True.
+
         Args:
             layer_index: If specified, only clear this layer. Otherwise clear all.
         """
-        if layer_index is not None:
-            layers_to_clear = [layer_index]
-        else:
-            layers_to_clear = list(range(self.num_layers))
+        with self._acquire_lock():
+            if layer_index is not None:
+                layers_to_clear = [layer_index]
+            else:
+                layers_to_clear = list(range(self.num_layers))
 
-        for layer_idx in layers_to_clear:
-            # Find zone cells that should have net cleared
-            zone_mask = self._is_zone[layer_idx]
-            clear_net_mask = zone_mask & ~self._is_obstacle[layer_idx] & ~self._blocked[layer_idx]
+            for layer_idx in layers_to_clear:
+                # Find zone cells that should have net cleared
+                zone_mask = self._is_zone[layer_idx]
+                clear_net_mask = (
+                    zone_mask & ~self._is_obstacle[layer_idx] & ~self._blocked[layer_idx]
+                )
 
-            # Clear nets where applicable
-            self._net[layer_idx] = np.where(clear_net_mask, 0, self._net[layer_idx])
+                # Clear nets where applicable
+                self._net[layer_idx] = np.where(clear_net_mask, 0, self._net[layer_idx])
 
-            # Clear zone flags
-            self._is_zone[layer_idx] = False
+                # Clear zone flags
+                self._is_zone[layer_idx] = False
 
-            # Clear zone IDs for this layer from sparse storage
-            keys_to_remove = [k for k in self._zone_ids if k[0] == layer_idx]
-            for key in keys_to_remove:
-                del self._zone_ids[key]
+                # Clear zone IDs for this layer from sparse storage
+                keys_to_remove = [k for k in self._zone_ids if k[0] == layer_idx]
+                for key in keys_to_remove:
+                    del self._zone_ids[key]
 
     def get_zone_cells(self, layer_index: int, zone_id: str | None = None) -> set[tuple[int, int]]:
         """Get all cells belonging to zones on a layer.
@@ -894,6 +994,8 @@ class RoutingGrid:
         This prevents routes from being placed too close to the board edge,
         which would violate copper-to-edge clearance DRC rules.
 
+        Thread-safe when thread_safe=True.
+
         Args:
             edge_segments: List of (start, end) tuples defining edge line segments.
                           Each segment is ((x1, y1), (x2, y2)) in world coordinates.
@@ -902,22 +1004,23 @@ class RoutingGrid:
         Returns:
             Number of cells blocked.
         """
-        if clearance <= 0 or not edge_segments:
-            return 0
+        with self._acquire_lock():
+            if clearance <= 0 or not edge_segments:
+                return 0
 
-        blocked_count = 0
-        clearance_cells = int(clearance / self.resolution) + 1
+            blocked_count = 0
+            clearance_cells = int(clearance / self.resolution) + 1
 
-        # Get all routable layer indices
-        layer_indices = self.get_routable_indices()
+            # Get all routable layer indices
+            layer_indices = self.get_routable_indices()
 
-        for (x1, y1), (x2, y2) in edge_segments:
-            # Mark cells along each edge segment with clearance buffer
-            blocked_count += self._mark_edge_segment_keepout(
-                x1, y1, x2, y2, clearance_cells, layer_indices
-            )
+            for (x1, y1), (x2, y2) in edge_segments:
+                # Mark cells along each edge segment with clearance buffer
+                blocked_count += self._mark_edge_segment_keepout(
+                    x1, y1, x2, y2, clearance_cells, layer_indices
+                )
 
-        return blocked_count
+            return blocked_count
 
     def _mark_edge_segment_keepout(
         self,
@@ -1104,9 +1207,16 @@ class RoutingGrid:
         This method uses pre-computed circular masks and array slicing
         instead of per-cell loops, providing ~5x speedup for pad addition.
 
+        Thread-safe when thread_safe=True.
+
         Args:
             pad: Pad to add to the grid
         """
+        with self._acquire_lock():
+            self._add_pad_vectorized_unsafe(pad)
+
+    def _add_pad_vectorized_unsafe(self, pad: Pad) -> None:
+        """Internal vectorized pad addition without locking."""
         # Calculate effective clearance
         if self.expanded_obstacles:
             # Full clearance + trace margin baked into obstacle
@@ -1210,6 +1320,7 @@ class RoutingGrid:
             "blocked_percent": round(100 * blocked_cells / total_cells, 1),
             "pad_cells": pad_cells,
             "expanded_obstacles": self.expanded_obstacles,
+            "thread_safe": self._thread_safe,
             "memory_mb": round(
                 (
                     self._blocked.nbytes
