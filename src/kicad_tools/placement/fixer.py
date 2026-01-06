@@ -494,13 +494,18 @@ class PlacementFixer:
         ref = fix.component
 
         # Pattern to match the footprint block with this reference.
+        # KiCad PCB files have two reference formats:
+        # 1. KiCad 8 property format: (property "Reference" "REF" ...)
+        # 2. Legacy fp_text format: (fp_text reference "REF" ...)
+        #
         # Key fixes:
         # 1. Use "[^"]+" for quoted footprint name (not [^\)]+)
         # 2. Use [\s\S]*? for lazy match across nested S-expressions (not [^\)]*)
         # 3. The suffix includes the closing ), so don't add another in replacement
+        # 4. Match both reference formats using alternation (?: ... | ... )
         #
-        # Structure: (footprint "name" (layer "...") ... (at X Y [R]) ... property "Reference" "REF" ...)
-        fp_pattern = rf'(\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\)[\s\S]*?property\s+"Reference"\s+"{re.escape(ref)}")'
+        # Structure: (footprint "name" (layer "...") ... (at X Y [R]) ... reference identifier ...)
+        fp_pattern = rf'(\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+)([\d.-]+)\s+([\d.-]+)(\s+[\d.-]+)?(\)[\s\S]*?(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}"))'
 
         def update_position(match):
             prefix = match.group(1)
