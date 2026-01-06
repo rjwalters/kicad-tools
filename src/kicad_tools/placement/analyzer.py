@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,12 +66,15 @@ class PlacementAnalyzer:
         self,
         pcb_path: str | Path,
         rules: DesignRules | None = None,
+        max_workers: int | None = None,
     ) -> list[Conflict]:
         """Find all placement conflicts in a PCB.
 
         Args:
             pcb_path: Path to .kicad_pcb file
             rules: Design rules for conflict detection (uses defaults if None)
+            max_workers: Maximum number of worker threads for parallel conflict
+                detection. Defaults to CPU count. Set to 1 to disable parallelism.
 
         Returns:
             List of detected conflicts
@@ -80,25 +85,24 @@ class PlacementAnalyzer:
         # Load PCB and extract component info
         self._load_pcb(pcb_path, rules.courtyard_margin)
 
-        conflicts: list[Conflict] = []
+        # Use CPU count if max_workers not specified
+        if max_workers is None:
+            max_workers = os.cpu_count() or 1
 
-        # Check each pair of components
-        for c1, c2 in itertools.combinations(self._components, 2):
-            # Only check components on the same layer (or through-hole)
-            if not self._same_layer(c1, c2):
-                continue
+        # Generate component pairs that need checking
+        pairs_to_check = [
+            (c1, c2)
+            for c1, c2 in itertools.combinations(self._components, 2)
+            if self._same_layer(c1, c2)
+        ]
 
-            # Check courtyard overlap
-            if conflict := self._check_courtyard_overlap(c1, c2):
-                conflicts.append(conflict)
+        if self.verbose:
+            print(f"Checking {len(pairs_to_check)} component pairs with {max_workers} workers")
 
-            # Check pad clearance
-            conflicts.extend(self._check_pad_clearance(c1, c2, rules.min_pad_clearance))
+        # Check pairs in parallel
+        conflicts = self._check_pairs_parallel(pairs_to_check, rules, max_workers)
 
-            # Check hole-to-hole
-            conflicts.extend(self._check_hole_to_hole(c1, c2, rules.min_hole_to_hole))
-
-        # Check edge clearance
+        # Check edge clearance (sequential, typically small)
         if self._board_edge:
             conflicts.extend(self._check_edge_clearance(rules.min_edge_clearance))
 
@@ -106,6 +110,74 @@ class PlacementAnalyzer:
         conflicts.sort(key=lambda c: (c.severity.value, c.location.x, c.location.y))
 
         return conflicts
+
+    def _check_pair(
+        self,
+        pair: tuple[ComponentInfo, ComponentInfo],
+        rules: DesignRules,
+    ) -> list[Conflict]:
+        """Check a single component pair for all conflict types.
+
+        This method is designed to be called in parallel - it only reads
+        shared state and doesn't modify any instance variables.
+
+        Args:
+            pair: Tuple of two components to check
+            rules: Design rules for conflict detection
+
+        Returns:
+            List of conflicts found between the two components
+        """
+        c1, c2 = pair
+        conflicts: list[Conflict] = []
+
+        # Check courtyard overlap
+        if conflict := self._check_courtyard_overlap(c1, c2):
+            conflicts.append(conflict)
+
+        # Check pad clearance
+        conflicts.extend(self._check_pad_clearance(c1, c2, rules.min_pad_clearance))
+
+        # Check hole-to-hole
+        conflicts.extend(self._check_hole_to_hole(c1, c2, rules.min_hole_to_hole))
+
+        return conflicts
+
+    def _check_pairs_parallel(
+        self,
+        pairs: list[tuple[ComponentInfo, ComponentInfo]],
+        rules: DesignRules,
+        max_workers: int,
+    ) -> list[Conflict]:
+        """Check multiple component pairs in parallel.
+
+        Args:
+            pairs: List of component pairs to check
+            rules: Design rules for conflict detection
+            max_workers: Maximum number of worker threads
+
+        Returns:
+            Flattened list of all conflicts found
+        """
+        # For small numbers of pairs or single worker, run sequentially
+        if max_workers <= 1 or len(pairs) < 4:
+            conflicts: list[Conflict] = []
+            for pair in pairs:
+                conflicts.extend(self._check_pair(pair, rules))
+            return conflicts
+
+        # Run in parallel using ThreadPoolExecutor
+        all_conflicts: list[Conflict] = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Map each pair to its conflicts
+            results = executor.map(lambda p: self._check_pair(p, rules), pairs)
+
+            # Flatten results
+            for pair_conflicts in results:
+                all_conflicts.extend(pair_conflicts)
+
+        return all_conflicts
 
     def _load_pcb(self, pcb_path: str | Path, courtyard_margin: float):
         """Load PCB and extract component information."""
