@@ -9,7 +9,6 @@ These improvements target the JLCPCB grid performance issue, aiming for
 <60 second routing time for standard boards with 5mil clearance.
 """
 
-
 import pytest
 
 from kicad_tools.router import DesignRules, LayerStack, Pad, RoutingGrid
@@ -409,7 +408,7 @@ class TestPerformanceComparison:
                 width=0.5,
                 height=0.5,
                 net=i + 1,
-                net_name=f"NET{i+1}",
+                net_name=f"NET{i + 1}",
                 layer=Layer.F_CU,
                 through_hole=False,
                 drill=0,

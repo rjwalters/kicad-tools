@@ -289,13 +289,15 @@ def cmd_export_dru(args):
   (constraint silk_clearance (min {rules.min_silkscreen_width_mm}mm)))
 """
 
-    # Output
+    # Output to specified path or current directory
     if args.output:
-        output_path = args.output
+        output_path = Path(args.output)
     else:
-        rules_dir = Path(__file__).parent / "manufacturers" / "rules"
-        rules_dir.mkdir(exist_ok=True)
-        output_path = rules_dir / f"{profile.id}-{args.layers}layer-{args.copper:.0f}oz.kicad_dru"
+        # Default: output to current directory with descriptive filename
+        output_path = Path(f"{profile.id}-{args.layers}layer-{args.copper:.0f}oz.kicad_dru")
+
+    # Ensure parent directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     output_path.write_text(dru_content)
     print(f"DRC rules exported to: {output_path}")
