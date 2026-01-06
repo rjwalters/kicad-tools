@@ -1515,14 +1515,21 @@ class TestSymbolDefParsing:
         assert str(first_child.value) == "MyLib:TestSymbol"
 
     def test_add_prefix_to_node_unit_symbol(self):
-        """Unit symbols (with _N_N suffix) get prefixed correctly."""
+        """Unit symbols (with _N_N suffix) should NOT have library prefix.
+
+        KiCad expects:
+        - Parent symbol: (symbol "Lib:Name" ...)
+        - Unit symbols: (symbol "Name_0_1" ...) - NO library prefix
+
+        This was fixed in issue #596.
+        """
         sym_def = SymbolDef(lib_id="Test:Sym", name="Sym", raw_sexp="")
         sym_node = SExp.list("symbol", "TestSymbol_0_1")
 
         result = sym_def._add_prefix_to_node(sym_node, "MyLib")
         first_child = result.children[0]
-        # Should be prefixed as MyLib:TestSymbol_0_1
-        assert str(first_child.value) == "MyLib:TestSymbol_0_1"
+        # Unit symbols should NOT have library prefix
+        assert str(first_child.value) == "TestSymbol_0_1"
 
     def test_to_sexp_nodes_with_sexp_node(self):
         """Get SExp nodes when _sexp_node is available."""

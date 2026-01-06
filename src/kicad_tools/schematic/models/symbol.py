@@ -214,14 +214,11 @@ class SymbolDef:
                     if not re.match(r".+_\d+_\d+$", sym_name):
                         new_node.append(SExp.atom(f"{lib_name}:{sym_name}"))
                     else:
-                        # Unit symbol - prefix the base name part
-                        # e.g., "AP2204K-1.5_0_1" -> "Lib:AP2204K-1.5_0_1"
-                        match = re.match(r"(.+?)(_\d+_\d+)$", sym_name)
-                        if match:
-                            base, suffix = match.groups()
-                            new_node.append(SExp.atom(f"{lib_name}:{base}{suffix}"))
-                        else:
-                            new_node.append(child)
+                        # Unit symbol - keep as-is without library prefix
+                        # KiCad expects: parent "(symbol "Lib:Name" ...)"
+                        #                unit   "(symbol "Name_0_1" ...)"
+                        # NOT: unit "(symbol "Lib:Name_0_1" ...)"
+                        new_node.append(child)
                 elif node.name == "extends" and i == 0:
                     # First child of extends is parent name
                     new_node.append(SExp.atom(f"{lib_name}:{child.value}"))
