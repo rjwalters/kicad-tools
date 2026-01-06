@@ -1,7 +1,5 @@
 """Tests for C++ router backend fallback behavior."""
 
-import pytest
-
 from kicad_tools.router.cpp_backend import (
     get_backend_info,
     is_cpp_available,
