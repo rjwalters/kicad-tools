@@ -27,16 +27,29 @@ Example:
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
+from kicad_tools.intent import (
+    REGISTRY,
+    IntentDeclaration,
+    create_intent_declaration,
+)
 from kicad_tools.mcp.types import (
     ApplyMoveResult,
+    ClearIntentResult,
     CommitResult,
     ComponentPosition,
+    ConstraintInfo,
+    DeclareInterfaceResult,
+    DeclarePowerRailResult,
+    IntentInfo,
+    IntentStatus,
+    IntentViolation,
+    ListIntentsResult,
     QueryMoveResult,
     RollbackResult,
     RoutingImpactInfo,
@@ -60,12 +73,76 @@ class SessionMetadata:
         pcb_path: Path to the source PCB file
         session: The underlying PlacementSession object
         initial_score: Score at session start
+        intents: List of declared design intents
     """
 
     session_id: str
     pcb_path: str
     session: PlacementSession
     initial_score: float
+    intents: list[IntentDeclaration] = field(default_factory=list)
+
+    def declare_intent(self, declaration: IntentDeclaration) -> None:
+        """Add an intent declaration to the session."""
+        self.intents.append(declaration)
+
+    def get_constraints_for_net(self, net: str) -> list:
+        """Get all constraints affecting a specific net."""
+        constraints = []
+        for intent in self.intents:
+            if net in intent.nets:
+                constraints.extend(intent.constraints)
+        return constraints
+
+    def get_all_derived_constraints(self) -> list:
+        """Get all constraints from all intents."""
+        constraints = []
+        for intent in self.intents:
+            constraints.extend(intent.constraints)
+        return constraints
+
+    def get_intents_for_net(self, net: str) -> list[IntentDeclaration]:
+        """Get all intents that include a specific net."""
+        return [intent for intent in self.intents if net in intent.nets]
+
+    def clear_intents(
+        self,
+        interface_type: str | None = None,
+        nets: list[str] | None = None,
+    ) -> int:
+        """Clear intent declarations matching the criteria.
+
+        Args:
+            interface_type: If provided, only clear intents of this type
+            nets: If provided, only clear intents involving these nets
+
+        Returns:
+            Number of intents cleared
+        """
+        if interface_type is None and nets is None:
+            # Clear all intents
+            count = len(self.intents)
+            self.intents = []
+            return count
+
+        # Filter intents to keep
+        original_count = len(self.intents)
+        new_intents = []
+
+        for intent in self.intents:
+            should_remove = False
+
+            if interface_type is not None and intent.interface_type == interface_type:
+                should_remove = True
+
+            if nets is not None and any(net in intent.nets for net in nets):
+                should_remove = True
+
+            if not should_remove:
+                new_intents.append(intent)
+
+        self.intents = new_intents
+        return original_count - len(self.intents)
 
 
 class SessionManager:
@@ -267,6 +344,15 @@ def query_move(
         crossing_changes=result.routing_impact.crossing_changes,
     )
 
+    # Get intent status if intents are declared
+    intent_status = None
+    if metadata.intents:
+        intent_status = _get_intent_status_for_move(
+            metadata=metadata,
+            ref=ref,
+            affected_nets=result.routing_impact.affected_nets,
+        )
+
     return QueryMoveResult(
         success=True,
         would_succeed=True,
@@ -276,6 +362,7 @@ def query_move(
         affected_components=result.affected_components,
         routing_impact=routing_impact,
         warnings=result.warnings,
+        intent_status=intent_status,
     )
 
 
@@ -332,6 +419,17 @@ def apply_move(
 
     new_score = session._compute_score()
 
+    # Get intent status if intents are declared
+    intent_status = None
+    if metadata.intents:
+        # Get affected nets from routing impact
+        affected_nets = result.routing_impact.affected_nets if result.routing_impact else []
+        intent_status = _get_intent_status_for_move(
+            metadata=metadata,
+            ref=ref,
+            affected_nets=affected_nets,
+        )
+
     return ApplyMoveResult(
         success=True,
         move_id=len(session.pending_moves),
@@ -339,6 +437,7 @@ def apply_move(
         new_score=new_score,
         score_delta=result.score_delta,
         pending_moves=len(session.pending_moves),
+        intent_status=intent_status,
     )
 
 
@@ -508,3 +607,326 @@ def reset_session_manager() -> None:
     """Reset the global session manager (for testing)."""
     global _session_manager
     _session_manager = SessionManager()
+
+
+# =============================================================================
+# Intent Declaration Tools
+# =============================================================================
+
+
+def declare_interface(
+    session_id: str,
+    interface_type: str,
+    nets: list[str],
+    params: dict | None = None,
+) -> DeclareInterfaceResult:
+    """Declare a design interface intent.
+
+    Declares that a set of nets form a specific interface type, automatically
+    deriving constraints from the interface specification. Subsequent operations
+    will be aware of these declarations for constraint checking.
+
+    Args:
+        session_id: Active placement session ID
+        interface_type: Interface type (e.g., "usb2_high_speed", "spi_fast", "i2c_standard")
+        nets: Net names that form this interface
+        params: Optional interface-specific parameters
+
+    Returns:
+        DeclareInterfaceResult with declaration status and derived constraints
+
+    Example:
+        >>> declare_interface(
+        ...     session_id="sess_123",
+        ...     interface_type="usb2_high_speed",
+        ...     nets=["USB_D+", "USB_D-"]
+        ... )
+    """
+    metadata = _session_manager.get(session_id)
+    if not metadata:
+        return DeclareInterfaceResult(
+            success=False,
+            error_message=f"Session not found: {session_id}",
+        )
+
+    # Validate interface type exists
+    spec = REGISTRY.get(interface_type)
+    if spec is None:
+        available = REGISTRY.list_interfaces()
+        return DeclareInterfaceResult(
+            success=False,
+            error_message=(
+                f"Unknown interface type: '{interface_type}'. "
+                f"Available types: {', '.join(available) or '(none)'}"
+            ),
+        )
+
+    # Validate nets for this interface
+    validation_errors = spec.validate_nets(nets)
+    if validation_errors:
+        return DeclareInterfaceResult(
+            success=False,
+            error_message=f"Invalid nets for {interface_type}: {'; '.join(validation_errors)}",
+        )
+
+    try:
+        # Create intent declaration with derived constraints
+        declaration = create_intent_declaration(
+            interface_type=interface_type,
+            nets=nets,
+            params=params,
+            validate=False,  # Already validated above
+        )
+
+        # Add to session
+        metadata.declare_intent(declaration)
+
+        # Convert constraints to MCP types
+        constraint_infos = [
+            ConstraintInfo(
+                type=c.type,
+                params=dict(c.params) if c.params else {},
+                source=c.source,
+                severity=c.severity.value if hasattr(c.severity, "value") else str(c.severity),
+            )
+            for c in declaration.constraints
+        ]
+
+        # Check for warnings (e.g., duplicate declarations)
+        warnings = []
+        existing = [
+            i
+            for i in metadata.intents[:-1]  # Exclude the one we just added
+            if i.interface_type == interface_type and any(n in i.nets for n in nets)
+        ]
+        if existing:
+            warnings.append(
+                f"Note: Similar intent already declared for {interface_type}. "
+                "Multiple declarations for overlapping nets may cause constraint conflicts."
+            )
+
+        return DeclareInterfaceResult(
+            success=True,
+            declared=True,
+            interface_type=interface_type,
+            nets=nets,
+            constraints=constraint_infos,
+            warnings=warnings,
+        )
+
+    except ValueError as e:
+        return DeclareInterfaceResult(
+            success=False,
+            error_message=str(e),
+        )
+    except Exception as e:
+        return DeclareInterfaceResult(
+            success=False,
+            error_message=f"Failed to declare interface: {e}",
+        )
+
+
+def declare_power_rail(
+    session_id: str,
+    net: str,
+    voltage: float,
+    max_current: float = 0.5,
+) -> DeclarePowerRailResult:
+    """Declare a power rail with requirements.
+
+    Declares a power rail net with voltage and current requirements,
+    automatically deriving constraints for trace width and decoupling.
+
+    Args:
+        session_id: Active placement session ID
+        net: Power net name (e.g., "VDD_3V3")
+        voltage: Rail voltage
+        max_current: Maximum expected current draw (default 0.5A)
+
+    Returns:
+        DeclarePowerRailResult with declaration status and derived constraints
+
+    Example:
+        >>> declare_power_rail(
+        ...     session_id="sess_123",
+        ...     net="VDD_3V3",
+        ...     voltage=3.3,
+        ...     max_current=0.5
+        ... )
+    """
+    metadata = _session_manager.get(session_id)
+    if not metadata:
+        return DeclarePowerRailResult(
+            success=False,
+            error_message=f"Session not found: {session_id}",
+        )
+
+    try:
+        # Create power rail intent declaration
+        declaration = create_intent_declaration(
+            interface_type="power_rail",
+            nets=[net],
+            params={"voltage": voltage, "max_current": max_current},
+        )
+
+        # Add to session
+        metadata.declare_intent(declaration)
+
+        # Convert constraints to MCP types
+        constraint_infos = [
+            ConstraintInfo(
+                type=c.type,
+                params=dict(c.params) if c.params else {},
+                source=c.source,
+                severity=c.severity.value if hasattr(c.severity, "value") else str(c.severity),
+            )
+            for c in declaration.constraints
+        ]
+
+        return DeclarePowerRailResult(
+            success=True,
+            declared=True,
+            net=net,
+            voltage=voltage,
+            max_current=max_current,
+            constraints=constraint_infos,
+        )
+
+    except ValueError as e:
+        return DeclarePowerRailResult(
+            success=False,
+            error_message=str(e),
+        )
+    except Exception as e:
+        return DeclarePowerRailResult(
+            success=False,
+            error_message=f"Failed to declare power rail: {e}",
+        )
+
+
+def list_intents(session_id: str) -> ListIntentsResult:
+    """List all declared intents in a session.
+
+    Returns information about all intent declarations in the session,
+    including the interface types, nets, and constraint counts.
+
+    Args:
+        session_id: Active placement session ID
+
+    Returns:
+        ListIntentsResult with all declared intents
+
+    Example:
+        >>> list_intents(session_id="sess_123")
+    """
+    metadata = _session_manager.get(session_id)
+    if not metadata:
+        return ListIntentsResult(
+            success=False,
+            error_message=f"Session not found: {session_id}",
+        )
+
+    intent_infos = [
+        IntentInfo(
+            interface_type=intent.interface_type,
+            nets=intent.nets,
+            constraint_count=len(intent.constraints),
+            metadata=dict(intent.metadata) if intent.metadata else {},
+        )
+        for intent in metadata.intents
+    ]
+
+    total_constraints = sum(len(intent.constraints) for intent in metadata.intents)
+
+    return ListIntentsResult(
+        success=True,
+        intents=intent_infos,
+        constraint_count=total_constraints,
+    )
+
+
+def clear_intent(
+    session_id: str,
+    interface_type: str | None = None,
+    nets: list[str] | None = None,
+) -> ClearIntentResult:
+    """Remove intent declaration(s) from session.
+
+    Clears intent declarations matching the specified criteria. If no criteria
+    are provided, all intents are cleared.
+
+    Args:
+        session_id: Active placement session ID
+        interface_type: If provided, only clear intents of this type
+        nets: If provided, only clear intents involving these nets
+
+    Returns:
+        ClearIntentResult with counts of cleared and remaining intents
+
+    Example:
+        >>> # Clear all USB intents
+        >>> clear_intent(session_id="sess_123", interface_type="usb2_high_speed")
+        >>>
+        >>> # Clear intents for specific nets
+        >>> clear_intent(session_id="sess_123", nets=["USB_D+", "USB_D-"])
+        >>>
+        >>> # Clear all intents
+        >>> clear_intent(session_id="sess_123")
+    """
+    metadata = _session_manager.get(session_id)
+    if not metadata:
+        return ClearIntentResult(
+            success=False,
+            error_message=f"Session not found: {session_id}",
+        )
+
+    cleared_count = metadata.clear_intents(interface_type=interface_type, nets=nets)
+
+    return ClearIntentResult(
+        success=True,
+        cleared_count=cleared_count,
+        remaining_count=len(metadata.intents),
+    )
+
+
+def _get_intent_status_for_move(
+    metadata: SessionMetadata,
+    ref: str,
+    affected_nets: list[str],
+) -> IntentStatus:
+    """Get intent status for a move operation.
+
+    Checks which intents are affected by a component move and reports
+    any relevant warnings.
+
+    Args:
+        metadata: Session metadata with intents
+        ref: Component reference being moved
+        affected_nets: Nets connected to the component
+
+    Returns:
+        IntentStatus with violations, warnings, and affected intents
+    """
+    violations: list[IntentViolation] = []
+    warnings: list[str] = []
+    affected_intents: list[str] = []
+
+    # Find intents affected by this move
+    for intent in metadata.intents:
+        # Check if any of the component's nets are part of this intent
+        overlapping_nets = [net for net in affected_nets if net in intent.nets]
+        if overlapping_nets:
+            if intent.interface_type not in affected_intents:
+                affected_intents.append(intent.interface_type)
+
+            # Add warning about moving components in declared interfaces
+            warnings.append(
+                f"Component {ref} is connected to nets in {intent.interface_type} interface: "
+                f"{', '.join(overlapping_nets)}"
+            )
+
+    return IntentStatus(
+        violations=violations,
+        warnings=warnings,
+        affected_intents=affected_intents,
+    )
