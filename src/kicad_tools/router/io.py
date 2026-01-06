@@ -453,8 +453,11 @@ def detect_layer_stack(pcb_text: str) -> LayerStack:
         if layer_name.endswith(".Cu"):
             # If multiple zones on same layer, prefer power/GND nets
             existing = zone_layers.get(layer_name, "")
-            if not existing or net_name.upper() in ("GND", "GNDA", "GNDD") or existing.upper() not in ("GND", "GNDA", "GNDD") and any(
-                c in net_name.upper() for c in ["+", "V", "PWR", "VCC", "VDD"]
+            if (
+                not existing
+                or net_name.upper() in ("GND", "GNDA", "GNDD")
+                or existing.upper() not in ("GND", "GNDA", "GNDD")
+                and any(c in net_name.upper() for c in ["+", "V", "PWR", "VCC", "VDD"])
             ):
                 zone_layers[layer_name] = net_name
 

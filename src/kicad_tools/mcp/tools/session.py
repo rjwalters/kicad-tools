@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from kicad_tools.drc.predictive import PredictiveAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.intent import (
@@ -53,6 +54,7 @@ from kicad_tools.mcp.types import (
     IntentStatus,
     IntentViolation,
     ListIntentsResult,
+    PredictiveWarningInfo,
     QueryMoveResult,
     RollbackResult,
     RoutingImpactInfo,
@@ -287,6 +289,37 @@ def _convert_drc_delta(drc_delta) -> DRCDeltaInfo | None:
     )
 
 
+def _get_predictions(
+    metadata: SessionMetadata,
+    ref: str,
+    new_pos: tuple[float, float],
+) -> list[PredictiveWarningInfo]:
+    """Get predictive warnings for a move.
+
+    Args:
+        metadata: Session metadata with intents
+        ref: Component reference being moved
+        new_pos: New position (x, y)
+
+    Returns:
+        List of predictive warnings converted to MCP types
+    """
+    analyzer = PredictiveAnalyzer(metadata.session, metadata.intents)
+    warnings = analyzer.analyze_move(ref, new_pos)
+
+    return [
+        PredictiveWarningInfo(
+            type=w.type,
+            message=w.message,
+            confidence=w.confidence,
+            suggestion=w.suggestion,
+            affected_nets=w.affected_nets,
+            location=w.location,
+        )
+        for w in warnings
+    ]
+
+
 def start_session(
     pcb_path: str,
     fixed_refs: list[str] | None = None,
@@ -412,6 +445,9 @@ def query_move(
     # Convert DRC delta to MCP type
     drc_preview = _convert_drc_delta(result.drc_delta)
 
+    # Get predictive warnings
+    predictions = _get_predictions(metadata, ref, (x, y))
+
     # Calculate net DRC change and generate recommendation
     net_drc_change = 0
     recommendation = ""
@@ -427,6 +463,16 @@ def query_move(
         else:
             recommendation = "NEUTRAL: Move has minimal impact on DRC and placement"
 
+    # Add prediction warnings to recommendation if present
+    if predictions:
+        warning_types = {p.type for p in predictions}
+        if "routing_difficulty" in warning_types:
+            recommendation += " | WARNING: May increase routing difficulty"
+        if "congestion" in warning_types:
+            recommendation += " | WARNING: Area becoming congested"
+        if "intent_risk" in warning_types:
+            recommendation += " | WARNING: May affect design intent constraints"
+
     return QueryMoveResult(
         success=True,
         would_succeed=True,
@@ -440,6 +486,7 @@ def query_move(
         drc_preview=drc_preview,
         net_drc_change=net_drc_change,
         recommendation=recommendation,
+        predictions=predictions,
     )
 
 
@@ -510,6 +557,9 @@ def apply_move(
     # Convert DRC delta to MCP type
     drc = _convert_drc_delta(result.drc_delta)
 
+    # Get predictive warnings
+    predictions = _get_predictions(metadata, ref, (x, y))
+
     return ApplyMoveResult(
         success=True,
         move_id=len(session.pending_moves),
@@ -519,6 +569,7 @@ def apply_move(
         pending_moves=len(session.pending_moves),
         intent_status=intent_status,
         drc=drc,
+        predictions=predictions,
     )
 
 

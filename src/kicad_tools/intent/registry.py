@@ -104,11 +104,7 @@ class InterfaceRegistry:
         Returns:
             Sorted list of interface names in the specified category.
         """
-        return sorted(
-            name
-            for name, spec in self._interfaces.items()
-            if spec.category == category
-        )
+        return sorted(name for name, spec in self._interfaces.items() if spec.category == category)
 
     def __len__(self) -> int:
         """Return the number of registered interfaces."""

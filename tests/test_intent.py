@@ -153,9 +153,7 @@ class MockUSBSpec:
             return ["USB 2.0 High Speed requires exactly 2 nets (D+ and D-)"]
         return []
 
-    def derive_constraints(
-        self, nets: list[str], params: dict[str, object]
-    ) -> list[Constraint]:
+    def derive_constraints(self, nets: list[str], params: dict[str, object]) -> list[Constraint]:
         return [
             Constraint(
                 type="impedance",
@@ -191,9 +189,7 @@ class MockSPISpec:
             return ["SPI requires at least 3 nets (CLK, MOSI, MISO)"]
         return []
 
-    def derive_constraints(
-        self, nets: list[str], params: dict[str, object]
-    ) -> list[Constraint]:
+    def derive_constraints(self, nets: list[str], params: dict[str, object]) -> list[Constraint]:
         return [
             Constraint(
                 type="timing",
@@ -221,9 +217,7 @@ class MockPowerSpec:
     def validate_nets(self, nets: list[str]) -> list[str]:
         return []
 
-    def derive_constraints(
-        self, nets: list[str], params: dict[str, object]
-    ) -> list[Constraint]:
+    def derive_constraints(self, nets: list[str], params: dict[str, object]) -> list[Constraint]:
         return []
 
     def get_validation_message(self, violation: dict[str, object]) -> str:

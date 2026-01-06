@@ -94,9 +94,7 @@ class InterfaceSpec(Protocol):
         """
         ...
 
-    def derive_constraints(
-        self, nets: list[str], params: dict[str, object]
-    ) -> list[Constraint]:
+    def derive_constraints(self, nets: list[str], params: dict[str, object]) -> list[Constraint]:
         """Derive constraints from interface declaration.
 
         Generates the set of constraints that apply to the given nets

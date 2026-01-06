@@ -108,6 +108,7 @@ def validate_assembly_bom(
             "error": str(e),
         }
 
+
 # Supported manufacturers
 SUPPORTED_MANUFACTURERS = ["generic", "jlcpcb", "pcbway", "oshpark", "seeed"]
 
