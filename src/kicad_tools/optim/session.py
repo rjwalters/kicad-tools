@@ -32,10 +32,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from kicad_tools.constraints import ConstraintManager
+from kicad_tools.drc.incremental import DRCDelta, IncrementalDRC
+from kicad_tools.manufacturers import get_profile
 from kicad_tools.optim.components import Component
 from kicad_tools.optim.placement import PlacementOptimizer
 
 if TYPE_CHECKING:
+    from kicad_tools.manufacturers.base import DesignRules
     from kicad_tools.schema.pcb import PCB
 
 __all__ = [
@@ -101,10 +104,12 @@ class MoveResult:
     score_delta: float = 0.0  # Change in overall placement score
     warnings: list[str] = field(default_factory=list)
     error_message: str = ""
+    # DRC delta from incremental DRC engine
+    drc_delta: DRCDelta | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        result = {
             "success": self.success,
             "new_violations": [v.to_dict() for v in self.new_violations],
             "resolved_violations": [v.to_dict() for v in self.resolved_violations],
@@ -114,6 +119,14 @@ class MoveResult:
             "warnings": self.warnings,
             "error_message": self.error_message,
         }
+        if self.drc_delta:
+            result["drc_delta"] = {
+                "new_violations": len(self.drc_delta.new_violations),
+                "resolved_violations": len(self.drc_delta.resolved_violations),
+                "net_change": self.drc_delta.net_change,
+                "check_time_ms": round(self.drc_delta.check_time_ms, 2),
+            }
+        return result
 
     def to_json(self) -> str:
         """Convert to JSON string."""
@@ -205,6 +218,8 @@ class PlacementSession:
         pcb: PCB,
         constraints: ConstraintManager | None = None,
         fixed_refs: list[str] | None = None,
+        design_rules: DesignRules | None = None,
+        manufacturer: str = "jlcpcb",
     ):
         """
         Initialize a placement session.
@@ -213,6 +228,8 @@ class PlacementSession:
             pcb: The PCB to work with
             constraints: Optional constraint manager for validation
             fixed_refs: Optional list of component references that shouldn't move
+            design_rules: Optional design rules for DRC. If None, uses manufacturer defaults
+            manufacturer: Manufacturer ID for default design rules (default: jlcpcb)
         """
         self.pcb = pcb
         self.constraints = constraints or ConstraintManager()
@@ -226,6 +243,17 @@ class PlacementSession:
 
         # History for undo (states before each move)
         self.history: list[SessionState] = []
+
+        # DRC engine for continuous validation
+        rules = design_rules or get_profile(manufacturer).get_design_rules()
+        self._drc_engine = IncrementalDRC(pcb, rules)
+
+        # DRC violation history: list of (operation, DRCDelta) tuples
+        self._drc_history: list[tuple[str, DRCDelta]] = []
+
+        # Initial DRC state
+        self._initial_drc_violations = self._drc_engine.full_check()
+        self._initial_drc_count = len(self._initial_drc_violations)
 
         # Store initial state
         self._initial_state = self._capture_state()
@@ -407,7 +435,7 @@ class PlacementSession:
             rotation: New rotation in degrees (None = keep current)
 
         Returns:
-            MoveResult with impact analysis
+            MoveResult with impact analysis including DRC delta
         """
         comp = self._optimizer.get_component(ref)
         if not comp:
@@ -426,11 +454,14 @@ class PlacementSession:
         old_x, old_y, old_rot = comp.x, comp.y, comp.rotation
         new_rot = rotation if rotation is not None else old_rot
 
-        # Temporarily apply the move
+        # Check DRC impact using incremental engine (preview only)
+        drc_delta = self._drc_engine.check_move(ref, x, y)
+
+        # Temporarily apply the move for placement violations
         comp.x, comp.y, comp.rotation = x, y, new_rot
         comp.update_pin_positions()
 
-        # Check violations after move
+        # Check placement violations after move
         new_violations = self._check_violations()
         old_state = self._capture_state()
         old_violations = old_state.violations
@@ -463,7 +494,9 @@ class PlacementSession:
                 f"Move increases routing length by {routing_impact.estimated_length_change_mm:.1f}mm"
             )
         if truly_new:
-            warnings.append(f"Move creates {len(truly_new)} new violation(s)")
+            warnings.append(f"Move creates {len(truly_new)} new placement violation(s)")
+        if drc_delta.new_violations:
+            warnings.append(f"Move creates {len(drc_delta.new_violations)} new DRC violation(s)")
 
         return MoveResult(
             success=True,
@@ -473,6 +506,7 @@ class PlacementSession:
             routing_impact=routing_impact,
             score_delta=score_delta,
             warnings=warnings,
+            drc_delta=drc_delta,
         )
 
     def apply_move(
@@ -492,7 +526,7 @@ class PlacementSession:
             rotation: New rotation in degrees (None = keep current)
 
         Returns:
-            MoveResult with impact analysis
+            MoveResult with impact analysis and DRC delta
         """
         # First query to check validity
         result = self.query_move(ref, x, y, rotation)
@@ -521,9 +555,18 @@ class PlacementSession:
         )
         self.pending_moves.append(move)
 
-        # Apply the move
+        # Apply the move to optimizer
         comp.x, comp.y, comp.rotation = x, y, new_rot
         comp.update_pin_positions()
+
+        # Apply the move to DRC engine and get actual delta
+        drc_delta = self._drc_engine.apply_move(ref, x, y)
+
+        # Record DRC history
+        self._drc_history.append((f"move:{ref}", drc_delta))
+
+        # Update result with actual DRC delta (not preview)
+        result.drc_delta = drc_delta
 
         return result
 
@@ -671,6 +714,57 @@ class PlacementSession:
             "score_change": round(current_state.score - self._initial_score, 4),
             "violations": len(current_state.violations),
             "components": len(self._optimizer.components),
+        }
+
+    def get_drc_summary(self) -> dict:
+        """Get current DRC state summary.
+
+        Returns:
+            Dictionary with DRC summary including:
+            - total_violations: Current total violation count
+            - by_severity: Counts by severity level (error, warning)
+            - by_type: Counts by violation type (clearance, courtyard, etc.)
+            - trend: Recent trend (improving, worsening, stable)
+            - session_delta: Change since session start
+        """
+        # Get current violations from DRC engine
+        current_violations = self._drc_engine.get_current_violations()
+        current_count = len(current_violations)
+
+        # Count by severity
+        by_severity: dict[str, int] = {}
+        for v in current_violations:
+            severity = v.severity or "error"
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+
+        # Count by type
+        by_type: dict[str, int] = {}
+        for v in current_violations:
+            by_type[v.rule_id] = by_type.get(v.rule_id, 0) + 1
+
+        # Calculate trend from recent history
+        trend = "stable"
+        if len(self._drc_history) >= 3:
+            recent = self._drc_history[-3:]
+            net_change = sum(delta.net_change for _, delta in recent)
+            if net_change < -1:
+                trend = "improving"
+            elif net_change > 1:
+                trend = "worsening"
+
+        # Session delta
+        session_delta = {
+            "initial": self._initial_drc_count,
+            "current": current_count,
+            "change": current_count - self._initial_drc_count,
+        }
+
+        return {
+            "total_violations": current_count,
+            "by_severity": by_severity,
+            "by_type": by_type,
+            "trend": trend,
+            "session_delta": session_delta,
         }
 
     def get_component_position(self, ref: str) -> dict | None:

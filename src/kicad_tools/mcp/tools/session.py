@@ -46,6 +46,9 @@ from kicad_tools.mcp.types import (
     ConstraintInfo,
     DeclareInterfaceResult,
     DeclarePowerRailResult,
+    DRCDeltaInfo,
+    DRCSummary,
+    DRCViolationDetail,
     IntentInfo,
     IntentStatus,
     IntentViolation,
@@ -53,6 +56,7 @@ from kicad_tools.mcp.types import (
     QueryMoveResult,
     RollbackResult,
     RoutingImpactInfo,
+    SessionStatusResult,
     StartSessionResult,
     UndoResult,
     ViolationInfo,
@@ -231,6 +235,58 @@ class SessionManager:
 _session_manager = SessionManager()
 
 
+def _convert_drc_delta(drc_delta) -> DRCDeltaInfo | None:
+    """Convert internal DRCDelta to MCP DRCDeltaInfo type.
+
+    Args:
+        drc_delta: The DRCDelta from PlacementSession
+
+    Returns:
+        DRCDeltaInfo for MCP response, or None if drc_delta is None
+    """
+    if drc_delta is None:
+        return None
+
+    # Convert violations to MCP format
+    new_violations = [
+        DRCViolationDetail(
+            id=v.id,
+            type=v.rule_id,
+            severity=v.severity or "error",
+            message=v.message,
+            components=list(v.items) if v.items else [],
+            location=v.location,
+        )
+        for v in drc_delta.new_violations
+    ]
+
+    resolved_violations = [
+        DRCViolationDetail(
+            id=v.id,
+            type=v.rule_id,
+            severity=v.severity or "error",
+            message=v.message,
+            components=list(v.items) if v.items else [],
+            location=v.location,
+        )
+        for v in drc_delta.resolved_violations
+    ]
+
+    # Calculate delta string - note: total_violations is set to 0 as delta doesn't track total
+    # Use session_status for accurate total counts
+    delta_str = (
+        f"+{len(new_violations)} -{len(resolved_violations)} = {drc_delta.net_change:+d} net"
+    )
+
+    return DRCDeltaInfo(
+        new_violations=new_violations,
+        resolved_violations=resolved_violations,
+        total_violations=0,  # Total not tracked in delta; use session_status for totals
+        delta=delta_str,
+        check_time_ms=drc_delta.check_time_ms,
+    )
+
+
 def start_session(
     pcb_path: str,
     fixed_refs: list[str] | None = None,
@@ -353,6 +409,24 @@ def query_move(
             affected_nets=result.routing_impact.affected_nets,
         )
 
+    # Convert DRC delta to MCP type
+    drc_preview = _convert_drc_delta(result.drc_delta)
+
+    # Calculate net DRC change and generate recommendation
+    net_drc_change = 0
+    recommendation = ""
+    if result.drc_delta:
+        net_drc_change = result.drc_delta.net_change
+        # Generate AI-friendly recommendation
+        if net_drc_change < 0:
+            recommendation = f"RECOMMEND: Move resolves {-net_drc_change} DRC violation(s)"
+        elif net_drc_change > 0:
+            recommendation = f"CAUTION: Move creates {net_drc_change} new DRC violation(s)"
+        elif result.score_delta < 0:
+            recommendation = "NEUTRAL: Move improves placement score with no DRC change"
+        else:
+            recommendation = "NEUTRAL: Move has minimal impact on DRC and placement"
+
     return QueryMoveResult(
         success=True,
         would_succeed=True,
@@ -363,6 +437,9 @@ def query_move(
         routing_impact=routing_impact,
         warnings=result.warnings,
         intent_status=intent_status,
+        drc_preview=drc_preview,
+        net_drc_change=net_drc_change,
+        recommendation=recommendation,
     )
 
 
@@ -430,6 +507,9 @@ def apply_move(
             affected_nets=affected_nets,
         )
 
+    # Convert DRC delta to MCP type
+    drc = _convert_drc_delta(result.drc_delta)
+
     return ApplyMoveResult(
         success=True,
         move_id=len(session.pending_moves),
@@ -438,6 +518,7 @@ def apply_move(
         score_delta=result.score_delta,
         pending_moves=len(session.pending_moves),
         intent_status=intent_status,
+        drc=drc,
     )
 
 
@@ -590,6 +671,50 @@ def rollback_session(session_id: str) -> RollbackResult:
         success=True,
         moves_discarded=moves_count,
         session_closed=True,
+    )
+
+
+def session_status(session_id: str) -> SessionStatusResult:
+    """Get comprehensive status of a placement session including DRC summary.
+
+    Returns the current state of the session including pending moves,
+    placement scores, and a complete DRC summary with violation counts
+    and trend analysis.
+
+    Args:
+        session_id: Session ID from start_session
+
+    Returns:
+        SessionStatusResult with session state and DRC summary
+    """
+    metadata = _session_manager.get(session_id)
+    if not metadata:
+        return SessionStatusResult(
+            success=False,
+            error_message=f"Session not found: {session_id}",
+        )
+
+    session = metadata.session
+    status = session.get_status()
+    drc_summary_data = session.get_drc_summary()
+
+    # Convert DRC summary to MCP type
+    drc_summary = DRCSummary(
+        total_violations=drc_summary_data["total_violations"],
+        by_severity=drc_summary_data["by_severity"],
+        by_type=drc_summary_data["by_type"],
+        trend=drc_summary_data["trend"],
+        session_delta=drc_summary_data["session_delta"],
+    )
+
+    return SessionStatusResult(
+        success=True,
+        session_id=session_id,
+        pending_moves=status["pending_moves"],
+        current_score=status["current_score"],
+        initial_score=status["initial_score"],
+        score_delta=status["score_change"],
+        drc_summary=drc_summary,
     )
 
 

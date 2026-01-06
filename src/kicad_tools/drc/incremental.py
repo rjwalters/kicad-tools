@@ -533,6 +533,16 @@ class IncrementalDRC:
 
         return delta
 
+    def get_current_violations(self) -> list[Violation]:
+        """Get the current list of DRC violations.
+
+        Returns:
+            List of current violations, empty if not initialized
+        """
+        if self.state is None:
+            return []
+        return list(self.state.violations)
+
     def _build_spatial_index(self) -> None:
         """Build spatial index from PCB footprints."""
         assert self.state is not None
