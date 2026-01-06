@@ -44,7 +44,13 @@ Quick Start::
     # ... use with router, DRC, export functions
 """
 
-__version__ = "0.7.0"
+# Get version from package metadata (single source of truth: pyproject.toml)
+try:
+    from importlib.metadata import version as _get_version
+
+    __version__ = _get_version("kicad-tools")
+except Exception:
+    __version__ = "0.0.0.dev"  # Fallback for editable installs without metadata
 
 # Core S-expression handling
 # Constraints - Multi-stage optimization locking

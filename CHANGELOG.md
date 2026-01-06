@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-01-06
+
+### Added
+
+#### Router Performance Optimization (Phase 4)
+
+- **C++/nanobind Core** (`router/cpp/`)
+  - High-performance C++ implementation of core routing operations
+  - nanobind bindings for Python integration
+  - ~100x speedup potential for A* neighbor evaluation
+  - ~100x speedup potential for route marking operations
+  - Graceful fallback when C++ module is not built
+
+- **Algorithm Improvements** (`router/pathfinder.py`)
+  - Optimized grid operations for JLCPCB's 0.0635mm grid constraints
+  - NumPy-based grid for improved performance
+  - Benchmarking infrastructure with `--profile` flag (#554)
+
+#### New Commands
+
+- **`kct init` Command** (`cli/init_cmd.py`)
+  - Initialize projects with manufacturer-specific design rules
+  - Support for all registered manufacturers
+
+- **Parts Suggest CLI** - Exposed parts suggestion feature as command-line tool
+
+#### Manufacturers
+
+- **FlashPCB** (`manufacturers/flashpcb.py`, `manufacturers/data/flashpcb.yaml`)
+  - USA-based PCB fabrication and assembly house
+  - 2 and 4 layer boards with 1oz/2oz copper
+  - 5 mil trace/space, 8 mil minimum drill
+  - 10" × 10" max board size
+  - 2-sided assembly (down to 0201)
+  - 3, 5, and 10 day lead times
+
+### Fixed
+
+- **Trace Blocking Radius** (#553) - Include clearance in trace blocking radius calculation for DRC compliance
+- **fp_text Reference Format** (#565, #547) - Support `fp_text` reference format in placement fix apply
+- **mfr export-dru FileNotFoundError** (#550) - Fix FileNotFoundError when running outside project
+- **Trace Deletion** (#555) - Delete traces from sexp.children instead of sexp.values
+- **Test Cleanup** (#557) - Remove unused pytest import in cpp_backend tests
+
+### Changed
+
+- **Version Management** - `__version__` now automatically reads from `pyproject.toml` via `importlib.metadata`
+
 ## [0.9.0] - 2026-01-06
 
 ### Added
