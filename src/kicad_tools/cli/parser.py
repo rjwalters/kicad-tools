@@ -1021,6 +1021,38 @@ def _add_parts_parser(subparsers) -> None:
         help="Cache action (default: stats)",
     )
 
+    # parts suggest
+    parts_suggest = parts_subparsers.add_parser(
+        "suggest", help="Suggest LCSC part numbers for components without them"
+    )
+    parts_suggest.add_argument("schematic", help="Path to .kicad_sch file")
+    parts_suggest.add_argument(
+        "--format", choices=["table", "json"], default="table", help="Output format"
+    )
+    parts_suggest.add_argument(
+        "--all",
+        action="store_true",
+        dest="show_all",
+        help="Show suggestions for all components (including those with LCSC numbers)",
+    )
+    parts_suggest.add_argument(
+        "--no-basic-preference",
+        action="store_true",
+        help="Don't prefer JLCPCB basic parts",
+    )
+    parts_suggest.add_argument(
+        "--min-stock",
+        type=int,
+        default=100,
+        help="Minimum stock level to consider (default: 100)",
+    )
+    parts_suggest.add_argument(
+        "--max-suggestions",
+        type=int,
+        default=3,
+        help="Maximum suggestions per component (default: 3)",
+    )
+
 
 def _add_datasheet_parser(subparsers) -> None:
     """Add datasheet subcommand parser with its subcommands."""
