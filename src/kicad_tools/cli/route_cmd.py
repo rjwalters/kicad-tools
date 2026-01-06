@@ -481,6 +481,15 @@ def main(argv: list[str] | None = None) -> int:
             "determine the appropriate layer stack."
         ),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Force routing even when grid resolution exceeds clearance. "
+            "Without this flag, routing will fail if grid > clearance to "
+            "prevent DRC violations. Use with caution."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -503,6 +512,27 @@ def main(argv: list[str] | None = None) -> int:
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Validate grid resolution vs clearance (prevents DRC violations)
+    if args.grid > args.clearance:
+        recommended_grid = args.clearance / 2
+        if not args.force:
+            print(
+                f"Error: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
+                f"This WILL cause DRC violations.\n\n"
+                f"Options:\n"
+                f"  1. Use a finer grid: --grid {recommended_grid}\n"
+                f"  2. Use --force to override (not recommended)\n",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            # User forced, continue with warning
+            print(
+                f"Warning: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
+                f"Proceeding anyway due to --force flag. Expect DRC violations.",
+                file=sys.stderr,
+            )
 
     # Import router modules
     from kicad_tools.router import (
