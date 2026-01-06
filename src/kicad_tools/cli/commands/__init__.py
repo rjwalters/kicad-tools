@@ -27,7 +27,7 @@ from .mcp import run_mcp_command
 from .parts import run_parts_command
 from .pcb import run_pcb_command
 from .placement import run_placement_command
-from .project import run_clean_command
+from .project import run_clean_command, run_init_command
 from .reasoning import run_reason_command
 from .routing import run_optimize_command, run_route_command, run_zones_command
 from .schematic import run_sch_command
@@ -85,6 +85,7 @@ __all__ = [
     "run_suggest_command",
     # Project
     "run_clean_command",
+    "run_init_command",
     # Impedance
     "run_impedance_command",
     # MCP

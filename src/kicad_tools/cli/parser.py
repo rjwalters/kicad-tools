@@ -39,6 +39,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools analyze <command>      - PCB analysis tools
     kicad-tools audit <project>        - Manufacturing readiness audit
     kicad-tools clean <project>        - Clean up old/orphaned files
+    kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -89,6 +90,8 @@ Examples:
     kct audit project.kicad_pro --format json --strict
     kct clean project.kicad_pro
     kct clean project.kicad_pro --deep --force
+    kct init myproject --mfr jlcpcb --layers 4
+    kct init existing.kicad_pro --mfr seeed
 """
 
 
@@ -152,6 +155,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
+    _add_init_parser(subparsers)
 
     return parser
 
@@ -2222,4 +2226,58 @@ def _add_mcp_parser(subparsers) -> None:
         type=int,
         default=8080,
         help="Port for HTTP mode (default: 8080)",
+    )
+
+
+def _add_init_parser(subparsers) -> None:
+    """Add init subcommand parser for project initialization."""
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize a KiCad project with manufacturer design rules",
+        description=(
+            "Create or configure a KiCad project with manufacturer-specific design rules. "
+            "This prevents DRC issues by setting appropriate rules from the start."
+        ),
+    )
+    init_parser.add_argument(
+        "init_project",
+        metavar="PROJECT",
+        help="Project name or path to .kicad_pro file (use '.' for current directory)",
+    )
+    init_parser.add_argument(
+        "-m",
+        "--mfr",
+        dest="init_mfr",
+        required=True,
+        metavar="MANUFACTURER",
+        help="Manufacturer ID (jlcpcb, seeed, pcbway, oshpark)",
+    )
+    init_parser.add_argument(
+        "-l",
+        "--layers",
+        dest="init_layers",
+        type=int,
+        default=2,
+        help="Number of copper layers (default: 2)",
+    )
+    init_parser.add_argument(
+        "-c",
+        "--copper",
+        dest="init_copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz (default: 1.0)",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        dest="init_dry_run",
+        action="store_true",
+        help="Show what would be done without making changes",
+    )
+    init_parser.add_argument(
+        "--format",
+        dest="init_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
     )
