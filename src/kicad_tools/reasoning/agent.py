@@ -388,6 +388,34 @@ class PCBReasoningAgent:
                 )
             )
 
+    def update_violations_from_checker(self, drc_results):
+        """Update state with violations from pure Python DRCChecker.
+
+        Args:
+            drc_results: DRCResults from kicad_tools.validate.DRCChecker
+        """
+        self.state.violations.clear()
+
+        for v in drc_results.violations:
+            from .state import ViolationState
+
+            self.state.violations.append(
+                ViolationState(
+                    type=v.rule_id,
+                    severity=v.severity,
+                    message=v.message,
+                    x=v.location[0] if v.location else 0,
+                    y=v.location[1] if v.location else 0,
+                    layer=v.layer or "",
+                    nets=[],  # Pure Python checker doesn't track net associations
+                    items=list(v.items),
+                )
+            )
+
+        # Update initial violations count if this is the first update
+        if self.initial_violations == 0 and self.state.violations:
+            self.initial_violations = len(self.state.violations)
+
     def run_drc_check(self, kicad_cli: str = "kicad-cli") -> DRCReport | None:
         """Run DRC check using KiCad CLI (if available).
 

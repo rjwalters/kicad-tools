@@ -13,6 +13,8 @@ import json
 import sys
 from pathlib import Path
 
+from kicad_tools.manufacturers import get_manufacturer_ids
+
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for reason command."""
@@ -59,6 +61,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--drc",
         help="Path to DRC report file for violation awareness",
+    )
+    parser.add_argument(
+        "--mfr",
+        "-m",
+        choices=get_manufacturer_ids(),
+        default="jlcpcb",
+        help="Target manufacturer for DRC rules (default: jlcpcb)",
+    )
+    parser.add_argument(
+        "--layers",
+        "-l",
+        type=int,
+        default=2,
+        help="Number of copper layers for DRC (default: 2)",
+    )
+    parser.add_argument(
+        "--no-drc",
+        action="store_true",
+        help="Skip automatic DRC checks (violations will be 0)",
     )
     parser.add_argument(
         "-v",
@@ -109,7 +130,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Run automatic DRC checks if no external DRC report provided
+    if not args.drc and not args.no_drc:
+        print("\n--- Running DRC Checks ---")
+        try:
+            from kicad_tools.schema.pcb import PCB
+            from kicad_tools.validate import DRCChecker
+
+            pcb = PCB.load(pcb_path)
+            checker = DRCChecker(pcb, manufacturer=args.mfr, layers=args.layers)
+            drc_results = checker.check_all()
+            agent.update_violations_from_checker(drc_results)
+            print(f"  Manufacturer: {args.mfr.upper()}")
+            print(f"  Rules checked: {drc_results.rules_checked}")
+        except Exception as e:
+            print(f"  Warning: DRC check failed: {e}", file=sys.stderr)
+            print("  Use --no-drc to skip DRC checks")
+
     state = agent.get_state()
+    print("\n--- Board Summary ---")
     print(f"  Board size: {state.outline.width:.1f}mm x {state.outline.height:.1f}mm")
     print(f"  Components: {len(state.components)}")
     print(f"  Nets total: {len(state.routed_nets) + len(state.unrouted_nets)}")
