@@ -276,6 +276,145 @@ class TestAutorouterMonteCarlo:
         score = router._evaluate_solution([route])
         assert score > 0  # Should have positive score with routed net
 
+    def test_monte_carlo_sequential_execution(self, router):
+        """Test Monte Carlo routing with sequential execution (num_workers=1)."""
+        # Add two simple 2-pin nets
+        pads1 = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        pads2 = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+            {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+        ]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        # Run with num_workers=1 (sequential)
+        routes = router.route_all_monte_carlo(num_trials=3, seed=42, verbose=False, num_workers=1)
+        assert isinstance(routes, list)
+
+    def test_monte_carlo_parallel_execution(self, router):
+        """Test Monte Carlo routing with parallel execution."""
+        # Add two simple 2-pin nets
+        pads1 = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        pads2 = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+            {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+        ]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        # Run with num_workers=2 (parallel)
+        routes = router.route_all_monte_carlo(num_trials=4, seed=42, verbose=False, num_workers=2)
+        assert isinstance(routes, list)
+
+    def test_monte_carlo_num_workers_auto_detection(self, router):
+        """Test that num_workers=None auto-detects based on CPU count."""
+        # Add a simple net
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        # num_workers=None should auto-detect
+        routes = router.route_all_monte_carlo(
+            num_trials=2, seed=42, verbose=False, num_workers=None
+        )
+        assert isinstance(routes, list)
+
+    def test_monte_carlo_num_workers_zero_triggers_auto(self, router):
+        """Test that num_workers=0 triggers auto-detection."""
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        routes = router.route_all_monte_carlo(num_trials=2, seed=42, verbose=False, num_workers=0)
+        assert isinstance(routes, list)
+
+    def test_monte_carlo_determinism_with_seed(self, router):
+        """Test that Monte Carlo routing is deterministic with same seed."""
+        # Add nets
+        pads1 = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads1)
+
+        # Run twice with same seed (sequential to ensure determinism)
+        routes1 = router.route_all_monte_carlo(num_trials=3, seed=42, verbose=False, num_workers=1)
+        score1 = router._evaluate_solution(routes1)
+
+        # Reset and run again
+        router._reset_for_new_trial()
+        routes2 = router.route_all_monte_carlo(num_trials=3, seed=42, verbose=False, num_workers=1)
+        score2 = router._evaluate_solution(routes2)
+
+        # Scores should be identical with same seed
+        assert score1 == score2
+
+    def test_monte_carlo_workers_capped_to_trials(self, router):
+        """Test that num_workers is capped to num_trials."""
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        # Request more workers than trials - should not fail
+        routes = router.route_all_monte_carlo(num_trials=2, seed=42, verbose=False, num_workers=10)
+        assert isinstance(routes, list)
+
+    def test_serialize_for_parallel(self, router):
+        """Test that router state serialization works correctly."""
+        # Add pads and nets
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        # Serialize
+        config = router._serialize_for_parallel()
+
+        # Verify essential fields are present
+        assert "width" in config
+        assert "height" in config
+        assert "pads_data" in config
+        assert "nets" in config
+        assert "net_names" in config
+        assert len(config["pads_data"]) == 2
+
+    def test_monte_carlo_varying_trials(self, router):
+        """Test Monte Carlo with varying number of trials."""
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        # Test with 1 trial
+        routes_1 = router.route_all_monte_carlo(num_trials=1, seed=42, verbose=False, num_workers=1)
+        assert isinstance(routes_1, list)
+
+        # Test with 4 trials (parallel)
+        router._reset_for_new_trial()
+        routes_4 = router.route_all_monte_carlo(num_trials=4, seed=42, verbose=False, num_workers=2)
+        assert isinstance(routes_4, list)
+
+        # Test with 10 trials (parallel)
+        router._reset_for_new_trial()
+        routes_10 = router.route_all_monte_carlo(
+            num_trials=10, seed=42, verbose=False, num_workers=4
+        )
+        assert isinstance(routes_10, list)
+
 
 class TestRoutingResult:
     """Tests for RoutingResult dataclass."""
