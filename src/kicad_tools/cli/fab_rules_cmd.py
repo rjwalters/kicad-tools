@@ -26,6 +26,7 @@ from kicad_tools.manufacturers import (
     get_profile,
     list_manufacturers,
 )
+from kicad_tools.units import get_current_formatter
 
 
 @dataclass
@@ -207,6 +208,7 @@ def cmd_show(args):
         return 0
 
     # Text format
+    fmt = get_current_formatter()
     print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()} Design Rules")
     print(f"{'=' * 60}")
@@ -214,34 +216,31 @@ def cmd_show(args):
     print(f"\nProfile: {profile.id}")
     print(f"Website: {profile.website}")
     print(f"Configuration: {args.layers}-layer, {args.copper}oz copper")
+    print(f"Units: {fmt.unit_name}")
 
     print(f"\n{'Trace & Spacing':─^40}")
-    print(
-        f"  Min trace width:    {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
-    )
-    print(
-        f"  Min clearance:      {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
-    )
+    print(f"  Min trace width:    {fmt.format(rules.min_trace_width_mm)}")
+    print(f"  Min clearance:      {fmt.format(rules.min_clearance_mm)}")
 
     print(f"\n{'Vias':─^40}")
-    print(f"  Min via drill:      {rules.min_via_drill_mm:.3f} mm")
-    print(f"  Min via diameter:   {rules.min_via_diameter_mm:.3f} mm")
-    print(f"  Min annular ring:   {rules.min_annular_ring_mm:.3f} mm")
+    print(f"  Min via drill:      {fmt.format(rules.min_via_drill_mm)}")
+    print(f"  Min via diameter:   {fmt.format(rules.min_via_diameter_mm)}")
+    print(f"  Min annular ring:   {fmt.format(rules.min_annular_ring_mm)}")
 
     print(f"\n{'Holes':─^40}")
-    print(f"  Min hole diameter:  {rules.min_hole_diameter_mm:.3f} mm")
-    print(f"  Max hole diameter:  {rules.max_hole_diameter_mm:.3f} mm")
+    print(f"  Min hole diameter:  {fmt.format(rules.min_hole_diameter_mm)}")
+    print(f"  Max hole diameter:  {fmt.format(rules.max_hole_diameter_mm)}")
 
     print(f"\n{'Edge Clearance':─^40}")
-    print(f"  Copper to edge:     {rules.min_copper_to_edge_mm:.3f} mm")
-    print(f"  Hole to edge:       {rules.min_hole_to_edge_mm:.3f} mm")
+    print(f"  Copper to edge:     {fmt.format(rules.min_copper_to_edge_mm)}")
+    print(f"  Hole to edge:       {fmt.format(rules.min_hole_to_edge_mm)}")
 
     print(f"\n{'Silkscreen':─^40}")
-    print(f"  Min line width:     {rules.min_silkscreen_width_mm:.3f} mm")
-    print(f"  Min text height:    {rules.min_silkscreen_height_mm:.3f} mm")
+    print(f"  Min line width:     {fmt.format(rules.min_silkscreen_width_mm)}")
+    print(f"  Min text height:    {fmt.format(rules.min_silkscreen_height_mm)}")
 
     print(f"\n{'Solder Mask':─^40}")
-    print(f"  Min dam width:      {rules.min_solder_mask_dam_mm:.3f} mm")
+    print(f"  Min dam width:      {fmt.format(rules.min_solder_mask_dam_mm)}")
 
     print(f"\n{'=' * 60}")
     return 0
@@ -296,14 +295,16 @@ def cmd_compare(args):
         return 0
 
     # Text format
+    fmt = get_current_formatter()
     print(f"\nDesign Rules Comparison: {project_path.name} vs {profile.name.upper()}")
     print("=" * 70)
+    print(f"Units: {fmt.unit_name}")
     print(f"\n{'Constraint':<20} {'Project':>12} {profile.id.upper():>12} {'Status':>12}")
     print("-" * 70)
 
     for c in comparisons:
-        project_str = f"{c.project_value:.4f}mm" if c.project_value else "Not set"
-        mfr_str = f"{c.manufacturer_value:.4f}mm"
+        project_str = fmt.format_compact(c.project_value) if c.project_value else "Not set"
+        mfr_str = fmt.format_compact(c.manufacturer_value)
 
         if c.status == "ok":
             status = "✓ OK"

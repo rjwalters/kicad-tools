@@ -28,6 +28,7 @@ from kicad_tools.manufacturers import (
     get_profile,
     list_manufacturers,
 )
+from kicad_tools.units import get_current_formatter
 
 
 def cmd_list(args):
@@ -105,41 +106,39 @@ def cmd_rules(args):
         sys.exit(1)
 
     rules = profile.get_design_rules(args.layers, args.copper)
+    fmt = get_current_formatter()
 
     print(f"\n{'=' * 60}")
     print(f"{profile.name.upper()} - {args.layers}-LAYER {args.copper}oz RULES")
     print(f"{'=' * 60}")
+    print(f"Units: {fmt.unit_name}")
 
     print("\nTrace & Spacing:")
-    print(
-        f"  Min trace width:    {rules.min_trace_width_mm:.4f} mm ({rules.min_trace_width_mil:.1f} mil)"
-    )
-    print(
-        f"  Min clearance:      {rules.min_clearance_mm:.4f} mm ({rules.min_clearance_mil:.1f} mil)"
-    )
+    print(f"  Min trace width:    {fmt.format(rules.min_trace_width_mm)}")
+    print(f"  Min clearance:      {fmt.format(rules.min_clearance_mm)}")
 
     print("\nVias:")
-    print(f"  Min via drill:      {rules.min_via_drill_mm} mm")
-    print(f"  Min via diameter:   {rules.min_via_diameter_mm} mm")
-    print(f"  Min annular ring:   {rules.min_annular_ring_mm} mm")
+    print(f"  Min via drill:      {fmt.format(rules.min_via_drill_mm)}")
+    print(f"  Min via diameter:   {fmt.format(rules.min_via_diameter_mm)}")
+    print(f"  Min annular ring:   {fmt.format(rules.min_annular_ring_mm)}")
 
     print("\nHoles:")
-    print(f"  Min hole diameter:  {rules.min_hole_diameter_mm} mm")
-    print(f"  Max hole diameter:  {rules.max_hole_diameter_mm} mm")
+    print(f"  Min hole diameter:  {fmt.format(rules.min_hole_diameter_mm)}")
+    print(f"  Max hole diameter:  {fmt.format(rules.max_hole_diameter_mm)}")
 
     print("\nEdge Clearance:")
-    print(f"  Copper to edge:     {rules.min_copper_to_edge_mm} mm")
-    print(f"  Hole to edge:       {rules.min_hole_to_edge_mm} mm")
+    print(f"  Copper to edge:     {fmt.format(rules.min_copper_to_edge_mm)}")
+    print(f"  Hole to edge:       {fmt.format(rules.min_hole_to_edge_mm)}")
 
     print("\nSilkscreen:")
-    print(f"  Min line width:     {rules.min_silkscreen_width_mm} mm")
-    print(f"  Min text height:    {rules.min_silkscreen_height_mm} mm")
+    print(f"  Min line width:     {fmt.format(rules.min_silkscreen_width_mm)}")
+    print(f"  Min text height:    {fmt.format(rules.min_silkscreen_height_mm)}")
 
     print("\nSolder Mask:")
-    print(f"  Min dam width:      {rules.min_solder_mask_dam_mm} mm")
+    print(f"  Min dam width:      {fmt.format(rules.min_solder_mask_dam_mm)}")
 
     print("\nBoard:")
-    print(f"  Thickness:          {rules.board_thickness_mm} mm")
+    print(f"  Thickness:          {fmt.format(rules.board_thickness_mm)}")
     print(f"  Outer copper:       {rules.outer_copper_oz} oz")
     if rules.inner_copper_oz > 0:
         print(f"  Inner copper:       {rules.inner_copper_oz} oz")
