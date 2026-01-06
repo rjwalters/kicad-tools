@@ -16,13 +16,13 @@ from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import MonteCarloRouter, MSTRouter, NegotiatedRouter
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
 from .bus_routing import BusRouter
+from .cpp_backend import create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
-from .pathfinder import Router
 from .primitives import Obstacle, Pad, Route
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 from .zones import ZoneManager
@@ -161,6 +161,7 @@ class Autorouter:
         layer_stack: LayerStack | None = None,
         stackup: Stackup | None = None,
         physics_enabled: bool = True,
+        force_python: bool = False,
     ):
         """Initialize the autorouter.
 
@@ -174,14 +175,17 @@ class Autorouter:
             layer_stack: Layer stack for routing
             stackup: PCB stackup for physics calculations (optional)
             physics_enabled: Enable physics-based calculations (default True)
+            force_python: If True, force use of Python backend even if C++ is
+                available. Default False (use C++ when available for 10-100x speedup).
         """
         self.rules = rules or DesignRules()
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
         self.layer_stack = layer_stack
+        self._force_python = force_python
         self.grid = RoutingGrid(
             width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
         )
-        self.router = Router(self.grid, self.rules, self.net_class_map)
+        self.router = create_hybrid_router(self.grid, self.rules, force_python=force_python)
         self.zone_manager = ZoneManager(self.grid, self.rules)
 
         self.pads: dict[tuple[str, str], Pad] = {}
@@ -219,6 +223,30 @@ class Autorouter:
     def physics_available(self) -> bool:
         """Check if physics calculations are available."""
         return self._transmission_line is not None
+
+    @property
+    def backend_info(self) -> dict:
+        """Get information about the active router backend.
+
+        Returns:
+            Dictionary with backend info:
+                - backend: "cpp" or "python"
+                - version: Backend version string
+                - available: True if C++ backend is available
+                - active: "cpp" or "python" (what's actually being used)
+
+        Example:
+            >>> router = Autorouter(100, 100)
+            >>> print(router.backend_info)
+            {'backend': 'cpp', 'version': '1.0.0', 'available': True, 'active': 'cpp'}
+        """
+        info = get_backend_info()
+        # Determine what's actually active based on router type
+        from .cpp_backend import CppPathfinder
+
+        active = "cpp" if isinstance(self.router, CppPathfinder) else "python"
+        info["active"] = active
+        return info
 
     def get_width_for_impedance(
         self,
@@ -649,7 +677,7 @@ class Autorouter:
         origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
 
         self.grid = RoutingGrid(width, height, self.rules, origin_x, origin_y)
-        self.router = Router(self.grid, self.rules, self.net_class_map)
+        self.router = create_hybrid_router(self.grid, self.rules, force_python=self._force_python)
         self.zone_manager = ZoneManager(self.grid, self.rules)
 
         for pad in self.pads.values():

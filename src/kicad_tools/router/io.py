@@ -750,6 +750,7 @@ def load_pcb_for_routing(
     validate_drc: bool = True,
     edge_clearance: float | None = None,
     layer_stack: LayerStack | None = None,
+    force_python: bool = False,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -776,6 +777,9 @@ def load_pcb_for_routing(
                      Use LayerStack.four_layer_sig_gnd_pwr_sig() for 4-layer
                      boards with GND/PWR planes, which routes signals on outer
                      layers (F.Cu, B.Cu) with vias for layer transitions.
+        force_python: If True, force use of Python router backend even if the
+                     C++ backend is available. Default False uses C++ when
+                     available for 10-100x performance improvement.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -971,6 +975,7 @@ def load_pcb_for_routing(
         rules=rules,
         net_class_map=DEFAULT_NET_CLASS_MAP,
         layer_stack=layer_stack,
+        force_python=force_python,
     )
 
     # Add all components

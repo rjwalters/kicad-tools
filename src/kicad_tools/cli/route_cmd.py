@@ -523,6 +523,18 @@ def main(argv: list[str] | None = None) -> int:
             "visualize with: snakeviz route_profile.prof"
         ),
     )
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "cpp", "python"],
+        default="auto",
+        help=(
+            "Router backend to use: "
+            "'auto' = use C++ if available, fall back to Python (default); "
+            "'cpp' = require C++ backend (fails if not available); "
+            "'python' = force Python backend (for testing/debugging). "
+            "C++ backend provides 10-100x speedup for fine-grid routing."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -575,9 +587,24 @@ def main(argv: list[str] | None = None) -> int:
         DifferentialPairConfig,
         LayerStack,
         RoutabilityAnalyzer,
+        is_cpp_available,
         load_pcb_for_routing,
     )
     from kicad_tools.router.io import detect_layer_stack
+
+    # Handle backend selection
+    force_python = False
+    if args.backend == "cpp":
+        if not is_cpp_available():
+            print(
+                "Error: C++ backend requested but not available.\n"
+                "Build the C++ extension or use --backend auto/python.\n"
+                "See README for build instructions.",
+                file=sys.stderr,
+            )
+            return 1
+    elif args.backend == "python":
+        force_python = True
 
     # Create layer stack from --layers argument (or auto-detect)
     if args.layers == "auto":
@@ -653,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
                 rules=rules,
                 edge_clearance=args.edge_clearance,
                 layer_stack=layer_stack,
+                force_python=force_python,
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)
@@ -670,6 +698,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not quiet:
         print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+        backend_info = router.backend_info
+        print(
+            f"  Backend:    {backend_info['active']} (C++ available: {backend_info['available']})"
+        )
         print(f"  Total nets: {len(net_map)}")
         print(f"  Nets to route: {nets_to_route}")
 
