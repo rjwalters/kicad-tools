@@ -27,7 +27,9 @@ Example::
 from __future__ import annotations
 
 import math
+import os
 import random
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
@@ -103,6 +105,158 @@ class Individual:
             rotations=dict(self.rotations),
             fitness=self.fitness,
         )
+
+
+@dataclass
+class _EvaluationContext:
+    """
+    Serializable context for parallel fitness evaluation.
+
+    Contains all data needed to compute fitness without access to
+    the optimizer instance, enabling use in worker processes.
+    """
+
+    # Component data: ref -> (x, y, rotation, width, height, pin_offsets)
+    # pin_offsets: list of (offset_x, offset_y, pin_number)
+    components: dict[str, tuple[float, float, float, float, float, list[tuple[float, float, str]]]]
+
+    # Spring data: list of (comp1_ref, pin1_num, comp2_ref, pin2_num)
+    springs: list[tuple[str, str, str, str]]
+
+    # Board outline vertices: list of (x, y)
+    board_vertices: list[tuple[float, float]]
+
+    # Board bounds: (min_x, min_y, max_x, max_y)
+    board_bounds: tuple[float, float, float, float]
+
+    # Fitness weights
+    wire_length_weight: float
+    conflict_weight: float
+    routability_weight: float
+    boundary_violation_weight: float
+
+
+def _evaluate_fitness_worker(
+    args: tuple[Individual, _EvaluationContext],
+) -> float:
+    """
+    Stateless fitness evaluation function for parallel processing.
+
+    This is a module-level function so it can be pickled for ProcessPoolExecutor.
+
+    Args:
+        args: Tuple of (individual, evaluation_context)
+
+    Returns:
+        Fitness value (higher is better)
+    """
+    ind, ctx = args
+
+    # Build component positions with individual's genotype applied
+    # comp_state: ref -> (x, y, rotation, width, height, list of absolute pin positions)
+    comp_state: dict[
+        str, tuple[float, float, float, float, float, list[tuple[float, float, str]]]
+    ] = {}
+
+    for ref, (orig_x, orig_y, orig_rot, width, height, pin_offsets) in ctx.components.items():
+        # Get position from individual, or use original if not movable
+        if ref in ind.positions:
+            x, y = ind.positions[ref]
+            rotation = ind.rotations.get(ref, orig_rot)
+        else:
+            x, y, rotation = orig_x, orig_y, orig_rot
+
+        # Compute absolute pin positions based on position and rotation
+        cos_r = math.cos(math.radians(rotation))
+        sin_r = math.sin(math.radians(rotation))
+
+        pin_positions = []
+        for ox, oy, pin_num in pin_offsets:
+            pin_x = x + ox * cos_r - oy * sin_r
+            pin_y = y + ox * sin_r + oy * cos_r
+            pin_positions.append((pin_x, pin_y, pin_num))
+
+        comp_state[ref] = (x, y, rotation, width, height, pin_positions)
+
+    # Calculate wire length
+    wire_length = 0.0
+    for comp1_ref, pin1_num, comp2_ref, pin2_num in ctx.springs:
+        if comp1_ref not in comp_state or comp2_ref not in comp_state:
+            continue
+
+        _, _, _, _, _, pins1 = comp_state[comp1_ref]
+        _, _, _, _, _, pins2 = comp_state[comp2_ref]
+
+        # Find matching pins
+        pin1_pos = next(((px, py) for px, py, pn in pins1 if pn == pin1_num), None)
+        pin2_pos = next(((px, py) for px, py, pn in pins2 if pn == pin2_num), None)
+
+        if pin1_pos and pin2_pos:
+            dx = pin2_pos[0] - pin1_pos[0]
+            dy = pin2_pos[1] - pin1_pos[1]
+            wire_length += math.sqrt(dx * dx + dy * dy)
+
+    # Count conflicts (AABB overlap)
+    conflicts = 0
+    comp_list = list(comp_state.values())
+    n = len(comp_list)
+    for i in range(n):
+        x1, y1, _, w1, h1, _ = comp_list[i]
+        hw1, hh1 = w1 / 2, h1 / 2
+        for j in range(i + 1, n):
+            x2, y2, _, w2, h2, _ = comp_list[j]
+            hw2, hh2 = w2 / 2, h2 / 2
+            dx = abs(x1 - x2)
+            dy = abs(y1 - y2)
+            if dx < (hw1 + hw2) and dy < (hh1 + hh2):
+                conflicts += 1
+
+    # Count boundary violations (point-in-polygon check)
+    boundary_violations = 0
+    vertices = ctx.board_vertices
+    n_verts = len(vertices)
+    if n_verts >= 3:
+        for ref, (x, y, _, _, _, _) in comp_state.items():
+            # Ray casting algorithm for point-in-polygon
+            inside = False
+            j = n_verts - 1
+            for i in range(n_verts):
+                xi, yi = vertices[i]
+                xj, yj = vertices[j]
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                    inside = not inside
+                j = i
+            if not inside:
+                boundary_violations += 1
+
+    # Estimate routability (average spacing)
+    routability_score = 0.0
+    if n >= 2:
+        total_spacing = 0.0
+        count = 0
+        for i in range(n):
+            x1, y1, _, _, _, _ = comp_list[i]
+            for j in range(i + 1, n):
+                x2, y2, _, _, _, _ = comp_list[j]
+                dx = x1 - x2
+                dy = y1 - y2
+                total_spacing += math.sqrt(dx * dx + dy * dy)
+                count += 1
+        avg_spacing = total_spacing / count if count > 0 else 0
+        routability_score = min(100.0, avg_spacing * 5.0)
+    else:
+        routability_score = 100.0
+
+    # Compute fitness (higher is better)
+    fitness = (
+        1000.0
+        - wire_length * ctx.wire_length_weight
+        - conflicts * ctx.conflict_weight
+        - boundary_violations * ctx.boundary_violation_weight
+        + routability_score * ctx.routability_weight
+    )
+
+    return fitness
 
 
 class EvolutionaryPlacementOptimizer:
@@ -544,22 +698,75 @@ class EvolutionaryPlacementOptimizer:
 
         return new_population
 
+    def _create_evaluation_context(self) -> _EvaluationContext:
+        """
+        Create serializable evaluation context for parallel fitness evaluation.
+
+        Extracts all data needed to compute fitness into a picklable structure.
+        """
+        # Serialize component data
+        components: dict[
+            str, tuple[float, float, float, float, float, list[tuple[float, float, str]]]
+        ] = {}
+        for comp in self.components:
+            # Ensure pin offsets are computed
+            if not comp._pin_offsets and comp.pins:
+                comp._compute_pin_offsets()
+
+            pin_offsets = [
+                (offset[0], offset[1], comp.pins[i].number)
+                for i, offset in enumerate(comp._pin_offsets)
+            ]
+            components[comp.ref] = (
+                comp.x,
+                comp.y,
+                comp.rotation,
+                comp.width,
+                comp.height,
+                pin_offsets,
+            )
+
+        # Serialize spring data
+        springs = [(s.comp1_ref, s.pin1_num, s.comp2_ref, s.pin2_num) for s in self.springs]
+
+        # Serialize board outline
+        board_vertices = [(v.x, v.y) for v in self.board_outline.vertices]
+
+        return _EvaluationContext(
+            components=components,
+            springs=springs,
+            board_vertices=board_vertices,
+            board_bounds=self._board_bounds,
+            wire_length_weight=self.config.wire_length_weight,
+            conflict_weight=self.config.conflict_weight,
+            routability_weight=self.config.routability_weight,
+            boundary_violation_weight=self.config.boundary_violation_weight,
+        )
+
     def _evaluate_population(self, population: list[Individual]):
         """
         Evaluate fitness for all individuals in population.
 
-        Uses parallel processing if configured.
+        Uses parallel processing with ProcessPoolExecutor if configured.
+        Falls back to sequential evaluation for small populations or when
+        parallel=False.
         """
+        # Use parallel evaluation for larger populations
         if self.config.parallel and len(population) > 4:
-            # Parallel evaluation
-            # Note: This requires picklable objects; for simplicity,
-            # we'll evaluate sequentially in the current implementation
-            # since Component objects have complex state.
-            # A proper implementation would serialize the individual data.
-            for ind in population:
-                ind.fitness = self._evaluate_fitness(ind)
+            ctx = self._create_evaluation_context()
+            max_workers = self.config.max_workers or os.cpu_count()
+
+            # Prepare work items as (individual, context) tuples
+            work_items = [(ind, ctx) for ind in population]
+
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                fitness_values = list(executor.map(_evaluate_fitness_worker, work_items))
+
+            # Assign fitness values back to individuals
+            for ind, fitness in zip(population, fitness_values, strict=True):
+                ind.fitness = fitness
         else:
-            # Sequential evaluation
+            # Sequential evaluation for small populations or when parallel=False
             for ind in population:
                 ind.fitness = self._evaluate_fitness(ind)
 
