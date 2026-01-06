@@ -5,6 +5,8 @@ Usage:
     kct parts lookup C123456              - Look up LCSC part
     kct parts search "100nF 0402"         - Search for parts
     kct parts availability design.kicad_sch - Check BOM availability
+    kct parts suggest design.kicad_sch    - Suggest LCSC parts based on value/footprint
+    kct parts suggest design.kicad_sch --apply - Apply suggestions to schematic
     kct parts import STM32F103C8T6 --library myproject.kicad_sym
     kct parts cache stats                 - Show cache statistics
     kct parts cache clear                 - Clear the cache
@@ -96,6 +98,39 @@ def main(argv: list[str] | None = None) -> int:
         "--issues-only", action="store_true", help="Only show parts with availability issues"
     )
 
+    # suggest subcommand
+    suggest_parser = subparsers.add_parser(
+        "suggest", help="Suggest LCSC part numbers based on value/footprint"
+    )
+    suggest_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    suggest_parser.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    suggest_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply suggested LCSC numbers to the schematic",
+    )
+    suggest_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Show all components, not just those missing LCSC numbers",
+    )
+    suggest_parser.add_argument(
+        "--min-stock",
+        type=int,
+        default=100,
+        help="Minimum stock level to consider (default: 100)",
+    )
+    suggest_parser.add_argument(
+        "--no-prefer-basic",
+        action="store_true",
+        help="Don't prefer JLCPCB Basic parts",
+    )
+
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
     cache_subparsers = cache_parser.add_subparsers(dest="cache_action", help="Cache commands")
@@ -118,6 +153,8 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     elif args.action == "availability":
         return _availability(args)
+    elif args.action == "suggest":
+        return _suggest(args)
     elif args.action == "cache":
         return _cache(args)
 
@@ -507,6 +544,293 @@ def _availability_summary(result, schematic_path: Path) -> None:
         print("\n✓ All parts available")
     else:
         print("\n✗ Some parts have availability issues")
+
+
+def _suggest(args) -> int:
+    """Handle parts suggest command."""
+    try:
+        from ..cost.suggest import PartSuggester
+        from ..schema.bom import extract_bom
+    except ImportError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("Install with: pip install kicad-tools[parts]", file=sys.stderr)
+        return 1
+
+    schematic_path = Path(args.schematic)
+    if not schematic_path.exists():
+        print(f"Error: File not found: {schematic_path}", file=sys.stderr)
+        return 1
+
+    # Extract BOM
+    try:
+        bom = extract_bom(str(schematic_path))
+    except Exception as e:
+        print(f"Error loading schematic: {e}", file=sys.stderr)
+        return 1
+
+    if not bom.items:
+        print("No components found in schematic", file=sys.stderr)
+        return 1
+
+    # Create suggester
+    suggester = PartSuggester(
+        prefer_basic=not args.no_prefer_basic,
+        min_stock=args.min_stock,
+    )
+
+    try:
+        result = suggester.suggest_for_bom(bom)
+    finally:
+        suggester.close()
+
+    # Filter suggestions
+    suggestions = result.suggestions
+    if not args.all:
+        suggestions = [s for s in suggestions if s.needs_lcsc]
+
+    if not suggestions:
+        if args.all:
+            print("No components found in schematic")
+        else:
+            print("All components already have LCSC part numbers")
+        return 0
+
+    # Output results
+    if args.format == "json":
+        _suggest_json(result, suggestions)
+    else:
+        _suggest_table(result, suggestions, schematic_path)
+
+    # Apply if requested
+    if args.apply:
+        return _apply_suggestions(schematic_path, result)
+
+    return 0
+
+
+def _suggest_json(result, suggestions) -> None:
+    """Output suggestions as JSON."""
+    output = {
+        "summary": {
+            "total_components": result.total_components,
+            "missing_lcsc": result.missing_lcsc,
+            "found_suggestions": result.found_suggestions,
+            "no_suggestions": result.no_suggestions,
+        },
+        "suggestions": [],
+    }
+
+    for s in suggestions:
+        item = {
+            "reference": s.reference,
+            "value": s.value,
+            "footprint": s.footprint,
+            "package": s.package,
+            "existing_lcsc": s.existing_lcsc,
+            "search_query": s.search_query,
+            "error": s.error,
+            "best_suggestion": None,
+            "all_suggestions": [],
+        }
+
+        if s.best_suggestion:
+            item["best_suggestion"] = {
+                "lcsc_part": s.best_suggestion.lcsc_part,
+                "mfr_part": s.best_suggestion.mfr_part,
+                "description": s.best_suggestion.description,
+                "package": s.best_suggestion.package,
+                "stock": s.best_suggestion.stock,
+                "is_basic": s.best_suggestion.is_basic,
+                "unit_price": s.best_suggestion.unit_price,
+                "confidence": s.best_suggestion.confidence,
+            }
+
+        for sug in s.suggestions:
+            item["all_suggestions"].append(
+                {
+                    "lcsc_part": sug.lcsc_part,
+                    "mfr_part": sug.mfr_part,
+                    "description": sug.description,
+                    "package": sug.package,
+                    "stock": sug.stock,
+                    "is_basic": sug.is_basic,
+                    "unit_price": sug.unit_price,
+                    "confidence": sug.confidence,
+                }
+            )
+
+        output["suggestions"].append(item)
+
+    print(json.dumps(output, indent=2))
+
+
+def _suggest_table(result, suggestions, schematic_path: Path) -> None:
+    """Output suggestions as formatted table."""
+    print()
+    print("=" * 90)
+    print("LCSC PART SUGGESTIONS")
+    print("=" * 90)
+    print(f"Schematic: {schematic_path.name}")
+    print(f"Components analyzed: {result.total_components}")
+    print(f"Missing LCSC numbers: {result.missing_lcsc}")
+    print()
+
+    # Table header
+    print(
+        f"{'Ref':<6} {'Value':<12} {'Footprint':<18} {'Suggested LCSC':<12} "
+        f"{'Stock':>8} {'Type':<6}"
+    )
+    print("-" * 90)
+
+    # Group by status
+    found = [s for s in suggestions if s.has_suggestion]
+    not_found = [s for s in suggestions if not s.has_suggestion and s.needs_lcsc]
+    has_lcsc = [s for s in suggestions if not s.needs_lcsc]
+
+    # Show found suggestions
+    for s in found:
+        best = s.best_suggestion
+        # Truncate long values
+        value = s.value[:11] if len(s.value) > 11 else s.value
+        fp = s.package[:17] if len(s.package) > 17 else s.package
+
+        stock_str = _format_stock(best.stock)
+        print(
+            f"{s.reference:<6} {value:<12} {fp:<18} {best.lcsc_part:<12} "
+            f"{stock_str:>8} {best.type_str:<6}"
+        )
+
+    # Show not found
+    if not_found:
+        print()
+        print("? NO SUGGESTIONS FOUND:")
+        for s in not_found:
+            value = s.value[:11] if len(s.value) > 11 else s.value
+            error = s.error or "No matching parts"
+            print(f"  {s.reference}: {value} - {error}")
+
+    # Show already has LCSC (if --all)
+    if has_lcsc:
+        print()
+        print(f"✓ ALREADY HAS LCSC ({len(has_lcsc)} components)")
+
+    # Summary
+    print()
+    print("-" * 90)
+    print(f"Summary: {result.found_suggestions}/{result.missing_lcsc} suggestions found")
+
+    if result.found_suggestions > 0:
+        print()
+        print("Run with --apply to update schematic with suggested LCSC numbers")
+
+
+def _format_stock(stock: int) -> str:
+    """Format stock number for display."""
+    if stock >= 1_000_000:
+        return f"{stock / 1_000_000:.1f}M"
+    elif stock >= 1000:
+        return f"{stock / 1000:.1f}k"
+    else:
+        return str(stock)
+
+
+def _apply_suggestions(schematic_path: Path, result) -> int:
+    """Apply suggested LCSC numbers to the schematic."""
+    from ..schema.hierarchy import build_hierarchy
+    from ..schema.schematic import Schematic
+
+    # Build mapping of reference -> suggested LCSC
+    lcsc_map = {}
+    for s in result.suggestions:
+        if s.has_suggestion and s.needs_lcsc:
+            lcsc_map[s.reference] = s.best_suggestion.lcsc_part
+
+    if not lcsc_map:
+        print("No suggestions to apply")
+        return 0
+
+    # Load hierarchy and update all sheets
+    hierarchy = build_hierarchy(str(schematic_path))
+    updated_count = 0
+
+    for node in hierarchy.all_nodes():
+        try:
+            sch = Schematic.load(node.path)
+            sheet_updated = False
+
+            for symbol in sch.sexp.find_all("symbol"):
+                # Get reference
+                ref = None
+                for prop in symbol.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref = prop.get_string(1)
+                        break
+
+                if not ref or ref not in lcsc_map:
+                    continue
+
+                # Check if already has LCSC property
+                has_lcsc = False
+                for prop in symbol.find_all("property"):
+                    name = prop.get_string(0)
+                    if name and name.lower() in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
+                        has_lcsc = True
+                        break
+
+                if has_lcsc:
+                    continue
+
+                # Add LCSC property
+                lcsc_value = lcsc_map[ref]
+                _add_lcsc_property(symbol, lcsc_value)
+                updated_count += 1
+                sheet_updated = True
+
+            if sheet_updated:
+                sch.save()
+
+        except Exception as e:
+            print(f"Warning: Failed to update {node.path}: {e}", file=sys.stderr)
+
+    print(f"\n✓ Applied {updated_count} LCSC part numbers to schematic")
+    return 0
+
+
+def _add_lcsc_property(symbol, lcsc_value: str) -> None:
+    """Add LCSC property to a symbol S-expression."""
+    from kicad_tools.sexp import SExp
+
+    # Find position from existing properties
+    pos = (0.0, 0.0)
+    for prop in symbol.find_all("property"):
+        if at := prop.find("at"):
+            pos = (at.get_float(0) or 0, at.get_float(1) or 0)
+            break
+
+    # Create LCSC property
+    prop = SExp("property")
+    prop.add("LCSC")
+    prop.add(lcsc_value)
+
+    # Add position (offset from reference position)
+    at = SExp("at")
+    at.add(pos[0])
+    at.add(pos[1] + 2.54)  # Offset below
+    at.add(0)
+    prop.add(at)
+
+    # Add effects (hidden by default)
+    effects = SExp("effects")
+    font = SExp("font")
+    size = SExp("size")
+    size.add(1.27)
+    size.add(1.27)
+    font.add(size)
+    effects.add(font)
+    effects.add(SExp("hide"))
+    prop.add(effects)
+
+    symbol.add(prop)
 
 
 def _availability_table(result, items, schematic_path: Path, quantity: int) -> None:
