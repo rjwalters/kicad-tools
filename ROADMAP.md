@@ -10,17 +10,17 @@ file manipulation. We complement KiCad—we don't replace it.
 1. **Agent-First API** - Every operation callable from code with structured I/O
 2. **Rich Feedback** - Validation returns actionable information, not just pass/fail
 3. **Round-Trip Fidelity** - Edits preserve existing file structure
-4. **Leverage KiCad** - Use kicad-cli for complex operations (Gerbers, rendering); focus our effort on agent-specific capabilities
+4. **Leverage KiCad** - Use kicad-cli for complex operations; focus on agent-specific capabilities
 5. **Hierarchical Abstractions** - Work with circuit blocks, not just primitives
 
 ---
 
-## Agent Workflow
+## Current State (v0.8.0)
 
-The complete agent PCB design workflow:
+The complete agent PCB design workflow is now supported:
 
-| Step | Capability | Status |
-|------|------------|--------|
+| Step | Capability | Version |
+|------|------------|---------|
 | Parse datasheets | `datasheet` module | v0.4.0 |
 | Create symbols/footprints | `library` module, generators | v0.4.0 |
 | Design schematic | `Schematic`, circuit blocks | v0.5.0 |
@@ -30,7 +30,14 @@ The complete agent PCB design workflow:
 | Export for manufacturing | `AssemblyPackage` (via kicad-cli) | v0.2.0 |
 | AI agent integration | MCP server, sessions | v0.8.0 |
 
-**Core challenges for agents** (addressed in planned versions):
+See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
+
+---
+
+## Core Challenges for Agents
+
+These are the fundamental challenges AI agents face when designing PCBs, and how
+we plan to address them:
 
 | Challenge | Description | Solution |
 |-----------|-------------|----------|
@@ -39,141 +46,6 @@ The complete agent PCB design workflow:
 | Feedback Latency | Problems discovered late in process | Continuous Validation (v0.9) |
 | Knowledge Gap | Agents lack PCB design expertise | Patterns + Explanations (v0.10) |
 | Communication Overhead | Verbose state, repeated context | Context Persistence (v0.9) |
-
----
-
-## Released Versions
-
-### v0.1.0 - Foundation
-
-- S-expression parser with round-trip editing
-- Schematic/PCB/Library parsing
-- Unified CLI with JSON output
-- Manufacturer design rules (JLCPCB, OSHPark, PCBWay, Seeed)
-- ERC/DRC report parsing
-
-### v0.2.0 - Manufacturing Readiness
-
-- LCSC parts database integration
-- Assembly package export (gerbers, BOM, pick-and-place)
-- Fluent query API (`sch.symbols.filter(value="100nF")`)
-- A* autorouter with obstacle awareness
-- Trace optimizer with length matching
-- Footprint validation and repair
-
-### v0.3.0 - Reasoning & Routing
-
-- **LLM reasoning integration** (`kct reason`)
-  - PCB state representation for LLMs
-  - Command vocabulary for routing actions
-  - Feedback/diagnosis for failed operations
-- Differential pair routing with length matching
-- Bus routing for grouped signals
-- Zone-aware routing with thermal relief
-- Interactive REPL mode
-
-### v0.4.0 - Library Management & Validation
-
-- **Symbol library tools**: create, edit, save
-- **Footprint library tools**: create, edit, save
-- **Parametric footprint generators**: SOIC, QFP, QFN, DFN, BGA, chip, SOT, DIP
-- **Pure Python DRC** (no kicad-cli required)
-- **Datasheet tools**: PDF parsing, pin extraction, symbol generation
-
-### v0.5.0 - Workflow Polish
-
-- **Circuit Blocks**: MCUBlock, CrystalOscillator, USBConnector, DebugHeader, LDOBlock, etc.
-- **Schematic Enhancements**: auto-layout, netlist sync validation
-- **API Refinements**: unified `Project` class, progress callbacks, actionable errors
-- **Examples**: end-to-end PCB design, agent integration examples
-
-### v0.6.0 - Intelligent Placement
-
-**Focus**: Help agents make better initial component placement decisions.
-
-Placement is where agents struggle most—random placement leads to unroutable
-boards. This release adds intelligence to the placement step.
-
-**Placement Engine**
-- [x] Functional clustering (group related components: MCU+bypass caps, USB+ESD)
-- [x] Thermal-aware placement (power components near edges, heat spreading)
-- [x] Signal integrity hints (keep high-speed traces short, minimize stubs)
-- [x] Edge placement for connectors and interfaces
-
-**Placement Constraints**
-- [x] Keep-out zones (mechanical, thermal, RF)
-- [x] Component grouping rules (define which components belong together)
-- [x] Alignment constraints (grid snap, row/column alignment)
-
-**Agent Integration**
-- [x] Placement suggestions with rationale (explainable to LLMs)
-- [x] Iterative refinement API (agent can query "what if I move X here?")
-
-### v0.7.0 - Design Feedback & Iteration
-
-**Focus**: Help agents understand failures and improve designs.
-
-When DRC fails or routing is congested, agents need actionable guidance—not
-just error codes. This release makes the feedback loop agent-friendly.
-
-**Rich Error Diagnostics** *(inspired by atopile)*
-- [x] Source-attached exceptions with file:line:position tracking
-- [x] Rich terminal rendering with syntax highlighting (via Rich library)
-- [x] Error accumulation for batch validation (report ALL DRC violations)
-- [x] S-expression snippet extraction for error context
-- [x] Fix suggestions for common errors
-
-**Actionable Feedback**
-- [x] DRC errors with specific fix suggestions ("move C1 0.5mm left")
-- [x] Routing congestion analysis ("area around U1 pins 4-7 is congested")
-- [x] Constraint conflict detection ("keepout overlaps required via")
-
-**Design Quality Metrics**
-- [x] Trace length reports (for timing-critical nets)
-- [x] Thermal analysis hints (identify hot spots)
-- [x] Signal integrity estimates (crosstalk risk, impedance discontinuities)
-
-**Cross-Domain Validation**
-- [x] Schematic↔PCB consistency checks
-- [x] BOM↔placement verification (all parts placed?)
-- [x] Net connectivity validation
-
-**Cost Awareness**
-- [x] Manufacturing cost estimation (board + assembly)
-- [x] Part availability checking (LCSC stock levels)
-- [x] Alternative part suggestions
-
-### v0.8.0 - AI Agent Integration
-
-**Focus**: Enable AI agents to interact with KiCad designs via MCP.
-
-*(Inspired by atopile's MCP server architecture)*
-
-**MCP Server**
-- [x] FastMCP server exposing kicad-tools functionality
-- [x] Two-tier tool design: discovery (read-only) + action (mutations)
-- [x] Session management for stateful placement refinement
-- [x] Support stdio and HTTP transports
-
-**MCP Tools**
-| Category | Tools | State |
-|----------|-------|-------|
-| Analysis | `analyze_board`, `get_drc_violations`, `measure_clearance` | Stateless |
-| Export | `export_gerbers`, `export_bom`, `export_assembly` | Stateless |
-| Placement | `placement_analyze`, `placement_suggestions` | Stateless |
-| Placement Session | `start_session`, `query_move`, `apply_move`, `commit`, `rollback` | Stateful |
-| Routing | `route_net`, `get_unrouted_nets` | Stateless |
-
-**Layout Preservation** *(inspired by atopile)*
-- [x] Hierarchical address-based component matching (`power.ldo.package`)
-- [x] Preserve placement/routing when regenerating PCB from schematic
-- [x] Anchor-based offset calculation for subcircuit layouts
-- [x] Net remapping for name changes
-- [x] Incremental layout updates (only touch changed components)
-
-**BOM Enhancements**
-- [x] Availability checking with `--check-availability` flag
-- [x] JLCPCB assembly validation with `--validate-jlcpcb` flag
 
 ---
 
@@ -236,6 +108,8 @@ continuous feedback.
 - [ ] Learned preferences from agent behavior
 - [ ] Efficient state encoding (reduce token overhead)
 
+---
+
 ### v0.10.0 - Pattern Library & Explanations
 
 **Focus**: Encode expert PCB design knowledge for agent use.
@@ -296,6 +170,8 @@ library of validated design patterns accelerates iteration and improves quality.
 - [ ] Automatic decomposition of high-level commands
 - [ ] Consistent results across abstraction levels
 
+---
+
 ### v0.11.0 - Typed Interfaces & Constraints
 
 **Focus**: Type-safe circuit blocks and parametric part selection.
@@ -328,6 +204,8 @@ ldo = LDOBlock(sch, ref="U1",
 # System auto-selects LDO and caps from LCSC
 ```
 
+---
+
 ### v1.0.0 - Production Ready
 
 **Focus**: API stability, performance, and production deployment.
@@ -338,6 +216,8 @@ ldo = LDOBlock(sch, ref="U1",
 - [ ] Robust error handling across all modules
 - [ ] CI/CD integration examples
 - [ ] Benchmark suite for regression testing
+
+---
 
 ### Beyond v1.0 - Ecosystem & IDE
 
@@ -382,18 +262,3 @@ These are explicitly **not** planned:
 3. Support `--format json` in CLI commands
 4. Return actionable errors from every API
 5. Test with real KiCad files (8.0+)
-
----
-
-## Release History
-
-| Version | Date | Focus |
-|---------|------|-------|
-| 0.1.0 | 2025-12-29 | Foundation: parsing, CLI, manufacturer rules |
-| 0.2.0 | 2025-12-30 | Manufacturing: LCSC, export, autorouter |
-| 0.3.0 | 2025-12-31 | Reasoning: LLM integration, diff pairs, zones |
-| 0.4.0 | 2025-12-31 | Libraries: symbol/footprint creation, pure Python DRC, datasheets |
-| 0.5.0 | 2026-01-02 | Workflow: circuit blocks, Project class, examples |
-| 0.6.0 | 2026-01-03 | Intelligent Placement: clustering, thermal, edge, agent API |
-| 0.7.0 | 2026-01-04 | Design Feedback: rich errors, actionable suggestions, cost awareness |
-| 0.8.0 | 2026-01-05 | AI Agent Integration: MCP server, layout preservation, BOM validation |
