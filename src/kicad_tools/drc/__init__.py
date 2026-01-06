@@ -23,6 +23,14 @@ from .checker import (
     ManufacturerCheck,
     check_manufacturer_rules,
 )
+from .incremental import (
+    DRCDelta,
+    DRCState,
+    IncrementalDRC,
+    SpatialIndex,
+)
+from .incremental import Rectangle as DRCRectangle
+from .incremental import Violation as IncrementalViolation
 from .report import (
     DRCReport,
     parse_json_report,
@@ -58,4 +66,11 @@ __all__ = [
     "FixSuggestion",
     "FixAction",
     "generate_fix_suggestions",
+    # Incremental DRC
+    "IncrementalDRC",
+    "DRCState",
+    "DRCDelta",
+    "SpatialIndex",
+    "DRCRectangle",
+    "IncrementalViolation",
 ]
