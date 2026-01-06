@@ -407,6 +407,56 @@ class TestPcbModify:
         # Should show "Deleting" or "deleted" info
         assert "Deleting" in captured.out or "deleted" in captured.out.lower()
 
+    def test_delete_traces_actually_removes_segments(self, tmp_path, capsys, monkeypatch):
+        """Test delete-traces actually removes segments (not just dry-run).
+
+        This is a regression test for issue #552 where delete-traces reported
+        success but didn't actually remove segments due to deleting from a
+        computed property (sexp.values) instead of the actual list (sexp.children).
+        """
+        from kicad_tools.cli.pcb_modify import main
+
+        # Create a PCB with multiple segments on net GND
+        pcb_content = """(kicad_pcb
+  (version 20231120)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (segment (start 0 0) (end 10 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 10 0) (end 20 0) (width 0.2) (layer "F.Cu") (net 1))
+  (segment (start 20 0) (end 30 0) (width 0.2) (layer "F.Cu") (net 1))
+  (via (at 15 0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))
+  (segment (start 0 10) (end 10 10) (width 0.2) (layer "F.Cu") (net 2))
+)"""
+        pcb_file = tmp_path / "test_delete.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Run delete-traces on GND net (without dry-run)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["pcb-modify", str(pcb_file), "delete-traces", "GND"],
+        )
+        main()
+
+        captured = capsys.readouterr()
+        assert "Segments: 3" in captured.out
+        assert "Vias:     1" in captured.out
+
+        # Read the modified file and verify segments are gone
+        modified_content = pcb_file.read_text()
+
+        # GND segments should be removed
+        assert "(net 1)" not in modified_content or modified_content.count("(net 1)") == 1
+        # The net definition itself should still exist (net 1 "GND")
+        assert '(net 1 "GND")' in modified_content
+        # VCC segment should still exist
+        assert "(net 2)" in modified_content
+
     def test_kicad8_pcb_footprint_not_found(self, minimal_pcb: Path, capsys, monkeypatch):
         """Test that KiCad 8 PCBs with 'property' format report footprint not found.
 

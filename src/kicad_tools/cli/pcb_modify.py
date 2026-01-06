@@ -221,17 +221,20 @@ def cmd_delete_traces(sexp: SExp, args) -> bool:
         print(f"Error: Net '{args.net}' not found", file=sys.stderr)
         return False
 
-    # Count segments and vias to delete
+    # Collect segments and vias to delete
+    # Note: We must iterate over sexp.children (not sexp.values) and delete
+    # from sexp.children, because sexp.values is a computed property that
+    # returns a new list each time - deleting from it has no effect.
     segments_to_delete = []
     vias_to_delete = []
 
-    for i, child in enumerate(sexp.values):
-        if isinstance(child, SExp):
-            if child.tag == "segment":
-                if net := child.find_child("net"):
-                    if net.get_int(0) == net_number:
-                        segments_to_delete.append(i)
-            elif child.tag == "via" and (net := child.find_child("net")):
+    for i, child in enumerate(sexp.children):
+        if child.name == "segment":
+            if net := child.find_child("net"):
+                if net.get_int(0) == net_number:
+                    segments_to_delete.append(i)
+        elif child.name == "via":
+            if net := child.find_child("net"):
                 if net.get_int(0) == net_number:
                     vias_to_delete.append(i)
 
@@ -242,7 +245,7 @@ def cmd_delete_traces(sexp: SExp, args) -> bool:
     if not args.dry_run:
         # Delete in reverse order to preserve indices
         for i in sorted(segments_to_delete + vias_to_delete, reverse=True):
-            del sexp.values[i]
+            del sexp.children[i]
 
     return True
 
