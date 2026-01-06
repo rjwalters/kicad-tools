@@ -458,3 +458,94 @@ class TestSeverityClassification:
             r for r in reports if r.severity in (Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)
         ]
         assert len(elevated) > 0
+
+
+class TestParallelProcessing:
+    """Tests for parallel grid processing."""
+
+    def test_max_workers_default(self):
+        """Test that max_workers defaults to CPU count."""
+        import os
+
+        analyzer = CongestionAnalyzer()
+        assert analyzer.max_workers == (os.cpu_count() or 1)
+
+    def test_max_workers_custom(self):
+        """Test that max_workers can be customized."""
+        analyzer = CongestionAnalyzer(max_workers=2)
+        assert analyzer.max_workers == 2
+
+    def test_max_workers_disable_parallel(self):
+        """Test that max_workers=1 disables parallelism."""
+        analyzer = CongestionAnalyzer(max_workers=1)
+        assert analyzer.max_workers == 1
+
+    def test_parallel_and_sequential_results_match(self, congested_pcb: Path):
+        """Test that parallel and sequential processing produce identical results."""
+        pcb = PCB.load(str(congested_pcb))
+
+        # Sequential (max_workers=1)
+        sequential_analyzer = CongestionAnalyzer(grid_size=2.0, max_workers=1)
+        sequential_reports = sequential_analyzer.analyze(pcb)
+
+        # Parallel (max_workers=4)
+        parallel_analyzer = CongestionAnalyzer(grid_size=2.0, max_workers=4)
+        parallel_reports = parallel_analyzer.analyze(pcb)
+
+        # Same number of reports
+        assert len(parallel_reports) == len(sequential_reports)
+
+        # Same content (reports are sorted by severity, so order should match)
+        for seq, par in zip(sequential_reports, parallel_reports, strict=True):
+            assert seq.center == par.center
+            assert seq.radius == par.radius
+            assert seq.track_density == par.track_density
+            assert seq.via_count == par.via_count
+            assert seq.severity == par.severity
+            assert seq.components == par.components
+            assert seq.nets == par.nets
+
+    def test_parallel_with_simple_pcb(self, simple_pcb: Path):
+        """Test parallel processing with simple PCB."""
+        pcb = PCB.load(str(simple_pcb))
+
+        # Both should produce same results
+        sequential_analyzer = CongestionAnalyzer(max_workers=1)
+        parallel_analyzer = CongestionAnalyzer(max_workers=4)
+
+        seq_reports = sequential_analyzer.analyze(pcb)
+        par_reports = parallel_analyzer.analyze(pcb)
+
+        assert len(par_reports) == len(seq_reports)
+
+    def test_parallel_threshold_respected(self):
+        """Test that small grids fall back to sequential processing."""
+        # The _PARALLEL_THRESHOLD is 100 cells
+        # A small grid with less than 100 cells should use sequential
+        analyzer = CongestionAnalyzer(grid_size=2.0, max_workers=4)
+        assert analyzer._PARALLEL_THRESHOLD == 100
+
+    def test_different_worker_counts_same_results(self, congested_pcb: Path):
+        """Test that different worker counts produce identical results."""
+        pcb = PCB.load(str(congested_pcb))
+
+        results = []
+        for workers in [1, 2, 4, 8]:
+            analyzer = CongestionAnalyzer(grid_size=2.0, max_workers=workers)
+            reports = analyzer.analyze(pcb)
+            results.append(reports)
+
+        # All should have same number of reports
+        counts = [len(r) for r in results]
+        assert len(set(counts)) == 1, (
+            f"Different worker counts produced different result counts: {counts}"
+        )
+
+        # All should have same content
+        baseline = results[0]
+        for reports in results[1:]:
+            for base, other in zip(baseline, reports, strict=True):
+                assert base.center == other.center
+                assert base.track_density == other.track_density
+                assert base.via_count == other.via_count
+                assert base.severity == other.severity
