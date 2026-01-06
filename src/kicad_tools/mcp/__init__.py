@@ -14,6 +14,22 @@ Example (HTTP):
     kct mcp serve --transport http --port 8080
 """
 
+from kicad_tools.mcp.context import (
+    AgentPreferences,
+    AnnotateDecisionResult,
+    CheckpointResult,
+    Decision,
+    DecisionHistoryResult,
+    RecordDecisionResult,
+    SessionContext,
+    SessionContextResult,
+    SessionSummaryResult,
+    StateSnapshot,
+)
+from kicad_tools.mcp.preference_learner import (
+    PatternMatch,
+    PreferenceLearner,
+)
 from kicad_tools.mcp.server import (
     MCPServer,
     create_fastmcp_server,
@@ -38,10 +54,26 @@ from kicad_tools.mcp.types import (
 )
 
 __all__ = [
+    # Server
     "MCPServer",
     "create_server",
     "create_fastmcp_server",
     "run_server",
+    # Context types
+    "AgentPreferences",
+    "AnnotateDecisionResult",
+    "CheckpointResult",
+    "Decision",
+    "DecisionHistoryResult",
+    "RecordDecisionResult",
+    "SessionContext",
+    "SessionContextResult",
+    "SessionSummaryResult",
+    "StateSnapshot",
+    # Preference learner
+    "PatternMatch",
+    "PreferenceLearner",
+    # Board analysis types
     "AffectedItem",
     "BoardAnalysis",
     "BoardDimensions",
