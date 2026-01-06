@@ -5,6 +5,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-01-06
+
+### Added
+
+#### Design Intent System (`kicad_tools.intent`)
+
+Declare high-level design intent and automatically derive constraints:
+
+- **Interface Declarations** (`intent/types.py`, `intent/constraints.py`)
+  - `IntentDeclaration` - Declare design intent for net groups
+  - `Constraint` - Auto-derived constraints from interface specs
+  - `create_intent_declaration()` - Create declarations with automatic constraint derivation
+  - `validate_intent()` - Validate declarations against design
+
+- **Built-in Interface Specifications** (`intent/interfaces/`)
+  - `USB2HighSpeedSpec`, `USB2FullSpeedSpec`, `USB3Spec` - USB with impedance/length matching
+  - `SPISpec` - SPI bus with clock/data timing constraints
+  - `I2CSpec` - I2C with pull-up and capacitance requirements
+  - `PowerRailSpec` - Power rails with decoupling and current requirements
+
+- **Interface Registry** (`intent/registry.py`)
+  - `REGISTRY` - Global registry of interface types
+  - Extensible for custom interface definitions
+  - Auto-registration of built-in specs
+
+- **MCP Integration** (`mcp/tools/intent.py`)
+  - `declare_interface` - Declare interface intent via MCP
+  - `list_interfaces` - List available interface types
+  - `get_intent_status` - Check constraint satisfaction
+
+#### Continuous Validation (`kicad_tools.drc`)
+
+Real-time DRC during placement sessions:
+
+- **Incremental DRC Engine** (`drc/incremental.py`)
+  - `IncrementalDRC` - Efficient DRC with cached state
+  - `SpatialIndex` - R-tree spatial indexing for O(log n) region queries
+  - `check_move()` - Preview DRC impact without applying
+  - `apply_move()` - Apply move and update cached state
+  - Performance: <10ms incremental checks for 200+ components
+
+- **DRC Delta in Responses** (`drc/incremental.py`)
+  - `DRCDelta` - New vs resolved violations after changes
+  - `Violation` - Rich violation details with location and items
+  - Integrated into MCP `query_move` and `apply_move` responses
+
+- **Predictive Warnings** (`drc/predictive.py`)
+  - `PredictiveAnalyzer` - Anticipate problems before they occur
+  - Routing difficulty estimation based on placement
+  - Congestion analysis for component density
+  - Intent risk checking for declared interfaces
+  - Confidence-scored warnings with suggestions
+
+#### Intelligent Failure Recovery (`kicad_tools.router`)
+
+Root cause analysis and resolution strategies for failures:
+
+- **Failure Analysis** (`router/failure_analysis.py`)
+  - `RootCauseAnalyzer` - Determine why operations failed
+  - `FailureCause` enum - CONGESTION, BLOCKED_PATH, CLEARANCE, etc.
+  - `BlockingElement` - Identify what's blocking desired operations
+  - `CongestionMap` - Grid-based congestion heatmap
+
+- **Resolution Strategies** (`router/resolution.py`)
+  - `ResolutionStrategy` - Actionable fix with difficulty rating
+  - Multiple strategies per failure with trade-off analysis
+  - Strategy types: MOVE_COMPONENT, ADD_VIA, REROUTE_NET, USE_LAYER
+  - Difficulty estimation: EASY, MEDIUM, HARD
+
+#### Context Persistence (`kicad_tools.mcp.context`)
+
+Maintain design context across MCP sessions:
+
+- **Decision Tracking** (`mcp/context.py`)
+  - `Decision` - Record design decisions with rationale
+  - `DecisionOutcome` - Track success/failure of decisions
+  - Decision history for learning and explanation
+
+- **Session Context** (`mcp/context.py`)
+  - `SessionContext` - Extended session state
+  - `AgentPreferences` - Learned preferences from behavior
+  - `StateSnapshot` - Efficient state checkpoints
+
+- **State Summaries** (`mcp/context.py`)
+  - Compact state encoding for reduced token overhead
+  - Incremental updates instead of full state
+  - Queryable decision history
+
+### Changed
+
+- MCP session tools now return DRC delta in `query_move` and `apply_move` responses
+- Placement sessions integrate with incremental DRC for real-time validation
+
+### Dependencies
+
+- `rtree>=1.0` - R-tree spatial indexing (optional, falls back to linear scan)
+
 ## [0.8.0] - 2026-01-05
 
 ### Added
@@ -642,6 +739,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.9.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.9.0
 [0.8.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.8.0
 [0.7.2]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.2
 [0.7.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.7.1

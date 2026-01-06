@@ -15,7 +15,7 @@ file manipulation. We complement KiCad—we don't replace it.
 
 ---
 
-## Current State (v0.8.0)
+## Current State (v0.9.0)
 
 The complete agent PCB design workflow is now supported:
 
@@ -29,6 +29,7 @@ The complete agent PCB design workflow is now supported:
 | Validate design | Pure Python DRC, rich feedback | v0.7.0 |
 | Export for manufacturing | `AssemblyPackage` (via kicad-cli) | v0.2.0 |
 | AI agent integration | MCP server, sessions | v0.8.0 |
+| Design intent & feedback | `intent` module, incremental DRC | v0.9.0 |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
 
@@ -41,11 +42,11 @@ we plan to address them:
 
 | Challenge | Description | Solution |
 |-----------|-------------|----------|
-| Incomplete Information | Tools don't understand design intent | Design Intent System (v0.9) |
+| Incomplete Information | Tools don't understand design intent | ✅ Design Intent System (v0.9) |
 | Combinatorial Explosion | Huge placement/routing solution space | Pattern Library (v0.10) |
-| Feedback Latency | Problems discovered late in process | Continuous Validation (v0.9) |
+| Feedback Latency | Problems discovered late in process | ✅ Continuous Validation (v0.9) |
 | Knowledge Gap | Agents lack PCB design expertise | Patterns + Explanations (v0.10) |
-| Communication Overhead | Verbose state, repeated context | Context Persistence (v0.9) |
+| Communication Overhead | Verbose state, repeated context | ✅ Context Persistence (v0.9) |
 
 ---
 
@@ -62,20 +63,20 @@ release adds a design intent layer that captures requirements and provides
 continuous feedback.
 
 **Design Intent System**
-- [ ] Interface declarations with automatic constraint derivation
+- [x] Interface declarations with automatic constraint derivation
   ```python
   # Declare intent - system derives constraints automatically
   design.declare_interface("USB_D+", "USB_D-", type="usb2_high_speed")
   # System now enforces: 90Ω diff impedance, length matching, diff pair routing
   ```
-- [ ] Built-in interface types: `USB2`, `USB3`, `SPI`, `I2C`, `LVDS`, `DDR`, `Ethernet`
-- [ ] Intent-aware validation ("violates USB 2.0 spec" vs "clearance too small")
-- [ ] Intent-aware suggestions ("USB traces should be shorter for high-speed")
-- [ ] Custom interface definitions for project-specific needs
+- [x] Built-in interface types: `USB2`, `USB3`, `SPI`, `I2C`, `LVDS`, `DDR`, `Ethernet`
+- [x] Intent-aware validation ("violates USB 2.0 spec" vs "clearance too small")
+- [x] Intent-aware suggestions ("USB traces should be shorter for high-speed")
+- [x] Custom interface definitions for project-specific needs
 
 **Continuous Validation**
-- [ ] Real-time DRC during placement sessions (not just at end)
-- [ ] Predictive warnings based on current trajectory
+- [x] Real-time DRC during placement sessions (not just at end)
+- [x] Predictive warnings based on current trajectory
   ```python
   session.apply_move("C1", x=45, y=32)
   # Response includes:
@@ -83,13 +84,13 @@ continuous feedback.
   #   "message": "This position may make routing USB_D+ difficult",
   #   "suggestion": "Consider moving 2mm left"}]}
   ```
-- [ ] Routing difficulty estimation before routing
-- [ ] Incremental validation (only check affected areas)
-- [ ] "What-if" analysis API for evaluating changes without committing
+- [x] Routing difficulty estimation before routing
+- [x] Incremental validation (only check affected areas)
+- [x] "What-if" analysis API for evaluating changes without committing
 
 **Intelligent Failure Recovery**
-- [ ] Root cause analysis for routing/placement failures
-- [ ] Multiple resolution strategies with trade-offs
+- [x] Root cause analysis for routing/placement failures
+- [x] Multiple resolution strategies with trade-offs
   ```python
   result = router.route_net("CLK")
   # On failure, returns:
@@ -99,14 +100,14 @@ continuous feedback.
   #   {"strategy": "reroute_blocking_net", "net": "SPI_MOSI", "difficulty": "hard"}
   # ]}
   ```
-- [ ] Similar problem pattern matching ("this looks like bypass_cap_blocking")
-- [ ] Difficulty estimation for each fix option
+- [x] Similar problem pattern matching ("this looks like bypass_cap_blocking")
+- [x] Difficulty estimation for each fix option
 
 **Context Persistence**
-- [ ] Persistent design context across MCP calls
-- [ ] Decision history with rationale tracking
-- [ ] Learned preferences from agent behavior
-- [ ] Efficient state encoding (reduce token overhead)
+- [x] Persistent design context across MCP calls
+- [x] Decision history with rationale tracking
+- [x] Learned preferences from agent behavior
+- [x] Efficient state encoding (reduce token overhead)
 
 ---
 
