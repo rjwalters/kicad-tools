@@ -16,7 +16,7 @@ from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import MonteCarloRouter, MSTRouter, NegotiatedRouter
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
 from .bus_routing import BusRouter
-from .cpp_backend import create_hybrid_router, get_backend_info
+from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
@@ -220,6 +220,58 @@ class Autorouter:
             self._transmission_line = None
 
     @property
+    def _cpp_grid(self) -> CppGrid | None:
+        """Get the C++ grid if using C++ backend, None otherwise.
+
+        The C++ grid must be kept in sync with the Python grid to prevent
+        routing through previously placed traces (issue #590).
+        """
+        if isinstance(self.router, CppPathfinder):
+            return self.router._grid
+        return None
+
+    def _mark_route_on_cpp_grid(self, route: Route) -> None:
+        """Mark a route on the C++ grid to keep it in sync with Python grid.
+
+        This prevents the C++ pathfinder from routing through clearance zones
+        of previously routed traces. Without this sync, the C++ grid becomes
+        stale after the first route, causing DRC violations (issue #590).
+        """
+        cpp_grid = self._cpp_grid
+        if cpp_grid is None:
+            return
+
+        # Calculate clearance in grid cells (same logic as Python grid)
+        total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
+        clearance_cells = int(total_clearance / self.grid.resolution) + 1
+
+        # Mark all segments on C++ grid
+        for seg in route.segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+            cpp_grid.mark_segment(gx1, gy1, gx2, gy2, layer_idx, seg.net, clearance_cells)
+
+        # Mark all vias on C++ grid
+        for via in route.vias:
+            gx, gy = self.grid.world_to_grid(via.x, via.y)
+            # Via radius includes via_clearance + trace half-width (same as Python)
+            radius_cells = int(
+                (via.diameter / 2 + self.rules.via_clearance + self.rules.trace_width / 2)
+                / self.grid.resolution
+            )
+            cpp_grid.mark_via(gx, gy, via.net, radius_cells)
+
+    def _mark_route(self, route: Route) -> None:
+        """Mark a route on both Python and C++ grids.
+
+        This is the unified method that should be used instead of calling
+        self.grid.mark_route() directly, to ensure grid synchronization.
+        """
+        self.grid.mark_route(route)
+        self._mark_route_on_cpp_grid(route)
+
+    @property
     def physics_available(self) -> bool:
         """Check if physics calculations are available."""
         return self._transmission_line is not None
@@ -405,7 +457,7 @@ class Autorouter:
         # Handle intra-IC connections first
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
         for route in intra_routes:
-            self.grid.mark_route(route)
+            self._mark_route(route)
             routes.append(route)
             self.routes.append(route)
 
@@ -418,7 +470,7 @@ class Autorouter:
         mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
 
         def mark_route(route: Route):
-            self.grid.mark_route(route)
+            self._mark_route(route)
             self.routes.append(route)
 
         if use_mst and len(pad_objs) > 2:
@@ -654,7 +706,7 @@ class Autorouter:
         routes: list[Route] = []
         intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
         for route in intra_routes:
-            self.grid.mark_route(route)
+            self._mark_route(route)
             routes.append(route)
 
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
@@ -665,7 +717,7 @@ class Autorouter:
         neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
 
         def mark_route(route: Route):
-            self.grid.mark_route(route)
+            self._mark_route(route)
 
         new_routes = neg_router.route_net_negotiated(pad_objs, present_cost_factor, mark_route)
         routes.extend(new_routes)
