@@ -16,6 +16,7 @@ from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
 from .bus_routing import BusRouter
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
+from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
@@ -713,3 +714,125 @@ class Autorouter:
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Route all nets with differential pair-aware routing."""
         return self._diffpair.route_all_with_diffpairs(diffpair_config, net_order)
+
+    # =========================================================================
+    # Failure Analysis API
+    # =========================================================================
+
+    def analyze_routing_failure(
+        self,
+        net: int | str,
+        start_pad: tuple[str, str] | None = None,
+        end_pad: tuple[str, str] | None = None,
+    ) -> FailureAnalysis | None:
+        """Analyze why routing failed for a net.
+
+        Provides detailed root cause analysis including congestion score,
+        blocking elements, and actionable suggestions.
+
+        Args:
+            net: Net ID or net name to analyze
+            start_pad: Optional (ref, pin) tuple for start pad
+            end_pad: Optional (ref, pin) tuple for end pad
+
+        Returns:
+            FailureAnalysis with root cause and suggestions, or None if net not found
+
+        Example::
+
+            # After routing fails
+            failed_nets = router.get_failed_nets()
+            for net in failed_nets:
+                analysis = router.analyze_routing_failure(net)
+                print(f"Net {net}: {analysis.root_cause.value}")
+                for suggestion in analysis.suggestions:
+                    print(f"  - {suggestion}")
+        """
+        # Resolve net ID
+        net_id = net if isinstance(net, int) else self._resolve_net_id(net)
+        if net_id is None or net_id not in self.nets:
+            return None
+
+        pads = self.nets[net_id]
+        if len(pads) < 2:
+            return None
+
+        # Determine which pads to analyze
+        if start_pad and end_pad:
+            pad1 = self.pads.get(start_pad)
+            pad2 = self.pads.get(end_pad)
+        else:
+            # Use first two pads
+            pad1 = self.pads.get(pads[0])
+            pad2 = self.pads.get(pads[1])
+
+        if not pad1 or not pad2:
+            return None
+
+        # Create analyzer and analyze
+        analyzer = RootCauseAnalyzer()
+        net_name = self.net_names.get(net_id, f"Net_{net_id}")
+
+        return analyzer.analyze_routing_failure(
+            grid=self.grid,
+            start=(pad1.x, pad1.y),
+            end=(pad2.x, pad2.y),
+            net=net_name,
+            layer=self.grid.layer_to_index(pad1.layer.value),
+        )
+
+    def _resolve_net_id(self, net_name: str) -> int | None:
+        """Resolve a net name to its ID."""
+        for net_id, name in self.net_names.items():
+            if name == net_name:
+                return net_id
+        return None
+
+    def get_failed_nets(self) -> list[int]:
+        """Get list of nets that failed to route.
+
+        Returns:
+            List of net IDs that were not successfully routed
+        """
+        routed_nets = {r.net for r in self.routes}
+        all_nets = {n for n in self.nets.keys() if n != 0}
+        return list(all_nets - routed_nets)
+
+    def get_congestion_map(self) -> CongestionMap:
+        """Get a congestion heatmap for the current board state.
+
+        Returns:
+            CongestionMap that can be queried for congestion scores
+            and hotspots
+
+        Example::
+
+            cmap = router.get_congestion_map()
+            hotspots = cmap.find_congestion_hotspots(threshold=0.7)
+            for hotspot in hotspots:
+                print(f"Hotspot at ({hotspot.center[0]:.1f}, {hotspot.center[1]:.1f})")
+        """
+        return CongestionMap(self.grid)
+
+    def analyze_all_failures(self) -> dict[int, FailureAnalysis]:
+        """Analyze all failed nets and return failure analyses.
+
+        Returns:
+            Dictionary mapping net ID to FailureAnalysis
+
+        Example::
+
+            failures = router.analyze_all_failures()
+            for net_id, analysis in failures.items():
+                net_name = router.net_names.get(net_id, f"Net_{net_id}")
+                print(f"{net_name}: {analysis.root_cause.value} ({analysis.confidence:.0%})")
+        """
+        failed_nets = self.get_failed_nets()
+        analyses: dict[int, FailureAnalysis] = {}
+
+        for net_id in failed_nets:
+            analysis = self.analyze_routing_failure(net_id)
+            if analysis:
+                analyses[net_id] = analysis
+
+        return analyses

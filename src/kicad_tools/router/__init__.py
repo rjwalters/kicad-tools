@@ -35,6 +35,14 @@ from .analysis import (
     RoutingSeverity,
     analyze_routing_failure,
 )
+from .failure_analysis import (
+    BlockingElement,
+    CongestionMap,
+    FailureAnalysis,
+    FailureCause,
+    PathAttempt,
+    RootCauseAnalyzer,
+)
 from .bus import (
     BusGroup,
     BusRoutingConfig,
@@ -210,4 +218,11 @@ __all__ = [
     "ObstacleType",
     "RoutingSeverity",
     "analyze_routing_failure",
+    # Failure Analysis (Root Cause)
+    "FailureCause",
+    "FailureAnalysis",
+    "BlockingElement",
+    "PathAttempt",
+    "CongestionMap",
+    "RootCauseAnalyzer",
 ]
