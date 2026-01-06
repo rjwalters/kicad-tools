@@ -29,6 +29,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
     kicad-tools net-status <pcb>       - Report net connectivity status
+    kicad-tools init <project>         - Initialize project with manufacturer rules
 
 See `kicad-tools --help` for complete documentation.
 """
@@ -49,6 +50,7 @@ from .commands import (
     run_fix_footprints_command,
     run_footprint_command,
     run_impedance_command,
+    run_init_command,
     run_interactive_command,
     run_lib_command,
     run_mcp_command,
@@ -352,6 +354,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "mcp":
         return run_mcp_command(args)
+
+    elif args.command == "init":
+        return run_init_command(args)
 
     return 0
 
