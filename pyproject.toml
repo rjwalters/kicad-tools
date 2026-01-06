@@ -107,6 +107,13 @@ mcp = [
     "fastmcp>=2.0,<3",
     "pydantic>=2.0",
 ]
+# C++ native router acceleration (requires C++ compiler)
+native = [
+    "nanobind>=2.0",
+    "scikit-build-core>=0.8",
+    "cmake>=3.15",
+    "ninja>=1.10",
+]
 # All optional features
 all = [
     "rtree>=1.0",
