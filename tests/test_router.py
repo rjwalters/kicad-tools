@@ -1856,6 +1856,106 @@ class TestRouterPathfinder:
 
         assert route is not None
 
+    def test_trace_half_width_cells_includes_clearance(self):
+        """Test that trace blocking radius includes clearance (issue #553).
+
+        Previously, _trace_half_width_cells only accounted for trace_width/2,
+        causing DRC clearance violations when traces were placed too close to
+        obstacles. The fix ensures the calculation includes both trace half-width
+        AND clearance distance.
+
+        The formula should be: ceil((trace_width/2 + trace_clearance) / resolution)
+        """
+        import math
+
+        # Set up design rules with specific values
+        trace_width = 0.15  # mm
+        trace_clearance = 0.127  # mm (JLCPCB minimum)
+        grid_resolution = 0.1  # mm
+
+        rules = DesignRules(
+            trace_width=trace_width,
+            trace_clearance=trace_clearance,
+            grid_resolution=grid_resolution,
+        )
+        grid = RoutingGrid(50.0, 50.0, rules)
+        router = Router(grid, rules)
+
+        # Expected: ceil((0.15/2 + 0.127) / 0.1) = ceil((0.075 + 0.127) / 0.1)
+        #         = ceil(0.202 / 0.1) = ceil(2.02) = 3
+        expected_cells = max(
+            1, math.ceil((trace_width / 2 + trace_clearance) / grid_resolution)
+        )
+
+        assert router._trace_half_width_cells == expected_cells
+        assert router._trace_half_width_cells == 3  # Explicit check
+
+        # The OLD (buggy) calculation would have been:
+        # ceil(0.15/2 / 0.1) = ceil(0.75) = 1
+        # Verify we're NOT using the old formula
+        old_buggy_cells = max(1, math.ceil((trace_width / 2) / grid_resolution))
+        assert router._trace_half_width_cells != old_buggy_cells or expected_cells == old_buggy_cells
+
+    def test_trace_clearance_prevents_drc_violations(self):
+        """Test that router respects clearance when routing near obstacles.
+
+        This is a functional test for issue #553. With the fix, a trace should
+        not be placed within clearance distance of an obstacle, even if the
+        grid resolution equals the clearance value.
+        """
+        # Use grid resolution equal to clearance (the problematic case)
+        rules = DesignRules(
+            trace_width=0.15,
+            trace_clearance=0.127,
+            grid_resolution=0.127,  # Same as clearance - previously problematic
+        )
+        grid = RoutingGrid(30.0, 30.0, rules)
+        router = Router(grid, rules)
+
+        # Place an obstacle in the middle
+        obstacle = Obstacle(x=15.0, y=15.0, width=2.0, height=2.0, layer=Layer.F_CU)
+        grid.add_obstacle(obstacle)
+
+        # Create pads on opposite sides that would need to route around obstacle
+        start_pad = Pad(
+            x=5.0, y=15.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
+        end_pad = Pad(
+            x=25.0, y=15.0, width=0.5, height=0.5, net=1, net_name="test", layer=Layer.F_CU
+        )
+
+        grid.add_pad(start_pad)
+        grid.add_pad(end_pad)
+
+        route = router.route(start_pad, end_pad)
+
+        # Should find a route that goes around the obstacle
+        assert route is not None
+
+        # Verify no segment passes through the obstacle's clearance zone
+        # Obstacle is at (15, 15) with 2mm width/height
+        # Clearance zone extends from (14-clearance, 14-clearance) to (16+clearance, 16+clearance)
+        clearance = rules.trace_clearance
+        trace_half = rules.trace_width / 2
+        min_safe_distance = clearance + trace_half  # Trace edge must be this far from obstacle
+
+        for seg in route.segments:
+            if seg.layer != Layer.F_CU:
+                continue
+            # For horizontal segments at y near obstacle
+            if seg.y1 == seg.y2:  # Horizontal segment
+                y_dist = abs(seg.y1 - 15.0) - 1.0  # Distance from y to obstacle edge
+                if y_dist < min_safe_distance:
+                    # This segment is within clearance height band, check x doesn't cross
+                    x_min = min(seg.x1, seg.x2)
+                    x_max = max(seg.x1, seg.x2)
+                    # If segment crosses the obstacle x-range
+                    if x_min < 16.0 + clearance and x_max > 14.0 - clearance:
+                        # This would be a clearance violation - fail
+                        assert (
+                            y_dist >= min_safe_distance
+                        ), f"Segment at y={seg.y1} too close to obstacle"
+
 
 # =============================================================================
 # AdaptiveAutorouter Tests
