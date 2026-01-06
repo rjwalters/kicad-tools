@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .primitives import Pad, Route
-    from .rules import DesignRules
+    from .rules import DesignRules, NetClassRouting
 
 # Try to import C++ module
 try:
@@ -177,22 +177,25 @@ class CppPathfinder:
         self,
         start: Pad,
         end: Pad,
-        start_layers: list[int] | None = None,
-        end_layers: list[int] | None = None,
+        net_class: NetClassRouting | None = None,
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
+        start_layers: list[int] | None = None,
+        end_layers: list[int] | None = None,
     ) -> Route | None:
         """Route between two pads.
 
         Args:
             start: Source pad
             end: Destination pad
-            start_layers: Valid start layers (for PTH pads)
-            end_layers: Valid end layers (for PTH pads)
+            net_class: Optional net class for routing parameters (for interface
+                compatibility with Python Router; not fully used by C++ backend)
             negotiated_mode: Enable negotiated congestion routing
             present_cost_factor: Multiplier for sharing penalty
             weight: A* weight (1.0 = optimal, >1.0 = faster)
+            start_layers: Valid start layers (for PTH pads)
+            end_layers: Valid end layers (for PTH pads)
 
         Returns:
             Route object if successful, None if no path found

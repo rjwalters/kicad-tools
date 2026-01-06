@@ -45,6 +45,13 @@ from .bus import (
     group_buses,
 )
 from .core import AdaptiveAutorouter, Autorouter, RoutingResult
+from .cpp_backend import (
+    CppGrid,
+    CppPathfinder,
+    create_hybrid_router,
+    get_backend_info,
+    is_cpp_available,
+)
 from .diffpair import (
     DifferentialPair,
     DifferentialPairConfig,
@@ -127,6 +134,12 @@ __all__ = [
     "Autorouter",
     "AdaptiveAutorouter",
     "RoutingResult",
+    # C++ backend
+    "is_cpp_available",
+    "get_backend_info",
+    "create_hybrid_router",
+    "CppGrid",
+    "CppPathfinder",
     # Bus routing
     "BusGroup",
     "BusRoutingConfig",
