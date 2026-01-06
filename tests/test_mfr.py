@@ -358,6 +358,73 @@ class TestDRUFiles:
 class TestMfrCLICommands:
     """Tests for mfr CLI commands."""
 
+    def test_export_dru_default_output(self, tmp_path, monkeypatch):
+        """Test export-dru outputs to current directory by default (issue #550)."""
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        # Change to temp directory
+        monkeypatch.chdir(tmp_path)
+
+        # Run export-dru without -o flag
+        mfr_main(["export-dru", "jlcpcb", "--layers", "4"])
+
+        # Should create file in current directory with descriptive name
+        expected_file = tmp_path / "jlcpcb-4layer-1oz.kicad_dru"
+        assert expected_file.exists(), f"Expected {expected_file} to exist"
+
+        # Verify content is valid
+        content = expected_file.read_text()
+        assert "(version 1)" in content
+        assert "track_width" in content
+        assert "clearance" in content
+
+    def test_export_dru_with_output_path(self, tmp_path):
+        """Test export-dru with explicit -o output path."""
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        output_file = tmp_path / "custom_rules.kicad_dru"
+
+        mfr_main(["export-dru", "seeed", "--layers", "2", "-o", str(output_file)])
+
+        assert output_file.exists()
+        content = output_file.read_text()
+        assert "(version 1)" in content
+
+    def test_export_dru_creates_parent_dirs(self, tmp_path):
+        """Test export-dru creates parent directories if needed."""
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        # Nested path that doesn't exist
+        output_file = tmp_path / "nested" / "dir" / "rules.kicad_dru"
+
+        mfr_main(["export-dru", "pcbway", "--layers", "4", "-o", str(output_file)])
+
+        assert output_file.exists()
+
+    def test_export_dru_different_copper_weights(self, tmp_path, monkeypatch):
+        """Test export-dru with different copper weights."""
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        monkeypatch.chdir(tmp_path)
+
+        # Test 2oz copper
+        mfr_main(["export-dru", "jlcpcb", "--layers", "2", "--copper", "2.0"])
+
+        expected_file = tmp_path / "jlcpcb-2layer-2oz.kicad_dru"
+        assert expected_file.exists()
+
+    def test_export_dru_all_manufacturers(self, tmp_path, monkeypatch):
+        """Test export-dru works for all manufacturers."""
+        from kicad_tools.cli.mfr import main as mfr_main
+
+        monkeypatch.chdir(tmp_path)
+
+        manufacturers = ["jlcpcb", "seeed", "pcbway", "oshpark"]
+        for mfr in manufacturers:
+            mfr_main(["export-dru", mfr, "--layers", "2"])
+            expected = tmp_path / f"{mfr}-2layer-1oz.kicad_dru"
+            assert expected.exists(), f"Failed for {mfr}"
+
     def test_apply_rules_dry_run(self, tmp_path):
         """Test apply-rules command with dry-run."""
         import shutil
