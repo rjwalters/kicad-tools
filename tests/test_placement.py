@@ -881,3 +881,185 @@ class TestApplyFixes:
         original = overlapping_pcb.read_text()
         modified = output_path.read_text()
         assert original != modified, "Fix command should modify the file"
+
+
+# Test PCB using legacy fp_text reference format (real KiCad file format)
+# This format is used by actual KiCad PCB files, as opposed to the
+# property "Reference" format used in inline test fixtures.
+FP_TEXT_FORMAT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad-tools-demo")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
+    (layer "F.Cu")
+    (uuid "mcu-u1-001")
+    (at 100 100)
+    (fp_text reference "U1"
+      (at 0 -6)
+      (layer "F.SilkS")
+      (uuid "u1-ref-001")
+      (effects
+        (font
+          (size 1 1)
+          (thickness 0.15)
+        )
+      )
+    )
+    (fp_text value "STM32F103"
+      (at 0 6)
+      (layer "F.Fab")
+      (uuid "u1-val-001")
+    )
+    (pad "1" smd rect (at -4.500 -2.800) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+  )
+  (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
+    (layer "F.Cu")
+    (uuid "mcu-u2-001")
+    (at 100.5 100)
+    (fp_text reference "U2"
+      (at 0 -6)
+      (layer "F.SilkS")
+      (uuid "u2-ref-001")
+      (effects
+        (font
+          (size 1 1)
+          (thickness 0.15)
+        )
+      )
+    )
+    (fp_text value "STM32F103"
+      (at 0 6)
+      (layer "F.Fab")
+      (uuid "u2-val-001")
+    )
+    (pad "1" smd rect (at -4.500 -2.800) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET1"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def fp_text_format_pcb(tmp_path: Path) -> Path:
+    """Create a PCB file using the legacy fp_text reference format."""
+    pcb_file = tmp_path / "fp_text_format.kicad_pcb"
+    pcb_file.write_text(FP_TEXT_FORMAT_PCB)
+    return pcb_file
+
+
+class TestFpTextReferenceFormat:
+    """Tests for fix application with fp_text reference format (issue #547).
+
+    Real KiCad PCB files use fp_text reference "REF" format, not
+    property "Reference" "REF". This was causing the fix command to
+    suggest fixes but apply 0 of them.
+    """
+
+    def test_apply_fixes_with_fp_text_format(self, fp_text_format_pcb: Path, tmp_path: Path):
+        """Test that apply_fixes works with fp_text reference format.
+
+        This is the core test for issue #547 - fixes were being suggested
+        but the regex wasn't matching fp_text format, so 0 fixes were applied.
+        """
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(fp_text_format_pcb)
+        assert len(conflicts) >= 1, "Should have conflicts to fix"
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+        assert len(fixes) >= 1, "Should suggest fixes"
+
+        # Apply fixes to a new file
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(fp_text_format_pcb, fixes, output_path)
+
+        # The key assertion: fixes_applied should be > 0
+        assert result.fixes_applied > 0, (
+            f"Should apply at least one fix with fp_text format, but applied {result.fixes_applied}. "
+            "This was the bug in issue #547."
+        )
+
+        # Verify the output file was modified
+        original = fp_text_format_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Output file should be different from original"
+
+    def test_fp_text_format_position_changes(self, fp_text_format_pcb: Path, tmp_path: Path):
+        """Test that fp_text format positions are actually modified."""
+        import re
+
+        analyzer = PlacementAnalyzer()
+        conflicts = analyzer.find_conflicts(fp_text_format_pcb)
+
+        fixer = PlacementFixer()
+        fixes = fixer.suggest_fixes(conflicts, analyzer)
+
+        # Get the component being moved
+        component_to_move = fixes[0].component
+        move_vector = fixes[0].move_vector
+
+        # Find original position
+        original = fp_text_format_pcb.read_text()
+
+        # Apply fixes
+        output_path = tmp_path / "fixed.kicad_pcb"
+        result = fixer.apply_fixes(fp_text_format_pcb, fixes, output_path)
+
+        assert result.fixes_applied > 0
+
+        # Read modified content and verify position changed
+        modified = output_path.read_text()
+
+        # Helper to find position - must match both formats
+        def find_position(content: str, ref: str) -> tuple[float, float] | None:
+            # Match both property "Reference" and fp_text reference formats
+            pattern = rf'\(footprint\s+"[^"]+"\s+\(layer\s+"[^"]+"\)[\s\S]*?\(at\s+([\d.-]+)\s+([\d.-]+)[\s\S]*?(?:property\s+"Reference"\s+"{re.escape(ref)}"|fp_text\s+reference\s+"{re.escape(ref)}")'
+            match = re.search(pattern, content)
+            if match:
+                return float(match.group(1)), float(match.group(2))
+            return None
+
+        orig_pos = find_position(original, component_to_move)
+        new_pos = find_position(modified, component_to_move)
+
+        assert orig_pos is not None, f"Should find original position for {component_to_move}"
+        assert new_pos is not None, f"Should find new position for {component_to_move}"
+
+        # Verify position changed by approximately the move vector
+        dx = new_pos[0] - orig_pos[0]
+        dy = new_pos[1] - orig_pos[1]
+
+        assert abs(dx - move_vector.x) < 0.001, (
+            f"X position change {dx} should match move vector {move_vector.x}"
+        )
+        assert abs(dy - move_vector.y) < 0.001, (
+            f"Y position change {dy} should match move vector {move_vector.y}"
+        )
+
+    def test_cli_fix_with_fp_text_format(self, fp_text_format_pcb: Path, tmp_path: Path):
+        """Test that CLI fix command works with fp_text format."""
+        from kicad_tools.cli.placement_cmd import main
+
+        output_path = tmp_path / "cli_fixed.kicad_pcb"
+
+        # Run fix command
+        main(["fix", str(fp_text_format_pcb), "-o", str(output_path), "--quiet"])
+
+        # Verify output file exists and is different from original
+        assert output_path.exists(), "Fix command should create output file"
+
+        original = fp_text_format_pcb.read_text()
+        modified = output_path.read_text()
+        assert original != modified, "Fix command should modify the file with fp_text format"
