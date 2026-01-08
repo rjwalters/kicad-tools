@@ -636,6 +636,68 @@ class TestLDOBlockMocked:
         # Should add rail extension
         assert mock_schematic.add_rail.called
 
+    def test_ldo_domain_parameter(self, mock_schematic):
+        """LDO block accepts domain parameter."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="A", output_voltage="3V3")
+
+        assert ldo.domain == "A"
+        assert ldo.output_voltage == "3V3"
+
+    def test_ldo_get_vout_net_name_no_domain(self, mock_schematic):
+        """Get VOUT net name without domain."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="", output_voltage="3V3")
+
+        assert ldo.get_vout_net_name() == "+3V3"
+
+    def test_ldo_get_vout_net_name_analog_domain(self, mock_schematic):
+        """Get VOUT net name for analog domain."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="A", output_voltage="3V3")
+
+        assert ldo.get_vout_net_name() == "+3V3A"
+
+    def test_ldo_get_vout_net_name_digital_domain(self, mock_schematic):
+        """Get VOUT net name for digital domain."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="D", output_voltage="3V3")
+
+        assert ldo.get_vout_net_name() == "+3V3D"
+
+    def test_ldo_get_gnd_net_name_no_domain(self, mock_schematic):
+        """Get GND net name without domain."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="", output_voltage="3V3")
+
+        assert ldo.get_gnd_net_name() == "GND"
+
+    def test_ldo_get_gnd_net_name_analog_domain(self, mock_schematic):
+        """Get GND net name for analog domain."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="A", output_voltage="3V3")
+
+        assert ldo.get_gnd_net_name() == "AGND"
+
+    def test_ldo_get_gnd_net_name_digital_domain(self, mock_schematic):
+        """Get GND net name for digital domain."""
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="D", output_voltage="3V3")
+
+        assert ldo.get_gnd_net_name() == "DGND"
+
+    def test_ldo_add_power_labels(self, mock_schematic):
+        """LDO adds domain-specific power labels."""
+        mock_schematic.add_global_label = Mock()
+
+        ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", domain="A", output_voltage="3V3")
+        ldo.add_power_labels(vout_rail_y=50, gnd_rail_y=150)
+
+        # Should add two global labels
+        assert mock_schematic.add_global_label.call_count == 2
+
+        # Check the calls
+        calls = mock_schematic.add_global_label.call_args_list
+        # First call is VOUT label
+        assert calls[0][0][0] == "+3V3A"
+        assert calls[0][1]["shape"] == "input"
+        # Second call is GND label
+        assert calls[1][0][0] == "AGND"
+        assert calls[1][1]["shape"] == "passive"
+
 
 class TestOscillatorBlockMocked:
     """Tests for OscillatorBlock with mocked schematic."""

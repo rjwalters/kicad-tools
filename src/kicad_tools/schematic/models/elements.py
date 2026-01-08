@@ -214,7 +214,8 @@ class GlobalLabel:
     automatically connected throughout the entire schematic hierarchy.
 
     Commonly used for:
-    - Power rails (VCC, GND, +3V3)
+    - Power rails (VCC, GND, +3V3, AGND, DGND)
+    - Domain-specific power (VCC_3V3A, VCC_3V3D)
     - Shared buses (I2C_SDA, I2C_SCL)
     - Control signals that span multiple sheets
     """

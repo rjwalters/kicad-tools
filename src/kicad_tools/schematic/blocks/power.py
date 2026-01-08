@@ -112,6 +112,12 @@ class LDOBlock(CircuitBlock):
         - VOUT: Output voltage
         - GND: Ground
         - EN: Enable (optional, usually tied to VIN)
+
+    Power Domain Support:
+        Use the `domain` parameter to create domain-specific power nets:
+        - domain="" (default): Uses standard power symbols (+3V3, GND)
+        - domain="A": Creates analog domain (+3V3A, AGND)
+        - domain="D": Creates digital domain (+3V3D, DGND)
     """
 
     def __init__(
@@ -126,6 +132,8 @@ class LDOBlock(CircuitBlock):
         output_caps: list[str] = None,
         cap_ref_start: int = 1,
         en_tied_to_vin: bool = True,
+        domain: str = "",
+        output_voltage: str = "3V3",
     ):
         """
         Create an LDO power supply block.
@@ -141,8 +149,12 @@ class LDOBlock(CircuitBlock):
             output_caps: List of output capacitor values
             cap_ref_start: Starting reference number for caps
             en_tied_to_vin: If True, tie EN pin to VIN
+            domain: Power domain identifier ("" for generic, "A" for analog, "D" for digital)
+            output_voltage: Output voltage string (e.g., "3V3", "5V") for net naming
         """
         super().__init__(sch, x, y)
+        self.domain = domain
+        self.output_voltage = output_voltage
 
         if output_caps is None:
             output_caps = ["10uF", "100nF"]
@@ -233,6 +245,64 @@ class LDOBlock(CircuitBlock):
         if extend_vout_rail_to is not None:
             vout_pos = self.ldo.pin_position("VOUT")
             sch.add_rail(vout_rail_y, vout_pos[0], extend_vout_rail_to)
+
+    def get_vout_net_name(self) -> str:
+        """Get the domain-specific output voltage net name.
+
+        Returns:
+            Net name based on domain and output voltage:
+            - domain="": "+3V3" (generic)
+            - domain="A": "+3V3A" (analog)
+            - domain="D": "+3V3D" (digital)
+        """
+        if self.domain:
+            return f"+{self.output_voltage}{self.domain}"
+        return f"+{self.output_voltage}"
+
+    def get_gnd_net_name(self) -> str:
+        """Get the domain-specific ground net name.
+
+        Returns:
+            Ground net name based on domain:
+            - domain="": "GND" (generic)
+            - domain="A": "AGND" (analog)
+            - domain="D": "DGND" (digital)
+        """
+        if self.domain:
+            return f"{self.domain}GND"
+        return "GND"
+
+    def add_power_labels(
+        self,
+        vout_rail_y: float,
+        gnd_rail_y: float,
+        label_x_offset: float = -10,
+    ):
+        """Add domain-specific global labels for power nets.
+
+        This method adds global labels instead of power symbols, enabling
+        proper domain isolation (analog vs digital power planes).
+
+        Args:
+            vout_rail_y: Y coordinate where VOUT label should be placed
+            gnd_rail_y: Y coordinate where GND label should be placed
+            label_x_offset: X offset from LDO center for labels
+
+        Example:
+            ldo = LDOBlock(sch, x=100, y=50, domain="A", output_voltage="3V3")
+            ldo.add_power_labels(vout_rail_y=30, gnd_rail_y=80)
+            # Creates global labels: "+3V3A" and "AGND"
+        """
+        sch = self.schematic
+        label_x = self.x + label_x_offset
+
+        # Add output voltage global label (power input shape for consumers)
+        vout_name = self.get_vout_net_name()
+        sch.add_global_label(vout_name, label_x, vout_rail_y, shape="input", rotation=0)
+
+        # Add ground global label (passive for bidirectional current flow)
+        gnd_name = self.get_gnd_net_name()
+        sch.add_global_label(gnd_name, label_x, gnd_rail_y, shape="passive", rotation=0)
 
 
 class BarrelJackInput(CircuitBlock):
@@ -669,8 +739,35 @@ def create_3v3_ldo(
     y: float,
     ref: str = "U1",
     cap_ref_start: int = 1,
+    domain: str = "",
 ) -> LDOBlock:
-    """Create a 3.3V LDO block with standard capacitors."""
+    """Create a 3.3V LDO block with standard capacitors.
+
+    Args:
+        sch: Schematic to add to
+        x: X coordinate of LDO center
+        y: Y coordinate of LDO center
+        ref: LDO reference designator
+        cap_ref_start: Starting reference number for capacitors
+        domain: Power domain identifier ("" for generic, "A" for analog, "D" for digital)
+
+    Returns:
+        LDOBlock with domain-aware power net naming
+
+    Example:
+        # Create analog and digital 3.3V LDOs
+        analog_ldo = create_3v3_ldo(sch, 50, 50, "U1", domain="A")
+        digital_ldo = create_3v3_ldo(sch, 150, 50, "U2", domain="D")
+
+        # Wire to rails and add domain-specific labels
+        analog_ldo.connect_to_rails(vin_rail_y=30, vout_rail_y=40, gnd_rail_y=80)
+        analog_ldo.add_power_labels(vout_rail_y=40, gnd_rail_y=80)
+        # Creates: +3V3A and AGND global labels
+
+        digital_ldo.connect_to_rails(vin_rail_y=30, vout_rail_y=40, gnd_rail_y=80)
+        digital_ldo.add_power_labels(vout_rail_y=40, gnd_rail_y=80)
+        # Creates: +3V3D and DGND global labels
+    """
     return LDOBlock(
         sch,
         x,
@@ -681,6 +778,8 @@ def create_3v3_ldo(
         input_cap="10uF",
         output_caps=["10uF", "100nF"],
         cap_ref_start=cap_ref_start,
+        domain=domain,
+        output_voltage="3V3",
     )
 
 

@@ -308,7 +308,7 @@ class SchematicElementsMixin:
         automatically connected throughout the entire schematic hierarchy.
 
         Args:
-            text: Label text (net name)
+            text: Label text (net name, e.g., "VCC_3V3A", "AGND")
             x, y: Label position (snapped to grid unless snap=False)
             shape: Signal type shape (input, output, bidirectional, tri_state, passive)
             rotation: Rotation in degrees
@@ -321,6 +321,10 @@ class SchematicElementsMixin:
             # Add global labels for power rails
             sch.add_global_label("VCC_3V3", 100, 50, shape="input")
             sch.add_global_label("GND", 100, 100, shape="input")
+
+            # Add domain-specific power labels
+            sch.add_global_label("VCC_3V3A", 100, 50, shape="input")  # Analog
+            sch.add_global_label("AGND", 100, 100, shape="passive")   # Analog ground
 
             # Add global label for I2C bus
             sch.add_global_label("I2C_SDA", 200, 50, shape="bidirectional")
