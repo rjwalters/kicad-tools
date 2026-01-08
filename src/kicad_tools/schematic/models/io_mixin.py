@@ -19,7 +19,7 @@ from kicad_tools.sexp.builders import (
 )
 
 from ..logging import _log_info
-from .elements import HierarchicalLabel, Junction, Label, PowerSymbol, Wire
+from .elements import GlobalLabel, HierarchicalLabel, Junction, Label, PowerSymbol, Wire
 from .symbol import SymbolInstance
 
 if TYPE_CHECKING:
@@ -176,6 +176,11 @@ class SchematicIOMixin:
             if child.name == "hierarchical_label":
                 sch.hier_labels.append(HierarchicalLabel.from_sexp(child))
 
+        # Parse global labels
+        for child in doc.children:
+            if child.name == "global_label":
+                sch.global_labels.append(GlobalLabel.from_sexp(child))
+
         # Parse text notes
         for child in doc.children:
             if child.name == "text":
@@ -280,6 +285,10 @@ class SchematicIOMixin:
         # Hierarchical labels
         for hl in self.hier_labels:
             root.append(hl.to_sexp_node())
+
+        # Global labels
+        for gl in self.global_labels:
+            root.append(gl.to_sexp_node())
 
         # Text notes
         for text, x, y in self.text_notes:

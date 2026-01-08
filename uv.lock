@@ -858,7 +858,7 @@ wheels = [
 
 [[package]]
 name = "kicad-tools"
-version = "0.9.1"
+version = "0.9.3"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -921,6 +921,11 @@ parts = [
     { name = "requests" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest-cov" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "cmake", marker = "extra == 'native'", specifier = ">=3.15" },
@@ -962,6 +967,9 @@ requires-dist = [
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
 ]
 provides-extras = ["drc", "parts", "datasheet", "constraints", "mcp", "native", "all", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest-cov", specifier = ">=7.0.0" }]
 
 [[package]]
 name = "librt"

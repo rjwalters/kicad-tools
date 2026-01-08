@@ -20,6 +20,7 @@ from kicad_tools.sexp import SExp
 
 from ..grid import DEFAULT_GRID
 from .elements import (
+    GlobalLabel,
     HierarchicalLabel,
     Junction,
     Label,
@@ -137,6 +138,7 @@ class Schematic(
         self.junctions: list[Junction] = []
         self.labels: list[Label] = []
         self.hier_labels: list[HierarchicalLabel] = []
+        self.global_labels: list[GlobalLabel] = []
         self.text_notes: list[tuple[str, float, float]] = []
 
         # Cache for loaded symbol definitions

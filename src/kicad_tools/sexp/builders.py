@@ -168,6 +168,35 @@ def hier_label_node(
     )
 
 
+def global_label_node(
+    text: str, x: float, y: float, shape: str, rotation: float, uuid_str: str
+) -> SExp:
+    """Build a complete global label S-expression.
+
+    Global labels connect nets by name across all sheets without requiring
+    sheet pins or explicit wiring on parent sheets. Commonly used for
+    power rails, buses, and shared control signals.
+
+    Args:
+        text: Label text (net name)
+        x: X position
+        y: Y position
+        shape: Signal type shape (input, output, bidirectional, tri_state, passive)
+        rotation: Rotation angle (0, 90, 180, 270)
+        uuid_str: Unique identifier
+    """
+    justify = "right" if rotation == 180 else "left"
+    return SExp.list(
+        "global_label",
+        text,
+        SExp.list("shape", shape),
+        at(x, y, rotation),
+        SExp.list("fields_autoplaced", "yes"),
+        effects(justify=justify),
+        uuid_node(uuid_str),
+    )
+
+
 def text_node(text: str, x: float, y: float, uuid_str: str) -> SExp:
     """Build a complete text note S-expression."""
     return SExp.list(
@@ -435,5 +464,8 @@ if __name__ == "__main__":
 
     print("\nhier_label_node('MCLK', 100, 200, 'output', 180, 'hl-uuid'):")
     print(hier_label_node("MCLK", 100, 200, "output", 180, "hl-uuid").to_string())
+
+    print("\nglobal_label_node('VCC_3V3', 100, 200, 'bidirectional', 0, 'gl-uuid'):")
+    print(global_label_node("VCC_3V3", 100, 200, "bidirectional", 0, "gl-uuid").to_string())
 
     print("\n--- All tests passed ---")

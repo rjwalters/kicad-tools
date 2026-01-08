@@ -1,7 +1,7 @@
 """
 KiCad Schematic Element Models
 
-Wire, Junction, Label, HierarchicalLabel, and PowerSymbol classes.
+Wire, Junction, Label, HierarchicalLabel, GlobalLabel, and PowerSymbol classes.
 """
 
 import uuid
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import (
     at,
+    global_label_node,
     hier_label_node,
     junction_node,
     label_node,
@@ -189,6 +190,65 @@ class HierarchicalLabel:
         # Get shape
         shape_node = node.get("shape")
         shape = shape_node.get_first_atom() if shape_node else "input"
+
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+        x = round(float(atoms[0]), 2)
+        y = round(float(atoms[1]), 2)
+        rotation = float(atoms[2]) if len(atoms) > 2 else 0
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+
+        return cls(
+            text=str(text), x=x, y=y, shape=str(shape), rotation=rotation, uuid_str=str(uuid_str)
+        )
+
+
+@dataclass
+class GlobalLabel:
+    """A global label that connects nets by name across all sheets.
+
+    Global labels are simpler than hierarchical labels - they don't require
+    sheet pins on parent sheets. Nets with the same global label name are
+    automatically connected throughout the entire schematic hierarchy.
+
+    Commonly used for:
+    - Power rails (VCC, GND, +3V3)
+    - Shared buses (I2C_SDA, I2C_SCL)
+    - Control signals that span multiple sheets
+    """
+
+    text: str
+    x: float
+    y: float
+    shape: str = "bidirectional"  # input, output, bidirectional, tri_state, passive
+    rotation: float = 0
+    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this global label."""
+        return global_label_node(self.text, self.x, self.y, self.shape, self.rotation, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "GlobalLabel":
+        """Parse a GlobalLabel from an S-expression node.
+
+        Expected format:
+            (global_label "text" (shape bidirectional) (at x y [rotation]) ... (uuid ...))
+        """
+        # Get text from first atom child
+        text = node.get_first_atom()
+        if text is None:
+            raise ValueError("GlobalLabel must have text")
+
+        # Get shape
+        shape_node = node.get("shape")
+        shape = shape_node.get_first_atom() if shape_node else "bidirectional"
 
         at_node = node["at"]
         atoms = at_node.get_atoms()
