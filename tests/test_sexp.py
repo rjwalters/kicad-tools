@@ -305,6 +305,37 @@ class TestSExpSerialization:
         # The float 42.0 may be serialized as "42" or "42.0" depending on implementation
         assert "42" in result
 
+    def test_serialize_multiline_text(self):
+        """Serialize multiline text with actual newlines (not escape sequences).
+
+        KiCad expects actual newline characters in quoted strings, not \\n sequences.
+        See issue #602.
+        """
+        sexp = SExp("text")
+        sexp.add("Line 1\nLine 2\nLine 3")
+        result = serialize_sexp(sexp)
+        # Should contain actual newlines, not escape sequences
+        assert "\\n" not in result  # No literal backslash-n
+        assert "Line 1\nLine 2\nLine 3" in result  # Actual newlines preserved
+
+    def test_serialize_multiline_roundtrip(self):
+        """Multiline text should survive parse-serialize-parse cycle."""
+        original_text = "Header\n\nDetails:\n- Item 1\n- Item 2"
+        sexp = SExp("text")
+        sexp.add(original_text)
+        serialized = serialize_sexp(sexp)
+        reparsed = parse_sexp(serialized)
+        assert reparsed.get_string(0) == original_text
+
+    def test_serialize_tabs_preserved(self):
+        """Tab characters should be preserved as actual tabs."""
+        sexp = SExp("text")
+        sexp.add("Col1\tCol2\tCol3")
+        result = serialize_sexp(sexp)
+        # Should contain actual tabs, not escape sequences
+        assert "\\t" not in result  # No literal backslash-t
+        assert "Col1\tCol2\tCol3" in result  # Actual tabs preserved
+
 
 class TestSExpFileIO:
     """Tests for file I/O functions."""

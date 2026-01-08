@@ -489,7 +489,7 @@ class SExp:
             # Check if needs quoting
             if self._needs_quoting(self.value):
                 escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
-                escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+                # Do NOT escape newlines/tabs - KiCad expects actual control chars in quoted strings
                 return f'"{escaped}"'
             return self.value
         # For numbers, use original string if available (for round-trip preservation)
