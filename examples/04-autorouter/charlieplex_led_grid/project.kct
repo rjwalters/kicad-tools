@@ -1,0 +1,147 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Charlieplexed LED Grid Demo
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "Charlieplex LED Grid"
+  revision: "A"
+  created: 2025-01-08
+  author: "kicad-tools"
+  description: |
+    3x3 LED matrix using charlieplexing technique to drive 9 LEDs
+    with only 4 GPIO pins. Demonstrates autorouting on a dense
+    interconnected topology.
+  artifacts:
+    pcb: "charlieplex_3x3.kicad_pcb"
+
+intent:
+  summary: |
+    A compact LED display module using charlieplexing to minimize
+    GPIO usage. 9 LEDs arranged in a 3x3 grid controlled by 4 GPIO
+    lines with current-limiting resistors. Ideal for status indicators
+    or simple animations.
+
+  use_cases:
+    - Status indicator array
+    - Simple LED animation display
+    - Autorouter stress test (dense topology)
+    - Educational charlieplex example
+
+  interfaces:
+    - name: GPIO_CONTROL
+      type: gpio
+      description: "4-wire charlieplex control interface"
+      pins: ["LINE_A", "LINE_B", "LINE_C", "LINE_D"]
+
+    - name: POWER
+      type: power_rail
+      description: "Logic power supply"
+      voltage: "3.3V"
+      current_max: "100mA"
+
+  constraints:
+    - "4 GPIO pins to control 9 LEDs"
+    - "Matched current-limiting resistors"
+    - "Dense routing topology is intentionally challenging"
+    - "2-layer PCB"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        min: "3.0V"
+        max: "5.5V"
+      current:
+        max: "100mA"
+    outputs:
+      - rail: "LED current"
+        current_max: "20mA per LED"
+
+  mechanical:
+    dimensions:
+      width: "50mm"
+      height: "55mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 2
+    min_trace: "0.2mm"
+    min_space: "0.2mm"
+    assembly: smt
+
+  compliance:
+    rohs: true
+
+suggestions:
+  components:
+    mcu:
+      preferred: ["ATtiny85", "ATtiny84"]
+      rationale: "Minimal MCU with 4+ GPIO pins"
+    resistors:
+      preferred: ["100ohm 0805"]
+      rationale: "Limits LED current to ~20mA at 3.3V"
+    leds:
+      preferred: ["0805 SMD LED"]
+      rationale: "Compact, widely available"
+
+  layout:
+    - "LEDs in 3x3 grid pattern"
+    - "Resistors between MCU and LED matrix"
+    - "MCU above LED grid for clean signal routing"
+    - "Expect some vias due to dense topology"
+    - "Consider bottom layer for crossing traces"
+
+  notes:
+    - "This is intentionally a challenging routing problem"
+    - "Monte Carlo routing strategy recommended"
+    - "Some nets may require manual routing on 2-layer"
+
+decisions:
+  - date: 2025-01-08
+    phase: concept
+    topic: "LED Drive Method"
+    choice: "Charlieplexing"
+    rationale: "Drives 9 LEDs with only 4 GPIO pins (N*(N-1) LEDs from N pins)"
+    alternatives: ["Direct drive (9 pins)", "Shift register (3 pins + data)"]
+
+  - date: 2025-01-08
+    phase: concept
+    topic: "Grid Size"
+    choice: "3x3 (9 LEDs)"
+    rationale: "Demonstrates technique while keeping routing manageable"
+    alternatives: ["4x4 (12 LEDs)", "2x2 (2 LEDs)"]
+
+  - date: 2025-01-08
+    phase: layout
+    topic: "Routing Strategy"
+    choice: "Monte Carlo with 10 trials"
+    rationale: "Dense topology benefits from multiple routing attempts"
+    alternatives: ["Basic A*", "Negotiated congestion"]
+
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define LED drive method (charlieplex)"
+        - "[x] Calculate resistor values"
+        - "[x] Determine grid size (3x3)"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] MCU symbol with GPIO"
+        - "[x] 4x current-limiting resistors"
+        - "[x] 9x LED matrix"
+        - "[x] Net assignments for charlieplex"
+    layout:
+      status: in_progress
+      checklist:
+        - "[x] Component placement (grid layout)"
+        - "[x] Run autorouter demo"
+        - "[ ] Compare routing strategies"
+        - "[ ] DRC verification"

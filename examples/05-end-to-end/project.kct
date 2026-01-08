@@ -1,0 +1,154 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# STM32 Development Board - End-to-End Example
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "STM32F103 Development Board"
+  revision: "A"
+  created: 2025-01-08
+  author: "kicad-tools"
+  description: |
+    Minimal STM32F103C8 "Blue Pill" style development board demonstrating
+    programmatic schematic generation with kicad-tools.
+  artifacts:
+    schematic: "output/stm32_devboard.kicad_sch"
+
+intent:
+  summary: |
+    A minimal STM32 development board for learning and prototyping,
+    featuring USB power, 3.3V regulation, crystal oscillator, SWD debug,
+    and a user LED. Demonstrates end-to-end programmatic PCB design.
+
+  use_cases:
+    - Learning embedded development
+    - Rapid prototyping
+    - kicad-tools API demonstration
+    - Educational example for programmatic PCB design
+
+  interfaces:
+    - name: USB_POWER
+      type: power_rail
+      description: "5V input from USB connector"
+      voltage: "5V"
+      current_max: "500mA"
+
+    - name: REGULATED_3V3
+      type: power_rail
+      description: "3.3V regulated output for MCU"
+      voltage: "3.3V"
+      current_max: "300mA"
+
+    - name: SWD
+      type: debug
+      description: "Serial Wire Debug interface"
+      protocol: "ARM SWD"
+      pins: ["SWCLK", "SWDIO", "RESET", "VCC", "GND"]
+
+    - name: OSC
+      type: clock
+      description: "8MHz crystal oscillator"
+      pins: ["OSC_IN", "OSC_OUT"]
+
+  constraints:
+    - "Must use widely available components"
+    - "2-layer PCB for cost efficiency"
+    - "Compatible with standard STM32F103C8T6"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "5V"
+        min: "4.5V"
+        max: "5.5V"
+      current:
+        max: "500mA"
+    outputs:
+      - rail: "3.3V"
+        tolerance: "5%"
+        current_max: "300mA"
+        ripple_max: "100mV_pp"
+
+  mechanical:
+    dimensions:
+      width: "50mm"
+      height: "25mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 2
+    min_trace: "0.15mm"
+    min_space: "0.15mm"
+    assembly: both
+
+  compliance:
+    rohs: true
+
+suggestions:
+  components:
+    regulator:
+      preferred: ["AMS1117-3.3"]
+      rationale: "Widely available, low dropout, sufficient current"
+    crystal:
+      preferred: ["8MHz HC49"]
+      rationale: "Common frequency for STM32, easy to source"
+    debug_header:
+      preferred: ["2.54mm pitch 6-pin"]
+      rationale: "Compatible with standard SWD debuggers"
+
+  layout:
+    - "Place LDO between USB input and MCU"
+    - "Crystal close to MCU OSC pins"
+    - "Decoupling caps within 3mm of power pins"
+    - "Debug header at board edge for easy access"
+
+  notes:
+    - "This is an educational example - MCU not included in generated schematic"
+    - "User must add STM32F103C8T6 and connect to generated blocks"
+
+decisions:
+  - date: 2025-01-08
+    phase: concept
+    topic: "Voltage Regulator Selection"
+    choice: "AMS1117-3.3"
+    rationale: "Low cost, widely available, sufficient current for dev board"
+    alternatives: ["AP2112K-3.3", "MIC5219-3.3"]
+
+  - date: 2025-01-08
+    phase: concept
+    topic: "Crystal Frequency"
+    choice: "8MHz"
+    rationale: "Standard frequency for STM32, allows PLL to 72MHz"
+    alternatives: ["16MHz", "12MHz"]
+
+progress:
+  phase: schematic
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define power requirements"
+        - "[x] Select regulator topology (linear LDO)"
+        - "[x] Determine debug interface (SWD)"
+        - "[x] Choose crystal frequency"
+    schematic:
+      status: in_progress
+      checklist:
+        - "[x] Power input section"
+        - "[x] LDO with decoupling"
+        - "[x] Crystal oscillator block"
+        - "[x] Debug header"
+        - "[x] User LED"
+        - "[ ] Add MCU symbol (manual step)"
+        - "[ ] Connect MCU to peripherals"
+    layout:
+      status: pending
+      checklist:
+        - "[ ] Component placement"
+        - "[ ] Power routing"
+        - "[ ] Signal routing"
+        - "[ ] DRC clean"

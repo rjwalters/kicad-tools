@@ -1,0 +1,161 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# USB Joystick Controller Demo
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "USB Joystick Controller"
+  revision: "A"
+  created: 2025-01-08
+  author: "kicad-tools"
+  description: |
+    USB game controller with analog joystick and tactile buttons.
+    Demonstrates autorouting with mixed signal types: USB differential
+    pairs, analog inputs, and digital I/O.
+  artifacts:
+    pcb: "usb_joystick.kicad_pcb"
+
+intent:
+  summary: |
+    A USB HID game controller featuring a 2-axis analog joystick,
+    multiple tactile buttons, and USB-C connectivity. Designed to
+    demonstrate kicad-tools autorouting capabilities with mixed
+    signal types requiring different routing considerations.
+
+  use_cases:
+    - Game controller
+    - Autorouter demonstration
+    - Mixed-signal routing example
+    - USB HID device example
+
+  interfaces:
+    - name: USB_C
+      type: usb_device
+      description: "USB Type-C for data and power"
+      protocol: "USB 2.0 Full Speed"
+      voltage: "5V"
+      current_max: "500mA"
+
+    - name: JOYSTICK
+      type: analog
+      description: "2-axis analog joystick with button"
+      pins: ["JOY_X", "JOY_Y", "JOY_BTN", "VCC", "GND"]
+
+    - name: BUTTONS
+      type: gpio
+      description: "Tactile button inputs"
+      pins: ["BTN1", "BTN2", "BTN3", "BTN4"]
+
+  constraints:
+    - "USB differential pair must be length-matched"
+    - "Crystal traces must be short and isolated"
+    - "Analog signals separated from high-speed digital"
+    - "2-layer PCB for cost efficiency"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "5V"
+      current:
+        max: "500mA"
+    signals:
+      usb:
+        impedance: "90ohm_differential"
+        max_length: "50mm"
+      analog:
+        bandwidth: "DC-1kHz"
+        resolution: "10-bit ADC"
+
+  mechanical:
+    dimensions:
+      width: "60mm"
+      height: "40mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 2
+    min_trace: "0.15mm"
+    min_space: "0.15mm"
+    min_via: "0.3mm"
+    assembly: smt
+
+  compliance:
+    standards:
+      - USB_2.0
+    rohs: true
+
+suggestions:
+  components:
+    mcu:
+      preferred: ["ATmega32U4"]
+      rationale: "Native USB, adequate I/O, QFP package for routing demo"
+    usb_connector:
+      preferred: ["USB-C receptacle"]
+      rationale: "Modern, reversible, robust"
+    crystal:
+      preferred: ["16MHz HC49"]
+      rationale: "Required for USB timing"
+
+  layout:
+    - "USB connector at board edge"
+    - "MCU centered with room for breakout"
+    - "Crystal close to MCU XTAL pins"
+    - "Decoupling caps within 2mm of VCC pins"
+    - "Joystick connector opposite USB for ergonomics"
+    - "Keep USB D+/D- traces short and matched"
+    - "Route analog signals away from digital switching"
+
+  bom:
+    preferred_vendors: ["LCSC", "Digikey"]
+    cost_target: "$5/board"
+
+decisions:
+  - date: 2025-01-08
+    phase: concept
+    topic: "MCU Selection"
+    choice: "ATmega32U4"
+    rationale: "Native USB support, widely available, good for HID devices"
+    alternatives: ["STM32F103", "RP2040"]
+
+  - date: 2025-01-08
+    phase: concept
+    topic: "USB Connector Type"
+    choice: "USB Type-C"
+    rationale: "Modern standard, reversible, demonstrates complex routing"
+    alternatives: ["Micro-USB", "Mini-USB"]
+
+  - date: 2025-01-08
+    phase: layout
+    topic: "Routing Grid Resolution"
+    choice: "0.1mm"
+    rationale: "Required for TQFP-32 0.8mm pitch routing"
+    alternatives: ["0.25mm"]
+
+progress:
+  phase: layout
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define controller features"
+        - "[x] Select MCU with USB support"
+        - "[x] Determine input types (analog + digital)"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] USB connector and ESD protection"
+        - "[x] MCU with decoupling"
+        - "[x] Crystal oscillator"
+        - "[x] Joystick interface"
+        - "[x] Button inputs"
+    layout:
+      status: in_progress
+      checklist:
+        - "[x] Component placement"
+        - "[x] USB differential pair routing"
+        - "[ ] Signal routing (autorouter demo)"
+        - "[ ] DRC clean"
