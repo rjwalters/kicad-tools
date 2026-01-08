@@ -36,12 +36,12 @@ def xy(x: float, y: float) -> SExp:
 
 
 def at(x: float, y: float, rotation: float = 0) -> SExp:
-    """Build an (at X Y [ROTATION]) position node.
+    """Build an (at X Y ROTATION) position node.
 
-    Omits rotation if 0 for cleaner output.
+    Always includes rotation angle (required by KiCad GUI for symbols,
+    properties, labels, etc.). KiCad-cli is lenient but GUI parser fails
+    without explicit angle.
     """
-    if rotation == 0:
-        return SExp.list("at", fmt(x), fmt(y))
     return SExp.list("at", fmt(x), fmt(y), int(rotation))
 
 
