@@ -32,6 +32,7 @@ from .project import run_clean_command, run_init_command
 from .reasoning import run_reason_command
 from .routing import run_optimize_command, run_route_command, run_zones_command
 from .schematic import run_sch_command
+from .spec import run_spec_command
 from .suggest import run_suggest_command
 from .validation import (
     run_audit_command,
@@ -87,6 +88,8 @@ __all__ = [
     # Project
     "run_clean_command",
     "run_init_command",
+    # Spec
+    "run_spec_command",
     # Impedance
     "run_impedance_command",
     # MCP
