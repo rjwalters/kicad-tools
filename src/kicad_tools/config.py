@@ -48,6 +48,12 @@ KNOWN_KEYS = {
         "tolerance_mm",
         "library_mappings",
     },
+    "footprint_selection": {
+        "profile",
+        "capacitor",
+        "resistor",
+        "inductor",
+    },
 }
 
 
@@ -119,6 +125,20 @@ class FootprintValidationConfig:
 
 
 @dataclass
+class FootprintSelectionConfig:
+    """Footprint selection configuration for passive components."""
+
+    # Profile name: "default", "machine", "hand_solder", "compact"
+    profile: str = "default"
+    # Custom capacitor rules: {"0-100nF": "Capacitor_SMD:C_0402_1005Metric", ...}
+    capacitor: dict[str, str] = field(default_factory=dict)
+    # Custom resistor rules: {"0-10k": "Resistor_SMD:R_0402_1005Metric", ...}
+    resistor: dict[str, str] = field(default_factory=dict)
+    # Custom inductor rules: {"0-1uH": "Inductor_SMD:L_0603_1608Metric", ...}
+    inductor: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     """Merged configuration from all sources."""
 
@@ -131,6 +151,7 @@ class Config:
     footprint_validation: FootprintValidationConfig = field(
         default_factory=FootprintValidationConfig
     )
+    footprint_selection: FootprintSelectionConfig = field(default_factory=FootprintSelectionConfig)
 
     # Track which file each setting came from (for --show)
     _sources: dict = field(default_factory=dict, repr=False)
@@ -369,6 +390,26 @@ def _merge_config(
             config.footprint_validation.library_mappings = fpv_data["library_mappings"]
             sources["footprint_validation.library_mappings"] = source
 
+    # Merge footprint_selection section
+    if "footprint_selection" in data:
+        fps_data = data["footprint_selection"]
+        _warn_unknown_keys(
+            fps_data, KNOWN_KEYS["footprint_selection"], "footprint_selection", source
+        )
+
+        if "profile" in fps_data:
+            config.footprint_selection.profile = fps_data["profile"]
+            sources["footprint_selection.profile"] = source
+        if "capacitor" in fps_data:
+            config.footprint_selection.capacitor = fps_data["capacitor"]
+            sources["footprint_selection.capacitor"] = source
+        if "resistor" in fps_data:
+            config.footprint_selection.resistor = fps_data["resistor"]
+            sources["footprint_selection.resistor"] = source
+        if "inductor" in fps_data:
+            config.footprint_selection.inductor = fps_data["inductor"]
+            sources["footprint_selection.inductor"] = source
+
 
 def _warn_unknown_keys(data: dict[str, Any], known: set[str], section: str, source: str) -> None:
     """Warn about unknown keys in a config section."""
@@ -462,6 +503,32 @@ def generate_template() -> str:
 # [footprint_validation.library_mappings]
 # "CustomCap_0402" = "Capacitor_SMD"
 # "MyResistor_0603" = "Resistor_SMD"
+
+[footprint_selection]
+# Footprint selection profile: "default", "machine", "hand_solder", "compact"
+# - default: Balanced profile for general use
+# - machine: Optimized for pick & place assembly (smaller packages)
+# - hand_solder: Larger packages easier to hand solder
+# - compact: Smallest packages that can handle the values
+# profile = "default"
+
+# Custom capacitor footprint rules (overrides profile defaults)
+# Format: "value_range" = "Footprint:Name"
+# [footprint_selection.capacitor]
+# "0-100nF" = "Capacitor_SMD:C_0402_1005Metric"
+# "100nF-1uF" = "Capacitor_SMD:C_0603_1608Metric"
+# "1uF-10uF" = "Capacitor_SMD:C_0805_2012Metric"
+# "10uF+" = "Capacitor_SMD:C_1206_3216Metric"
+
+# Custom resistor footprint rules (overrides profile defaults)
+# [footprint_selection.resistor]
+# "0-10k" = "Resistor_SMD:R_0402_1005Metric"
+# "10k+" = "Resistor_SMD:R_0603_1608Metric"
+
+# Custom inductor footprint rules (overrides profile defaults)
+# [footprint_selection.inductor]
+# "0-10uH" = "Inductor_SMD:L_0603_1608Metric"
+# "10uH+" = "Inductor_SMD:L_0805_2012Metric"
 """
 
 

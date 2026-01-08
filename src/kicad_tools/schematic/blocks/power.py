@@ -34,6 +34,7 @@ class DecouplingCaps(CircuitBlock):
         ref_prefix: str = "C",
         spacing: float = 15,
         cap_symbol: str = "Device:C",
+        auto_footprint: bool = False,
     ):
         """
         Create a bank of decoupling capacitors.
@@ -47,6 +48,7 @@ class DecouplingCaps(CircuitBlock):
             ref_prefix: Reference designator prefix
             spacing: Horizontal spacing between caps
             cap_symbol: KiCad symbol for capacitors
+            auto_footprint: If True, automatically select footprint based on value
         """
         super().__init__(sch, x, y)
         self.caps = []
@@ -55,7 +57,7 @@ class DecouplingCaps(CircuitBlock):
         for i, value in enumerate(values):
             cap_x = x + i * spacing
             ref = f"{ref_prefix}{ref_start + i}"
-            cap = sch.add_symbol(cap_symbol, cap_x, y, ref, value)
+            cap = sch.add_symbol(cap_symbol, cap_x, y, ref, value, auto_footprint=auto_footprint)
             self.caps.append(cap)
 
         self.components = {f"C{i + 1}": cap for i, cap in enumerate(self.caps)}
@@ -134,6 +136,7 @@ class LDOBlock(CircuitBlock):
         en_tied_to_vin: bool = True,
         domain: str = "",
         output_voltage: str = "3V3",
+        auto_footprint: bool = False,
     ):
         """
         Create an LDO power supply block.
@@ -151,6 +154,7 @@ class LDOBlock(CircuitBlock):
             en_tied_to_vin: If True, tie EN pin to VIN
             domain: Power domain identifier ("" for generic, "A" for analog, "D" for digital)
             output_voltage: Output voltage string (e.g., "3V3", "5V") for net naming
+            auto_footprint: If True, automatically select footprint for caps based on value
         """
         super().__init__(sch, x, y)
         self.domain = domain
@@ -170,14 +174,18 @@ class LDOBlock(CircuitBlock):
         # Place input capacitor
         c_in_x = x + input_cap_offset
         c_in_ref = f"C{cap_ref_start}"
-        self.input_cap = sch.add_symbol("Device:C", c_in_x, y + 15, c_in_ref, input_cap)
+        self.input_cap = sch.add_symbol(
+            "Device:C", c_in_x, y + 15, c_in_ref, input_cap, auto_footprint=auto_footprint
+        )
 
         # Place output capacitors
         self.output_caps = []
         for i, cap_value in enumerate(output_caps):
             c_out_x = x + output_cap_offset + i * cap_spacing
             c_out_ref = f"C{cap_ref_start + 1 + i}"
-            cap = sch.add_symbol("Device:C", c_out_x, y + 15, c_out_ref, cap_value)
+            cap = sch.add_symbol(
+                "Device:C", c_out_x, y + 15, c_out_ref, cap_value, auto_footprint=auto_footprint
+            )
             self.output_caps.append(cap)
 
         # Store all components
@@ -908,6 +916,7 @@ class VoltageDivider(CircuitBlock):
         cap_offset: float = 10,
         resistor_symbol: str = "Device:R",
         cap_symbol: str = "Device:C",
+        auto_footprint: bool = False,
     ):
         """
         Create a voltage divider.
@@ -927,6 +936,7 @@ class VoltageDivider(CircuitBlock):
             cap_offset: Horizontal offset for filter capacitor (mm)
             resistor_symbol: KiCad symbol for resistors
             cap_symbol: KiCad symbol for capacitor
+            auto_footprint: If True, automatically select footprint based on value
         """
         super().__init__(sch, x, y)
         self.r_top_value = r_top
@@ -938,11 +948,15 @@ class VoltageDivider(CircuitBlock):
         r_bottom_ref = f"{ref_prefix}{ref_start + 1}"
 
         # Place top resistor (R1)
-        self.r_top = sch.add_symbol(resistor_symbol, x, y, r_top_ref, r_top)
+        self.r_top = sch.add_symbol(
+            resistor_symbol, x, y, r_top_ref, r_top, auto_footprint=auto_footprint
+        )
 
         # Place bottom resistor (R2) below R1
         r_bottom_y = y + resistor_spacing
-        self.r_bottom = sch.add_symbol(resistor_symbol, x, r_bottom_y, r_bottom_ref, r_bottom)
+        self.r_bottom = sch.add_symbol(
+            resistor_symbol, x, r_bottom_y, r_bottom_ref, r_bottom, auto_footprint=auto_footprint
+        )
 
         self.components = {
             "R_TOP": self.r_top,
@@ -971,7 +985,9 @@ class VoltageDivider(CircuitBlock):
             # Place cap at same Y as VOUT junction, extending to GND
             cap_y = (vout_pos[1] + r_bottom_pin2[1]) / 2
 
-            self.filter_cap = sch.add_symbol(cap_symbol, cap_x, cap_y, cap_ref, filter_cap)
+            self.filter_cap = sch.add_symbol(
+                cap_symbol, cap_x, cap_y, cap_ref, filter_cap, auto_footprint=auto_footprint
+            )
             self.components["C_FILT"] = self.filter_cap
 
             # Get cap pin positions

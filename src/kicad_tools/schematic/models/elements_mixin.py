@@ -92,6 +92,7 @@ class SchematicElementsMixin:
         footprint: str = "",
         snap: bool = True,
         auto_layout: bool = False,
+        auto_footprint: bool = False,
     ) -> SymbolInstance:
         """Add a symbol to the schematic.
 
@@ -101,9 +102,11 @@ class SchematicElementsMixin:
             ref: Reference designator (e.g., "U1")
             value: Value (defaults to symbol name)
             rotation: Rotation in degrees (0, 90, 180, 270)
-            footprint: Footprint string
+            footprint: Footprint string (explicit footprint takes precedence)
             snap: Whether to apply grid snapping (default: True)
             auto_layout: If True, automatically adjust position to avoid overlaps
+            auto_footprint: If True, automatically select footprint for passive
+                components based on value and the configured profile
 
         Returns:
             SymbolInstance with pin_position() method
@@ -113,6 +116,12 @@ class SchematicElementsMixin:
             sym = sch.add_symbol(
                 "Device:R", x=100, y=50, ref="R1",
                 value="10k", auto_layout=True
+            )
+
+            # Add with automatic footprint selection
+            sym = sch.add_symbol(
+                "Device:C", x=100, y=50, ref="C1",
+                value="100nF", auto_footprint=True
             )
         """
         # Apply grid snapping if enabled
@@ -135,6 +144,18 @@ class SchematicElementsMixin:
 
         sym_def = self._symbol_defs[lib_id]
 
+        # Auto-select footprint for passive components if enabled
+        effective_footprint = footprint
+        if auto_footprint and not footprint and value:
+            from ..footprint_selector import select_footprint_for_passive
+
+            # Get profile from schematic's footprint_selector if available
+            profile = getattr(self, "_footprint_profile", "default")
+            auto_fp = select_footprint_for_passive(lib_id, value, profile)
+            if auto_fp:
+                effective_footprint = auto_fp
+                _log_debug(f"  Auto-selected footprint for {ref}: {auto_fp}")
+
         instance = SymbolInstance(
             symbol_def=sym_def,
             x=x,
@@ -142,7 +163,7 @@ class SchematicElementsMixin:
             rotation=rotation,
             reference=ref,
             value=value or sym_def.name,
-            footprint=footprint,
+            footprint=effective_footprint,
         )
 
         self.symbols.append(instance)
