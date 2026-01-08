@@ -328,6 +328,15 @@ class TestGlobalLabelNode:
         shape_node = node.get("shape")
         assert shape_node.children[0].value == "input"
 
+        at_node = node.get("at")
+        assert at_node is not None
+
+        effects_node = node.get("effects")
+        assert effects_node is not None
+
+        uuid_n = node.get("uuid")
+        assert uuid_n.children[0].value == "gl-uuid"
+
     def test_global_label_node_passive(self):
         """Build global label with passive shape for GND."""
         node = global_label_node("AGND", 100, 200, "passive", 0, "gl-uuid")
@@ -336,6 +345,12 @@ class TestGlobalLabelNode:
 
         shape_node = node.get("shape")
         assert shape_node.children[0].value == "passive"
+
+    def test_global_label_node_bidirectional(self):
+        """Global label with bidirectional shape for I2C signals."""
+        node = global_label_node("I2C_SDA", 100, 200, "bidirectional", 0, "gl-uuid")
+        shape_node = node.get("shape")
+        assert shape_node.children[0].value == "bidirectional"
 
     def test_global_label_node_right_justify(self):
         """Rotation 180 gets right justify."""
@@ -350,6 +365,14 @@ class TestGlobalLabelNode:
         effects_node = node.get("effects")
         justify_node = effects_node.get("justify")
         assert justify_node.children[0].value == "left"
+
+    def test_global_label_all_shapes(self):
+        """Test all valid shape types."""
+        for shape in ["input", "output", "bidirectional", "tri_state", "passive"]:
+            node = global_label_node("NET", 0, 0, shape, 0, "uuid")
+            shape_node = node.get("shape")
+            assert shape_node.children[0].value == shape
+
 
 
 class TestTextNode:
