@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..grid import is_on_grid, snap_to_grid
 from ..logging import _log_debug, _log_info
 from .elements import (
+    GlobalLabel,
     HierarchicalLabel,
     Junction,
     Label,
@@ -290,6 +291,47 @@ class SchematicElementsMixin:
         hl = HierarchicalLabel(text=text, x=x, y=y, shape=shape, rotation=rotation)
         self.hier_labels.append(hl)
         return hl
+
+    def add_global_label(
+        self,
+        text: str,
+        x: float,
+        y: float,
+        shape: str = "bidirectional",
+        rotation: float = 0,
+        snap: bool = True,
+    ) -> GlobalLabel:
+        """Add a global label that connects nets by name across all sheets.
+
+        Global labels are simpler than hierarchical labels - they don't require
+        sheet pins on parent sheets. Nets with the same global label name are
+        automatically connected throughout the entire schematic hierarchy.
+
+        Args:
+            text: Label text (net name)
+            x, y: Label position (snapped to grid unless snap=False)
+            shape: Signal type shape (input, output, bidirectional, tri_state, passive)
+            rotation: Rotation in degrees
+            snap: Whether to apply grid snapping (default: True)
+
+        Returns:
+            The GlobalLabel created
+
+        Example:
+            # Add global labels for power rails
+            sch.add_global_label("VCC_3V3", 100, 50, shape="input")
+            sch.add_global_label("GND", 100, 100, shape="input")
+
+            # Add global label for I2C bus
+            sch.add_global_label("I2C_SDA", 200, 50, shape="bidirectional")
+        """
+        if snap:
+            x = self._snap_coord(x, f"global_label {text}")
+            y = self._snap_coord(y, f"global_label {text}")
+        gl = GlobalLabel(text=text, x=x, y=y, shape=shape, rotation=rotation)
+        self.global_labels.append(gl)
+        _log_info(f"Added global label '{text}' at ({x}, {y})")
+        return gl
 
     def add_text(self, text: str, x: float, y: float, snap: bool = True):
         """Add a text note.
