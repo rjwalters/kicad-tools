@@ -105,6 +105,23 @@ class SchematicWiringMixin:
         physically meet at connection points - junctions placed on a long wire
         are visual indicators only and don't establish electrical connectivity.
 
+        IMPORTANT - Rail Segmentation for T-Connections:
+            This method creates a single continuous wire. If you need to tap
+            components off this rail (T-connections), you must segment the rail
+            at each tap point so wire endpoints meet.
+
+            For rails with multiple taps, consider creating segments manually:
+
+            ```python
+            # Rail from x=25 to x=175 with taps at x=50, x=100, x=150
+            tap_points = [50, 100, 150]
+            all_x = sorted([25] + tap_points + [175])
+            for i in range(len(all_x) - 1):
+                sch.add_wire((all_x[i], rail_y), (all_x[i + 1], rail_y))
+            ```
+
+            Or use wire_to_rail() which handles segmentation automatically.
+
         Args:
             y: Y coordinate of the rail (snapped to grid)
             x_start: Starting X coordinate (snapped to grid)
@@ -114,6 +131,10 @@ class SchematicWiringMixin:
 
         Returns:
             The wire created
+
+        See Also:
+            - wire_to_rail(): Connect a pin to rail with proper T-connection
+            - add_wire(): Understand wire endpoint connectivity rules
         """
         wire = self.add_wire((x_start, y), (x_end, y), snap=snap)
         if net_label:
