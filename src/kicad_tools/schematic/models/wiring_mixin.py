@@ -98,7 +98,12 @@ class SchematicWiringMixin:
     def add_rail(
         self, y: float, x_start: float, x_end: float, net_label: str = None, snap: bool = True
     ) -> Wire:
-        """Add a horizontal power/ground rail.
+        """Add a horizontal power/ground rail as a single wire.
+
+        WARNING: For T-connections where vertical wires connect to the rail,
+        use add_segmented_rail() instead. KiCad requires wire endpoints to
+        physically meet at connection points - junctions placed on a long wire
+        are visual indicators only and don't establish electrical connectivity.
 
         Args:
             y: Y coordinate of the rail (snapped to grid)
@@ -115,6 +120,127 @@ class SchematicWiringMixin:
             # Use the actual snapped wire coordinates for the label
             self.add_label(net_label, wire.x1, wire.y1, rotation=0, snap=False)
         return wire
+
+    def add_segmented_rail(
+        self,
+        y: float,
+        x_points: list[float],
+        net_label: str = None,
+        add_junctions: bool = True,
+        snap: bool = True,
+    ) -> list[Wire]:
+        """Add a horizontal rail as wire segments with endpoints at each connection point.
+
+        This method creates proper T-connections for KiCad. Unlike add_rail() which
+        creates a single long wire, this creates segments between consecutive X points,
+        ensuring wire endpoints meet at each connection point.
+
+        KiCad ERC requires wire endpoints to physically meet for electrical connectivity.
+        Junctions placed on the middle of a long wire are visual only and don't create
+        electrical connections for T-intersections.
+
+        Example:
+            # Components at x=50, x=100, x=150 connect to rail at y=30
+            sch.add_segmented_rail(y=30, x_points=[25, 50, 100, 150, 175])
+            # Creates 4 wire segments: (25,30)-(50,30), (50,30)-(100,30), etc.
+            # Adds junctions at interior points: (50,30), (100,30), (150,30)
+
+        Args:
+            y: Y coordinate of the rail (snapped to grid)
+            x_points: List of X coordinates where the rail should have endpoints.
+                     These should include the rail start/end plus all connection points.
+                     Points will be sorted automatically.
+            net_label: Optional net label to add at the leftmost point
+            add_junctions: Whether to add junction markers at interior connection points
+                          (default True for visual clarity)
+            snap: Whether to apply grid snapping (default: True)
+
+        Returns:
+            List of wires created (one for each segment)
+        """
+        if len(x_points) < 2:
+            raise ValueError("x_points must contain at least 2 values for start and end")
+
+        # Sort points left to right
+        sorted_points = sorted(x_points)
+        wires = []
+
+        # Create wire segments between consecutive points
+        for i in range(len(sorted_points) - 1):
+            wire = self.add_wire((sorted_points[i], y), (sorted_points[i + 1], y), snap=snap)
+            wires.append(wire)
+
+        # Add junctions at interior points for visual clarity
+        if add_junctions:
+            for x in sorted_points[1:-1]:
+                if snap:
+                    x = self._snap_coord(x, "wire")
+                    snapped_y = self._snap_coord(y, "wire")
+                else:
+                    snapped_y = y
+                self.add_junction(x, snapped_y)
+
+        # Add net label at the start
+        if net_label and wires:
+            first_wire = wires[0]
+            self.add_label(net_label, first_wire.x1, first_wire.y1, rotation=0, snap=False)
+
+        _log_info(f"Added segmented rail at y={y} with {len(wires)} segments")
+        return wires
+
+    def add_vertical_segmented_rail(
+        self,
+        x: float,
+        y_points: list[float],
+        net_label: str = None,
+        add_junctions: bool = True,
+        snap: bool = True,
+    ) -> list[Wire]:
+        """Add a vertical rail as wire segments with endpoints at each connection point.
+
+        Vertical version of add_segmented_rail(). Creates proper T-connections for
+        horizontal wires connecting to a vertical rail.
+
+        Args:
+            x: X coordinate of the rail (snapped to grid)
+            y_points: List of Y coordinates where the rail should have endpoints.
+                     Points will be sorted automatically.
+            net_label: Optional net label to add at the topmost point
+            add_junctions: Whether to add junction markers at interior connection points
+            snap: Whether to apply grid snapping (default: True)
+
+        Returns:
+            List of wires created (one for each segment)
+        """
+        if len(y_points) < 2:
+            raise ValueError("y_points must contain at least 2 values for start and end")
+
+        # Sort points top to bottom
+        sorted_points = sorted(y_points)
+        wires = []
+
+        # Create wire segments between consecutive points
+        for i in range(len(sorted_points) - 1):
+            wire = self.add_wire((x, sorted_points[i]), (x, sorted_points[i + 1]), snap=snap)
+            wires.append(wire)
+
+        # Add junctions at interior points for visual clarity
+        if add_junctions:
+            for y in sorted_points[1:-1]:
+                if snap:
+                    snapped_x = self._snap_coord(x, "wire")
+                    y = self._snap_coord(y, "wire")
+                else:
+                    snapped_x = x
+                self.add_junction(snapped_x, y)
+
+        # Add net label at the start (top)
+        if net_label and wires:
+            first_wire = wires[0]
+            self.add_label(net_label, first_wire.x1, first_wire.y1, rotation=90, snap=False)
+
+        _log_info(f"Added vertical segmented rail at x={x} with {len(wires)} segments")
+        return wires
 
     def wire_power_to_pin(
         self,

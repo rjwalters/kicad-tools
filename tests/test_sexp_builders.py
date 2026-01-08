@@ -374,7 +374,6 @@ class TestGlobalLabelNode:
             assert shape_node.children[0].value == shape
 
 
-
 class TestTextNode:
     """Tests for the text_node() builder."""
 

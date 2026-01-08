@@ -1802,3 +1802,146 @@ class TestSchematicSymbolSearch:
         sch = sch_with_mixed_symbols
         result = sch.remove_symbol("X99")
         assert result is False
+
+
+class TestSegmentedRails:
+    """Tests for segmented rail methods that create proper T-connections.
+
+    KiCad requires wire endpoints to physically meet at connection points.
+    Junctions placed on a long wire are visual only - they don't create
+    electrical connections for T-intersections.
+    """
+
+    def test_add_segmented_rail_creates_segments(self):
+        """Segmented rail creates wire segments between consecutive points."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wires = sch.add_segmented_rail(y=100, x_points=[25, 50, 100, 150], snap=False)
+
+        # Should create 3 wire segments for 4 points
+        assert len(wires) == 3
+        assert len(sch.wires) == 3
+
+        # Verify segments are between consecutive points
+        assert wires[0].x1 == 25 and wires[0].x2 == 50
+        assert wires[1].x1 == 50 and wires[1].x2 == 100
+        assert wires[2].x1 == 100 and wires[2].x2 == 150
+
+        # All segments at same Y coordinate
+        for wire in wires:
+            assert wire.y1 == 100
+            assert wire.y2 == 100
+
+    def test_add_segmented_rail_adds_junctions(self):
+        """Segmented rail adds junctions at interior points."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_segmented_rail(y=100, x_points=[25, 50, 100, 150], add_junctions=True, snap=False)
+
+        # Should create 2 junctions at interior points (50 and 100)
+        # Note: 25 and 150 are endpoints, not interior
+        assert len(sch.junctions) == 2
+        junction_xs = sorted([j.x for j in sch.junctions])
+        assert junction_xs == [50, 100]
+
+    def test_add_segmented_rail_no_junctions(self):
+        """Segmented rail can skip junction creation."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_segmented_rail(y=100, x_points=[25, 50, 100], add_junctions=False, snap=False)
+
+        assert len(sch.junctions) == 0
+
+    def test_add_segmented_rail_with_label(self):
+        """Segmented rail adds net label at start."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_segmented_rail(y=100, x_points=[25, 50, 100], net_label="VCC", snap=False)
+
+        assert len(sch.labels) == 1
+        assert sch.labels[0].text == "VCC"
+
+    def test_add_segmented_rail_unsorted_points(self):
+        """Segmented rail sorts points automatically."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wires = sch.add_segmented_rail(y=100, x_points=[100, 25, 150, 50], snap=False)
+
+        # Points should be sorted: 25, 50, 100, 150
+        assert wires[0].x1 == 25 and wires[0].x2 == 50
+        assert wires[1].x1 == 50 and wires[1].x2 == 100
+        assert wires[2].x1 == 100 and wires[2].x2 == 150
+
+    def test_add_segmented_rail_minimum_points(self):
+        """Segmented rail works with minimum 2 points."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wires = sch.add_segmented_rail(y=100, x_points=[25, 100], snap=False)
+
+        assert len(wires) == 1
+        assert len(sch.junctions) == 0  # No interior points
+
+    def test_add_segmented_rail_too_few_points(self):
+        """Segmented rail raises error with less than 2 points."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        with pytest.raises(ValueError, match="at least 2 values"):
+            sch.add_segmented_rail(y=100, x_points=[25], snap=False)
+
+    def test_add_vertical_segmented_rail(self):
+        """Vertical segmented rail creates vertical wire segments."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wires = sch.add_vertical_segmented_rail(x=100, y_points=[25, 50, 100], snap=False)
+
+        assert len(wires) == 2
+
+        # Verify segments are vertical between consecutive Y points
+        assert wires[0].y1 == 25 and wires[0].y2 == 50
+        assert wires[1].y1 == 50 and wires[1].y2 == 100
+
+        # All segments at same X coordinate
+        for wire in wires:
+            assert wire.x1 == 100
+            assert wire.x2 == 100
+
+    def test_add_vertical_segmented_rail_junctions(self):
+        """Vertical segmented rail adds junctions at interior Y points."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_vertical_segmented_rail(
+            x=100, y_points=[25, 50, 100, 150], add_junctions=True, snap=False
+        )
+
+        # Should create 2 junctions at interior points (50 and 100)
+        assert len(sch.junctions) == 2
+        junction_ys = sorted([j.y for j in sch.junctions])
+        assert junction_ys == [50, 100]
+
+    def test_segmented_rail_endpoints_meet(self):
+        """Verify wire endpoints physically meet at segment boundaries.
+
+        This is the key behavior that fixes T-connections. Each segment's
+        endpoint must be the start of the next segment.
+        """
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wires = sch.add_segmented_rail(y=100, x_points=[25, 50, 100], snap=False)
+
+        # Wire 0 ends where wire 1 begins
+        assert wires[0].x2 == wires[1].x1
+        assert wires[0].y2 == wires[1].y1
+
+    def test_segmented_rail_t_connection_pattern(self):
+        """Test the pattern that fixes T-connection ERC errors.
+
+        Create a horizontal rail with a vertical wire connecting to it.
+        The rail segments ensure the connection point is a wire endpoint.
+        """
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Horizontal rail from x=25 to x=100, with connection point at x=50
+        sch.add_segmented_rail(y=100, x_points=[25, 50, 100], snap=False)
+
+        # Vertical wire from (50, 100) down to (50, 150)
+        sch.add_wire((50, 100), (50, 150), snap=False)
+
+        # The key: x=50 is now an endpoint of rail segments, not just a point
+        # on a long wire. This ensures proper electrical connectivity.
+        assert len(sch.wires) == 3  # 2 rail segments + 1 vertical wire
+
+        # Junction should exist at (50, 100) for visual clarity
+        assert len(sch.junctions) == 1
+        assert sch.junctions[0].x == 50
+        assert sch.junctions[0].y == 100

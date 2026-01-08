@@ -229,7 +229,9 @@ class GlobalLabel:
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression tree for this global label."""
-        return global_label_node(self.text, self.x, self.y, self.shape, self.rotation, self.uuid_str)
+        return global_label_node(
+            self.text, self.x, self.y, self.shape, self.rotation, self.uuid_str
+        )
 
     def to_sexp(self) -> str:
         """Generate S-expression string (delegates to to_sexp_node)."""
