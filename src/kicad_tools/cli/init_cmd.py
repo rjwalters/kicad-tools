@@ -18,6 +18,11 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
+from kicad_tools.core.netclass_templates import (
+    apply_design_template,
+    get_available_design_types,
+    get_netclass_summary,
+)
 from kicad_tools.manufacturers import DesignRules, get_manufacturer_ids, get_profile
 from kicad_tools.units import get_current_formatter
 
@@ -99,6 +104,8 @@ def print_init_summary(
     copper: float,
     created_project: bool,
     created_dru: bool,
+    design_type: str | None = None,
+    netclass_summary: list[dict] | None = None,
 ) -> None:
     """Print a summary of what was initialized.
 
@@ -111,10 +118,14 @@ def print_init_summary(
         copper: Copper weight in oz
         created_project: Whether a new project was created
         created_dru: Whether DRU file was created/updated
+        design_type: Design type template applied (if any)
+        netclass_summary: Summary of netclasses created (if any)
     """
     fmt = get_current_formatter()
     console.print(f"\n[bold green]✓[/bold green] Initialized project for {profile.name}")
     console.print(f"  Configuration: {layers}-layer, {copper}oz copper")
+    if design_type:
+        console.print(f"  Design type: {design_type}")
     console.print(f"  Units: {fmt.unit_name}\n")
 
     # Design rules table
@@ -156,6 +167,25 @@ def print_init_summary(
 
     console.print(table)
 
+    # Netclass table (if netclasses were configured)
+    if netclass_summary and len(netclass_summary) > 1:
+        console.print()
+        nc_table = Table(title="Net Classes Configured", show_header=True, header_style="bold cyan")
+        nc_table.add_column("Class", style="bold")
+        nc_table.add_column("Track Width", justify="right")
+        nc_table.add_column("Clearance", justify="right")
+        nc_table.add_column("Patterns", justify="right", style="dim")
+
+        for nc in netclass_summary:
+            nc_table.add_row(
+                nc["name"],
+                fmt.format(nc["track_width"]),
+                fmt.format(nc["clearance"]),
+                str(nc["pattern_count"]) if nc["pattern_count"] > 0 else "-",
+            )
+
+        console.print(nc_table)
+
     # Files section
     console.print("\n[bold]Files:[/bold]")
     if created_project:
@@ -181,6 +211,7 @@ def init_project(
     manufacturer: str,
     layers: int = 2,
     copper: float = 1.0,
+    design_type: str | None = None,
     dry_run: bool = False,
     output_format: str = "text",
 ) -> int:
@@ -191,6 +222,7 @@ def init_project(
         manufacturer: Manufacturer ID (jlcpcb, seeed, etc.)
         layers: Number of copper layers
         copper: Copper weight in oz
+        design_type: Design type template for netclass configuration
         dry_run: If True, show what would be done without making changes
         output_format: Output format ("text" or "json")
 
@@ -246,6 +278,7 @@ def init_project(
             "manufacturer": profile.id,
             "layers": layers,
             "copper_oz": copper,
+            "design_type": design_type,
             "rules": rules.to_dict(),
             "will_create_project": will_create_project,
             "will_create_dru": will_create_dru,
@@ -267,6 +300,7 @@ def init_project(
             copper,
             will_create_project,
             will_create_dru,
+            design_type=design_type,
         )
         return 0
 
@@ -316,6 +350,17 @@ def init_project(
     project_data["meta"]["layers"] = layers
     project_data["meta"]["copper_oz"] = copper
 
+    # Apply netclass template if specified
+    netclass_summary = None
+    if design_type:
+        try:
+            apply_design_template(project_data, design_type)
+            project_data["meta"]["design_type"] = design_type
+            netclass_summary = get_netclass_summary(project_data)
+        except ValueError as e:
+            err_console.print(f"[red]Error:[/red] {e}")
+            return 1
+
     # Write project file
     try:
         project_path.write_text(json.dumps(project_data, indent=2), encoding="utf-8")
@@ -342,6 +387,8 @@ def init_project(
             copper,
             will_create_project,
             will_create_dru,
+            design_type=design_type,
+            netclass_summary=netclass_summary,
         )
 
     return 0
@@ -349,6 +396,7 @@ def init_project(
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for init command."""
+    design_types = get_available_design_types()
     parser = argparse.ArgumentParser(
         description="Initialize a KiCad project with manufacturer design rules",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -356,11 +404,13 @@ def main(argv: list[str] | None = None) -> int:
 Examples:
   kct init myproject --mfr jlcpcb               Create project with JLCPCB 2-layer rules
   kct init myproject --mfr jlcpcb --layers 4    Create project with 4-layer rules
+  kct init myproject --mfr jlcpcb -t audio      Create audio project with netclasses
   kct init existing.kicad_pro --mfr seeed       Apply Seeed rules to existing project
   kct init . --mfr jlcpcb                       Initialize in current directory
   kct init myproject --mfr jlcpcb --dry-run     Show what would be done
 
 Available manufacturers: {", ".join(get_manufacturer_ids())}
+Design types: {", ".join(design_types)}
 """,
     )
     parser.add_argument(
@@ -389,6 +439,14 @@ Available manufacturers: {", ".join(get_manufacturer_ids())}
         help="Copper weight in oz (default: 1.0)",
     )
     parser.add_argument(
+        "-t",
+        "--design-type",
+        choices=design_types,
+        default=None,
+        metavar="TYPE",
+        help=f"Design type for netclass configuration ({', '.join(design_types)})",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be done without making changes",
@@ -407,6 +465,7 @@ Available manufacturers: {", ".join(get_manufacturer_ids())}
         manufacturer=args.mfr,
         layers=args.layers,
         copper=args.copper,
+        design_type=args.design_type,
         dry_run=args.dry_run,
         output_format=args.format,
     )

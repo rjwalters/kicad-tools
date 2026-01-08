@@ -2277,6 +2277,15 @@ def _add_init_parser(subparsers) -> None:
         help="Copper weight in oz (default: 1.0)",
     )
     init_parser.add_argument(
+        "-t",
+        "--design-type",
+        dest="init_design_type",
+        choices=["audio", "power_supply", "digital", "mixed_signal", "rf"],
+        default=None,
+        metavar="TYPE",
+        help="Design type for netclass configuration (audio, power_supply, digital, mixed_signal, rf)",
+    )
+    init_parser.add_argument(
         "--dry-run",
         dest="init_dry_run",
         action="store_true",
