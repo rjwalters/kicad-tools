@@ -86,12 +86,13 @@ class TestAtBuilder:
     """Tests for the at() position builder."""
 
     def test_at_without_rotation(self):
-        """at() without rotation omits rotation value."""
+        """at() without rotation defaults to 0 (KiCad GUI requires angle)."""
         node = at(100, 200)
         assert node.name == "at"
-        assert len(node.children) == 2
+        assert len(node.children) == 3
         assert node.children[0].value == 100
         assert node.children[1].value == 200
+        assert node.children[2].value == 0
 
     def test_at_with_rotation(self):
         """at() with rotation includes rotation value."""
@@ -102,10 +103,11 @@ class TestAtBuilder:
         assert node.children[1].value == 200
         assert node.children[2].value == 90
 
-    def test_at_zero_rotation_omitted(self):
-        """Zero rotation should be omitted."""
+    def test_at_zero_rotation_included(self):
+        """Zero rotation is explicitly included (KiCad GUI requires angle)."""
         node = at(100, 200, 0)
-        assert len(node.children) == 2
+        assert len(node.children) == 3
+        assert node.children[2].value == 0
 
 
 class TestStrokeBuilder:
