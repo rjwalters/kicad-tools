@@ -9,6 +9,7 @@ Tests for:
 import pytest
 
 from kicad_tools.schematic.models.elements import (
+    GlobalLabel,
     HierarchicalLabel,
     Junction,
     Label,
@@ -257,6 +258,83 @@ class TestHierarchicalLabel:
 
         hl = HierarchicalLabel.from_sexp(hl_sexp)
         assert hl.shape == "input"
+
+
+class TestGlobalLabel:
+    """Tests for GlobalLabel dataclass."""
+
+    def test_global_label_creation(self):
+        """Create global label with defaults."""
+        gl = GlobalLabel(text="VCC_3V3A", x=10.0, y=20.0)
+        assert gl.text == "VCC_3V3A"
+        assert gl.x == 10.0
+        assert gl.y == 20.0
+        assert gl.shape == "bidirectional"
+        assert gl.rotation == 0
+
+    def test_global_label_with_shape(self):
+        """Create global label with passive shape for ground nets."""
+        gl = GlobalLabel(text="AGND", x=10.0, y=20.0, shape="passive", rotation=180)
+        assert gl.text == "AGND"
+        assert gl.shape == "passive"
+        assert gl.rotation == 180
+
+    def test_global_label_to_sexp_node(self):
+        """GlobalLabel generates valid S-expression node."""
+        gl = GlobalLabel(text="VCC_3V3A", x=10.0, y=20.0, uuid_str="gl-uuid")
+        sexp = gl.to_sexp_node()
+        assert sexp.name == "global_label"
+
+    def test_global_label_to_sexp(self):
+        """GlobalLabel generates S-expression string."""
+        gl = GlobalLabel(text="VCC_3V3A", x=10.0, y=20.0)
+        sexp_str = gl.to_sexp()
+        assert "global_label" in sexp_str
+        assert "VCC_3V3A" in sexp_str
+
+    def test_global_label_from_sexp(self):
+        """Parse global label from S-expression node."""
+        gl_sexp = SExp.list(
+            "global_label",
+            "+3V3A",
+            SExp.list("shape", "input"),
+            SExp.list("at", 10.0, 20.0, 0),
+            SExp.list("uuid", "gl-uuid-123"),
+        )
+
+        gl = GlobalLabel.from_sexp(gl_sexp)
+        assert gl.text == "+3V3A"
+        assert gl.shape == "input"
+        assert gl.x == 10.0
+        assert gl.y == 20.0
+        assert gl.rotation == 0
+
+    def test_global_label_from_sexp_with_rotation(self):
+        """Parse global label with rotation."""
+        gl_sexp = SExp.list(
+            "global_label",
+            "DGND",
+            SExp.list("shape", "passive"),
+            SExp.list("at", 100.0, 200.0, 180),
+            SExp.list("uuid", "gl-uuid"),
+        )
+
+        gl = GlobalLabel.from_sexp(gl_sexp)
+        assert gl.text == "DGND"
+        assert gl.shape == "passive"
+        assert gl.rotation == 180
+
+    def test_global_label_from_sexp_default_shape(self):
+        """Parse global label defaults to bidirectional shape."""
+        gl_sexp = SExp.list(
+            "global_label",
+            "VCC_5V",
+            SExp.list("at", 10.0, 20.0),
+            SExp.list("uuid", "gl-uuid"),
+        )
+
+        gl = GlobalLabel.from_sexp(gl_sexp)
+        assert gl.shape == "bidirectional"
 
 
 class TestPowerSymbol:

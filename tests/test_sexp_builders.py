@@ -7,6 +7,7 @@ from kicad_tools.sexp.builders import (
     fmt,
     font,
     footprint_at_node,
+    global_label_node,
     hier_label_node,
     junction_node,
     label_node,
@@ -311,6 +312,42 @@ class TestHierLabelNode:
         effects_node = node.get("effects")
         justify_node = effects_node.get("justify")
         assert justify_node.children[0].value == "right"
+
+
+class TestGlobalLabelNode:
+    """Tests for the global_label_node() builder."""
+
+    def test_global_label_node_basic(self):
+        """Build global label with basic params."""
+        node = global_label_node("VCC_3V3A", 100, 200, "input", 0, "gl-uuid")
+        assert node.name == "global_label"
+        assert node.children[0].value == "VCC_3V3A"
+
+        shape_node = node.get("shape")
+        assert shape_node.children[0].value == "input"
+
+    def test_global_label_node_passive(self):
+        """Build global label with passive shape for GND."""
+        node = global_label_node("AGND", 100, 200, "passive", 0, "gl-uuid")
+        assert node.name == "global_label"
+        assert node.children[0].value == "AGND"
+
+        shape_node = node.get("shape")
+        assert shape_node.children[0].value == "passive"
+
+    def test_global_label_node_right_justify(self):
+        """Rotation 180 gets right justify."""
+        node = global_label_node("DGND", 100, 200, "passive", 180, "gl-uuid")
+        effects_node = node.get("effects")
+        justify_node = effects_node.get("justify")
+        assert justify_node.children[0].value == "right"
+
+    def test_global_label_node_left_justify(self):
+        """Rotation 0 gets left justify."""
+        node = global_label_node("+3V3D", 100, 200, "input", 0, "gl-uuid")
+        effects_node = node.get("effects")
+        justify_node = effects_node.get("justify")
+        assert justify_node.children[0].value == "left"
 
 
 class TestTextNode:
