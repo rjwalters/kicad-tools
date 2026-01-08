@@ -212,13 +212,52 @@ class SchematicElementsMixin:
     def add_pwr_flag(self, x: float, y: float) -> PowerSymbol:
         """Add a PWR_FLAG symbol to mark a power net as intentionally driven.
 
-        This suppresses ERC errors about power pins not being driven.
-        Place on the power net near where power enters the schematic.
+        Power symbols like +5V and GND are defined as **power input** pins - they
+        indicate where a net receives power but don't declare a power source.
+        Without PWR_FLAG, ERC reports: "Input Power pin not driven by any Output
+        Power pins".
+
+        PWR_FLAG tells KiCad that external power is intentionally provided at this
+        point (e.g., from a connector, battery, or regulator output).
+
+        When to use PWR_FLAG:
+            - Power connector pins (DC jack, USB VBUS)
+            - Voltage regulator outputs
+            - Battery connections
+            - Test points where power can be injected
+
+        Args:
+            x, y: Position for the PWR_FLAG (should be on the power net wire)
+
+        Returns:
+            The PowerSymbol created
+
+        Example:
+            # Power entry from USB connector
+            sch.add_power("power:+5V", x=50, y=30)
+            sch.add_pwr_flag(50, 35)  # Mark +5V as externally driven
+            sch.add_wire((50, 30), (50, 50))
+
+            # Voltage regulator output
+            sch.add_power("power:+3.3V", x=100, y=30)
+            sch.add_pwr_flag(100, 35)  # 3.3V is driven by regulator
+            sch.add_wire((100, 30), (100, 50))
+
+        See Also:
+            - add_power(): Add power symbols (+5V, GND, etc.)
+            - README.md in this module for power symbol documentation
         """
         return self.add_power("power:PWR_FLAG", x, y, rotation=0)
 
     def add_wire(self, p1: tuple[float, float], p2: tuple[float, float], snap: bool = True) -> Wire:
         """Add a wire between two points.
+
+        IMPORTANT - Wire Connectivity Rule:
+            KiCad establishes electrical connections only where **wire endpoints meet**.
+            A wire passing through a point does NOT connect to other wires at that point.
+
+            To create a T-connection, you must split the rail into segments so that
+            wire endpoints meet at the intersection point.
 
         Args:
             p1: Start point (x, y)
@@ -227,6 +266,22 @@ class SchematicElementsMixin:
 
         Returns:
             The Wire created
+
+        Example:
+            # WRONG: Wire passes through - NO CONNECTION
+            sch.add_wire((0, 50), (200, 50))     # Continuous rail
+            sch.add_wire((100, 50), (100, 100))  # Touches rail but NOT connected!
+
+            # CORRECT: Wire endpoints meet - CONNECTED
+            sch.add_wire((0, 50), (100, 50))     # Segment 1 ends at intersection
+            sch.add_wire((100, 50), (200, 50))  # Segment 2 starts at intersection
+            sch.add_wire((100, 50), (100, 100)) # Vertical meets at same point
+            sch.add_junction(100, 50)           # Visual indicator (optional)
+
+        See Also:
+            - add_junction(): Add visual indicator at wire connections
+            - wire_to_rail(): Higher-level helper that handles segmentation
+            - README.md in this module for detailed connectivity documentation
         """
         # Apply grid snapping if enabled
         if snap:
@@ -254,11 +309,40 @@ class SchematicElementsMixin:
         return wires
 
     def add_junction(self, x: float, y: float, snap: bool = True) -> Junction:
-        """Add a junction point.
+        """Add a junction point (visual indicator only).
+
+        IMPORTANT - Junction Semantics:
+            Junctions are **visual indicators only** - they do NOT establish
+            electrical connectivity. Wire endpoints must already meet at the
+            junction point for an actual connection to exist.
+
+            Use junctions to:
+            1. Show that wires are intentionally connected (not just crossing)
+            2. Distinguish connected crossings from non-connected overlaps
 
         Args:
             x, y: Junction position (snapped to grid unless snap=False)
             snap: Whether to apply grid snapping (default: True)
+
+        Returns:
+            The Junction created
+
+        Example:
+            # WRONG: Junction without endpoint connectivity - NO CONNECTION!
+            sch.add_wire((0, 50), (200, 50))     # Continuous wire
+            sch.add_wire((100, 0), (100, 100))   # Passes through
+            sch.add_junction(100, 50)            # Visual only - NOT connected!
+
+            # CORRECT: Endpoints meet, junction for visual clarity
+            sch.add_wire((0, 50), (100, 50))     # Ends at intersection
+            sch.add_wire((100, 50), (200, 50))   # Starts at intersection
+            sch.add_wire((100, 0), (100, 50))    # Meets at intersection
+            sch.add_wire((100, 50), (100, 100))  # Continues from intersection
+            sch.add_junction(100, 50)            # Visual indicator
+
+        See Also:
+            - add_wire(): Create wires with proper endpoint connectivity
+            - README.md in this module for detailed connectivity documentation
         """
         if snap:
             x = self._snap_coord(x, "junction")
