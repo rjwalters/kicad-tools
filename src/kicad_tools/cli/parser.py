@@ -164,6 +164,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_mcp_parser(subparsers)
     _add_init_parser(subparsers)
     _add_build_native_parser(subparsers)
+    _add_spec_parser(subparsers)
 
     return parser
 
@@ -2345,4 +2346,130 @@ def _add_build_native_parser(subparsers) -> None:
         dest="build_native_check",
         action="store_true",
         help="Just check if C++ backend is available, don't build",
+    )
+
+
+def _add_spec_parser(subparsers) -> None:
+    """Add spec subcommand parser for .kct project specification files."""
+    spec_parser = subparsers.add_parser(
+        "spec",
+        help="Project specification (.kct) management",
+        description=(
+            "Manage .kct project specification files that capture design intent, "
+            "requirements, decisions, and progress for PCB projects."
+        ),
+    )
+    spec_subparsers = spec_parser.add_subparsers(
+        dest="spec_command",
+        help="Spec commands",
+    )
+
+    # spec init
+    spec_init = spec_subparsers.add_parser(
+        "init",
+        help="Initialize a new .kct specification file",
+        description="Create a new project specification file from a template.",
+    )
+    spec_init.add_argument(
+        "spec_name",
+        metavar="NAME",
+        help="Project name",
+    )
+    spec_init.add_argument(
+        "-t",
+        "--template",
+        dest="spec_template",
+        choices=["minimal", "power_supply", "sensor_board", "mcu_breakout"],
+        default="minimal",
+        help="Template to use (default: minimal)",
+    )
+    spec_init.add_argument(
+        "-o",
+        "--output",
+        dest="spec_output",
+        metavar="FILE",
+        help="Output file path (default: project.kct)",
+    )
+    spec_init.add_argument(
+        "-f",
+        "--force",
+        dest="spec_force",
+        action="store_true",
+        help="Overwrite existing file",
+    )
+
+    # spec validate
+    spec_validate = spec_subparsers.add_parser(
+        "validate",
+        help="Validate a .kct specification file",
+        description="Check a spec file for schema and semantic errors.",
+    )
+    spec_validate.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+
+    # spec status
+    spec_status = spec_subparsers.add_parser(
+        "status",
+        help="Show project status and progress",
+        description="Display progress, phase status, and recent decisions from a spec file.",
+    )
+    spec_status.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+
+    # spec decide
+    spec_decide = spec_subparsers.add_parser(
+        "decide",
+        help="Record a design decision",
+        description="Add a design decision with rationale to the spec file.",
+    )
+    spec_decide.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+    spec_decide.add_argument(
+        "--topic",
+        dest="decide_topic",
+        required=True,
+        help="Decision topic (e.g., 'Buck Converter Selection')",
+    )
+    spec_decide.add_argument(
+        "--choice",
+        dest="decide_choice",
+        required=True,
+        help="Chosen option",
+    )
+    spec_decide.add_argument(
+        "--rationale",
+        dest="decide_rationale",
+        required=True,
+        help="Reasoning for the decision",
+    )
+    spec_decide.add_argument(
+        "--alternatives",
+        dest="decide_alternatives",
+        help="Comma-separated alternative options considered",
+    )
+
+    # spec check
+    spec_check = spec_subparsers.add_parser(
+        "check",
+        help="Mark a checklist item as complete",
+        description="Mark a progress checklist item as completed.",
+    )
+    spec_check.add_argument(
+        "spec_file",
+        metavar="FILE",
+        help="Path to .kct file",
+    )
+    spec_check.add_argument(
+        "check_item",
+        metavar="ITEM",
+        help="Checklist item to mark complete (format: 'phase.item' or 'item')",
     )

@@ -65,6 +65,7 @@ from .commands import (
     run_reason_command,
     run_route_command,
     run_sch_command,
+    run_spec_command,
     run_suggest_command,
     run_validate_command,
     run_validate_footprints_command,
@@ -369,6 +370,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "build-native":
         return run_build_native_command(args)
+
+    elif args.command == "spec":
+        return run_spec_command(args)
 
     return 0
 
