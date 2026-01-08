@@ -12,6 +12,7 @@ def run_init_command(args) -> int:
         manufacturer=args.init_mfr,
         layers=args.init_layers,
         copper=args.init_copper,
+        design_type=args.init_design_type,
         dry_run=args.init_dry_run,
         output_format=args.init_format,
     )

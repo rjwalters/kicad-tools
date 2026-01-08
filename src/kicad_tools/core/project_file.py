@@ -186,3 +186,279 @@ def get_manufacturer_metadata(data: dict[str, Any]) -> dict[str, Any]:
         Manufacturer metadata (empty dict if not set)
     """
     return data.get("meta", {})
+
+
+# =============================================================================
+# NETCLASS FUNCTIONS
+# =============================================================================
+
+# Default netclass definition structure (KiCad 7+ format)
+DEFAULT_NETCLASS_DEFINITION: dict[str, Any] = {
+    "bus_width": 12,
+    "clearance": 0.2,
+    "diff_pair_gap": 0.25,
+    "diff_pair_via_gap": 0.25,
+    "diff_pair_width": 0.2,
+    "line_style": 0,
+    "microvia_diameter": 0.3,
+    "microvia_drill": 0.1,
+    "name": "Default",
+    "pcb_color": "rgba(0, 0, 0, 0.000)",
+    "schematic_color": "rgba(0, 0, 0, 0.000)",
+    "track_width": 0.25,
+    "via_diameter": 0.6,
+    "via_drill": 0.3,
+    "wire_width": 6,
+}
+
+
+def get_net_settings(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Get net_settings from project data, creating if missing.
+
+    Args:
+        data: Project data dictionary
+
+    Returns:
+        Net settings dictionary
+    """
+    if "net_settings" not in data:
+        data["net_settings"] = {
+            "classes": [DEFAULT_NETCLASS_DEFINITION.copy()],
+            "meta": {"version": 3},
+            "net_colors": None,
+            "netclass_assignments": None,
+            "netclass_patterns": [],
+        }
+    return data["net_settings"]
+
+
+def get_netclass_definitions(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Get list of netclass definitions from project data.
+
+    Args:
+        data: Project data dictionary
+
+    Returns:
+        List of netclass definition dictionaries
+    """
+    net_settings = get_net_settings(data)
+    if "classes" not in net_settings:
+        net_settings["classes"] = [DEFAULT_NETCLASS_DEFINITION.copy()]
+    return net_settings["classes"]
+
+
+def get_netclass_patterns(data: dict[str, Any]) -> list[dict[str, str]]:
+    """
+    Get list of netclass patterns from project data.
+
+    Args:
+        data: Project data dictionary
+
+    Returns:
+        List of pattern dictionaries with 'netclass' and 'pattern' keys
+    """
+    net_settings = get_net_settings(data)
+    if "netclass_patterns" not in net_settings:
+        net_settings["netclass_patterns"] = []
+    return net_settings["netclass_patterns"]
+
+
+def create_netclass_definition(
+    name: str,
+    track_width: float = 0.25,
+    clearance: float = 0.2,
+    via_diameter: float = 0.6,
+    via_drill: float = 0.3,
+    pcb_color: str | None = None,
+    schematic_color: str | None = None,
+    diff_pair_width: float = 0.2,
+    diff_pair_gap: float = 0.25,
+) -> dict[str, Any]:
+    """
+    Create a netclass definition dictionary.
+
+    Args:
+        name: Netclass name
+        track_width: Trace width in mm
+        clearance: Trace-to-trace clearance in mm
+        via_diameter: Via outer diameter in mm
+        via_drill: Via drill diameter in mm
+        pcb_color: PCB editor color (RGBA string) or None for default
+        schematic_color: Schematic editor color (RGBA string) or None for default
+        diff_pair_width: Differential pair trace width in mm
+        diff_pair_gap: Differential pair gap in mm
+
+    Returns:
+        Netclass definition dictionary
+    """
+    definition = DEFAULT_NETCLASS_DEFINITION.copy()
+    definition["name"] = name
+    definition["track_width"] = track_width
+    definition["clearance"] = clearance
+    definition["via_diameter"] = via_diameter
+    definition["via_drill"] = via_drill
+    definition["diff_pair_width"] = diff_pair_width
+    definition["diff_pair_gap"] = diff_pair_gap
+
+    if pcb_color is not None:
+        definition["pcb_color"] = pcb_color
+    if schematic_color is not None:
+        definition["schematic_color"] = schematic_color
+
+    return definition
+
+
+def add_netclass_definition(
+    data: dict[str, Any],
+    name: str,
+    track_width: float = 0.25,
+    clearance: float = 0.2,
+    via_diameter: float = 0.6,
+    via_drill: float = 0.3,
+    pcb_color: str | None = None,
+    schematic_color: str | None = None,
+    diff_pair_width: float = 0.2,
+    diff_pair_gap: float = 0.25,
+) -> dict[str, Any]:
+    """
+    Add a netclass definition to project data.
+
+    If a netclass with the same name already exists, it will be updated.
+
+    Args:
+        data: Project data dictionary
+        name: Netclass name
+        track_width: Trace width in mm
+        clearance: Trace-to-trace clearance in mm
+        via_diameter: Via outer diameter in mm
+        via_drill: Via drill diameter in mm
+        pcb_color: PCB editor color (RGBA string) or None for default
+        schematic_color: Schematic editor color (RGBA string) or None for default
+        diff_pair_width: Differential pair trace width in mm
+        diff_pair_gap: Differential pair gap in mm
+
+    Returns:
+        The created/updated netclass definition
+    """
+    classes = get_netclass_definitions(data)
+
+    # Check if netclass already exists
+    for i, cls in enumerate(classes):
+        if cls.get("name") == name:
+            # Update existing
+            definition = create_netclass_definition(
+                name=name,
+                track_width=track_width,
+                clearance=clearance,
+                via_diameter=via_diameter,
+                via_drill=via_drill,
+                pcb_color=pcb_color,
+                schematic_color=schematic_color,
+                diff_pair_width=diff_pair_width,
+                diff_pair_gap=diff_pair_gap,
+            )
+            classes[i] = definition
+            return definition
+
+    # Add new netclass
+    definition = create_netclass_definition(
+        name=name,
+        track_width=track_width,
+        clearance=clearance,
+        via_diameter=via_diameter,
+        via_drill=via_drill,
+        pcb_color=pcb_color,
+        schematic_color=schematic_color,
+        diff_pair_width=diff_pair_width,
+        diff_pair_gap=diff_pair_gap,
+    )
+    classes.append(definition)
+    return definition
+
+
+def add_netclass_pattern(
+    data: dict[str, Any],
+    netclass: str,
+    pattern: str,
+) -> dict[str, str]:
+    """
+    Add a netclass pattern assignment to project data.
+
+    Patterns use wildcard matching where * matches any substring.
+
+    Args:
+        data: Project data dictionary
+        netclass: Target netclass name
+        pattern: Wildcard pattern for matching net names
+
+    Returns:
+        The created pattern dictionary
+    """
+    patterns = get_netclass_patterns(data)
+
+    # Check if this exact pattern already exists
+    for p in patterns:
+        if p.get("netclass") == netclass and p.get("pattern") == pattern:
+            return p
+
+    # Add new pattern
+    pattern_dict = {"netclass": netclass, "pattern": pattern}
+    patterns.append(pattern_dict)
+    return pattern_dict
+
+
+def add_netclass_patterns(
+    data: dict[str, Any],
+    netclass: str,
+    patterns: list[str],
+) -> list[dict[str, str]]:
+    """
+    Add multiple netclass pattern assignments for a single netclass.
+
+    Args:
+        data: Project data dictionary
+        netclass: Target netclass name
+        patterns: List of wildcard patterns for matching net names
+
+    Returns:
+        List of created pattern dictionaries
+    """
+    return [add_netclass_pattern(data, netclass, p) for p in patterns]
+
+
+def clear_netclass_definitions(data: dict[str, Any], keep_default: bool = True) -> None:
+    """
+    Clear all netclass definitions from project data.
+
+    Args:
+        data: Project data dictionary
+        keep_default: If True, keep the Default netclass
+    """
+    net_settings = get_net_settings(data)
+    if keep_default:
+        # Keep only the Default class
+        classes = net_settings.get("classes", [])
+        default_class = None
+        for cls in classes:
+            if cls.get("name") == "Default":
+                default_class = cls
+                break
+        if default_class:
+            net_settings["classes"] = [default_class]
+        else:
+            net_settings["classes"] = [DEFAULT_NETCLASS_DEFINITION.copy()]
+    else:
+        net_settings["classes"] = []
+
+
+def clear_netclass_patterns(data: dict[str, Any]) -> None:
+    """
+    Clear all netclass patterns from project data.
+
+    Args:
+        data: Project data dictionary
+    """
+    net_settings = get_net_settings(data)
+    net_settings["netclass_patterns"] = []
