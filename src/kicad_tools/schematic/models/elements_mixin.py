@@ -17,6 +17,7 @@ from .elements import (
     HierarchicalLabel,
     Junction,
     Label,
+    NoConnect,
     PowerSymbol,
     Wire,
 )
@@ -353,6 +354,39 @@ class SchematicElementsMixin:
         junc = Junction(x=x, y=y)
         self.junctions.append(junc)
         return junc
+
+    def add_no_connect(self, x: float, y: float, snap: bool = True) -> NoConnect:
+        """Add a no-connect marker at a pin to indicate intentional non-connection.
+
+        No-connect markers silence ERC "pin not connected" warnings for pins
+        that are intentionally left unconnected (e.g., NC pins on ICs).
+
+        Args:
+            x, y: Position of the pin (snapped to grid unless snap=False)
+            snap: Whether to apply grid snapping (default: True)
+
+        Returns:
+            The NoConnect created
+
+        Example:
+            # Mark NC pins on an IC as intentionally unconnected
+            ic = sch.add_symbol("Package_DIP:DIP-8_W7.62mm", 100, 100, "U1")
+            # If pins 5 and 6 are NC:
+            pin5_pos = ic.pin_position("5")
+            pin6_pos = ic.pin_position("6")
+            sch.add_no_connect(pin5_pos[0], pin5_pos[1])
+            sch.add_no_connect(pin6_pos[0], pin6_pos[1])
+        """
+        if snap:
+            x = self._snap_coord(x, "no_connect")
+            y = self._snap_coord(y, "no_connect")
+        else:
+            x = round(x, 2)
+            y = round(y, 2)
+        nc = NoConnect(x=x, y=y)
+        self.no_connects.append(nc)
+        _log_debug(f"Added no-connect marker at ({x}, {y})")
+        return nc
 
     def add_label(
         self, text: str, x: float, y: float, rotation: float = 0, snap: bool = True

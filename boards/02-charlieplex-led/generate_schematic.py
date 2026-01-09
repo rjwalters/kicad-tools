@@ -120,10 +120,15 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
 
     # Add wire stubs with global labels for MCU pins
     for pin_num, net_name in MCU_PINS.items():
+        pin_pos = mcu.pin_position(pin_num)
         if net_name:
-            pin_pos = mcu.pin_position(pin_num)
             add_pin_label(sch, pin_pos, net_name, direction="right")
             print(f"      Pin {pin_num} -> {net_name}")
+        else:
+            # Mark NC pins with no-connect markers
+            if pin_pos:
+                sch.add_no_connect(pin_pos[0], pin_pos[1], snap=False)
+                print(f"      Pin {pin_num} -> NC (no-connect)")
 
     # =========================================================================
     # Section 2: Place Resistors with wire stubs
@@ -177,7 +182,7 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
         print(f"      {anode_net} -> LED -> {cathode_net}")
 
     # =========================================================================
-    # Section 4: Add Power Symbols with wire stubs
+    # Section 4: Add Power Symbols with wire stubs and PWR_FLAG
     # =========================================================================
     print("\n4. Adding power symbols...")
 
@@ -193,7 +198,13 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
     sch.add_wire(gnd_conn, (gnd_conn[0] + WIRE_STUB, gnd_conn[1]), snap=False)
     sch.add_global_label("GND", gnd_conn[0] + WIRE_STUB, gnd_conn[1], shape="input", rotation=180, snap=False)
 
-    print("   Added VCC and GND power symbols with labels")
+    # Add PWR_FLAG symbols to indicate power entry points
+    # This tells ERC that these power nets are intentionally driven externally
+    # (e.g., from an external power supply connected to the MCU)
+    sch.add_pwr_flag(vcc_pwr.x, vcc_pwr.y)
+    sch.add_pwr_flag(gnd_pwr.x, gnd_pwr.y)
+
+    print("   Added VCC and GND power symbols with PWR_FLAG")
 
     # =========================================================================
     # Section 5: Validate and Write

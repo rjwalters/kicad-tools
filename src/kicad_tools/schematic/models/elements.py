@@ -15,6 +15,7 @@ from kicad_tools.sexp.builders import (
     hier_label_node,
     junction_node,
     label_node,
+    no_connect_node,
     pin_uuid_node,
     symbol_instances_node,
     symbol_property_node,
@@ -104,6 +105,47 @@ class Junction:
 
         Expected format:
             (junction (at x y) (diameter 0) (color ...) (uuid ...))
+        """
+        at_node = node["at"]
+        atoms = at_node.get_atoms()
+
+        uuid_node_elem = node.get("uuid")
+        uuid_str = uuid_node_elem.get_first_atom() if uuid_node_elem else str(uuid.uuid4())
+
+        return cls(x=round(float(atoms[0]), 2), y=round(float(atoms[1]), 2), uuid_str=str(uuid_str))
+
+
+@dataclass
+class NoConnect:
+    """A no-connect marker indicating a pin is intentionally unconnected.
+
+    No-connect markers silence ERC "pin not connected" warnings.
+    Place them at pin endpoints to indicate intentional non-connection.
+    """
+
+    x: float
+    y: float
+    uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def __post_init__(self):
+        # Round coordinates for consistent matching
+        self.x = round(self.x, 2)
+        self.y = round(self.y, 2)
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression tree for this no-connect marker."""
+        return no_connect_node(self.x, self.y, self.uuid_str)
+
+    def to_sexp(self) -> str:
+        """Generate S-expression string (delegates to to_sexp_node)."""
+        return self.to_sexp_node().to_string(indent=1)
+
+    @classmethod
+    def from_sexp(cls, node: SExp) -> "NoConnect":
+        """Parse a NoConnect from an S-expression node.
+
+        Expected format:
+            (no_connect (at x y) (uuid ...))
         """
         at_node = node["at"]
         atoms = at_node.get_atoms()
