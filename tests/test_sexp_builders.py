@@ -124,7 +124,7 @@ class TestStrokeBuilder:
         # Find type child
         type_node = node.get("type")
         assert type_node is not None
-        assert type_node.children[0].value == "solid"
+        assert type_node.children[0].value == "default"
 
     def test_stroke_custom_values(self):
         """stroke() with custom width and type."""
@@ -263,18 +263,23 @@ class TestJunctionNode:
     """Tests for the junction_node() builder."""
 
     def test_junction_node(self):
-        """Build complete junction node."""
+        """Build complete junction node.
+
+        Note: Junctions use simpler (at x y) format without rotation angle,
+        and don't include color field for compatibility with kicad-cli.
+        """
         node = junction_node(50, 60, "junc-uuid")
         assert node.name == "junction"
 
         at_node = node.get("at")
         assert at_node is not None
+        # Junction at should only have x, y (no rotation)
+        assert len(at_node.children) == 2
 
         diameter_node = node.get("diameter")
         assert diameter_node is not None
 
-        color_node = node.get("color")
-        assert color_node is not None
+        # Note: color field removed for kicad-cli compatibility
 
         uuid_n = node.get("uuid")
         assert uuid_n.children[0].value == "junc-uuid"

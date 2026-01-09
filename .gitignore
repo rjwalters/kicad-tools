@@ -38,6 +38,7 @@ ENV/
 htmlcov/
 coverage.xml
 *.cover
+*.rpt
 
 # Build
 *.whl

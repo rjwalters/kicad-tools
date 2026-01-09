@@ -240,7 +240,7 @@ class SchematicIOMixin:
         """Build complete schematic as SExp tree."""
         root = SExp.list(
             "kicad_sch",
-            SExp.list("version", 20250114),
+            SExp.list("version", 20231120),
             SExp.list("generator", "eeschema"),
             SExp.list("generator_version", "9.0"),
             uuid_node(self.sheet_uuid),
