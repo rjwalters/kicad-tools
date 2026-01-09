@@ -352,6 +352,9 @@ class SymbolInstance:
                 suggestions=suggestions,
             )
 
+        # Get the wire connection point (end of pin) in symbol-local coordinates
+        conn_x, conn_y = pin.connection_point()
+
         # Apply rotation transformation
         # Note: KiCad schematic uses Y-down, but symbol definitions use Y-up
         # So we negate the Y component when translating
@@ -359,9 +362,9 @@ class SymbolInstance:
         cos_r = math.cos(rad)
         sin_r = math.sin(rad)
 
-        # Rotate pin position around origin (in symbol's Y-up coordinate system)
-        rx = pin.x * cos_r - pin.y * sin_r
-        ry = pin.x * sin_r + pin.y * cos_r
+        # Rotate connection point around origin (in symbol's Y-up coordinate system)
+        rx = conn_x * cos_r - conn_y * sin_r
+        ry = conn_x * sin_r + conn_y * cos_r
 
         # Translate to symbol position (flip Y for schematic's Y-down system)
         # Round to 2 decimal places for consistent wire matching
