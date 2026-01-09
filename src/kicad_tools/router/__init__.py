@@ -133,6 +133,15 @@ from .rules import (
     ZoneRules,
     create_net_class_map,
 )
+from .parallel import (
+    BoundingBox,
+    NetGroup,
+    ParallelRouter,
+    ParallelRoutingResult,
+    find_independent_groups,
+    find_route_conflicts,
+    resolve_parallel_conflicts,
+)
 from .sparse import SparseRouter, SparseRoutingGraph, Waypoint
 from .zones import (
     ConnectionType,
@@ -180,6 +189,14 @@ __all__ = [
     "SparseRouter",
     "SparseRoutingGraph",
     "Waypoint",
+    # Parallel routing
+    "ParallelRouter",
+    "ParallelRoutingResult",
+    "BoundingBox",
+    "NetGroup",
+    "find_independent_groups",
+    "find_route_conflicts",
+    "resolve_parallel_conflicts",
     # Pathfinding
     "Router",
     "AStarNode",

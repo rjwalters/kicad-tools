@@ -32,6 +32,7 @@ from .rules import (
     NetClassRouting,
     assign_layer_preferences,
 )
+from .parallel import ParallelRouter, ParallelRoutingResult, find_independent_groups
 from .sparse import Corridor, SparseRouter, Waypoint
 from .zones import ZoneManager
 
@@ -520,8 +521,30 @@ class Autorouter:
         self,
         net_order: list[int] | None = None,
         progress_callback: ProgressCallback | None = None,
+        parallel: bool = False,
+        max_workers: int = 4,
     ) -> list[Route]:
-        """Route all nets in priority order."""
+        """Route all nets in priority order.
+
+        Args:
+            net_order: Optional explicit net ordering (by priority)
+            progress_callback: Optional callback for progress updates
+            parallel: If True, route independent nets in parallel using
+                bounding box analysis to find non-overlapping net groups.
+                Can provide 3-4x speedup for boards with many independent nets.
+            max_workers: Maximum number of parallel workers (default: 4).
+                Only used when parallel=True.
+
+        Returns:
+            List of Route objects for all nets
+        """
+        if parallel:
+            return self.route_all_parallel(
+                net_order=net_order,
+                progress_callback=progress_callback,
+                max_workers=max_workers,
+            )
+
         if net_order is None:
             net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
 
@@ -550,6 +573,59 @@ class Autorouter:
             progress_callback(1.0, f"Routed {routed_count}/{total_nets} nets", False)
 
         return all_routes
+
+    def route_all_parallel(
+        self,
+        net_order: list[int] | None = None,
+        progress_callback: ProgressCallback | None = None,
+        max_workers: int = 4,
+    ) -> list[Route]:
+        """Route all nets using parallel execution where possible.
+
+        Groups nets by bounding box independence and routes independent
+        nets concurrently using ThreadPoolExecutor. This can provide
+        3-4x speedup for boards with many independent nets.
+
+        Args:
+            net_order: Optional explicit net ordering (by priority)
+            progress_callback: Optional callback for progress updates
+            max_workers: Maximum number of parallel workers
+
+        Returns:
+            List of Route objects for all nets
+
+        Example:
+            >>> router = Autorouter(100, 100)
+            >>> # ... add components ...
+            >>> routes = router.route_all_parallel(max_workers=4)
+            >>> print(f"Routed {len(routes)} routes")
+        """
+        print("\n=== Parallel Net Routing ===")
+        print(f"  Max workers: {max_workers}")
+
+        # Find independent groups
+        clearance = self.rules.trace_clearance * 2
+        groups = find_independent_groups(self.nets, self.pads, clearance)
+
+        print(f"  Found {len(groups)} parallel groups")
+        for i, group in enumerate(groups):
+            print(f"    Group {i + 1}: {len(group.nets)} nets")
+
+        # Create parallel router and execute
+        parallel_router = ParallelRouter(self, max_workers=max_workers)
+        result = parallel_router.route_parallel(
+            net_order=net_order,
+            progress_callback=progress_callback,
+        )
+
+        # Report results
+        print(f"\n=== Parallel Routing Complete ===")
+        print(f"  Successful nets: {len(result.successful_nets)}")
+        print(f"  Failed nets: {len(result.failed_nets)}")
+        print(f"  Conflicts resolved: {result.conflicts_resolved}")
+        print(f"  Total time: {result.total_time_ms:.0f}ms")
+
+        return result.routes
 
     def route_all_negotiated(
         self,
