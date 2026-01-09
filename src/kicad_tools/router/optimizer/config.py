@@ -21,6 +21,9 @@ class OptimizationConfig:
     compress_staircase: bool = True
     """Compress staircase patterns (alternating horizontal/diagonal) into optimal paths."""
 
+    minimize_vias: bool = True
+    """Enable post-routing via minimization."""
+
     min_staircase_segments: int = 3
     """Minimum number of segments to consider as a staircase pattern."""
 
@@ -29,6 +32,12 @@ class OptimizationConfig:
 
     corner_chamfer_size: float = 0.5
     """Size of 45-degree chamfer at corners (mm)."""
+
+    via_max_detour_factor: float = 1.5
+    """Maximum detour length as factor of direct distance for via removal."""
+
+    via_pair_threshold: float = 2.0
+    """Maximum distance between vias to consider as a removable pair (mm)."""
 
     tolerance: float = 1e-4
     """Tolerance for floating-point comparisons (mm)."""
@@ -45,6 +54,8 @@ class OptimizationStats:
     length_before: float = 0.0
     length_after: float = 0.0
     nets_optimized: int = 0
+    vias_before: int = 0
+    vias_after: int = 0
 
     @property
     def segment_reduction(self) -> float:
@@ -59,3 +70,10 @@ class OptimizationStats:
         if self.length_before == 0:
             return 0.0
         return (1 - self.length_after / self.length_before) * 100
+
+    @property
+    def via_reduction(self) -> float:
+        """Percentage reduction in via count."""
+        if self.vias_before == 0:
+            return 0.0
+        return (1 - self.vias_after / self.vias_before) * 100
