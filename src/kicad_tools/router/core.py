@@ -21,10 +21,10 @@ from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWa
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
-from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
+from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .primitives import Obstacle, Pad, Route
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
