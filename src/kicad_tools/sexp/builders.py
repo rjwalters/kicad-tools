@@ -45,7 +45,7 @@ def at(x: float, y: float, rotation: float = 0) -> SExp:
     return SExp.list("at", fmt(x), fmt(y), int(rotation))
 
 
-def stroke(width: float = 0, stroke_type: str = "solid") -> SExp:
+def stroke(width: float = 0, stroke_type: str = "default") -> SExp:
     """Build a (stroke (width W) (type T)) node."""
     return SExp.list("stroke", SExp.list("width", width), SExp.list("type", stroke_type))
 
@@ -136,8 +136,17 @@ def wire_node(x1: float, y1: float, x2: float, y2: float, uuid_str: str) -> SExp
 
 
 def junction_node(x: float, y: float, uuid_str: str) -> SExp:
-    """Build a complete junction S-expression."""
-    return SExp.list("junction", at(x, y), SExp.list("diameter", 0), color(), uuid_node(uuid_str))
+    """Build a complete junction S-expression.
+
+    Note: Junctions use simpler (at x y) format without rotation angle,
+    and don't include color field for compatibility with kicad-cli.
+    """
+    return SExp.list(
+        "junction",
+        SExp.list("at", fmt(x), fmt(y)),  # No rotation for junctions
+        SExp.list("diameter", 0),
+        uuid_node(uuid_str),
+    )
 
 
 def label_node(text: str, x: float, y: float, rotation: float, uuid_str: str) -> SExp:

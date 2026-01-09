@@ -15,6 +15,7 @@ from .algorithms import (
 from .chain import sort_into_chains
 from .collision import CollisionChecker
 from .config import OptimizationConfig, OptimizationStats
+from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 from .geometry import (
     angle_between,
     count_corners,
@@ -73,6 +74,19 @@ class TraceOptimizer:
         """
         self.config = config or OptimizationConfig()
         self.collision_checker = collision_checker
+
+        # Initialize via optimizer with matching config
+        via_config = ViaOptimizationConfig(
+            enabled=self.config.minimize_vias,
+            max_detour_factor=self.config.via_max_detour_factor,
+            via_pair_threshold=self.config.via_pair_threshold,
+            min_segment_length=self.config.min_segment_length,
+            tolerance=self.config.tolerance,
+        )
+        self._via_optimizer = ViaOptimizer(
+            config=via_config,
+            collision_checker=collision_checker,
+        )
 
     def optimize_segments(self, segments: list[Segment]) -> list[Segment]:
         """Optimize a list of segments for a single net/layer.
@@ -203,6 +217,10 @@ class TraceOptimizer:
     def optimize_route(self, route: Route) -> Route:
         """Optimize a complete route.
 
+        Applies optimizations in order:
+        1. Segment optimization (collinear merge, zigzag elimination, etc.)
+        2. Via minimization (remove unnecessary layer transitions)
+
         Segments are grouped by layer and then sorted into connected chains
         before optimization. This prevents optimization from creating
         shortcuts between unconnected parts of the route.
@@ -211,7 +229,7 @@ class TraceOptimizer:
             route: Route to optimize.
 
         Returns:
-            New Route with optimized segments.
+            New Route with optimized segments and minimized vias.
         """
         # Group segments by layer for optimization
         segments_by_layer: dict[Layer, list[Segment]] = {}
@@ -226,12 +244,19 @@ class TraceOptimizer:
             optimized = self.optimize_segments(segs)
             optimized_segments.extend(optimized)
 
-        return Route(
+        # Create route with optimized segments
+        optimized_route = Route(
             net=route.net,
             net_name=route.net_name,
             segments=optimized_segments,
-            vias=list(route.vias),  # Vias unchanged
+            vias=list(route.vias),
         )
+
+        # Apply via minimization if enabled
+        if self.config.minimize_vias:
+            optimized_route = self._via_optimizer.optimize_route(optimized_route)
+
+        return optimized_route
 
     def optimize_pcb(
         self,
@@ -341,3 +366,25 @@ class TraceOptimizer:
     ) -> str:
         """Replace original segments with optimized ones in PCB text."""
         return replace_segments(pcb_text, original, optimized)
+
+    def get_via_stats(self) -> dict:
+        """Get via optimization statistics.
+
+        Returns:
+            Dictionary with via optimization stats:
+                - vias_before: Total vias before optimization
+                - vias_after: Total vias after optimization
+                - vias_removed: Total vias removed
+                - via_reduction_percent: Percentage reduction
+        """
+        stats = self._via_optimizer.get_stats()
+        return {
+            "vias_before": stats.vias_before,
+            "vias_after": stats.vias_after,
+            "vias_removed": stats.vias_removed,
+            "via_reduction_percent": stats.via_reduction_percent,
+        }
+
+    def reset_via_stats(self) -> None:
+        """Reset via optimization statistics."""
+        self._via_optimizer.reset_stats()
