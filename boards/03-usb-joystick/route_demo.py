@@ -26,6 +26,7 @@ from kicad_tools.router import (
     create_net_class_map,
     load_pcb_for_routing,
 )
+from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
 
 def main():
@@ -102,10 +103,44 @@ def main():
     print("\n--- Routing (standard mode) ---")
     router.route_all()
 
-    # Get statistics
+    # Get statistics before optimization
+    stats_before = router.get_statistics()
+
+    print("\n--- Raw Results (before optimization) ---")
+    print(f"  Routes created: {stats_before['routes']}")
+    print(f"  Segments: {stats_before['segments']}")
+    print(f"  Vias: {stats_before['vias']}")
+    print(f"  Total length: {stats_before['total_length_mm']:.2f}mm")
+    print(f"  Nets routed: {stats_before['nets_routed']}")
+
+    # Optimize traces - merge collinear segments, eliminate zigzags, etc.
+    print("\n--- Optimizing traces ---")
+    opt_config = OptimizationConfig(
+        merge_collinear=True,
+        eliminate_zigzags=True,
+        compress_staircase=True,
+        convert_45_corners=True,
+        minimize_vias=True,
+    )
+    optimizer = TraceOptimizer(config=opt_config)
+
+    optimized_routes = []
+    for route in router.routes:
+        optimized_route = optimizer.optimize_route(route)
+        optimized_routes.append(optimized_route)
+    router.routes = optimized_routes
+
+    # Get statistics after optimization
     stats = router.get_statistics()
 
-    print("\n--- Results ---")
+    segments_before = stats_before["segments"]
+    segments_after = stats["segments"]
+    reduction = (1 - segments_after / segments_before) * 100 if segments_before > 0 else 0
+
+    print(f"  Segments: {segments_before} -> {segments_after} ({reduction:.1f}% reduction)")
+    print(f"  Vias: {stats_before['vias']} -> {stats['vias']}")
+
+    print("\n--- Final Results ---")
     print(f"  Routes created: {stats['routes']}")
     print(f"  Segments: {stats['segments']}")
     print(f"  Vias: {stats['vias']}")
