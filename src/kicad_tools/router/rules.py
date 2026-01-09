@@ -99,6 +99,11 @@ class NetClassRouting:
     zone_connection: str = "thermal"  # Default connection type ("thermal", "solid", "none")
     is_pour_net: bool = False  # This net is used for copper pours (e.g., GND, VCC)
 
+    # Layer preference parameters (Issue #625)
+    preferred_layers: list[int] | None = None  # Layer indices to prefer (lower cost)
+    avoid_layers: list[int] | None = None  # Layer indices to avoid (higher cost)
+    layer_cost_multiplier: float = 2.0  # Cost penalty for non-preferred layers
+
 
 # =============================================================================
 # PREDEFINED NET CLASSES
@@ -219,3 +224,161 @@ DEFAULT_NET_CLASS_MAP: dict[str, NetClassRouting] = create_net_class_map(
     audio_nets=["AUDIO_L", "AUDIO_R", "I2S_DIN", "I2S_DOUT"],
     debug_nets=["SWDIO", "SWCLK", "NRST", "TDI", "TDO", "TCK", "TMS"],
 )
+
+
+# =============================================================================
+# LAYER PREFERENCE ASSIGNMENT (Issue #625)
+# =============================================================================
+
+
+def assign_layer_preferences(
+    net_class_map: dict[str, NetClassRouting],
+    layer_stack: "LayerStack",
+) -> dict[str, NetClassRouting]:
+    """Assign layer preferences to net classes based on signal type.
+
+    This function automatically configures layer preferences based on
+    the net class type and the available layer stack. The strategy is:
+
+    - Power/Ground: Prefer inner layers adjacent to power/ground planes
+    - High-speed/Clock: Prefer inner layers with reference planes for
+      better impedance control and return current paths
+    - Low-speed/Digital: Prefer outer layers for easy access
+    - Audio/Noise-sensitive: Prefer outer layers, away from digital noise
+
+    Args:
+        net_class_map: Dictionary mapping net names to NetClassRouting objects
+        layer_stack: LayerStack describing the PCB stackup
+
+    Returns:
+        Updated net class map with layer preferences assigned.
+        Note: Creates new NetClassRouting objects, doesn't modify originals.
+
+    Example:
+        >>> from kicad_tools.router.rules import assign_layer_preferences
+        >>> from kicad_tools.router.layers import LayerStack
+        >>>
+        >>> stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        >>> updated_map = assign_layer_preferences(DEFAULT_NET_CLASS_MAP, stack)
+        >>> # Power nets now prefer inner layers
+        >>> print(updated_map["+3.3V"].preferred_layers)
+    """
+    from dataclasses import replace
+
+    updated_map: dict[str, NetClassRouting] = {}
+
+    # Get layer indices by category
+    outer_layers = layer_stack.get_outer_layer_indices()
+    inner_layers = layer_stack.get_inner_layer_indices()
+    adjacent_to_gnd = layer_stack.get_layers_adjacent_to_plane("GND")
+    with_reference = layer_stack.get_layers_with_reference_plane()
+
+    for net_name, net_class in net_class_map.items():
+        # Determine layer preferences based on net class type
+        preferred: list[int] | None = None
+        avoid: list[int] | None = None
+
+        if net_class.is_pour_net:
+            # Power nets: prefer inner layers adjacent to planes
+            if adjacent_to_gnd or inner_layers:
+                preferred = adjacent_to_gnd if adjacent_to_gnd else inner_layers
+                avoid = outer_layers if len(outer_layers) < len(preferred) else None
+
+        elif net_class.length_critical:
+            # High-speed/clock nets: prefer layers with reference planes
+            if with_reference:
+                preferred = with_reference
+            elif inner_layers:
+                preferred = inner_layers
+            # Avoid outer layers if we have inner layers
+            if inner_layers and preferred != outer_layers:
+                avoid = outer_layers
+
+        elif net_class.noise_sensitive:
+            # Audio/analog: prefer outer layers away from digital noise
+            preferred = outer_layers
+            avoid = inner_layers if inner_layers else None
+
+        else:
+            # Default/digital: prefer outer layers for easy access
+            # (but don't avoid inner layers completely)
+            preferred = outer_layers
+
+        # Create updated net class with layer preferences
+        updated_map[net_name] = replace(
+            net_class,
+            preferred_layers=preferred,
+            avoid_layers=avoid,
+        )
+
+    return updated_map
+
+
+def detect_signal_type(net_name: str) -> str:
+    """Detect signal type from net name for layer preference assignment.
+
+    Uses pattern matching to categorize nets:
+    - "power": Power supply nets (VCC, VDD, +3.3V, etc.)
+    - "ground": Ground nets (GND, GNDA, etc.)
+    - "high_speed": High-speed signals (USB, ETH, LVDS, etc.)
+    - "clock": Clock signals (CLK, MCLK, etc.)
+    - "analog": Analog signals (AUDIO, ADC, DAC, etc.)
+    - "low_speed": Default for other digital signals
+
+    Args:
+        net_name: Name of the net to classify
+
+    Returns:
+        Signal type string
+    """
+    name_upper = net_name.upper()
+
+    # Power patterns
+    power_patterns = ["VCC", "VDD", "VIN", "+", "PWR", "POWER", "VBUS", "VREF"]
+    if any(p in name_upper for p in power_patterns):
+        return "power"
+
+    # Ground patterns
+    ground_patterns = ["GND", "VSS", "GROUND", "AGND", "DGND", "PGND"]
+    if any(p in name_upper for p in ground_patterns):
+        return "ground"
+
+    # High-speed patterns
+    high_speed_patterns = [
+        "USB",
+        "ETH",
+        "LVDS",
+        "MIPI",
+        "HDMI",
+        "PCIE",
+        "SATA",
+        "DDR",
+        "SDRAM",
+        "HS_",
+        "HIGHSPEED",
+    ]
+    if any(p in name_upper for p in high_speed_patterns):
+        return "high_speed"
+
+    # Clock patterns
+    clock_patterns = ["CLK", "CLOCK", "MCLK", "BCLK", "LRCLK", "SCK", "OSC", "XTAL"]
+    if any(p in name_upper for p in clock_patterns):
+        return "clock"
+
+    # Analog patterns
+    analog_patterns = [
+        "AUDIO",
+        "ADC",
+        "DAC",
+        "AIN",
+        "AOUT",
+        "ANALOG",
+        "I2S",
+        "CODEC",
+        "MIC",
+        "SPK",
+    ]
+    if any(p in name_upper for p in analog_patterns):
+        return "analog"
+
+    return "low_speed"

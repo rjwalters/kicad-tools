@@ -25,7 +25,12 @@ from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
 from .primitives import Obstacle, Pad, Route
-from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
+from .rules import (
+    DEFAULT_NET_CLASS_MAP,
+    DesignRules,
+    NetClassRouting,
+    assign_layer_preferences,
+)
 from .sparse import Corridor, SparseRouter, Waypoint
 from .zones import ZoneManager
 
@@ -1491,6 +1496,7 @@ class Autorouter:
             for s in r.segments
         )
         congestion_stats = self.grid.get_congestion_map()
+        layer_stats = self.get_layer_usage_statistics()
 
         return {
             "routes": len(self.routes),
@@ -1501,7 +1507,102 @@ class Autorouter:
             "max_congestion": congestion_stats["max_congestion"],
             "avg_congestion": congestion_stats["avg_congestion"],
             "congested_regions": congestion_stats["congested_regions"],
+            "layer_usage": layer_stats,
         }
+
+    def get_layer_usage_statistics(self) -> dict:
+        """Get layer utilization statistics from routed segments (Issue #625).
+
+        Returns:
+            Dictionary with:
+            - per_layer: Dict mapping layer index to usage statistics
+            - total_length: Total trace length across all layers
+            - most_used_layer: Layer index with highest usage
+            - least_used_layer: Layer index with lowest usage (among used layers)
+            - balance_ratio: Ratio of min/max usage (1.0 = perfectly balanced)
+        """
+        # Count segments and length per layer
+        layer_stats: dict[int, dict] = {}
+
+        for route in self.routes:
+            for seg in route.segments:
+                # Get layer index from segment
+                layer_idx = (
+                    self.grid.layer_to_index(seg.layer.value)
+                    if self.layer_stack
+                    else seg.layer.value
+                )
+
+                if layer_idx not in layer_stats:
+                    layer_stats[layer_idx] = {
+                        "segments": 0,
+                        "length_mm": 0.0,
+                        "nets": set(),
+                    }
+
+                seg_length = math.sqrt((seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2)
+                layer_stats[layer_idx]["segments"] += 1
+                layer_stats[layer_idx]["length_mm"] += seg_length
+                layer_stats[layer_idx]["nets"].add(route.net)
+
+        # Convert sets to counts for JSON serialization
+        for layer_idx, stats in layer_stats.items():
+            stats["net_count"] = len(stats["nets"])
+            del stats["nets"]
+
+        # Calculate summary statistics
+        total_length = sum(s["length_mm"] for s in layer_stats.values())
+        lengths = [s["length_mm"] for s in layer_stats.values()] if layer_stats else [0]
+
+        most_used = (
+            max(layer_stats.keys(), key=lambda k: layer_stats[k]["length_mm"]) if layer_stats else 0
+        )
+        least_used = (
+            min(layer_stats.keys(), key=lambda k: layer_stats[k]["length_mm"]) if layer_stats else 0
+        )
+
+        # Balance ratio: min/max (1.0 = perfectly balanced)
+        max_length = max(lengths) if lengths else 0
+        min_length = min(lengths) if lengths else 0
+        balance_ratio = min_length / max_length if max_length > 0 else 1.0
+
+        return {
+            "per_layer": layer_stats,
+            "total_length": total_length,
+            "most_used_layer": most_used,
+            "least_used_layer": least_used,
+            "balance_ratio": balance_ratio,
+        }
+
+    def enable_auto_layer_preferences(self) -> None:
+        """Enable automatic layer preference assignment (Issue #625).
+
+        Analyzes the layer stack and updates the net class map with
+        appropriate layer preferences based on signal types:
+
+        - Power/Ground: Inner layers adjacent to planes
+        - High-speed/Clock: Layers with reference planes
+        - Analog: Outer layers (away from digital noise)
+        - Digital: Outer layers (easy access)
+
+        This should be called before routing if you want intelligent
+        layer assignment based on signal type.
+
+        Requires a layer_stack to be set on the autorouter.
+        """
+        if self.layer_stack is None:
+            # No layer stack - can't determine layer preferences
+            return
+
+        # Update net class map with layer preferences
+        self.net_class_map = assign_layer_preferences(
+            self.net_class_map,
+            self.layer_stack,
+        )
+
+        # Also update the router's net class map
+        if hasattr(self.router, "net_class_map"):
+            self.router.net_class_map = self.net_class_map
 
     @property
     def _bus(self) -> BusRouter:

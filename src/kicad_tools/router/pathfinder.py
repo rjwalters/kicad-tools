@@ -356,6 +356,36 @@ class Router:
             # Different net - should be blocked, but return high cost as fallback
             return 100.0
 
+    def _get_layer_preference_cost(self, layer: int, net_class: NetClassRouting | None) -> float:
+        """Get routing cost based on layer preferences (Issue #625).
+
+        Applies cost modifiers based on the net class's layer preferences:
+        - Preferred layers get a discount (cost multiplier 0.5)
+        - Avoided layers get a penalty (cost multiplier from net_class)
+        - Neutral layers have no adjustment
+
+        Args:
+            layer: Grid layer index
+            net_class: NetClassRouting with layer preferences
+
+        Returns:
+            Cost multiplier (< 1.0 for preferred, > 1.0 for avoided, 1.0 for neutral)
+        """
+        if net_class is None:
+            return 1.0
+
+        # Check if this is a preferred layer
+        if net_class.preferred_layers is not None:
+            if layer in net_class.preferred_layers:
+                return 0.5  # Discount for preferred layer
+
+        # Check if this is an avoided layer
+        if net_class.avoid_layers is not None:
+            if layer in net_class.avoid_layers:
+                return net_class.layer_cost_multiplier  # Penalty for avoided layer
+
+        return 1.0  # Neutral
+
     def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
         """Check if via placement is legal considering zones on all layers.
 
@@ -553,9 +583,12 @@ class Router:
                 # Add zone cost (reduced for same-net zones)
                 zone_cost = self._get_zone_cost(nx, ny, nlayer, start.net)
 
+                # Add layer preference cost (Issue #625)
+                layer_pref_mult = self._get_layer_preference_cost(nlayer, net_class)
+
                 new_g = (
                     current.g_score
-                    + neighbor_cost_mult * self.rules.cost_straight
+                    + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
                     + turn_cost
                     + congestion_cost
                     + negotiated_cost
@@ -608,8 +641,14 @@ class Router:
                         current.x, current.y, new_layer, present_cost_factor
                     )
 
+                # Add layer preference cost for new layer (Issue #625)
+                layer_pref_mult = self._get_layer_preference_cost(new_layer, net_class)
+
                 new_g = (
-                    current.g_score + self.rules.cost_via + congestion_cost + negotiated_cost
+                    current.g_score
+                    + self.rules.cost_via * layer_pref_mult
+                    + congestion_cost
+                    + negotiated_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
