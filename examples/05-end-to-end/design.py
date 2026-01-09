@@ -73,10 +73,17 @@ def create_stm32_devboard(output_dir: Path) -> None:
     # =========================================================================
     print("\n1. Creating power rails...")
 
-    # Add power rails across the schematic
-    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=150, net_label="+5V")
-    sch.add_rail(RAIL_3V3, x_start=80, x_end=X_RIGHT, net_label="+3.3V")
-    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=X_RIGHT, net_label="GND")
+    # Add power rails - endpoints should match actual component connection points
+    # to avoid floating wire endpoints. For T-connections, use add_segmented_rail()
+    # or ensure rail endpoints align with component tap points.
+    #
+    # Rail endpoints based on component positions:
+    # - 5V: Power symbol (25) to LDO VIN (~93)
+    # - 3.3V: LDO VOUT (~108) to debug header (~245)
+    # - GND: Power symbol (25) to debug header (~245)
+    sch.add_rail(RAIL_5V, x_start=X_LEFT, x_end=93, net_label="+5V")
+    sch.add_rail(RAIL_3V3, x_start=80, x_end=245, net_label="+3.3V")
+    sch.add_rail(RAIL_GND, x_start=X_LEFT, x_end=245, net_label="GND")
     print("   Added +5V, +3.3V, and GND rails")
 
     # Add power symbols

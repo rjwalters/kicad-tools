@@ -105,10 +105,11 @@ class SchematicValidationMixin:
         # Collect all connection points
         connection_points = set()
 
-        # Pin positions
+        # Pin positions - use pin.number for unique identification
+        # (many symbols like Device:C, Device:R have pins all named "~")
         for sym in self.symbols:
             for pin in sym.symbol_def.pins:
-                pos = sym.pin_position(pin.name if pin.name else pin.number)
+                pos = sym.pin_position(pin.number)
                 connection_points.add((round(pos[0], 2), round(pos[1], 2)))
 
         # Power symbol positions
@@ -206,15 +207,18 @@ class SchematicValidationMixin:
         for sym in self.symbols:
             for pin in sym.symbol_def.pins:
                 if pin.pin_type in ("power_in", "power_out"):
-                    pos = sym.pin_position(pin.name if pin.name else pin.number)
+                    # Use pin.number for unique identification
+                    pos = sym.pin_position(pin.number)
                     pos_rounded = (round(pos[0], 2), round(pos[1], 2))
 
                     if pos_rounded not in connected_points:
+                        # Display name for readability, but number for lookup
+                        display_name = pin.name if pin.name and pin.name != "~" else pin.number
                         issues.append(
                             {
                                 "severity": "warning",
                                 "type": "unconnected_power_pin",
-                                "message": f"Power pin {pin.name or pin.number} on {sym.reference} at ({pos[0]}, {pos[1]}) may be unconnected",
+                                "message": f"Power pin {display_name} on {sym.reference} at ({pos[0]}, {pos[1]}) may be unconnected",
                                 "location": pos_rounded,
                                 "fix_applied": False,
                             }

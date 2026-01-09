@@ -647,8 +647,10 @@ class SchematicWiringMixin:
         display_name = name or symbol.reference
         print(f"\n{display_name} pins at ({symbol.x}, {symbol.y}) rot={symbol.rotation}:")
         for pin in symbol.symbol_def.pins:
-            pos = symbol.pin_position(pin.name)
-            print(f"  {pin.name} ({pin.number}): ({pos[0]:.2f}, {pos[1]:.2f})")
+            # Use pin.number for unique identification (many symbols have pins all named "~")
+            pos = symbol.pin_position(pin.number)
+            pin_display = pin.name if pin.name and pin.name != "~" else pin.number
+            print(f"  {pin_display} ({pin.number}): ({pos[0]:.2f}, {pos[1]:.2f})")
 
     def wire_ferrite_bead(self, fb: SymbolInstance, rail1_y: float, rail2_y: float) -> list[Wire]:
         """Wire a ferrite bead between two ground rails."""

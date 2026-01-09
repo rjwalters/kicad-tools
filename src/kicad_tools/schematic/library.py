@@ -190,9 +190,11 @@ def describe_symbol(symbol: SymbolInstance) -> str:
         if pins:
             lines.append(f"  [{group_name}]")
             for pin in pins:
-                pos = symbol.pin_position(pin.name if pin.name else pin.number)
+                # Use pin.number for unique identification (many symbols have pins all named "~")
+                pos = symbol.pin_position(pin.number)
+                display_name = pin.name if pin.name and pin.name != "~" else pin.number
                 lines.append(
-                    f"    {pin.name or pin.number} (pin {pin.number}): at ({pos[0]:.2f}, {pos[1]:.2f})"
+                    f"    {display_name} (pin {pin.number}): at ({pos[0]:.2f}, {pos[1]:.2f})"
                 )
 
     return "\n".join(lines)
