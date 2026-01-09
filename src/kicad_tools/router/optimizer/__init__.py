@@ -5,6 +5,7 @@ Provides algorithms to optimize routed traces:
 - Zigzag elimination (remove unnecessary back-and-forth)
 - Staircase compression (compress alternating horizontal/diagonal patterns)
 - 45-degree corner conversion (smooth 90-degree turns)
+- Via minimization (remove unnecessary layer transitions)
 
 Collision detection is supported to prevent optimizations that would
 create DRC violations (shorts, track crossings).
@@ -26,11 +27,18 @@ Example::
     # Optimize traces in a PCB file
     stats = optimizer.optimize_pcb("board.kicad_pcb", output="optimized.kicad_pcb")
     print(f"Reduced segments from {stats['before']} to {stats['after']}")
+    print(f"Reduced vias from {stats['vias_before']} to {stats['vias_after']}")
 """
 
 from .collision import CollisionChecker, GridCollisionChecker
 from .config import OptimizationConfig, OptimizationStats
 from .trace import TraceOptimizer
+from .via_optimizer import (
+    ViaOptimizationConfig,
+    ViaOptimizationStats,
+    ViaOptimizer,
+    optimize_route_vias,
+)
 
 __all__ = [
     "CollisionChecker",
@@ -38,4 +46,8 @@ __all__ = [
     "OptimizationConfig",
     "OptimizationStats",
     "TraceOptimizer",
+    "ViaOptimizationConfig",
+    "ViaOptimizationStats",
+    "ViaOptimizer",
+    "optimize_route_vias",
 ]
