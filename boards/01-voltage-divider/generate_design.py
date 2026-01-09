@@ -201,12 +201,20 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     warnings = [i for i in issues if i["severity"] == "warning"]
 
     if errors:
-        print(f"   Found {len(errors)} errors (rail endpoints expected)")
+        print(f"   Found {len(errors)} errors:")
+        for err in errors:
+            print(f"      [{err['type']}] {err['message']}")
+            if err.get("location"):
+                print(f"                  at {err['location']}")
     else:
         print("   No errors found")
 
     if warnings:
-        print(f"   Found {len(warnings)} warnings")
+        print(f"   Found {len(warnings)} warnings:")
+        for warn in warnings[:5]:  # Limit to first 5
+            print(f"      [{warn['type']}] {warn['message']}")
+        if len(warnings) > 5:
+            print(f"      ... and {len(warnings) - 5} more")
 
     # Get statistics
     stats = sch.get_statistics()
