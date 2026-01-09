@@ -192,9 +192,9 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     print(f"   Output voltage: {5.0 * ratio:.2f}V")
 
     # =========================================================================
-    # Validate Schematic
+    # Section 4: Validate Schematic
     # =========================================================================
-    print("\n5. Validating schematic...")
+    print("\n4. Validating schematic...")
 
     issues = sch.validate()
     errors = [i for i in issues if i["severity"] == "error"]
@@ -226,9 +226,9 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     print(f"      Labels: {stats['label_count']}")
 
     # =========================================================================
-    # Write Output Files
+    # Section 5: Write Output Files
     # =========================================================================
-    print("\n6. Writing schematic...")
+    print("\n5. Writing schematic...")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
