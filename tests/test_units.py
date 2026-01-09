@@ -1,6 +1,5 @@
 """Tests for the units module."""
 
-
 from kicad_tools.config import Config, DisplayConfig
 from kicad_tools.units import (
     MM_PER_MIL,

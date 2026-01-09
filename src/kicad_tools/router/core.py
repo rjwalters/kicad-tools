@@ -922,9 +922,7 @@ class Autorouter:
                 # Calculate adaptive parameters (Issue #633)
                 if adaptive:
                     # Calculate congestion ratio for adaptive present cost
-                    total_cells = (
-                        self.grid.cols * self.grid.rows * self.grid.num_layers
-                    )
+                    total_cells = self.grid.cols * self.grid.rows * self.grid.num_layers
                     overflow_ratio = overflow / max(total_cells, 1)
 
                     # Adaptive history increment based on convergence progress

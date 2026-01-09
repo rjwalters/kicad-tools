@@ -185,13 +185,17 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
     vcc_pwr = sch.add_power("power:VCC", x=25.4, y=25.4, rotation=0)
     vcc_conn = (vcc_pwr.x, vcc_pwr.y)
     sch.add_wire(vcc_conn, (vcc_conn[0] + WIRE_STUB, vcc_conn[1]), snap=False)
-    sch.add_global_label("VCC", vcc_conn[0] + WIRE_STUB, vcc_conn[1], shape="input", rotation=180, snap=False)
+    sch.add_global_label(
+        "VCC", vcc_conn[0] + WIRE_STUB, vcc_conn[1], shape="input", rotation=180, snap=False
+    )
 
     # GND power rail - use power symbol's position as connection point
     gnd_pwr = sch.add_power("power:GND", x=25.4, y=50.8, rotation=180)
     gnd_conn = (gnd_pwr.x, gnd_pwr.y)
     sch.add_wire(gnd_conn, (gnd_conn[0] + WIRE_STUB, gnd_conn[1]), snap=False)
-    sch.add_global_label("GND", gnd_conn[0] + WIRE_STUB, gnd_conn[1], shape="input", rotation=180, snap=False)
+    sch.add_global_label(
+        "GND", gnd_conn[0] + WIRE_STUB, gnd_conn[1], shape="input", rotation=180, snap=False
+    )
 
     print("   Added VCC and GND power symbols with labels")
 
@@ -255,6 +259,7 @@ def main():
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
 

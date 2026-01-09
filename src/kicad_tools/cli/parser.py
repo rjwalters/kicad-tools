@@ -163,6 +163,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
     _add_init_parser(subparsers)
+    _add_build_parser(subparsers)
     _add_build_native_parser(subparsers)
     _add_spec_parser(subparsers)
     _add_benchmark_parser(subparsers)
@@ -2299,6 +2300,53 @@ def _add_init_parser(subparsers) -> None:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+
+def _add_build_parser(subparsers) -> None:
+    """Add build subcommand parser for end-to-end workflow."""
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Build from spec to manufacturable design",
+        description=(
+            "Orchestrate the full build workflow from .kct specification to routed, verified PCB. "
+            "Runs schematic generation, PCB generation, autorouting, and verification in sequence."
+        ),
+    )
+    build_parser.add_argument(
+        "build_spec",
+        metavar="SPEC",
+        nargs="?",
+        help="Path to .kct file or project directory (default: current directory)",
+    )
+    build_parser.add_argument(
+        "--step",
+        "-s",
+        dest="build_step",
+        choices=["schematic", "pcb", "route", "verify", "all"],
+        default="all",
+        help="Run specific step or all (default: all)",
+    )
+    build_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="build_mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Target manufacturer for verification (default: jlcpcb)",
+    )
+    build_parser.add_argument(
+        "--dry-run",
+        dest="build_dry_run",
+        action="store_true",
+        help="Preview build steps without executing",
+    )
+    build_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="build_verbose",
+        action="store_true",
+        help="Show detailed output",
     )
 
 
