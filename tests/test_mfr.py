@@ -433,7 +433,7 @@ class TestMfrCLICommands:
         from kicad_tools.cli.mfr import main as mfr_main
 
         # Copy test file to temp directory
-        src_pcb = Path("demo/usb_joystick/usb_joystick.kicad_pcb")
+        src_pcb = Path("boards/03-usb-joystick/usb_joystick.kicad_pcb")
         if not src_pcb.exists():
             pytest.skip("Demo PCB file not found")
 
@@ -452,7 +452,7 @@ class TestMfrCLICommands:
 
         from kicad_tools.cli.mfr import main as mfr_main
 
-        src_pcb = Path("demo/usb_joystick/usb_joystick_routed.kicad_pcb")
+        src_pcb = Path("boards/03-usb-joystick/usb_joystick_routed.kicad_pcb")
         if not src_pcb.exists():
             pytest.skip("Demo PCB file not found")
 

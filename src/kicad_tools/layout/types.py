@@ -702,12 +702,13 @@ class LayoutChange:
 
 
 @dataclass
-class LayoutSnapshot:
+class IncrementalSnapshot:
     """
-    Snapshot of component positions in a PCB layout.
+    Snapshot of component positions in a PCB layout for incremental updates.
 
     Captures the state of all components for later comparison
-    when detecting changes for incremental updates.
+    when detecting changes for incremental updates. This is a lighter-weight
+    snapshot focused on component state, not full layout with traces/zones.
 
     Attributes:
         component_states: Dictionary mapping addresses to ComponentState
@@ -763,7 +764,7 @@ class LayoutSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> LayoutSnapshot:
+    def from_dict(cls, data: dict) -> IncrementalSnapshot:
         """Create from serialized dictionary."""
         component_states = {}
         for addr, state_data in data.get("component_states", {}).items():

@@ -76,7 +76,7 @@ BENCHMARK_CASES: list[BenchmarkCase] = [
     # Simple boards (should always achieve 100%)
     BenchmarkCase(
         name="charlieplex_3x3",
-        pcb_path="examples/04-autorouter/charlieplex_led_grid/charlieplex_3x3.kicad_pcb",
+        pcb_path="boards/02-charlieplex-led/charlieplex_3x3.kicad_pcb",
         expected_completion=1.0,
         expected_max_vias=12,
         difficulty=Difficulty.EASY,
@@ -88,7 +88,7 @@ BENCHMARK_CASES: list[BenchmarkCase] = [
     # Medium complexity
     BenchmarkCase(
         name="usb_joystick",
-        pcb_path="examples/04-autorouter/usb_joystick/usb_joystick.kicad_pcb",
+        pcb_path="boards/03-usb-joystick/usb_joystick.kicad_pcb",
         expected_completion=0.9,
         expected_max_vias=20,
         difficulty=Difficulty.MEDIUM,

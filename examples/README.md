@@ -1,18 +1,20 @@
 # kicad-tools Examples
 
-This directory contains example projects demonstrating common workflows with kicad-tools.
+This directory contains examples demonstrating specific kicad-tools features and workflows.
 
-## Examples
+For complete board designs, see the [boards/](../boards/) directory.
+
+## Feature Examples
 
 | Example | Description | Key Concepts |
 |---------|-------------|--------------|
 | [01-schematic-analysis](01-schematic-analysis/) | Load and analyze KiCad schematics | Symbols, nets, labels, wires |
 | [02-bom-generation](02-bom-generation/) | Extract Bill of Materials | BOM extraction, grouping, export |
 | [03-drc-checking](03-drc-checking/) | Parse DRC reports, check manufacturer rules | DRC parsing, manufacturer validation |
-| [04-autorouter](04-autorouter/) | PCB autorouting with placement optimization | Routing strategies, force-directed layout |
-| [05-end-to-end](05-end-to-end/) | Create complete designs programmatically | Circuit blocks, power rails, schematic generation |
+| [04-autorouter](04-autorouter/) | Routing strategy comparisons | Routing algorithms, Monte Carlo, congestion |
 | [06-intelligent-placement](06-intelligent-placement/) | v0.6.0 intelligent placement for AI agents | Clustering, edge detection, thermal, sessions |
 | [07-design-feedback](07-design-feedback/) | v0.7.0 design feedback for AI agents | Rich errors, congestion, thermal, cost estimation |
+| [08-label-based-schematic](08-label-based-schematic/) | Label-based schematic generation | Hierarchical labels, net connections |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 | [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
@@ -81,28 +83,6 @@ from kicad_tools.router import load_pcb_for_routing, DesignRules
 
 router, _ = load_pcb_for_routing("board.kicad_pcb", rules=rules)
 router.route_all_monte_carlo(num_trials=10)
-```
-
-### 05 - End-to-End Design
-
-Create complete schematic designs programmatically using circuit blocks.
-
-```python
-from kicad_tools.schematic.models.schematic import Schematic
-from kicad_tools.schematic.blocks import CrystalOscillator, DebugHeader
-
-# Create schematic
-sch = Schematic(title="My Board", date="2025-01")
-
-# Add power rails
-sch.add_rail(y=30, x_start=25, x_end=200, net_label="+3.3V")
-
-# Add circuit blocks
-xtal = CrystalOscillator(sch, x=100, y=80, frequency="8MHz")
-debug = DebugHeader(sch, x=150, y=100, interface="swd")
-
-# Write output
-sch.write("output/board.kicad_sch")
 ```
 
 ### 06 - Intelligent Placement (v0.6.0)
@@ -223,8 +203,12 @@ Each example includes sample KiCad files:
 
 - `simple_rc.kicad_sch` - Simple RC circuit schematic
 - `sample_drc.rpt` - DRC report with sample violations
-- `charlieplex_led_grid/` - LED matrix demo board
-- `usb_joystick/` - USB game controller demo
+
+For complete board demos, see [boards/](../boards/):
+- `boards/01-voltage-divider/` - Simple voltage divider
+- `boards/02-charlieplex-led/` - LED matrix demo
+- `boards/03-usb-joystick/` - USB game controller
+- `boards/04-stm32-devboard/` - STM32 development board
 
 ## Running All Examples
 

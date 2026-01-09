@@ -143,7 +143,7 @@ def test_routing_on_placements(pcb_path: Path, name: str, skip_nets: list, rules
 
 
 def main():
-    demo_dir = Path(__file__).parent
+    boards_dir = Path(__file__).parent.parent.parent / "boards"
 
     print("=" * 60)
     print("KICAD-TOOLS: PLACEMENT & ROUTING COMPARISON")
@@ -152,7 +152,7 @@ def main():
     results = {}
 
     # Test Charlieplex LED Grid
-    charlieplex_pcb = demo_dir / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+    charlieplex_pcb = boards_dir / "02-charlieplex-led" / "charlieplex_3x3.kicad_pcb"
     if charlieplex_pcb.exists():
         placement = test_placement_optimization(charlieplex_pcb, "Charlieplex LED Grid")
         routing = test_routing_on_placements(
@@ -164,7 +164,7 @@ def main():
         results["charlieplex"] = {"placement": placement, "routing": routing}
 
     # Test USB Joystick
-    usb_pcb = demo_dir / "usb_joystick" / "usb_joystick.kicad_pcb"
+    usb_pcb = boards_dir / "03-usb-joystick" / "usb_joystick.kicad_pcb"
     if usb_pcb.exists():
         placement = test_placement_optimization(usb_pcb, "USB Joystick")
         routing = test_routing_on_placements(

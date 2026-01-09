@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING
 from .types import (
     ChangeType,
     ComponentState,
+    IncrementalSnapshot,
     LayoutChange,
-    LayoutSnapshot,
     UpdateResult,
 )
 
@@ -44,7 +44,7 @@ class SnapshotBuilder:
         self,
         pcb: PCB,
         registry: AddressRegistry | None = None,
-    ) -> LayoutSnapshot:
+    ) -> IncrementalSnapshot:
         """Build a snapshot from current PCB state.
 
         Args:
@@ -53,7 +53,7 @@ class SnapshotBuilder:
                      If not provided, uses reference designators as addresses.
 
         Returns:
-            LayoutSnapshot capturing current state
+            IncrementalSnapshot capturing current state
         """
         component_states: dict[str, ComponentState] = {}
         net_connections: dict[str, list[str]] = {}
@@ -88,7 +88,7 @@ class SnapshotBuilder:
             if nets:
                 net_connections[addr] = nets
 
-        return LayoutSnapshot(
+        return IncrementalSnapshot(
             component_states=component_states,
             net_connections=net_connections,
         )
@@ -112,7 +112,7 @@ class ChangeDetector:
 
     def __init__(
         self,
-        old_snapshot: LayoutSnapshot,
+        old_snapshot: IncrementalSnapshot,
         new_registry: AddressRegistry,
     ):
         """Initialize change detector.
@@ -381,7 +381,7 @@ class IncrementalUpdater:
 
 
 def detect_layout_changes(
-    old_snapshot: LayoutSnapshot,
+    old_snapshot: IncrementalSnapshot,
     new_registry: AddressRegistry,
 ) -> list[LayoutChange]:
     """Convenience function to detect layout changes.

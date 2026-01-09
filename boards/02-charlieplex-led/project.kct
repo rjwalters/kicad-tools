@@ -16,6 +16,7 @@ project:
     interconnected topology.
   artifacts:
     pcb: "charlieplex_3x3.kicad_pcb"
+    pcb_routed: "charlieplex_3x3_routed.kicad_pcb"
 
 intent:
   summary: |

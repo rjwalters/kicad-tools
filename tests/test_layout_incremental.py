@@ -17,9 +17,9 @@ from kicad_tools.layout import (
     ChangeDetector,
     ChangeType,
     ComponentState,
+    IncrementalSnapshot,
     IncrementalUpdater,
     LayoutChange,
-    LayoutSnapshot,
     SnapshotBuilder,
     UpdateResult,
     detect_layout_changes,
@@ -137,12 +137,12 @@ class TestLayoutChange:
         assert change.change_type == ChangeType.ADDED
 
 
-class TestLayoutSnapshot:
-    """Tests for LayoutSnapshot dataclass."""
+class TestIncrementalSnapshot:
+    """Tests for IncrementalSnapshot dataclass."""
 
     def test_create_empty_snapshot(self):
         """Empty snapshot has no components."""
-        snapshot = LayoutSnapshot()
+        snapshot = IncrementalSnapshot()
         assert snapshot.component_count == 0
         assert len(snapshot.addresses()) == 0
 
@@ -168,7 +168,7 @@ class TestLayoutSnapshot:
             "C1": ["VCC", "GND"],
             "R1": ["VCC", "OUT"],
         }
-        snapshot = LayoutSnapshot(
+        snapshot = IncrementalSnapshot(
             component_states=states,
             net_connections=nets,
         )
@@ -185,7 +185,7 @@ class TestLayoutSnapshot:
             rotation=180.0,
             layer="F.Cu",
         )
-        snapshot = LayoutSnapshot(
+        snapshot = IncrementalSnapshot(
             component_states={"power.U1": state},
         )
         retrieved = snapshot.get_state("power.U1")
@@ -198,7 +198,7 @@ class TestLayoutSnapshot:
 
     def test_get_nets(self):
         """Get nets connected to a component."""
-        snapshot = LayoutSnapshot(
+        snapshot = IncrementalSnapshot(
             component_states={
                 "C1": ComponentState(
                     reference="C1",
@@ -219,7 +219,7 @@ class TestLayoutSnapshot:
 
     def test_timestamp_auto_set(self):
         """Timestamp should be auto-set if not provided."""
-        snapshot = LayoutSnapshot()
+        snapshot = IncrementalSnapshot()
         assert snapshot.created_at != ""
         assert "T" in snapshot.created_at  # ISO format has T separator
 
@@ -234,7 +234,7 @@ class TestLayoutSnapshot:
             footprint="Package_SO:SOIC-8",
             uuid="test-uuid",
         )
-        original = LayoutSnapshot(
+        original = IncrementalSnapshot(
             component_states={"power.U1": state},
             net_connections={"power.U1": ["VCC", "GND"]},
             created_at="2024-01-01T00:00:00+00:00",
@@ -248,7 +248,7 @@ class TestLayoutSnapshot:
         assert "created_at" in data
 
         # Deserialize
-        restored = LayoutSnapshot.from_dict(data)
+        restored = IncrementalSnapshot.from_dict(data)
         assert restored.component_count == 1
         assert restored.created_at == original.created_at
 
@@ -268,7 +268,7 @@ class TestLayoutSnapshot:
             rotation=0.0,
             layer="F.Cu",
         )
-        snapshot = LayoutSnapshot(
+        snapshot = IncrementalSnapshot(
             component_states={"C1": state},
             net_connections={"C1": ["VCC"]},
         )
@@ -278,7 +278,7 @@ class TestLayoutSnapshot:
         assert isinstance(json_str, str)
 
         # Should round-trip
-        restored = LayoutSnapshot.from_dict(json.loads(json_str))
+        restored = IncrementalSnapshot.from_dict(json.loads(json_str))
         assert restored.component_count == 1
 
 
@@ -339,7 +339,7 @@ class TestChangeDetector:
     def test_detect_removed_components(self, tmp_path: Path):
         """Detect components that were removed."""
         # Old snapshot has C1, C2
-        old_snapshot = LayoutSnapshot(
+        old_snapshot = IncrementalSnapshot(
             component_states={
                 "C1": ComponentState(
                     reference="C1",
@@ -398,7 +398,7 @@ class TestChangeDetector:
     def test_detect_added_components(self, tmp_path: Path):
         """Detect components that were added."""
         # Old snapshot has C1 only
-        old_snapshot = LayoutSnapshot(
+        old_snapshot = IncrementalSnapshot(
             component_states={
                 "C1": ComponentState(
                     reference="C1",
@@ -456,7 +456,7 @@ class TestChangeDetector:
     def test_detect_unchanged_components(self, tmp_path: Path):
         """Components present in both should be marked unchanged."""
         # Old snapshot has C1
-        old_snapshot = LayoutSnapshot(
+        old_snapshot = IncrementalSnapshot(
             component_states={
                 "C1": ComponentState(
                     reference="C1",
@@ -507,7 +507,7 @@ class TestChangeDetector:
 
     def test_get_summary(self, tmp_path: Path):
         """Summary counts changes by type."""
-        old_snapshot = LayoutSnapshot(
+        old_snapshot = IncrementalSnapshot(
             component_states={
                 "C1": ComponentState(
                     reference="C1",
@@ -729,7 +729,7 @@ class TestConvenienceFunctions:
 
     def test_detect_layout_changes(self, tmp_path: Path):
         """detect_layout_changes convenience function."""
-        old_snapshot = LayoutSnapshot(
+        old_snapshot = IncrementalSnapshot(
             component_states={
                 "C1": ComponentState(
                     reference="C1",

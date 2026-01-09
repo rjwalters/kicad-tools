@@ -43,6 +43,7 @@ from .types import (
     ComponentLayout,
     ComponentOffset,
     ComponentState,
+    IncrementalSnapshot,
     LayoutChange,
     LayoutSnapshot,
     MatchReason,
@@ -66,6 +67,7 @@ __all__ = [
     # Snapshot & Preservation
     "SnapshotCapture",
     "capture_layout",
+    "IncrementalSnapshot",
     "LayoutSnapshot",
     "LayoutPreserver",
     "PreservationResult",

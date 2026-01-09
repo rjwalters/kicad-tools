@@ -1,0 +1,154 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Voltage Divider - Validation Test Project
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "Voltage Divider"
+  revision: "A"
+  created: 2025-01-09
+  author: "kicad-tools"
+  description: |
+    Minimal voltage divider for validating the kicad-tools workflow.
+    Demonstrates programmatic schematic generation, PCB creation,
+    autorouting, and DRC checking in a simple 4-component design.
+  artifacts:
+    schematic: "output/voltage_divider.kicad_sch"
+    pcb: "output/voltage_divider.kicad_pcb"
+    pcb_routed: "output/voltage_divider_routed.kicad_pcb"
+
+intent:
+  summary: |
+    A minimal test circuit for validating the complete kicad-tools
+    pipeline. Two 10k resistors form a voltage divider that converts
+    5V input to 2.5V output. Simple enough to verify correctness,
+    complete enough to exercise all major features.
+
+  use_cases:
+    - Workflow validation
+    - API demonstration
+    - Regression testing
+    - Learning example
+
+  interfaces:
+    - name: VIN
+      type: power_rail
+      description: "5V input from external source"
+      voltage: "5V"
+      pins: ["J1.1"]
+
+    - name: VOUT
+      type: analog
+      description: "2.5V divided output"
+      voltage: "2.5V"
+      pins: ["J2.1"]
+
+    - name: GND
+      type: power_rail
+      description: "Common ground"
+      pins: ["J1.2", "J2.2"]
+
+  constraints:
+    - "Must route on 2-layer PCB"
+    - "All nets must complete successfully"
+    - "DRC must pass with JLCPCB rules"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "5V"
+    output:
+      voltage:
+        nominal: "2.5V"
+        formula: "VIN * R2 / (R1 + R2)"
+    division_ratio: 0.5
+
+  mechanical:
+    dimensions:
+      width: "30mm"
+      height: "25mm"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      preferred: 2
+    min_trace: "0.3mm"
+    min_space: "0.2mm"
+    assembly: mixed
+
+  compliance:
+    rohs: true
+
+suggestions:
+  components:
+    resistors:
+      preferred: ["10k 0805"]
+      rationale: "Equal values for 50% division, 0805 for easy hand soldering"
+    connectors:
+      preferred: ["2.54mm pitch pin header"]
+      rationale: "Standard breadboard-compatible pitch"
+
+  layout:
+    - "J1 on left edge for input"
+    - "J2 on right edge for output"
+    - "Resistors in center, vertically stacked"
+    - "Short, direct traces"
+
+  notes:
+    - "This is the simplest possible validation project"
+    - "Used for testing the complete kicad-tools pipeline"
+    - "Run generate_design.py to regenerate all outputs"
+
+decisions:
+  - date: 2025-01-09
+    phase: concept
+    topic: "Division Ratio"
+    choice: "50% (equal resistors)"
+    rationale: "Simple to verify: output should be exactly half of input"
+    alternatives: ["33% (1:2 ratio)", "66% (2:1 ratio)"]
+
+  - date: 2025-01-09
+    phase: concept
+    topic: "Resistor Package"
+    choice: "0805 SMD"
+    rationale: "Balance of size and hand-solderability"
+    alternatives: ["0603", "through-hole"]
+
+  - date: 2025-01-09
+    phase: layout
+    topic: "Board Size"
+    choice: "30mm x 25mm"
+    rationale: "Minimum practical size for 4 components with comfortable spacing"
+    alternatives: ["50mm x 50mm", "25mm x 20mm"]
+
+progress:
+  phase: complete
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define voltage division requirements"
+        - "[x] Select resistor values (10k/10k)"
+        - "[x] Choose connector type"
+    schematic:
+      status: completed
+      checklist:
+        - "[x] Input connector with power rails"
+        - "[x] Voltage divider resistors"
+        - "[x] Output connector"
+        - "[x] Net labels and junctions"
+    layout:
+      status: completed
+      checklist:
+        - "[x] Component placement"
+        - "[x] Autorouting"
+        - "[x] DRC verification"
+    validation:
+      status: completed
+      checklist:
+        - "[x] All nets routed"
+        - "[x] DRC clean"
+        - "[x] Manufacturing files generated"

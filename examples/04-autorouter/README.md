@@ -1,24 +1,21 @@
-# kicad-tools Demo Directory
+# Autorouter Examples
 
-This directory contains example PCB designs demonstrating the autorouting and placement optimization capabilities of kicad-tools.
+This directory contains scripts demonstrating autorouting and placement optimization capabilities.
 
-## Demos
-
-| Demo | Components | Nets | Description |
-|------|------------|------|-------------|
-| [charlieplex_led_grid](charlieplex_led_grid/) | 14 | 8 | 3x3 LED matrix with charlieplex driving |
-| [usb_joystick](usb_joystick/) | 12 | 13 | USB game controller with analog joystick |
+For complete board examples, see the [boards/](../../boards/) directory:
+- [02-charlieplex-led](../../boards/02-charlieplex-led/) - 3x3 LED matrix with charlieplex driving
+- [03-usb-joystick](../../boards/03-usb-joystick/) - USB game controller with analog joystick
 
 ## Quick Start
 
 ```bash
 # Generate and route charlieplex demo
-cd charlieplex_led_grid
+cd ../../boards/02-charlieplex-led
 python generate_pcb.py
 python route_demo.py
 
 # Generate and route USB joystick demo
-cd ../usb_joystick
+cd ../03-usb-joystick
 python generate_pcb.py
 python route_demo.py
 ```
@@ -145,9 +142,12 @@ kicad-tools/
 │   │   ├── grid.py     # Routing grid
 │   │   └── heuristics.py # Routing cost functions
 │   └── schema/         # PCB data models
-└── demo/
-    ├── charlieplex_led_grid/
-    ├── usb_joystick/
+├── boards/             # Complete board examples
+│   ├── 01-voltage-divider/
+│   ├── 02-charlieplex-led/
+│   ├── 03-usb-joystick/
+│   └── 04-stm32-devboard/
+└── examples/04-autorouter/
     └── test_*.py       # Comparison scripts
 ```
 

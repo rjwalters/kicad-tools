@@ -222,7 +222,7 @@ Available blocks:
 - **LEDIndicator**: Status LED with current-limiting resistor
 - **DecouplingCaps**: Decoupling capacitor placement
 
-See `examples/05-end-to-end/` for a complete design example.
+See `boards/04-stm32-devboard/` for a complete design example.
 
 ### Project Workflow
 

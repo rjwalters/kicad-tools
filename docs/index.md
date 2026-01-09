@@ -117,18 +117,28 @@ project.export_assembly("output/", manufacturer="jlcpcb")
 
 ## Examples
 
-Complete working examples are in the [`examples/`](https://github.com/rjwalters/kicad-tools/tree/main/examples) directory:
+Complete working examples are organized into two directories:
+
+### Feature Examples ([`examples/`](https://github.com/rjwalters/kicad-tools/tree/main/examples))
 
 | Example | Description |
 |---------|-------------|
 | `01-schematic-analysis/` | Parse and analyze schematics |
 | `02-bom-generation/` | Generate bills of materials |
 | `03-drc-checking/` | Design rule checking |
-| `04-autorouter/` | Automatic PCB routing |
-| `05-end-to-end/` | Complete design workflow |
+| `04-autorouter/` | Routing strategy comparisons |
 | `06-intelligent-placement/` | Smart component placement |
 | `agent-integration/` | Integration with AI agents |
 | `llm-routing/` | LLM-driven routing decisions |
+
+### Complete Board Demos ([`boards/`](https://github.com/rjwalters/kicad-tools/tree/main/boards))
+
+| Board | Complexity | Description |
+|-------|------------|-------------|
+| `01-voltage-divider/` | Simple | Minimal workflow validation |
+| `02-charlieplex-led/` | Medium | Dense topology, Monte Carlo routing |
+| `03-usb-joystick/` | Complex | Mixed signals, USB differential pairs |
+| `04-stm32-devboard/` | Complex | Programmatic schematic generation |
 
 ---
 

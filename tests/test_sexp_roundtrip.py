@@ -20,7 +20,7 @@ KICAD_CLI = shutil.which("kicad-cli")
 def demo_pcb_path():
     """Path to a demo PCB file."""
     path = (
-        Path(__file__).parent.parent / "demo" / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+        Path(__file__).parent.parent / "boards" / "02-charlieplex-led" / "charlieplex_3x3.kicad_pcb"
     )
     if not path.exists():
         pytest.skip(f"Demo PCB file not found: {path}")
@@ -32,8 +32,8 @@ def demo_routed_pcb_path():
     """Path to a demo routed PCB file."""
     path = (
         Path(__file__).parent.parent
-        / "demo"
-        / "charlieplex_led_grid"
+        / "boards"
+        / "02-charlieplex-led"
         / "charlieplex_3x3_routed.kicad_pcb"
     )
     if not path.exists():

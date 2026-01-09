@@ -28,9 +28,9 @@ def projects_dir() -> Path:
 
 
 @pytest.fixture
-def demo_dir() -> Path:
-    """Return the path to the demo directory with real projects."""
-    return Path(__file__).parent.parent / "demo"
+def boards_dir() -> Path:
+    """Return the path to the boards directory with complete demo projects."""
+    return Path(__file__).parent.parent / "boards"
 
 
 class TestSchematicParsing:
@@ -219,9 +219,9 @@ class TestPCBParsing:
         assert zone_5v.connect_pads == "none"
         assert len(zone_5v.polygon) == 5  # Irregular pentagon
 
-    def test_demo_pcb_charlieplex(self, demo_dir: Path) -> None:
+    def test_demo_pcb_charlieplex(self, boards_dir: Path) -> None:
         """Test loading a real demo PCB (charlieplex LED grid)."""
-        pcb_path = demo_dir / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+        pcb_path = boards_dir / "02-charlieplex-led" / "charlieplex_3x3.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("Demo PCB not available")
 
@@ -237,9 +237,9 @@ class TestPCBParsing:
         assert "nets" in summary
         assert "segments" in summary
 
-    def test_demo_pcb_usb_joystick(self, demo_dir: Path) -> None:
+    def test_demo_pcb_usb_joystick(self, boards_dir: Path) -> None:
         """Test loading a more complex demo PCB (USB joystick)."""
-        pcb_path = demo_dir / "usb_joystick" / "usb_joystick.kicad_pcb"
+        pcb_path = boards_dir / "03-usb-joystick" / "usb_joystick.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("Demo PCB not available")
 
@@ -443,9 +443,9 @@ class TestProjectWorkflow:
 class TestDemoProjects:
     """Integration tests using real demo projects."""
 
-    def test_charlieplex_full_workflow(self, demo_dir: Path) -> None:
+    def test_charlieplex_full_workflow(self, boards_dir: Path) -> None:
         """Test full workflow with charlieplex demo."""
-        pcb_path = demo_dir / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+        pcb_path = boards_dir / "02-charlieplex-led" / "charlieplex_3x3.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("Demo project not available")
 
@@ -464,9 +464,9 @@ class TestDemoProjects:
         trace_length = pcb.total_trace_length()
         assert trace_length >= 0
 
-    def test_usb_joystick_full_workflow(self, demo_dir: Path) -> None:
+    def test_usb_joystick_full_workflow(self, boards_dir: Path) -> None:
         """Test full workflow with USB joystick demo."""
-        pcb_path = demo_dir / "usb_joystick" / "usb_joystick.kicad_pcb"
+        pcb_path = boards_dir / "03-usb-joystick" / "usb_joystick.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("Demo project not available")
 

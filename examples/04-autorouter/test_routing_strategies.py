@@ -146,10 +146,10 @@ def test_demo(name: str, pcb_path: Path, skip_nets: list, rules: DesignRules):
 
 
 def main():
-    demo_dir = Path(__file__).parent
+    boards_dir = Path(__file__).parent.parent.parent / "boards"
 
     # Test Charlieplex LED Grid
-    charlieplex_pcb = demo_dir / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
+    charlieplex_pcb = boards_dir / "02-charlieplex-led" / "charlieplex_3x3.kicad_pcb"
     charlieplex_rules = DesignRules(
         grid_resolution=0.1,  # clearance/2 for reliable DRC compliance
         trace_width=0.3,
@@ -165,7 +165,7 @@ def main():
     # Test USB Joystick
     # NOTE: TQFP-32 has 0.8mm pin pitch, so we need a finer grid (0.1mm)
     # to route between pins. A coarser grid won't find paths through the dense QFP.
-    usb_pcb = demo_dir / "usb_joystick" / "usb_joystick.kicad_pcb"
+    usb_pcb = boards_dir / "03-usb-joystick" / "usb_joystick.kicad_pcb"
     usb_rules = DesignRules(
         grid_resolution=0.1,
         trace_width=0.2,

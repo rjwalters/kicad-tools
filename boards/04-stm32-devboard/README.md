@@ -27,10 +27,10 @@ We create a simple **STM32 Development Board** (Blue Pill style) with:
 
 ```bash
 # From repository root
-uv run python examples/05-end-to-end/design.py
+uv run python boards/04-stm32-devboard/design.py
 
 # Or specify output directory
-uv run python examples/05-end-to-end/design.py /path/to/output
+uv run python boards/04-stm32-devboard/design.py /path/to/output
 ```
 
 ## Output Files
@@ -212,7 +212,7 @@ project.export_positions("output/manufacturing/positions.csv")
 
 ## Related Examples
 
-- [01-schematic-analysis](../01-schematic-analysis/) - Parse existing schematics
-- [02-bom-generation](../02-bom-generation/) - Extract BOM from designs
-- [03-drc-checking](../03-drc-checking/) - Validate against manufacturer rules
-- [04-autorouter](../04-autorouter/) - PCB autorouting strategies
+- [examples/01-schematic-analysis](../../examples/01-schematic-analysis/) - Parse existing schematics
+- [examples/02-bom-generation](../../examples/02-bom-generation/) - Extract BOM from designs
+- [examples/03-drc-checking](../../examples/03-drc-checking/) - Validate against manufacturer rules
+- [examples/04-autorouter](../../examples/04-autorouter/) - PCB autorouting strategies
