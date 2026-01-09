@@ -78,9 +78,13 @@ class CopperElement:
 
 
 def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, float]:
-    """Transform pad position from footprint-local to board coordinates."""
-    # Apply rotation
-    angle_rad = math.radians(footprint.rotation)
+    """Transform pad position from footprint-local to board coordinates.
+
+    Note: KiCad uses clockwise-positive rotation when Y points down.
+    Standard math rotation is counterclockwise-positive, so we negate the angle.
+    """
+    # Apply rotation - negate angle for KiCad's clockwise-positive convention
+    angle_rad = math.radians(-footprint.rotation)
     cos_a = math.cos(angle_rad)
     sin_a = math.sin(angle_rad)
 
