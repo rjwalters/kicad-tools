@@ -113,7 +113,11 @@ from kicad_tools.optim.query import (
     query_position,
     query_swap,
 )
-from kicad_tools.optim.routing import FigureOfMerit, RoutingOptimizer
+from kicad_tools.optim.routing import (
+    FigureOfMerit,
+    RoutingOptimizer,
+    estimate_net_congestion,
+)
 from kicad_tools.optim.session import (
     Move,
     MoveResult,
@@ -165,6 +169,7 @@ __all__ = [
     "EvolutionaryPlacementOptimizer",
     "RoutingOptimizer",
     "FigureOfMerit",
+    "estimate_net_congestion",
     # Session and query API
     "PlacementSession",
     "MoveResult",

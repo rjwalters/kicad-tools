@@ -849,6 +849,203 @@ class TestRoutingOptimizer:
         with pytest.raises(ValueError, match="Unknown optimization method"):
             optimizer.optimize_net_order(create_router, method="invalid_method")
 
+    def test_optimize_net_order_congestion_requires_map(self):
+        """Test that congestion method requires a congestion_map."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            router.add_component(
+                "U1",
+                [{"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "NET1"}],
+            )
+            router.add_component(
+                "U2",
+                [{"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "NET1"}],
+            )
+            return router
+
+        optimizer = RoutingOptimizer()
+        with pytest.raises(ValueError, match="congestion_map is required"):
+            optimizer.optimize_net_order(create_router, method="congestion")
+
+    def test_optimize_net_order_hybrid_requires_map(self):
+        """Test that hybrid method requires a congestion_map."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            router.add_component(
+                "U1",
+                [{"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "NET1"}],
+            )
+            router.add_component(
+                "U2",
+                [{"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "NET1"}],
+            )
+            return router
+
+        optimizer = RoutingOptimizer()
+        with pytest.raises(ValueError, match="congestion_map is required"):
+            optimizer.optimize_net_order(create_router, method="hybrid")
+
+    def test_optimize_net_order_congestion_method(self):
+        """Test congestion-based net ordering."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            # Create two nets - one in a more "congested" area
+            router.add_component(
+                "U1",
+                [
+                    {"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "NET1"},
+                    {"number": "2", "x": 10, "y": 15, "net": 2, "net_name": "NET2"},
+                ],
+            )
+            router.add_component(
+                "U2",
+                [
+                    {"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "NET1"},
+                    {"number": "2", "x": 30, "y": 15, "net": 2, "net_name": "NET2"},
+                ],
+            )
+            return router
+
+        # Create router and get congestion map
+        router = create_router()
+        congestion_map = router.get_congestion_map()
+
+        optimizer = RoutingOptimizer()
+        order, fom = optimizer.optimize_net_order(
+            create_router, method="congestion", congestion_map=congestion_map
+        )
+
+        # Should return a valid order
+        assert len(order) == 2
+        assert set(order) == {1, 2}
+        assert isinstance(fom, FigureOfMerit)
+
+    def test_optimize_net_order_hybrid_method(self):
+        """Test hybrid ordering puts power/clock nets first, then by congestion."""
+        from kicad_tools.router import Autorouter
+
+        def create_router():
+            router = Autorouter(50, 50)
+            router.add_component(
+                "U1",
+                [
+                    {"number": "1", "x": 10, "y": 10, "net": 1, "net_name": "DATA"},
+                    {"number": "2", "x": 10, "y": 15, "net": 2, "net_name": "GND"},
+                    {"number": "3", "x": 10, "y": 20, "net": 3, "net_name": "CLK"},
+                    {"number": "4", "x": 10, "y": 25, "net": 4, "net_name": "SIGNAL"},
+                ],
+            )
+            router.add_component(
+                "U2",
+                [
+                    {"number": "1", "x": 30, "y": 10, "net": 1, "net_name": "DATA"},
+                    {"number": "2", "x": 30, "y": 15, "net": 2, "net_name": "GND"},
+                    {"number": "3", "x": 30, "y": 20, "net": 3, "net_name": "CLK"},
+                    {"number": "4", "x": 30, "y": 25, "net": 4, "net_name": "SIGNAL"},
+                ],
+            )
+            return router
+
+        # Create router and get congestion map
+        router = create_router()
+        congestion_map = router.get_congestion_map()
+
+        optimizer = RoutingOptimizer()
+        order, fom = optimizer.optimize_net_order(
+            create_router, method="hybrid", congestion_map=congestion_map
+        )
+
+        # GND (power) should be first, CLK second, DATA/SIGNAL last
+        assert len(order) == 4
+        assert order[0] == 2  # GND - power net, first tier
+        assert order[1] == 3  # CLK - high-speed net, second tier
+        # DATA (1) and SIGNAL (4) should be in remaining slots
+        assert set(order[2:]) == {1, 4}
+
+
+class TestEstimateNetCongestion:
+    """Tests for the estimate_net_congestion function."""
+
+    def test_estimate_net_congestion_empty_pads(self):
+        """Test that empty pad list returns 0."""
+        from kicad_tools.optim import estimate_net_congestion
+        from kicad_tools.router import Autorouter
+
+        router = Autorouter(50, 50)
+        congestion_map = router.get_congestion_map()
+
+        score = estimate_net_congestion([], congestion_map)
+        assert score == 0.0
+
+    def test_estimate_net_congestion_single_pad(self):
+        """Test that single pad returns 0 (need at least 2 for a corridor)."""
+        from kicad_tools.optim import estimate_net_congestion
+        from kicad_tools.router import Autorouter
+        from kicad_tools.router.primitives import Pad
+
+        router = Autorouter(50, 50)
+        congestion_map = router.get_congestion_map()
+
+        pad = Pad(x=10, y=10, width=1, height=1, net=1, net_name="NET1")
+        score = estimate_net_congestion([pad], congestion_map)
+        assert score == 0.0
+
+    def test_estimate_net_congestion_two_pads(self):
+        """Test congestion estimation with two pads."""
+        from kicad_tools.optim import estimate_net_congestion
+        from kicad_tools.router import Autorouter
+        from kicad_tools.router.primitives import Pad
+
+        router = Autorouter(50, 50)
+        # Add some components to create congestion
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 15, "y": 10, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 15, "y": 20, "net": 2, "net_name": "NET2"},
+            ],
+        )
+        congestion_map = router.get_congestion_map()
+
+        # Create pads that span the area
+        pad1 = Pad(x=10, y=10, width=1, height=1, net=3, net_name="NET3")
+        pad2 = Pad(x=20, y=20, width=1, height=1, net=3, net_name="NET3")
+
+        score = estimate_net_congestion([pad1, pad2], congestion_map)
+        # Score should be between 0 and 1
+        assert 0.0 <= score <= 1.0
+
+    def test_estimate_net_congestion_multiple_pads(self):
+        """Test congestion estimation with multiple pads."""
+        from kicad_tools.optim import estimate_net_congestion
+        from kicad_tools.router import Autorouter
+        from kicad_tools.router.primitives import Pad
+
+        router = Autorouter(50, 50)
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 20, "y": 20, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 25, "y": 25, "net": 1, "net_name": "NET1"},
+            ],
+        )
+        congestion_map = router.get_congestion_map()
+
+        # Three pads forming a triangle
+        pad1 = Pad(x=10, y=10, width=1, height=1, net=2, net_name="NET2")
+        pad2 = Pad(x=30, y=10, width=1, height=1, net=2, net_name="NET2")
+        pad3 = Pad(x=20, y=30, width=1, height=1, net=2, net_name="NET2")
+
+        score = estimate_net_congestion([pad1, pad2, pad3], congestion_map)
+        # Score should be between 0 and 1
+        assert 0.0 <= score <= 1.0
+
 
 class TestPin:
     """Tests for Pin dataclass."""

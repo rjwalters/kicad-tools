@@ -10,12 +10,67 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import combinations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, DesignRules
+    from kicad_tools.router.failure_analysis import CongestionMap
+    from kicad_tools.router.primitives import Pad
 
-__all__ = ["FigureOfMerit", "RoutingOptimizer"]
+__all__ = ["FigureOfMerit", "RoutingOptimizer", "estimate_net_congestion"]
+
+
+def estimate_net_congestion(
+    net_pads: list[Pad],
+    congestion_map: CongestionMap,
+    margin: float = 2.0,
+) -> float:
+    """Estimate how congested a net's routing corridor will be.
+
+    For each pair of pads, samples congestion along the Manhattan bounding box
+    (routing corridor) between them. Returns the average congestion score.
+
+    Args:
+        net_pads: List of Pad objects for the net.
+        congestion_map: CongestionMap to query for congestion values.
+        margin: Margin around the routing corridor in mm. Default 2.0.
+
+    Returns:
+        Average congestion score (0.0-1.0) across all pad pairs.
+        Returns 0.0 if the net has fewer than 2 pads.
+
+    Example::
+
+        from kicad_tools.optim import estimate_net_congestion
+
+        pads = [pad1, pad2, pad3]
+        congestion_map = router.get_congestion_map()
+        score = estimate_net_congestion(pads, congestion_map)
+        print(f"Net congestion: {score:.2f}")
+    """
+    if len(net_pads) < 2:
+        return 0.0
+
+    # Import Rectangle locally to avoid circular imports
+    from kicad_tools.router.failure_analysis import Rectangle
+
+    total_congestion = 0.0
+    pair_count = 0
+
+    # Sample congestion for each pair of pads
+    for p1, p2 in combinations(net_pads, 2):
+        # Create bounding box (routing corridor) between the two pads
+        min_x = min(p1.x, p2.x) - margin
+        max_x = max(p1.x, p2.x) + margin
+        min_y = min(p1.y, p2.y) - margin
+        max_y = max(p1.y, p2.y) + margin
+
+        corridor = Rectangle(min_x, min_y, max_x, max_y)
+        total_congestion += congestion_map.get_congestion(corridor)
+        pair_count += 1
+
+    return total_congestion / pair_count if pair_count > 0 else 0.0
 
 
 @dataclass
@@ -275,6 +330,7 @@ class RoutingOptimizer:
         router_factory: Callable[[], Autorouter],
         method: str = "greedy",
         iterations: int = 1000,
+        congestion_map: CongestionMap | None = None,
     ) -> tuple[list[int], FigureOfMerit]:
         """
         Find optimal net routing order.
@@ -288,11 +344,28 @@ class RoutingOptimizer:
             method: Optimization method:
                 - "greedy": Route shortest/simplest nets first
                 - "critical_first": Route timing-critical and power nets first
+                - "congestion": Route through congested areas first (requires congestion_map)
+                - "hybrid": Combine critical_first with congestion awareness (requires congestion_map)
                 - "simulated_annealing": Probabilistic optimization (uses iterations)
             iterations: Number of iterations for simulated_annealing method
+            congestion_map: Optional CongestionMap for congestion-aware ordering.
+                           Required for "congestion" and "hybrid" methods.
 
         Returns:
             Tuple of (optimal net order, FigureOfMerit with that order)
+
+        Example::
+
+            optimizer = RoutingOptimizer()
+            router = router_factory()
+            congestion_map = router.get_congestion_map()
+
+            # Use hybrid ordering combining power/clock priority with congestion
+            order, fom = optimizer.optimize_net_order(
+                router_factory,
+                method="hybrid",
+                congestion_map=congestion_map,
+            )
         """
         import random
 
@@ -321,6 +394,26 @@ class RoutingOptimizer:
                 return (2, len(router.nets.get(net_id, [])))
 
             order = sorted(net_ids, key=net_priority)
+
+        elif method == "congestion":
+            # Route through congested areas first while routing options exist
+            if congestion_map is None:
+                raise ValueError(
+                    "congestion_map is required for 'congestion' method. "
+                    "Use router.get_congestion_map() to create one."
+                )
+
+            order = self._order_by_congestion(router, net_ids, congestion_map)
+
+        elif method == "hybrid":
+            # Combine critical_first with congestion awareness
+            if congestion_map is None:
+                raise ValueError(
+                    "congestion_map is required for 'hybrid' method. "
+                    "Use router.get_congestion_map() to create one."
+                )
+
+            order = self._order_hybrid(router, net_ids, congestion_map)
 
         elif method == "simulated_annealing":
             # Start with greedy order
@@ -368,6 +461,94 @@ class RoutingOptimizer:
         fom = FigureOfMerit.from_routes(routes, len(net_ids))
 
         return order, fom
+
+    def _order_by_congestion(
+        self,
+        router: Autorouter,
+        net_ids: list[int],
+        congestion_map: CongestionMap,
+    ) -> list[int]:
+        """Order nets by congestion level (highest congestion first).
+
+        Nets passing through congested areas are routed first while routing
+        options still exist. This gives congested nets more path choices.
+
+        Args:
+            router: Autorouter with pads and nets defined.
+            net_ids: List of net IDs to order.
+            congestion_map: CongestionMap for querying congestion levels.
+
+        Returns:
+            Net IDs sorted by descending congestion score.
+        """
+        scored_nets: list[tuple[float, int]] = []
+
+        for net_id in net_ids:
+            pad_keys = router.nets.get(net_id, [])
+            net_pads = [router.pads[key] for key in pad_keys if key in router.pads]
+
+            congestion_score = estimate_net_congestion(net_pads, congestion_map)
+            scored_nets.append((congestion_score, net_id))
+
+        # Sort by congestion descending (highest congestion first)
+        scored_nets.sort(reverse=True, key=lambda x: x[0])
+
+        return [net_id for _, net_id in scored_nets]
+
+    def _order_hybrid(
+        self,
+        router: Autorouter,
+        net_ids: list[int],
+        congestion_map: CongestionMap,
+    ) -> list[int]:
+        """Combine priority-based ordering with congestion awareness.
+
+        Orders nets in tiers:
+        1. Power nets (VCC, VDD, GND, etc.) - critical infrastructure
+        2. High-speed signals (CLK, etc.) - timing sensitive
+        3. Remaining nets sorted by congestion (highest first)
+
+        Within power and high-speed tiers, nets are also sorted by congestion.
+
+        Args:
+            router: Autorouter with pads and nets defined.
+            net_ids: List of net IDs to order.
+            congestion_map: CongestionMap for querying congestion levels.
+
+        Returns:
+            Net IDs in hybrid priority order.
+        """
+        power_nets: list[tuple[float, int]] = []
+        highspeed_nets: list[tuple[float, int]] = []
+        other_nets: list[tuple[float, int]] = []
+
+        for net_id in net_ids:
+            net_name = router.net_names.get(net_id, "").lower()
+            pad_keys = router.nets.get(net_id, [])
+            net_pads = [router.pads[key] for key in pad_keys if key in router.pads]
+
+            congestion_score = estimate_net_congestion(net_pads, congestion_map)
+
+            # Classify net by type
+            if any(p in net_name for p in ["vcc", "vdd", "gnd", "+3", "+5", "pwr", "vss"]):
+                power_nets.append((congestion_score, net_id))
+            elif any(p in net_name for p in ["clk", "clock", "mclk", "sclk"]):
+                highspeed_nets.append((congestion_score, net_id))
+            else:
+                other_nets.append((congestion_score, net_id))
+
+        # Sort each tier by congestion (highest first within tier)
+        power_nets.sort(reverse=True, key=lambda x: x[0])
+        highspeed_nets.sort(reverse=True, key=lambda x: x[0])
+        other_nets.sort(reverse=True, key=lambda x: x[0])
+
+        # Combine: power first, then high-speed, then remaining by congestion
+        result: list[int] = []
+        result.extend(net_id for _, net_id in power_nets)
+        result.extend(net_id for _, net_id in highspeed_nets)
+        result.extend(net_id for _, net_id in other_nets)
+
+        return result
 
     def optimize_grid_resolution(
         self,
