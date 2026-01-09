@@ -43,6 +43,7 @@ from kicad_tools.units import get_unit_formatter, set_current_formatter
 from .commands import (
     run_analyze_command,
     run_audit_command,
+    run_benchmark_command,
     run_build_native_command,
     run_check_command,
     run_clean_command,
@@ -373,6 +374,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "spec":
         return run_spec_command(args)
+
+    elif args.command == "benchmark":
+        return run_benchmark_command(args)
 
     return 0
 

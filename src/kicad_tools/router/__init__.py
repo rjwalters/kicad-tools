@@ -82,11 +82,6 @@ from .failure_analysis import (
     PathAttempt,
     RootCauseAnalyzer,
 )
-from .placement_feedback import (
-    PlacementAdjustment,
-    PlacementFeedbackLoop,
-    PlacementFeedbackResult,
-)
 from .grid import RoutingGrid
 from .heuristics import (
     CongestionAwareHeuristic,
@@ -110,6 +105,12 @@ from .io import (
     validate_routes,
 )
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
+from .length import (
+    LengthTracker,
+    LengthViolation,
+    ViolationType,
+    create_match_group,
+)
 from .optimizer import (
     CollisionChecker,
     GridCollisionChecker,
@@ -118,6 +119,11 @@ from .optimizer import (
     TraceOptimizer,
 )  # noqa: F401 - optimizer is now a package
 from .pathfinder import AStarNode, Router
+from .placement_feedback import (
+    PlacementAdjustment,
+    PlacementFeedbackLoop,
+    PlacementFeedbackResult,
+)
 from .primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
@@ -129,6 +135,7 @@ from .rules import (
     NET_CLASS_HIGH_SPEED,
     NET_CLASS_POWER,
     DesignRules,
+    LengthConstraint,
     NetClassRouting,
     ZoneRules,
     create_net_class_map,
@@ -226,6 +233,7 @@ __all__ = [
     "Obstacle",
     # Rules
     "DesignRules",
+    "LengthConstraint",
     "NetClassRouting",
     "ZoneRules",
     "create_net_class_map",
@@ -237,6 +245,11 @@ __all__ = [
     "NET_CLASS_DIGITAL",
     "NET_CLASS_DEBUG",
     "NET_CLASS_DEFAULT",
+    # Length tracking
+    "LengthTracker",
+    "LengthViolation",
+    "ViolationType",
+    "create_match_group",
     # I/O
     "route_pcb",
     "load_pcb_for_routing",

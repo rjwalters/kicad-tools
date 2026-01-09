@@ -32,6 +32,14 @@ Example::
 
 from .collision import CollisionChecker, GridCollisionChecker
 from .config import OptimizationConfig, OptimizationStats
+from .serpentine import (
+    SerpentineConfig,
+    SerpentineGenerator,
+    SerpentineResult,
+    SerpentineStyle,
+    add_serpentine,
+    tune_match_group,
+)
 from .trace import TraceOptimizer
 from .via_optimizer import (
     ViaOptimizationConfig,
@@ -45,9 +53,15 @@ __all__ = [
     "GridCollisionChecker",
     "OptimizationConfig",
     "OptimizationStats",
+    "SerpentineConfig",
+    "SerpentineGenerator",
+    "SerpentineResult",
+    "SerpentineStyle",
     "TraceOptimizer",
     "ViaOptimizationConfig",
     "ViaOptimizationStats",
     "ViaOptimizer",
+    "add_serpentine",
     "optimize_route_vias",
+    "tune_match_group",
 ]

@@ -16,6 +16,7 @@ This package contains command handler modules organized by domain:
 """
 
 from .analyze import run_analyze_command
+from .benchmark import run_benchmark_command
 from .config import run_config_command, run_interactive_command
 from .datasheet import run_datasheet_command
 from .estimate import run_estimate_command
@@ -55,6 +56,8 @@ __all__ = [
     "run_route_command",
     "run_zones_command",
     "run_optimize_command",
+    # Benchmark
+    "run_benchmark_command",
     # Validation
     "run_check_command",
     "run_validate_command",
