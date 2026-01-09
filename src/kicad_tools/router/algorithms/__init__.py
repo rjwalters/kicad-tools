@@ -8,10 +8,21 @@ This package contains various routing algorithms:
 
 from .monte_carlo import MonteCarloRouter
 from .mst import MSTRouter
-from .negotiated import NegotiatedRouter
+from .negotiated import (
+    NegotiatedRouter,
+    calculate_history_increment,
+    calculate_present_cost,
+    detect_oscillation,
+    should_terminate_early,
+)
 
 __all__ = [
     "MSTRouter",
     "NegotiatedRouter",
     "MonteCarloRouter",
+    # Adaptive parameter functions (Issue #633)
+    "calculate_history_increment",
+    "calculate_present_cost",
+    "detect_oscillation",
+    "should_terminate_early",
 ]
