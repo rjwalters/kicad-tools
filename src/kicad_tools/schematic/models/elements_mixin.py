@@ -29,6 +29,100 @@ if TYPE_CHECKING:
 class SchematicElementsMixin:
     """Mixin providing element addition and grid snapping for Schematic class."""
 
+    # Default tolerance for point matching (in mm)
+    POINT_TOLERANCE = 0.1
+
+    def _point_on_wire(
+        self, x: float, y: float, wire: Wire, tolerance: float = POINT_TOLERANCE
+    ) -> bool:
+        """Check if a point lies on a wire segment.
+
+        Args:
+            x, y: Point coordinates
+            wire: Wire to check against
+            tolerance: Maximum distance from wire to be considered "on" it
+
+        Returns:
+            True if point is on the wire segment within tolerance
+        """
+        x1, y1, x2, y2 = wire.x1, wire.y1, wire.x2, wire.y2
+
+        # Check if point is within bounding box
+        if not (min(x1, x2) - tolerance <= x <= max(x1, x2) + tolerance):
+            return False
+        if not (min(y1, y2) - tolerance <= y <= max(y1, y2) + tolerance):
+            return False
+
+        # Calculate wire length
+        dx = x2 - x1
+        dy = y2 - y1
+        length = (dx * dx + dy * dy) ** 0.5
+
+        if length < tolerance:
+            # Wire is basically a point - check distance to that point
+            return ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5 < tolerance
+
+        # Calculate perpendicular distance from point to line
+        dist = abs(dy * x - dx * y + x2 * y1 - y2 * x1) / length
+        return dist < tolerance
+
+    def _point_on_any_wire(
+        self, x: float, y: float, tolerance: float = POINT_TOLERANCE
+    ) -> bool:
+        """Check if a point lies on any wire in the schematic.
+
+        Args:
+            x, y: Point coordinates
+            tolerance: Maximum distance from wire to be considered "on" it
+
+        Returns:
+            True if point is on any wire segment within tolerance
+        """
+        for wire in self.wires:
+            if self._point_on_wire(x, y, wire, tolerance):
+                return True
+        return False
+
+    def _find_nearest_wire_point(
+        self, x: float, y: float
+    ) -> tuple[tuple[float, float] | None, float]:
+        """Find the nearest point on any wire to the given coordinates.
+
+        Args:
+            x, y: Point coordinates
+
+        Returns:
+            Tuple of (nearest_point, distance) where nearest_point is (x, y) or None if no wires
+        """
+        if not self.wires:
+            return None, float("inf")
+
+        nearest_point = None
+        min_dist = float("inf")
+
+        for wire in self.wires:
+            x1, y1, x2, y2 = wire.x1, wire.y1, wire.x2, wire.y2
+
+            # Calculate wire length
+            dx = x2 - x1
+            dy = y2 - y1
+            length_sq = dx * dx + dy * dy
+
+            if length_sq < 0.0001:
+                # Wire is basically a point
+                closest = (x1, y1)
+            else:
+                # Project point onto line and clamp to segment
+                t = max(0, min(1, ((x - x1) * dx + (y - y1) * dy) / length_sq))
+                closest = (x1 + t * dx, y1 + t * dy)
+
+            dist = ((x - closest[0]) ** 2 + (y - closest[1]) ** 2) ** 0.5
+            if dist < min_dist:
+                min_dist = dist
+                nearest_point = closest
+
+        return nearest_point, min_dist
+
     def _snap_coord(self, value: float, context: str = "") -> float:
         """Apply grid snapping to a single coordinate based on snap_mode.
 
@@ -355,7 +449,13 @@ class SchematicElementsMixin:
         return junc
 
     def add_label(
-        self, text: str, x: float, y: float, rotation: float = 0, snap: bool = True
+        self,
+        text: str,
+        x: float,
+        y: float,
+        rotation: float = 0,
+        snap: bool = True,
+        validate_connection: bool = True,
     ) -> Label:
         """Add a net label.
 
@@ -364,10 +464,38 @@ class SchematicElementsMixin:
             x, y: Label position (snapped to grid unless snap=False)
             rotation: Rotation in degrees
             snap: Whether to apply grid snapping (default: True)
+            validate_connection: Whether to warn if label is not on a wire (default: True)
+
+        Warning:
+            If validate_connection is True and the label position is not on any wire,
+            a warning will be issued. This helps catch disconnected labels that would
+            cause ERC errors in KiCad.
         """
         if snap:
             x = self._snap_coord(x, f"label {text}")
             y = self._snap_coord(y, f"label {text}")
+        else:
+            x = round(x, 2)
+            y = round(y, 2)
+
+        # Validate that the label is on a wire
+        if validate_connection and self.wires:
+            if not self._point_on_any_wire(x, y):
+                nearest_point, distance = self._find_nearest_wire_point(x, y)
+                if nearest_point:
+                    warnings.warn(
+                        f"Label '{text}' at ({x}, {y}) is not on any wire. "
+                        f"Nearest wire point is ({nearest_point[0]:.2f}, {nearest_point[1]:.2f}), "
+                        f"{distance:.2f}mm away. This will cause ERC errors.",
+                        stacklevel=2,
+                    )
+                else:
+                    warnings.warn(
+                        f"Label '{text}' at ({x}, {y}) is not on any wire. "
+                        f"No wires found in schematic. This will cause ERC errors.",
+                        stacklevel=2,
+                    )
+
         label = Label(text=text, x=x, y=y, rotation=rotation)
         self.labels.append(label)
         return label
@@ -380,6 +508,7 @@ class SchematicElementsMixin:
         shape: str = "input",
         rotation: float = 0,
         snap: bool = True,
+        validate_connection: bool = True,
     ) -> HierarchicalLabel:
         """Add a hierarchical label.
 
@@ -389,10 +518,32 @@ class SchematicElementsMixin:
             shape: Label shape (input, output, bidirectional, passive)
             rotation: Rotation in degrees
             snap: Whether to apply grid snapping (default: True)
+            validate_connection: Whether to warn if label is not on a wire (default: True)
+
+        Warning:
+            If validate_connection is True and the label position is not on any wire,
+            a warning will be issued. This helps catch disconnected labels that would
+            cause ERC errors in KiCad.
         """
         if snap:
             x = self._snap_coord(x, f"hier_label {text}")
             y = self._snap_coord(y, f"hier_label {text}")
+        else:
+            x = round(x, 2)
+            y = round(y, 2)
+
+        # Validate that the label is on a wire
+        if validate_connection and self.wires:
+            if not self._point_on_any_wire(x, y):
+                nearest_point, distance = self._find_nearest_wire_point(x, y)
+                if nearest_point:
+                    warnings.warn(
+                        f"Hierarchical label '{text}' at ({x}, {y}) is not on any wire. "
+                        f"Nearest wire point is ({nearest_point[0]:.2f}, {nearest_point[1]:.2f}), "
+                        f"{distance:.2f}mm away. This will cause ERC errors.",
+                        stacklevel=2,
+                    )
+
         hl = HierarchicalLabel(text=text, x=x, y=y, shape=shape, rotation=rotation)
         self.hier_labels.append(hl)
         return hl
@@ -405,6 +556,7 @@ class SchematicElementsMixin:
         shape: str = "bidirectional",
         rotation: float = 0,
         snap: bool = True,
+        validate_connection: bool = True,
     ) -> GlobalLabel:
         """Add a global label that connects nets by name across all sheets.
 
@@ -418,9 +570,15 @@ class SchematicElementsMixin:
             shape: Signal type shape (input, output, bidirectional, tri_state, passive)
             rotation: Rotation in degrees
             snap: Whether to apply grid snapping (default: True)
+            validate_connection: Whether to warn if label is not on a wire (default: True)
 
         Returns:
             The GlobalLabel created
+
+        Warning:
+            If validate_connection is True and the label position is not on any wire,
+            a warning will be issued. This helps catch disconnected labels that would
+            cause ERC errors in KiCad.
 
         Example:
             # Add global labels for power rails
@@ -437,6 +595,22 @@ class SchematicElementsMixin:
         if snap:
             x = self._snap_coord(x, f"global_label {text}")
             y = self._snap_coord(y, f"global_label {text}")
+        else:
+            x = round(x, 2)
+            y = round(y, 2)
+
+        # Validate that the label is on a wire
+        if validate_connection and self.wires:
+            if not self._point_on_any_wire(x, y):
+                nearest_point, distance = self._find_nearest_wire_point(x, y)
+                if nearest_point:
+                    warnings.warn(
+                        f"Global label '{text}' at ({x}, {y}) is not on any wire. "
+                        f"Nearest wire point is ({nearest_point[0]:.2f}, {nearest_point[1]:.2f}), "
+                        f"{distance:.2f}mm away. This will cause ERC errors.",
+                        stacklevel=2,
+                    )
+
         gl = GlobalLabel(text=text, x=x, y=y, shape=shape, rotation=rotation)
         self.global_labels.append(gl)
         _log_info(f"Added global label '{text}' at ({x}, {y})")
