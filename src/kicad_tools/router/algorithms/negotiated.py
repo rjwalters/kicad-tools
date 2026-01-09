@@ -189,3 +189,105 @@ class NegotiatedRouter:
                 if route in routes_list:
                     routes_list.remove(route)
             net_routes[net] = []
+
+    def targeted_ripup(
+        self,
+        failed_net: int,
+        blocking_nets: set[int],
+        net_routes: dict[int, list[Route]],
+        routes_list: list[Route],
+        pads_by_net: dict[int, list[Pad]],
+        present_cost_factor: float,
+        mark_route_callback: callable,
+        ripup_history: dict[int, int] | None = None,
+        max_ripups_per_net: int = 3,
+    ) -> bool:
+        """Perform targeted rip-up of blocking nets and re-route.
+
+        Instead of ripping up all conflicting nets, this method only rips up
+        the specific nets that are blocking the failed net's path, then
+        re-routes the failed net first (giving it priority) followed by
+        the displaced nets.
+
+        Args:
+            failed_net: Net ID that failed to route
+            blocking_nets: Set of net IDs blocking the failed net's path
+            net_routes: Dictionary of net_id -> list of routes
+            routes_list: Master list of all routes
+            pads_by_net: Dictionary of net_id -> list of pads for that net
+            present_cost_factor: Current congestion cost factor
+            mark_route_callback: Callback to mark routes on the grid
+            ripup_history: Optional dict tracking ripup count per net
+            max_ripups_per_net: Maximum times a net can be ripped up (prevents loops)
+
+        Returns:
+            True if re-routing succeeded for all affected nets, False otherwise
+        """
+        if ripup_history is None:
+            ripup_history = {}
+
+        # Filter out nets that have been ripped up too many times
+        # This prevents infinite loops where nets keep displacing each other
+        nets_to_ripup: set[int] = set()
+        for net in blocking_nets:
+            if ripup_history.get(net, 0) < max_ripups_per_net:
+                nets_to_ripup.add(net)
+                ripup_history[net] = ripup_history.get(net, 0) + 1
+
+        if not nets_to_ripup:
+            # All blocking nets have reached their ripup limit
+            # Fall back to normal routing with high congestion cost
+            return False
+
+        # Rip up only the blocking nets
+        self.rip_up_nets(list(nets_to_ripup), net_routes, routes_list)
+
+        # Re-route the failed net first (it now has priority with cleared path)
+        failed_pads = pads_by_net.get(failed_net, [])
+        if failed_pads and len(failed_pads) >= 2:
+            routes = self.route_net_negotiated(
+                failed_pads, present_cost_factor, mark_route_callback
+            )
+            if routes:
+                net_routes[failed_net] = routes
+                for route in routes:
+                    self.grid.mark_route_usage(route)
+                    routes_list.append(route)
+
+        # Re-route the displaced nets
+        success = True
+        for net in nets_to_ripup:
+            net_pads = pads_by_net.get(net, [])
+            if net_pads and len(net_pads) >= 2:
+                routes = self.route_net_negotiated(
+                    net_pads, present_cost_factor, mark_route_callback
+                )
+                if routes:
+                    net_routes[net] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        routes_list.append(route)
+                else:
+                    # Displaced net failed to re-route
+                    success = False
+
+        return success
+
+    def find_blocking_nets_for_connection(
+        self,
+        source_pad: Pad,
+        target_pad: Pad,
+    ) -> set[int]:
+        """Find nets blocking a specific connection.
+
+        Uses the pathfinder's find_blocking_nets method to identify
+        which nets are blocking the direct path between two pads.
+
+        Args:
+            source_pad: Starting pad
+            target_pad: Ending pad
+
+        Returns:
+            Set of net IDs blocking the path
+        """
+        return self.router.find_blocking_nets(source_pad, target_pad)

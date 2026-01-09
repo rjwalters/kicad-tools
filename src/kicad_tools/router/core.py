@@ -547,6 +547,8 @@ class Autorouter:
         history_increment: float = 1.0,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        use_targeted_ripup: bool = False,
+        max_ripups_per_net: int = 3,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -557,6 +559,13 @@ class Autorouter:
             history_increment: History cost increment per iteration
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds. If reached, returns best partial result.
+            use_targeted_ripup: If True, use targeted rip-up of blocking nets instead
+                of ripping up all nets through overused cells. This can improve
+                convergence by only displacing nets that actually block the failed
+                net's path.
+            max_ripups_per_net: Maximum times a single net can be ripped up during
+                targeted rip-up (prevents infinite loops). Only used when
+                use_targeted_ripup=True.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -568,6 +577,8 @@ class Autorouter:
         print("\n=== Negotiated Congestion Routing ===")
         print(f"  Max iterations: {max_iterations}")
         print(f"  Present factor: {initial_present_factor} + {present_factor_increment}/iter")
+        if use_targeted_ripup:
+            print(f"  Targeted rip-up: enabled (max {max_ripups_per_net} ripups/net)")
         if timeout:
             print(f"  Timeout: {timeout}s")
 
@@ -579,6 +590,16 @@ class Autorouter:
         net_routes: dict[int, list[Route]] = {}
         present_factor = initial_present_factor
         timed_out = False
+
+        # For targeted rip-up: build pads_by_net mapping and track ripup history
+        pads_by_net: dict[int, list[Pad]] = {}
+        ripup_history: dict[int, int] = {}
+        if use_targeted_ripup:
+            for net in net_order:
+                if net in self.nets:
+                    pads_for_routing = self.nets[net]
+                    if len(pads_for_routing) >= 2:
+                        pads_by_net[net] = [self.pads[p] for p in pads_for_routing]
 
         def check_timeout() -> bool:
             """Check if timeout has been reached."""
@@ -653,35 +674,109 @@ class Autorouter:
                 self.grid.update_history_costs(history_increment)
 
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
-                print(f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})")
 
-                neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
+                if use_targeted_ripup:
+                    # Targeted rip-up: for each conflicting net, find its specific blockers
+                    # and only rip up those instead of all conflicting nets at once
+                    print(
+                        f"  Using targeted rip-up for {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
+                    )
+                    targeted_ripup_count = 0
+                    failed_nets: list[int] = []
 
-                rerouted_count = 0
-                for i, net in enumerate(nets_to_reroute):
-                    if check_timeout():
-                        print(
-                            f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
-                        )
-                        timed_out = True
+                    for i, failed_net in enumerate(nets_to_reroute):
+                        if check_timeout():
+                            print(
+                                f"  ⚠ Timeout during targeted reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                            )
+                            timed_out = True
+                            break
+
+                        # Find blocking nets for this failed net
+                        pads = pads_by_net.get(failed_net, [])
+                        if len(pads) < 2:
+                            continue
+
+                        # Find which nets are blocking by checking pad connections
+                        blocking_nets: set[int] = set()
+                        for j in range(len(pads) - 1):
+                            blockers = neg_router.find_blocking_nets_for_connection(
+                                pads[j], pads[j + 1]
+                            )
+                            blocking_nets.update(blockers)
+
+                        if blocking_nets:
+                            # Use targeted rip-up to displace only blocking nets
+                            def mark_route(route: Route) -> None:
+                                self._mark_route(route)
+
+                            success = neg_router.targeted_ripup(
+                                failed_net=failed_net,
+                                blocking_nets=blocking_nets,
+                                net_routes=net_routes,
+                                routes_list=self.routes,
+                                pads_by_net=pads_by_net,
+                                present_cost_factor=present_factor,
+                                mark_route_callback=mark_route,
+                                ripup_history=ripup_history,
+                                max_ripups_per_net=max_ripups_per_net,
+                            )
+                            if success:
+                                targeted_ripup_count += 1
+                            else:
+                                failed_nets.append(failed_net)
+                        else:
+                            # No blocking nets found, try regular reroute
+                            routes = self._route_net_negotiated(failed_net, present_factor)
+                            if routes:
+                                net_routes[failed_net] = routes
+                                targeted_ripup_count += 1
+                                for route in routes:
+                                    self.grid.mark_route_usage(route)
+                                    self.routes.append(route)
+
+                    if timed_out:
                         break
 
-                    routes = self._route_net_negotiated(net, present_factor)
-                    if routes:
-                        net_routes[net] = routes
-                        rerouted_count += 1
-                        for route in routes:
-                            self.grid.mark_route_usage(route)
-                            self.routes.append(route)
+                    overflow = self.grid.get_total_overflow()
+                    overused = self.grid.find_overused_cells()
+                    print(
+                        f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
+                        f"overflow: {overflow} ({elapsed_str()})"
+                    )
+                else:
+                    # Full rip-up: rip up all nets through overused cells
+                    print(
+                        f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
+                    )
 
-                if timed_out:
-                    break
+                    neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
-                overflow = self.grid.get_total_overflow()
-                overused = self.grid.find_overused_cells()
-                print(
-                    f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
-                )
+                    rerouted_count = 0
+                    for i, net in enumerate(nets_to_reroute):
+                        if check_timeout():
+                            print(
+                                f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                            )
+                            timed_out = True
+                            break
+
+                        routes = self._route_net_negotiated(net, present_factor)
+                        if routes:
+                            net_routes[net] = routes
+                            rerouted_count += 1
+                            for route in routes:
+                                self.grid.mark_route_usage(route)
+                                self.routes.append(route)
+
+                    if timed_out:
+                        break
+
+                    overflow = self.grid.get_total_overflow()
+                    overused = self.grid.find_overused_cells()
+                    print(
+                        f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
+                    )
 
                 if overflow == 0:
                     print(f"  Convergence achieved at iteration {iteration}!")
