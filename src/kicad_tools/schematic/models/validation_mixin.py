@@ -120,9 +120,13 @@ class SchematicValidationMixin:
         for junc in self.junctions:
             connection_points.add((round(junc.x, 2), round(junc.y, 2)))
 
-        # Label positions
+        # Label positions (local labels)
         for label in self.labels:
             connection_points.add((round(label.x, 2), round(label.y, 2)))
+
+        # Global label positions
+        for gl in self.global_labels:
+            connection_points.add((round(gl.x, 2), round(gl.y, 2)))
 
         # Hierarchical label positions
         for hl in self.hier_labels:

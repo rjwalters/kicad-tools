@@ -60,14 +60,21 @@ class TestBoundingBox:
     """Tests for SymbolInstance.bounding_box()."""
 
     def test_bounding_box_basic(self):
-        """Bounding box includes all pin positions plus padding."""
+        """Bounding box includes all pin CONNECTION POINT positions plus padding.
+
+        Pin connection points are at the END of pins (base + length in pin direction).
+        For the default test symbol:
+        - Pins 1,2: base at x=-5.08, angle=180 (left), length=2.54 -> connection at x=-7.62
+        - Pins 3,4: base at x=+5.08, angle=0 (right), length=2.54 -> connection at x=+7.62
+        - All pins have y at ±2.54
+        """
         sym = make_symbol_instance(x=100.0, y=100.0)
         box = sym.bounding_box(padding=0)
 
-        # Pins at +-5.08, +-2.54 relative to center
-        assert box[0] == pytest.approx(100.0 - 5.08, abs=0.01)  # min_x
+        # Pin connection points at +-7.62 (5.08 base + 2.54 length), +-2.54 (unchanged y)
+        assert box[0] == pytest.approx(100.0 - 7.62, abs=0.01)  # min_x
         assert box[1] == pytest.approx(100.0 - 2.54, abs=0.01)  # min_y
-        assert box[2] == pytest.approx(100.0 + 5.08, abs=0.01)  # max_x
+        assert box[2] == pytest.approx(100.0 + 7.62, abs=0.01)  # max_x
         assert box[3] == pytest.approx(100.0 + 2.54, abs=0.01)  # max_y
 
     def test_bounding_box_with_padding(self):
@@ -75,10 +82,10 @@ class TestBoundingBox:
         sym = make_symbol_instance(x=100.0, y=100.0)
         box = sym.bounding_box(padding=2.54)
 
-        # Pins at +-5.08, +-2.54 relative to center, plus 2.54 padding
-        assert box[0] == pytest.approx(100.0 - 5.08 - 2.54, abs=0.01)
+        # Pin connection points at +-7.62, +-2.54 relative to center, plus 2.54 padding
+        assert box[0] == pytest.approx(100.0 - 7.62 - 2.54, abs=0.01)
         assert box[1] == pytest.approx(100.0 - 2.54 - 2.54, abs=0.01)
-        assert box[2] == pytest.approx(100.0 + 5.08 + 2.54, abs=0.01)
+        assert box[2] == pytest.approx(100.0 + 7.62 + 2.54, abs=0.01)
         assert box[3] == pytest.approx(100.0 + 2.54 + 2.54, abs=0.01)
 
     def test_bounding_box_no_pins(self):
@@ -152,16 +159,16 @@ class TestOverlaps:
     def test_no_overlap_horizontal(self):
         """Two symbols side by side with enough spacing don't overlap."""
         sym1 = make_symbol_instance(x=100.0, y=100.0, ref="U1")
-        # Pins extend to about +/- 5.08, plus 2.54 padding = 7.62
-        # So need at least 15.24 horizontal separation
-        sym2 = make_symbol_instance(x=120.0, y=100.0, ref="U2")
+        # Pin connection points extend to +/- 7.62, plus 2.54 padding = 10.16
+        # So need at least 20.32 horizontal separation
+        sym2 = make_symbol_instance(x=125.0, y=100.0, ref="U2")
 
         assert sym1.overlaps(sym2) is False
 
     def test_no_overlap_vertical(self):
         """Two symbols stacked with enough spacing don't overlap."""
         sym1 = make_symbol_instance(x=100.0, y=100.0, ref="U1")
-        # Pins extend to about +/- 2.54, plus 2.54 padding = 5.08
+        # Pins extend to about +/- 2.54 in Y, plus 2.54 padding = 5.08
         # So need at least 10.16 vertical separation
         sym2 = make_symbol_instance(x=100.0, y=115.0, ref="U2")
 
@@ -170,8 +177,9 @@ class TestOverlaps:
     def test_overlap_zero_padding(self):
         """With zero padding, symbols need to actually touch to overlap."""
         sym1 = make_symbol_instance(x=100.0, y=100.0, ref="U1")
-        # With zero padding, bounding boxes are just the pin extents
-        sym2 = make_symbol_instance(x=111.0, y=100.0, ref="U2")
+        # With zero padding, bounding boxes extend to pin connection points (+/- 7.62)
+        # Two symbols need center distance > 15.24 to not overlap
+        sym2 = make_symbol_instance(x=116.0, y=100.0, ref="U2")
 
         assert sym1.overlaps(sym2, padding=0) is False
 
