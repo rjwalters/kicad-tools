@@ -1858,8 +1858,8 @@ class TestSchematicValidationAdvanced:
         t_junctions = [i for i in issues if i["type"] == "missing_junction"]
         # Note: May or may not detect depending on implementation
 
-    def test_check_power_pins_connected(self):
-        """Power pins connected to wires don't generate warnings."""
+    def test_check_unconnected_pins_power_connected(self):
+        """Power pins connected to wires don't generate errors."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
 
         pins = [Pin(name="VCC", number="1", x=0, y=0, angle=0, length=0, pin_type="power_in")]
@@ -1873,9 +1873,153 @@ class TestSchematicValidationAdvanced:
         # Connect wire to the power pin position
         sch.add_wire((100, 100), (100, 50), snap=False)
 
-        issues = sch._check_power_pins()
+        issues = sch._check_unconnected_pins()
         unconnected = [i for i in issues if i["type"] == "unconnected_power_pin"]
         assert len(unconnected) == 0
+
+    def test_check_unconnected_pins_power_not_connected(self):
+        """Power pins not connected to wires generate errors."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        pins = [Pin(name="VCC", number="1", x=0, y=0, angle=0, length=0, pin_type="power_in")]
+        sym_def = SymbolDef(lib_id="Device:IC", name="IC", raw_sexp="", pins=pins)
+
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="U1", value="IC"
+        )
+        sch.symbols.append(inst)
+
+        # No wire connected to pin
+        issues = sch._check_unconnected_pins()
+        unconnected = [i for i in issues if i["type"] == "unconnected_power_pin"]
+        assert len(unconnected) == 1
+        assert unconnected[0]["severity"] == "error"
+
+    def test_check_unconnected_pins_io_not_connected(self):
+        """Input/output pins not connected generate errors."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        pins = [Pin(name="DATA", number="1", x=0, y=0, angle=0, length=0, pin_type="input")]
+        sym_def = SymbolDef(lib_id="Device:IC", name="IC", raw_sexp="", pins=pins)
+
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="U1", value="IC"
+        )
+        sch.symbols.append(inst)
+
+        # No wire connected
+        issues = sch._check_unconnected_pins()
+        unconnected = [i for i in issues if i["type"] == "unconnected_pin"]
+        assert len(unconnected) == 1
+        assert unconnected[0]["severity"] == "error"
+
+    def test_check_unconnected_pins_no_connect_marker(self):
+        """Pins with no_connect markers don't generate issues."""
+        from kicad_tools.schematic.models.elements import NoConnect
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        pins = [Pin(name="NC", number="1", x=0, y=0, angle=0, length=0, pin_type="input")]
+        sym_def = SymbolDef(lib_id="Device:IC", name="IC", raw_sexp="", pins=pins)
+
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="U1", value="IC"
+        )
+        sch.symbols.append(inst)
+
+        # Add no_connect marker at pin position
+        sch.no_connects.append(NoConnect(x=100.0, y=100.0))
+
+        issues = sch._check_unconnected_pins()
+        unconnected = [i for i in issues if "unconnected" in i["type"]]
+        assert len(unconnected) == 0
+
+    def test_check_unconnected_pins_simple_passive_skipped(self):
+        """Simple 2-pin passive components (like resistors) are skipped."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # 2-pin passive component like a resistor
+        pins = [
+            Pin(name="~", number="1", x=-2.54, y=0, angle=180, length=2.54, pin_type="passive"),
+            Pin(name="~", number="2", x=2.54, y=0, angle=0, length=2.54, pin_type="passive"),
+        ]
+        sym_def = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=pins)
+
+        inst = SymbolInstance(
+            symbol_def=sym_def, x=100.0, y=100.0, rotation=0, reference="R1", value="10k"
+        )
+        sch.symbols.append(inst)
+
+        # No wires connected - but should not generate issues for simple passives
+        issues = sch._check_unconnected_pins()
+        unconnected = [i for i in issues if "unconnected" in i["type"]]
+        assert len(unconnected) == 0
+
+    def test_check_disconnected_labels_connected(self):
+        """Labels at wire endpoints don't generate errors."""
+        from kicad_tools.schematic.models.elements import Label
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Add a wire
+        sch.add_wire((100, 100), (200, 100), snap=False)
+
+        # Add label at wire endpoint
+        sch.labels.append(Label(text="NET1", x=100.0, y=100.0))
+
+        issues = sch._check_disconnected_labels()
+        disconnected = [i for i in issues if i["type"] == "disconnected_label"]
+        assert len(disconnected) == 0
+
+    def test_check_disconnected_labels_on_wire(self):
+        """Labels on wire segments (not at endpoints) don't generate errors."""
+        from kicad_tools.schematic.models.elements import Label
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Add a horizontal wire
+        sch.add_wire((100, 100), (200, 100), snap=False)
+
+        # Add label in middle of wire
+        sch.labels.append(Label(text="NET1", x=150.0, y=100.0))
+
+        issues = sch._check_disconnected_labels()
+        disconnected = [i for i in issues if i["type"] == "disconnected_label"]
+        assert len(disconnected) == 0
+
+    def test_check_disconnected_labels_floating(self):
+        """Labels not on any wire generate errors."""
+        from kicad_tools.schematic.models.elements import Label
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Add a wire
+        sch.add_wire((100, 100), (200, 100), snap=False)
+
+        # Add floating label (not on wire)
+        sch.labels.append(Label(text="FLOATING", x=300.0, y=300.0))
+
+        issues = sch._check_disconnected_labels()
+        disconnected = [i for i in issues if i["type"] == "disconnected_label"]
+        assert len(disconnected) == 1
+        assert "FLOATING" in disconnected[0]["message"]
+
+    def test_check_disconnected_global_labels(self):
+        """Global labels not on any wire generate errors."""
+        from kicad_tools.schematic.models.elements import GlobalLabel
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Add a wire
+        sch.add_wire((100, 100), (200, 100), snap=False)
+
+        # Add floating global label
+        sch.global_labels.append(GlobalLabel(text="VCC_3V3", x=300.0, y=300.0))
+
+        issues = sch._check_disconnected_labels()
+        disconnected = [i for i in issues if i["type"] == "disconnected_label"]
+        assert len(disconnected) == 1
+        assert "VCC_3V3" in disconnected[0]["message"]
 
 
 class TestSymbolDefParsing:

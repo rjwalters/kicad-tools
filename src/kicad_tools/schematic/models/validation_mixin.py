@@ -79,9 +79,13 @@ class SchematicValidationMixin:
         connectivity_issues = self._check_wire_connectivity()
         issues.extend(connectivity_issues)
 
-        # Check for power pins without connections
-        power_pin_issues = self._check_power_pins()
-        issues.extend(power_pin_issues)
+        # Check for unconnected pins (all types, not just power)
+        unconnected_pin_issues = self._check_unconnected_pins()
+        issues.extend(unconnected_pin_issues)
+
+        # Check for disconnected labels (labels not on wires)
+        disconnected_label_issues = self._check_disconnected_labels()
+        issues.extend(disconnected_label_issues)
 
         # Log validation summary
         errors = sum(1 for i in issues if i["severity"] == "error")
@@ -197,38 +201,190 @@ class SchematicValidationMixin:
             return min(x1, x2) < px < max(x1, x2)
         return False
 
-    def _check_power_pins(self) -> list[dict]:
-        """Check for power pins that might not be properly connected."""
+    def _check_unconnected_pins(self) -> list[dict]:
+        """Check for unconnected pins on all symbols.
+
+        This checks ALL pin types (not just power pins) for proper connections.
+        Pins are considered connected if they touch:
+        - A wire endpoint
+        - A junction
+        - A power symbol
+        - A no_connect marker
+
+        Passive pins on simple 2-pin components (like resistors, capacitors)
+        are skipped as they commonly have one end floating during design.
+        """
         issues = []
 
+        # Build set of all valid connection points
         connected_points = set()
+
+        # Wire endpoints
         for wire in self.wires:
             connected_points.add((round(wire.x1, 2), round(wire.y1, 2)))
             connected_points.add((round(wire.x2, 2), round(wire.y2, 2)))
+
+        # Junctions
         for junc in self.junctions:
             connected_points.add((round(junc.x, 2), round(junc.y, 2)))
 
-        for sym in self.symbols:
-            for pin in sym.symbol_def.pins:
-                if pin.pin_type in ("power_in", "power_out"):
-                    # Use pin.number for unique identification
-                    pos = sym.pin_position(pin.number)
-                    pos_rounded = (round(pos[0], 2), round(pos[1], 2))
+        # Power symbols (they connect at their position)
+        for pwr in self.power_symbols:
+            connected_points.add((round(pwr.x, 2), round(pwr.y, 2)))
 
-                    if pos_rounded not in connected_points:
-                        # Display name for readability, but number for lookup
-                        display_name = pin.name if pin.name and pin.name != "~" else pin.number
-                        issues.append(
-                            {
-                                "severity": "warning",
-                                "type": "unconnected_power_pin",
-                                "message": f"Power pin {display_name} on {sym.reference} at ({pos[0]}, {pos[1]}) may be unconnected",
-                                "location": pos_rounded,
-                                "fix_applied": False,
-                            }
-                        )
+        # No-connect markers (pins with these are intentionally unconnected)
+        no_connect_points = set()
+        for nc in self.no_connects:
+            no_connect_points.add((round(nc.x, 2), round(nc.y, 2)))
+
+        # Collect wire segments for T-junction detection
+        wire_segments = []
+        for wire in self.wires:
+            p1 = (round(wire.x1, 2), round(wire.y1, 2))
+            p2 = (round(wire.x2, 2), round(wire.y2, 2))
+            wire_segments.append((p1, p2))
+
+        for sym in self.symbols:
+            # Skip simple 2-pin passive components (resistors, capacitors, etc.)
+            # These often have one pin floating during design
+            is_simple_passive = len(sym.symbol_def.pins) == 2 and all(
+                p.pin_type == "passive" for p in sym.symbol_def.pins
+            )
+
+            for pin in sym.symbol_def.pins:
+                # Skip passive pins on simple 2-pin devices
+                if is_simple_passive and pin.pin_type == "passive":
+                    continue
+
+                pos = sym.pin_position(pin.number)
+                pos_rounded = (round(pos[0], 2), round(pos[1], 2))
+
+                # Skip if marked with no_connect
+                if pos_rounded in no_connect_points:
+                    continue
+
+                # Check if connected to a wire endpoint or junction
+                if pos_rounded in connected_points:
+                    continue
+
+                # Check if on a wire segment (T-junction without explicit junction)
+                on_wire = False
+                for seg_start, seg_end in wire_segments:
+                    if self._point_on_segment(pos_rounded, seg_start, seg_end):
+                        on_wire = True
+                        break
+
+                if on_wire:
+                    continue
+
+                # Pin is unconnected
+                display_name = pin.name if pin.name and pin.name != "~" else pin.number
+
+                # Determine severity based on pin type
+                if pin.pin_type in ("power_in", "power_out"):
+                    severity = "error"
+                    issue_type = "unconnected_power_pin"
+                elif pin.pin_type in ("input", "output", "bidirectional"):
+                    severity = "error"
+                    issue_type = "unconnected_pin"
+                else:
+                    severity = "warning"
+                    issue_type = "unconnected_pin"
+
+                issues.append(
+                    {
+                        "severity": severity,
+                        "type": issue_type,
+                        "message": f"Pin {display_name} ({pin.pin_type}) on {sym.reference} at ({pos[0]}, {pos[1]}) is not connected",
+                        "location": pos_rounded,
+                        "fix_applied": False,
+                    }
+                )
 
         return issues
+
+    def _check_disconnected_labels(self) -> list[dict]:
+        """Check for labels that are not connected to any wire.
+
+        Labels must be placed at wire endpoints or on wire segments to be valid.
+        A label floating in space (not touching a wire) is an error.
+        """
+        issues = []
+
+        # Collect wire endpoints
+        wire_endpoints = set()
+        for wire in self.wires:
+            wire_endpoints.add((round(wire.x1, 2), round(wire.y1, 2)))
+            wire_endpoints.add((round(wire.x2, 2), round(wire.y2, 2)))
+
+        # Collect wire segments for checking if label is on a wire
+        wire_segments = []
+        for wire in self.wires:
+            p1 = (round(wire.x1, 2), round(wire.y1, 2))
+            p2 = (round(wire.x2, 2), round(wire.y2, 2))
+            wire_segments.append((p1, p2))
+
+        # Check local labels
+        for label in self.labels:
+            pos = (round(label.x, 2), round(label.y, 2))
+            if not self._is_on_wire_network(pos, wire_endpoints, wire_segments):
+                issues.append(
+                    {
+                        "severity": "error",
+                        "type": "disconnected_label",
+                        "message": f"Label '{label.text}' at ({label.x}, {label.y}) is not connected to any wire",
+                        "location": pos,
+                        "fix_applied": False,
+                    }
+                )
+
+        # Check global labels
+        for gl in self.global_labels:
+            pos = (round(gl.x, 2), round(gl.y, 2))
+            if not self._is_on_wire_network(pos, wire_endpoints, wire_segments):
+                issues.append(
+                    {
+                        "severity": "error",
+                        "type": "disconnected_label",
+                        "message": f"Global label '{gl.text}' at ({gl.x}, {gl.y}) is not connected to any wire",
+                        "location": pos,
+                        "fix_applied": False,
+                    }
+                )
+
+        # Check hierarchical labels
+        for hl in self.hier_labels:
+            pos = (round(hl.x, 2), round(hl.y, 2))
+            if not self._is_on_wire_network(pos, wire_endpoints, wire_segments):
+                issues.append(
+                    {
+                        "severity": "error",
+                        "type": "disconnected_label",
+                        "message": f"Hierarchical label '{hl.text}' at ({hl.x}, {hl.y}) is not connected to any wire",
+                        "location": pos,
+                        "fix_applied": False,
+                    }
+                )
+
+        return issues
+
+    def _is_on_wire_network(
+        self,
+        point: tuple,
+        wire_endpoints: set,
+        wire_segments: list,
+    ) -> bool:
+        """Check if a point is on the wire network (endpoint or on segment)."""
+        # Check if at a wire endpoint
+        if point in wire_endpoints:
+            return True
+
+        # Check if on a wire segment
+        for seg_start, seg_end in wire_segments:
+            if self._point_on_segment(point, seg_start, seg_end):
+                return True
+
+        return False
 
     def get_statistics(self) -> dict:
         """Get schematic statistics useful for agents."""
