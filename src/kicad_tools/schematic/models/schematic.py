@@ -148,6 +148,10 @@ class Schematic(
         # Embedded lib_symbols from loaded schematics (preserved for round-trip)
         self._embedded_lib_symbols: dict[str, SExp] = {}
 
+        # Track continuous rails for T-connection warnings
+        # Each entry: (y, x_start, x_end) for horizontal rails
+        self._continuous_rails: list[tuple[float, float, float]] = []
+
     @property
     def sheet_path(self) -> str:
         """Get the sheet path for this schematic."""

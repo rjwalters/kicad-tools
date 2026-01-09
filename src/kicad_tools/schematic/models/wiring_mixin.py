@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..logging import _log_info
+from ..logging import _log_info, _log_warning
 from .elements import HierarchicalLabel, PowerSymbol, Wire
 from .symbol import SymbolInstance
 
@@ -82,6 +82,9 @@ class SchematicWiringMixin:
         pin_pos = symbol.pin_position(pin_name)
         wires = []
 
+        # Check for T-connection on a continuous rail (created by add_rail)
+        self._warn_if_continuous_rail_t_connection(pin_pos[0], rail_y)
+
         # Vertical wire from pin to rail
         wires.append(self.add_wire(pin_pos, (pin_pos[0], rail_y)))
 
@@ -95,6 +98,22 @@ class SchematicWiringMixin:
 
         return wires
 
+    def _warn_if_continuous_rail_t_connection(self, x: float, y: float) -> None:
+        """Check if a connection point creates a T-connection on a continuous rail.
+
+        Emits a warning if the point is in the interior of a continuous rail
+        (created by add_rail), as this will cause ERC failures in KiCad.
+        """
+        for rail_y, x_start, x_end in self._continuous_rails:
+            # Check if y matches and x is strictly inside the rail (not at endpoints)
+            if abs(y - rail_y) < 0.01 and x_start < x < x_end:
+                _log_warning(
+                    f"T-connection at ({x:.2f}, {y:.2f}) is on a continuous rail. "
+                    f"This may cause ERC failures. Consider using add_segmented_rail() "
+                    f"instead of add_rail() for rails with T-connections."
+                )
+                return  # Only warn once per connection
+
     def add_rail(
         self, y: float, x_start: float, x_end: float, net_label: str = None, snap: bool = True
     ) -> Wire:
@@ -105,22 +124,20 @@ class SchematicWiringMixin:
         physically meet at connection points - junctions placed on a long wire
         are visual indicators only and don't establish electrical connectivity.
 
+        A runtime warning will be emitted if wire_to_rail() is used to create
+        a T-connection on a rail created by this method.
+
         IMPORTANT - Rail Segmentation for T-Connections:
             This method creates a single continuous wire. If you need to tap
             components off this rail (T-connections), you must segment the rail
             at each tap point so wire endpoints meet.
 
-            For rails with multiple taps, consider creating segments manually:
+            For rails with multiple taps, use add_segmented_rail() instead:
 
             ```python
             # Rail from x=25 to x=175 with taps at x=50, x=100, x=150
-            tap_points = [50, 100, 150]
-            all_x = sorted([25] + tap_points + [175])
-            for i in range(len(all_x) - 1):
-                sch.add_wire((all_x[i], rail_y), (all_x[i + 1], rail_y))
+            sch.add_segmented_rail(y=30, x_points=[25, 50, 100, 150, 175])
             ```
-
-            Or use wire_to_rail() which handles segmentation automatically.
 
         Args:
             y: Y coordinate of the rail (snapped to grid)
@@ -133,10 +150,18 @@ class SchematicWiringMixin:
             The wire created
 
         See Also:
-            - wire_to_rail(): Connect a pin to rail with proper T-connection
+            - add_segmented_rail(): Preferred for rails with T-connections
+            - wire_to_rail(): Connect a pin to rail (warns if on continuous rail)
             - add_wire(): Understand wire endpoint connectivity rules
         """
         wire = self.add_wire((x_start, y), (x_end, y), snap=snap)
+
+        # Track this rail for T-connection warnings
+        # Use actual wire coordinates (may be snapped)
+        actual_x_start = min(wire.x1, wire.x2)
+        actual_x_end = max(wire.x1, wire.x2)
+        self._continuous_rails.append((wire.y1, actual_x_start, actual_x_end))
+
         if net_label:
             # Use the actual snapped wire coordinates for the label
             self.add_label(net_label, wire.x1, wire.y1, rotation=0, snap=False)

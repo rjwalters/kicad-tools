@@ -759,6 +759,102 @@ class TestSchematicConstruction:
         assert len(sch.labels) == 1
         assert sch.labels[0].text == "VCC"
 
+    def test_add_rail_tracks_continuous_rails(self):
+        """add_rail() registers the rail for T-connection warnings."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_rail(y=100, x_start=10, x_end=50, snap=False)
+        assert len(sch._continuous_rails) == 1
+        assert sch._continuous_rails[0] == (100, 10, 50)
+
+    def test_add_rail_t_connection_warning(self, caplog):
+        """wire_to_rail() warns when creating T-connection on continuous rail."""
+        import logging
+
+        from kicad_tools.schematic.logging import enable_verbose
+
+        enable_verbose("WARNING")
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Create a continuous rail
+        sch.add_rail(y=100, x_start=10, x_end=50, snap=False)
+
+        # Add a symbol and try to wire to the rail (creating a T-connection)
+        pins = [
+            Pin(name="1", number="1", x=0, y=2.54, angle=90, length=2.54, pin_type="passive"),
+            Pin(name="2", number="2", x=0, y=-2.54, angle=270, length=2.54, pin_type="passive"),
+        ]
+        symbol_def = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=pins)
+        sch._symbol_defs["Device:R"] = symbol_def
+        sym = sch.add_symbol("Device:R", 30, 90, "R1", snap=False)
+
+        # This should trigger a warning
+        with caplog.at_level(logging.WARNING, logger="kicad_sch_helper"):
+            sch.wire_to_rail(sym, "2", rail_y=100)
+
+        # Check that a warning was logged
+        assert any("T-connection" in record.message for record in caplog.records)
+        assert any("add_segmented_rail" in record.message for record in caplog.records)
+
+    def test_add_rail_no_warning_at_endpoints(self, caplog):
+        """No warning when connecting at rail endpoints (not a T-connection)."""
+        import logging
+
+        from kicad_tools.schematic.logging import enable_verbose
+
+        enable_verbose("WARNING")
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_rail(y=100, x_start=10, x_end=50, snap=False)
+
+        # Add a symbol at the rail endpoint
+        pins = [
+            Pin(name="1", number="1", x=0, y=2.54, angle=90, length=2.54, pin_type="passive"),
+            Pin(name="2", number="2", x=0, y=-2.54, angle=270, length=2.54, pin_type="passive"),
+        ]
+        symbol_def = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=pins)
+        sch._symbol_defs["Device:R"] = symbol_def
+        sym = sch.add_symbol("Device:R", 10, 90, "R1", snap=False)  # x=10 is endpoint
+
+        # This should NOT trigger a warning (connecting at endpoint)
+        with caplog.at_level(logging.WARNING, logger="kicad_sch_helper"):
+            sch.wire_to_rail(sym, "2", rail_y=100)
+
+        # Check that no T-connection warning was logged
+        t_connection_warnings = [r for r in caplog.records if "T-connection" in r.message]
+        assert len(t_connection_warnings) == 0
+
+    def test_segmented_rail_no_warning(self, caplog):
+        """add_segmented_rail() does not trigger T-connection warnings."""
+        import logging
+
+        from kicad_tools.schematic.logging import enable_verbose
+
+        enable_verbose("WARNING")
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Create a segmented rail (proper T-connection support)
+        sch.add_segmented_rail(y=100, x_points=[10, 30, 50], snap=False)
+
+        # Segmented rails should NOT be tracked as continuous
+        assert len(sch._continuous_rails) == 0
+
+        # Add symbol and wire to rail
+        pins = [
+            Pin(name="1", number="1", x=0, y=2.54, angle=90, length=2.54, pin_type="passive"),
+            Pin(name="2", number="2", x=0, y=-2.54, angle=270, length=2.54, pin_type="passive"),
+        ]
+        symbol_def = SymbolDef(lib_id="Device:R", name="R", raw_sexp="", pins=pins)
+        sch._symbol_defs["Device:R"] = symbol_def
+        sym = sch.add_symbol("Device:R", 30, 90, "R1", snap=False)
+
+        # This should NOT trigger a warning
+        with caplog.at_level(logging.WARNING, logger="kicad_sch_helper"):
+            sch.wire_to_rail(sym, "2", rail_y=100)
+
+        # Check that no T-connection warning was logged
+        t_connection_warnings = [r for r in caplog.records if "T-connection" in r.message]
+        assert len(t_connection_warnings) == 0
+
 
 class TestSchematicQueries:
     """Tests for Schematic query methods."""
