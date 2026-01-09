@@ -2395,3 +2395,100 @@ class TestSegmentedRails:
         assert len(sch.junctions) == 1
         assert sch.junctions[0].x == 50
         assert sch.junctions[0].y == 100
+
+
+class TestValidationSummaryHelpers:
+    """Tests for validation summary helper functions."""
+
+    def test_summarize_issues_by_type_empty(self):
+        """Summarize empty issue list."""
+        from kicad_tools.schematic.models.validation_mixin import summarize_issues_by_type
+
+        result = summarize_issues_by_type([])
+        assert result == {}
+
+    def test_summarize_issues_by_type_single_type(self):
+        """Summarize issues with single type."""
+        from kicad_tools.schematic.models.validation_mixin import summarize_issues_by_type
+
+        issues = [
+            {"severity": "warning", "type": "off_grid_wire", "message": "Msg 1"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Msg 2"},
+        ]
+        result = summarize_issues_by_type(issues)
+        assert "off_grid_wire" in result
+        assert len(result["off_grid_wire"]) == 2
+
+    def test_summarize_issues_by_type_multiple_types(self):
+        """Summarize issues with multiple types."""
+        from kicad_tools.schematic.models.validation_mixin import summarize_issues_by_type
+
+        issues = [
+            {"severity": "warning", "type": "off_grid_wire", "message": "Msg 1"},
+            {"severity": "error", "type": "floating_wire", "message": "Msg 2"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Msg 3"},
+            {"severity": "warning", "type": "missing_junction", "message": "Msg 4"},
+        ]
+        result = summarize_issues_by_type(issues)
+        assert len(result["off_grid_wire"]) == 2
+        assert len(result["floating_wire"]) == 1
+        assert len(result["missing_junction"]) == 1
+
+    def test_format_validation_summary_no_issues(self):
+        """Format summary with no issues."""
+        from kicad_tools.schematic.models.validation_mixin import format_validation_summary
+
+        result = format_validation_summary([])
+        assert "Errors: 0" in result
+        assert "Warnings: 0" in result
+        assert "Warning summary:" not in result
+
+    def test_format_validation_summary_warnings_only(self):
+        """Format summary with warnings only."""
+        from kicad_tools.schematic.models.validation_mixin import format_validation_summary
+
+        issues = [
+            {"severity": "warning", "type": "off_grid_wire", "message": "Wire is off grid"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Another wire off grid"},
+            {"severity": "warning", "type": "missing_junction", "message": "Junction needed"},
+        ]
+        result = format_validation_summary(issues)
+        assert "Errors: 0" in result
+        assert "Warnings: 3" in result
+        assert "Warning summary:" in result
+        assert "2 off_grid_wire" in result
+        assert "1 missing_junction" in result
+        assert "Use --verbose or -v to see warning details." in result
+
+    def test_format_validation_summary_verbose(self):
+        """Format summary with verbose flag."""
+        from kicad_tools.schematic.models.validation_mixin import format_validation_summary
+
+        issues = [
+            {"severity": "warning", "type": "off_grid_wire", "message": "Wire 1 off grid"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Wire 2 off grid"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Wire 3 off grid"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Wire 4 off grid"},
+        ]
+        result = format_validation_summary(issues, verbose=True)
+        assert "Wire 1 off grid" in result
+        assert "Wire 2 off grid" in result
+        assert "Wire 3 off grid" in result
+        assert "... and 1 more" in result
+        # Verbose mode should not show the hint
+        assert "Use --verbose" not in result
+
+    def test_format_validation_summary_errors(self):
+        """Format summary with errors."""
+        from kicad_tools.schematic.models.validation_mixin import format_validation_summary
+
+        issues = [
+            {"severity": "error", "type": "floating_wire", "message": "Wire endpoint floating"},
+            {"severity": "warning", "type": "off_grid_wire", "message": "Wire off grid"},
+        ]
+        result = format_validation_summary(issues)
+        assert "Errors: 1" in result
+        assert "Warnings: 1" in result
+        assert "ERROR: Wire endpoint floating" in result
+        # Errors are always shown in detail, warnings need verbose
+        assert "Wire off grid" not in result

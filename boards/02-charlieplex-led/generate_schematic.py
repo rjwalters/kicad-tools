@@ -9,14 +9,15 @@ This approach:
 3. Places global label at wire end
 
 Usage:
-    python generate_schematic.py [output_file]
+    python generate_schematic.py [output_file] [-v|--verbose]
 """
 
+import argparse
 import sys
 from pathlib import Path
 
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
-
+from kicad_tools.schematic.models.validation_mixin import format_validation_summary
 
 # Charlieplex LED connections: (LED_ref, anode_node, cathode_node)
 LED_CONNECTIONS = [
@@ -83,9 +84,13 @@ def add_pin_label(sch: Schematic, pin_pos: tuple, net_name: str, direction: str 
     sch.add_global_label(net_name, end_x, y, shape="bidirectional", rotation=rotation, snap=False)
 
 
-def create_charlieplex_schematic(output_path: Path) -> bool:
+def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bool:
     """
     Create a 3x3 charlieplex LED grid schematic using global labels with wire stubs.
+
+    Args:
+        output_path: Path to write the schematic file
+        verbose: If True, show detailed validation warnings
 
     Returns True if successful.
     """
@@ -216,15 +221,11 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
     print("\n5. Validating schematic...")
 
     issues = sch.validate()
-    errors = [i for i in issues if i["severity"] == "error"]
-    warnings = [i for i in issues if i["severity"] == "warning"]
 
-    print(f"   Errors: {len(errors)}")
-    print(f"   Warnings: {len(warnings)}")
-
-    if errors:
-        for err in errors[:5]:
-            print(f"      ERROR: {err.get('message', err)}")
+    # Print validation summary with warning categorization
+    summary = format_validation_summary(issues, verbose=verbose)
+    for line in summary.split("\n"):
+        print(f"   {line}")
 
     stats = sch.get_statistics()
     print("\n   Schematic statistics:")
@@ -243,13 +244,31 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
 
 def main():
     """Main entry point."""
-    if len(sys.argv) > 1:
-        output_path = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(
+        description="Generate a KiCad schematic for a 3x3 Charlieplex LED grid"
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="Output file path (default: charlieplex_3x3.kicad_sch)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed validation warnings",
+    )
+
+    args = parser.parse_args()
+
+    if args.output:
+        output_path = Path(args.output)
     else:
         output_path = Path(__file__).parent / "charlieplex_3x3.kicad_sch"
 
     try:
-        success = create_charlieplex_schematic(output_path)
+        success = create_charlieplex_schematic(output_path, verbose=args.verbose)
 
         print("\n" + "=" * 60)
         print("SUMMARY")
