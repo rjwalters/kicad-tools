@@ -625,6 +625,22 @@ def main(argv: list[str] | None = None) -> int:
             "Determines minimum clearances, trace widths, and other design rules."
         ),
     )
+    parser.add_argument(
+        "--no-optimize",
+        action="store_true",
+        help=(
+            "Skip trace optimization after routing. By default, traces are "
+            "optimized to merge collinear segments, eliminate zigzags, and "
+            "convert corners to 45 degrees. Use this flag to keep raw "
+            "grid-step segments for debugging."
+        ),
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        dest="no_optimize",
+        help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -994,6 +1010,48 @@ def main(argv: list[str] | None = None) -> int:
     if _interrupt_state["interrupted"]:
         _save_partial_results()
         return 2  # Exit code 2 indicates interruption with partial results saved
+
+    # Optimize traces (unless --no-optimize/--raw flag is set)
+    if not args.no_optimize and router.routes:
+        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+
+        if not quiet:
+            print("\n--- Optimizing traces ---")
+
+        # Get pre-optimization statistics
+        pre_segments = sum(len(r.segments) for r in router.routes)
+        pre_vias = sum(len(r.vias) for r in router.routes)
+
+        # Configure and run optimizer
+        opt_config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=True,
+            compress_staircase=True,
+            convert_45_corners=True,
+            corner_chamfer_size=0.5,
+            minimize_vias=True,
+        )
+        optimizer = TraceOptimizer(config=opt_config)
+
+        with spinner("Optimizing traces...", quiet=quiet):
+            optimized_routes = []
+            for route in router.routes:
+                optimized_route = optimizer.optimize_route(route)
+                optimized_routes.append(optimized_route)
+            router.routes = optimized_routes
+
+        # Get post-optimization statistics
+        post_segments = sum(len(r.segments) for r in router.routes)
+        post_vias = sum(len(r.vias) for r in router.routes)
+
+        if not quiet:
+            segment_reduction = (
+                ((pre_segments - post_segments) / pre_segments * 100) if pre_segments > 0 else 0
+            )
+            via_reduction = ((pre_vias - post_vias) / pre_vias * 100) if pre_vias > 0 else 0
+            print(f"  Segments: {pre_segments} -> {post_segments} ({-segment_reduction:+.1f}%)")
+            if pre_vias > 0:
+                print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
 
     # Get statistics
     stats = router.get_statistics()
