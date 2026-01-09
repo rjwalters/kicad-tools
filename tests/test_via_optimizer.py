@@ -1,6 +1,5 @@
 """Tests for via optimization in post-routing cleanup."""
 
-
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer import (
     OptimizationConfig,

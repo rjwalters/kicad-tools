@@ -17,6 +17,7 @@ This package contains command handler modules organized by domain:
 
 from .analyze import run_analyze_command
 from .benchmark import run_benchmark_command
+from .build import run_build_command
 from .config import run_config_command, run_interactive_command
 from .datasheet import run_datasheet_command
 from .estimate import run_estimate_command
@@ -46,6 +47,8 @@ from .validation import (
 )
 
 __all__ = [
+    # Build
+    "run_build_command",
     # Schematic
     "run_sch_command",
     # PCB

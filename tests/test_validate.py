@@ -1496,10 +1496,7 @@ class TestSilkscreenRules:
 
         # Use the example PCB that has fp_text elements
         pcb_file = (
-            Path(__file__).parent.parent
-            / "boards"
-            / "03-usb-joystick"
-            / "usb_joystick.kicad_pcb"
+            Path(__file__).parent.parent / "boards" / "03-usb-joystick" / "usb_joystick.kicad_pcb"
         )
 
         if not pcb_file.exists():
