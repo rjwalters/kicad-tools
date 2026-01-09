@@ -9,7 +9,6 @@ from kicad_tools.intent.types import Constraint, ConstraintSeverity, IntentDecla
 from kicad_tools.optim.session import PlacementSession
 from kicad_tools.schema.pcb import PCB
 
-
 # Test fixture: PCB with multiple components forming a cluster
 PCB_CLUSTERED = """(kicad_pcb
   (version 20240108)

@@ -15,7 +15,7 @@ import heapq
 import math
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .core import Autorouter
@@ -57,7 +57,7 @@ class GridPos:
             return NotImplemented
         return self.x == other.x and self.y == other.y and self.layer == other.layer
 
-    def __add__(self, other: tuple[int, int, int]) -> "GridPos":
+    def __add__(self, other: tuple[int, int, int]) -> GridPos:
         return GridPos(self.x + other[0], self.y + other[1], self.layer + other[2])
 
 
@@ -100,7 +100,7 @@ class CoupledNode:
     f_score: float
     g_score: float = field(compare=False)
     state: CoupledState = field(compare=False)
-    parent: Optional["CoupledNode"] = field(compare=False, default=None)
+    parent: CoupledNode | None = field(compare=False, default=None)
     via_from_parent: bool = field(compare=False, default=False)
 
 

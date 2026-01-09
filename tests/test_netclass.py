@@ -7,12 +7,8 @@ import pytest
 from kicad_tools.core.netclass_templates import (
     AUDIO_TEMPLATE,
     DESIGN_TYPE_TEMPLATES,
-    DIGITAL_TEMPLATE,
-    MIXED_SIGNAL_TEMPLATE,
     POWER_SUPPLY_TEMPLATE,
     RF_TEMPLATE,
-    DesignTypeTemplate,
-    NetclassTemplate,
     apply_design_template,
     get_available_design_types,
     get_design_template,

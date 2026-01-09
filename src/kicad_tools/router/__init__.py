@@ -118,6 +118,15 @@ from .optimizer import (
     OptimizationStats,
     TraceOptimizer,
 )  # noqa: F401 - optimizer is now a package
+from .parallel import (
+    BoundingBox,
+    NetGroup,
+    ParallelRouter,
+    ParallelRoutingResult,
+    find_independent_groups,
+    find_route_conflicts,
+    resolve_parallel_conflicts,
+)
 from .pathfinder import AStarNode, Router
 from .placement_feedback import (
     PlacementAdjustment,
@@ -140,16 +149,21 @@ from .rules import (
     ZoneRules,
     create_net_class_map,
 )
-from .parallel import (
-    BoundingBox,
-    NetGroup,
-    ParallelRouter,
-    ParallelRoutingResult,
-    find_independent_groups,
-    find_route_conflicts,
-    resolve_parallel_conflicts,
-)
 from .sparse import SparseRouter, SparseRoutingGraph, Waypoint
+from .tuning import (
+    COST_PROFILES,
+    BoardCharacteristics,
+    CostParams,
+    CostProfile,
+    RoutingQualityScore,
+    TuningResult,
+    analyze_board,
+    create_adaptive_router,
+    evaluate_routing_quality,
+    quick_tune,
+    select_profile,
+    tune_parameters,
+)
 from .zones import (
     ConnectionType,
     FilledZone,
@@ -204,6 +218,19 @@ __all__ = [
     "find_independent_groups",
     "find_route_conflicts",
     "resolve_parallel_conflicts",
+    # Cost tuning
+    "CostParams",
+    "CostProfile",
+    "COST_PROFILES",
+    "BoardCharacteristics",
+    "RoutingQualityScore",
+    "TuningResult",
+    "analyze_board",
+    "quick_tune",
+    "tune_parameters",
+    "select_profile",
+    "create_adaptive_router",
+    "evaluate_routing_quality",
     # Pathfinding
     "Router",
     "AStarNode",
@@ -256,6 +283,11 @@ __all__ = [
     "detect_layer_stack",
     "generate_netclass_setup",
     "merge_routes_into_pcb",
+    "ClearanceViolation",
+    "PCBDesignRules",
+    "parse_pcb_design_rules",
+    "validate_grid_resolution",
+    "validate_routes",
     # Optimizer
     "TraceOptimizer",
     "OptimizationConfig",

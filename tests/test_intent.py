@@ -19,7 +19,6 @@ from kicad_tools.intent import (
     IntentDeclaration,
     InterfaceCategory,
     InterfaceRegistry,
-    InterfaceSpec,
     create_intent_declaration,
     derive_constraints,
     validate_intent,

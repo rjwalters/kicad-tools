@@ -1,9 +1,7 @@
 """Tests for via optimization in post-routing cleanup."""
 
-import pytest
 
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Route, Segment, Via
 from kicad_tools.router.optimizer import (
     OptimizationConfig,
     TraceOptimizer,
@@ -15,6 +13,7 @@ from kicad_tools.router.optimizer.via_optimizer import (
     ViaOptimizer,
     optimize_route_vias,
 )
+from kicad_tools.router.primitives import Route, Segment, Via
 
 
 class TestViaOptimizationConfig:
@@ -168,20 +167,12 @@ class TestBuildViaContexts:
         optimizer = ViaOptimizer()
 
         # Segment ends at via position on from_layer
-        seg_before = Segment(
-            x1=0, y1=0, x2=5, y2=5, width=0.2, layer=Layer.F_CU, net=1
-        )
+        seg_before = Segment(x1=0, y1=0, x2=5, y2=5, width=0.2, layer=Layer.F_CU, net=1)
         # Segment starts at via position on to_layer
-        seg_after = Segment(
-            x1=5, y1=5, x2=10, y2=5, width=0.2, layer=Layer.B_CU, net=1
-        )
-        via = Via(
-            x=5, y=5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        seg_after = Segment(x1=5, y1=5, x2=10, y2=5, width=0.2, layer=Layer.B_CU, net=1)
+        via = Via(x=5, y=5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
 
-        route = Route(
-            net=1, net_name="Net1", segments=[seg_before, seg_after], vias=[via]
-        )
+        route = Route(net=1, net_name="Net1", segments=[seg_before, seg_after], vias=[via])
 
         contexts = optimizer._build_via_contexts(route)
 
@@ -204,9 +195,7 @@ class TestIntegrationWithTraceOptimizer:
         # Create a simple route with a via
         seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
         seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
-        via = Via(
-            x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
 
         result = optimizer.optimize_route(route)
@@ -218,9 +207,7 @@ class TestIntegrationWithTraceOptimizer:
         config = OptimizationConfig(minimize_vias=False)
         optimizer = TraceOptimizer(config=config)
 
-        via = Via(
-            x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         route = Route(net=1, net_name="Net1", segments=[], vias=[via])
 
         result = optimizer.optimize_route(route)
@@ -237,9 +224,7 @@ class TestIntegrationWithTraceOptimizer:
 
         # Optimize a route with vias
         seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
-        via = Via(
-            x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1
-        )
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
         route = Route(net=1, net_name="Net1", segments=[seg1], vias=[via])
         optimizer.optimize_route(route)
 

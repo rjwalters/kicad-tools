@@ -32,6 +32,7 @@ from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
+from .parallel import ParallelRouter, find_independent_groups
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
 from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .primitives import Obstacle, Pad, Route
@@ -42,8 +43,15 @@ from .rules import (
     NetClassRouting,
     assign_layer_preferences,
 )
-from .parallel import ParallelRouter, ParallelRoutingResult, find_independent_groups
 from .sparse import Corridor, SparseRouter, Waypoint
+from .tuning import (
+    COST_PROFILES,
+    CostProfile,
+    analyze_board,
+    create_adaptive_router,
+    quick_tune,
+    tune_parameters,
+)
 from .zones import ZoneManager
 
 # Re-export for backward compatibility
@@ -632,13 +640,129 @@ class Autorouter:
         )
 
         # Report results
-        print(f"\n=== Parallel Routing Complete ===")
+        print("\n=== Parallel Routing Complete ===")
         print(f"  Successful nets: {len(result.successful_nets)}")
         print(f"  Failed nets: {len(result.failed_nets)}")
         print(f"  Conflicts resolved: {result.conflicts_resolved}")
         print(f"  Total time: {result.total_time_ms:.0f}ms")
 
         return result.routes
+
+    def route_all_tuned(
+        self,
+        method: str = "quick",
+        max_iterations: int = 10,
+        profile: CostProfile | str | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[Route]:
+        """Route all nets with auto-tuned cost parameters.
+
+        Automatically adjusts routing cost parameters (via cost, turn cost,
+        congestion cost) based on board characteristics for better results.
+
+        Args:
+            method: Tuning method to use:
+                - "quick": Fast heuristic-based tuning (default)
+                - "nelder-mead": Gradient-free optimization
+                - "powell": Powell's optimization method
+                - "adaptive": Adjust costs during routing
+            max_iterations: Maximum optimization iterations (for non-quick methods)
+            profile: Optional cost profile to use instead of auto-tuning:
+                - CostProfile enum value
+                - String: "sparse", "standard", "dense", "minimize_vias",
+                  "minimize_length", "high_speed"
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            List of Route objects for all nets
+
+        Example:
+            >>> router = Autorouter(100, 100)
+            >>> # ... add components ...
+            >>> # Auto-tune parameters
+            >>> routes = router.route_all_tuned(method="quick")
+            >>> # Or use a preset profile
+            >>> routes = router.route_all_tuned(profile="dense")
+        """
+        print("\n=== Auto-Tuned Routing ===")
+
+        # Handle preset profiles
+        if profile is not None:
+            if isinstance(profile, str):
+                profile = CostProfile(profile)
+            params = COST_PROFILES[profile]
+            print(f"  Using profile: {profile.value}")
+            print(f"    Via cost: {params.via}")
+            print(f"    Turn cost: {params.turn}")
+            print(f"    Congestion cost: {params.congestion}")
+
+            # Apply parameters
+            self.rules = params.apply_to_rules(self.rules)
+            return self.route_all(progress_callback=progress_callback)
+
+        # Analyze board characteristics
+        characteristics = analyze_board(
+            nets=self.nets,
+            pads=self.pads,
+            board_width=self.grid.width,
+            board_height=self.grid.height,
+            layer_count=self.grid.num_layers,
+        )
+
+        print("  Board characteristics:")
+        print(f"    Pads: {characteristics.total_pads}")
+        print(f"    Nets: {characteristics.total_nets}")
+        print(f"    Pin density: {characteristics.pin_density:.4f} pads/mm²")
+        print(f"    Avg net span: {characteristics.avg_net_span:.1f}mm")
+
+        if method == "adaptive":
+            # Use adaptive routing with dynamic cost adjustment
+            print(f"  Method: Adaptive (max {max_iterations} iterations)")
+            adaptive_router = create_adaptive_router(
+                self,
+                max_iterations=max_iterations,
+            )
+            routes = adaptive_router()
+        elif method == "quick":
+            # Fast heuristic tuning
+            params = quick_tune(characteristics)
+            print("  Method: Quick heuristic tuning")
+            print("  Tuned parameters:")
+            print(f"    Via cost: {params.via:.1f}")
+            print(f"    Turn cost: {params.turn:.1f}")
+            print(f"    Congestion cost: {params.congestion:.1f}")
+
+            self.rules = params.apply_to_rules(self.rules)
+            routes = self.route_all(progress_callback=progress_callback)
+        else:
+            # Full optimization
+            print(f"  Method: {method} optimization (max {max_iterations} iterations)")
+            result = tune_parameters(
+                self,
+                max_iterations=max_iterations,
+                method=method,
+            )
+
+            print(f"  Tuning completed in {result.tuning_time_ms:.0f}ms")
+            print("  Best parameters:")
+            print(f"    Via cost: {result.params.via:.1f}")
+            print(f"    Turn cost: {result.params.turn:.1f}")
+            print(f"    Congestion cost: {result.params.congestion:.1f}")
+
+            if result.quality:
+                print(f"  Quality score: {result.quality.score:.1f}")
+                print(f"    Completion: {result.quality.completion_rate * 100:.1f}%")
+                print(f"    Total vias: {result.quality.total_vias}")
+
+            self.rules = result.params.apply_to_rules(self.rules)
+            routes = self.route_all(progress_callback=progress_callback)
+
+        print("\n=== Tuned Routing Complete ===")
+        print(f"  Routes: {len(routes)}")
+        print(f"  Segments: {sum(len(r.segments) for r in routes)}")
+        print(f"  Vias: {sum(len(r.vias) for r in routes)}")
+
+        return routes
 
     def route_all_negotiated(
         self,

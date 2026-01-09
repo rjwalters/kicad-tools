@@ -1,8 +1,7 @@
 """Tests for the units module."""
 
-import os
-import pytest
 
+from kicad_tools.config import Config, DisplayConfig
 from kicad_tools.units import (
     MM_PER_MIL,
     UnitFormatter,
@@ -11,7 +10,6 @@ from kicad_tools.units import (
     get_unit_formatter,
     set_current_formatter,
 )
-from kicad_tools.config import Config, DisplayConfig
 
 
 class TestUnitSystem:
@@ -98,7 +96,7 @@ class TestUnitFormatter:
 
         fmt_mils = UnitFormatter(UnitSystem.MILS)
         result = fmt_mils.format_coordinate(0.254, 0.508)
-        assert "(10.0, 20.0) mils" == result
+        assert result == "(10.0, 20.0) mils"
 
     def test_format_delta(self):
         """Test delta formatting with sign."""
