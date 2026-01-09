@@ -115,6 +115,7 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
         y=mcu_y,
         ref="U1",
         value="MCU",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
     )
     print(f"   U1 (MCU): placed at ({mcu.x}, {mcu.y})")
 
@@ -143,7 +144,7 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
         x = resistor_base_x
         y = resistor_base_y + i * resistor_spacing
 
-        r = sch.add_symbol("Device:R", x=x, y=y, ref=ref, value="330R")
+        r = sch.add_symbol("Device:R", x=x, y=y, ref=ref, value="330R", auto_footprint=True)
         print(f"   {ref}: placed at ({r.x}, {r.y})")
 
         # Add wire stubs with global labels at resistor pins
@@ -170,7 +171,10 @@ def create_charlieplex_schematic(output_path: Path) -> bool:
         x = led_start_x + col * led_spacing_x
         y = led_start_y + row * led_spacing_y
 
-        led = sch.add_symbol("Device:LED", x=x, y=y, ref=ref, value="LED")
+        led = sch.add_symbol(
+            "Device:LED", x=x, y=y, ref=ref, value="LED",
+            footprint="LED_SMD:LED_0805_2012Metric"
+        )
         print(f"   {ref}: placed at ({led.x}, {led.y})")
 
         # LED pins: pin 1 = cathode (K), pin 2 = anode (A)

@@ -65,18 +65,19 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
         y=90,
         ref="J1",
         value="IN",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
     )
     j1_pin1 = j_in.pin_position("1")
     j1_pin2 = j_in.pin_position("2")
     print(f"   J1: Input connector at ({j_in.x}, {j_in.y})")
 
     # Voltage divider resistors (not using VoltageDivider block to control wiring)
-    r1 = sch.add_symbol("Device:R", x=110, y=60, ref="R1", value="10k")
+    r1 = sch.add_symbol("Device:R", x=110, y=60, ref="R1", value="10k", auto_footprint=True)
     r1_pin1 = r1.pin_position("1")  # Top (VIN side)
     r1_pin2 = r1.pin_position("2")  # Bottom (VOUT side)
     print(f"   R1: 10k at ({r1.x}, {r1.y})")
 
-    r2 = sch.add_symbol("Device:R", x=110, y=75, ref="R2", value="10k")
+    r2 = sch.add_symbol("Device:R", x=110, y=75, ref="R2", value="10k", auto_footprint=True)
     r2_pin1 = r2.pin_position("1")  # Top (VOUT side)
     r2_pin2 = r2.pin_position("2")  # Bottom (GND side)
     print(f"   R2: 10k at ({r2.x}, {r2.y})")
@@ -88,6 +89,7 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
         y=90,
         ref="J2",
         value="OUT",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
     )
     j2_pin1 = j_out.pin_position("1")
     j2_pin2 = j_out.pin_position("2")
