@@ -46,8 +46,9 @@ def main():
     print(f"Output: {output_path}")
 
     # Configure design rules for this board
+    # Note: grid_resolution should be <= clearance/2 for reliable DRC compliance
     rules = DesignRules(
-        grid_resolution=0.25,  # 0.25mm grid (fine for 0805 components)
+        grid_resolution=0.1,  # 0.1mm grid (clearance/2 for reliable DRC)
         trace_width=0.3,  # 0.3mm traces (12mil)
         trace_clearance=0.2,  # 0.2mm clearance (8mil)
         via_drill=0.3,  # 0.3mm via drill

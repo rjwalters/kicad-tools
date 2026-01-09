@@ -151,7 +151,7 @@ def main():
     # Test Charlieplex LED Grid
     charlieplex_pcb = demo_dir / "charlieplex_led_grid" / "charlieplex_3x3.kicad_pcb"
     charlieplex_rules = DesignRules(
-        grid_resolution=0.25,
+        grid_resolution=0.1,  # clearance/2 for reliable DRC compliance
         trace_width=0.3,
         trace_clearance=0.2,
     )
