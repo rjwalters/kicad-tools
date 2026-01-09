@@ -493,6 +493,68 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     return success
 
 
+def run_erc(sch_path: Path) -> bool:
+    """
+    Run ERC on the schematic.
+
+    Returns True if no errors found.
+    """
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.cli.runner import run_erc as kicad_run_erc
+    from kicad_tools.erc import ERCReport
+
+    print("\n" + "=" * 60)
+    print("Running ERC...")
+    print("=" * 60)
+
+    # Check for kicad-cli
+    kicad_cli = find_kicad_cli()
+    if not kicad_cli:
+        print("\n   WARNING: kicad-cli not found - skipping ERC")
+        print("   Install KiCad 8 from: https://www.kicad.org/download/")
+        return True  # Skip ERC if kicad-cli not available
+
+    result = kicad_run_erc(sch_path)
+
+    if not result.success:
+        print(f"\n   Error running ERC: {result.stderr}")
+        return False
+
+    # Parse the report
+    try:
+        report = ERCReport.load(result.output_path)
+    except Exception as e:
+        print(f"\n   Error parsing ERC report: {e}")
+        return False
+    finally:
+        # Clean up temp file
+        if result.output_path:
+            result.output_path.unlink(missing_ok=True)
+
+    # Filter out excluded violations
+    violations = [v for v in report.violations if not v.excluded]
+    error_count = sum(1 for v in violations if v.is_error)
+    warning_count = len(violations) - error_count
+
+    if error_count > 0:
+        print(f"\n   Found {error_count} ERC errors:")
+        for v in [v for v in violations if v.is_error][:5]:
+            print(f"      - [{v.type_str}] {v.description}")
+        if error_count > 5:
+            print(f"      ... and {error_count - 5} more")
+        return False
+    elif warning_count > 0:
+        print(f"\n   Found {warning_count} ERC warnings (no errors)")
+        for v in violations[:3]:
+            print(f"      - [{v.type_str}] {v.description}")
+        if warning_count > 3:
+            print(f"      ... and {warning_count - 3} more")
+        return True
+    else:
+        print("\n   No ERC violations found!")
+        return True
+
+
 def run_drc(pcb_path: Path) -> bool:
     """
     Run DRC on the PCB.
@@ -534,14 +596,17 @@ def main() -> int:
         # Step 1: Create schematic
         sch_path = create_voltage_divider_schematic(output_dir)
 
-        # Step 2: Create PCB
+        # Step 2: Run ERC on schematic
+        erc_success = run_erc(sch_path)
+
+        # Step 3: Create PCB
         pcb_path = create_voltage_divider_pcb(output_dir)
 
-        # Step 3: Route PCB
+        # Step 4: Route PCB
         routed_path = output_dir / "voltage_divider_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
-        # Step 4: Run DRC
+        # Step 5: Run DRC
         drc_success = run_drc(routed_path)
 
         # Summary
@@ -554,6 +619,7 @@ def main() -> int:
         print(f"  2. PCB (unrouted): {pcb_path.name}")
         print(f"  3. PCB (routed): {routed_path.name}")
         print("\nResults:")
+        print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
         print("\nDesign summary:")
@@ -562,7 +628,7 @@ def main() -> int:
         print("  - J2: 2-pin output connector (VOUT, GND)")
         print("  - 5V input -> 2.5V output")
 
-        return 0 if route_success and drc_success else 1
+        return 0 if erc_success and route_success and drc_success else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
