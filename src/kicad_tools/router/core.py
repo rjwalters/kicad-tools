@@ -13,7 +13,15 @@ if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
 from .adaptive import AdaptiveAutorouter, RoutingResult
-from .algorithms import MonteCarloRouter, MSTRouter, NegotiatedRouter
+from .algorithms import (
+    MonteCarloRouter,
+    MSTRouter,
+    NegotiatedRouter,
+    calculate_history_increment,
+    calculate_present_cost,
+    detect_oscillation,
+    should_terminate_early,
+)
 from .bus import BusGroup, BusRoutingConfig, BusRoutingMode
 from .bus_routing import BusRouter
 from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
@@ -642,14 +650,15 @@ class Autorouter:
         timeout: float | None = None,
         use_targeted_ripup: bool = False,
         max_ripups_per_net: int = 3,
+        adaptive: bool = True,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
         Args:
             max_iterations: Maximum number of rip-up and reroute iterations
             initial_present_factor: Initial congestion penalty factor
-            present_factor_increment: Factor increase per iteration
-            history_increment: History cost increment per iteration
+            present_factor_increment: Factor increase per iteration (used when adaptive=False)
+            history_increment: Base history cost increment per iteration
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds. If reached, returns best partial result.
             use_targeted_ripup: If True, use targeted rip-up of blocking nets instead
@@ -659,6 +668,12 @@ class Autorouter:
             max_ripups_per_net: Maximum times a single net can be ripped up during
                 targeted rip-up (prevents infinite loops). Only used when
                 use_targeted_ripup=True.
+            adaptive: If True (default), use adaptive parameter tuning (Issue #633):
+                - History increment adjusts based on convergence progress
+                - Present cost adapts to congestion level
+                - Oscillation detection triggers escape strategies
+                - Early termination when no progress is being made
+                This improves convergence for difficult routing scenarios.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -669,11 +684,20 @@ class Autorouter:
 
         print("\n=== Negotiated Congestion Routing ===")
         print(f"  Max iterations: {max_iterations}")
-        print(f"  Present factor: {initial_present_factor} + {present_factor_increment}/iter")
+        if adaptive:
+            print(f"  Mode: Adaptive (Issue #633)")
+            print(f"  Present factor: {initial_present_factor} (adaptive)")
+            print(f"  History increment: {history_increment} (adaptive)")
+        else:
+            print(f"  Present factor: {initial_present_factor} + {present_factor_increment}/iter")
         if use_targeted_ripup:
             print(f"  Targeted rip-up: enabled (max {max_ripups_per_net} ripups/net)")
         if timeout:
             print(f"  Timeout: {timeout}s")
+
+        # Track overflow history for adaptive mode (Issue #633)
+        overflow_history: list[int] = []
+        escape_strategy_index = 0
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         net_order = [n for n in net_order if n != 0]
@@ -733,6 +757,7 @@ class Autorouter:
 
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()
+        overflow_history.append(overflow)  # Track for adaptive mode
         print(
             f"  Routed {len(net_routes)}/{total_nets} nets, overflow: {overflow} ({elapsed_str()})"
         )
@@ -753,6 +778,12 @@ class Autorouter:
                     timed_out = True
                     break
 
+                # Adaptive early termination check (Issue #633)
+                if adaptive and should_terminate_early(overflow_history, iteration):
+                    print(f"\n  ⚠ Early termination: no progress detected ({elapsed_str()})")
+                    print(f"    Overflow history: {overflow_history[-5:]}")
+                    break
+
                 if progress_callback is not None:
                     progress = iteration / (max_iterations + 1)
                     if not progress_callback(
@@ -763,8 +794,30 @@ class Autorouter:
                         break
 
                 print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
-                present_factor += present_factor_increment
-                self.grid.update_history_costs(history_increment)
+
+                # Calculate adaptive parameters (Issue #633)
+                if adaptive:
+                    # Calculate congestion ratio for adaptive present cost
+                    total_cells = (
+                        self.grid.grid_width * self.grid.grid_height * self.grid.num_layers
+                    )
+                    overflow_ratio = overflow / max(total_cells, 1)
+
+                    # Adaptive history increment based on convergence progress
+                    adaptive_history = calculate_history_increment(
+                        iteration, overflow_history, history_increment
+                    )
+                    # Adaptive present cost based on iteration and congestion
+                    present_factor = calculate_present_cost(
+                        iteration, max_iterations, overflow_ratio, initial_present_factor
+                    )
+                    print(
+                        f"  Adaptive params: history={adaptive_history:.2f}, present={present_factor:.2f}"
+                    )
+                    self.grid.update_history_costs(adaptive_history)
+                else:
+                    present_factor += present_factor_increment
+                    self.grid.update_history_costs(history_increment)
 
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
 
@@ -833,10 +886,50 @@ class Autorouter:
 
                     overflow = self.grid.get_total_overflow()
                     overused = self.grid.find_overused_cells()
+                    # Track overflow for both branches (Issue #633)
+                    overflow_history.append(overflow)
                     print(
                         f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
                         f"overflow: {overflow} ({elapsed_str()})"
                     )
+
+                    # Check for convergence in targeted mode
+                    if overflow == 0:
+                        print(f"  Convergence achieved at iteration {iteration}!")
+                        break
+
+                    # Adaptive oscillation detection for targeted mode (Issue #633)
+                    if adaptive and detect_oscillation(overflow_history):
+                        print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
+                        print(f"    Attempting escape strategy {escape_strategy_index + 1}...")
+
+                        def mark_route_targeted(route: Route) -> None:
+                            self._mark_route(route)
+
+                        success, new_overflow = neg_router.escape_local_minimum(
+                            overflow_history=overflow_history,
+                            net_routes=net_routes,
+                            routes_list=self.routes,
+                            pads_by_net=pads_by_net,
+                            net_order=net_order,
+                            present_cost_factor=present_factor,
+                            mark_route_callback=mark_route_targeted,
+                            strategy_index=escape_strategy_index,
+                        )
+                        escape_strategy_index += 1
+
+                        if success:
+                            print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
+                            overflow = new_overflow
+                            overflow_history[-1] = new_overflow
+                            overused = self.grid.find_overused_cells()
+                        else:
+                            print(f"    Escape attempt did not improve overflow")
+
+                    # Skip common code since targeted ripup handles everything
+                    # (convergence and oscillation already checked above)
+                    continue
+
                 else:
                     # Full rip-up: rip up all nets through overused cells
                     print(
@@ -871,9 +964,41 @@ class Autorouter:
                         f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
                     )
 
+                # Track overflow history for adaptive mode (Issue #633)
+                overflow_history.append(overflow)
+
                 if overflow == 0:
                     print(f"  Convergence achieved at iteration {iteration}!")
                     break
+
+                # Adaptive oscillation detection and escape (Issue #633)
+                if adaptive and detect_oscillation(overflow_history):
+                    print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
+                    print(f"    Attempting escape strategy {escape_strategy_index + 1}...")
+
+                    def mark_route(route: Route) -> None:
+                        self._mark_route(route)
+
+                    success, new_overflow = neg_router.escape_local_minimum(
+                        overflow_history=overflow_history,
+                        net_routes=net_routes,
+                        routes_list=self.routes,
+                        pads_by_net=pads_by_net,
+                        net_order=net_order,
+                        present_cost_factor=present_factor,
+                        mark_route_callback=mark_route,
+                        strategy_index=escape_strategy_index,
+                    )
+                    escape_strategy_index += 1
+
+                    if success:
+                        print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
+                        overflow = new_overflow
+                        overflow_history[-1] = new_overflow  # Update last entry
+                        overused = self.grid.find_overused_cells()
+                    else:
+                        print(f"    Escape attempt did not improve overflow")
+                        # Continue to next iteration with different parameters
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
         total_elapsed = time.time() - start_time
