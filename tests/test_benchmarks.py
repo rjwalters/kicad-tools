@@ -783,7 +783,7 @@ class TestRouterBenchmarks:
             router, _ = load_pcb_for_routing(
                 str(large_routable_pcb_file),
                 rules=rules,
-                layer_stack=LayerStack.four_layer(),
+                layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
             )
             return router.route_all()
 
@@ -837,7 +837,7 @@ class TestRouterBenchmarks:
             router, _ = load_pcb_for_routing(
                 str(jlcpcb_grid_pcb_file),
                 rules=rules,
-                layer_stack=LayerStack.four_layer(),
+                layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
             )
             return router.route_all()
 
