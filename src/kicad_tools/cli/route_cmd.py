@@ -333,6 +333,78 @@ def show_failure_diagnostics(
     print(f"{'=' * 60}")
 
 
+def run_post_route_drc(
+    output_path: Path,
+    manufacturer: str,
+    layers: int,
+    quiet: bool = False,
+) -> tuple[int, int]:
+    """Run DRC validation on the routed PCB.
+
+    Args:
+        output_path: Path to the routed PCB file
+        manufacturer: Manufacturer profile for DRC rules (e.g., "jlcpcb")
+        layers: Number of PCB layers
+        quiet: If True, suppress output
+
+    Returns:
+        Tuple of (error_count, warning_count)
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    try:
+        # Load the routed PCB
+        pcb = PCB.load(str(output_path))
+
+        # Run DRC
+        checker = DRCChecker(pcb, manufacturer=manufacturer, layers=layers)
+        results = checker.check_all()
+
+        error_count = results.error_count
+        warning_count = results.warning_count
+
+        if not quiet:
+            print("\n--- DRC Validation ---")
+            if error_count == 0 and warning_count == 0:
+                print(f"  DRC PASSED ({manufacturer} profile, {layers} layers)")
+            else:
+                if error_count > 0:
+                    print(f"  Errors:   {error_count}")
+                if warning_count > 0:
+                    print(f"  Warnings: {warning_count}")
+
+                # Show first few violations
+                shown = 0
+                for v in results.errors[:5]:
+                    location = (
+                        f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                    )
+                    print(f"    - {v.rule_id}: {v.message}{location}")
+                    shown += 1
+                if error_count > 5:
+                    print(f"    ... and {error_count - 5} more errors")
+
+                if warning_count > 0 and shown < 5:
+                    for v in results.warnings[: 5 - shown]:
+                        location = (
+                            f" at ({v.location[0]:.2f}, {v.location[1]:.2f})" if v.location else ""
+                        )
+                        print(f"    - {v.rule_id}: {v.message}{location}")
+                    if warning_count > (5 - shown):
+                        print(f"    ... and {warning_count - (5 - shown)} more warnings")
+
+                print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
+
+        return error_count, warning_count
+
+    except Exception as e:
+        if not quiet:
+            print("\n--- DRC Validation ---")
+            print(f"  Warning: DRC check failed: {e}")
+        return -1, -1  # Indicate failure to run DRC
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
@@ -533,6 +605,24 @@ def main(argv: list[str] | None = None) -> int:
             "'cpp' = require C++ backend (fails if not available); "
             "'python' = force Python backend (for testing/debugging). "
             "C++ backend provides 10-100x speedup for fine-grid routing."
+        ),
+    )
+    parser.add_argument(
+        "--skip-drc",
+        action="store_true",
+        help=(
+            "Skip post-routing DRC validation. By default, the router runs "
+            "a DRC check after routing and warns about violations. Use this "
+            "flag for performance-critical use or when running separate validation."
+        ),
+    )
+    parser.add_argument(
+        "--manufacturer",
+        "--mfr",
+        default="jlcpcb",
+        help=(
+            "Manufacturer profile for DRC validation (default: jlcpcb). "
+            "Determines minimum clearances, trace widths, and other design rules."
         ),
     )
 
@@ -1000,22 +1090,56 @@ def main(argv: list[str] | None = None) -> int:
         if not quiet:
             print(f"  Saved to: {output_path}")
 
+    # Run DRC validation unless skipped or dry-run
+    drc_errors = 0
+    drc_warnings = 0
+    drc_ran = False
+
+    if not args.dry_run and not args.skip_drc and stats["nets_routed"] > 0:
+        drc_ran = True
+        drc_errors, drc_warnings = run_post_route_drc(
+            output_path=output_path,
+            manufacturer=args.manufacturer,
+            layers=layer_stack.num_layers,
+            quiet=quiet,
+        )
+
     # Summary
+    all_nets_routed = stats["nets_routed"] == nets_to_route
+    drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
+
     if not quiet:
         print("\n" + "=" * 60)
-        if stats["nets_routed"] == nets_to_route:
-            print("SUCCESS: All nets routed!")
+        if all_nets_routed and drc_passed:
+            if drc_ran and drc_errors == 0:
+                print("SUCCESS: All nets routed, DRC passed!")
+            else:
+                print("SUCCESS: All nets routed!")
+                if not drc_ran and not args.skip_drc and not args.dry_run:
+                    print("  Note: Run 'kct check' to validate before manufacturing")
+        elif all_nets_routed and not drc_passed:
+            print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
+            print("  Review DRC errors before manufacturing.")
+            print(f"  Run 'kct check {output_path} --mfr {args.manufacturer}' for full details")
         else:
             print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
             print("  Some nets may require manual routing or a different strategy.")
+            if drc_ran and drc_errors > 0:
+                print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
 
             # Show detailed failure diagnostics
             show_failure_diagnostics(router, net_map, nets_to_route, quiet=quiet)
 
-    if stats["nets_routed"] == nets_to_route:
+    # Exit codes:
+    # 0 = All nets routed AND (DRC passed OR DRC not run)
+    # 1 = Not all nets routed OR DRC errors detected
+    if all_nets_routed and drc_passed:
         return 0
+    elif not all_nets_routed:
+        return 1
     else:
-        return 1 if stats["nets_routed"] < nets_to_route else 0
+        # All nets routed but DRC failed
+        return 1
 
 
 if __name__ == "__main__":
