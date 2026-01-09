@@ -19,6 +19,7 @@ from .bus_routing import BusRouter
 from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backend_info
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
+from .escape import EscapeRouter, PackageInfo, is_dense_package
 from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
 from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .grid import RoutingGrid
@@ -222,6 +223,7 @@ class Autorouter:
         # Lazy-initialized routers
         self._bus_router: BusRouter | None = None
         self._diffpair_router: DiffPairRouter | None = None
+        self._escape_router: EscapeRouter | None = None
 
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
@@ -1784,3 +1786,197 @@ class Autorouter:
             use_negotiated=use_negotiated,
             min_confidence=min_confidence,
         )
+
+    # =========================================================================
+    # Escape Routing API (Dense Packages)
+    # =========================================================================
+
+    @property
+    def _escape(self) -> EscapeRouter:
+        """Lazy-initialize escape router."""
+        if self._escape_router is None:
+            self._escape_router = EscapeRouter(self.grid, self.rules)
+        return self._escape_router
+
+    def detect_dense_packages(self) -> list[PackageInfo]:
+        """Detect dense packages that need escape routing.
+
+        Identifies components with pin pitch < 0.5mm or pin count > 48,
+        which typically require special escape routing patterns to
+        achieve full routability.
+
+        Returns:
+            List of PackageInfo for dense packages
+
+        Example::
+
+            dense = router.detect_dense_packages()
+            for pkg in dense:
+                print(f"{pkg.ref}: {pkg.package_type.name} ({pkg.pin_count} pins)")
+        """
+        dense_packages: list[PackageInfo] = []
+
+        # Group pads by component reference
+        component_pads: dict[str, list[Pad]] = {}
+        for (ref, _), pad in self.pads.items():
+            if ref not in component_pads:
+                component_pads[ref] = []
+            component_pads[ref].append(pad)
+
+        # Check each component
+        for ref, pads in component_pads.items():
+            if is_dense_package(pads):
+                info = self._escape.analyze_package(pads)
+                dense_packages.append(info)
+
+        return dense_packages
+
+    def generate_escape_routes(
+        self,
+        packages: list[PackageInfo] | None = None,
+    ) -> list[Route]:
+        """Generate escape routes for dense packages.
+
+        Creates escape routes that guide pins outward from dense packages
+        without blocking each other. For BGA packages, uses ring-based
+        escape with layer alternation. For QFP/QFN, uses alternating
+        direction escape.
+
+        Args:
+            packages: List of packages to generate escapes for.
+                If None, auto-detects dense packages.
+
+        Returns:
+            List of Route objects for the escape paths
+
+        Example::
+
+            # Auto-detect and generate escapes
+            escape_routes = router.generate_escape_routes()
+
+            # Or specify packages
+            packages = router.detect_dense_packages()
+            escape_routes = router.generate_escape_routes(packages)
+        """
+        if packages is None:
+            packages = self.detect_dense_packages()
+
+        all_routes: list[Route] = []
+
+        for package in packages:
+            escapes = self._escape.generate_escapes(package)
+            routes = self._escape.apply_escape_routes(escapes)
+            all_routes.extend(routes)
+
+            # Track these routes
+            self.routes.extend(routes)
+
+            print(
+                f"  Escape routes: {package.ref} ({package.package_type.name})"
+                f" - {len(escapes)} pins escaped"
+            )
+
+        return all_routes
+
+    def route_with_escape(
+        self,
+        use_negotiated: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+    ) -> list[Route]:
+        """Route with automatic escape routing for dense packages.
+
+        First generates escape routes for any detected dense packages
+        (BGA, QFP, QFN with high pin count or fine pitch), then routes
+        remaining connections using the standard algorithm.
+
+        This is the recommended approach for boards with BGAs or
+        fine-pitch ICs that struggle with standard routing.
+
+        Args:
+            use_negotiated: Use negotiated congestion routing
+            progress_callback: Optional callback for progress updates
+            timeout: Optional timeout in seconds
+
+        Returns:
+            List of all routes (escapes + regular routing)
+
+        Example::
+
+            # Route with automatic escape handling
+            routes = router.route_with_escape()
+
+            # Check statistics
+            stats = router.get_statistics()
+            print(f"Routed {stats['nets_routed']} nets")
+        """
+        print("\n=== Routing with Escape Pattern Generation ===")
+
+        # Phase 1: Detect and route dense packages
+        dense_packages = self.detect_dense_packages()
+
+        if dense_packages:
+            print(f"\n--- Phase 1: Escape Routing ({len(dense_packages)} dense packages) ---")
+            for pkg in dense_packages:
+                print(f"  {pkg.ref}: {pkg.package_type.name}, {pkg.pin_count} pins")
+
+            escape_routes = self.generate_escape_routes(dense_packages)
+            print(f"  Generated {len(escape_routes)} escape route segments")
+        else:
+            print("\n--- No dense packages detected, skipping escape routing ---")
+            escape_routes = []
+
+        # Phase 2: Route remaining connections
+        print("\n--- Phase 2: Main Routing ---")
+
+        if use_negotiated:
+            main_routes = self.route_all_negotiated(
+                progress_callback=progress_callback,
+                timeout=timeout,
+            )
+        else:
+            main_routes = self.route_all(
+                progress_callback=progress_callback,
+            )
+
+        # Combine results
+        all_routes = escape_routes + main_routes
+
+        # Summary
+        stats = self.get_statistics()
+        print("\n=== Routing with Escape Complete ===")
+        print(f"  Dense packages escaped: {len(dense_packages)}")
+        print(f"  Total nets routed: {stats['nets_routed']}")
+        print(f"  Total segments: {stats['segments']}")
+        print(f"  Total vias: {stats['vias']}")
+
+        return all_routes
+
+    def get_escape_statistics(self) -> dict:
+        """Get statistics about escape routing.
+
+        Returns:
+            Dictionary with escape routing stats:
+            - dense_packages: Number of detected dense packages
+            - total_pins_escaped: Total pins with escape routes
+            - escape_segments: Number of escape route segments
+            - escape_vias: Number of vias used in escapes
+        """
+        dense_packages = self.detect_dense_packages()
+
+        total_pins = sum(pkg.pin_count for pkg in dense_packages)
+
+        return {
+            "dense_packages": len(dense_packages),
+            "total_pins_escaped": total_pins,
+            "package_details": [
+                {
+                    "ref": pkg.ref,
+                    "type": pkg.package_type.name,
+                    "pin_count": pkg.pin_count,
+                    "pitch": pkg.pin_pitch,
+                    "is_dense": pkg.is_dense,
+                }
+                for pkg in dense_packages
+            ],
+        }

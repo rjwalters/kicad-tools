@@ -64,6 +64,16 @@ from .diffpair import (
     detect_differential_signals,
     group_differential_pairs,
 )
+from .escape import (
+    EscapeDirection,
+    EscapeRoute,
+    EscapeRouter,
+    PackageInfo,
+    PackageType,
+    detect_package_type,
+    get_package_info,
+    is_dense_package,
+)
 from .failure_analysis import (
     BlockingElement,
     CongestionMap,
@@ -252,4 +262,13 @@ __all__ = [
     "PlacementFeedbackLoop",
     "PlacementFeedbackResult",
     "PlacementAdjustment",
+    # Escape Routing (dense packages)
+    "EscapeRouter",
+    "EscapeRoute",
+    "EscapeDirection",
+    "PackageType",
+    "PackageInfo",
+    "is_dense_package",
+    "detect_package_type",
+    "get_package_info",
 ]
