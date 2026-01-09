@@ -104,6 +104,21 @@ from .io import (
     validate_grid_resolution,
     validate_routes,
 )
+from .net_class import (
+    NET_CLASS_PATTERNS,
+    SYMBOL_INDICATORS,
+    NetClass,
+    NetClassification,
+    apply_net_class_rules,
+    auto_classify_nets,
+    classify_and_apply_rules,
+    classify_from_name,
+    classify_from_pin_type,
+    classify_from_symbol,
+    classify_net,
+    find_differential_partner,
+    is_differential_pair_name,
+)
 from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
 from .length import (
     LengthTracker,
@@ -301,4 +316,18 @@ __all__ = [
     "is_dense_package",
     "detect_package_type",
     "get_package_info",
+    # Net Class Auto-Detection (Issue #634)
+    "NetClass",
+    "NetClassification",
+    "SYMBOL_INDICATORS",
+    "NET_CLASS_PATTERNS",
+    "classify_from_symbol",
+    "classify_from_pin_type",
+    "classify_from_name",
+    "classify_net",
+    "auto_classify_nets",
+    "apply_net_class_rules",
+    "classify_and_apply_rules",
+    "is_differential_pair_name",
+    "find_differential_partner",
 ]
