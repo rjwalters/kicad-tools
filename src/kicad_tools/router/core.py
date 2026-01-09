@@ -20,14 +20,16 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
-from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
+from .length import LengthTracker, LengthViolation
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
+from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .primitives import Obstacle, Pad, Route
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
     DesignRules,
+    LengthConstraint,
     NetClassRouting,
     assign_layer_preferences,
 )
@@ -227,6 +229,9 @@ class Autorouter:
         # Lazy-initialized routers
         self._bus_router: BusRouter | None = None
         self._diffpair_router: DiffPairRouter | None = None
+
+        # Length constraint tracking (Issue #630)
+        self._length_tracker: LengthTracker = LengthTracker()
 
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
@@ -1603,6 +1608,249 @@ class Autorouter:
         # Also update the router's net class map
         if hasattr(self.router, "net_class_map"):
             self.router.net_class_map = self.net_class_map
+
+    # =========================================================================
+    # Length Constraint API (Issue #630)
+    # =========================================================================
+
+    def add_length_constraint(self, constraint: LengthConstraint) -> None:
+        """Add a length constraint for a net.
+
+        Length constraints are used to enforce timing requirements for
+        signals like DDR data buses, differential pairs, and clock
+        distribution networks.
+
+        Args:
+            constraint: LengthConstraint specifying min/max length or match group
+
+        Example::
+
+            from kicad_tools.router import LengthConstraint
+
+            # Minimum length constraint
+            router.add_length_constraint(LengthConstraint(
+                net_id=100,
+                min_length=50.0,  # mm
+            ))
+
+            # Match group for DDR data
+            for net_id in [100, 101, 102, 103]:
+                router.add_length_constraint(LengthConstraint(
+                    net_id=net_id,
+                    match_group="DDR_DATA",
+                    match_tolerance=0.5,  # mm
+                ))
+        """
+        self._length_tracker.add_constraint(constraint)
+
+    def add_match_group(
+        self,
+        name: str,
+        net_ids: list[int],
+        tolerance: float = 0.5,
+        min_length: float | None = None,
+        max_length: float | None = None,
+    ) -> None:
+        """Add length constraints for a match group.
+
+        This is a convenience method for creating multiple constraints
+        that all belong to the same match group. All nets in the group
+        must have similar lengths (within tolerance).
+
+        Args:
+            name: Match group name (e.g., "DDR_DATA")
+            net_ids: List of net IDs in the group
+            tolerance: Length match tolerance in mm (default: 0.5)
+            min_length: Minimum length for all nets (optional)
+            max_length: Maximum length for all nets (optional)
+
+        Example::
+
+            # DDR data bus - all 8 bits must match
+            router.add_match_group(
+                "DDR_DATA",
+                [100, 101, 102, 103, 104, 105, 106, 107],
+                tolerance=0.5,  # 0.5mm tolerance
+            )
+        """
+        from .length import create_match_group
+
+        constraints = create_match_group(
+            name=name,
+            net_ids=net_ids,
+            tolerance=tolerance,
+            min_length=min_length,
+            max_length=max_length,
+        )
+        for constraint in constraints:
+            self._length_tracker.add_constraint(constraint)
+
+    def get_length_violations(self) -> list[LengthViolation]:
+        """Get all length constraint violations.
+
+        Should be called after routing is complete to check if any
+        length constraints were violated.
+
+        Returns:
+            List of LengthViolation objects describing any violations
+
+        Example::
+
+            # After routing
+            violations = router.get_length_violations()
+            for v in violations:
+                print(f"Violation: {v}")
+        """
+        # Update tracker with current route lengths
+        self._update_length_tracker()
+        return self._length_tracker.get_violations()
+
+    def get_length_statistics(self) -> dict:
+        """Get statistics about tracked route lengths.
+
+        Returns:
+            Dictionary with length statistics including:
+            - total_nets: Number of nets with length tracking
+            - constrained_nets: Number of nets with constraints
+            - match_groups: Number of match groups
+            - violations: Number of constraint violations
+            - min_length: Minimum route length
+            - max_length: Maximum route length
+            - avg_length: Average route length
+        """
+        self._update_length_tracker()
+        return self._length_tracker.get_statistics()
+
+    def _update_length_tracker(self) -> None:
+        """Update the length tracker with current route lengths."""
+        for route in self.routes:
+            self._length_tracker.record_route(route.net, route)
+
+    def apply_length_tuning(
+        self,
+        verbose: bool = True,
+    ) -> dict[int, tuple[Route, any]]:
+        """Apply serpentine tuning to routes that don't meet length constraints.
+
+        This post-routing pass adds serpentine (meander) patterns to
+        routes that are too short or need to match other routes in
+        their match group.
+
+        Args:
+            verbose: Whether to print progress information
+
+        Returns:
+            Dictionary mapping net ID to (tuned_route, result)
+
+        Example::
+
+            # After routing, tune lengths
+            results = router.apply_length_tuning()
+            for net_id, (new_route, result) in results.items():
+                if result.success:
+                    print(f"Net {net_id}: added {result.length_added:.3f}mm")
+        """
+        from .optimizer.serpentine import SerpentineGenerator, tune_match_group
+
+        self._update_length_tracker()
+        results: dict[int, tuple[Route, any]] = {}
+
+        # Get violations to determine which nets need tuning
+        violations = self._length_tracker.get_violations()
+
+        if not violations and verbose:
+            print("No length violations - no tuning needed")
+            return results
+
+        if verbose:
+            print(f"\n=== Length Tuning ({len(violations)} violations) ===")
+
+        # Build routes by net ID
+        routes_by_net: dict[int, Route] = {}
+        for route in self.routes:
+            routes_by_net[route.net] = route
+
+        # Process match groups
+        processed_groups: set[str] = set()
+        for group_name, net_ids in self._length_tracker.match_groups.items():
+            if group_name in processed_groups:
+                continue
+            processed_groups.add(group_name)
+
+            # Get tolerance from first constraint
+            tolerance = 0.5
+            if net_ids and net_ids[0] in self._length_tracker._constraint_map:
+                tolerance = self._length_tracker._constraint_map[net_ids[0]].match_tolerance
+
+            if verbose:
+                print(f"  Tuning match group '{group_name}' ({len(net_ids)} nets)")
+
+            group_results = tune_match_group(
+                routes=routes_by_net,
+                group_net_ids=net_ids,
+                tolerance=tolerance,
+                grid=self.grid,
+            )
+
+            # Update routes and collect results
+            for net_id, (new_route, result) in group_results.items():
+                if result.success and result.length_added > 0:
+                    # Replace route in routes list
+                    for i, r in enumerate(self.routes):
+                        if r.net == net_id:
+                            self.routes[i] = new_route
+                            break
+                    routes_by_net[net_id] = new_route
+
+                    if verbose:
+                        print(f"    Net {net_id}: {result.message}")
+
+                results[net_id] = (new_route, result)
+
+        # Process individual min length violations (not in match groups)
+        generator = SerpentineGenerator()
+        for violation in violations:
+            if violation.violation_type.value == "too_short":
+                net_id = violation.net_id
+                if isinstance(net_id, str):
+                    continue  # Match group, already processed
+
+                constraint = self._length_tracker.get_constraint(net_id)
+                if constraint and constraint.match_group:
+                    continue  # Part of a match group, already processed
+
+                route = routes_by_net.get(net_id)
+                if not route:
+                    continue
+
+                target = violation.target_length or 0
+                new_route, result = generator.add_serpentine(route, target, self.grid)
+
+                if result.success and result.length_added > 0:
+                    for i, r in enumerate(self.routes):
+                        if r.net == net_id:
+                            self.routes[i] = new_route
+                            break
+
+                    if verbose:
+                        net_name = self.net_names.get(net_id, f"Net {net_id}")
+                        print(f"  {net_name}: {result.message}")
+
+                results[net_id] = (new_route, result)
+
+        if verbose:
+            print("=== Length Tuning Complete ===\n")
+
+        return results
+
+    @property
+    def length_tracker(self) -> LengthTracker:
+        """Get the length tracker for manual inspection.
+
+        Returns:
+            LengthTracker instance with recorded lengths and constraints
+        """
+        return self._length_tracker
 
     @property
     def _bus(self) -> BusRouter:
