@@ -11,6 +11,7 @@ Example::
         FailureAnalysis,
         FailureCause,
         StrategyGenerator,
+        StrategyApplicator,
         PatternMatcher,
     )
 
@@ -28,6 +29,13 @@ Example::
     generator = StrategyGenerator()
     strategies = generator.generate_strategies(pcb, analysis)
 
+    # Apply the best placement strategy
+    applicator = StrategyApplicator()
+    if strategies and applicator.is_safe_to_apply(strategies[0], pcb):
+        result = applicator.apply_strategy(pcb, strategies[0])
+        if result.success:
+            print(f"Moved {len(result.components_moved)} components")
+
     # Find matching patterns for better suggestions
     matcher = PatternMatcher()
     patterns = matcher.match_patterns(analysis)
@@ -42,9 +50,12 @@ Classes:
     Action: A single action in a strategy
     SideEffect: A potential side effect of a strategy
     StrategyGenerator: Generates resolution strategies from failure analysis
+    StrategyApplicator: Applies strategies to modify PCB placement
+    ApplicationResult: Result of applying a strategy
     PatternMatcher: Matches failures to known patterns for better suggestions
 """
 
+from .applicator import ApplicationResult, StrategyApplicator
 from .patterns import PatternMatcher
 from .strategy import StrategyGenerator
 from .types import (
@@ -72,7 +83,9 @@ __all__ = [
     "ResolutionStrategy",
     "Action",
     "SideEffect",
+    "ApplicationResult",
     # Classes
     "StrategyGenerator",
+    "StrategyApplicator",
     "PatternMatcher",
 ]

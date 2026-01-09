@@ -72,6 +72,11 @@ from .failure_analysis import (
     PathAttempt,
     RootCauseAnalyzer,
 )
+from .placement_feedback import (
+    PlacementAdjustment,
+    PlacementFeedbackLoop,
+    PlacementFeedbackResult,
+)
 from .grid import RoutingGrid
 from .heuristics import (
     CongestionAwareHeuristic,
@@ -243,4 +248,8 @@ __all__ = [
     "PathAttempt",
     "CongestionMap",
     "RootCauseAnalyzer",
+    # Placement-Routing Feedback
+    "PlacementFeedbackLoop",
+    "PlacementFeedbackResult",
+    "PlacementAdjustment",
 ]
