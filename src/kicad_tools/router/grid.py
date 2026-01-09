@@ -295,6 +295,12 @@ class RoutingGrid:
         self._thread_safe = thread_safe
         self._lock: threading.RLock | None = threading.RLock() if thread_safe else None
 
+        # Corridor preference tracking for two-phase routing
+        # Maps net ID to Corridor object (from sparse.py)
+        # Use Any type hint to avoid circular import; actual type checked at runtime
+        self._corridor_preferences: dict[int, any] = {}
+        self._corridor_penalty: float = 5.0  # Default penalty for leaving corridor
+
     @property
     def congestion(self) -> np.ndarray:
         """Return congestion array (backward compatible)."""
@@ -991,6 +997,101 @@ class RoutingGrid:
         if not (0 <= gx < self.cols and 0 <= gy < self.rows):
             return False
         return bool(self._is_zone[layer_index, gy, gx])
+
+    # =========================================================================
+    # CORRIDOR PREFERENCE SUPPORT (TWO-PHASE ROUTING)
+    # =========================================================================
+
+    def set_corridor_preference(
+        self, corridor: any, net: int, penalty: float | None = None
+    ) -> None:
+        """Set a corridor preference for a net during two-phase routing.
+
+        The pathfinder will add a cost penalty when routing this net
+        outside its assigned corridor.
+
+        Thread-safe when thread_safe=True.
+
+        Args:
+            corridor: The Corridor from global routing (sparse.Corridor)
+            net: Net ID this corridor is assigned to
+            penalty: Cost penalty multiplier for leaving corridor (default: 5.0)
+        """
+        with self._acquire_lock():
+            self._corridor_preferences[net] = corridor
+            if penalty is not None:
+                self._corridor_penalty = penalty
+
+    def clear_corridor_preference(self, net: int) -> None:
+        """Remove corridor preference for a net.
+
+        Thread-safe when thread_safe=True.
+
+        Args:
+            net: Net ID whose corridor preference to remove
+        """
+        with self._acquire_lock():
+            self._corridor_preferences.pop(net, None)
+
+    def clear_all_corridor_preferences(self) -> None:
+        """Remove all corridor preferences.
+
+        Thread-safe when thread_safe=True.
+        """
+        with self._acquire_lock():
+            self._corridor_preferences.clear()
+
+    def get_corridor_cost(self, gx: int, gy: int, layer: int, net: int) -> float:
+        """Get corridor cost penalty for a cell.
+
+        Returns additional cost if the cell is outside the net's assigned
+        corridor (if any). This guides detailed routing to stay within
+        the corridor established during global routing.
+
+        Args:
+            gx, gy: Grid coordinates
+            layer: Grid layer index
+            net: Net being routed
+
+        Returns:
+            Additional cost (0 if inside corridor or no corridor assigned)
+        """
+        corridor = self._corridor_preferences.get(net)
+        if corridor is None:
+            return 0.0
+
+        # Convert grid to world coordinates
+        x, y = self.grid_to_world(gx, gy)
+
+        # Check if point is inside corridor
+        if corridor.contains_point(x, y, layer):
+            return 0.0
+
+        # Outside corridor - apply penalty
+        return self._corridor_penalty
+
+    def has_corridor_preference(self, net: int) -> bool:
+        """Check if a net has an assigned corridor.
+
+        Args:
+            net: Net ID to check
+
+        Returns:
+            True if net has a corridor preference set
+        """
+        return net in self._corridor_preferences
+
+    def get_corridor_statistics(self) -> dict:
+        """Get statistics about corridor preferences.
+
+        Returns:
+            Dictionary with corridor stats
+        """
+        return {
+            "corridors_assigned": len(self._corridor_preferences),
+            "corridor_penalty": self._corridor_penalty,
+            "nets_with_corridors": list(self._corridor_preferences.keys()),
+        }
 
     # =========================================================================
     # BOARD EDGE CLEARANCE SUPPORT
