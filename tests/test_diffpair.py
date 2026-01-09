@@ -1,6 +1,5 @@
 """Tests for differential pair routing module."""
 
-import math
 
 from kicad_tools.router.diffpair import (
     DifferentialPair,

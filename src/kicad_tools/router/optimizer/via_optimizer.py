@@ -268,9 +268,7 @@ class ViaOptimizer:
                 continue
 
             # Check distance between vias
-            dist = math.sqrt(
-                (ctx2.via.x - ctx1.via.x) ** 2 + (ctx2.via.y - ctx1.via.y) ** 2
-            )
+            dist = math.sqrt((ctx2.via.x - ctx1.via.x) ** 2 + (ctx2.via.y - ctx1.via.y) ** 2)
             if dist > self.config.via_pair_threshold:
                 continue
 
@@ -288,9 +286,7 @@ class ViaOptimizer:
 
             if alt_path:
                 # Remove the via pair and intermediate segment
-                self._apply_via_pair_removal(
-                    ctx1, ctx2, alt_path, segments, vias, route
-                )
+                self._apply_via_pair_removal(ctx1, ctx2, alt_path, segments, vias, route)
                 indices_to_remove.add(i)
                 indices_to_remove.add(i + 1)
                 pairs_removed += 1
@@ -300,9 +296,7 @@ class ViaOptimizer:
     def _is_via_pair(self, ctx1: ViaContext, ctx2: ViaContext) -> bool:
         """Check if two vias form a down-up or up-down pair."""
         # Via1 goes from A to B, Via2 goes from B to A
-        return (
-            ctx1.from_layer == ctx2.to_layer and ctx1.to_layer == ctx2.from_layer
-        )
+        return ctx1.from_layer == ctx2.to_layer and ctx1.to_layer == ctx2.from_layer
 
     def _remove_single_vias(
         self,
@@ -340,9 +334,7 @@ class ViaOptimizer:
             end_x, end_y = seg_after.x2, seg_after.y2
 
             # Calculate direct distance
-            direct_dist = math.sqrt(
-                (end_x - start_x) ** 2 + (end_y - start_y) ** 2
-            )
+            direct_dist = math.sqrt((end_x - start_x) ** 2 + (end_y - start_y) ** 2)
 
             # Try to find path on the 'before' layer
             alt_path = self._find_same_layer_path(
@@ -460,9 +452,8 @@ class ViaOptimizer:
         for seg in segments:
             # Check if segment is between the two via positions
             if seg.layer == ctx1.to_layer:  # Intermediate layer
-                if (
-                    (abs(seg.x1 - ctx1.via.x) < tol and abs(seg.y1 - ctx1.via.y) < tol)
-                    or (abs(seg.x2 - ctx2.via.x) < tol and abs(seg.y2 - ctx2.via.y) < tol)
+                if (abs(seg.x1 - ctx1.via.x) < tol and abs(seg.y1 - ctx1.via.y) < tol) or (
+                    abs(seg.x2 - ctx2.via.x) < tol and abs(seg.y2 - ctx2.via.y) < tol
                 ):
                     segs_to_remove.append(seg)
 

@@ -48,8 +48,8 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     )
 
     # Define layout coordinates
-    RAIL_VIN = 30     # Input voltage rail
-    RAIL_GND = 150    # Ground rail
+    RAIL_VIN = 30  # Input voltage rail
+    RAIL_GND = 150  # Ground rail
     X_LEFT = 25
     X_RIGHT = 200
 
@@ -105,10 +105,10 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     x_right = sch._snap_coord(X_RIGHT, "rail")
 
     # Get X positions of all components that connect to rails
-    x_j1 = j1_pin1[0]    # J1 connection point
-    x_r1 = r1_pin1[0]    # R1 VIN connection point
-    x_r2 = r2_pin2[0]    # R2 GND connection point
-    x_j2 = j2_pin2[0]    # J2 GND connection point
+    x_j1 = j1_pin1[0]  # J1 connection point
+    x_r1 = r1_pin1[0]  # R1 VIN connection point
+    x_r2 = r2_pin2[0]  # R2 GND connection point
+    x_j2 = j2_pin2[0]  # J2 GND connection point
 
     # Sort X positions for VIN rail: left edge, J1, R1, right edge
     vin_x_points = sorted([x_left, x_j1, x_r1, x_right])
@@ -118,11 +118,11 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
 
     # Create VIN rail as segments
     for i in range(len(vin_x_points) - 1):
-        sch.add_wire((vin_x_points[i], rail_vin_y), (vin_x_points[i+1], rail_vin_y))
+        sch.add_wire((vin_x_points[i], rail_vin_y), (vin_x_points[i + 1], rail_vin_y))
 
     # Create GND rail as segments
     for i in range(len(gnd_x_points) - 1):
-        sch.add_wire((gnd_x_points[i], rail_gnd_y), (gnd_x_points[i+1], rail_gnd_y))
+        sch.add_wire((gnd_x_points[i], rail_gnd_y), (gnd_x_points[i + 1], rail_gnd_y))
 
     # Add power symbols at rail start
     sch.add_power("power:+5V", x=X_LEFT, y=RAIL_VIN, rotation=0)
@@ -137,8 +137,8 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     sch.add_label("+5V", X_LEFT, RAIL_VIN)
     sch.add_label("GND", X_LEFT, RAIL_GND)
 
-    print(f"   VIN rail with {len(vin_x_points)-1} segments")
-    print(f"   GND rail with {len(gnd_x_points)-1} segments")
+    print(f"   VIN rail with {len(vin_x_points) - 1} segments")
+    print(f"   GND rail with {len(gnd_x_points) - 1} segments")
 
     # =========================================================================
     # Section 3: Wire Components to Rails
@@ -172,7 +172,7 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     # J2 Pin 1 to VOUT (horizontal then vertical)
     vout_y = r1_pin2[1]  # VOUT is at R1 pin 2 Y position
     sch.add_wire(r1_pin2, (x_j2, vout_y))  # Horizontal from VOUT to J2's X
-    sch.add_wire((x_j2, vout_y), j2_pin1)   # Vertical down to J2 Pin 1
+    sch.add_wire((x_j2, vout_y), j2_pin1)  # Vertical down to J2 Pin 1
     print("   VOUT -> J2 Pin 1")
 
     # J2 Pin 2 to GND rail
@@ -187,7 +187,7 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     r_top = 10000  # 10k
     r_bottom = 10000  # 10k
     ratio = r_bottom / (r_top + r_bottom)
-    print(f"\n   Voltage divider: R1=10k, R2=10k")
+    print("\n   Voltage divider: R1=10k, R2=10k")
     print(f"   Division ratio: {ratio:.2f}")
     print(f"   Output voltage: {5.0 * ratio:.2f}V")
 
@@ -257,9 +257,9 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
 
     # Component positions (relative to board origin)
     # Layout: J1 on left, R1-R2 in middle, J2 on right
-    J1_POS = (BOARD_ORIGIN_X + 5, BOARD_ORIGIN_Y + 12.5)   # Input connector
-    R1_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 8)     # Top resistor
-    R2_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 17)    # Bottom resistor
+    J1_POS = (BOARD_ORIGIN_X + 5, BOARD_ORIGIN_Y + 12.5)  # Input connector
+    R1_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 8)  # Top resistor
+    R2_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 17)  # Bottom resistor
     J2_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 12.5)  # Output connector
 
     def generate_header() -> str:
@@ -338,7 +338,9 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     (pad "2" thru_hole oval (at 0 {pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin2_num} "{pin2_net}"))
   )"""
 
-    def generate_resistor(ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "10k") -> str:
+    def generate_resistor(
+        ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "10k"
+    ) -> str:
         """Generate an 0805 resistor footprint."""
         x, y = pos
         pin1_num = NETS[pin1_net]
@@ -398,7 +400,7 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     print(f"   PCB: {pcb_path}")
 
     print(f"\n   Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print(f"   Components: 2 connectors, 2 resistors")
+    print("   Components: 2 connectors, 2 resistors")
     print(f"   Nets: {len([n for n in NETS.values() if n > 0])} (VIN, VOUT, GND)")
 
     return pcb_path
@@ -419,11 +421,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Configure design rules
     # Note: grid_resolution should be < trace_clearance for reliable DRC
     rules = DesignRules(
-        grid_resolution=0.1,   # 0.1mm grid (fine for DRC compliance)
-        trace_width=0.3,       # 0.3mm traces
-        trace_clearance=0.2,   # 0.2mm clearance
-        via_drill=0.3,         # 0.3mm via drill
-        via_diameter=0.6,      # 0.6mm via pad
+        grid_resolution=0.1,  # 0.1mm grid (fine for DRC compliance)
+        trace_width=0.3,  # 0.3mm traces
+        trace_clearance=0.2,  # 0.2mm clearance
+        via_drill=0.3,  # 0.3mm via drill
+        via_diameter=0.6,  # 0.6mm via pad
     )
 
     print(f"\n1. Loading PCB: {input_path}")
@@ -557,6 +559,7 @@ def main() -> int:
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
 

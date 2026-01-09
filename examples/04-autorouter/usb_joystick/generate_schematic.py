@@ -285,7 +285,7 @@ def create_usb_joystick_schematic(output_path: Path) -> bool:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sch.write(output_path)
-    print(f"   SUCCESS: Schematic written!")
+    print("   SUCCESS: Schematic written!")
 
     return len(overlaps) == 0
 

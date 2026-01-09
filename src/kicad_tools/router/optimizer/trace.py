@@ -15,7 +15,6 @@ from .algorithms import (
 from .chain import sort_into_chains
 from .collision import CollisionChecker
 from .config import OptimizationConfig, OptimizationStats
-from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 from .geometry import (
     angle_between,
     count_corners,
@@ -30,6 +29,7 @@ from .geometry import (
     total_length,
 )
 from .pcb import optimize_pcb, parse_net_names, parse_segments, replace_segments
+from .via_optimizer import ViaOptimizationConfig, ViaOptimizer
 
 
 class TraceOptimizer:

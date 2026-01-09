@@ -1,6 +1,5 @@
 """Tests for parallel net routing."""
 
-
 from kicad_tools.router import Autorouter, DesignRules
 from kicad_tools.router.parallel import (
     BoundingBox,
