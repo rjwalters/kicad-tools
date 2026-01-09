@@ -801,6 +801,17 @@ def _add_route_parser(subparsers) -> None:
             "'6' = 6-layer"
         ),
     )
+    route_parser.add_argument(
+        "--no-optimize",
+        action="store_true",
+        help="Skip trace optimization (keep raw grid-step segments)",
+    )
+    route_parser.add_argument(
+        "--raw",
+        action="store_true",
+        dest="no_optimize",
+        help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
+    )
 
 
 def _add_reason_parser(subparsers) -> None:
