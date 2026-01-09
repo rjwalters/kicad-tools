@@ -165,6 +165,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_init_parser(subparsers)
     _add_build_native_parser(subparsers)
     _add_spec_parser(subparsers)
+    _add_benchmark_parser(subparsers)
 
     return parser
 
@@ -2472,4 +2473,106 @@ def _add_spec_parser(subparsers) -> None:
         "check_item",
         metavar="ITEM",
         help="Checklist item to mark complete (format: 'phase.item' or 'item')",
+    )
+
+
+def _add_benchmark_parser(subparsers) -> None:
+    """Add benchmark subcommand parser."""
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="Run routing benchmarks and regression tests",
+        description="Benchmark routing performance and detect regressions.",
+    )
+    benchmark_subparsers = benchmark_parser.add_subparsers(
+        dest="benchmark_command",
+        help="Benchmark commands",
+    )
+
+    # benchmark run
+    benchmark_run = benchmark_subparsers.add_parser(
+        "run",
+        help="Run benchmark suite",
+        description="Execute routing benchmarks and collect metrics.",
+    )
+    benchmark_run.add_argument(
+        "--cases",
+        help="Comma-separated list of cases to run (default: all)",
+    )
+    benchmark_run.add_argument(
+        "--strategies",
+        help="Comma-separated strategies: basic,negotiated,monte_carlo (default: all)",
+    )
+    benchmark_run.add_argument(
+        "--difficulty",
+        choices=["easy", "medium", "hard"],
+        help="Filter by difficulty level",
+    )
+    benchmark_run.add_argument(
+        "-o",
+        "--output",
+        help="Output file path for results",
+    )
+    benchmark_run.add_argument(
+        "--save",
+        action="store_true",
+        help="Save results to benchmarks/ directory",
+    )
+    benchmark_run.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed progress",
+    )
+
+    # benchmark compare
+    benchmark_compare = benchmark_subparsers.add_parser(
+        "compare",
+        help="Compare against baseline",
+        description="Run benchmarks and check for regressions against a baseline.",
+    )
+    benchmark_compare.add_argument(
+        "--baseline",
+        required=True,
+        help="Path to baseline results JSON file",
+    )
+    benchmark_compare.add_argument(
+        "--fail-on-warning",
+        action="store_true",
+        help="Exit with error on warnings (not just errors)",
+    )
+    benchmark_compare.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed progress",
+    )
+
+    # benchmark report
+    benchmark_report = benchmark_subparsers.add_parser(
+        "report",
+        help="Generate benchmark report",
+        description="Generate human-readable report from benchmark results.",
+    )
+    benchmark_report.add_argument(
+        "input",
+        help="Path to benchmark results JSON file",
+    )
+    benchmark_report.add_argument(
+        "--format",
+        choices=["text", "markdown"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # benchmark list
+    benchmark_list = benchmark_subparsers.add_parser(
+        "list",
+        help="List available benchmark cases",
+        description="Show all registered benchmark test cases.",
+    )
+    benchmark_list.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
     )
