@@ -19,7 +19,7 @@ from kicad_tools.sexp.builders import (
 )
 
 from ..logging import _log_info
-from .elements import GlobalLabel, HierarchicalLabel, Junction, Label, PowerSymbol, Wire
+from .elements import GlobalLabel, HierarchicalLabel, Junction, Label, NoConnect, PowerSymbol, Wire
 from .symbol import SymbolInstance
 
 if TYPE_CHECKING:
@@ -166,6 +166,11 @@ class SchematicIOMixin:
             if child.name == "junction":
                 sch.junctions.append(Junction.from_sexp(child))
 
+        # Parse no-connects
+        for child in doc.children:
+            if child.name == "no_connect":
+                sch.no_connects.append(NoConnect.from_sexp(child))
+
         # Parse labels
         for child in doc.children:
             if child.name == "label":
@@ -277,6 +282,10 @@ class SchematicIOMixin:
         # Junctions
         for junc in self.junctions:
             root.append(junc.to_sexp_node())
+
+        # No-connects
+        for nc in self.no_connects:
+            root.append(nc.to_sexp_node())
 
         # Labels
         for label in self.labels:

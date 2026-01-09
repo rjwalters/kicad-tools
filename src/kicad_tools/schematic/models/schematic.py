@@ -24,6 +24,7 @@ from .elements import (
     HierarchicalLabel,
     Junction,
     Label,
+    NoConnect,
     PowerSymbol,
     Wire,
 )
@@ -136,6 +137,7 @@ class Schematic(
         self.power_symbols: list[PowerSymbol] = []
         self.wires: list[Wire] = []
         self.junctions: list[Junction] = []
+        self.no_connects: list[NoConnect] = []
         self.labels: list[Label] = []
         self.hier_labels: list[HierarchicalLabel] = []
         self.global_labels: list[GlobalLabel] = []

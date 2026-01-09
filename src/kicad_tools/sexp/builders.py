@@ -149,6 +149,21 @@ def junction_node(x: float, y: float, uuid_str: str) -> SExp:
     )
 
 
+def no_connect_node(x: float, y: float, uuid_str: str) -> SExp:
+    """Build a complete no_connect S-expression.
+
+    No-connect markers indicate that a pin is intentionally unconnected.
+    They silence ERC "pin not connected" warnings.
+
+    Note: Uses simpler (at x y) format without rotation angle.
+    """
+    return SExp.list(
+        "no_connect",
+        SExp.list("at", fmt(x), fmt(y)),
+        uuid_node(uuid_str),
+    )
+
+
 def label_node(text: str, x: float, y: float, rotation: float, uuid_str: str) -> SExp:
     """Build a complete label S-expression."""
     return SExp.list(
