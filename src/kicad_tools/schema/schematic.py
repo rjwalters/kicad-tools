@@ -198,7 +198,8 @@ class Schematic:
             # Import here to avoid circular import
             from ..query.symbols import SymbolList
 
-            items = [SymbolInstance.from_sexp(s) for s in self._sexp.find_all("symbol")]
+            # Use find_children to only get direct symbol children, not lib_symbol definitions
+            items = [SymbolInstance.from_sexp(s) for s in self._sexp.find_children("symbol")]
             self._symbols = SymbolList(items)
         return self._symbols
 
