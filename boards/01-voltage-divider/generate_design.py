@@ -421,6 +421,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     Returns True if all nets were routed successfully.
     """
     from kicad_tools.router import DesignRules, load_pcb_for_routing
+    from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
     print("\n" + "=" * 60)
     print("Routing PCB...")
@@ -455,10 +456,44 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("\n2. Routing nets...")
     router.route_all()
 
-    # Get statistics
+    # Get statistics before optimization
+    stats_before = router.get_statistics()
+
+    print("\n3. Raw routing results (before optimization):")
+    print(f"   Routes created: {stats_before['routes']}")
+    print(f"   Segments: {stats_before['segments']}")
+    print(f"   Vias: {stats_before['vias']}")
+    print(f"   Total length: {stats_before['total_length_mm']:.2f}mm")
+    print(f"   Nets routed: {stats_before['nets_routed']}")
+
+    # Optimize traces - merge collinear segments, eliminate zigzags, etc.
+    print("\n4. Optimizing traces...")
+    opt_config = OptimizationConfig(
+        merge_collinear=True,
+        eliminate_zigzags=True,
+        compress_staircase=True,
+        convert_45_corners=True,
+        minimize_vias=True,
+    )
+    optimizer = TraceOptimizer(config=opt_config)
+
+    optimized_routes = []
+    for route in router.routes:
+        optimized_route = optimizer.optimize_route(route)
+        optimized_routes.append(optimized_route)
+    router.routes = optimized_routes
+
+    # Get statistics after optimization
     stats = router.get_statistics()
 
-    print("\n3. Routing results:")
+    segments_before = stats_before["segments"]
+    segments_after = stats["segments"]
+    reduction = (1 - segments_after / segments_before) * 100 if segments_before > 0 else 0
+
+    print(f"   Segments: {segments_before} -> {segments_after} ({reduction:.1f}% reduction)")
+    print(f"   Vias: {stats_before['vias']} -> {stats['vias']}")
+
+    print("\n5. Final routing results:")
     print(f"   Routes created: {stats['routes']}")
     print(f"   Segments: {stats['segments']}")
     print(f"   Vias: {stats['vias']}")
@@ -466,7 +501,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print(f"   Nets routed: {stats['nets_routed']}")
 
     # Save routed PCB
-    print(f"\n4. Saving routed PCB: {output_path}")
+    print(f"\n6. Saving routed PCB: {output_path}")
 
     original_content = input_path.read_text()
     route_sexp = router.to_sexp()
