@@ -82,6 +82,42 @@ class DesignRules:
 
 
 @dataclass
+class LengthConstraint:
+    """Length constraint for timing-critical nets.
+
+    Use cases:
+    - DDR memory buses: Data lines must match clock ±50mil
+    - Differential pairs: P/N must match within 5mil
+    - Parallel buses: All bits should be similar length
+    - Clock distribution: Equal path lengths to all loads
+
+    Attributes:
+        net_id: Net ID this constraint applies to
+        min_length: Minimum required trace length in mm (optional)
+        max_length: Maximum allowed trace length in mm (optional)
+        match_group: Group name for nets that must match lengths (optional)
+        match_tolerance: Tolerance for length matching in mm (default: 0.5mm)
+    """
+
+    net_id: int
+    min_length: float | None = None
+    max_length: float | None = None
+    match_group: str | None = None
+    match_tolerance: float = 0.5  # mm
+
+    def __post_init__(self):
+        """Validate constraint parameters."""
+        if self.min_length is not None and self.max_length is not None:
+            if self.min_length > self.max_length:
+                raise ValueError(
+                    f"min_length ({self.min_length}) cannot be greater than "
+                    f"max_length ({self.max_length})"
+                )
+        if self.match_tolerance < 0:
+            raise ValueError(f"match_tolerance must be non-negative, got {self.match_tolerance}")
+
+
+@dataclass
 class NetClassRouting:
     """Routing parameters for a net class."""
 
@@ -103,6 +139,9 @@ class NetClassRouting:
     preferred_layers: list[int] | None = None  # Layer indices to prefer (lower cost)
     avoid_layers: list[int] | None = None  # Layer indices to avoid (higher cost)
     layer_cost_multiplier: float = 2.0  # Cost penalty for non-preferred layers
+
+    # Length constraint parameters (Issue #630)
+    length_constraint: LengthConstraint | None = None  # Length constraint for this net class
 
 
 # =============================================================================
