@@ -732,17 +732,144 @@ class TestSchematicConstruction:
     def test_add_label(self):
         """Add label to schematic."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        label = sch.add_label("NET1", 10, 20, snap=False)
+        label = sch.add_label("NET1", 10, 20, snap=False, validate_connection=False)
         assert len(sch.labels) == 1
+        assert label.text == "NET1"
+
+    def test_add_label_on_wire_no_warning(self):
+        """Add label on a wire - no warning should be issued."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Add a wire first
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        # Add label on the wire - should not warn
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            label = sch.add_label("NET1", 25, 20, snap=False)
+            assert len(w) == 0
+        assert label.text == "NET1"
+
+    def test_add_label_on_wire_endpoint_no_warning(self):
+        """Add label at wire endpoint - no warning should be issued."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Add a wire first
+        sch.add_wire((10, 20), (50, 20), snap=False)
+        # Add label at wire endpoint - should not warn
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            label = sch.add_label("NET1", 10, 20, snap=False)
+            assert len(w) == 0
+        assert label.text == "NET1"
+
+    def test_add_label_off_wire_warns(self):
+        """Add label not on any wire - warning should be issued."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Add a wire
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        # Add label off the wire - should warn
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            label = sch.add_label("NET1", 25, 30, snap=False)
+            assert len(w) == 1
+            assert "not on any wire" in str(w[0].message)
+            assert "NET1" in str(w[0].message)
+            assert "ERC errors" in str(w[0].message)
+        assert label.text == "NET1"
+
+    def test_add_label_off_wire_shows_nearest_point(self):
+        """Warning includes the nearest wire point information."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # Add a wire
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        # Add label 10mm away from the wire
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sch.add_label("NET1", 25, 30, snap=False)
+            assert len(w) == 1
+            # Should mention the nearest wire point
+            assert "Nearest wire point" in str(w[0].message)
+            # Distance should be ~10mm
+            assert "10.00mm away" in str(w[0].message)
+
+    def test_add_label_validate_connection_disabled(self):
+        """validate_connection=False disables the warning."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        # Add label off the wire with validation disabled
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            label = sch.add_label("NET1", 25, 30, snap=False, validate_connection=False)
+            assert len(w) == 0
+        assert label.text == "NET1"
+
+    def test_add_label_no_wires_no_warning(self):
+        """No warning when no wires exist (nothing to validate against)."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        # No wires - should not warn since validation only runs when wires exist
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            label = sch.add_label("NET1", 25, 30, snap=False)
+            assert len(w) == 0
         assert label.text == "NET1"
 
     def test_add_hier_label(self):
         """Add hierarchical label to schematic."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        hl = sch.add_hier_label("DATA", 10, 20, shape="output", snap=False)
+        hl = sch.add_hier_label("DATA", 10, 20, shape="output", snap=False, validate_connection=False)
         assert len(sch.hier_labels) == 1
         assert hl.text == "DATA"
         assert hl.shape == "output"
+
+    def test_add_hier_label_off_wire_warns(self):
+        """Add hierarchical label not on any wire - warning should be issued."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            hl = sch.add_hier_label("DATA", 25, 30, shape="output", snap=False)
+            assert len(w) == 1
+            assert "Hierarchical label" in str(w[0].message)
+            assert "not on any wire" in str(w[0].message)
+        assert hl.text == "DATA"
+
+    def test_add_global_label_off_wire_warns(self):
+        """Add global label not on any wire - warning should be issued."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            gl = sch.add_global_label("VCC", 25, 30, snap=False)
+            assert len(w) == 1
+            assert "Global label" in str(w[0].message)
+            assert "not on any wire" in str(w[0].message)
+        assert gl.text == "VCC"
+
+    def test_add_global_label_on_wire_no_warning(self):
+        """Add global label on a wire - no warning should be issued."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            gl = sch.add_global_label("VCC", 25, 20, snap=False)
+            assert len(w) == 0
+        assert gl.text == "VCC"
 
     def test_add_text(self):
         """Add text note to schematic."""
@@ -856,14 +983,97 @@ class TestSchematicConstruction:
         assert len(t_connection_warnings) == 0
 
 
+class TestWireGeometryHelpers:
+    """Tests for wire geometry helper methods."""
+
+    def test_point_on_wire_horizontal(self):
+        """Point on horizontal wire segment."""
+        from kicad_tools.schematic.models.elements import Wire
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wire = Wire.between((0, 20), (50, 20))
+        sch.wires.append(wire)
+
+        # Point on the wire
+        assert sch._point_on_wire(25, 20, wire) is True
+        # Wire endpoints
+        assert sch._point_on_wire(0, 20, wire) is True
+        assert sch._point_on_wire(50, 20, wire) is True
+        # Point off the wire (10mm away vertically)
+        assert sch._point_on_wire(25, 30, wire) is False
+        # Point before wire start
+        assert sch._point_on_wire(-10, 20, wire) is False
+
+    def test_point_on_wire_vertical(self):
+        """Point on vertical wire segment."""
+        from kicad_tools.schematic.models.elements import Wire
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wire = Wire.between((20, 0), (20, 50))
+        sch.wires.append(wire)
+
+        # Point on the wire
+        assert sch._point_on_wire(20, 25, wire) is True
+        # Point off the wire
+        assert sch._point_on_wire(30, 25, wire) is False
+
+    def test_point_on_wire_diagonal(self):
+        """Point on diagonal wire segment."""
+        from kicad_tools.schematic.models.elements import Wire
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wire = Wire.between((0, 0), (50, 50))
+        sch.wires.append(wire)
+
+        # Point on the diagonal
+        assert sch._point_on_wire(25, 25, wire) is True
+        # Point off the diagonal
+        assert sch._point_on_wire(25, 30, wire) is False
+
+    def test_point_on_any_wire(self):
+        """Check point against multiple wires."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 20), (50, 20), snap=False)
+        sch.add_wire((100, 0), (100, 50), snap=False)
+
+        # Point on first wire
+        assert sch._point_on_any_wire(25, 20) is True
+        # Point on second wire
+        assert sch._point_on_any_wire(100, 25) is True
+        # Point on neither wire
+        assert sch._point_on_any_wire(60, 60) is False
+
+    def test_find_nearest_wire_point_horizontal(self):
+        """Find nearest point on horizontal wire."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 20), (50, 20), snap=False)
+
+        # Point directly above wire
+        nearest, dist = sch._find_nearest_wire_point(25, 30)
+        assert nearest == (25, 20)
+        assert abs(dist - 10) < 0.01
+
+        # Point to the left of wire
+        nearest, dist = sch._find_nearest_wire_point(-10, 20)
+        assert nearest == (0, 20)
+        assert abs(dist - 10) < 0.01
+
+    def test_find_nearest_wire_point_no_wires(self):
+        """Return None when no wires exist."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        nearest, dist = sch._find_nearest_wire_point(25, 30)
+        assert nearest is None
+        assert dist == float("inf")
+
+
 class TestSchematicQueries:
     """Tests for Schematic query methods."""
 
     def test_find_label(self):
         """Find label by name."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        sch.add_label("NET1", 10, 20, snap=False)
-        sch.add_label("NET2", 30, 40, snap=False)
+        sch.add_label("NET1", 10, 20, snap=False, validate_connection=False)
+        sch.add_label("NET2", 30, 40, snap=False, validate_connection=False)
 
         label = sch.find_label("NET1")
         assert label is not None
@@ -878,9 +1088,9 @@ class TestSchematicQueries:
     def test_find_labels_pattern(self):
         """Find labels by pattern."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        sch.add_label("DATA_IN", 10, 20, snap=False)
-        sch.add_label("DATA_OUT", 30, 40, snap=False)
-        sch.add_label("CLK", 50, 60, snap=False)
+        sch.add_label("DATA_IN", 10, 20, snap=False, validate_connection=False)
+        sch.add_label("DATA_OUT", 30, 40, snap=False, validate_connection=False)
+        sch.add_label("CLK", 50, 60, snap=False, validate_connection=False)
 
         matches = sch.find_labels("DATA_*")
         assert len(matches) == 2
@@ -888,8 +1098,8 @@ class TestSchematicQueries:
     def test_find_labels_all(self):
         """Find all labels."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        sch.add_label("NET1", 10, 20, snap=False)
-        sch.add_label("NET2", 30, 40, snap=False)
+        sch.add_label("NET1", 10, 20, snap=False, validate_connection=False)
+        sch.add_label("NET2", 30, 40, snap=False, validate_connection=False)
 
         matches = sch.find_labels()
         assert len(matches) == 2
@@ -934,8 +1144,8 @@ class TestSchematicQueries:
     def test_find_wires_connected_to_label(self):
         """Find wires connected to a label."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        sch.add_label("NET1", 10, 20, snap=False)
         sch.add_wire((10, 20), (30, 20), snap=False)
+        sch.add_label("NET1", 10, 20, snap=False)
 
         wires = sch.find_wires(connected_to_label="NET1")
         assert len(wires) == 1
@@ -976,7 +1186,7 @@ class TestSchematicRemoval:
     def test_remove_label(self):
         """Remove label by name."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        sch.add_label("NET1", 10, 20, snap=False)
+        sch.add_label("NET1", 10, 20, snap=False, validate_connection=False)
         assert len(sch.labels) == 1
 
         result = sch.remove_label("NET1")
@@ -1010,8 +1220,8 @@ class TestSchematicRemoval:
     def test_remove_net(self):
         """Remove net (label and connected wires)."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        sch.add_label("NET1", 10, 20, snap=False)
         sch.add_wire((10, 20), (30, 20), snap=False)
+        sch.add_label("NET1", 10, 20, snap=False)
 
         result = sch.remove_net("NET1")
         assert result["label_removed"] is True
