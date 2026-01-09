@@ -39,8 +39,8 @@ def create_usb_joystick_schematic(output_path: Path) -> bool:
     )
 
     # Layout constants
-    RAIL_VCC = 25.4       # Top rail for VCC
-    RAIL_GND = 177.8      # Bottom rail for GND
+    RAIL_VCC = 25.4  # Top rail for VCC
+    RAIL_GND = 177.8  # Bottom rail for GND
 
     # =========================================================================
     # Section 1: Place MCU (central component)
@@ -53,7 +53,7 @@ def create_usb_joystick_schematic(output_path: Path) -> bool:
         mcu = sch.add_symbol(
             "Connector_Generic:Conn_02x16_Counter_Clockwise",
             x=101.6,  # 4" from left (in mm)
-            y=88.9,   # Center vertically
+            y=88.9,  # Center vertically
             ref="U1",
             value="MCU",
         )
@@ -183,10 +183,10 @@ def create_usb_joystick_schematic(output_path: Path) -> bool:
     print("\n6. Placing Decoupling Capacitors...")
 
     cap_positions = [
-        ("C1", 88.9, 63.5),    # Near MCU VCC
-        ("C2", 114.3, 63.5),   # Near MCU VCC
-        ("C3", 88.9, 114.3),   # Near MCU GND
-        ("C4", 55.88, 38.1),   # Near USB VBUS
+        ("C1", 88.9, 63.5),  # Near MCU VCC
+        ("C2", 114.3, 63.5),  # Near MCU VCC
+        ("C3", 88.9, 114.3),  # Near MCU GND
+        ("C4", 55.88, 38.1),  # Near USB VBUS
     ]
 
     caps = []
@@ -311,6 +311,7 @@ def main():
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
 

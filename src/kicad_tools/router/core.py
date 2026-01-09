@@ -20,6 +20,7 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
+from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
@@ -1230,3 +1231,100 @@ class Autorouter:
                 analyses[net_id] = analysis
 
         return analyses
+
+    # =========================================================================
+    # Placement-Routing Feedback API
+    # =========================================================================
+
+    def route_with_placement_feedback(
+        self,
+        pcb: any = None,
+        max_adjustments: int = 3,
+        use_negotiated: bool = True,
+        min_confidence: float = 0.5,
+        verbose: bool = True,
+    ) -> PlacementFeedbackResult:
+        """Route with automatic placement adjustment on failures.
+
+        Implements a closed-loop feedback system between routing failures
+        and placement optimization. When routing fails, this method:
+
+        1. Analyzes failures to determine root causes
+        2. Generates placement strategies to resolve failures
+        3. Applies the best safe strategy to adjust placement
+        4. Clears routes and retries routing
+        5. Repeats until success or max iterations reached
+
+        This enables automatic recovery from placement-induced routing
+        failures without manual intervention.
+
+        Args:
+            pcb: The PCB object to modify placement on. If None, only
+                routing will be attempted (no placement adjustment).
+            max_adjustments: Maximum number of placement adjustments to try.
+                Each adjustment moves one or more components.
+            use_negotiated: Whether to use negotiated congestion routing.
+                Negotiated routing is generally more successful but slower.
+            min_confidence: Minimum confidence required to apply a strategy.
+                Strategies below this threshold are skipped.
+            verbose: Whether to print progress information.
+
+        Returns:
+            PlacementFeedbackResult with:
+            - success: Whether all nets were routed
+            - routes: Final list of routes
+            - iterations: Number of iterations performed
+            - adjustments: List of placement adjustments made
+            - failed_nets: Net IDs that remain unrouted
+            - total_components_moved: Total components moved
+
+        Example::
+
+            from kicad_tools.router import Autorouter
+            from kicad_tools.schema.pcb import PCB
+
+            # Load PCB
+            pcb = PCB.from_file("board.kicad_pcb")
+
+            # Create router and add components
+            router = Autorouter(100, 100)
+            for fp in pcb.footprints:
+                pads = [...]  # Extract pad info
+                router.add_component(fp.reference, pads)
+
+            # Route with automatic placement feedback
+            result = router.route_with_placement_feedback(
+                pcb=pcb,
+                max_adjustments=3,
+            )
+
+            if result.success:
+                print(f"Routed successfully!")
+                print(f"  Iterations: {result.iterations}")
+                print(f"  Components moved: {result.total_components_moved}")
+            else:
+                print(f"Failed to route {len(result.failed_nets)} nets")
+                for adj in result.adjustments:
+                    print(f"  Tried: {adj.result.message}")
+
+        Note:
+            When pcb is None, this method behaves like route_all() or
+            route_all_negotiated() depending on the use_negotiated flag.
+            Placement adjustments require a PCB object to modify.
+
+        See Also:
+            - route_all_negotiated: For negotiated routing without feedback
+            - analyze_routing_failure: For analyzing individual failures
+            - get_failed_nets: For getting list of failed nets
+        """
+        feedback_loop = PlacementFeedbackLoop(
+            router=self,
+            pcb=pcb,
+            verbose=verbose,
+        )
+
+        return feedback_loop.run(
+            max_adjustments=max_adjustments,
+            use_negotiated=use_negotiated,
+            min_confidence=min_confidence,
+        )
