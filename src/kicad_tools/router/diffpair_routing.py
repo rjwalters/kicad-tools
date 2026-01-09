@@ -132,8 +132,7 @@ class CoupledPathfinder:
         self._trace_half_width_cells = max(
             1,
             math.ceil(
-                (self.rules.trace_width / 2 + self.rules.trace_clearance)
-                / self.grid.resolution
+                (self.rules.trace_width / 2 + self.rules.trace_clearance) / self.grid.resolution
             ),
         )
 
@@ -141,8 +140,7 @@ class CoupledPathfinder:
         self._via_half_cells = max(
             1,
             math.ceil(
-                (self.rules.via_diameter / 2 + self.rules.via_clearance)
-                / self.grid.resolution
+                (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
             ),
         )
 
@@ -347,18 +345,14 @@ class CoupledPathfinder:
 
             # Goal check - both traces must reach their goals
             p_at_goal = (
-                current.state.p_pos.x == p_goal_pos.x
-                and current.state.p_pos.y == p_goal_pos.y
+                current.state.p_pos.x == p_goal_pos.x and current.state.p_pos.y == p_goal_pos.y
             )
             n_at_goal = (
-                current.state.n_pos.x == n_goal_pos.x
-                and current.state.n_pos.y == n_goal_pos.y
+                current.state.n_pos.x == n_goal_pos.x and current.state.n_pos.y == n_goal_pos.y
             )
 
             if p_at_goal and n_at_goal:
-                return self._reconstruct_coupled_routes(
-                    current, p_start, p_end, n_start, n_end
-                )
+                return self._reconstruct_coupled_routes(current, p_start, p_end, n_start, n_end)
 
             # Explore neighbors
             for new_state, cost, is_via in self._get_coupled_neighbors(
@@ -375,9 +369,7 @@ class CoupledPathfinder:
                     h = self._heuristic(new_state, p_goal_pos, n_goal_pos)
                     f = new_g + h
 
-                    neighbor_node = CoupledNode(
-                        f, new_g, new_state, current, is_via
-                    )
+                    neighbor_node = CoupledNode(f, new_g, new_state, current, is_via)
                     heapq.heappush(open_set, neighbor_node)
 
         # No path found
@@ -401,12 +393,8 @@ class CoupledPathfinder:
 
         node: CoupledNode | None = end_node
         while node:
-            p_wx, p_wy = self.grid.grid_to_world(
-                node.state.p_pos.x, node.state.p_pos.y
-            )
-            n_wx, n_wy = self.grid.grid_to_world(
-                node.state.n_pos.x, node.state.n_pos.y
-            )
+            p_wx, p_wy = self.grid.grid_to_world(node.state.p_pos.x, node.state.p_pos.y)
+            n_wx, n_wy = self.grid.grid_to_world(node.state.n_pos.x, node.state.n_pos.y)
 
             p_path.append((p_wx, p_wy, node.state.p_pos.layer, node.via_from_parent))
             n_path.append((n_wx, n_wy, node.state.n_pos.layer, node.via_from_parent))
@@ -624,9 +612,7 @@ def create_serpentine(
 
     # Replace the original segment with serpentine segments
     route.segments = (
-        route.segments[:best_segment_idx]
-        + new_segments
-        + route.segments[best_segment_idx + 1 :]
+        route.segments[:best_segment_idx] + new_segments + route.segments[best_segment_idx + 1 :]
     )
 
     return True
@@ -694,9 +680,7 @@ class DiffPairRouter:
         """Analyze net names for differential pairs."""
         return analyze_differential_pairs(self.autorouter.net_names)
 
-    def _get_pair_pads(
-        self, pair: DifferentialPair
-    ) -> tuple[list[Pad], list[Pad]] | None:
+    def _get_pair_pads(self, pair: DifferentialPair) -> tuple[list[Pad], list[Pad]] | None:
         """Get pads for P and N nets of a differential pair.
 
         Returns:

@@ -695,10 +695,7 @@ class TestCreateSerpentine:
         """Test serpentine with zero length to add."""
         route = Route(net=1, net_name="TEST")
         route.segments.append(
-            Segment(
-                x1=0, y1=0, x2=10, y2=0,
-                width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
-            )
+            Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1, net_name="TEST")
         )
 
         result = create_serpentine(route, 0)
@@ -708,10 +705,7 @@ class TestCreateSerpentine:
         """Test serpentine with negative length to add."""
         route = Route(net=1, net_name="TEST")
         route.segments.append(
-            Segment(
-                x1=0, y1=0, x2=10, y2=0,
-                width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
-            )
+            Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1, net_name="TEST")
         )
 
         result = create_serpentine(route, -1)
@@ -722,8 +716,14 @@ class TestCreateSerpentine:
         route = Route(net=1, net_name="TEST")
         route.segments.append(
             Segment(
-                x1=0, y1=0, x2=0.5, y2=0,  # Only 0.5mm long
-                width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+                x1=0,
+                y1=0,
+                x2=0.5,
+                y2=0,  # Only 0.5mm long
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="TEST",
             )
         )
 
@@ -735,8 +735,14 @@ class TestCreateSerpentine:
         route = Route(net=1, net_name="TEST")
         route.segments.append(
             Segment(
-                x1=0, y1=0, x2=10, y2=0,  # 10mm horizontal
-                width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+                x1=0,
+                y1=0,
+                x2=10,
+                y2=0,  # 10mm horizontal
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="TEST",
             )
         )
 
@@ -755,8 +761,14 @@ class TestCreateSerpentine:
         route = Route(net=1, net_name="TEST")
         route.segments.append(
             Segment(
-                x1=0, y1=0, x2=0, y2=10,  # 10mm vertical
-                width=0.2, layer=Layer.F_CU, net=1, net_name="TEST"
+                x1=0,
+                y1=0,
+                x2=0,
+                y2=10,  # 10mm vertical
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="TEST",
             )
         )
 
@@ -772,17 +784,20 @@ class TestMatchPairLengths:
         """Test matching traces that are already matched."""
         p_route = Route(net=1, net_name="USB_D+")
         p_route.segments.append(
-            Segment(
-                x1=0, y1=0, x2=10, y2=0,
-                width=0.2, layer=Layer.F_CU, net=1, net_name="USB_D+"
-            )
+            Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1, net_name="USB_D+")
         )
 
         n_route = Route(net=2, net_name="USB_D-")
         n_route.segments.append(
             Segment(
-                x1=0, y1=1, x2=10, y2=1,  # Same length
-                width=0.2, layer=Layer.F_CU, net=2, net_name="USB_D-"
+                x1=0,
+                y1=1,
+                x2=10,
+                y2=1,  # Same length
+                width=0.2,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="USB_D-",
             )
         )
 
@@ -794,16 +809,28 @@ class TestMatchPairLengths:
         p_route = Route(net=1, net_name="USB_D+")
         p_route.segments.append(
             Segment(
-                x1=0, y1=0, x2=12, y2=0,  # 12mm
-                width=0.2, layer=Layer.F_CU, net=1, net_name="USB_D+"
+                x1=0,
+                y1=0,
+                x2=12,
+                y2=0,  # 12mm
+                width=0.2,
+                layer=Layer.F_CU,
+                net=1,
+                net_name="USB_D+",
             )
         )
 
         n_route = Route(net=2, net_name="USB_D-")
         n_route.segments.append(
             Segment(
-                x1=0, y1=1, x2=10, y2=1,  # 10mm - 2mm shorter (needs serpentine)
-                width=0.2, layer=Layer.F_CU, net=2, net_name="USB_D-"
+                x1=0,
+                y1=1,
+                x2=10,
+                y2=1,  # 10mm - 2mm shorter (needs serpentine)
+                width=0.2,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="USB_D-",
             )
         )
 
@@ -827,17 +854,20 @@ class TestMatchPairLengths:
         """Test matching with serpentines disabled."""
         p_route = Route(net=1, net_name="USB_D+")
         p_route.segments.append(
-            Segment(
-                x1=0, y1=0, x2=10, y2=0,
-                width=0.2, layer=Layer.F_CU, net=1, net_name="USB_D+"
-            )
+            Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1, net_name="USB_D+")
         )
 
         n_route = Route(net=2, net_name="USB_D-")
         n_route.segments.append(
             Segment(
-                x1=0, y1=1, x2=5, y2=1,  # 5mm shorter
-                width=0.2, layer=Layer.F_CU, net=2, net_name="USB_D-"
+                x1=0,
+                y1=1,
+                x2=5,
+                y2=1,  # 5mm shorter
+                width=0.2,
+                layer=Layer.F_CU,
+                net=2,
+                net_name="USB_D-",
             )
         )
 
@@ -865,10 +895,18 @@ class TestCoupledRoutingIntegration:
         )
 
         # Create pads with 2mm spacing between P and N
-        p_start = Pad(x=5.0, y=10.0, width=1.0, height=1.0, net=1, net_name="USB_D+", layer=Layer.F_CU)
-        p_end = Pad(x=25.0, y=10.0, width=1.0, height=1.0, net=1, net_name="USB_D+", layer=Layer.F_CU)
-        n_start = Pad(x=5.0, y=12.0, width=1.0, height=1.0, net=2, net_name="USB_D-", layer=Layer.F_CU)
-        n_end = Pad(x=25.0, y=12.0, width=1.0, height=1.0, net=2, net_name="USB_D-", layer=Layer.F_CU)
+        p_start = Pad(
+            x=5.0, y=10.0, width=1.0, height=1.0, net=1, net_name="USB_D+", layer=Layer.F_CU
+        )
+        p_end = Pad(
+            x=25.0, y=10.0, width=1.0, height=1.0, net=1, net_name="USB_D+", layer=Layer.F_CU
+        )
+        n_start = Pad(
+            x=5.0, y=12.0, width=1.0, height=1.0, net=2, net_name="USB_D-", layer=Layer.F_CU
+        )
+        n_end = Pad(
+            x=25.0, y=12.0, width=1.0, height=1.0, net=2, net_name="USB_D-", layer=Layer.F_CU
+        )
 
         # Add pads to grid
         grid.add_pad(p_start)
