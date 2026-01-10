@@ -33,12 +33,15 @@ DRC Compliance (v0.5.1):
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
@@ -82,6 +85,36 @@ class GridResolutionError(ValueError):
                 f"for reliable DRC compliance."
             )
         super().__init__(message)
+
+
+@dataclass
+class GridAdjustment:
+    """Result of automatic grid resolution adjustment.
+
+    Returned when auto_adjust_grid=True and the grid resolution was adjusted
+    to ensure DRC compliance.
+
+    Attributes:
+        original: The original grid resolution in mm
+        adjusted: The adjusted grid resolution in mm
+        clearance: The clearance requirement in mm
+        was_adjusted: True if adjustment was made
+    """
+
+    original: float
+    adjusted: float
+    clearance: float
+    was_adjusted: bool = False
+
+    @property
+    def message(self) -> str:
+        """Human-readable message about the adjustment."""
+        if self.was_adjusted:
+            return (
+                f"Grid resolution adjusted from {self.original}mm to {self.adjusted}mm "
+                f"for DRC compliance with {self.clearance}mm clearance"
+            )
+        return f"Grid resolution {self.original}mm is compliant"
 
 
 @dataclass
@@ -352,6 +385,45 @@ def validate_grid_resolution(
             warnings.warn(msg, stacklevel=2)
 
     return issues
+
+
+def adjust_grid_for_compliance(
+    grid_resolution: float,
+    clearance: float,
+) -> GridAdjustment:
+    """Adjust grid resolution if needed for DRC compliance.
+
+    When the grid resolution is too coarse for the required clearance,
+    this function calculates a DRC-compliant grid resolution (clearance / 2).
+
+    Args:
+        grid_resolution: Current grid resolution in mm
+        clearance: Required trace/via clearance in mm
+
+    Returns:
+        GridAdjustment with original and adjusted values.
+
+    Example:
+        >>> adjustment = adjust_grid_for_compliance(0.25, 0.2)
+        >>> if adjustment.was_adjusted:
+        ...     print(f"Adjusted: {adjustment.original}mm -> {adjustment.adjusted}mm")
+    """
+    recommended = clearance / 2
+
+    if grid_resolution > recommended:
+        return GridAdjustment(
+            original=grid_resolution,
+            adjusted=recommended,
+            clearance=clearance,
+            was_adjusted=True,
+        )
+
+    return GridAdjustment(
+        original=grid_resolution,
+        adjusted=grid_resolution,
+        clearance=clearance,
+        was_adjusted=False,
+    )
 
 
 def validate_routes(
@@ -798,6 +870,7 @@ def load_pcb_for_routing(
     use_pcb_rules: bool = True,
     validate_drc: bool = True,
     strict_drc: bool = True,
+    auto_adjust_grid: bool = False,
     edge_clearance: float | None = None,
     layer_stack: LayerStack | None = None,
     force_python: bool = False,
@@ -823,6 +896,10 @@ def load_pcb_for_routing(
                     wasted routing time producing DRC-failing output. Set to
                     False for lenient mode that only fails on guaranteed
                     violations (grid > clearance) and warns for risky settings.
+        auto_adjust_grid: If True, automatically adjust grid resolution to a
+                         DRC-compliant value (clearance / 2) instead of failing.
+                         When enabled, logs an INFO message about the adjustment.
+                         Default is False for backward compatibility.
         edge_clearance: Copper-to-edge clearance in mm. If specified, blocks
                         routing within this distance of the board edge. Common
                         values are 0.25-0.5mm. If None, no edge clearance is
@@ -850,6 +927,9 @@ def load_pcb_for_routing(
         >>>
         >>> # Skip DRC validation warnings
         >>> router, nets = load_pcb_for_routing("board.kicad_pcb", validate_drc=False)
+        >>>
+        >>> # Auto-adjust grid resolution for DRC compliance
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb", auto_adjust_grid=True)
         >>>
         >>> # Apply 0.5mm edge clearance
         >>> router, nets = load_pcb_for_routing("board.kicad_pcb", edge_clearance=0.5)
@@ -1031,6 +1111,24 @@ def load_pcb_for_routing(
         else:
             # Fall back to conservative defaults
             rules = DesignRules(grid_resolution=0.1)
+
+    # Auto-adjust grid resolution if enabled
+    if auto_adjust_grid:
+        adjustment = adjust_grid_for_compliance(
+            rules.grid_resolution,
+            rules.trace_clearance,
+        )
+        if adjustment.was_adjusted:
+            logger.info(adjustment.message)
+            # Create new rules with adjusted grid resolution
+            rules = DesignRules(
+                grid_resolution=adjustment.adjusted,
+                trace_width=rules.trace_width,
+                trace_clearance=rules.trace_clearance,
+                via_drill=rules.via_drill,
+                via_diameter=rules.via_diameter,
+                via_clearance=rules.via_clearance,
+            )
 
     # Validate grid resolution for DRC compliance
     if validate_drc:
