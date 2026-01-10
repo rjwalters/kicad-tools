@@ -572,7 +572,9 @@ class Autorouter:
             # Determine failure reason
             if blocking_nets:
                 if len(blocking_nets) == 1:
-                    reason = f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                    reason = (
+                        f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                    )
                 else:
                     reason = f"Blocked by {len(blocking_nets)} nets"
             else:
@@ -876,7 +878,7 @@ class Autorouter:
         print("\n=== Negotiated Congestion Routing ===")
         print(f"  Max iterations: {max_iterations}")
         if adaptive:
-            print(f"  Mode: Adaptive (Issue #633)")
+            print("  Mode: Adaptive (Issue #633)")
             print(f"  Present factor: {initial_present_factor} (adaptive)")
             print(f"  History increment: {history_increment} (adaptive)")
         else:
@@ -1113,7 +1115,7 @@ class Autorouter:
                             overflow_history[-1] = new_overflow
                             overused = self.grid.find_overused_cells()
                         else:
-                            print(f"    Escape attempt did not improve overflow")
+                            print("    Escape attempt did not improve overflow")
 
                     # Skip common code since targeted ripup handles everything
                     # (convergence and oscillation already checked above)
@@ -1186,7 +1188,7 @@ class Autorouter:
                         overflow_history[-1] = new_overflow  # Update last entry
                         overused = self.grid.find_overused_cells()
                     else:
-                        print(f"    Escape attempt did not improve overflow")
+                        print("    Escape attempt did not improve overflow")
                         # Continue to next iteration with different parameters
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)

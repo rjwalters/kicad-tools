@@ -4,8 +4,6 @@ These tests verify the adaptive parameter tuning functions that improve
 convergence for negotiated congestion routing.
 """
 
-import pytest
-
 from kicad_tools.router.algorithms.negotiated import (
     calculate_history_increment,
     calculate_present_cost,
