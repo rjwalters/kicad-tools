@@ -6,6 +6,7 @@ import math
 import os
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -54,11 +55,36 @@ from .tuning import (
 )
 from .zones import ZoneManager
 
+
+@dataclass
+class RoutingFailure:
+    """Records a failed routing attempt with diagnostic information.
+
+    Attributes:
+        net: Net ID
+        net_name: Human-readable net name
+        source_pad: Source pad (ref, pin) tuple
+        target_pad: Target pad (ref, pin) tuple
+        blocking_nets: Set of net IDs that blocked this route
+        blocking_components: Components blocking the path (e.g., "U1", "R4")
+        reason: Human-readable failure reason
+    """
+
+    net: int
+    net_name: str
+    source_pad: tuple[str, str]
+    target_pad: tuple[str, str]
+    blocking_nets: set[int] = field(default_factory=set)
+    blocking_components: list[str] = field(default_factory=list)
+    reason: str = "No path found"
+
+
 # Re-export for backward compatibility
 __all__ = [
     "Autorouter",
     "AdaptiveAutorouter",
     "Corridor",
+    "RoutingFailure",
     "RoutingResult",
     "SparseRouter",
     "Waypoint",
@@ -150,6 +176,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
         # Add directly to avoid component grouping overhead
         from kicad_tools.router.primitives import Pad
 
+        pin = str(pad_info["number"])
         pad = Pad(
             x=pad_info["x"],
             y=pad_info["y"],
@@ -159,10 +186,11 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             net_name=pad_info["net_name"],
             layer=pad_info["layer"],
             ref=ref,
+            pin=pin,
             through_hole=pad_info["through_hole"],
             drill=pad_info["drill"],
         )
-        key = (ref, str(pad_info["number"]))
+        key = (ref, pin)
         router.pads[key] = pad
         router.grid.add_pad(pad)
 
@@ -251,6 +279,9 @@ class Autorouter:
 
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
+
+        # Routing failure tracking (Issue #688)
+        self.routing_failures: list[RoutingFailure] = []
 
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
@@ -413,6 +444,7 @@ class Autorouter:
     def add_component(self, ref: str, pads: list[dict]):
         """Add a component's pads."""
         for pad_info in pads:
+            pin = str(pad_info["number"])
             pad = Pad(
                 x=pad_info["x"],
                 y=pad_info["y"],
@@ -422,10 +454,11 @@ class Autorouter:
                 net_name=pad_info.get("net_name", ""),
                 layer=pad_info.get("layer", Layer.F_CU),
                 ref=ref,
+                pin=pin,
                 through_hole=pad_info.get("through_hole", False),
                 drill=pad_info.get("drill", 0.0),
             )
-            key = (ref, str(pad_info["number"]))
+            key = (ref, pin)
             self.pads[key] = pad
 
             if pad.net > 0:
@@ -522,10 +555,44 @@ class Autorouter:
             self._mark_route(route)
             self.routes.append(route)
 
+        def record_failure(source_pad: Pad, target_pad: Pad):
+            """Record a routing failure for diagnostics."""
+            # Find blocking nets using the router's analysis
+            blocking_nets = self.router.find_blocking_nets(source_pad, target_pad)
+
+            # Map blocking nets to component references
+            blocking_components = []
+            for blocking_net in blocking_nets:
+                # Find pads on this blocking net
+                for (ref, _pin), pad in self.pads.items():
+                    if pad.net == blocking_net and ref not in blocking_components:
+                        blocking_components.append(ref)
+                        break  # One component per net is enough
+
+            # Determine failure reason
+            if blocking_nets:
+                if len(blocking_nets) == 1:
+                    reason = f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                else:
+                    reason = f"Blocked by {len(blocking_nets)} nets"
+            else:
+                reason = "No path found (congestion or obstacles)"
+
+            failure = RoutingFailure(
+                net=net,
+                net_name=self.net_names.get(net, f"Net_{net}"),
+                source_pad=(source_pad.ref, source_pad.pin),
+                target_pad=(target_pad.ref, target_pad.pin),
+                blocking_nets=blocking_nets,
+                blocking_components=blocking_components,
+                reason=reason,
+            )
+            self.routing_failures.append(failure)
+
         if use_mst and len(pad_objs) > 2:
-            new_routes = mst_router.route_net(pad_objs, mark_route)
+            new_routes = mst_router.route_net(pad_objs, mark_route, record_failure)
         else:
-            new_routes = mst_router.route_net_star(pad_objs, mark_route)
+            new_routes = mst_router.route_net_star(pad_objs, mark_route, record_failure)
 
         routes.extend(new_routes)
         return routes

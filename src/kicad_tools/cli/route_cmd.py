@@ -256,8 +256,6 @@ def show_failure_diagnostics(
     if quiet:
         return
 
-    from kicad_tools.router import RoutabilityAnalyzer
-
     # Find unrouted nets
     routed_net_ids = {route.net for route in router.routes}
     all_net_ids = {v for k, v in net_map.items() if v > 0}
@@ -269,68 +267,65 @@ def show_failure_diagnostics(
     print(f"\n{'=' * 60}")
     print("ROUTING FAILURE DIAGNOSTICS")
     print(f"{'=' * 60}")
-    print(f"\nFailed to route {len(unrouted_ids)} net(s):\n")
 
     # Get net name mapping
     reverse_net = {v: k for k, v in net_map.items()}
 
+    # Group recorded failures by net
+    failures_by_net: dict[int, list] = {}
+    for failure in getattr(router, "routing_failures", []):
+        if failure.net not in failures_by_net:
+            failures_by_net[failure.net] = []
+        failures_by_net[failure.net].append(failure)
+
+    # Collect all blocking components for suggestions
+    all_blocking_components: set[str] = set()
+
+    print(f"\nFailed nets ({len(unrouted_ids)}):\n")
+
     for net_id in sorted(unrouted_ids):
         net_name = reverse_net.get(net_id, f"Net_{net_id}")
-        pad_keys = router.nets.get(net_id, [])
+        net_failures = failures_by_net.get(net_id, [])
 
-        if not pad_keys:
-            continue
+        # Determine failure reason
+        if net_failures:
+            # Use recorded failure information
+            failure = net_failures[0]  # First failure gives the reason
+            reason = failure.reason
+            for f in net_failures:
+                all_blocking_components.update(f.blocking_components)
+        else:
+            reason = "No path found"
 
-        print(f"Net: {net_name}")
+        print(f"  - {net_name}: {reason}")
 
-        # Get pad positions
-        pads = [router.pads[k] for k in pad_keys if k in router.pads]
-        if len(pads) >= 2:
-            # Calculate distance
-            import math
+        # Show failed connections if there are multiple
+        if len(net_failures) > 1:
+            for f in net_failures[:3]:  # Show first 3 failed connections
+                src = f"{f.source_pad[0]}.{f.source_pad[1]}"
+                tgt = f"{f.target_pad[0]}.{f.target_pad[1]}"
+                print(f"      {src} -> {tgt}: {f.reason}")
+            if len(net_failures) > 3:
+                print(f"      ... and {len(net_failures) - 3} more failed connections")
 
-            total_dist = 0.0
-            for i, p1 in enumerate(pads):
-                for p2 in pads[i + 1 :]:
-                    dist = math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2)
-                    total_dist = max(total_dist, dist)
+    # Show suggestions based on failure analysis
+    print("\nSuggestions:")
 
-            print(f"  Pads: {len(pads)}")
-            print(f"  Max distance: {total_dist:.2f}mm")
-            print("  Endpoints:")
-            for ref, pin in pad_keys[:4]:  # Show first 4 pads
-                pad = router.pads.get((ref, pin))
-                if pad:
-                    print(f"    - {ref}.{pin} at ({pad.x:.2f}, {pad.y:.2f})")
-            if len(pad_keys) > 4:
-                print(f"    - ... and {len(pad_keys) - 4} more")
+    if all_blocking_components:
+        comp_list = ", ".join(sorted(all_blocking_components)[:5])
+        if len(all_blocking_components) > 5:
+            comp_list += f" and {len(all_blocking_components) - 5} more"
+        print(f"  - Reposition blocking components: {comp_list}")
 
-        # Analyze what's blocking the path
-        try:
-            analyzer = RoutabilityAnalyzer(router)
-            net_report = analyzer._analyze_net(net_id, pad_keys)
+    # Check if multi-layer routing might help
+    num_layers = getattr(router.grid, "num_layers", 2)
+    if num_layers <= 2:
+        print("  - Consider using more layers for additional routing space")
 
-            if net_report.blocking_obstacles:
-                print("  Blocked by:")
-                for obs in net_report.blocking_obstacles[:5]:
-                    print(f"    - {obs}")
+    print("  - Try negotiated routing: kct route --algorithm negotiated")
+    print("  - Try Monte Carlo routing: kct route --algorithm monte-carlo --trials 20")
 
-            if net_report.suggestions:
-                print("  Suggestions:")
-                for sug in net_report.suggestions:
-                    print(f"    - {sug}")
-
-            if net_report.alternatives:
-                print("  Alternatives:")
-                for alt in net_report.alternatives[:3]:
-                    print(f"    {alt}")
-
-        except Exception:
-            pass  # Skip analysis if it fails
-
-        print()
-
-    print(f"{'=' * 60}")
+    print(f"\n{'=' * 60}")
 
 
 def run_post_route_drc(

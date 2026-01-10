@@ -44,7 +44,7 @@ from .bus import (
     detect_bus_signals,
     group_buses,
 )
-from .core import AdaptiveAutorouter, Autorouter, RoutingResult
+from .core import AdaptiveAutorouter, Autorouter, RoutingFailure, RoutingResult
 from .cpp_backend import (
     CppGrid,
     CppPathfinder,
@@ -104,6 +104,13 @@ from .io import (
     validate_grid_resolution,
     validate_routes,
 )
+from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
+from .length import (
+    LengthTracker,
+    LengthViolation,
+    ViolationType,
+    create_match_group,
+)
 from .net_class import (
     NET_CLASS_PATTERNS,
     SYMBOL_INDICATORS,
@@ -118,13 +125,6 @@ from .net_class import (
     classify_net,
     find_differential_partner,
     is_differential_pair_name,
-)
-from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
-from .length import (
-    LengthTracker,
-    LengthViolation,
-    ViolationType,
-    create_match_group,
 )
 from .optimizer import (
     CollisionChecker,
@@ -193,6 +193,7 @@ __all__ = [
     # High-level API
     "Autorouter",
     "AdaptiveAutorouter",
+    "RoutingFailure",
     "RoutingResult",
     # C++ backend
     "is_cpp_available",

@@ -84,12 +84,15 @@ class MSTRouter:
         self,
         pad_objs: list[Pad],
         mark_route_callback: callable,
+        failure_callback: callable | None = None,
     ) -> list[Route]:
         """Route a net using MST ordering.
 
         Args:
             pad_objs: List of Pad objects to connect
             mark_route_callback: Callback to mark a route on the grid
+            failure_callback: Optional callback to record routing failures.
+                Called with (source_pad, target_pad) when routing fails.
 
         Returns:
             List of successfully created routes
@@ -115,12 +118,16 @@ class MSTRouter:
                 if route:
                     mark_route_callback(route)
                     routes.append(route)
+                elif failure_callback:
+                    failure_callback(source_pad, target_pad)
         else:
             # Simple 2-pin net
             route = self.router.route(pad_objs[0], pad_objs[1])
             if route:
                 mark_route_callback(route)
                 routes.append(route)
+            elif failure_callback:
+                failure_callback(pad_objs[0], pad_objs[1])
 
         return routes
 
@@ -128,12 +135,15 @@ class MSTRouter:
         self,
         pad_objs: list[Pad],
         mark_route_callback: callable,
+        failure_callback: callable | None = None,
     ) -> list[Route]:
         """Route a net using star topology from the first pad.
 
         Args:
             pad_objs: List of Pad objects to connect
             mark_route_callback: Callback to mark a route on the grid
+            failure_callback: Optional callback to record routing failures.
+                Called with (source_pad, target_pad) when routing fails.
 
         Returns:
             List of successfully created routes
@@ -151,5 +161,7 @@ class MSTRouter:
             if route:
                 mark_route_callback(route)
                 routes.append(route)
+            elif failure_callback:
+                failure_callback(first_pad, target_pad)
 
         return routes

@@ -162,6 +162,7 @@ class Pad:
     net_name: str
     layer: Layer = Layer.F_CU
     ref: str = ""  # Component reference
+    pin: str = ""  # Pin number/name
     through_hole: bool = False  # PTH pads block both layers
     drill: float = 0.0  # Drill diameter for PTH pads (0 = use pad size)
 
