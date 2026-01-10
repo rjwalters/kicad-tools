@@ -14,13 +14,14 @@ class Pin:
     """Represents a symbol pin with position and properties.
 
     Pin coordinates in KiCad symbol definitions:
-    - (x, y) is the pin's WIRE CONNECTION POINT (where wires attach)
-    - angle is the direction the pin extends INTO the symbol (0=right, 90=up, 180=left, 270=down)
-    - length is how far the pin extends from the connection point into the symbol
+    - (x, y) is the wire CONNECTION point (where wires attach to the pin)
+    - angle is the direction the pin graphic extends INTO the symbol body
+    - length is how far the pin graphic extends into the symbol
 
-    In KiCad's schematic format, the (at x y angle) in a pin definition specifies
-    the endpoint where wires connect. The pin line then extends FROM that point
-    back toward the symbol body.
+    For example, a resistor's left pin might have:
+    - (x, y) = (-2.54, 0) - where wires connect, outside the symbol
+    - angle = 0 (extending right, toward the symbol body)
+    - length = 2.54 (reaching the symbol body edge)
     """
 
     name: str
@@ -35,13 +36,11 @@ class Pin:
         """Get the wire connection point.
 
         The connection point is where wires attach to the pin.
-        In KiCad, this is simply the pin's (x, y) position as specified
-        in the symbol definition.
+        In KiCad symbol definitions, this is the (x, y) position.
 
         Returns:
             (x, y) tuple of the wire connection point in symbol-local coordinates
         """
-        # The pin's (at x y angle) IS the connection point
         return (self.x, self.y)
 
     @classmethod

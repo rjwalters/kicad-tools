@@ -2676,8 +2676,10 @@ class TestLoadPcbForRouting:
 import warnings
 
 from kicad_tools.router.io import (
+    GridAdjustment,
     GridResolutionError,
     PCBDesignRules,
+    adjust_grid_for_compliance,
     parse_pcb_design_rules,
     validate_grid_resolution,
     validate_routes,
@@ -2855,6 +2857,70 @@ class TestValidateGridResolution:
         # Default behavior should raise for grid > clearance/2
         with pytest.raises(GridResolutionError):
             validate_grid_resolution(0.15, 0.2)  # 0.15 > 0.1 (half of 0.2)
+
+
+class TestAdjustGridForCompliance:
+    """Tests for adjust_grid_for_compliance function (Issue #705)."""
+
+    def test_no_adjustment_when_compliant(self):
+        """Test no adjustment when grid resolution is already compliant."""
+        adjustment = adjust_grid_for_compliance(0.1, 0.2)
+
+        assert adjustment.was_adjusted is False
+        assert adjustment.original == 0.1
+        assert adjustment.adjusted == 0.1
+        assert adjustment.clearance == 0.2
+
+    def test_adjustment_when_too_coarse(self):
+        """Test adjustment when grid resolution exceeds clearance/2."""
+        adjustment = adjust_grid_for_compliance(0.25, 0.2)
+
+        assert adjustment.was_adjusted is True
+        assert adjustment.original == 0.25
+        assert adjustment.adjusted == 0.1  # clearance / 2
+        assert adjustment.clearance == 0.2
+
+    def test_adjustment_at_boundary(self):
+        """Test no adjustment at exact boundary (grid == clearance/2)."""
+        adjustment = adjust_grid_for_compliance(0.1, 0.2)
+
+        assert adjustment.was_adjusted is False
+        assert adjustment.adjusted == 0.1
+
+    def test_adjustment_slightly_over_boundary(self):
+        """Test adjustment when grid is slightly over clearance/2."""
+        adjustment = adjust_grid_for_compliance(0.11, 0.2)
+
+        assert adjustment.was_adjusted is True
+        assert adjustment.adjusted == 0.1
+
+    def test_message_when_adjusted(self):
+        """Test message property when adjustment was made."""
+        adjustment = adjust_grid_for_compliance(0.25, 0.2)
+
+        assert "adjusted" in adjustment.message.lower()
+        assert "0.25" in adjustment.message
+        assert "0.1" in adjustment.message
+
+    def test_message_when_compliant(self):
+        """Test message property when no adjustment needed."""
+        adjustment = adjust_grid_for_compliance(0.1, 0.2)
+
+        assert "compliant" in adjustment.message.lower()
+
+    def test_adjustment_dataclass_immutable_fields(self):
+        """Test GridAdjustment has expected fields."""
+        adjustment = GridAdjustment(
+            original=0.25,
+            adjusted=0.1,
+            clearance=0.2,
+            was_adjusted=True,
+        )
+
+        assert adjustment.original == 0.25
+        assert adjustment.adjusted == 0.1
+        assert adjustment.clearance == 0.2
+        assert adjustment.was_adjusted is True
 
 
 class TestValidateRoutes:
@@ -3098,6 +3164,189 @@ class TestLoadPcbForRoutingDrcCompliance:
         # Custom rules should be used, not PCB rules
         assert router.rules.trace_width == 0.3
         assert router.rules.trace_clearance == 0.25
+
+    def test_auto_adjust_grid_adjusts_coarse_resolution(self, tmp_path):
+        """Test that auto_adjust_grid=True adjusts coarse grid resolution."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_auto_adjust.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with coarse grid resolution (0.25 > 0.2/2 = 0.1)
+        rules = DesignRules(grid_resolution=0.25, trace_clearance=0.2)
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), rules=rules, auto_adjust_grid=True, validate_drc=True
+        )
+
+        # Grid should be adjusted to clearance/2
+        assert router.rules.grid_resolution == 0.1
+        # Other rules should be preserved
+        assert router.rules.trace_clearance == 0.2
+
+    def test_auto_adjust_grid_no_change_when_compliant(self, tmp_path):
+        """Test that auto_adjust_grid=True doesn't change compliant grid."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_auto_adjust.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with compliant grid resolution
+        rules = DesignRules(grid_resolution=0.1, trace_clearance=0.2)
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), rules=rules, auto_adjust_grid=True, validate_drc=True
+        )
+
+        # Grid should not be changed
+        assert router.rules.grid_resolution == 0.1
+
+    def test_auto_adjust_grid_false_raises_error(self, tmp_path):
+        """Test that auto_adjust_grid=False (default) raises error for bad grid."""
+        import pytest
+
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_auto_adjust.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with coarse grid resolution
+        rules = DesignRules(grid_resolution=0.25, trace_clearance=0.2)
+
+        # Should raise GridResolutionError when auto_adjust_grid=False
+        with pytest.raises(GridResolutionError):
+            load_pcb_for_routing(
+                str(pcb_file), rules=rules, auto_adjust_grid=False, validate_drc=True
+            )
+
+    def test_auto_adjust_grid_preserves_other_rules(self, tmp_path):
+        """Test that auto_adjust_grid preserves all other design rules."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_auto_adjust.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with specific values
+        rules = DesignRules(
+            grid_resolution=0.25,  # Will be adjusted
+            trace_width=0.15,
+            trace_clearance=0.2,
+            via_drill=0.3,
+            via_diameter=0.6,
+            via_clearance=0.25,
+        )
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), rules=rules, auto_adjust_grid=True, validate_drc=True
+        )
+
+        # Grid should be adjusted
+        assert router.rules.grid_resolution == 0.1
+        # All other rules should be preserved
+        assert router.rules.trace_width == 0.15
+        assert router.rules.trace_clearance == 0.2
+        assert router.rules.via_drill == 0.3
+        assert router.rules.via_diameter == 0.6
+        assert router.rules.via_clearance == 0.25
+
+    def test_auto_adjust_grid_preserves_cost_settings(self, tmp_path):
+        """Test that auto_adjust_grid preserves cost and layer settings."""
+        from kicad_tools.router import Layer
+
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_cost_preserve.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with custom cost settings and layer preferences
+        rules = DesignRules(
+            grid_resolution=0.25,  # Will be adjusted
+            trace_clearance=0.2,
+            # Custom cost settings
+            cost_turn=15.0,  # Non-default
+            cost_via=25.0,  # Non-default
+            cost_congestion=5.0,  # Non-default
+            # Custom layer preference
+            preferred_layer=Layer.B_CU,  # Non-default
+        )
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), rules=rules, auto_adjust_grid=True, validate_drc=True
+        )
+
+        # Grid should be adjusted
+        assert router.rules.grid_resolution == 0.1
+        # Cost settings should be preserved (these were the bug - previously reset to defaults)
+        assert router.rules.cost_turn == 15.0
+        assert router.rules.cost_via == 25.0
+        assert router.rules.cost_congestion == 5.0
+        # Layer preference should be preserved
+        assert router.rules.preferred_layer == Layer.B_CU
 
 
 # =============================================================================

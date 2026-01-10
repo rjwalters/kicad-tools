@@ -94,8 +94,10 @@ from .heuristics import (
 )
 from .io import (
     ClearanceViolation,
+    GridAdjustment,
     GridResolutionError,
     PCBDesignRules,
+    adjust_grid_for_compliance,
     detect_layer_stack,
     generate_netclass_setup,
     load_pcb_for_routing,
@@ -301,8 +303,10 @@ __all__ = [
     "generate_netclass_setup",
     "merge_routes_into_pcb",
     "ClearanceViolation",
+    "GridAdjustment",
     "GridResolutionError",
     "PCBDesignRules",
+    "adjust_grid_for_compliance",
     "parse_pcb_design_rules",
     "validate_grid_resolution",
     "validate_routes",
