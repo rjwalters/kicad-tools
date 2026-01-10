@@ -51,11 +51,13 @@ class CopperElement:
         """Create from a PCB pad with footprint context."""
         # Transform pad position from footprint-local to board coordinates
         abs_x, abs_y = _transform_pad_position(pad, footprint)
+        # Transform pad dimensions to axis-aligned bounding box
+        width, height = _transform_pad_dimensions(pad, footprint)
         return cls(
             element_type="pad",
             layer="*",  # Pads can span multiple layers
             net_number=pad.net_number,
-            geometry=(abs_x, abs_y, pad.size[0], pad.size[1]),
+            geometry=(abs_x, abs_y, width, height),
             reference=f"{footprint.reference}-{pad.number}",
         )
 
@@ -98,6 +100,51 @@ def _transform_pad_position(pad: Pad, footprint: Footprint) -> tuple[float, floa
     abs_y = footprint.position[1] + rotated_y
 
     return abs_x, abs_y
+
+
+def _transform_pad_dimensions(pad: Pad, footprint: Footprint) -> tuple[float, float]:
+    """Transform pad dimensions to axis-aligned bounding box in board coordinates.
+
+    For rectangular pads, when the footprint is rotated, the pad's effective
+    width and height in board coordinates change. This function computes the
+    axis-aligned bounding box dimensions of the rotated pad.
+
+    For cardinal rotations (90°, 270°), this simply swaps width and height.
+    For arbitrary rotations, this computes the axis-aligned bounding box.
+
+    Args:
+        pad: The pad whose dimensions to transform
+        footprint: The footprint containing the pad (provides rotation)
+
+    Returns:
+        Tuple of (width, height) representing the axis-aligned bounding box
+    """
+    width, height = pad.size
+
+    # Get total rotation from footprint
+    # Note: pad.rotation is relative to footprint, footprint.rotation is absolute
+    total_rotation = footprint.rotation
+
+    # Normalize rotation to [0, 360)
+    total_rotation = total_rotation % 360
+
+    # For cardinal rotations, we can simply swap dimensions
+    if abs(total_rotation - 90) < 0.001 or abs(total_rotation - 270) < 0.001:
+        return height, width
+    elif abs(total_rotation) < 0.001 or abs(total_rotation - 180) < 0.001:
+        return width, height
+
+    # For arbitrary rotations, compute the axis-aligned bounding box
+    # of the rotated rectangle
+    angle_rad = math.radians(-total_rotation)  # Negate for KiCad convention
+    cos_a = abs(math.cos(angle_rad))
+    sin_a = abs(math.sin(angle_rad))
+
+    # The bounding box of a rotated rectangle
+    new_width = width * cos_a + height * sin_a
+    new_height = width * sin_a + height * cos_a
+
+    return new_width, new_height
 
 
 def _point_to_segment_distance(
@@ -240,8 +287,14 @@ def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[floa
 
 
 def _rect_rect_clearance(
-    cx1: float, cy1: float, w1: float, h1: float,
-    cx2: float, cy2: float, w2: float, h2: float,
+    cx1: float,
+    cy1: float,
+    w1: float,
+    h1: float,
+    cx2: float,
+    cy2: float,
+    w2: float,
+    h2: float,
 ) -> float:
     """Calculate clearance between two axis-aligned rectangles.
 
@@ -273,8 +326,13 @@ def _rect_rect_clearance(
 
 
 def _rect_circle_clearance(
-    cx: float, cy: float, w: float, h: float,
-    circle_x: float, circle_y: float, radius: float,
+    cx: float,
+    cy: float,
+    w: float,
+    h: float,
+    circle_x: float,
+    circle_y: float,
+    radius: float,
 ) -> float:
     """Calculate clearance between an axis-aligned rectangle and a circle.
 
