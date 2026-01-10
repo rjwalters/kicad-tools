@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 from kicad_tools.mcp.tools.session import (
     apply_move,
     clear_intent,

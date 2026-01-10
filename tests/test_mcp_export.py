@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 from kicad_tools.mcp.server import create_server
 from kicad_tools.mcp.tools.export import (
     SUPPORTED_MANUFACTURERS,

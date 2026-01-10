@@ -6,6 +6,10 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("pydantic")
+
 from kicad_tools.mcp.server import create_server
 from kicad_tools.mcp.tools.export import (
     SUPPORTED_BOM_FORMATS,
