@@ -3,6 +3,22 @@
 This demo demonstrates the kicad-tools autorouter by routing a USB game controller PCB
 with mixed signal types: USB differential pairs, analog inputs, and digital I/O.
 
+## Quick Start
+
+```bash
+# One-command build (recommended)
+kct build boards/03-usb-joystick
+
+# Or run specific steps
+kct build boards/03-usb-joystick --step schematic
+kct build boards/03-usb-joystick --step pcb
+kct build boards/03-usb-joystick --step route
+kct build boards/03-usb-joystick --step verify
+
+# Preview what would happen
+kct build boards/03-usb-joystick --dry-run
+```
+
 ## Circuit Overview
 
 ```
@@ -64,7 +80,9 @@ This design demonstrates routing of different signal classes:
 | `route_demo.py` | Script to run the autorouter |
 | `usb_joystick_routed.kicad_pcb` | Routed PCB output |
 
-## Usage
+## Advanced: Manual Build
+
+For more control over individual steps, you can run Python scripts directly.
 
 ### Step 1: Generate the PCB
 
