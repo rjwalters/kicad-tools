@@ -826,7 +826,9 @@ class TestSchematicConstruction:
     def test_add_hier_label(self):
         """Add hierarchical label to schematic."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
-        hl = sch.add_hier_label("DATA", 10, 20, shape="output", snap=False, validate_connection=False)
+        hl = sch.add_hier_label(
+            "DATA", 10, 20, shape="output", snap=False, validate_connection=False
+        )
         assert len(sch.hier_labels) == 1
         assert hl.text == "DATA"
         assert hl.shape == "output"

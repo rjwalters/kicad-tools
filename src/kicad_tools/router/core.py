@@ -572,7 +572,9 @@ class Autorouter:
             # Determine failure reason
             if blocking_nets:
                 if len(blocking_nets) == 1:
-                    reason = f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                    reason = (
+                        f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                    )
                 else:
                     reason = f"Blocked by {len(blocking_nets)} nets"
             else:

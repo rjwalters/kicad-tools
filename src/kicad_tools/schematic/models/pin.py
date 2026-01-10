@@ -4,7 +4,6 @@ KiCad Pin Model
 Represents a symbol pin with position and properties.
 """
 
-import math
 from dataclasses import dataclass
 
 from kicad_tools.sexp import SExp
@@ -15,38 +14,34 @@ class Pin:
     """Represents a symbol pin with position and properties.
 
     Pin coordinates in KiCad symbol definitions:
-    - (x, y) is the pin's BASE position (where it attaches to the symbol body)
-    - angle is the direction the pin points (0=right, 90=up, 180=left, 270=down)
-    - length is how far the pin extends from the base
+    - (x, y) is the wire CONNECTION point (where wires attach to the pin)
+    - angle is the direction the pin graphic extends INTO the symbol body
+    - length is how far the pin graphic extends into the symbol
 
-    The wire connection point is at the END of the pin, calculated as:
-        connection_x = x + length * cos(angle)
-        connection_y = y + length * sin(angle)
+    For example, a resistor's left pin might have:
+    - (x, y) = (-2.54, 0) - where wires connect, outside the symbol
+    - angle = 0 (extending right, toward the symbol body)
+    - length = 2.54 (reaching the symbol body edge)
     """
 
     name: str
     number: str
-    x: float  # Base position relative to symbol center (NOT wire connection point)
+    x: float  # Wire connection point relative to symbol center
     y: float
-    angle: float  # Pin direction in degrees (0=right, 90=up, 180=left, 270=down)
+    angle: float  # Direction pin extends INTO symbol (0=right, 90=up, 180=left, 270=down)
     length: float
     pin_type: str = "passive"
 
     def connection_point(self) -> tuple[float, float]:
-        """Get the wire connection point (end of pin).
+        """Get the wire connection point.
 
         The connection point is where wires attach to the pin.
-        It's at the END of the pin, not the base.
+        In KiCad symbol definitions, this is the (x, y) position.
 
         Returns:
             (x, y) tuple of the wire connection point in symbol-local coordinates
         """
-        # Calculate the end point of the pin based on angle and length
-        # KiCad angles: 0=right, 90=up, 180=left, 270=down
-        rad = math.radians(self.angle)
-        conn_x = self.x + self.length * math.cos(rad)
-        conn_y = self.y + self.length * math.sin(rad)
-        return (conn_x, conn_y)
+        return (self.x, self.y)
 
     @classmethod
     def from_sexp(cls, node: SExp) -> "Pin":

@@ -67,9 +67,7 @@ class SchematicElementsMixin:
         dist = abs(dy * x - dx * y + x2 * y1 - y2 * x1) / length
         return dist < tolerance
 
-    def _point_on_any_wire(
-        self, x: float, y: float, tolerance: float = POINT_TOLERANCE
-    ) -> bool:
+    def _point_on_any_wire(self, x: float, y: float, tolerance: float = POINT_TOLERANCE) -> bool:
         """Check if a point lies on any wire in the schematic.
 
         Args:
