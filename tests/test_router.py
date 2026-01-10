@@ -3301,6 +3301,53 @@ class TestLoadPcbForRoutingDrcCompliance:
         assert router.rules.via_diameter == 0.6
         assert router.rules.via_clearance == 0.25
 
+    def test_auto_adjust_grid_preserves_cost_settings(self, tmp_path):
+        """Test that auto_adjust_grid preserves cost and layer settings."""
+        from kicad_tools.router import Layer
+
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+  )
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (net 0 "")
+  (footprint "Test"
+    (layer "F.Cu")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)"""
+        pcb_file = tmp_path / "test_cost_preserve.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Use rules with custom cost settings and layer preferences
+        rules = DesignRules(
+            grid_resolution=0.25,  # Will be adjusted
+            trace_clearance=0.2,
+            # Custom cost settings
+            cost_turn=15.0,  # Non-default
+            cost_via=25.0,  # Non-default
+            cost_congestion=5.0,  # Non-default
+            # Custom layer preference
+            preferred_layer=Layer.B_CU,  # Non-default
+        )
+
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), rules=rules, auto_adjust_grid=True, validate_drc=True
+        )
+
+        # Grid should be adjusted
+        assert router.rules.grid_resolution == 0.1
+        # Cost settings should be preserved (these were the bug - previously reset to defaults)
+        assert router.rules.cost_turn == 15.0
+        assert router.rules.cost_via == 25.0
+        assert router.rules.cost_congestion == 5.0
+        # Layer preference should be preserved
+        assert router.rules.preferred_layer == Layer.B_CU
+
 
 # =============================================================================
 # Net Class Setup and PCB Merge Tests (Issue #45 - KiCad 7+ Compatibility)

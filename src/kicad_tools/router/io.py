@@ -37,7 +37,7 @@ import logging
 import math
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1120,15 +1120,8 @@ def load_pcb_for_routing(
         )
         if adjustment.was_adjusted:
             logger.info(adjustment.message)
-            # Create new rules with adjusted grid resolution
-            rules = DesignRules(
-                grid_resolution=adjustment.adjusted,
-                trace_width=rules.trace_width,
-                trace_clearance=rules.trace_clearance,
-                via_drill=rules.via_drill,
-                via_diameter=rules.via_diameter,
-                via_clearance=rules.via_clearance,
-            )
+            # Update grid resolution while preserving all other rule settings
+            rules = replace(rules, grid_resolution=adjustment.adjusted)
 
     # Validate grid resolution for DRC compliance
     if validate_drc:
