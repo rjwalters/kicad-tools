@@ -44,7 +44,7 @@ from .bus import (
     detect_bus_signals,
     group_buses,
 )
-from .core import AdaptiveAutorouter, Autorouter, RoutingResult
+from .core import AdaptiveAutorouter, Autorouter, RoutingFailure, RoutingResult
 from .cpp_backend import (
     CppGrid,
     CppPathfinder,
@@ -194,6 +194,7 @@ __all__ = [
     # High-level API
     "Autorouter",
     "AdaptiveAutorouter",
+    "RoutingFailure",
     "RoutingResult",
     # C++ backend
     "is_cpp_available",
