@@ -2346,9 +2346,12 @@ class TestLoadPcbForRouting:
             grid_resolution=0.5,
         )
 
+        # Use validate_drc=False since this test is about custom rules, not DRC compliance
+        # (Note: grid_resolution > clearance would always fail even with strict_drc=False)
         router, net_map = load_pcb_for_routing(
             str(routing_test_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         assert router.rules.trace_width == 0.3
@@ -2673,6 +2676,7 @@ class TestLoadPcbForRouting:
 import warnings
 
 from kicad_tools.router.io import (
+    GridResolutionError,
     PCBDesignRules,
     parse_pcb_design_rules,
     validate_grid_resolution,
@@ -2778,36 +2782,49 @@ class TestValidateGridResolution:
         """Test no warnings when grid resolution is <= clearance/2."""
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            issues = validate_grid_resolution(0.1, 0.2, warn=True)
+            issues = validate_grid_resolution(0.1, 0.2, warn=True, strict=True)
 
             assert len(issues) == 0
             assert len(w) == 0
 
-    def test_warning_when_resolution_exceeds_half_clearance(self):
-        """Test warning when grid resolution > clearance/2."""
+    def test_strict_raises_when_resolution_exceeds_half_clearance(self):
+        """Test strict mode raises GridResolutionError when grid > clearance/2."""
+        import pytest
+
+        with pytest.raises(GridResolutionError) as exc_info:
+            validate_grid_resolution(0.15, 0.2, strict=True)
+
+        assert exc_info.value.grid_resolution == 0.15
+        assert exc_info.value.clearance == 0.2
+        assert "may cause clearance violations" in str(exc_info.value)
+
+    def test_lenient_warns_when_resolution_exceeds_half_clearance(self):
+        """Test lenient mode warns but doesn't raise when grid > clearance/2."""
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            issues = validate_grid_resolution(0.15, 0.2, warn=True)
+            issues = validate_grid_resolution(0.15, 0.2, warn=True, strict=False)
 
             assert len(issues) == 1
             assert "may cause clearance violations" in issues[0]
             assert len(w) == 1
 
-    def test_error_when_resolution_exceeds_clearance(self):
-        """Test error message when grid resolution > clearance."""
+    def test_always_raises_when_resolution_exceeds_clearance(self):
+        """Test exception always raised when grid resolution > clearance."""
+        import pytest
+
+        # Even with strict=False, this should raise because it WILL cause violations
+        with pytest.raises(GridResolutionError) as exc_info:
+            validate_grid_resolution(0.3, 0.2, strict=False)
+
+        assert exc_info.value.grid_resolution == 0.3
+        assert exc_info.value.clearance == 0.2
+        assert "WILL cause DRC violations" in str(exc_info.value)
+
+    def test_warn_false_suppresses_warnings_in_lenient_mode(self):
+        """Test that warn=False suppresses warnings.warn() calls in lenient mode."""
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            issues = validate_grid_resolution(0.3, 0.2, warn=True)
-
-            assert len(issues) == 1
-            assert "WILL cause DRC violations" in issues[0]
-            assert len(w) == 1
-
-    def test_warn_false_suppresses_warnings(self):
-        """Test that warn=False suppresses warnings.warn() calls."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            issues = validate_grid_resolution(0.3, 0.2, warn=False)
+            issues = validate_grid_resolution(0.15, 0.2, warn=False, strict=False)
 
             # Issues should still be returned
             assert len(issues) == 1
@@ -2816,8 +2833,28 @@ class TestValidateGridResolution:
 
     def test_exact_half_is_compliant(self):
         """Test that exactly clearance/2 is compliant (edge case)."""
-        issues = validate_grid_resolution(0.1, 0.2, warn=False)
+        issues = validate_grid_resolution(0.1, 0.2, warn=False, strict=True)
         assert len(issues) == 0
+
+    def test_exception_has_correct_attributes(self):
+        """Test GridResolutionError has correct attributes."""
+        import pytest
+
+        with pytest.raises(GridResolutionError) as exc_info:
+            validate_grid_resolution(0.3, 0.2)
+
+        error = exc_info.value
+        assert error.grid_resolution == 0.3
+        assert error.clearance == 0.2
+        assert error.recommended == 0.1  # clearance / 2
+
+    def test_default_is_strict_mode(self):
+        """Test that strict=True is the default behavior."""
+        import pytest
+
+        # Default behavior should raise for grid > clearance/2
+        with pytest.raises(GridResolutionError):
+            validate_grid_resolution(0.15, 0.2)  # 0.15 > 0.1 (half of 0.2)
 
 
 class TestValidateRoutes:

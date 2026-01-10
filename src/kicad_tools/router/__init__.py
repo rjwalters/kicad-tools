@@ -94,6 +94,7 @@ from .heuristics import (
 )
 from .io import (
     ClearanceViolation,
+    GridResolutionError,
     PCBDesignRules,
     detect_layer_stack,
     generate_netclass_setup,
@@ -103,6 +104,13 @@ from .io import (
     route_pcb,
     validate_grid_resolution,
     validate_routes,
+)
+from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
+from .length import (
+    LengthTracker,
+    LengthViolation,
+    ViolationType,
+    create_match_group,
 )
 from .net_class import (
     NET_CLASS_PATTERNS,
@@ -118,13 +126,6 @@ from .net_class import (
     classify_net,
     find_differential_partner,
     is_differential_pair_name,
-)
-from .layers import Layer, LayerDefinition, LayerStack, LayerType, ViaDefinition, ViaRules, ViaType
-from .length import (
-    LengthTracker,
-    LengthViolation,
-    ViolationType,
-    create_match_group,
 )
 from .optimizer import (
     CollisionChecker,
@@ -299,6 +300,7 @@ __all__ = [
     "generate_netclass_setup",
     "merge_routes_into_pcb",
     "ClearanceViolation",
+    "GridResolutionError",
     "PCBDesignRules",
     "parse_pcb_design_rules",
     "validate_grid_resolution",
