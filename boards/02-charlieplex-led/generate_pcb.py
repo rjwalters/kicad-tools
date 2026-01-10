@@ -18,11 +18,22 @@ For a 3x3 grid, we use 9 of these 12 combinations.
 
 Usage:
     python generate_pcb.py [output_file]
+
+Note:
+    Design data (LED connections, resistor connections, nets) is defined
+    in design_spec.py to ensure schematic and PCB stay synchronized.
 """
 
 import sys
 import uuid
 from pathlib import Path
+
+from design_spec import (
+    LED_CONNECTIONS,
+    NETS,
+    RESISTOR_CONNECTIONS,
+    RESISTOR_VALUE,
+)
 
 
 def generate_uuid() -> str:
@@ -57,35 +68,11 @@ LED_POSITIONS = [
     for i in range(3)
 ]
 
-# Net definitions
+# Net definitions imported from design_spec.py (NETS dict)
 # Nets: 0 = no net, 1-4 = LINE_A/B/C/D (MCU to resistors), 5-8 = NODE_A/B/C/D (resistor to LEDs)
-NETS = {
-    "": 0,
-    "LINE_A": 1,
-    "LINE_B": 2,
-    "LINE_C": 3,
-    "LINE_D": 4,
-    "NODE_A": 5,
-    "NODE_B": 6,
-    "NODE_C": 7,
-    "NODE_D": 8,
-    "VCC": 9,
-    "GND": 10,
-}
 
-# Charlieplex LED connections: (anode_node, cathode_node)
+# LED connections imported from design_spec.py (LED_CONNECTIONS tuple)
 # Using 9 of the 12 possible combinations for our 3x3 grid
-LED_CONNECTIONS = [
-    ("NODE_A", "NODE_B"),  # D1: A->B
-    ("NODE_B", "NODE_A"),  # D2: B->A
-    ("NODE_A", "NODE_C"),  # D3: A->C
-    ("NODE_C", "NODE_A"),  # D4: C->A
-    ("NODE_A", "NODE_D"),  # D5: A->D
-    ("NODE_D", "NODE_A"),  # D6: D->A
-    ("NODE_B", "NODE_C"),  # D7: B->C
-    ("NODE_C", "NODE_B"),  # D8: C->B
-    ("NODE_B", "NODE_D"),  # D9: B->D
-]
 
 
 def generate_header() -> str:
@@ -223,7 +210,7 @@ def generate_resistor(ref: str, pos: tuple, input_net: str, output_net: str) -> 
     (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "330R" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "{RESISTOR_VALUE}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" smd roundrect (at {-pad_offset} 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {input_num} "{input_net}"))
@@ -264,20 +251,14 @@ def generate_pcb() -> str:
         generate_mcu(),
     ]
 
-    # Resistors: connect LINE_x to NODE_x
-    resistor_connections = [
-        ("R1", RESISTOR_POSITIONS[0], "LINE_A", "NODE_A"),
-        ("R2", RESISTOR_POSITIONS[1], "LINE_B", "NODE_B"),
-        ("R3", RESISTOR_POSITIONS[2], "LINE_C", "NODE_C"),
-        ("R4", RESISTOR_POSITIONS[3], "LINE_D", "NODE_D"),
-    ]
-    for ref, pos, in_net, out_net in resistor_connections:
-        parts.append(generate_resistor(ref, pos, in_net, out_net))
+    # Resistors: connect LINE_x to NODE_x (using shared design spec)
+    for i, resistor in enumerate(RESISTOR_CONNECTIONS):
+        pos = RESISTOR_POSITIONS[i]
+        parts.append(generate_resistor(resistor.ref, pos, resistor.input_net, resistor.output_net))
 
-    # LEDs with charlieplex connections
-    for i, (pos, (anode, cathode)) in enumerate(zip(LED_POSITIONS, LED_CONNECTIONS, strict=False)):
-        ref = f"D{i + 1}"
-        parts.append(generate_led(ref, pos, anode, cathode))
+    # LEDs with charlieplex connections (using shared design spec)
+    for i, (pos, led_conn) in enumerate(zip(LED_POSITIONS, LED_CONNECTIONS, strict=False)):
+        parts.append(generate_led(led_conn.ref, pos, led_conn.anode_node, led_conn.cathode_node))
 
     parts.append(")")  # Close kicad_pcb
 

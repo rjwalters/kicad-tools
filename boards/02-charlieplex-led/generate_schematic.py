@@ -10,47 +10,25 @@ This approach:
 
 Usage:
     python generate_schematic.py [output_file] [-v|--verbose]
+
+Note:
+    Design data (LED connections, resistor connections, MCU pins) is defined
+    in design_spec.py to ensure schematic and PCB stay synchronized.
 """
 
 import argparse
 import sys
 from pathlib import Path
 
+from design_spec import (
+    LED_CONNECTIONS,
+    MCU_PINS,
+    RESISTOR_CONNECTIONS,
+    RESISTOR_VALUE,
+)
+
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
-
-# Charlieplex LED connections: (LED_ref, anode_node, cathode_node)
-LED_CONNECTIONS = [
-    ("D1", "NODE_A", "NODE_B"),  # A->B
-    ("D2", "NODE_B", "NODE_A"),  # B->A
-    ("D3", "NODE_A", "NODE_C"),  # A->C
-    ("D4", "NODE_C", "NODE_A"),  # C->A
-    ("D5", "NODE_A", "NODE_D"),  # A->D
-    ("D6", "NODE_D", "NODE_A"),  # D->A
-    ("D7", "NODE_B", "NODE_C"),  # B->C
-    ("D8", "NODE_C", "NODE_B"),  # C->B
-    ("D9", "NODE_B", "NODE_D"),  # B->D
-]
-
-# MCU pin assignments
-MCU_PINS = {
-    "1": "LINE_A",
-    "2": "LINE_B",
-    "3": "LINE_C",
-    "4": "LINE_D",
-    "5": None,  # NC
-    "6": None,  # NC
-    "7": "VCC",
-    "8": "GND",
-}
-
-# Resistor connections: (ref, pin1_net, pin2_net)
-RESISTOR_CONNECTIONS = [
-    ("R1", "LINE_A", "NODE_A"),
-    ("R2", "LINE_B", "NODE_B"),
-    ("R3", "LINE_C", "NODE_C"),
-    ("R4", "LINE_D", "NODE_D"),
-]
 
 # Wire stub length for connecting pins to labels
 WIRE_STUB = 5.08  # 200 mils
@@ -145,20 +123,22 @@ def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bo
     resistor_base_y = 63.5
     resistor_spacing = 12.7
 
-    for i, (ref, pin1_net, pin2_net) in enumerate(RESISTOR_CONNECTIONS):
+    for i, resistor in enumerate(RESISTOR_CONNECTIONS):
         x = resistor_base_x
         y = resistor_base_y + i * resistor_spacing
 
-        r = sch.add_symbol("Device:R", x=x, y=y, ref=ref, value="330R", auto_footprint=True)
-        print(f"   {ref}: placed at ({r.x}, {r.y})")
+        r = sch.add_symbol(
+            "Device:R", x=x, y=y, ref=resistor.ref, value=RESISTOR_VALUE, auto_footprint=True
+        )
+        print(f"   {resistor.ref}: placed at ({r.x}, {r.y})")
 
         # Add wire stubs with global labels at resistor pins
         pin1_pos = r.pin_position("1")
         pin2_pos = r.pin_position("2")
 
-        add_pin_label(sch, pin1_pos, pin1_net, direction="left")
-        add_pin_label(sch, pin2_pos, pin2_net, direction="right")
-        print(f"      {pin1_net} --[{ref}]-- {pin2_net}")
+        add_pin_label(sch, pin1_pos, resistor.input_net, direction="left")
+        add_pin_label(sch, pin2_pos, resistor.output_net, direction="right")
+        print(f"      {resistor.input_net} --[{resistor.ref}]-- {resistor.output_net}")
 
     # =========================================================================
     # Section 3: Place LEDs with wire stubs
@@ -170,25 +150,29 @@ def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bo
     led_spacing_x = 25.4
     led_spacing_y = 25.4
 
-    for i, (ref, anode_net, cathode_net) in enumerate(LED_CONNECTIONS):
+    for i, led_conn in enumerate(LED_CONNECTIONS):
         row = i // 3
         col = i % 3
         x = led_start_x + col * led_spacing_x
         y = led_start_y + row * led_spacing_y
 
         led = sch.add_symbol(
-            "Device:LED", x=x, y=y, ref=ref, value="LED",
-            footprint="LED_SMD:LED_0805_2012Metric"
+            "Device:LED",
+            x=x,
+            y=y,
+            ref=led_conn.ref,
+            value="LED",
+            footprint="LED_SMD:LED_0805_2012Metric",
         )
-        print(f"   {ref}: placed at ({led.x}, {led.y})")
+        print(f"   {led_conn.ref}: placed at ({led.x}, {led.y})")
 
         # LED pins: pin 1 = cathode (K), pin 2 = anode (A)
         pin1_pos = led.pin_position("1")  # Cathode
         pin2_pos = led.pin_position("2")  # Anode
 
-        add_pin_label(sch, pin1_pos, cathode_net, direction="left")
-        add_pin_label(sch, pin2_pos, anode_net, direction="right")
-        print(f"      {anode_net} -> LED -> {cathode_net}")
+        add_pin_label(sch, pin1_pos, led_conn.cathode_node, direction="left")
+        add_pin_label(sch, pin2_pos, led_conn.anode_node, direction="right")
+        print(f"      {led_conn.anode_node} -> LED -> {led_conn.cathode_node}")
 
     # =========================================================================
     # Section 4: Add Power Symbols with wire stubs and PWR_FLAG
@@ -282,8 +266,8 @@ def main():
 
         print("\nCharlieplex LED mapping:")
         print("  LED   Anode    Cathode  (To light: Anode=HIGH, Cathode=LOW)")
-        for ref, anode, cathode in LED_CONNECTIONS:
-            print(f"  {ref}    {anode}  {cathode}")
+        for led_conn in LED_CONNECTIONS:
+            print(f"  {led_conn.ref}    {led_conn.anode_node}  {led_conn.cathode_node}")
 
         print("\nNet connectivity (via global labels):")
         print("  MCU pins 1-4 -> LINE_A-D -> R1-R4 -> NODE_A-D -> LEDs")
