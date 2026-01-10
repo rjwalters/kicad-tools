@@ -2,6 +2,30 @@
 
 Complete PCB designs demonstrating kicad-tools capabilities. Each board includes a `.kct` project specification file describing the design intent, requirements, and progress.
 
+## Quick Start
+
+The easiest way to build any demo is using the `kct build` command:
+
+```bash
+# Build any project (runs full pipeline: schematic → PCB → route → verify)
+kct build boards/01-voltage-divider
+
+# Or specify a .kct file directly
+kct build boards/02-charlieplex-led/project.kct
+
+# Run individual steps
+kct build boards/01-voltage-divider --step schematic
+kct build boards/01-voltage-divider --step pcb
+kct build boards/01-voltage-divider --step route
+kct build boards/01-voltage-divider --step verify
+
+# Preview what would happen without running
+kct build boards/01-voltage-divider --dry-run
+
+# Target a specific manufacturer for DRC verification
+kct build boards/01-voltage-divider --mfr jlcpcb
+```
+
 ## Board Status
 
 | # | Board | Status | Components | Nets | Notes |
@@ -16,37 +40,35 @@ Complete PCB designs demonstrating kicad-tools capabilities. Each board includes
 - ⚠️ Needs optimization - Works but may have routing challenges or require post-processing
 - 🚧 Work in progress - Incomplete implementation
 
-## Quick Start
+## Advanced: Manual Build
+
+For more control, you can run individual Python scripts directly:
 
 ```bash
 # Run any board's generation script
 cd boards/01-voltage-divider
 python generate_design.py
 
-# Or use uv
+# Or use uv from the repo root
 uv run python boards/01-voltage-divider/generate_design.py
 ```
 
-## Complete Workflow
+### Post-Build Commands
 
-For a full design-to-manufacturing workflow:
+After building, you can run additional verification and export commands:
 
 ```bash
-# 1. Generate the design
-cd boards/01-voltage-divider
-python generate_design.py
-
-# 2. Check for DRC violations (optional - use manufacturer rules)
+# Check for DRC violations with manufacturer rules
 kct check output/voltage_divider_routed.kicad_pcb --mfr jlcpcb
 
-# 3. Generate BOM
+# Generate BOM
 kct bom output/voltage_divider.kicad_sch --format csv
 
-# 4. Export Gerbers (via KiCad or kicad-cli)
+# Export Gerbers (via KiCad or kicad-cli)
 # Open the .kicad_pcb file in KiCad and use File > Plot
 ```
 
-See individual board READMEs for board-specific workflows.
+See individual board READMEs for board-specific details.
 
 ## Known Issues
 

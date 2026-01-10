@@ -2,6 +2,21 @@
 
 This example demonstrates the complete workflow for creating a PCB design programmatically using kicad-tools.
 
+## Quick Start
+
+```bash
+# One-command build (recommended)
+kct build boards/04-stm32-devboard
+
+# Or run specific steps
+kct build boards/04-stm32-devboard --step schematic
+
+# Preview what would happen
+kct build boards/04-stm32-devboard --dry-run
+```
+
+> **Note:** This board is currently schematic-only. PCB layout and routing are not yet implemented.
+
 ## Overview
 
 We create a simple **STM32 Development Board** (Blue Pill style) with:
@@ -23,7 +38,9 @@ We create a simple **STM32 Development Board** (Blue Pill style) with:
 | `DebugHeader` | SWD programming interface | J2 |
 | `LEDIndicator` | User LED with resistor | D1, R1 |
 
-## Running the Example
+## Advanced: Manual Build
+
+For more control, run the Python script directly:
 
 ```bash
 # From repository root

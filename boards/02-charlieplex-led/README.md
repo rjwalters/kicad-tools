@@ -2,6 +2,22 @@
 
 This demo demonstrates the kicad-tools autorouter by routing a 3x3 LED grid PCB.
 
+## Quick Start
+
+```bash
+# One-command build (recommended)
+kct build boards/02-charlieplex-led
+
+# Or run specific steps
+kct build boards/02-charlieplex-led --step schematic
+kct build boards/02-charlieplex-led --step pcb
+kct build boards/02-charlieplex-led --step route
+kct build boards/02-charlieplex-led --step verify
+
+# Preview what would happen
+kct build boards/02-charlieplex-led --dry-run
+```
+
 ## What is Charlieplexing?
 
 Charlieplexing is a technique for driving many LEDs with fewer GPIO pins. With N pins,
@@ -47,7 +63,9 @@ With 4 GPIO pins, we can drive 4*(4-1) = 12 LEDs. This demo uses 9 for a 3x3 gri
 | `route_demo.py` | Script to run the autorouter on the PCB |
 | `charlieplex_3x3_routed.kicad_pcb` | Routed PCB (after running route_demo.py) |
 
-## Usage
+## Advanced: Manual Build
+
+For more control over individual steps, you can run Python scripts directly.
 
 ### Step 1: Generate the PCB
 

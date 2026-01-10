@@ -2,6 +2,22 @@
 
 This demo demonstrates the complete kicad-tools workflow by creating the simplest possible PCB: a 4-component voltage divider.
 
+## Quick Start
+
+```bash
+# One-command build (recommended)
+kct build boards/01-voltage-divider
+
+# Or run specific steps
+kct build boards/01-voltage-divider --step schematic
+kct build boards/01-voltage-divider --step pcb
+kct build boards/01-voltage-divider --step route
+kct build boards/01-voltage-divider --step verify
+
+# Preview what would happen
+kct build boards/01-voltage-divider --dry-run
+```
+
 ## Circuit Overview
 
 ```
@@ -39,7 +55,9 @@ Two 10k resistors divide the 5V input to produce 2.5V output (50% division ratio
 | `output/voltage_divider.kicad_pcb` | Generated unrouted PCB |
 | `output/voltage_divider_routed.kicad_pcb` | Routed PCB |
 
-## Usage
+## Advanced: Manual Build
+
+For more control, run the Python script directly.
 
 ### Step 1: Generate the Design
 
