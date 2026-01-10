@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 from kicad_tools.mcp.context import (
     AgentPreferences,
     Decision,

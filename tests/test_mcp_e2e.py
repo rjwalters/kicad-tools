@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 from kicad_tools.mcp.server import MCPServer, create_server
 from kicad_tools.mcp.tools.analysis import analyze_board, get_drc_violations
 from kicad_tools.mcp.tools.session import (
