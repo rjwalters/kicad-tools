@@ -399,3 +399,73 @@ class SchematicValidationMixin:
             "power_nets": sorted({p.lib_id.split(":")[1] for p in self.power_symbols}),
             "net_labels": sorted({lbl.text for lbl in self.labels}),
         }
+
+
+def summarize_issues_by_type(issues: list[dict]) -> dict[str, list[dict]]:
+    """Group validation issues by their type.
+
+    Args:
+        issues: List of issue dictionaries from validate()
+
+    Returns:
+        Dictionary mapping issue type to list of issues of that type.
+        Example: {"off_grid_symbol": [...], "missing_junction": [...]}
+    """
+    by_type: dict[str, list[dict]] = {}
+    for issue in issues:
+        issue_type = issue.get("type", "unknown")
+        if issue_type not in by_type:
+            by_type[issue_type] = []
+        by_type[issue_type].append(issue)
+    return by_type
+
+
+def format_validation_summary(
+    issues: list[dict],
+    verbose: bool = False,
+    max_per_type: int = 3,
+) -> str:
+    """Format validation issues as a human-readable summary.
+
+    Args:
+        issues: List of issue dictionaries from validate()
+        verbose: If True, show individual issue details
+        max_per_type: Maximum issues to show per type when verbose
+
+    Returns:
+        Formatted string summarizing the validation results
+    """
+    errors = [i for i in issues if i["severity"] == "error"]
+    warnings = [i for i in issues if i["severity"] == "warning"]
+
+    lines = []
+    lines.append(f"Errors: {len(errors)}")
+    lines.append(f"Warnings: {len(warnings)}")
+
+    # Summarize warnings by type
+    if warnings:
+        warnings_by_type = summarize_issues_by_type(warnings)
+        lines.append("")
+        lines.append("Warning summary:")
+        for issue_type, type_issues in sorted(warnings_by_type.items()):
+            lines.append(f"  - {len(type_issues)} {issue_type}")
+            if verbose:
+                for issue in type_issues[:max_per_type]:
+                    lines.append(f"      {issue.get('message', str(issue))}")
+                if len(type_issues) > max_per_type:
+                    lines.append(f"      ... and {len(type_issues) - max_per_type} more")
+
+    # Show errors (always show details)
+    if errors:
+        lines.append("")
+        lines.append("Errors:")
+        for err in errors[:10]:
+            lines.append(f"  ERROR: {err.get('message', str(err))}")
+        if len(errors) > 10:
+            lines.append(f"  ... and {len(errors) - 10} more errors")
+
+    if not verbose and warnings:
+        lines.append("")
+        lines.append("Use --verbose or -v to see warning details.")
+
+    return "\n".join(lines)

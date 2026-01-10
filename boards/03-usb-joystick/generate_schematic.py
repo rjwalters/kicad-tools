@@ -8,18 +8,24 @@ This script demonstrates the kicad-tools schematic API and autolayout functional
 - find_overlapping_symbols() for validation
 
 Usage:
-    python generate_schematic.py [output_file]
+    python generate_schematic.py [output_file] [-v|--verbose]
 """
 
+import argparse
 import sys
 from pathlib import Path
 
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
+from kicad_tools.schematic.models.validation_mixin import format_validation_summary
 
 
-def create_usb_joystick_schematic(output_path: Path) -> bool:
+def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> bool:
     """
     Create a USB Joystick schematic demonstrating autolayout features.
+
+    Args:
+        output_path: Path to write the schematic file
+        verbose: If True, show detailed validation warnings
 
     Returns True if successful, False if errors occurred.
     """
@@ -261,15 +267,11 @@ def create_usb_joystick_schematic(output_path: Path) -> bool:
     print("\n10. Validating schematic...")
 
     issues = sch.validate()
-    errors = [i for i in issues if i["severity"] == "error"]
-    warnings = [i for i in issues if i["severity"] == "warning"]
 
-    print(f"   Errors: {len(errors)}")
-    print(f"   Warnings: {len(warnings)}")
-
-    if errors:
-        for err in errors[:5]:
-            print(f"      ERROR: {err.get('message', err)}")
+    # Print validation summary with warning categorization
+    summary = format_validation_summary(issues, verbose=verbose)
+    for line in summary.split("\n"):
+        print(f"   {line}")
 
     # Get statistics
     stats = sch.get_statistics()
@@ -292,13 +294,31 @@ def create_usb_joystick_schematic(output_path: Path) -> bool:
 
 def main():
     """Main entry point."""
-    if len(sys.argv) > 1:
-        output_path = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(
+        description="Generate a KiCad schematic for a USB Joystick Controller"
+    )
+    parser.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="Output file path (default: usb_joystick.kicad_sch)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed validation warnings",
+    )
+
+    args = parser.parse_args()
+
+    if args.output:
+        output_path = Path(args.output)
     else:
         output_path = Path(__file__).parent / "usb_joystick.kicad_sch"
 
     try:
-        success = create_usb_joystick_schematic(output_path)
+        success = create_usb_joystick_schematic(output_path, verbose=args.verbose)
 
         print("\n" + "=" * 60)
         print("SUMMARY")
