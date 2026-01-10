@@ -52,6 +52,38 @@ from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
 # =============================================================================
 
 
+class GridResolutionError(ValueError):
+    """Raised when grid resolution is incompatible with DRC compliance.
+
+    This exception is raised when the router detects that the grid resolution
+    is too coarse to guarantee DRC-compliant output. This prevents wasted
+    routing time that would produce unusable results.
+
+    Attributes:
+        grid_resolution: The problematic grid resolution in mm
+        clearance: The required clearance in mm
+        recommended: The recommended grid resolution (clearance / 2) in mm
+    """
+
+    def __init__(
+        self,
+        grid_resolution: float,
+        clearance: float,
+        message: str | None = None,
+    ):
+        self.grid_resolution = grid_resolution
+        self.clearance = clearance
+        self.recommended = clearance / 2
+
+        if message is None:
+            message = (
+                f"Grid resolution {grid_resolution}mm is incompatible with "
+                f"{clearance}mm clearance. Use grid_resolution <= {self.recommended}mm "
+                f"for reliable DRC compliance."
+            )
+        super().__init__(message)
+
+
 @dataclass
 class PCBDesignRules:
     """Design rules extracted from a KiCad PCB file's setup section.
@@ -260,6 +292,7 @@ def validate_grid_resolution(
     grid_resolution: float,
     clearance: float,
     warn: bool = True,
+    strict: bool = True,
 ) -> list[str]:
     """Validate grid resolution against clearance for DRC compliance.
 
@@ -270,13 +303,24 @@ def validate_grid_resolution(
     Args:
         grid_resolution: Router grid resolution in mm
         clearance: Required trace/via clearance in mm
-        warn: If True, emit warnings via warnings.warn()
+        warn: If True, emit warnings via warnings.warn() for non-fatal issues
+        strict: If True (default), raise GridResolutionError for any DRC risk.
+                If False, only raise for guaranteed violations (grid > clearance).
 
     Returns:
         List of warning messages (empty if compliant).
 
+    Raises:
+        GridResolutionError: When grid resolution will cause DRC violations
+            (always when grid > clearance, or when strict=True and grid > clearance/2)
+
     Example:
-        >>> warnings = validate_grid_resolution(0.25, 0.2)
+        >>> # Strict mode (default) - fails fast on any risk
+        >>> validate_grid_resolution(0.15, 0.2, strict=True)
+        GridResolutionError: Grid resolution 0.15mm is incompatible with 0.2mm clearance
+
+        >>> # Lenient mode - only fails on guaranteed violations
+        >>> warnings = validate_grid_resolution(0.15, 0.2, strict=False)
         >>> if warnings:
         ...     print("Grid resolution may cause DRC violations")
     """
@@ -285,13 +329,13 @@ def validate_grid_resolution(
     recommended = clearance / 2
 
     if grid_resolution > clearance:
-        msg = (
+        # This WILL cause DRC violations - always fail
+        raise GridResolutionError(
+            grid_resolution,
+            clearance,
             f"Grid resolution {grid_resolution}mm exceeds clearance {clearance}mm. "
-            f"This WILL cause DRC violations. Use grid_resolution <= {clearance}mm."
+            f"This WILL cause DRC violations. Use grid_resolution <= {clearance}mm.",
         )
-        issues.append(msg)
-        if warn:
-            warnings.warn(msg, stacklevel=2)
 
     elif grid_resolution > recommended:
         msg = (
@@ -299,6 +343,10 @@ def validate_grid_resolution(
             f"with {clearance}mm clearance. Recommend grid_resolution <= {recommended}mm "
             f"for reliable DRC compliance."
         )
+
+        if strict:
+            # In strict mode, any DRC risk is a failure
+            raise GridResolutionError(grid_resolution, clearance, msg)
         issues.append(msg)
         if warn:
             warnings.warn(msg, stacklevel=2)
@@ -749,6 +797,7 @@ def load_pcb_for_routing(
     rules: DesignRules | None = None,
     use_pcb_rules: bool = True,
     validate_drc: bool = True,
+    strict_drc: bool = True,
     edge_clearance: float | None = None,
     layer_stack: LayerStack | None = None,
     force_python: bool = False,
@@ -766,8 +815,14 @@ def load_pcb_for_routing(
                If None and use_pcb_rules=False, uses default rules.
         use_pcb_rules: If True and rules=None, parse design rules from the PCB
                        file's setup section and use them as defaults.
-        validate_drc: If True, validate grid resolution against clearance and
-                      emit warnings for potential DRC issues.
+        validate_drc: If True, validate grid resolution against clearance.
+                      When strict_drc=True (default), raises GridResolutionError
+                      if the grid resolution could cause DRC violations.
+        strict_drc: If True (default), raise GridResolutionError when grid
+                    resolution may cause clearance violations. This prevents
+                    wasted routing time producing DRC-failing output. Set to
+                    False for lenient mode that only fails on guaranteed
+                    violations (grid > clearance) and warns for risky settings.
         edge_clearance: Copper-to-edge clearance in mm. If specified, blocks
                         routing within this distance of the board edge. Common
                         values are 0.25-0.5mm. If None, no edge clearance is
@@ -983,6 +1038,7 @@ def load_pcb_for_routing(
             rules.grid_resolution,
             rules.trace_clearance,
             warn=True,
+            strict=strict_drc,
         )
 
     router = Autorouter(
