@@ -272,13 +272,17 @@ def generate_usb_connector() -> str:
     for pin, px, net_name in pins:
         net_num = NETS.get(net_name, 0)
         net_str = f'(net {net_num} "{net_name}")' if net_name else ""
-        # A-side at y=0, B-side at y=1.0 (wider spacing for routing)
+        # A-side at y=0, B-side at y=1.0 (1.0mm row spacing)
+        # Pad size 0.25mm x 0.35mm ensures >0.127mm clearance:
+        # - Horizontal: 0.5mm pitch - 0.25mm width = 0.25mm gap (for D+/D- pins)
+        # - Vertical: 1.0mm spacing - 0.35mm height = 0.65mm gap (A/B rows)
+        # Note: DRC uses max dimension for clearance, so keep both dimensions small
         py = 0 if pin.startswith("A") else 1.0
         pads.append(
-            f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.3 1.0) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+            f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.25 0.35) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
         )
 
-    # Shield/mounting tabs
+    # Shield/mounting tabs - positioned at y=1.5 to clear B-side pads (at y=1.0)
     pads.append(
         '    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
     )
