@@ -815,6 +815,205 @@ class TestClearanceRuleDistanceCalculations:
         assert elem.geometry == (100.0, 100.0, 0.8, 0.8)
 
 
+class TestRotatedPadDimensions:
+    """Tests for pad dimension transformation with footprint rotation."""
+
+    def test_pad_dimensions_no_rotation(self):
+        """Test pad dimensions with no footprint rotation."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_dimensions
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(0.5, 1.2),  # width=0.5, height=1.2
+            layers=["F.Cu"],
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=0.0,
+            reference="U1",
+            value="TEST",
+        )
+
+        width, height = _transform_pad_dimensions(pad, footprint)
+        assert width == pytest.approx(0.5)
+        assert height == pytest.approx(1.2)
+
+    def test_pad_dimensions_90_degree_rotation(self):
+        """Test pad dimensions with 90 degree footprint rotation."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_dimensions
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(0.5, 1.2),  # width=0.5, height=1.2
+            layers=["F.Cu"],
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=90.0,
+            reference="U1",
+            value="TEST",
+        )
+
+        width, height = _transform_pad_dimensions(pad, footprint)
+        # At 90 degrees, dimensions should be swapped
+        assert width == pytest.approx(1.2)
+        assert height == pytest.approx(0.5)
+
+    def test_pad_dimensions_180_degree_rotation(self):
+        """Test pad dimensions with 180 degree footprint rotation."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_dimensions
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(0.5, 1.2),
+            layers=["F.Cu"],
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=180.0,
+            reference="U1",
+            value="TEST",
+        )
+
+        width, height = _transform_pad_dimensions(pad, footprint)
+        # At 180 degrees, dimensions should remain the same
+        assert width == pytest.approx(0.5)
+        assert height == pytest.approx(1.2)
+
+    def test_pad_dimensions_270_degree_rotation(self):
+        """Test pad dimensions with 270 degree footprint rotation."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_dimensions
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(0.5, 1.2),
+            layers=["F.Cu"],
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=270.0,
+            reference="U1",
+            value="TEST",
+        )
+
+        width, height = _transform_pad_dimensions(pad, footprint)
+        # At 270 degrees, dimensions should be swapped
+        assert width == pytest.approx(1.2)
+        assert height == pytest.approx(0.5)
+
+    def test_pad_dimensions_45_degree_rotation(self):
+        """Test pad dimensions with 45 degree footprint rotation."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_dimensions
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(1.0, 2.0),
+            layers=["F.Cu"],
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=45.0,
+            reference="U1",
+            value="TEST",
+        )
+
+        width, height = _transform_pad_dimensions(pad, footprint)
+        # At 45 degrees, the bounding box should be larger
+        # For a 1x2 rectangle rotated 45 degrees:
+        # new_width = 1*cos(45) + 2*sin(45) = 0.707 + 1.414 = 2.121
+        # new_height = 1*sin(45) + 2*cos(45) = 0.707 + 1.414 = 2.121
+        expected = (1.0 + 2.0) * 0.7071067811865476  # sqrt(2)/2
+        assert width == pytest.approx(expected, rel=0.01)
+        assert height == pytest.approx(expected, rel=0.01)
+
+    def test_copper_element_from_pad_with_rotation(self):
+        """Test that CopperElement.from_pad uses transformed dimensions."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import CopperElement
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(0.5, 1.2),  # width=0.5, height=1.2
+            layers=["F.Cu"],
+            net_number=1,
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=90.0,  # 90 degree rotation
+            reference="U1",
+            value="TEST",
+        )
+
+        elem = CopperElement.from_pad(pad, footprint)
+        assert elem.element_type == "pad"
+        # Dimensions should be swapped due to 90 degree rotation
+        abs_x, abs_y, width, height = elem.geometry
+        assert width == pytest.approx(1.2)  # was 0.5
+        assert height == pytest.approx(0.5)  # was 1.2
+
+    def test_square_pad_unchanged_by_rotation(self):
+        """Test that square pads are unchanged by rotation."""
+        from kicad_tools.schema.pcb import Footprint, Pad
+        from kicad_tools.validate.rules.clearance import _transform_pad_dimensions
+
+        pad = Pad(
+            number="1",
+            type="smd",
+            shape="rect",
+            position=(0.0, 0.0),
+            size=(1.0, 1.0),  # Square pad
+            layers=["F.Cu"],
+        )
+        footprint = Footprint(
+            name="Test",
+            layer="F.Cu",
+            position=(100.0, 100.0),
+            rotation=45.0,  # Any rotation
+            reference="U1",
+            value="TEST",
+        )
+
+        width, height = _transform_pad_dimensions(pad, footprint)
+        # For a 1x1 square rotated 45 degrees, bounding box is sqrt(2) x sqrt(2)
+        # But since it's square, width == height
+        assert width == pytest.approx(height)
+
+
 class TestGraphicLineParsing:
     """Tests for GraphicLine parsing."""
 
