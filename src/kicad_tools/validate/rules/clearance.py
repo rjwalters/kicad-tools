@@ -201,25 +201,105 @@ def _segment_circle_clearance(
 
 
 def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[float, float, float]:
-    """Calculate clearance between two circles (pad/via)."""
+    """Calculate clearance between two pads/vias.
+
+    For vias (circular), uses circle-to-circle distance.
+    For rectangular pads, uses axis-aligned rectangle-to-rectangle distance.
+    For mixed (rect pad to via), uses rect-to-circle distance.
+    """
     x1, y1, w1, h1 = c1.geometry
     x2, y2, w2, h2 = c2.geometry
 
-    # Use max dimension as radius for conservative check
-    r1 = max(w1, h1) / 2
-    r2 = max(w2, h2) / 2
+    # Check if elements are circular (vias or square pads)
+    is_circular_1 = c1.element_type == "via" or abs(w1 - h1) < 0.001
+    is_circular_2 = c2.element_type == "via" or abs(w2 - h2) < 0.001
 
-    # Distance between centers
-    center_dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-    # Edge-to-edge clearance
-    clearance = center_dist - r1 - r2
+    if is_circular_1 and is_circular_2:
+        # Both circular: use circle-to-circle distance
+        r1 = w1 / 2
+        r2 = w2 / 2
+        center_dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+        clearance = center_dist - r1 - r2
+    elif not is_circular_1 and not is_circular_2:
+        # Both rectangular: use rectangle-to-rectangle distance
+        clearance = _rect_rect_clearance(x1, y1, w1, h1, x2, y2, w2, h2)
+    else:
+        # Mixed: rectangle to circle
+        if is_circular_1:
+            # c1 is circle, c2 is rect
+            clearance = _rect_circle_clearance(x2, y2, w2, h2, x1, y1, w1 / 2)
+        else:
+            # c1 is rect, c2 is circle
+            clearance = _rect_circle_clearance(x1, y1, w1, h1, x2, y2, w2 / 2)
 
     # Location is midpoint between centers
     loc_x = (x1 + x2) / 2
     loc_y = (y1 + y2) / 2
 
     return clearance, loc_x, loc_y
+
+
+def _rect_rect_clearance(
+    cx1: float, cy1: float, w1: float, h1: float,
+    cx2: float, cy2: float, w2: float, h2: float,
+) -> float:
+    """Calculate clearance between two axis-aligned rectangles.
+
+    Args:
+        cx1, cy1: Center of rectangle 1
+        w1, h1: Width and height of rectangle 1
+        cx2, cy2: Center of rectangle 2
+        w2, h2: Width and height of rectangle 2
+
+    Returns:
+        Edge-to-edge clearance (negative if overlapping)
+    """
+    # Gap in each axis (distance between edges)
+    gap_x = abs(cx2 - cx1) - (w1 + w2) / 2
+    gap_y = abs(cy2 - cy1) - (h1 + h2) / 2
+
+    if gap_x >= 0 and gap_y >= 0:
+        # Rectangles separated in both axes - corner-to-corner distance
+        return math.sqrt(gap_x * gap_x + gap_y * gap_y)
+    elif gap_x >= 0:
+        # Overlap in Y, separated in X - edge-to-edge in X direction
+        return gap_x
+    elif gap_y >= 0:
+        # Overlap in X, separated in Y - edge-to-edge in Y direction
+        return gap_y
+    else:
+        # Overlap in both axes - return least negative (closest to separating)
+        return max(gap_x, gap_y)
+
+
+def _rect_circle_clearance(
+    cx: float, cy: float, w: float, h: float,
+    circle_x: float, circle_y: float, radius: float,
+) -> float:
+    """Calculate clearance between an axis-aligned rectangle and a circle.
+
+    Args:
+        cx, cy: Center of rectangle
+        w, h: Width and height of rectangle
+        circle_x, circle_y: Center of circle
+        radius: Radius of circle
+
+    Returns:
+        Edge-to-edge clearance (negative if overlapping)
+    """
+    # Find the closest point on the rectangle to the circle center
+    half_w = w / 2
+    half_h = h / 2
+
+    # Clamp circle center to rectangle bounds
+    closest_x = max(cx - half_w, min(circle_x, cx + half_w))
+    closest_y = max(cy - half_h, min(circle_y, cy + half_h))
+
+    # Distance from closest point to circle center
+    dist = math.sqrt((circle_x - closest_x) ** 2 + (circle_y - closest_y) ** 2)
+
+    # Clearance is distance minus radius
+    return dist - radius
 
 
 class ClearanceRule(DRCRule):
