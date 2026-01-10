@@ -15,6 +15,7 @@
     "typecheck": "uv run mypy src/",
     "check:ci": "uv run ruff format . --check && uv run ruff check . && uv run pytest",
     "check:all": "uv run ruff format . --check && uv run ruff check . && uv run mypy src/ && uv run pytest",
-    "worktree:return": "./.loom/scripts/worktree-return.sh"
+    "worktree:return": "./.loom/scripts/worktree-return.sh",
+    "kct": "uv run kct"
   }
 }
