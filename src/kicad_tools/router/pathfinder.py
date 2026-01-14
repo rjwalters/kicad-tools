@@ -808,4 +808,10 @@ class Router:
             )
             route.segments.append(seg)
 
+        # Validate layer transitions and insert any missing vias
+        route.validate_layer_transitions(
+            via_drill=self.rules.via_drill,
+            via_diameter=self.rules.via_diameter,
+        )
+
         return route

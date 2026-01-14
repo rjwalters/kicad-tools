@@ -149,6 +149,61 @@ class Route:
             parts.append(via.to_sexp())
         return "\n\t".join(parts)
 
+    def validate_layer_transitions(
+        self,
+        via_drill: float = 0.35,
+        via_diameter: float = 0.7,
+    ) -> int:
+        """Ensure all layer transitions have corresponding vias.
+
+        When consecutive segments are on different layers, there must be a via
+        at the transition point. This method detects missing vias and inserts
+        them to ensure electrically valid routes.
+
+        Args:
+            via_drill: Drill diameter for inserted vias (mm)
+            via_diameter: Total diameter for inserted vias (mm)
+
+        Returns:
+            Number of vias inserted
+        """
+        if len(self.segments) < 2:
+            return 0
+
+        vias_inserted = 0
+
+        for i in range(len(self.segments) - 1):
+            seg1 = self.segments[i]
+            seg2 = self.segments[i + 1]
+
+            if seg1.layer != seg2.layer:
+                # Layer transition - check for via at connection point
+                # Segments connect at seg1.end == seg2.start
+                transition_x = seg1.x2
+                transition_y = seg1.y2
+
+                # Check if via already exists at this point
+                has_via = any(
+                    abs(via.x - transition_x) < 0.01 and abs(via.y - transition_y) < 0.01
+                    for via in self.vias
+                )
+
+                if not has_via:
+                    # Insert missing via
+                    new_via = Via(
+                        x=transition_x,
+                        y=transition_y,
+                        drill=via_drill,
+                        diameter=via_diameter,
+                        layers=(seg1.layer, seg2.layer),
+                        net=self.net,
+                        net_name=self.net_name,
+                    )
+                    self.vias.append(new_via)
+                    vias_inserted += 1
+
+        return vias_inserted
+
 
 @dataclass
 class Pad:
