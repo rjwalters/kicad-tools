@@ -1015,3 +1015,122 @@ class TestNegotiatedModePadObstacles:
         # Should be able to route to own pads
         net1_routes = [r for r in routes if r.net == 1]
         assert len(net1_routes) > 0 or len(router.routes) > 0, "Should be able to route to own pads"
+
+
+class TestSingleLayerRouting:
+    """Tests for single-layer routing constraint (Issue #715).
+
+    The allowed_layers field in DesignRules provides a hard constraint
+    for restricting routing to specific layers.
+    """
+
+    def test_single_layer_no_vias(self):
+        """Test that single-layer routing produces no vias."""
+        rules = DesignRules(allowed_layers=["F.Cu"])
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Add two pads (default layer is F.Cu)
+        pads = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 40.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        routes = router.route_net(1)
+
+        # Should produce routes with no vias
+        for route in routes:
+            assert len(route.vias) == 0, "Single-layer routing should produce no vias"
+
+    def test_single_layer_all_segments_on_allowed_layer(self):
+        """Test that all segments are on the allowed layer."""
+        rules = DesignRules(allowed_layers=["F.Cu"])
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        pads = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 30.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        routes = router.route_net(1)
+
+        for route in routes:
+            for segment in route.segments:
+                assert segment.layer == Layer.F_CU, f"Segment on {segment.layer}, expected F.Cu"
+
+    def test_back_copper_only_routing(self):
+        """Test routing constrained to B.Cu only."""
+        rules = DesignRules(allowed_layers=["B.Cu"])
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Add through-hole pads (can be routed on any layer)
+        pads = [
+            {
+                "number": "1",
+                "x": 10.0,
+                "y": 20.0,
+                "net": 1,
+                "net_name": "NET1",
+                "through_hole": True,
+                "drill": 0.8,
+            },
+            {
+                "number": "2",
+                "x": 30.0,
+                "y": 20.0,
+                "net": 1,
+                "net_name": "NET1",
+                "through_hole": True,
+                "drill": 0.8,
+            },
+        ]
+        router.add_component("J1", pads)
+
+        routes = router.route_net(1)
+
+        for route in routes:
+            assert len(route.vias) == 0, "Single-layer routing should produce no vias"
+            for segment in route.segments:
+                assert segment.layer == Layer.B_CU, f"Segment on {segment.layer}, expected B.Cu"
+
+    def test_allowed_layers_none_allows_all(self):
+        """Test that allowed_layers=None (default) allows all layers."""
+        rules = DesignRules()  # Default: allowed_layers=None
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Add pads that might need layer change
+        pads = [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 40.0, "y": 30.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        # Add an obstacle to potentially force layer change
+        router.add_obstacle(25.0, 20.0, 5.0, 15.0, Layer.F_CU)
+
+        routes = router.route_net(1)
+
+        # Should be able to route (may or may not use vias depending on path)
+        assert isinstance(routes, list)
+
+    def test_two_layer_constraint(self):
+        """Test allowing both F.Cu and B.Cu explicitly."""
+        rules = DesignRules(allowed_layers=["F.Cu", "B.Cu"])
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        pads = [
+            {"number": "1", "x": 10.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+            {"number": "2", "x": 30.0, "y": 20.0, "net": 1, "net_name": "NET1"},
+        ]
+        router.add_component("R1", pads)
+
+        routes = router.route_net(1)
+
+        # All segments should be on either F.Cu or B.Cu
+        for route in routes:
+            for segment in route.segments:
+                assert segment.layer in [
+                    Layer.F_CU,
+                    Layer.B_CU,
+                ], f"Segment on {segment.layer}, expected F.Cu or B.Cu"

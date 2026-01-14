@@ -386,6 +386,25 @@ class Router:
 
         return 1.0  # Neutral
 
+    def _is_layer_allowed(self, layer_idx: int) -> bool:
+        """Check if routing on this layer is allowed (Issue #715).
+
+        When allowed_layers is set in DesignRules, only those layers
+        can be used for routing. This provides a hard constraint for
+        single-layer or restricted-layer routing.
+
+        Args:
+            layer_idx: Grid layer index
+
+        Returns:
+            True if layer is allowed (or no restriction), False if blocked
+        """
+        if self.rules.allowed_layers is None:
+            return True  # No restriction
+
+        layer_name = self.grid.index_to_layer(layer_idx)
+        return layer_name in self.rules.allowed_layers
+
     def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
         """Check if via placement is legal considering zones on all layers.
 
@@ -452,6 +471,14 @@ class Router:
         # Get all valid start/end layers for this pad type
         start_layers = routable_layers if start.through_hole else [start_layer]
         end_layers = routable_layers if end.through_hole else [end_layer]
+
+        # Filter start/end layers by allowed_layers constraint (Issue #715)
+        if self.rules.allowed_layers is not None:
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            # If no valid layers remain, routing is impossible
+            if not start_layers or not end_layers:
+                return None
 
         # A* setup
         open_set: list[AStarNode] = []
@@ -609,6 +636,10 @@ class Router:
             # Only consider routable layers (skip planes)
             for new_layer in self.grid.get_routable_indices():
                 if new_layer == current.layer:
+                    continue
+
+                # Check layer constraint (Issue #715)
+                if not self._is_layer_allowed(new_layer):
                     continue
 
                 # Check if via placement is valid on ALL layers (through-hole via)
