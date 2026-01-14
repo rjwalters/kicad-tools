@@ -47,12 +47,31 @@ Difference from ``kicad_tools.drc``:
 from .checker import DRCChecker
 from .connectivity import ConnectivityIssue, ConnectivityResult, ConnectivityValidator
 from .consistency import ConsistencyIssue, ConsistencyResult, SchematicPCBChecker
+from .models import (
+    BaseViolation,
+    DRCResult,
+    Location,
+    Severity,
+    ValidationResult,
+    ViolationCategory,
+)
+from .models import (
+    DRCViolation as DRCViolationNew,
+)
 from .netlist import NetlistValidator, SyncIssue, SyncResult
 from .placement import BOMPlacementVerifier, PlacementResult, PlacementStatus
 from .violations import DRCResults, DRCViolation
 
 __all__ = [
-    # DRC validation
+    # New unified models (Pydantic-based)
+    "Severity",
+    "ViolationCategory",
+    "Location",
+    "BaseViolation",
+    "ValidationResult",
+    "DRCViolationNew",
+    "DRCResult",
+    # DRC validation (legacy, for backwards compatibility)
     "DRCChecker",
     "DRCViolation",
     "DRCResults",
