@@ -71,6 +71,8 @@ class EvolutionaryConfig:
     conflict_weight: float = 100.0
     routability_weight: float = 50.0
     boundary_violation_weight: float = 500.0  # Heavy penalty for components outside board
+    pin_alignment_weight: float = 5.0  # Bonus for aligned pins (routing efficiency)
+    pin_alignment_tolerance: float = 0.5  # Tolerance in mm for alignment detection
 
     # Grid snapping
     grid_snap: float = 0.127  # 5 mil grid (0 to disable)
@@ -134,6 +136,8 @@ class _EvaluationContext:
     conflict_weight: float
     routability_weight: float
     boundary_violation_weight: float
+    pin_alignment_weight: float
+    pin_alignment_tolerance: float
 
 
 def _evaluate_fitness_worker(
@@ -196,6 +200,31 @@ def _evaluate_fitness_worker(
             dy = pin2_pos[1] - pin1_pos[1]
             wire_length += math.sqrt(dx * dx + dy * dy)
 
+    # Calculate pin alignment score (routing efficiency)
+    # Aligned pins (horizontal or vertical) are easier to route
+    aligned_pins = 0
+    total_pin_pairs = 0
+    for comp1_ref, pin1_num, comp2_ref, pin2_num in ctx.springs:
+        if comp1_ref not in comp_state or comp2_ref not in comp_state:
+            continue
+
+        _, _, _, _, _, pins1 = comp_state[comp1_ref]
+        _, _, _, _, _, pins2 = comp_state[comp2_ref]
+
+        pin1_pos = next(((px, py) for px, py, pn in pins1 if pn == pin1_num), None)
+        pin2_pos = next(((px, py) for px, py, pn in pins2 if pn == pin2_num), None)
+
+        if pin1_pos and pin2_pos:
+            total_pin_pairs += 1
+            dx = abs(pin2_pos[0] - pin1_pos[0])
+            dy = abs(pin2_pos[1] - pin1_pos[1])
+            # Pins are considered aligned if within tolerance on one axis
+            if dx < ctx.pin_alignment_tolerance or dy < ctx.pin_alignment_tolerance:
+                aligned_pins += 1
+
+    # Alignment score: percentage of aligned pin pairs
+    alignment_score = (aligned_pins / total_pin_pairs * 100.0) if total_pin_pairs > 0 else 0.0
+
     # Count conflicts (AABB overlap)
     conflicts = 0
     comp_list = list(comp_state.values())
@@ -254,6 +283,7 @@ def _evaluate_fitness_worker(
         - conflicts * ctx.conflict_weight
         - boundary_violations * ctx.boundary_violation_weight
         + routability_score * ctx.routability_weight
+        + alignment_score * ctx.pin_alignment_weight
     )
 
     return fitness
@@ -548,6 +578,7 @@ class EvolutionaryPlacementOptimizer:
             conflicts = self._count_conflicts()
             boundary_violations = self._count_boundary_violations()
             routability = self._estimate_routability()
+            alignment = self._count_pin_alignments()
 
             # Weighted sum (higher = better)
             fitness = (
@@ -556,6 +587,7 @@ class EvolutionaryPlacementOptimizer:
                 - conflicts * self.config.conflict_weight
                 - boundary_violations * self.config.boundary_violation_weight
                 + routability * self.config.routability_weight
+                + alignment * self.config.pin_alignment_weight
             )
 
             return fitness
@@ -591,6 +623,41 @@ class EvolutionaryPlacementOptimizer:
             total += math.sqrt(dx * dx + dy * dy)
 
         return total
+
+    def _count_pin_alignments(self) -> float:
+        """
+        Count pin alignment score (routing efficiency metric).
+
+        Returns a score from 0-100 based on the percentage of connected
+        pin pairs that are horizontally or vertically aligned.
+        Aligned pins are easier to route with straight traces.
+        """
+        aligned_pins = 0
+        total_pin_pairs = 0
+        tolerance = self.config.pin_alignment_tolerance
+
+        for spring in self.springs:
+            comp1 = self._component_map.get(spring.comp1_ref)
+            comp2 = self._component_map.get(spring.comp2_ref)
+
+            if not comp1 or not comp2:
+                continue
+
+            pin1 = next((p for p in comp1.pins if p.number == spring.pin1_num), None)
+            pin2 = next((p for p in comp2.pins if p.number == spring.pin2_num), None)
+
+            if not pin1 or not pin2:
+                continue
+
+            total_pin_pairs += 1
+            dx = abs(pin2.x - pin1.x)
+            dy = abs(pin2.y - pin1.y)
+
+            # Pins are considered aligned if within tolerance on one axis
+            if dx < tolerance or dy < tolerance:
+                aligned_pins += 1
+
+        return (aligned_pins / total_pin_pairs * 100.0) if total_pin_pairs > 0 else 0.0
 
     def _count_conflicts(self) -> int:
         """
@@ -741,6 +808,8 @@ class EvolutionaryPlacementOptimizer:
             conflict_weight=self.config.conflict_weight,
             routability_weight=self.config.routability_weight,
             boundary_violation_weight=self.config.boundary_violation_weight,
+            pin_alignment_weight=self.config.pin_alignment_weight,
+            pin_alignment_tolerance=self.config.pin_alignment_tolerance,
         )
 
     def _evaluate_population(self, population: list[Individual]):
