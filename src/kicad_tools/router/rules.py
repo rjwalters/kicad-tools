@@ -80,6 +80,11 @@ class DesignRules:
     cost_zone_same_net: float = 0.1  # Low cost - encourage using zone copper
     cost_zone_clearance: float = 2.0  # Cost near zone boundaries
 
+    # Hard layer constraints (Issue #715)
+    # When set, only these layers are allowed for routing (blocks all others)
+    # Use layer names like ["F.Cu"] for single-layer routing
+    allowed_layers: list[str] | None = None
+
 
 @dataclass
 class LengthConstraint:
