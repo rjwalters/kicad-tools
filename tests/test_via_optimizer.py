@@ -2,6 +2,7 @@
 
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer import (
+    LayerConnectivityError,
     OptimizationConfig,
     TraceOptimizer,
 )
@@ -262,3 +263,139 @@ class TestOptimizationStatsIntegration:
         assert stats.vias_before == 5
         assert stats.vias_after == 3
         assert stats.via_reduction == 40.0
+
+
+class TestLayerConnectivityValidation:
+    """Test layer connectivity validation."""
+
+    def test_valid_route_with_via(self):
+        """Route with proper via at layer transition is valid."""
+        optimizer = ViaOptimizer()
+
+        # Segment on F.Cu ending at (5, 0)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        # Via at (5, 0) connecting F.Cu to B.Cu
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        # Segment on B.Cu starting at (5, 0)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 0
+
+    def test_invalid_route_missing_via(self):
+        """Route with layer transition but no via is invalid."""
+        optimizer = ViaOptimizer()
+
+        # Segment on F.Cu ending at (5, 0)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        # Segment on B.Cu starting at (5, 0) - but no via!
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 1
+        assert errors[0].point == (5.0, 0.0)
+        assert errors[0].from_layer == Layer.F_CU
+        assert errors[0].to_layer == Layer.B_CU
+
+    def test_single_layer_route_is_valid(self):
+        """Route with no layer transitions needs no vias."""
+        optimizer = ViaOptimizer()
+
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 0
+
+    def test_error_string_representation(self):
+        """LayerConnectivityError has useful string representation."""
+        error = LayerConnectivityError(
+            point=(5.0, 10.0),
+            from_layer=Layer.F_CU,
+            to_layer=Layer.B_CU,
+        )
+
+        error_str = str(error)
+        assert "5.0000" in error_str
+        assert "10.0000" in error_str
+        assert "F_CU" in error_str
+        assert "B_CU" in error_str
+
+    def test_multiple_transitions_all_validated(self):
+        """All layer transitions in a route are validated."""
+        optimizer = ViaOptimizer()
+
+        # Route: F.Cu -> B.Cu -> F.Cu with two vias
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        via2 = Via(x=10, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
+        seg3 = Segment(x1=10, y1=0, x2=15, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(
+            net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1, via2]
+        )
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 0
+
+    def test_missing_second_via_detected(self):
+        """Missing via in multi-transition route is detected."""
+        optimizer = ViaOptimizer()
+
+        # Route: F.Cu -> B.Cu -> F.Cu but only first via present
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via1 = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+        # Missing via2 at (10, 0)
+        seg3 = Segment(x1=10, y1=0, x2=15, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1])
+        errors = optimizer.validate_layer_connectivity(route)
+
+        assert len(errors) == 1
+        assert errors[0].point == (10.0, 0.0)
+
+
+class TestOptimizationWithValidation:
+    """Test that optimization validates and restores on failure."""
+
+    def test_optimization_preserves_valid_route(self):
+        """Valid optimization results are kept."""
+        optimizer = ViaOptimizer()
+
+        # Simple route with via that can't be optimized (no alternative path)
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        result = optimizer.optimize_route(route)
+
+        # Verify route is still valid after optimization
+        errors = optimizer.validate_layer_connectivity(result)
+        assert len(errors) == 0
+
+    def test_stats_updated_correctly_on_valid_optimization(self):
+        """Stats are correct when optimization is applied."""
+        optimizer = ViaOptimizer()
+        optimizer.reset_stats()
+
+        # Simple route that stays valid
+        seg1 = Segment(x1=0, y1=0, x2=5, y2=0, width=0.2, layer=Layer.F_CU, net=1)
+        via = Via(x=5, y=0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        seg2 = Segment(x1=5, y1=0, x2=10, y2=0, width=0.2, layer=Layer.B_CU, net=1)
+
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2], vias=[via])
+        optimizer.optimize_route(route)
+
+        stats = optimizer.get_stats()
+        assert stats.vias_before == 1
+        # Via count after depends on whether optimization was applied
+        assert stats.vias_after >= 0

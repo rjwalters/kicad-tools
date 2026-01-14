@@ -92,6 +92,21 @@ class ViaOptimizationStats:
         return (self.vias_removed / self.vias_before) * 100
 
 
+@dataclass
+class LayerConnectivityError:
+    """Error from layer connectivity validation."""
+
+    point: tuple[float, float]
+    from_layer: Layer
+    to_layer: Layer
+
+    def __str__(self) -> str:
+        return (
+            f"Layer transition at ({self.point[0]:.4f}, {self.point[1]:.4f}) "
+            f"from {self.from_layer.name} to {self.to_layer.name} has no via"
+        )
+
+
 class ViaOptimizer:
     """Optimizer for reducing via count in routed traces.
 
@@ -143,11 +158,15 @@ class ViaOptimizer:
         1. Via pair elimination (down-then-up patterns)
         2. Single via removal (same-layer reroute)
 
+        After optimization, validates that all layer transitions still have
+        vias. If validation fails, returns the original route unchanged.
+
         Args:
             route: Route to optimize.
 
         Returns:
-            New Route with minimized vias.
+            New Route with minimized vias, or original route if optimization
+            would break layer connectivity.
         """
         if not self.config.enabled or not route.vias:
             return route
@@ -183,14 +202,26 @@ class ViaOptimizer:
         )
         self._stats.vias_removed_single += singles_removed
 
-        self._stats.vias_after += len(optimized_vias)
-
-        return Route(
+        optimized_route = Route(
             net=route.net,
             net_name=route.net_name,
             segments=optimized_segments,
             vias=optimized_vias,
         )
+
+        # Validate layer connectivity after optimization
+        errors = self.validate_layer_connectivity(optimized_route)
+        if errors:
+            # Optimization broke connectivity - restore original route
+            # Reset stats since we're not applying the optimization
+            self._stats.vias_removed_pairs -= pairs_removed * 2
+            self._stats.vias_removed_single -= singles_removed
+            self._stats.vias_after += len(route.vias)
+            return route
+
+        self._stats.vias_after += len(optimized_vias)
+
+        return optimized_route
 
     def _build_via_contexts(self, route: Route) -> list[ViaContext]:
         """Build context information for each via.
@@ -493,6 +524,78 @@ class ViaOptimizer:
             seg.net = route.net
             seg.net_name = route.net_name
             segments.append(seg)
+
+    def validate_layer_connectivity(
+        self, route: Route
+    ) -> list[LayerConnectivityError]:
+        """Validate that all layer transitions have vias.
+
+        Checks each segment pair for layer transitions. When two segments
+        connect at a point but are on different layers, there must be a
+        via at that connection point.
+
+        Args:
+            route: The route to validate.
+
+        Returns:
+            List of connectivity errors found. Empty list means valid.
+        """
+        errors: list[LayerConnectivityError] = []
+        tol = self.config.tolerance
+
+        # Build via position set for fast lookup
+        via_positions: set[tuple[float, float]] = set()
+        for via in route.vias:
+            # Round to tolerance for matching
+            via_positions.add((round(via.x / tol) * tol, round(via.y / tol) * tol))
+
+        # Build segment endpoint map to find connected segments
+        # Key: (x, y, layer) -> list of segments that end/start there
+        segment_ends: dict[tuple[float, float, Layer], list[Segment]] = {}
+        segment_starts: dict[tuple[float, float, Layer], list[Segment]] = {}
+
+        for seg in route.segments:
+            end_key = (round(seg.x2 / tol) * tol, round(seg.y2 / tol) * tol, seg.layer)
+            start_key = (
+                round(seg.x1 / tol) * tol,
+                round(seg.y1 / tol) * tol,
+                seg.layer,
+            )
+            segment_ends.setdefault(end_key, []).append(seg)
+            segment_starts.setdefault(start_key, []).append(seg)
+
+        # Check for layer transitions without vias
+        # For each segment end point, check if there's a segment starting on a different layer
+        for (x, y, layer1), segs_ending in segment_ends.items():
+            # Check all segments starting at this point on different layers
+            for seg_start in route.segments:
+                start_x = round(seg_start.x1 / tol) * tol
+                start_y = round(seg_start.y1 / tol) * tol
+                layer2 = seg_start.layer
+
+                # Same position, different layers?
+                if start_x == x and start_y == y and layer1 != layer2:
+                    # Check if there's a via at this point
+                    point = (x, y)
+                    if point not in via_positions:
+                        # This is an error - layer transition without via
+                        errors.append(
+                            LayerConnectivityError(
+                                point=point,
+                                from_layer=layer1,
+                                to_layer=layer2,
+                            )
+                        )
+
+        # Deduplicate errors (same point may be found from both directions)
+        seen: set[tuple[float, float]] = set()
+        unique_errors: list[LayerConnectivityError] = []
+        for error in errors:
+            if error.point not in seen:
+                seen.add(error.point)
+                unique_errors.append(error)
+
+        return unique_errors
 
 
 def optimize_route_vias(
