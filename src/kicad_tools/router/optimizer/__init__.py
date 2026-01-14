@@ -42,6 +42,7 @@ from .serpentine import (
 )
 from .trace import TraceOptimizer
 from .via_optimizer import (
+    LayerConnectivityError,
     ViaOptimizationConfig,
     ViaOptimizationStats,
     ViaOptimizer,
@@ -51,6 +52,7 @@ from .via_optimizer import (
 __all__ = [
     "CollisionChecker",
     "GridCollisionChecker",
+    "LayerConnectivityError",
     "OptimizationConfig",
     "OptimizationStats",
     "SerpentineConfig",
