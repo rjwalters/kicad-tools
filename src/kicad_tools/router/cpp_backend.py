@@ -260,6 +260,12 @@ class CppPathfinder:
             )
             route.vias.append(via)
 
+        # Validate layer transitions and insert any missing vias
+        route.validate_layer_transitions(
+            via_drill=self._rules.via_drill,
+            via_diameter=self._rules.via_diameter,
+        )
+
         return route
 
     @property
