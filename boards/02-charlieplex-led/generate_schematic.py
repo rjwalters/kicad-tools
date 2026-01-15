@@ -27,8 +27,12 @@ from design_spec import (
     RESISTOR_VALUE,
 )
 
+from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
 
 # Wire stub length for connecting pins to labels
 WIRE_STUB = 5.08  # 200 mils

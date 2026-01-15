@@ -23,7 +23,11 @@ import uuid
 from pathlib import Path
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
+from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.models.schematic import Schematic
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
 
 
 def generate_uuid() -> str:

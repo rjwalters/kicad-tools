@@ -40,6 +40,48 @@ This installs:
 - Linting tools (ruff, mypy)
 - Documentation tools
 
+### Important: Pipx vs Source Conflicts
+
+If you have kicad-tools installed via pipx (e.g., from a release) and are also
+working with the source repository, you may encounter import errors:
+
+```
+ImportError: cannot import name 'new_function' from 'kicad_tools.module'
+```
+
+This happens because Python imports from the pipx-installed version instead of
+your source code. New functions added to source won't be available.
+
+**Solution 1: Reinstall from source (recommended for testing)**
+
+```bash
+pipx install --force .
+```
+
+**Solution 2: Use an editable install for development**
+
+```bash
+pipx uninstall kicad-tools
+pip install -e ".[dev]"
+```
+
+**Solution 3: Use a virtual environment (cleanest)**
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+The board generation scripts in `boards/` include automatic version mismatch
+detection and will warn you if the installed version differs from source:
+
+```
+⚠️  Version mismatch detected!
+   Installed: 0.9.2
+   Source:    0.9.3
+```
+
 ---
 
 ## Project Structure
