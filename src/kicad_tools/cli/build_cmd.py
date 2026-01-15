@@ -680,6 +680,26 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
                 sync_message = " (sync check found mismatches)"
             else:
                 sync_message = " (sync OK)"
+        else:
+            # Sync check was skipped - determine why and inform user
+            spec_defines_schematic = (
+                ctx.spec
+                and ctx.spec.project.artifacts
+                and ctx.spec.project.artifacts.schematic
+            )
+
+            if spec_defines_schematic:
+                # Spec defines a schematic but it wasn't found - always warn
+                expected_path = ctx.spec.project.artifacts.schematic
+                if not ctx.quiet:
+                    console.print(
+                        f"  [yellow]⚠[/yellow] Skipping sync check: "
+                        f"schematic '{expected_path}' not found"
+                    )
+                sync_message = " (sync skipped: schematic not found)"
+            elif ctx.verbose:
+                # No schematic defined in spec and verbose mode - inform user
+                console.print("  [dim]Skipping sync check: no schematic available[/dim]")
 
         return BuildResult(
             step="verify",
