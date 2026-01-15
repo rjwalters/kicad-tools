@@ -12,6 +12,7 @@ Orchestrates the full build pipeline:
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import re
 import subprocess
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.console import Console
+
+logger = logging.getLogger(__name__)
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -149,19 +152,23 @@ def _find_artifacts(directory: Path, spec_file: Path | None) -> tuple[Path | Non
                     pcb_path = directory / spec.project.artifacts.pcb
                     if pcb_path.exists():
                         pcb = pcb_path
-        except Exception:
-            pass  # Fall back to directory search
+        except Exception as e:
+            logger.warning(
+                "Failed to load artifacts from spec file %s: %s. Falling back to directory search.",
+                spec_file,
+                e,
+            )
 
-    # Fall back to finding files in directory
+    # Fall back to finding files in directory (search recursively including subdirectories)
     if not schematic:
-        sch_files = list(directory.glob("*.kicad_sch"))
+        sch_files = list(directory.glob("**/*.kicad_sch"))
         # Filter out backup files
         sch_files = [f for f in sch_files if not f.name.endswith("-bak.kicad_sch")]
         if sch_files:
             schematic = sch_files[0]
 
     if not pcb:
-        pcb_files = list(directory.glob("*.kicad_pcb"))
+        pcb_files = list(directory.glob("**/*.kicad_pcb"))
         # Filter out routed and backup files
         pcb_files = [
             f
@@ -776,8 +783,12 @@ Examples:
             from kicad_tools.spec import load_spec
 
             spec = load_spec(spec_file)
-        except Exception:
-            pass  # Spec loading is optional, continue without it
+        except Exception as e:
+            logger.warning(
+                "Failed to load spec file %s: %s. Continuing without spec.",
+                spec_file,
+                e,
+            )
 
     # Find existing artifacts
     schematic, pcb = _find_artifacts(project_dir, spec_file)
