@@ -268,6 +268,36 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
 
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
+    # Check if a routed PCB already exists (e.g., from generate_design.py)
+    # This prevents double-routing when a script already handled routing
+    # Search in the same directory as the unrouted PCB, or recursively in project
+    if ctx.pcb_file and ctx.pcb_file.exists():
+        # Look for routed file alongside the unrouted PCB
+        expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+        if expected_routed.exists():
+            if expected_routed.stat().st_mtime >= ctx.pcb_file.stat().st_mtime:
+                if not ctx.quiet:
+                    console.print(f"  Found existing routed PCB: {expected_routed.name}")
+                return BuildResult(
+                    step="route",
+                    success=True,
+                    message="Using existing routed PCB (newer than unrouted)",
+                    output_file=expected_routed,
+                )
+    else:
+        # No unrouted PCB, search recursively for any routed PCB
+        routed_files = list(ctx.project_dir.glob("**/*_routed.kicad_pcb"))
+        if routed_files:
+            routed_file = routed_files[0]
+            if not ctx.quiet:
+                console.print(f"  Found existing routed PCB: {routed_file.name}")
+            return BuildResult(
+                step="route",
+                success=True,
+                message="Using existing routed PCB",
+                output_file=routed_file,
+            )
+
     # First check for a route script
     route_script = ctx.project_dir / "route_demo.py"
     if not route_script.exists():
