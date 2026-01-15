@@ -28,6 +28,7 @@ from design_spec import (
 )
 
 from kicad_tools.dev import warn_if_stale
+from kicad_tools.schematic.grid import GridSize
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 from kicad_tools.schematic.models.validation_mixin import format_validation_summary
 
@@ -59,11 +60,10 @@ def add_pin_label(sch: Schematic, pin_pos: tuple, net_name: str, direction: str 
         end_x = x - WIRE_STUB
         rotation = 0  # Label points right toward wire
 
-    # Draw wire from pin to label position
-    # Use snap=False because pin positions may not be exactly on grid
-    sch.add_wire((x, y), (end_x, y), snap=False)
-    # Place global label at end of wire (also don't snap - must match wire endpoint)
-    sch.add_global_label(net_name, end_x, y, shape="bidirectional", rotation=rotation, snap=False)
+    # Draw wire from pin to label position (uses schematic's grid snapping)
+    sch.add_wire((x, y), (end_x, y))
+    # Place global label at end of wire
+    sch.add_global_label(net_name, end_x, y, shape="bidirectional", rotation=rotation)
 
 
 def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bool:
@@ -87,7 +87,7 @@ def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bo
         comment1="3x3 LED matrix using charlieplexing technique",
         comment2="9 LEDs driven by 4 GPIO pins",
         snap_mode=SnapMode.AUTO,
-        grid=2.54,
+        grid=GridSize.SCH_STANDARD.value,  # 1.27mm (50mil) - standard KiCad schematic grid
     )
 
     # =========================================================================
@@ -115,7 +115,7 @@ def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bo
         else:
             # Mark NC pins with no-connect markers
             if pin_pos:
-                sch.add_no_connect(pin_pos[0], pin_pos[1], snap=False)
+                sch.add_no_connect(pin_pos[0], pin_pos[1])
                 print(f"      Pin {pin_num} -> NC (no-connect)")
 
     # =========================================================================
@@ -186,18 +186,14 @@ def create_charlieplex_schematic(output_path: Path, verbose: bool = False) -> bo
     # VCC power rail - use power symbol's position as connection point
     vcc_pwr = sch.add_power("power:VCC", x=25.4, y=25.4, rotation=0)
     vcc_conn = (vcc_pwr.x, vcc_pwr.y)
-    sch.add_wire(vcc_conn, (vcc_conn[0] + WIRE_STUB, vcc_conn[1]), snap=False)
-    sch.add_global_label(
-        "VCC", vcc_conn[0] + WIRE_STUB, vcc_conn[1], shape="input", rotation=180, snap=False
-    )
+    sch.add_wire(vcc_conn, (vcc_conn[0] + WIRE_STUB, vcc_conn[1]))
+    sch.add_global_label("VCC", vcc_conn[0] + WIRE_STUB, vcc_conn[1], shape="input", rotation=180)
 
     # GND power rail - use power symbol's position as connection point
     gnd_pwr = sch.add_power("power:GND", x=25.4, y=50.8, rotation=180)
     gnd_conn = (gnd_pwr.x, gnd_pwr.y)
-    sch.add_wire(gnd_conn, (gnd_conn[0] + WIRE_STUB, gnd_conn[1]), snap=False)
-    sch.add_global_label(
-        "GND", gnd_conn[0] + WIRE_STUB, gnd_conn[1], shape="input", rotation=180, snap=False
-    )
+    sch.add_wire(gnd_conn, (gnd_conn[0] + WIRE_STUB, gnd_conn[1]))
+    sch.add_global_label("GND", gnd_conn[0] + WIRE_STUB, gnd_conn[1], shape="input", rotation=180)
 
     # Add PWR_FLAG symbols to indicate power entry points
     # This tells ERC that these power nets are intentionally driven externally
