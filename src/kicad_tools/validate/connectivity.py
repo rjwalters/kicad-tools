@@ -487,8 +487,8 @@ class ConnectivityValidator:
         import math
 
         # Convert rotation to radians
-        # KiCad uses clockwise-positive rotation, negate for standard math
-        angle = math.radians(-rotation)
+        # KiCad uses counter-clockwise positive rotation (standard math convention)
+        angle = math.radians(rotation)
 
         # Rotate pad position
         px, py = pad_local
