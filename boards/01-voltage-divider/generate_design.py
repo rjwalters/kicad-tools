@@ -50,8 +50,7 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     # Define layout coordinates
     RAIL_VIN = 30  # Input voltage rail
     RAIL_GND = 150  # Ground rail
-    X_LEFT = 25
-    X_RIGHT = 200
+    X_LEFT = 25  # Rail starting point (power symbols)
 
     # =========================================================================
     # Section 1: Place Components First (to get pin positions)
@@ -104,7 +103,6 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     rail_vin_y = sch._snap_coord(RAIL_VIN, "rail")
     rail_gnd_y = sch._snap_coord(RAIL_GND, "rail")
     x_left = sch._snap_coord(X_LEFT, "rail")
-    x_right = sch._snap_coord(X_RIGHT, "rail")
 
     # Get X positions of all components that connect to rails
     x_j1 = j1_pin1[0]  # J1 connection point
@@ -112,11 +110,13 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     x_r2 = r2_pin2[0]  # R2 GND connection point
     x_j2 = j2_pin2[0]  # J2 GND connection point
 
-    # Sort X positions for VIN rail: left edge, J1, R1, right edge
-    vin_x_points = sorted([x_left, x_j1, x_r1, x_right])
+    # Sort X positions for VIN rail: left edge, J1, R1
+    # Note: Don't extend past rightmost connection (R1) to avoid floating wire endpoints
+    vin_x_points = sorted([x_left, x_j1, x_r1])
 
-    # Sort X positions for GND rail: left edge, J1, R2, J2, right edge
-    gnd_x_points = sorted([x_left, x_j1, x_r2, x_j2, x_right])
+    # Sort X positions for GND rail: left edge, J1, R2, J2
+    # Note: Don't extend past rightmost connection (J2) to avoid floating wire endpoints
+    gnd_x_points = sorted([x_left, x_j1, x_r2, x_j2])
 
     # Create VIN rail as segments
     for i in range(len(vin_x_points) - 1):
