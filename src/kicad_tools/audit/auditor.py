@@ -320,8 +320,8 @@ class ManufacturingAudit:
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
             self.project_path = self.path
-            self.pcb_path = self.path.with_suffix(".kicad_pcb")
-            self.schematic_path = self.path.with_suffix(".kicad_sch")
+            self.pcb_path = self._resolve_pcb_path()
+            self.schematic_path = self._resolve_schematic_path()
         elif self.path.suffix == ".kicad_pcb":
             self.project_path = None
             self.pcb_path = self.path
@@ -333,6 +333,76 @@ class ManufacturingAudit:
         # Loaded objects (lazy)
         self._pcb: PCB | None = None
         self._profile = None
+
+    def _resolve_pcb_path(self) -> Path:
+        """Resolve PCB path when given a project file.
+
+        Resolution order:
+        1. Check project.kct for artifacts.pcb
+        2. Look for *_routed.kicad_pcb file
+        3. Default to <basename>.kicad_pcb
+        """
+        project_dir = self.path.parent
+        basename = self.path.stem
+
+        # 1. Try to find project.kct and use artifacts.pcb
+        kct_path = project_dir / "project.kct"
+        if not kct_path.exists():
+            # Also check parent directory (for output/ subdirectory case)
+            kct_path = project_dir.parent / "project.kct"
+
+        if kct_path.exists():
+            try:
+                from kicad_tools.spec import load_spec
+
+                spec = load_spec(kct_path)
+                if spec.project and spec.project.artifacts and spec.project.artifacts.pcb:
+                    # PCB path is relative to project.kct location
+                    pcb_path = kct_path.parent / spec.project.artifacts.pcb
+                    if pcb_path.exists():
+                        logger.debug(f"Using PCB from project.kct: {pcb_path}")
+                        return pcb_path
+            except Exception as e:
+                logger.debug(f"Failed to load project.kct: {e}")
+
+        # 2. Look for *_routed.kicad_pcb
+        routed_path = project_dir / f"{basename}_routed.kicad_pcb"
+        if routed_path.exists():
+            logger.debug(f"Using routed PCB: {routed_path}")
+            return routed_path
+
+        # 3. Default to <basename>.kicad_pcb
+        return self.path.with_suffix(".kicad_pcb")
+
+    def _resolve_schematic_path(self) -> Path:
+        """Resolve schematic path when given a project file.
+
+        Resolution order:
+        1. Check project.kct for artifacts.schematic
+        2. Default to <basename>.kicad_sch
+        """
+        project_dir = self.path.parent
+
+        # 1. Try to find project.kct and use artifacts.schematic
+        kct_path = project_dir / "project.kct"
+        if not kct_path.exists():
+            kct_path = project_dir.parent / "project.kct"
+
+        if kct_path.exists():
+            try:
+                from kicad_tools.spec import load_spec
+
+                spec = load_spec(kct_path)
+                if spec.project and spec.project.artifacts and spec.project.artifacts.schematic:
+                    sch_path = kct_path.parent / spec.project.artifacts.schematic
+                    if sch_path.exists():
+                        logger.debug(f"Using schematic from project.kct: {sch_path}")
+                        return sch_path
+            except Exception as e:
+                logger.debug(f"Failed to load project.kct: {e}")
+
+        # 2. Default to <basename>.kicad_sch
+        return self.path.with_suffix(".kicad_sch")
 
     def _load_pcb(self) -> PCB:
         """Load and cache the PCB."""
