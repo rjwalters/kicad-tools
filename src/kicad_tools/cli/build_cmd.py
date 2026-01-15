@@ -683,9 +683,7 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
         else:
             # Sync check was skipped - determine why and inform user
             spec_defines_schematic = (
-                ctx.spec
-                and ctx.spec.project.artifacts
-                and ctx.spec.project.artifacts.schematic
+                ctx.spec and ctx.spec.project.artifacts and ctx.spec.project.artifacts.schematic
             )
 
             if spec_defines_schematic:
