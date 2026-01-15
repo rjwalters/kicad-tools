@@ -2361,6 +2361,13 @@ def _add_build_parser(subparsers) -> None:
         action="store_true",
         help="Show detailed output",
     )
+    build_parser.add_argument(
+        "-f",
+        "--force",
+        dest="build_force",
+        action="store_true",
+        help="Force rebuild, ignoring existing outputs and timestamp checks",
+    )
 
 
 def _add_build_native_parser(subparsers) -> None:

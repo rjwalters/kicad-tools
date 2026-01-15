@@ -28,6 +28,9 @@ def run_build_command(args) -> int:
     if getattr(args, "build_verbose", False):
         sub_argv.append("--verbose")
 
+    if getattr(args, "build_force", False):
+        sub_argv.append("--force")
+
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
