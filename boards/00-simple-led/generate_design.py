@@ -249,9 +249,11 @@ def create_led_pcb(output_dir: Path) -> Path:
     }
 
     # Component positions (compact layout)
-    # J1 on left, R1 in middle, D1 on right
+    # J1 on left, R1 in middle (offset up for GND clearance), D1 on right
+    # R1 is rotated 90° so its pin 2 extends downward; moving R1 up
+    # ensures the GND trace from J1.2 to D1.2 can route below R1
     J1_POS = (BOARD_ORIGIN_X + 5, BOARD_ORIGIN_Y + 10)
-    R1_POS = (BOARD_ORIGIN_X + 12.5, BOARD_ORIGIN_Y + 10)
+    R1_POS = (BOARD_ORIGIN_X + 12.5, BOARD_ORIGIN_Y + 8)  # Offset up by 2mm
     D1_POS = (BOARD_ORIGIN_X + 20, BOARD_ORIGIN_Y + 10)
 
     def generate_header() -> str:
