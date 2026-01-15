@@ -21,6 +21,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.schematic.models.schematic import Schematic
 
 
@@ -593,6 +594,28 @@ def run_erc(sch_path: Path) -> bool:
         return True
 
 
+def create_project(output_dir: Path, project_name: str) -> Path:
+    """
+    Create a KiCad project file.
+
+    Returns the path to the generated project file.
+    """
+    print("\n" + "=" * 60)
+    print("Creating Project File...")
+    print("=" * 60)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{project_name}.kicad_pro"
+    project_data = create_minimal_project(filename)
+
+    project_path = output_dir / filename
+    save_project(project_data, project_path)
+    print(f"\n   Project: {project_path}")
+
+    return project_path
+
+
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the PCB using kct check for consistent results.
 
@@ -636,20 +659,23 @@ def main() -> int:
         output_dir = Path(__file__).parent / "output"
 
     try:
-        # Step 1: Create schematic
+        # Step 1: Create project file
+        project_path = create_project(output_dir, "voltage_divider")
+
+        # Step 2: Create schematic
         sch_path = create_voltage_divider_schematic(output_dir)
 
-        # Step 2: Run ERC on schematic
+        # Step 3: Run ERC on schematic
         erc_success = run_erc(sch_path)
 
-        # Step 3: Create PCB
+        # Step 4: Create PCB
         pcb_path = create_voltage_divider_pcb(output_dir)
 
-        # Step 4: Route PCB
+        # Step 5: Route PCB
         routed_path = output_dir / "voltage_divider_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
-        # Step 5: Run DRC
+        # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
         # Summary
@@ -658,9 +684,10 @@ def main() -> int:
         print("=" * 60)
         print(f"\nOutput directory: {output_dir.absolute()}")
         print("\nGenerated files:")
-        print(f"  1. Schematic: {sch_path.name}")
-        print(f"  2. PCB (unrouted): {pcb_path.name}")
-        print(f"  3. PCB (routed): {routed_path.name}")
+        print(f"  1. Project: {project_path.name}")
+        print(f"  2. Schematic: {sch_path.name}")
+        print(f"  3. PCB (unrouted): {pcb_path.name}")
+        print(f"  4. PCB (routed): {routed_path.name}")
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")

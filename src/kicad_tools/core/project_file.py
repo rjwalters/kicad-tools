@@ -462,3 +462,107 @@ def clear_netclass_patterns(data: dict[str, Any]) -> None:
     """
     net_settings = get_net_settings(data)
     net_settings["netclass_patterns"] = []
+
+
+def create_minimal_project(filename: str) -> dict[str, Any]:
+    """
+    Create a minimal but valid KiCad project structure.
+
+    This creates a project file with all required sections that KiCad expects,
+    suitable for use with kct commands and opening in KiCad GUI.
+
+    Args:
+        filename: The project filename (e.g., "my_project.kicad_pro")
+
+    Returns:
+        Project data dictionary ready to be saved with save_project()
+    """
+    return {
+        "board": {
+            "3dviewports": [],
+            "design_settings": {
+                "defaults": {
+                    "board_outline_line_width": 0.1,
+                    "copper_line_width": 0.2,
+                    "copper_text_size_h": 1.5,
+                    "copper_text_size_v": 1.5,
+                    "copper_text_thickness": 0.3,
+                    "other_line_width": 0.15,
+                    "silk_line_width": 0.15,
+                    "silk_text_size_h": 1.0,
+                    "silk_text_size_v": 1.0,
+                    "silk_text_thickness": 0.15,
+                },
+                "diff_pair_dimensions": [],
+                "drc_exclusions": [],
+                "rules": {
+                    "min_copper_edge_clearance": 0.0,
+                    "solder_mask_clearance": 0.0,
+                    "solder_mask_min_width": 0.0,
+                },
+                "track_widths": [],
+                "via_dimensions": [],
+            },
+            "layer_presets": [],
+            "viewports": [],
+        },
+        "boards": [],
+        "cvpcb": {"equivalence_files": []},
+        "libraries": {
+            "pinned_footprint_libs": [],
+            "pinned_symbol_libs": [],
+        },
+        "meta": {
+            "filename": filename,
+            "version": 1,
+        },
+        "net_settings": {
+            "classes": [DEFAULT_NETCLASS_DEFINITION.copy()],
+            "meta": {"version": 3},
+            "net_colors": None,
+            "netclass_assignments": None,
+            "netclass_patterns": [],
+        },
+        "pcbnew": {
+            "last_paths": {
+                "gencad": "",
+                "idf": "",
+                "netlist": "",
+                "specctra_dsn": "",
+                "step": "",
+                "vrml": "",
+            },
+            "page_layout_descr_file": "",
+        },
+        "schematic": {
+            "annotate_start_num": 0,
+            "drawing": {
+                "dashed_lines_dash_length_ratio": 12.0,
+                "dashed_lines_gap_length_ratio": 3.0,
+                "default_line_thickness": 6.0,
+                "default_text_size": 50.0,
+                "field_names": [],
+                "intersheets_ref_own_page": False,
+                "intersheets_ref_prefix": "",
+                "intersheets_ref_short": False,
+                "intersheets_ref_show": False,
+                "intersheets_ref_suffix": "",
+                "junction_size_choice": 3,
+                "label_size_ratio": 0.375,
+                "pin_symbol_size": 25.0,
+                "text_offset_ratio": 0.15,
+            },
+            "legacy_lib_dir": "",
+            "legacy_lib_list": [],
+            "meta": {"version": 1},
+            "net_format_name": "",
+            "page_layout_descr_file": "",
+            "plot_directory": "",
+            "spice_adjust_passive_values": False,
+            "spice_external_command": 'spice "%I"',
+            "subpart_first_id": 65,
+            "subpart_id_separator": 0,
+        },
+        "sheets": [],
+        "text_variables": {},
+    }

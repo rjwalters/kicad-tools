@@ -22,6 +22,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.schematic.models.schematic import Schematic
 
 
@@ -174,7 +175,7 @@ def create_led_schematic(output_dir: Path) -> Path:
     v_led = 2.0
     r_value = 330
     i_led = (v_in - v_led) / r_value * 1000  # mA
-    print(f"\n   Circuit: VCC=5V, R=330 ohm, LED Vf=2V")
+    print("\n   Circuit: VCC=5V, R=330 ohm, LED Vf=2V")
     print(f"   LED current: ({v_in}V - {v_led}V) / {r_value} = {i_led:.1f}mA")
 
     # =========================================================================
@@ -323,7 +324,9 @@ def create_led_pcb(output_dir: Path) -> Path:
     (pad "2" thru_hole oval (at 0 {pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin2_num} "{pin2_net}"))
   )"""
 
-    def generate_resistor(ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "330") -> str:
+    def generate_resistor(
+        ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "330"
+    ) -> str:
         """Generate an 0805 resistor footprint."""
         x, y = pos
         pin1_num = NETS[pin1_net]
@@ -473,7 +476,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Get final statistics
     stats = router.get_statistics()
 
-    print(f"\n5. Final routing results:")
+    print("\n5. Final routing results:")
     print(f"   Routes: {stats['routes']}")
     print(f"   Segments: {stats['segments']}")
     print(f"   Vias: {stats['vias']}")
@@ -551,6 +554,28 @@ def run_erc(sch_path: Path) -> bool:
         return True
 
 
+def create_project(output_dir: Path, project_name: str) -> Path:
+    """
+    Create a KiCad project file.
+
+    Returns the path to the generated project file.
+    """
+    print("\n" + "=" * 60)
+    print("Creating Project File...")
+    print("=" * 60)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{project_name}.kicad_pro"
+    project_data = create_minimal_project(filename)
+
+    project_path = output_dir / filename
+    save_project(project_data, project_path)
+    print(f"\n   Project: {project_path}")
+
+    return project_path
+
+
 def run_drc(pcb_path: Path) -> bool:
     """Run DRC on the PCB using kct check for consistent results.
 
@@ -594,20 +619,23 @@ def main() -> int:
         output_dir = Path(__file__).parent / "output"
 
     try:
-        # Step 1: Create schematic
+        # Step 1: Create project file
+        project_path = create_project(output_dir, "simple_led")
+
+        # Step 2: Create schematic
         sch_path = create_led_schematic(output_dir)
 
-        # Step 2: Run ERC
+        # Step 3: Run ERC
         erc_success = run_erc(sch_path)
 
-        # Step 3: Create PCB
+        # Step 4: Create PCB
         pcb_path = create_led_pcb(output_dir)
 
-        # Step 4: Route PCB
+        # Step 5: Route PCB
         routed_path = output_dir / "simple_led_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
-        # Step 5: Run DRC
+        # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
         # Summary
@@ -616,9 +644,10 @@ def main() -> int:
         print("=" * 60)
         print(f"\nOutput directory: {output_dir.absolute()}")
         print("\nGenerated files:")
-        print(f"  1. Schematic: {sch_path.name}")
-        print(f"  2. PCB (unrouted): {pcb_path.name}")
-        print(f"  3. PCB (routed): {routed_path.name}")
+        print(f"  1. Project: {project_path.name}")
+        print(f"  2. Schematic: {sch_path.name}")
+        print(f"  3. PCB (unrouted): {pcb_path.name}")
+        print(f"  4. PCB (routed): {routed_path.name}")
         print("\nResults:")
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
@@ -634,6 +663,7 @@ def main() -> int:
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
 
