@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from kicad_tools.dev import warn_if_stale
 from kicad_tools.router import DesignRules, load_pcb_for_routing
-from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+from kicad_tools.router.optimizer import GridCollisionChecker, OptimizationConfig, TraceOptimizer
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
@@ -153,6 +153,7 @@ def main():
     print(f"  Nets routed: {stats_before['nets_routed']}")
 
     # Optimize traces - merge collinear segments, eliminate zigzags, etc.
+    # Use collision checker to prevent optimizations that create DRC violations
     print("\n--- Optimizing traces ---")
     opt_config = OptimizationConfig(
         merge_collinear=True,
@@ -161,7 +162,8 @@ def main():
         convert_45_corners=True,
         minimize_vias=True,
     )
-    optimizer = TraceOptimizer(config=opt_config)
+    collision_checker = GridCollisionChecker(router.grid)
+    optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
     optimized_routes = []
     for route in router.routes:
