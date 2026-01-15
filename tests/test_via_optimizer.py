@@ -338,9 +338,7 @@ class TestLayerConnectivityValidation:
         via2 = Via(x=10, y=0, drill=0.3, diameter=0.6, layers=(Layer.B_CU, Layer.F_CU), net=1)
         seg3 = Segment(x1=10, y1=0, x2=15, y2=0, width=0.2, layer=Layer.F_CU, net=1)
 
-        route = Route(
-            net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1, via2]
-        )
+        route = Route(net=1, net_name="Net1", segments=[seg1, seg2, seg3], vias=[via1, via2])
         errors = optimizer.validate_layer_connectivity(route)
 
         assert len(errors) == 0

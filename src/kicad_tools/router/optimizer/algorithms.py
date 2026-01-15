@@ -457,8 +457,7 @@ def convert_corners_45(
                 # If next segment is too short (e.g., final approach to a pad),
                 # don't create a partial chamfer that would leave a gap.
                 next_can_shorten = (
-                    shorten_segment_start(next_seg, chamfer, config.min_segment_length)
-                    is not None
+                    shorten_segment_start(next_seg, chamfer, config.min_segment_length) is not None
                 )
                 if next_can_shorten:
                     shortened = shorten_segment_end(

@@ -106,9 +106,7 @@ class TestConnectivityValidationRotation:
         fp_x, fp_y = 112.5, 110.0
         rotation = 90
 
-        board_x, board_y = validator._transform_pad_position(
-            pad_local, fp_x, fp_y, rotation
-        )
+        board_x, board_y = validator._transform_pad_position(pad_local, fp_x, fp_y, rotation)
 
         # Expected: (112.5, 109.0)
         assert board_x == pytest.approx(112.5, abs=0.001)

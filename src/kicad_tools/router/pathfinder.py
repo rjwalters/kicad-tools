@@ -768,8 +768,17 @@ class Router:
 
         return blocking_nets
 
-    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route:
-        """Reconstruct the route from A* result."""
+    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
+        """Reconstruct the route from A* result with geometric validation.
+
+        Issue #750: After reconstructing the route from grid coordinates,
+        validates each segment against original obstacle geometry to catch
+        clearance violations that grid-based checking missed (particularly
+        for diagonal segments that can cut through obstacle corners).
+
+        Returns:
+            Route if valid, None if geometric clearance validation fails.
+        """
         route = Route(net=start_pad.net, net_name=start_pad.net_name)
 
         # Collect path points
@@ -844,5 +853,18 @@ class Router:
             via_drill=self.rules.via_drill,
             via_diameter=self.rules.via_diameter,
         )
+
+        # Issue #750: Geometric clearance validation
+        # Grid-based A* checking is approximate; diagonal segments can cut through
+        # obstacle corners. Validate actual geometry before returning the route.
+        for seg in route.segments:
+            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
+                seg, exclude_net=start_pad.net
+            )
+            if not is_valid:
+                # Route has clearance violations - reject it
+                # The caller will report "no path found" which is preferable
+                # to returning a route with DRC violations
+                return None
 
         return route
