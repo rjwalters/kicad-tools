@@ -266,6 +266,43 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     )
 
 
+def _get_routing_params(mfr: str) -> tuple[float, float, float, float, float]:
+    """Get routing parameters from manufacturer rules.
+
+    Auto-calculates grid to be compatible with clearance.
+    Grid must be ≤ clearance / 2 to allow routing without DRC violations.
+
+    Args:
+        mfr: Manufacturer ID (e.g., "jlcpcb")
+
+    Returns:
+        Tuple of (grid, clearance, trace_width, via_drill, via_diameter)
+    """
+    from kicad_tools.manufacturers import get_profile
+
+    try:
+        profile = get_profile(mfr)
+        rules = profile.get_design_rules(layers=2)  # Use 2-layer defaults
+
+        clearance = rules.min_clearance_mm
+        trace_width = rules.min_trace_width_mm
+        via_drill = rules.min_via_drill_mm
+        via_diameter = rules.min_via_diameter_mm
+
+        # Auto-calculate grid: must be ≤ clearance / 2 for DRC compliance
+        # Round DOWN to a clean value (0.05mm increments) to ensure compliance
+        import math
+        grid = clearance / 2
+        grid = max(0.05, math.floor(grid / 0.05) * 0.05)  # Round DOWN to 0.05mm, min 0.05mm
+
+        return grid, clearance, trace_width, via_drill, via_diameter
+
+    except Exception:
+        # Fall back to safe defaults if manufacturer lookup fails
+        # These defaults ensure grid < clearance
+        return 0.075, 0.15, 0.15, 0.3, 0.6
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
@@ -337,15 +374,23 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
 
     output_file = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
 
+    # Get routing parameters from manufacturer rules
+    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr)
+
     if ctx.dry_run:
         return BuildResult(
             step="route",
             success=True,
-            message=f"[dry-run] Would run: kct route {ctx.pcb_file.name} -o {output_file.name}",
+            message=(
+                f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
+                f"--grid {grid} --clearance {clearance}"
+            ),
         )
 
     if not ctx.quiet:
         console.print(f"  Running autorouter on {ctx.pcb_file.name}...")
+        if ctx.verbose:
+            console.print(f"    Grid: {grid}mm, Clearance: {clearance}mm")
 
     try:
         cmd = [
@@ -356,6 +401,16 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             str(ctx.pcb_file),
             "-o",
             str(output_file),
+            "--grid",
+            str(grid),
+            "--clearance",
+            str(clearance),
+            "--trace-width",
+            str(trace_width),
+            "--via-drill",
+            str(via_drill),
+            "--via-diameter",
+            str(via_diameter),
         ]
 
         if ctx.quiet:
