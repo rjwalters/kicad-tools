@@ -65,6 +65,7 @@ class BuildContext:
     verbose: bool = False
     dry_run: bool = False
     quiet: bool = False
+    force: bool = False
     _executed_scripts: set[Path] | None = None
 
     def mark_script_executed(self, script: Path) -> None:
@@ -207,8 +208,8 @@ def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
     script = _find_generator_script(ctx.project_dir, "schematic")
 
     if not script:
-        # Check if schematic already exists
-        if ctx.schematic_file and ctx.schematic_file.exists():
+        # Check if schematic already exists (unless force rebuild)
+        if ctx.schematic_file and ctx.schematic_file.exists() and not ctx.force:
             return BuildResult(
                 step="schematic",
                 success=True,
@@ -252,8 +253,8 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     script = _find_generator_script(ctx.project_dir, "pcb")
 
     if not script:
-        # Check if PCB already exists
-        if ctx.pcb_file and ctx.pcb_file.exists():
+        # Check if PCB already exists (unless force rebuild)
+        if ctx.pcb_file and ctx.pcb_file.exists() and not ctx.force:
             return BuildResult(
                 step="pcb",
                 success=True,
@@ -423,33 +424,35 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
     # This prevents double-routing when a script already handled routing
-    # Search in the same directory as the unrouted PCB, or recursively in project
-    if ctx.pcb_file and ctx.pcb_file.exists():
-        # Look for routed file alongside the unrouted PCB
-        expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
-        if expected_routed.exists():
-            if expected_routed.stat().st_mtime >= ctx.pcb_file.stat().st_mtime:
+    # Skip these checks if force rebuild is requested
+    if not ctx.force:
+        # Search in the same directory as the unrouted PCB, or recursively in project
+        if ctx.pcb_file and ctx.pcb_file.exists():
+            # Look for routed file alongside the unrouted PCB
+            expected_routed = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+            if expected_routed.exists():
+                if expected_routed.stat().st_mtime >= ctx.pcb_file.stat().st_mtime:
+                    if not ctx.quiet:
+                        console.print(f"  Found existing routed PCB: {expected_routed.name}")
+                    return BuildResult(
+                        step="route",
+                        success=True,
+                        message="Using existing routed PCB (newer than unrouted)",
+                        output_file=expected_routed,
+                    )
+        else:
+            # No unrouted PCB, search recursively for any routed PCB
+            routed_files = list(ctx.project_dir.glob("**/*_routed.kicad_pcb"))
+            if routed_files:
+                routed_file = routed_files[0]
                 if not ctx.quiet:
-                    console.print(f"  Found existing routed PCB: {expected_routed.name}")
+                    console.print(f"  Found existing routed PCB: {routed_file.name}")
                 return BuildResult(
                     step="route",
                     success=True,
-                    message="Using existing routed PCB (newer than unrouted)",
-                    output_file=expected_routed,
+                    message="Using existing routed PCB",
+                    output_file=routed_file,
                 )
-    else:
-        # No unrouted PCB, search recursively for any routed PCB
-        routed_files = list(ctx.project_dir.glob("**/*_routed.kicad_pcb"))
-        if routed_files:
-            routed_file = routed_files[0]
-            if not ctx.quiet:
-                console.print(f"  Found existing routed PCB: {routed_file.name}")
-            return BuildResult(
-                step="route",
-                success=True,
-                message="Using existing routed PCB",
-                output_file=routed_file,
-            )
 
     # First check for a route script
     route_script = ctx.project_dir / "route_demo.py"
@@ -665,6 +668,7 @@ Examples:
     kct build --step schematic          # Run only schematic generation
     kct build --step verify --mfr jlcpcb # Run only verification for JLCPCB
     kct build --dry-run                 # Preview what would be done
+    kct build --force                   # Rebuild even if outputs exist
         """,
     )
 
@@ -703,6 +707,12 @@ Examples:
         "--quiet",
         action="store_true",
         help="Suppress progress output",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Force rebuild, ignoring existing outputs and timestamp checks",
     )
 
     args = parser.parse_args(argv)
@@ -749,6 +759,7 @@ Examples:
         verbose=args.verbose,
         dry_run=args.dry_run,
         quiet=args.quiet,
+        force=args.force,
     )
 
     # Print build header
