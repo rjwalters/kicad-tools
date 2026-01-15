@@ -173,23 +173,37 @@ def _find_artifacts(directory: Path, spec_file: Path | None) -> tuple[Path | Non
     return schematic, pcb
 
 
-def _run_python_script(script_path: Path, cwd: Path, verbose: bool = False) -> tuple[bool, str]:
+def _run_python_script(
+    script_path: Path,
+    cwd: Path,
+    verbose: bool = False,
+    env_vars: dict[str, str] | None = None,
+) -> tuple[bool, str]:
     """Run a Python generator script.
 
     Args:
         script_path: Path to the Python script
         cwd: Working directory for execution
         verbose: Whether to show script output
+        env_vars: Optional additional environment variables to pass
 
     Returns:
         Tuple of (success, output/error message)
     """
+    import os
+
+    # Build environment with optional extra variables
+    run_env = os.environ.copy()
+    if env_vars:
+        run_env.update(env_vars)
+
     try:
         result = subprocess.run(
             [sys.executable, str(script_path)],
             cwd=str(cwd),
             capture_output=not verbose,
             text=True,
+            env=run_env,
         )
 
         if result.returncode == 0:
@@ -457,6 +471,19 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
         route_script = ctx.project_dir / "route.py"
 
     if route_script.exists():
+        # Get routing parameters from project.kct to pass as environment variables
+        # This allows custom route scripts to optionally use project.kct settings
+        grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(
+            ctx.mfr, ctx.spec
+        )
+        route_env_vars = {
+            "KCT_ROUTE_GRID": str(grid),
+            "KCT_ROUTE_CLEARANCE": str(clearance),
+            "KCT_ROUTE_TRACE_WIDTH": str(trace_width),
+            "KCT_ROUTE_VIA_DRILL": str(via_drill),
+            "KCT_ROUTE_VIA_DIAMETER": str(via_diameter),
+        }
+
         if ctx.dry_run:
             return BuildResult(
                 step="route",
@@ -466,8 +493,15 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
 
         if not ctx.quiet:
             console.print(f"  Running {route_script.name}...")
+            if ctx.verbose:
+                console.print("    Routing params from project.kct:")
+                console.print(f"      Grid: {grid}mm, Clearance: {clearance}mm")
+                console.print(f"      Trace width: {trace_width}mm")
+                console.print(f"      Via: {via_drill}mm drill, {via_diameter}mm diameter")
 
-        success, message = _run_python_script(route_script, ctx.project_dir, ctx.verbose)
+        success, message = _run_python_script(
+            route_script, ctx.project_dir, ctx.verbose, env_vars=route_env_vars
+        )
 
         # Find routed PCB
         routed_files = list(ctx.project_dir.glob("*_routed.kicad_pcb"))

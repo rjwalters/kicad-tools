@@ -15,6 +15,7 @@ Example:
     python route_demo.py charlieplex_3x3.kicad_pcb charlieplex_3x3_routed.kicad_pcb
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,25 @@ from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
+
+
+def _get_routing_params() -> dict[str, float]:
+    """Get routing parameters from environment variables (set by kct build) or defaults.
+
+    When run via 'kct build', routing parameters from project.kct are passed as
+    environment variables. This allows custom route scripts to use project settings
+    while still supporting standalone execution with defaults.
+
+    Returns:
+        Dict with grid_resolution, trace_width, trace_clearance, via_drill, via_diameter
+    """
+    return {
+        "grid_resolution": float(os.environ.get("KCT_ROUTE_GRID", "0.1")),
+        "trace_width": float(os.environ.get("KCT_ROUTE_TRACE_WIDTH", "0.3")),
+        "trace_clearance": float(os.environ.get("KCT_ROUTE_CLEARANCE", "0.2")),
+        "via_drill": float(os.environ.get("KCT_ROUTE_VIA_DRILL", "0.3")),
+        "via_diameter": float(os.environ.get("KCT_ROUTE_VIA_DIAMETER", "0.6")),
+    }
 
 
 def main():
@@ -51,13 +71,15 @@ def main():
     print(f"Output: {output_path}")
 
     # Configure design rules for this board
-    # Note: grid_resolution should be <= clearance/2 for reliable DRC compliance
+    # Parameters come from project.kct (via env vars when run by kct build)
+    # or fall back to sensible defaults for standalone execution
+    params = _get_routing_params()
     rules = DesignRules(
-        grid_resolution=0.1,  # 0.1mm grid (clearance/2 for reliable DRC)
-        trace_width=0.3,  # 0.3mm traces (12mil)
-        trace_clearance=0.2,  # 0.2mm clearance (8mil)
-        via_drill=0.3,  # 0.3mm via drill
-        via_diameter=0.6,  # 0.6mm via pad
+        grid_resolution=params["grid_resolution"],
+        trace_width=params["trace_width"],
+        trace_clearance=params["trace_clearance"],
+        via_drill=params["via_drill"],
+        via_diameter=params["via_diameter"],
     )
 
     # Skip power nets (we won't route VCC/GND in this demo)
