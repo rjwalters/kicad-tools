@@ -30,6 +30,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools interactive            - Launch interactive REPL mode
     kicad-tools net-status <pcb>       - Report net connectivity status
     kicad-tools init <project>         - Initialize project with manufacturer rules
+    kicad-tools run <script>           - Run Python script with kicad-tools interpreter
 
 See `kicad-tools --help` for complete documentation.
 """
@@ -66,6 +67,7 @@ from .commands import (
     run_placement_command,
     run_reason_command,
     run_route_command,
+    run_run_command,
     run_sch_command,
     run_spec_command,
     run_suggest_command,
@@ -381,6 +383,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "benchmark":
         return run_benchmark_command(args)
+
+    elif args.command == "run":
+        return run_run_command(args)
 
     return 0
 

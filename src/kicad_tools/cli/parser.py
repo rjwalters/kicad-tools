@@ -40,6 +40,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools audit <project>        - Manufacturing readiness audit
     kicad-tools clean <project>        - Clean up old/orphaned files
     kicad-tools init <project>         - Initialize project with manufacturer rules
+    kicad-tools run <script>           - Run Python script with kicad-tools interpreter
     kicad-tools config                 - View/manage configuration
     kicad-tools interactive            - Launch interactive REPL mode
 
@@ -167,6 +168,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_build_native_parser(subparsers)
     _add_spec_parser(subparsers)
     _add_benchmark_parser(subparsers)
+    _add_run_parser(subparsers)
 
     return parser
 
@@ -2634,4 +2636,37 @@ def _add_benchmark_parser(subparsers) -> None:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+
+def _add_run_parser(subparsers) -> None:
+    """Add run subcommand parser for executing Python scripts.
+
+    This command solves the common issue where users install kicad-tools
+    via pipx but cannot run board generation scripts with `python3 script.py`
+    because the kicad_tools module is not available in the system Python.
+    """
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run a Python script using the kicad-tools interpreter",
+        description=(
+            "Execute a Python script using the same Python interpreter that runs kicad-tools. "
+            "This is useful when kicad-tools is installed via pipx, as board generation scripts "
+            "can import kicad_tools modules that would otherwise be unavailable.\n\n"
+            "Example:\n"
+            "  kct run generate_design.py           # Run script\n"
+            "  kct run generate_design.py output/   # Pass arguments to script"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    run_parser.add_argument(
+        "run_script",
+        metavar="SCRIPT",
+        help="Path to Python script to run",
+    )
+    run_parser.add_argument(
+        "run_args",
+        nargs="*",
+        metavar="ARGS",
+        help="Arguments to pass to the script",
     )
