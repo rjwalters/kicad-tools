@@ -33,6 +33,7 @@ from .placement import run_placement_command
 from .project import run_clean_command, run_init_command
 from .reasoning import run_reason_command
 from .routing import run_optimize_command, run_route_command, run_zones_command
+from .run import run_run_command
 from .schematic import run_sch_command
 from .spec import run_spec_command
 from .suggest import run_suggest_command
@@ -102,4 +103,6 @@ __all__ = [
     "run_mcp_command",
     # Native build
     "run_build_native_command",
+    # Run
+    "run_run_command",
 ]
