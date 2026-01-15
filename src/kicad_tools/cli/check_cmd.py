@@ -31,6 +31,32 @@ from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 
 # Available check categories
+
+
+def _find_pcb_file(directory: Path) -> Path | None:
+    """Find a .kicad_pcb file in the given directory.
+
+    Searches recursively and filters out routed/backup files to find
+    the primary unrouted PCB file.
+
+    Args:
+        directory: Directory to search
+
+    Returns:
+        Path to PCB file if found, None otherwise
+    """
+    pcb_files = list(directory.glob("**/*.kicad_pcb"))
+    # Filter out routed and backup files
+    pcb_files = [
+        f
+        for f in pcb_files
+        if not f.name.endswith("_routed.kicad_pcb") and not f.name.endswith("-bak.kicad_pcb")
+    ]
+    if pcb_files:
+        return pcb_files[0]
+    return None
+
+
 CHECK_CATEGORIES = ["clearance", "dimensions", "edge", "silkscreen"]
 
 
@@ -44,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "pcb",
-        help="Path to .kicad_pcb file to check",
+        help="Path to .kicad_pcb file or directory containing one",
     )
     parser.add_argument(
         "--format",
@@ -126,14 +152,29 @@ def main(argv: list[str] | None = None) -> int:
             skip_set.add(cat)
 
     # Load PCB - resolve to absolute path for reliable file access
-    pcb_path = Path(args.pcb).resolve()
-    if not pcb_path.exists():
-        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
+    # Handles both file paths and directory paths (like kct build)
+    input_path = Path(args.pcb).resolve()
+
+    if not input_path.exists():
+        print(f"Error: Path not found: {input_path}", file=sys.stderr)
         return 1
 
-    if pcb_path.suffix != ".kicad_pcb":
-        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+    if input_path.is_dir():
+        # Auto-discover PCB file in directory (consistent with kct build)
+        pcb_path = _find_pcb_file(input_path)
+        if pcb_path is None:
+            print(f"Error: No .kicad_pcb file found in directory: {input_path}", file=sys.stderr)
+            print(
+                "Hint: Specify a .kicad_pcb file directly, or ensure the directory contains one.",
+                file=sys.stderr,
+            )
+            return 1
+    elif input_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {input_path.name}", file=sys.stderr)
+        print("Hint: Provide a .kicad_pcb file or a directory containing one.", file=sys.stderr)
         return 1
+    else:
+        pcb_path = input_path
 
     try:
         pcb = PCB.load(pcb_path)
