@@ -26,8 +26,7 @@ class TestGetRoutingParams:
 
         # Grid must be <= clearance / 2 to allow routing without DRC violations
         assert grid <= clearance / 2, (
-            f"Grid {grid}mm must be <= clearance/2 ({clearance/2}mm) "
-            f"to prevent DRC violations"
+            f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm) to prevent DRC violations"
         )
 
         # Verify we got JLCPCB-specific values (~5 mil = 0.127mm clearance)
@@ -40,25 +39,19 @@ class TestGetRoutingParams:
         """Seeed grid should be compatible with its clearance."""
         grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params("seeed")
 
-        assert grid <= clearance / 2, (
-            f"Grid {grid}mm must be <= clearance/2 ({clearance/2}mm)"
-        )
+        assert grid <= clearance / 2, f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm)"
 
     def test_pcbway_grid_compatible_with_clearance(self):
         """PCBWay grid should be compatible with its clearance."""
         grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params("pcbway")
 
-        assert grid <= clearance / 2, (
-            f"Grid {grid}mm must be <= clearance/2 ({clearance/2}mm)"
-        )
+        assert grid <= clearance / 2, f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm)"
 
     def test_oshpark_grid_compatible_with_clearance(self):
         """OSH Park grid should be compatible with its clearance."""
         grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params("oshpark")
 
-        assert grid <= clearance / 2, (
-            f"Grid {grid}mm must be <= clearance/2 ({clearance/2}mm)"
-        )
+        assert grid <= clearance / 2, f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm)"
 
     def test_grid_rounded_to_clean_value(self):
         """Grid should be rounded to 0.05mm increments."""
@@ -205,9 +198,7 @@ class TestGetRoutingParamsWithSpec:
     def test_partial_spec_uses_mfr_defaults(self):
         """Missing spec values should fall back to manufacturer defaults."""
         spec = self._make_spec(min_space="0.2mm")  # Only clearance specified
-        grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(
-            "jlcpcb", spec
-        )
+        grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params("jlcpcb", spec)
 
         # Clearance from spec
         assert clearance == pytest.approx(0.2)
@@ -232,9 +223,7 @@ class TestGetRoutingParamsWithSpec:
         grid, clearance, _, _, _ = _get_routing_params("jlcpcb", spec)
 
         # Grid must be <= clearance / 2 for DRC compliance
-        assert grid <= clearance / 2, (
-            f"Grid {grid}mm must be <= clearance/2 ({clearance/2}mm)"
-        )
+        assert grid <= clearance / 2, f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm)"
         # Grid should be rounded to 0.05mm increments
         assert grid * 20 == pytest.approx(round(grid * 20), abs=0.001)
 

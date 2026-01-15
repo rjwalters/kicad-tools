@@ -461,9 +461,7 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     output_file = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
 
     # Get routing parameters from project spec (preferred) or manufacturer rules (fallback)
-    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(
-        ctx.mfr, ctx.spec
-    )
+    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
 
     if ctx.dry_run:
         return BuildResult(
