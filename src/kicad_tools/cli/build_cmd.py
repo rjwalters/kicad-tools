@@ -12,15 +12,21 @@ Orchestrates the full build pipeline:
 from __future__ import annotations
 
 import argparse
+import math
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+
+if TYPE_CHECKING:
+    from kicad_tools.spec.schema import ProjectSpec
 
 __all__ = ["main"]
 
@@ -51,6 +57,7 @@ class BuildContext:
 
     project_dir: Path
     spec_file: Path | None
+    spec: ProjectSpec | None = None
     schematic_file: Path | None = None
     pcb_file: Path | None = None
     routed_pcb_file: Path | None = None
@@ -266,41 +273,120 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     )
 
 
-def _get_routing_params(mfr: str) -> tuple[float, float, float, float, float]:
-    """Get routing parameters from manufacturer rules.
+def _parse_dimension_mm(value: str | None) -> float | None:
+    """Parse a dimension string like '0.3mm' or '0.2 mm' into a float in mm.
+
+    Args:
+        value: String like "0.3mm", "0.2 mm", "0.15", or None
+
+    Returns:
+        Float value in mm, or None if parsing fails
+    """
+    if value is None:
+        return None
+
+    # Strip whitespace
+    value = value.strip()
+    if not value:
+        return None
+
+    # Try to parse numeric value with optional 'mm' suffix
+    match = re.match(r"^([\d.]+)\s*(?:mm)?$", value, re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    return None
+
+
+def _get_routing_params(
+    mfr: str, spec: ProjectSpec | None = None
+) -> tuple[float, float, float, float, float]:
+    """Get routing parameters from project spec or manufacturer rules.
+
+    Priority:
+    1. Project spec (min_trace, min_space from project.kct)
+    2. Manufacturer profile defaults
 
     Auto-calculates grid to be compatible with clearance.
     Grid must be ≤ clearance / 2 to allow routing without DRC violations.
 
     Args:
         mfr: Manufacturer ID (e.g., "jlcpcb")
+        spec: Optional ProjectSpec loaded from project.kct
 
     Returns:
         Tuple of (grid, clearance, trace_width, via_drill, via_diameter)
     """
     from kicad_tools.manufacturers import get_profile
 
+    # Start with None values to track what we've found
+    clearance: float | None = None
+    trace_width: float | None = None
+    via_drill: float | None = None
+    via_diameter: float | None = None
+
+    # First, try to get values from the project spec
+    if spec is not None and spec.requirements is not None:
+        mfr_reqs = spec.requirements.manufacturing
+        if mfr_reqs is not None:
+            # Parse min_space -> clearance
+            if mfr_reqs.min_space is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_space)
+                if parsed is not None:
+                    clearance = parsed
+
+            # Parse min_trace -> trace_width
+            if mfr_reqs.min_trace is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_trace)
+                if parsed is not None:
+                    trace_width = parsed
+
+            # Parse min_via -> via_diameter
+            if mfr_reqs.min_via is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_via)
+                if parsed is not None:
+                    via_diameter = parsed
+
+            # Parse min_drill -> via_drill
+            if mfr_reqs.min_drill is not None:
+                parsed = _parse_dimension_mm(mfr_reqs.min_drill)
+                if parsed is not None:
+                    via_drill = parsed
+
+    # Fill in missing values from manufacturer profile
     try:
         profile = get_profile(mfr)
         rules = profile.get_design_rules(layers=2)  # Use 2-layer defaults
 
-        clearance = rules.min_clearance_mm
-        trace_width = rules.min_trace_width_mm
-        via_drill = rules.min_via_drill_mm
-        via_diameter = rules.min_via_diameter_mm
-
-        # Auto-calculate grid: must be ≤ clearance / 2 for DRC compliance
-        # Round DOWN to a clean value (0.05mm increments) to ensure compliance
-        import math
-        grid = clearance / 2
-        grid = max(0.05, math.floor(grid / 0.05) * 0.05)  # Round DOWN to 0.05mm, min 0.05mm
-
-        return grid, clearance, trace_width, via_drill, via_diameter
+        if clearance is None:
+            clearance = rules.min_clearance_mm
+        if trace_width is None:
+            trace_width = rules.min_trace_width_mm
+        if via_drill is None:
+            via_drill = rules.min_via_drill_mm
+        if via_diameter is None:
+            via_diameter = rules.min_via_diameter_mm
 
     except Exception:
         # Fall back to safe defaults if manufacturer lookup fails
-        # These defaults ensure grid < clearance
-        return 0.075, 0.15, 0.15, 0.3, 0.6
+        if clearance is None:
+            clearance = 0.15
+        if trace_width is None:
+            trace_width = 0.15
+        if via_drill is None:
+            via_drill = 0.3
+        if via_diameter is None:
+            via_diameter = 0.6
+
+    # Auto-calculate grid: must be ≤ clearance / 2 for DRC compliance
+    # Round DOWN to a clean value (0.05mm increments) to ensure compliance
+    grid = clearance / 2
+    grid = max(0.05, math.floor(grid / 0.05) * 0.05)  # Round DOWN to 0.05mm, min 0.05mm
+
+    return grid, clearance, trace_width, via_drill, via_diameter
 
 
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
@@ -374,8 +460,10 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
 
     output_file = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
 
-    # Get routing parameters from manufacturer rules
-    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr)
+    # Get routing parameters from project spec (preferred) or manufacturer rules (fallback)
+    grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(
+        ctx.mfr, ctx.spec
+    )
 
     if ctx.dry_run:
         return BuildResult(
@@ -609,6 +697,16 @@ Examples:
         console.print(f"[red]Error:[/red] Directory not found: {project_dir}")
         return 1
 
+    # Load the spec file if available
+    spec = None
+    if spec_file and spec_file.exists():
+        try:
+            from kicad_tools.spec import load_spec
+
+            spec = load_spec(spec_file)
+        except Exception:
+            pass  # Spec loading is optional, continue without it
+
     # Find existing artifacts
     schematic, pcb = _find_artifacts(project_dir, spec_file)
 
@@ -616,6 +714,7 @@ Examples:
     ctx = BuildContext(
         project_dir=project_dir,
         spec_file=spec_file,
+        spec=spec,
         schematic_file=schematic,
         pcb_file=pcb,
         mfr=args.mfr,
@@ -626,15 +725,7 @@ Examples:
 
     # Print build header
     if not args.quiet:
-        project_name = project_dir.name
-        if spec_file:
-            try:
-                from kicad_tools.spec import load_spec
-
-                spec = load_spec(spec_file)
-                project_name = spec.project.name
-            except Exception:
-                pass
+        project_name = spec.project.name if spec else project_dir.name
 
         console.print(
             Panel.fit(
