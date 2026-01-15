@@ -521,7 +521,13 @@ class Router:
 
             # Goal check - accept any valid end layer for PTH pads
             if current.x == end_gx and current.y == end_gy and current.layer in end_layers:
-                return self._reconstruct_route(current, start, end)
+                route = self._reconstruct_route(current, start, end)
+                if route is not None:
+                    return route
+                # Geometric validation failed (Issue #750) - continue A* search
+                # This allows finding alternate paths (e.g., B.Cu when F.Cu fails)
+                # The node stays in closed_set, preventing re-exploration on this layer
+                continue
 
             # Explore neighbors
             for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
@@ -562,24 +568,21 @@ class Router:
                         continue
 
                 # Check blocked cells carefully
-                # Only allow routing through blocked cells if:
-                # 1. The cell is our net's pad CENTER (not just clearance zone)
-                # 2. We're at the exact start or end pad position
+                # Allow routing through blocked cells that belong to OUR net
+                # This enables THT pads to be entered/exited on any layer
                 cell = self.grid.grid[nlayer][ny][nx]
                 if cell.blocked:
-                    # Check if this is exactly the start or end pad center
-                    # For PTH pads, accept any valid layer
-                    is_start_center = nx == start_gx and ny == start_gy and nlayer in start_layers
-                    is_end_center = nx == end_gx and ny == end_gy and nlayer in end_layers
-
-                    if is_start_center or is_end_center:
-                        # Allow routing through our own pad centers
-                        if cell.net != start.net:
-                            continue  # Block if it's not our net
-                    else:
-                        # All other blocked cells are obstacles - use full check
+                    if cell.net == start.net:
+                        # Same-net blocked cell (e.g., our THT pad area)
+                        # Allow routing through it - this is key for THT routing
+                        pass
+                    elif cell.net == 0:
+                        # No-net blocked cell - use full check for obstacles
                         if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
                             continue
+                    else:
+                        # Different net's pad - always block
+                        continue
 
                 # Check zone blocking (other-net zones block routing)
                 if self._is_zone_blocked(nx, ny, nlayer, start.net):
