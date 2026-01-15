@@ -874,3 +874,237 @@ class TestRoutingGridThreadSafety:
                 thread_safe_grid.mark_route(route)
 
         assert len(thread_safe_grid.routes) == 1
+
+
+class TestGeometricClearanceValidation:
+    """Tests for geometric clearance validation (Issue #750).
+
+    The grid-based A* pathfinder uses discrete cells for obstacle checking,
+    which can miss clearance violations on diagonal segments that cut through
+    obstacle corners. These tests verify the geometric validation catches
+    such violations.
+    """
+
+    @pytest.fixture
+    def grid(self):
+        """Create a routing grid with pads for clearance testing."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,  # Standard clearance
+        )
+        return RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    def test_segment_clearance_valid(self, grid):
+        """Test segment with sufficient clearance passes validation."""
+        # Add a pad at (5.0, 5.0)
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="NET1")
+        grid.add_pad(pad)
+
+        # Create a segment far from the pad (should have sufficient clearance)
+        seg = Segment(
+            x1=10.0, y1=10.0, x2=12.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=2)
+
+        assert is_valid is True
+        assert clearance > grid.rules.trace_clearance
+        assert location is None
+
+    def test_segment_clearance_violation_pad(self, grid):
+        """Test segment too close to pad is detected as violation."""
+        # Add a pad at (5.0, 5.0) with width 1.0
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="NET1")
+        grid.add_pad(pad)
+
+        # Create a segment that passes very close to the pad
+        # Pad edge is at 5.5, segment at 5.55 with width 0.2 -> edge at 5.45
+        # Clearance = 5.55 - 5.5 - 0.1 = -0.05 (violation!)
+        seg = Segment(
+            x1=5.55, y1=0.0, x2=5.55, y2=10.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=2)
+
+        assert is_valid is False
+        assert clearance < grid.rules.trace_clearance
+        assert location is not None
+
+    def test_segment_clearance_same_net_ignored(self, grid):
+        """Test that same-net pads are ignored in clearance check."""
+        # Add a pad at (5.0, 5.0)
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="NET1")
+        grid.add_pad(pad)
+
+        # Create a segment from the same net that passes through the pad
+        seg = Segment(
+            x1=4.0, y1=5.0, x2=6.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=1)
+
+        # Same-net should be ignored, so no violation
+        assert is_valid is True
+
+    def test_segment_clearance_different_layer_smd(self, grid):
+        """Test that SMD pads on different layers don't cause violations."""
+        # Add an SMD pad on F.Cu
+        pad = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="NET1")
+        grid.add_pad(pad)
+
+        # Create a segment on B.Cu that passes through the same location
+        seg = Segment(
+            x1=4.0, y1=5.0, x2=6.0, y2=5.0, width=0.2, layer=Layer.B_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=2)
+
+        # Different layers for SMD, so no violation
+        assert is_valid is True
+
+    def test_segment_clearance_pth_blocks_all_layers(self, grid):
+        """Test that PTH pads block segments on all layers."""
+        # Add a PTH pad (blocks all layers)
+        pad = Pad(
+            x=5.0,
+            y=5.0,
+            width=1.7,
+            height=1.7,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="NET1",
+            through_hole=True,
+            drill=1.0,
+        )
+        grid.add_pad(pad)
+
+        # Create a segment on B.Cu that passes close to the PTH pad
+        seg = Segment(
+            x1=5.95, y1=0.0, x2=5.95, y2=10.0, width=0.2, layer=Layer.B_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=2)
+
+        # PTH should block on all layers, so this should be a violation
+        assert is_valid is False
+
+    def test_segment_to_segment_clearance_violation(self, grid):
+        """Test clearance violation between two segments."""
+        # Add a route with a segment
+        seg1 = Segment(
+            x1=5.0, y1=0.0, x2=5.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+        )
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        grid.mark_route(route1)
+
+        # Create a new segment that runs parallel and too close
+        # Segment 1 edge at 5.1, segment 2 edge at 5.1 (overlapping!)
+        seg2 = Segment(
+            x1=5.2, y1=0.0, x2=5.2, y2=10.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg2, exclude_net=2)
+
+        # Segments are too close (0.2 - 0.1 - 0.1 = 0.0, less than 0.127)
+        assert is_valid is False
+        assert clearance < grid.rules.trace_clearance
+
+    def test_segment_to_segment_clearance_valid(self, grid):
+        """Test segment-to-segment clearance when properly spaced."""
+        # Add a route with a segment
+        seg1 = Segment(
+            x1=5.0, y1=0.0, x2=5.0, y2=10.0, width=0.2, layer=Layer.F_CU, net=1, net_name="NET1"
+        )
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        grid.mark_route(route1)
+
+        # Create a new segment with sufficient spacing
+        # seg1 edge at 5.1, seg2 edge at 5.33, clearance = 0.23 > 0.127
+        seg2 = Segment(
+            x1=5.53, y1=0.0, x2=5.53, y2=10.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg2, exclude_net=2)
+
+        assert is_valid is True
+        assert clearance >= grid.rules.trace_clearance
+
+    def test_segment_to_via_clearance_violation(self, grid):
+        """Test clearance violation between segment and via."""
+        # Add a route with a via
+        via = Via(x=5.0, y=5.0, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        route1 = Route(net=1, net_name="NET1", segments=[], vias=[via])
+        grid.mark_route(route1)
+
+        # Create a segment that passes too close to the via
+        # Via edge at 5.3, segment edge at 5.3 (overlapping!)
+        seg = Segment(
+            x1=5.4, y1=0.0, x2=5.4, y2=10.0, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=2)
+
+        # Segment is too close to via
+        assert is_valid is False
+
+    def test_diagonal_segment_corner_violation(self, grid):
+        """Test that diagonal segments cutting through obstacle corners are detected.
+
+        This is the core case for Issue #750: diagonal segments can geometrically
+        pass through obstacle corners even when grid-based checking approves them.
+        """
+        # Add two pads creating a narrow gap
+        pad1 = Pad(x=5.0, y=5.0, width=1.0, height=1.0, layer=Layer.F_CU, net=1, net_name="NET1")
+        pad2 = Pad(x=6.5, y=6.5, width=1.0, height=1.0, layer=Layer.F_CU, net=3, net_name="NET3")
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        # Create a diagonal segment that would cut through the corner between pads
+        # This diagonal passes close to pad1's corner at (5.5, 5.5) and pad2's corner at (6.0, 6.0)
+        seg = Segment(
+            x1=5.3, y1=5.3, x2=6.7, y2=6.7, width=0.2, layer=Layer.F_CU, net=2, net_name="NET2"
+        )
+
+        is_valid, clearance, location = grid.validate_segment_clearance(seg, exclude_net=2)
+
+        # The diagonal should violate clearance with at least one of the pads
+        assert is_valid is False
+
+    def test_point_to_segment_distance_horizontal(self, grid):
+        """Test point-to-segment distance for horizontal segment."""
+        # Point directly above segment
+        dist = grid._point_to_segment_distance(5.0, 3.0, 0.0, 0.0, 10.0, 0.0)
+        assert abs(dist - 3.0) < 0.001
+
+    def test_point_to_segment_distance_endpoint(self, grid):
+        """Test point-to-segment distance when closest point is endpoint."""
+        # Point beyond segment end
+        dist = grid._point_to_segment_distance(15.0, 0.0, 0.0, 0.0, 10.0, 0.0)
+        assert abs(dist - 5.0) < 0.001
+
+    def test_segment_to_segment_distance_parallel(self, grid):
+        """Test segment-to-segment distance for parallel segments."""
+        # Two parallel horizontal segments, 2.0 apart
+        dist = grid._segment_to_segment_distance(0.0, 0.0, 10.0, 0.0, 0.0, 2.0, 10.0, 2.0)
+        assert abs(dist - 2.0) < 0.001
+
+    def test_segment_to_segment_distance_perpendicular(self, grid):
+        """Test segment-to-segment distance for perpendicular segments."""
+        # Horizontal and vertical segments, 1.0 apart at closest
+        dist = grid._segment_to_segment_distance(0.0, 0.0, 10.0, 0.0, 5.0, 1.0, 5.0, 5.0)
+        assert abs(dist - 1.0) < 0.001
+
+    def test_pads_stored_in_grid(self, grid):
+        """Test that pads are stored in grid._pads when added."""
+        assert len(grid._pads) == 0
+
+        pad1 = Pad(x=1.0, y=1.0, width=0.5, height=0.5, layer=Layer.F_CU, net=1, net_name="NET1")
+        pad2 = Pad(x=5.0, y=5.0, width=0.5, height=0.5, layer=Layer.F_CU, net=2, net_name="NET2")
+
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        assert len(grid._pads) == 2
+        assert grid._pads[0] is pad1
+        assert grid._pads[1] is pad2

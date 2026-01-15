@@ -301,6 +301,11 @@ class RoutingGrid:
         self._corridor_preferences: dict[int, any] = {}
         self._corridor_penalty: float = 5.0  # Default penalty for leaving corridor
 
+        # Store original pad geometry for geometric clearance validation
+        # Issue #750: Grid-based checking is approximate; we need precise geometry
+        # for post-route validation to catch diagonal segment violations
+        self._pads: list[Pad] = []
+
     @property
     def congestion(self) -> np.ndarray:
         """Return congestion array (backward compatible)."""
@@ -459,6 +464,9 @@ class RoutingGrid:
 
     def _add_pad_unsafe(self, pad: Pad) -> None:
         """Internal pad addition without locking."""
+        # Store pad geometry for geometric clearance validation (Issue #750)
+        self._pads.append(pad)
+
         # Clearance model: trace clearance + trace half-width from pad edge.
         # The pathfinder checks if the trace CENTER can be placed at a cell,
         # so we must block cells where the trace edge would violate clearance.
@@ -576,6 +584,175 @@ class RoutingGrid:
         if cell.blocked:
             return cell.net == 0 or cell.net != net
         return False
+
+    def validate_segment_clearance(
+        self,
+        seg: Segment,
+        exclude_net: int,
+        min_clearance: float | None = None,
+    ) -> tuple[bool, float, tuple[float, float] | None]:
+        """Validate geometric clearance of a segment against all obstacles.
+
+        This performs precise geometric distance calculations to catch violations
+        that grid-based checking misses, particularly for diagonal segments.
+        Issue #750: Grid discretization causes diagonal segments to pass through
+        obstacle corners that weren't detected during A* search.
+
+        Args:
+            seg: The segment to validate
+            exclude_net: Net ID to exclude (same-net elements don't violate clearance)
+            min_clearance: Minimum required clearance (default: rules.trace_clearance)
+
+        Returns:
+            Tuple of (is_valid, actual_clearance, violation_location)
+            - is_valid: True if segment meets clearance requirements
+            - actual_clearance: Minimum clearance found (negative if overlapping)
+            - violation_location: (x, y) of worst violation, or None if valid
+        """
+        import math
+
+        if min_clearance is None:
+            min_clearance = self.rules.trace_clearance
+
+        # Segment half-width for edge-to-edge distance calculation
+        seg_half_width = seg.width / 2
+
+        min_actual_clearance = float("inf")
+        violation_loc: tuple[float, float] | None = None
+
+        # Check against all stored pads
+        for pad in self._pads:
+            # Skip same-net pads (clearance not required within same net)
+            if pad.net == exclude_net:
+                continue
+
+            # Skip pads on different layers (unless PTH)
+            if not pad.through_hole:
+                # Convert layer for comparison
+                pad_layer_idx = self.layer_to_index(pad.layer.value)
+                seg_layer_idx = self.layer_to_index(seg.layer.value)
+                if pad_layer_idx != seg_layer_idx:
+                    continue
+
+            # Calculate distance from segment to pad center
+            # Use the pad's larger dimension as radius for conservative check
+            pad_radius = max(pad.width, pad.height) / 2
+
+            # Point-to-segment distance calculation
+            dist = self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
+
+            # Edge-to-edge clearance
+            clearance = dist - seg_half_width - pad_radius
+
+            if clearance < min_actual_clearance:
+                min_actual_clearance = clearance
+                if clearance < min_clearance:
+                    violation_loc = (pad.x, pad.y)
+
+        # Check against segments from existing routes
+        for route in self.routes:
+            # Skip same-net routes
+            if route.net == exclude_net:
+                continue
+
+            for other_seg in route.segments:
+                # Skip segments on different layers
+                if other_seg.layer != seg.layer:
+                    continue
+
+                # Segment-to-segment distance
+                dist = self._segment_to_segment_distance(
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    other_seg.x1,
+                    other_seg.y1,
+                    other_seg.x2,
+                    other_seg.y2,
+                )
+
+                # Edge-to-edge clearance (both segment half-widths)
+                clearance = dist - seg_half_width - other_seg.width / 2
+
+                if clearance < min_actual_clearance:
+                    min_actual_clearance = clearance
+                    if clearance < min_clearance:
+                        # Violation location at midpoint
+                        violation_loc = (
+                            (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
+                            (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
+                        )
+
+            # Check against vias from existing routes
+            for via in route.vias:
+                via_radius = via.diameter / 2
+
+                # Point-to-segment distance for via
+                dist = self._point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
+
+                clearance = dist - seg_half_width - via_radius
+
+                if clearance < min_actual_clearance:
+                    min_actual_clearance = clearance
+                    if clearance < min_clearance:
+                        violation_loc = (via.x, via.y)
+
+        is_valid = min_actual_clearance >= min_clearance
+        return is_valid, min_actual_clearance, violation_loc
+
+    def _point_to_segment_distance(
+        self,
+        px: float,
+        py: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+    ) -> float:
+        """Calculate the distance from a point to a line segment."""
+        import math
+
+        # Vector from p1 to p2
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Length squared of segment
+        len_sq = dx * dx + dy * dy
+
+        if len_sq == 0:
+            # Segment is a point
+            return math.sqrt((px - x1) ** 2 + (py - y1) ** 2)
+
+        # Parameter t for the closest point on the line
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / len_sq))
+
+        # Closest point on segment
+        closest_x = x1 + t * dx
+        closest_y = y1 + t * dy
+
+        # Distance from point to closest point
+        return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    def _segment_to_segment_distance(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        x3: float,
+        y3: float,
+        x4: float,
+        y4: float,
+    ) -> float:
+        """Calculate minimum distance between two line segments."""
+        # Check all four endpoint-to-segment distances
+        d1 = self._point_to_segment_distance(x1, y1, x3, y3, x4, y4)
+        d2 = self._point_to_segment_distance(x2, y2, x3, y3, x4, y4)
+        d3 = self._point_to_segment_distance(x3, y3, x1, y1, x2, y2)
+        d4 = self._point_to_segment_distance(x4, y4, x1, y1, x2, y2)
+
+        return min(d1, d2, d3, d4)
 
     def mark_route(self, route: Route) -> None:
         """Mark a route's cells as used.

@@ -525,9 +525,7 @@ class ViaOptimizer:
             seg.net_name = route.net_name
             segments.append(seg)
 
-    def validate_layer_connectivity(
-        self, route: Route
-    ) -> list[LayerConnectivityError]:
+    def validate_layer_connectivity(self, route: Route) -> list[LayerConnectivityError]:
         """Validate that all layer transitions have vias.
 
         Checks each segment pair for layer transitions. When two segments
