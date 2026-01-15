@@ -65,6 +65,19 @@ class BuildContext:
     verbose: bool = False
     dry_run: bool = False
     quiet: bool = False
+    _executed_scripts: set[Path] | None = None
+
+    def mark_script_executed(self, script: Path) -> None:
+        """Mark a script as having been executed."""
+        if self._executed_scripts is None:
+            self._executed_scripts = set()
+        self._executed_scripts.add(script.resolve())
+
+    def was_script_executed(self, script: Path) -> bool:
+        """Check if a script has already been executed."""
+        if self._executed_scripts is None:
+            return False
+        return script.resolve() in self._executed_scripts
 
 
 def _find_spec_file(directory: Path) -> Path | None:
@@ -220,6 +233,9 @@ def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
 
     success, message = _run_python_script(script, ctx.project_dir, ctx.verbose)
 
+    # Mark this script as executed to avoid running it again in PCB step
+    ctx.mark_script_executed(script)
+
     # Re-scan for artifacts after generation
     schematic, _ = _find_artifacts(ctx.project_dir, ctx.spec_file)
 
@@ -250,6 +266,17 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
             message="No PCB generator found (generate_pcb.py)",
         )
 
+    # Skip if this script was already executed (e.g., generate_design.py ran in schematic step)
+    if ctx.was_script_executed(script):
+        # Re-scan for artifacts that may have been created by the earlier run
+        _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
+        return BuildResult(
+            step="pcb",
+            success=True,
+            message=f"Script {script.name} already ran (produces both schematic and PCB)",
+            output_file=pcb,
+        )
+
     if ctx.dry_run:
         return BuildResult(
             step="pcb",
@@ -261,6 +288,9 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
         console.print(f"  Running {script.name}...")
 
     success, message = _run_python_script(script, ctx.project_dir, ctx.verbose)
+
+    # Mark this script as executed
+    ctx.mark_script_executed(script)
 
     # Re-scan for artifacts after generation
     _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
