@@ -18,15 +18,19 @@ Example:
 import sys
 from pathlib import Path
 
-# Add src to path for development
+# Add src to path for development (ensures source version is used)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+from kicad_tools.dev import warn_if_stale
 from kicad_tools.router import (
     DesignRules,
     create_net_class_map,
     load_pcb_for_routing,
 )
 from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
 
 
 def main():

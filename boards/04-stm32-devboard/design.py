@@ -22,6 +22,7 @@ If no output directory is specified, files are written to ./output/
 import sys
 from pathlib import Path
 
+from kicad_tools.dev import warn_if_stale
 from kicad_tools.schematic.blocks import (
     CrystalOscillator,
     DebugHeader,
@@ -30,6 +31,9 @@ from kicad_tools.schematic.blocks import (
 
 # Import the schematic builder and circuit blocks
 from kicad_tools.schematic.models.schematic import Schematic
+
+# Warn if running source scripts with stale pipx install
+warn_if_stale()
 
 
 def create_stm32_devboard(output_dir: Path) -> None:
