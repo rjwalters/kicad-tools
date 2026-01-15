@@ -804,6 +804,11 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force routing even when grid > clearance (may cause DRC violations)",
+    )
+    route_parser.add_argument(
         "--no-optimize",
         action="store_true",
         help="Skip trace optimization (keep raw grid-step segments)",

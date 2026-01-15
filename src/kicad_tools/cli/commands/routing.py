@@ -98,6 +98,8 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--power-nets", args.power_nets])
     if getattr(args, "layers", "auto") != "auto":
         sub_argv.extend(["--layers", args.layers])
+    if getattr(args, "force", False):
+        sub_argv.append("--force")
     if getattr(args, "no_optimize", False):
         sub_argv.append("--no-optimize")
     return route_main(sub_argv)
