@@ -9,7 +9,8 @@ project:
     the complete kicad-tools workflow with just 3 components.
   artifacts:
     schematic: "output/simple_led.kicad_sch"
-    pcb: "output/simple_led_routed.kicad_pcb"
+    pcb: "output/simple_led.kicad_pcb"
+    pcb_routed: "output/simple_led_routed.kicad_pcb"
 
 intent:
   summary: |
