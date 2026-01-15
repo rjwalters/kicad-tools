@@ -15,7 +15,9 @@ Example:
     python route_demo.py output/charlieplex_3x3.kicad_pcb output/charlieplex_3x3_routed.kicad_pcb
 """
 
+import contextlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,6 +30,40 @@ from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
 # Warn if running source scripts with stale pipx install
 warn_if_stale()
+
+
+def run_drc(pcb_path: Path) -> tuple[bool, int, int]:
+    """Run DRC on the PCB using kct check for consistent results.
+
+    Uses kct check as a subprocess to ensure the same DRC rules
+    are applied as when running kct check manually.
+
+    Returns:
+        Tuple of (success, error_count, warning_count)
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "kicad_tools.cli", "check", str(pcb_path)],
+            capture_output=True,
+            text=True,
+        )
+
+        # Parse the output to extract error/warning counts
+        error_count = 0
+        warning_count = 0
+        for line in result.stdout.split("\n"):
+            if "Errors:" in line:
+                with contextlib.suppress(ValueError):
+                    error_count = int(line.split(":")[-1].strip())
+            elif "Warnings:" in line:
+                with contextlib.suppress(ValueError):
+                    warning_count = int(line.split(":")[-1].strip())
+
+        return result.returncode == 0, error_count, warning_count
+
+    except Exception as e:
+        print(f"  Warning: DRC check failed: {e}")
+        return False, -1, -1
 
 
 def _get_routing_params() -> dict[str, float]:
@@ -172,17 +208,37 @@ def main():
     output_path.write_text(output_content)
     print(f"  Saved to: {output_path}")
 
+    # Run DRC validation
+    print("\n--- DRC Validation ---")
+    drc_passed, drc_errors, drc_warnings = run_drc(output_path)
+    if drc_passed:
+        print("  DRC PASSED")
+    else:
+        if drc_errors > 0:
+            print(f"  Errors:   {drc_errors}")
+        if drc_warnings > 0:
+            print(f"  Warnings: {drc_warnings}")
+        print(f"\n  Run 'kct check {output_path}' for full details")
+
     # Summary
     print("\n" + "=" * 60)
     total_nets = len([n for n in router.nets if n > 0])
-    if stats["nets_routed"] == total_nets:
-        print("SUCCESS: All nets routed!")
+    all_nets_routed = stats["nets_routed"] == total_nets
+
+    if all_nets_routed and drc_passed:
+        print("SUCCESS: All nets routed, DRC passed!")
+    elif all_nets_routed and not drc_passed:
+        print(f"WARNING: All nets routed, but {drc_errors} DRC violation(s) detected!")
+        print("  Review DRC errors before manufacturing.")
     else:
         print(f"PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
         print("  Some nets may require manual routing or a different strategy.")
+        if not drc_passed:
+            print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
     print("=" * 60)
 
-    return 0 if stats["nets_routed"] == total_nets else 1
+    # Return success only if all nets routed AND DRC passed
+    return 0 if all_nets_routed and drc_passed else 1
 
 
 if __name__ == "__main__":
