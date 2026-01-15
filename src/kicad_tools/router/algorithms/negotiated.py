@@ -549,13 +549,18 @@ class NegotiatedRouter:
         self.rip_up_nets(shuffled, net_routes, routes_list)
 
         # Re-route in shuffled order with higher cost
+        # Track successful re-routes to detect if any net was lost
         boosted_cost = present_cost_factor * 1.5
+        rerouted_count = 0
+        expected_count = 0
         for net in shuffled:
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                expected_count += 1
                 routes = self.route_net_negotiated(net_pads, boosted_cost, mark_route_callback)
                 if routes:
                     net_routes[net] = routes
+                    rerouted_count += 1
                     for route in routes:
                         self.grid.mark_route_usage(route)
                         routes_list.append(route)
@@ -563,7 +568,10 @@ class NegotiatedRouter:
         new_overflow = self.grid.get_total_overflow()
         best_overflow = min(overflow_history) if overflow_history else float("inf")
 
-        return new_overflow < best_overflow, new_overflow
+        # Only consider escape successful if ALL nets were re-routed AND overflow improved
+        # (Issue #762: escape was incorrectly reporting success when nets failed to re-route)
+        all_rerouted = rerouted_count == expected_count
+        return all_rerouted and new_overflow < best_overflow, new_overflow
 
     def _escape_reverse_order(
         self,
@@ -593,13 +601,18 @@ class NegotiatedRouter:
         self.rip_up_nets(reversed_order, net_routes, routes_list)
 
         # Re-route in reversed order
+        # Track successful re-routes to detect if any net was lost
         boosted_cost = present_cost_factor * 1.5
+        rerouted_count = 0
+        expected_count = 0
         for net in reversed_order:
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                expected_count += 1
                 routes = self.route_net_negotiated(net_pads, boosted_cost, mark_route_callback)
                 if routes:
                     net_routes[net] = routes
+                    rerouted_count += 1
                     for route in routes:
                         self.grid.mark_route_usage(route)
                         routes_list.append(route)
@@ -607,7 +620,10 @@ class NegotiatedRouter:
         new_overflow = self.grid.get_total_overflow()
         best_overflow = min(overflow_history) if overflow_history else float("inf")
 
-        return new_overflow < best_overflow, new_overflow
+        # Only consider escape successful if ALL nets were re-routed AND overflow improved
+        # (Issue #762: escape was incorrectly reporting success when nets failed to re-route)
+        all_rerouted = rerouted_count == expected_count
+        return all_rerouted and new_overflow < best_overflow, new_overflow
 
     def _escape_random_subset(
         self,
@@ -638,13 +654,18 @@ class NegotiatedRouter:
         self.rip_up_nets(subset, net_routes, routes_list)
 
         # Re-route with much higher cost to force different paths
+        # Track successful re-routes to detect if any net was lost
         boosted_cost = present_cost_factor * 2.0
+        rerouted_count = 0
+        expected_count = 0
         for net in subset:
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
+                expected_count += 1
                 routes = self.route_net_negotiated(net_pads, boosted_cost, mark_route_callback)
                 if routes:
                     net_routes[net] = routes
+                    rerouted_count += 1
                     for route in routes:
                         self.grid.mark_route_usage(route)
                         routes_list.append(route)
@@ -652,4 +673,7 @@ class NegotiatedRouter:
         new_overflow = self.grid.get_total_overflow()
         best_overflow = min(overflow_history) if overflow_history else float("inf")
 
-        return new_overflow < best_overflow, new_overflow
+        # Only consider escape successful if ALL nets were re-routed AND overflow improved
+        # (Issue #762: escape was incorrectly reporting success when nets failed to re-route)
+        all_rerouted = rerouted_count == expected_count
+        return all_rerouted and new_overflow < best_overflow, new_overflow

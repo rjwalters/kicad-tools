@@ -901,15 +901,15 @@ class Autorouter:
         present_factor = initial_present_factor
         timed_out = False
 
-        # For targeted rip-up: build pads_by_net mapping and track ripup history
+        # Build pads_by_net mapping for escape strategies and targeted rip-up
+        # (Issue #762: escape strategies need this even when use_targeted_ripup=False)
         pads_by_net: dict[int, list[Pad]] = {}
         ripup_history: dict[int, int] = {}
-        if use_targeted_ripup:
-            for net in net_order:
-                if net in self.nets:
-                    pads_for_routing = self.nets[net]
-                    if len(pads_for_routing) >= 2:
-                        pads_by_net[net] = [self.pads[p] for p in pads_for_routing]
+        for net in net_order:
+            if net in self.nets:
+                pads_for_routing = self.nets[net]
+                if len(pads_for_routing) >= 2:
+                    pads_by_net[net] = [self.pads[p] for p in pads_for_routing]
 
         def check_timeout() -> bool:
             """Check if timeout has been reached."""
