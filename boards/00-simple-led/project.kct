@@ -1,0 +1,70 @@
+kct_version: "1.0"
+
+project:
+  name: "Simple LED"
+  revision: "A"
+  author: "kicad-tools"
+  description: |
+    The "Hello World" of electronics - a minimal LED circuit demonstrating
+    the complete kicad-tools workflow with just 3 components.
+  artifacts:
+    schematic: "output/simple_led.kicad_sch"
+    pcb: "output/simple_led_routed.kicad_pcb"
+
+intent:
+  summary: |
+    Minimal test circuit for validating the kicad-tools pipeline.
+    This is the simplest possible design that demonstrates schematic
+    creation, PCB layout, autorouting, and DRC verification.
+  use_cases:
+    - Workflow validation
+    - Learning kicad-tools API
+    - Template for new designs
+
+requirements:
+  electrical:
+    input_voltage: 5V
+    led_current: 10mA
+    led_forward_voltage: 2V
+  mechanical:
+    board_width: 25mm
+    board_height: 20mm
+    layers: 2
+  components:
+    - id: J1
+      type: 2-pin connector
+      purpose: Power input (VCC, GND)
+      footprint: PinHeader_1x02_P2.54mm_Vertical
+    - id: R1
+      type: Resistor
+      value: 330 ohm
+      purpose: Current limiting
+      footprint: R_0805_2012Metric
+    - id: D1
+      type: LED
+      purpose: Visual indicator
+      footprint: LED_D5.0mm
+
+decisions:
+  - topic: Resistor value
+    choice: 330 ohm
+    rationale: |
+      Standard E24 value closest to ideal (5V - 2V) / 10mA = 300 ohm.
+      Provides approximately 9mA LED current, which is safe and visible.
+  - topic: LED footprint
+    choice: 5mm THT
+    rationale: |
+      Through-hole LED is visible and easy to assemble manually.
+      Good for prototyping and educational purposes.
+  - topic: Resistor footprint
+    choice: 0805 SMD
+    rationale: |
+      Common size, easy to hand-solder, demonstrates mixed THT/SMD design.
+
+progress:
+  phase: complete
+  checklist:
+    - [x] Schematic generation
+    - [x] PCB layout
+    - [x] Autorouting
+    - [x] DRC verification

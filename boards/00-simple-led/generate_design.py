@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Simple Voltage Divider - Validation Test Project
+Simple LED - Hello World of Electronics
 
-This is a minimal test to validate the kicad-tools workflow:
-- 2-pin input connector (VIN, GND)
-- 2-resistor voltage divider
-- 2-pin output connector (VOUT, GND)
+This is the minimal test board to validate the kicad-tools workflow:
+- 2-pin power connector (VCC, GND)
+- Current-limiting resistor (330 ohm)
+- LED
 
 The design targets:
 - Input: 5V
-- Output: 2.5V (50% division with equal resistors)
-- Resistors: 10k / 10k
+- LED forward voltage: ~2V
+- LED current: ~10mA
+- Resistor: (5V - 2V) / 10mA = 300 ohm -> use 330 ohm standard value
 
 Usage:
     python generate_design.py [output_dir]
@@ -29,170 +30,152 @@ def generate_uuid() -> str:
     return str(uuid.uuid4())
 
 
-def create_voltage_divider_schematic(output_dir: Path) -> Path:
+def create_led_schematic(output_dir: Path) -> Path:
     """
-    Create a simple voltage divider schematic.
+    Create a simple LED schematic.
 
     Returns the path to the generated schematic file.
     """
-    print("Creating Voltage Divider Schematic...")
+    print("Creating Simple LED Schematic...")
     print("=" * 60)
 
     # Create schematic with title block
     sch = Schematic(
-        title="Voltage Divider Test",
+        title="Simple LED - Hello World",
         date="2025-01",
         revision="A",
-        company="kicad-tools Validation",
-        comment1="Simple 2-resistor voltage divider",
-        comment2="5V -> 2.5V (10k/10k)",
+        company="kicad-tools Demo",
+        comment1="Minimal LED circuit",
+        comment2="5V input, 330 ohm resistor, LED",
     )
 
     # Define layout coordinates
-    RAIL_VIN = 30  # Input voltage rail
-    RAIL_GND = 150  # Ground rail
+    RAIL_VCC = 30  # VCC rail Y position
+    RAIL_GND = 130  # Ground rail Y position
     X_LEFT = 25
-    X_RIGHT = 200
 
     # =========================================================================
-    # Section 1: Place Components First (to get pin positions)
+    # Section 1: Place Components
     # =========================================================================
     print("\n1. Placing components...")
 
-    # Input connector
-    j_in = sch.add_symbol(
+    # Power connector (2-pin: VCC, GND)
+    j1 = sch.add_symbol(
         "Connector_Generic:Conn_01x02",
         x=50,
-        y=90,
+        y=80,
         ref="J1",
-        value="IN",
+        value="PWR",
         footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
     )
-    j1_pin1 = j_in.pin_position("1")
-    j1_pin2 = j_in.pin_position("2")
-    print(f"   J1: Input connector at ({j_in.x}, {j_in.y})")
+    j1_pin1 = j1.pin_position("1")  # VCC
+    j1_pin2 = j1.pin_position("2")  # GND
+    print(f"   J1: Power connector at ({j1.x}, {j1.y})")
 
-    # Voltage divider resistors (not using VoltageDivider block to control wiring)
-    r1 = sch.add_symbol("Device:R", x=110, y=60, ref="R1", value="10k", auto_footprint=True)
-    r1_pin1 = r1.pin_position("1")  # Top (VIN side)
-    r1_pin2 = r1.pin_position("2")  # Bottom (VOUT side)
-    print(f"   R1: 10k at ({r1.x}, {r1.y})")
+    # Current-limiting resistor (330 ohm)
+    r1 = sch.add_symbol(
+        "Device:R",
+        x=100,
+        y=55,
+        ref="R1",
+        value="330",
+        auto_footprint=True,
+    )
+    r1_pin1 = r1.pin_position("1")  # VCC side
+    r1_pin2 = r1.pin_position("2")  # LED side
+    print(f"   R1: 330 ohm at ({r1.x}, {r1.y})")
 
-    r2 = sch.add_symbol("Device:R", x=110, y=75, ref="R2", value="10k", auto_footprint=True)
-    r2_pin1 = r2.pin_position("1")  # Top (VOUT side)
-    r2_pin2 = r2.pin_position("2")  # Bottom (GND side)
-    print(f"   R2: 10k at ({r2.x}, {r2.y})")
-
-    # Output connector
-    j_out = sch.add_symbol(
-        "Connector_Generic:Conn_01x02",
-        x=165,
+    # LED
+    d1 = sch.add_symbol(
+        "Device:LED",
+        x=100,
         y=90,
-        ref="J2",
-        value="OUT",
-        footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+        ref="D1",
+        value="LED",
+        footprint="LED_THT:LED_D5.0mm",
     )
-    j2_pin1 = j_out.pin_position("1")
-    j2_pin2 = j_out.pin_position("2")
-    print(f"   J2: Output connector at ({j_out.x}, {j_out.y})")
+    d1_pin1 = d1.pin_position("1")  # Anode (positive)
+    d1_pin2 = d1.pin_position("2")  # Cathode (negative, to GND)
+    print(f"   D1: LED at ({d1.x}, {d1.y})")
 
     # =========================================================================
-    # Section 2: Create Segmented Power Rails
+    # Section 2: Create Power Rails
     # =========================================================================
-    print("\n2. Creating segmented power rails...")
+    print("\n2. Creating power rails...")
 
-    # Get the snapped rail Y positions
-    rail_vin_y = sch._snap_coord(RAIL_VIN, "rail")
+    # Get snapped coordinates
+    rail_vcc_y = sch._snap_coord(RAIL_VCC, "rail")
     rail_gnd_y = sch._snap_coord(RAIL_GND, "rail")
     x_left = sch._snap_coord(X_LEFT, "rail")
-    x_right = sch._snap_coord(X_RIGHT, "rail")
 
-    # Get X positions of all components that connect to rails
-    x_j1 = j1_pin1[0]  # J1 connection point
-    x_r1 = r1_pin1[0]  # R1 VIN connection point
-    x_r2 = r2_pin2[0]  # R2 GND connection point
-    x_j2 = j2_pin2[0]  # J2 GND connection point
+    # Get component X positions
+    x_j1 = j1_pin1[0]
+    x_r1 = r1_pin1[0]
+    x_d1 = d1_pin2[0]
 
-    # Sort X positions for VIN rail: left edge, J1, R1, right edge
-    vin_x_points = sorted([x_left, x_j1, x_r1, x_right])
+    # VCC rail segments (only from power symbol to last VCC connection - R1)
+    vcc_x_points = sorted([x_left, x_j1, x_r1])
+    for i in range(len(vcc_x_points) - 1):
+        sch.add_wire((vcc_x_points[i], rail_vcc_y), (vcc_x_points[i + 1], rail_vcc_y))
 
-    # Sort X positions for GND rail: left edge, J1, R2, J2, right edge
-    gnd_x_points = sorted([x_left, x_j1, x_r2, x_j2, x_right])
-
-    # Create VIN rail as segments
-    for i in range(len(vin_x_points) - 1):
-        sch.add_wire((vin_x_points[i], rail_vin_y), (vin_x_points[i + 1], rail_vin_y))
-
-    # Create GND rail as segments
+    # GND rail segments (only from power symbol to last GND connection - D1)
+    gnd_x_points = sorted([x_left, x_j1, x_d1])
     for i in range(len(gnd_x_points) - 1):
         sch.add_wire((gnd_x_points[i], rail_gnd_y), (gnd_x_points[i + 1], rail_gnd_y))
 
-    # Add power symbols at rail start
-    sch.add_power("power:+5V", x=X_LEFT, y=RAIL_VIN, rotation=0)
+    # Add power symbols
+    sch.add_power("power:VCC", x=X_LEFT, y=RAIL_VCC, rotation=0)
     sch.add_power("power:GND", x=X_LEFT, y=RAIL_GND, rotation=180)
 
-    # Add PWR_FLAG symbols to indicate power entry points
-    # This tells ERC that these nets are intentionally driven externally
-    sch.add_power("power:PWR_FLAG", x=x_j1, y=RAIL_VIN, rotation=0)
+    # Add PWR_FLAG for ERC
+    sch.add_power("power:PWR_FLAG", x=x_j1, y=RAIL_VCC, rotation=0)
     sch.add_power("power:PWR_FLAG", x=x_j1, y=RAIL_GND, rotation=0)
 
     # Add net labels
-    sch.add_label("+5V", X_LEFT, RAIL_VIN)
+    sch.add_label("VCC", X_LEFT, RAIL_VCC)
     sch.add_label("GND", X_LEFT, RAIL_GND)
 
-    print(f"   VIN rail with {len(vin_x_points) - 1} segments")
-    print(f"   GND rail with {len(gnd_x_points) - 1} segments")
+    print(f"   VCC rail: {len(vcc_x_points) - 1} segments")
+    print(f"   GND rail: {len(gnd_x_points) - 1} segments")
 
     # =========================================================================
-    # Section 3: Wire Components to Rails
+    # Section 3: Wire Components
     # =========================================================================
     print("\n3. Wiring components...")
 
-    # J1 Pin 1 to VIN rail (vertical wire)
-    sch.add_wire(j1_pin1, (x_j1, rail_vin_y))
-    sch.add_junction(x_j1, rail_vin_y)
+    # J1 Pin 1 (VCC) to VCC rail
+    sch.add_wire(j1_pin1, (x_j1, rail_vcc_y))
+    sch.add_junction(x_j1, rail_vcc_y)
 
-    # J1 Pin 2 to GND rail (vertical wire)
+    # J1 Pin 2 (GND) to GND rail
     sch.add_wire(j1_pin2, (x_j1, rail_gnd_y))
     sch.add_junction(x_j1, rail_gnd_y)
-    print("   J1 -> VIN/GND rails")
+    print("   J1 -> VCC/GND rails")
 
-    # R1 Pin 1 to VIN rail
-    sch.add_wire(r1_pin1, (x_r1, rail_vin_y))
-    sch.add_junction(x_r1, rail_vin_y)
-    print("   R1 -> VIN rail")
+    # R1 Pin 1 to VCC rail
+    sch.add_wire(r1_pin1, (x_r1, rail_vcc_y))
+    sch.add_junction(x_r1, rail_vcc_y)
+    print("   R1 -> VCC rail")
 
-    # R1-R2 connection (VOUT junction)
-    sch.add_wire(r1_pin2, r2_pin1)
-    sch.add_junction(r1_pin2[0], r1_pin2[1])
-    print("   R1 <-> R2 (VOUT)")
+    # R1 Pin 2 to D1 Pin 1 (Anode) - internal connection
+    sch.add_wire(r1_pin2, d1_pin1)
+    print("   R1 <-> D1 (internal connection)")
 
-    # R2 Pin 2 to GND rail
-    sch.add_wire(r2_pin2, (x_r2, rail_gnd_y))
-    sch.add_junction(x_r2, rail_gnd_y)
-    print("   R2 -> GND rail")
+    # D1 Pin 2 (Cathode) to GND rail
+    sch.add_wire(d1_pin2, (x_d1, rail_gnd_y))
+    sch.add_junction(x_d1, rail_gnd_y)
+    print("   D1 -> GND rail")
 
-    # J2 Pin 1 to VOUT (horizontal then vertical)
-    vout_y = r1_pin2[1]  # VOUT is at R1 pin 2 Y position
-    sch.add_wire(r1_pin2, (x_j2, vout_y))  # Horizontal from VOUT to J2's X
-    sch.add_wire((x_j2, vout_y), j2_pin1)  # Vertical down to J2 Pin 1
-    print("   VOUT -> J2 Pin 1")
+    # Add LED_ANODE label directly at R1 pin 2 (on the R1-D1 wire)
+    sch.add_label("LED_ANODE", r1_pin2[0], r1_pin2[1])
 
-    # J2 Pin 2 to GND rail
-    sch.add_wire(j2_pin2, (x_j2, rail_gnd_y))
-    sch.add_junction(x_j2, rail_gnd_y)
-    print("   J2 -> GND rail")
-
-    # Add VOUT label
-    sch.add_label("VOUT", x_j2 - 10, vout_y, rotation=0)
-
-    # Print voltage divider info
-    r_top = 10000  # 10k
-    r_bottom = 10000  # 10k
-    ratio = r_bottom / (r_top + r_bottom)
-    print("\n   Voltage divider: R1=10k, R2=10k")
-    print(f"   Division ratio: {ratio:.2f}")
-    print(f"   Output voltage: {5.0 * ratio:.2f}V")
+    # Print circuit calculation
+    v_in = 5.0
+    v_led = 2.0
+    r_value = 330
+    i_led = (v_in - v_led) / r_value * 1000  # mA
+    print(f"\n   Circuit: VCC=5V, R=330 ohm, LED Vf=2V")
+    print(f"   LED current: ({v_in}V - {v_led}V) / {r_value} = {i_led:.1f}mA")
 
     # =========================================================================
     # Section 4: Validate Schematic
@@ -205,21 +188,16 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
 
     if errors:
         print(f"   Found {len(errors)} errors:")
-        for err in errors:
+        for err in errors[:5]:
             print(f"      [{err['type']}] {err['message']}")
-            if err.get("location"):
-                print(f"                  at {err['location']}")
     else:
         print("   No errors found")
 
     if warnings:
         print(f"   Found {len(warnings)} warnings:")
-        for warn in warnings[:5]:  # Limit to first 5
+        for warn in warnings[:3]:
             print(f"      [{warn['type']}] {warn['message']}")
-        if len(warnings) > 5:
-            print(f"      ... and {len(warnings) - 5} more")
 
-    # Get statistics
     stats = sch.get_statistics()
     print("\n   Schematic statistics:")
     print(f"      Symbols: {stats['symbol_count']}")
@@ -229,49 +207,47 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     print(f"      Labels: {stats['label_count']}")
 
     # =========================================================================
-    # Section 5: Write Output Files
+    # Section 5: Write Output
     # =========================================================================
     print("\n5. Writing schematic...")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    sch_path = output_dir / "voltage_divider.kicad_sch"
+    sch_path = output_dir / "simple_led.kicad_sch"
     sch.write(sch_path)
     print(f"   Schematic: {sch_path}")
 
     return sch_path
 
 
-def create_voltage_divider_pcb(output_dir: Path) -> Path:
+def create_led_pcb(output_dir: Path) -> Path:
     """
-    Create a simple PCB for the voltage divider.
+    Create a simple PCB for the LED circuit.
 
     Returns the path to the generated PCB file.
     """
     print("\n" + "=" * 60)
-    print("Creating Voltage Divider PCB...")
+    print("Creating Simple LED PCB...")
     print("=" * 60)
 
     # Board dimensions (mm)
-    BOARD_WIDTH = 30.0
-    BOARD_HEIGHT = 25.0
+    BOARD_WIDTH = 25.0
+    BOARD_HEIGHT = 20.0
     BOARD_ORIGIN_X = 100.0
     BOARD_ORIGIN_Y = 100.0
 
     # Net definitions
     NETS = {
         "": 0,
-        "VIN": 1,
-        "VOUT": 2,
+        "VCC": 1,
+        "LED_ANODE": 2,
         "GND": 3,
     }
 
-    # Component positions (relative to board origin)
-    # Layout: J1 on left, R1-R2 in middle, J2 on right
-    J1_POS = (BOARD_ORIGIN_X + 5, BOARD_ORIGIN_Y + 12.5)  # Input connector
-    R1_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 8)  # Top resistor
-    R2_POS = (BOARD_ORIGIN_X + 15, BOARD_ORIGIN_Y + 17)  # Bottom resistor
-    J2_POS = (BOARD_ORIGIN_X + 25, BOARD_ORIGIN_Y + 12.5)  # Output connector
+    # Component positions (compact layout)
+    # J1 on left, R1 in middle, D1 on right
+    J1_POS = (BOARD_ORIGIN_X + 5, BOARD_ORIGIN_Y + 10)
+    R1_POS = (BOARD_ORIGIN_X + 12.5, BOARD_ORIGIN_Y + 10)
+    D1_POS = (BOARD_ORIGIN_X + 20, BOARD_ORIGIN_Y + 10)
 
     def generate_header() -> str:
         """Generate the PCB file header."""
@@ -331,8 +307,6 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
         x, y = pos
         pin1_num = NETS[pin1_net]
         pin2_num = NETS[pin2_net]
-
-        # Pin pitch 2.54mm (100mil)
         pitch = 2.54 / 2
 
         return f"""  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"
@@ -342,36 +316,54 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     (fp_text reference "{ref}" (at 0 -2.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (fp_text value "Conn_01x02" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
+    (fp_text value "PWR" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" thru_hole rect (at 0 {-pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin1_num} "{pin1_net}"))
     (pad "2" thru_hole oval (at 0 {pitch:.3f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {pin2_num} "{pin2_net}"))
   )"""
 
-    def generate_resistor(
-        ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "10k"
-    ) -> str:
+    def generate_resistor(ref: str, pos: tuple, pin1_net: str, pin2_net: str, value: str = "330") -> str:
         """Generate an 0805 resistor footprint."""
         x, y = pos
         pin1_num = NETS[pin1_net]
         pin2_num = NETS[pin2_net]
-
-        # 0805 pad positions: ~1mm from center
         pad_offset = 1.0
 
         return f"""  (footprint "Resistor_SMD:R_0805_2012Metric"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
-    (at {x} {y})
+    (at {x} {y} 90)
     (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "{value}" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at {-pad_offset} 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin1_num} "{pin1_net}"))
-    (pad "2" smd roundrect (at {pad_offset} 0) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin2_num} "{pin2_net}"))
+    (pad "1" smd roundrect (at {-pad_offset} 0 90) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin1_num} "{pin1_net}"))
+    (pad "2" smd roundrect (at {pad_offset} 0 90) (size 1.0 1.3) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {pin2_num} "{pin2_net}"))
+  )"""
+
+    def generate_led(ref: str, pos: tuple, anode_net: str, cathode_net: str) -> str:
+        """Generate a 5mm through-hole LED footprint."""
+        x, y = pos
+        anode_num = NETS[anode_net]
+        cathode_num = NETS[cathode_net]
+        # LED pitch: 2.54mm between anode and cathode
+        pitch = 2.54 / 2
+
+        return f"""  (footprint "LED_THT:LED_D5.0mm"
+    (layer "F.Cu")
+    (uuid "{generate_uuid()}")
+    (at {x} {y} 90)
+    (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (fp_text value "LED" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
+      (effects (font (size 1 1) (thickness 0.15)))
+    )
+    (pad "1" thru_hole rect (at {-pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
+    (pad "2" thru_hole circle (at {pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
   )"""
 
     # Build the PCB file
@@ -381,24 +373,19 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
         generate_board_outline(),
     ]
 
-    # Add components
     print("\n1. Adding footprints...")
 
-    # J1: Input connector (pin1=VIN, pin2=GND)
-    parts.append(generate_connector("J1", J1_POS, "VIN", "GND"))
-    print(f"   J1 (input) at {J1_POS}")
+    # J1: Power connector (pin1=VCC, pin2=GND)
+    parts.append(generate_connector("J1", J1_POS, "VCC", "GND"))
+    print(f"   J1 (power) at {J1_POS}")
 
-    # R1: Top resistor (pin1=VIN, pin2=VOUT)
-    parts.append(generate_resistor("R1", R1_POS, "VIN", "VOUT", "10k"))
-    print(f"   R1 (10k) at {R1_POS}")
+    # R1: Current-limiting resistor (pin1=VCC, pin2=LED_ANODE)
+    parts.append(generate_resistor("R1", R1_POS, "VCC", "LED_ANODE", "330"))
+    print(f"   R1 (330 ohm) at {R1_POS}")
 
-    # R2: Bottom resistor (pin1=VOUT, pin2=GND)
-    parts.append(generate_resistor("R2", R2_POS, "VOUT", "GND", "10k"))
-    print(f"   R2 (10k) at {R2_POS}")
-
-    # J2: Output connector (pin1=VOUT, pin2=GND)
-    parts.append(generate_connector("J2", J2_POS, "VOUT", "GND"))
-    print(f"   J2 (output) at {J2_POS}")
+    # D1: LED (anode=LED_ANODE, cathode=GND)
+    parts.append(generate_led("D1", D1_POS, "LED_ANODE", "GND"))
+    print(f"   D1 (LED) at {D1_POS}")
 
     parts.append(")")  # Close kicad_pcb
 
@@ -406,13 +393,13 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
 
     # Write PCB file
     print("\n2. Writing PCB file...")
-    pcb_path = output_dir / "voltage_divider.kicad_pcb"
+    pcb_path = output_dir / "simple_led.kicad_pcb"
     pcb_path.write_text(pcb_content)
     print(f"   PCB: {pcb_path}")
 
     print(f"\n   Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
-    print("   Components: 2 connectors, 2 resistors")
-    print(f"   Nets: {len([n for n in NETS.values() if n > 0])} (VIN, VOUT, GND)")
+    print("   Components: 1 connector, 1 resistor, 1 LED")
+    print(f"   Nets: {len([n for n in NETS.values() if n > 0])} (VCC, LED_ANODE, GND)")
 
     return pcb_path
 
@@ -431,13 +418,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("=" * 60)
 
     # Configure design rules
-    # Note: grid_resolution should be < trace_clearance for reliable DRC
     rules = DesignRules(
-        grid_resolution=0.1,  # 0.1mm grid (fine for DRC compliance)
-        trace_width=0.3,  # 0.3mm traces
-        trace_clearance=0.2,  # 0.2mm clearance
-        via_drill=0.3,  # 0.3mm via drill
-        via_diameter=0.6,  # 0.6mm via pad
+        grid_resolution=0.1,
+        trace_width=0.3,
+        trace_clearance=0.2,
+        via_drill=0.3,
+        via_diameter=0.6,
     )
 
     print(f"\n1. Loading PCB: {input_path}")
@@ -448,7 +434,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Load the PCB
     router, net_map = load_pcb_for_routing(
         str(input_path),
-        skip_nets=[],  # Route all nets
+        skip_nets=[],
         rules=rules,
     )
 
@@ -462,14 +448,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Get statistics before optimization
     stats_before = router.get_statistics()
 
-    print("\n3. Raw routing results (before optimization):")
-    print(f"   Routes created: {stats_before['routes']}")
+    print("\n3. Raw routing results:")
+    print(f"   Routes: {stats_before['routes']}")
     print(f"   Segments: {stats_before['segments']}")
     print(f"   Vias: {stats_before['vias']}")
-    print(f"   Total length: {stats_before['total_length_mm']:.2f}mm")
-    print(f"   Nets routed: {stats_before['nets_routed']}")
 
-    # Optimize traces - merge collinear segments, eliminate zigzags, etc.
+    # Optimize traces
     print("\n4. Optimizing traces...")
     opt_config = OptimizationConfig(
         merge_collinear=True,
@@ -486,18 +470,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         optimized_routes.append(optimized_route)
     router.routes = optimized_routes
 
-    # Get statistics after optimization
+    # Get final statistics
     stats = router.get_statistics()
 
-    segments_before = stats_before["segments"]
-    segments_after = stats["segments"]
-    reduction = (1 - segments_after / segments_before) * 100 if segments_before > 0 else 0
-
-    print(f"   Segments: {segments_before} -> {segments_after} ({reduction:.1f}% reduction)")
-    print(f"   Vias: {stats_before['vias']} -> {stats['vias']}")
-
-    print("\n5. Final routing results:")
-    print(f"   Routes created: {stats['routes']}")
+    print(f"\n5. Final routing results:")
+    print(f"   Routes: {stats['routes']}")
     print(f"   Segments: {stats['segments']}")
     print(f"   Vias: {stats['vias']}")
     print(f"   Total length: {stats['total_length_mm']:.2f}mm")
@@ -532,11 +509,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
 
 def run_erc(sch_path: Path) -> bool:
-    """
-    Run ERC on the schematic.
-
-    Returns True if no errors found.
-    """
+    """Run ERC on the schematic."""
     from kicad_tools.cli.runner import find_kicad_cli
     from kicad_tools.cli.runner import run_erc as kicad_run_erc
     from kicad_tools.erc import ERCReport
@@ -545,12 +518,10 @@ def run_erc(sch_path: Path) -> bool:
     print("Running ERC...")
     print("=" * 60)
 
-    # Check for kicad-cli
     kicad_cli = find_kicad_cli()
     if not kicad_cli:
         print("\n   WARNING: kicad-cli not found - skipping ERC")
-        print("   Install KiCad 8 from: https://www.kicad.org/download/")
-        return True  # Skip ERC if kicad-cli not available
+        return True
 
     result = kicad_run_erc(sch_path)
 
@@ -558,38 +529,25 @@ def run_erc(sch_path: Path) -> bool:
         print(f"\n   Error running ERC: {result.stderr}")
         return False
 
-    # Parse the report
     try:
         report = ERCReport.load(result.output_path)
     except Exception as e:
         print(f"\n   Error parsing ERC report: {e}")
         return False
     finally:
-        # Clean up temp file
         if result.output_path:
             result.output_path.unlink(missing_ok=True)
 
-    # Filter out excluded violations
     violations = [v for v in report.violations if not v.excluded]
     error_count = sum(1 for v in violations if v.is_error)
-    warning_count = len(violations) - error_count
 
     if error_count > 0:
         print(f"\n   Found {error_count} ERC errors:")
         for v in [v for v in violations if v.is_error][:5]:
             print(f"      - [{v.type_str}] {v.description}")
-        if error_count > 5:
-            print(f"      ... and {error_count - 5} more")
         return False
-    elif warning_count > 0:
-        print(f"\n   Found {warning_count} ERC warnings (no errors)")
-        for v in violations[:3]:
-            print(f"      - [{v.type_str}] {v.description}")
-        if warning_count > 3:
-            print(f"      ... and {warning_count - 3} more")
-        return True
     else:
-        print("\n   No ERC violations found!")
+        print("\n   No ERC errors found!")
         return True
 
 
@@ -637,16 +595,16 @@ def main() -> int:
 
     try:
         # Step 1: Create schematic
-        sch_path = create_voltage_divider_schematic(output_dir)
+        sch_path = create_led_schematic(output_dir)
 
-        # Step 2: Run ERC on schematic
+        # Step 2: Run ERC
         erc_success = run_erc(sch_path)
 
         # Step 3: Create PCB
-        pcb_path = create_voltage_divider_pcb(output_dir)
+        pcb_path = create_led_pcb(output_dir)
 
         # Step 4: Route PCB
-        routed_path = output_dir / "voltage_divider_routed.kicad_pcb"
+        routed_path = output_dir / "simple_led_routed.kicad_pcb"
         route_success = route_pcb(pcb_path, routed_path)
 
         # Step 5: Run DRC
@@ -665,18 +623,17 @@ def main() -> int:
         print(f"  ERC: {'PASS' if erc_success else 'FAIL'}")
         print(f"  Routing: {'SUCCESS' if route_success else 'PARTIAL'}")
         print(f"  DRC: {'PASS' if drc_success else 'FAIL'}")
-        print("\nDesign summary:")
-        print("  - J1: 2-pin input connector (VIN, GND)")
-        print("  - R1, R2: 10k voltage divider")
-        print("  - J2: 2-pin output connector (VOUT, GND)")
-        print("  - 5V input -> 2.5V output")
+        print("\nCircuit description:")
+        print("  - J1: 2-pin power input (VCC, GND)")
+        print("  - R1: 330 ohm current limiter")
+        print("  - D1: LED indicator")
+        print("  - 5V input -> ~10mA LED current")
 
         return 0 if erc_success and route_success and drc_success else 1
 
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
         import traceback
-
         traceback.print_exc()
         return 1
 
