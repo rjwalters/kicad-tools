@@ -1072,7 +1072,9 @@ def load_pcb_for_routing(
                 net_num = 0  # Treat as obstacle, not a routable net
 
             # Transform pad position by footprint rotation
-            rot_rad = math.radians(-fp_rot)
+            # KiCad stores rotation in degrees, positive = counter-clockwise
+            # Standard 2D rotation matrix applies directly (no negation needed)
+            rot_rad = math.radians(fp_rot)
             cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
             abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
             abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
