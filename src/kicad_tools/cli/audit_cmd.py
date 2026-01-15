@@ -93,8 +93,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Validate input file
-    path = Path(args.project_or_pcb)
+    # Validate input file - resolve to absolute path for reliable file access
+    path = Path(args.project_or_pcb).resolve()
     if not path.exists():
         print(f"Error: File not found: {path}", file=sys.stderr)
         return 1

@@ -125,8 +125,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             skip_set.add(cat)
 
-    # Load PCB
-    pcb_path = Path(args.pcb)
+    # Load PCB - resolve to absolute path for reliable file access
+    pcb_path = Path(args.pcb).resolve()
     if not pcb_path.exists():
         print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
         return 1
