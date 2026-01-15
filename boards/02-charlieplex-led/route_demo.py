@@ -12,7 +12,7 @@ Usage:
     python route_demo.py [input_pcb] [output_pcb]
 
 Example:
-    python route_demo.py charlieplex_3x3.kicad_pcb charlieplex_3x3_routed.kicad_pcb
+    python route_demo.py output/charlieplex_3x3.kicad_pcb output/charlieplex_3x3_routed.kicad_pcb
 """
 
 import sys
@@ -33,8 +33,8 @@ def main():
     """Run the routing demo."""
     # Parse arguments
     demo_dir = Path(__file__).parent
-    input_pcb = sys.argv[1] if len(sys.argv) > 1 else "charlieplex_3x3.kicad_pcb"
-    output_pcb = sys.argv[2] if len(sys.argv) > 2 else "charlieplex_3x3_routed.kicad_pcb"
+    input_pcb = sys.argv[1] if len(sys.argv) > 1 else "output/charlieplex_3x3.kicad_pcb"
+    output_pcb = sys.argv[2] if len(sys.argv) > 2 else "output/charlieplex_3x3_routed.kicad_pcb"
 
     input_path = demo_dir / input_pcb
     output_path = demo_dir / output_pcb
