@@ -87,7 +87,7 @@ For more control over individual steps, you can run Python scripts directly.
 ### Step 1: Generate the PCB
 
 ```bash
-python generate_pcb.py
+python3 generate_pcb.py
 ```
 
 Creates `usb_joystick.kicad_pcb` with all components placed and nets defined.
@@ -95,7 +95,7 @@ Creates `usb_joystick.kicad_pcb` with all components placed and nets defined.
 ### Step 2: Run the Autorouter
 
 ```bash
-python route_demo.py
+python3 route_demo.py
 ```
 
 This:

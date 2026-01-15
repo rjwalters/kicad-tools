@@ -70,7 +70,7 @@ For more control over individual steps, you can run Python scripts directly.
 ### Step 1: Generate the PCB
 
 ```bash
-python generate_pcb.py
+python3 generate_pcb.py
 ```
 
 This creates `charlieplex_3x3.kicad_pcb` with:
@@ -83,7 +83,7 @@ This creates `charlieplex_3x3.kicad_pcb` with:
 ### Step 2: Run the Autorouter
 
 ```bash
-python route_demo.py
+python3 route_demo.py
 ```
 
 This:

@@ -47,7 +47,7 @@ For more control, you can run individual Python scripts directly:
 ```bash
 # Run any board's generation script
 cd boards/01-voltage-divider
-python generate_design.py
+python3 generate_design.py
 
 # Or use uv from the repo root
 uv run python boards/01-voltage-divider/generate_design.py
