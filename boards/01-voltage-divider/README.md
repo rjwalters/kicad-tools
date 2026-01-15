@@ -62,7 +62,7 @@ For more control, run the Python script directly.
 ### Step 1: Generate the Design
 
 ```bash
-python generate_design.py
+python3 generate_design.py
 ```
 
 This creates:
