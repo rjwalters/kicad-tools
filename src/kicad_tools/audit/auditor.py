@@ -731,11 +731,15 @@ class ManufacturingAudit:
         return min_width if min_width != float("inf") else 0.15  # Default
 
     def _get_min_clearance(self, pcb: PCB) -> float:
-        """Get minimum clearance from design rules."""
+        """Get minimum clearance from design rules.
+
+        Returns the minimum clearance from PCB setup, or a JLCPCB-compliant
+        default of 0.2mm (well above 0.127mm minimum) when not available.
+        """
         # Return from PCB setup if available
         if hasattr(pcb, "setup") and pcb.setup:
-            return getattr(pcb.setup, "min_clearance", 0.1)
-        return 0.1  # Default
+            return getattr(pcb.setup, "min_clearance", 0.2)
+        return 0.2  # Default - JLCPCB min is 0.127mm
 
     def _get_min_via_drill(self, pcb: PCB) -> float:
         """Get minimum via drill size."""
@@ -746,13 +750,17 @@ class ManufacturingAudit:
         return min_drill if min_drill != float("inf") else 0.3  # Default
 
     def _get_min_annular_ring(self, pcb: PCB) -> float:
-        """Get minimum annular ring."""
+        """Get minimum annular ring.
+
+        Returns the minimum annular ring from actual vias, or a JLCPCB-compliant
+        default of 0.15mm (exactly at JLCPCB 2-layer minimum) when no vias exist.
+        """
         min_annular = float("inf")
         for via in pcb.vias:
             annular = (via.size - via.drill) / 2
             if annular < min_annular:
                 min_annular = annular
-        return min_annular if min_annular != float("inf") else 0.125  # Default
+        return min_annular if min_annular != float("inf") else 0.15  # Default - JLCPCB min
 
     def _get_board_size(self, pcb: PCB) -> tuple[float, float]:
         """Get board dimensions (width, height) in mm."""
