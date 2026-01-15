@@ -76,9 +76,11 @@ This design demonstrates routing of different signal classes:
 | File | Description |
 |------|-------------|
 | `generate_pcb.py` | Script to generate the unrouted PCB file |
-| `usb_joystick.kicad_pcb` | Generated unrouted PCB |
+| `generate_schematic.py` | Script to generate the schematic file |
 | `route_demo.py` | Script to run the autorouter |
-| `usb_joystick_routed.kicad_pcb` | Routed PCB output |
+| `output/usb_joystick.kicad_sch` | Generated schematic |
+| `output/usb_joystick.kicad_pcb` | Generated unrouted PCB |
+| `output/usb_joystick_routed.kicad_pcb` | Routed PCB output |
 
 ## Advanced: Manual Build
 
@@ -90,7 +92,7 @@ For more control over individual steps, you can run Python scripts directly.
 python3 generate_pcb.py
 ```
 
-Creates `usb_joystick.kicad_pcb` with all components placed and nets defined.
+Creates `output/usb_joystick.kicad_pcb` with all components placed and nets defined.
 
 ### Step 2: Run the Autorouter
 
@@ -102,7 +104,7 @@ This:
 1. Loads the unrouted PCB
 2. Configures net classes (USB gets high priority)
 3. Routes signal nets (power nets are skipped, assuming planes)
-4. Saves the result to `usb_joystick_routed.kicad_pcb`
+4. Saves the result to `output/usb_joystick_routed.kicad_pcb`
 
 **Note:** This is a challenging routing problem with a dense 32-pin QFP and multiple
 signal types. The autorouter demonstrates its capabilities but may not complete all

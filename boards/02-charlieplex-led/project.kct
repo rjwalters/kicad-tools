@@ -15,8 +15,9 @@ project:
     with only 4 GPIO pins. Demonstrates autorouting on a dense
     interconnected topology.
   artifacts:
-    pcb: "charlieplex_3x3.kicad_pcb"
-    pcb_routed: "charlieplex_3x3_routed.kicad_pcb"
+    schematic: "output/charlieplex_3x3.kicad_sch"
+    pcb: "output/charlieplex_3x3.kicad_pcb"
+    pcb_routed: "output/charlieplex_3x3_routed.kicad_pcb"
 
 intent:
   summary: |

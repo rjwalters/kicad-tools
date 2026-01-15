@@ -447,7 +447,7 @@ def generate_pcb() -> str:
 
 def main():
     """Generate the PCB file."""
-    output_file = sys.argv[1] if len(sys.argv) > 1 else "usb_joystick.kicad_pcb"
+    output_file = sys.argv[1] if len(sys.argv) > 1 else "output/usb_joystick.kicad_pcb"
     output_path = Path(__file__).parent / output_file
 
     pcb_content = generate_pcb()

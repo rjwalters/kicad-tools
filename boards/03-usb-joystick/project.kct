@@ -15,9 +15,9 @@ project:
     Demonstrates autorouting with mixed signal types: USB differential
     pairs, analog inputs, and digital I/O.
   artifacts:
-    schematic: "usb_joystick.kicad_sch"
-    pcb: "usb_joystick.kicad_pcb"
-    pcb_routed: "usb_joystick_routed.kicad_pcb"
+    schematic: "output/usb_joystick.kicad_sch"
+    pcb: "output/usb_joystick.kicad_pcb"
+    pcb_routed: "output/usb_joystick_routed.kicad_pcb"
 
 intent:
   summary: |

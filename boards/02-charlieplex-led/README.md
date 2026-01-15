@@ -59,9 +59,11 @@ With 4 GPIO pins, we can drive 4*(4-1) = 12 LEDs. This demo uses 9 for a 3x3 gri
 | File | Description |
 |------|-------------|
 | `generate_pcb.py` | Script to generate the unrouted PCB file |
-| `charlieplex_3x3.kicad_pcb` | Generated unrouted PCB (after running generate_pcb.py) |
+| `generate_schematic.py` | Script to generate the schematic file |
 | `route_demo.py` | Script to run the autorouter on the PCB |
-| `charlieplex_3x3_routed.kicad_pcb` | Routed PCB (after running route_demo.py) |
+| `output/charlieplex_3x3.kicad_sch` | Generated schematic |
+| `output/charlieplex_3x3.kicad_pcb` | Generated unrouted PCB |
+| `output/charlieplex_3x3_routed.kicad_pcb` | Routed PCB (after running route_demo.py) |
 
 ## Advanced: Manual Build
 
@@ -73,7 +75,7 @@ For more control over individual steps, you can run Python scripts directly.
 python3 generate_pcb.py
 ```
 
-This creates `charlieplex_3x3.kicad_pcb` with:
+This creates `output/charlieplex_3x3.kicad_pcb` with:
 - 1 MCU (U1) - 8-pin DIP footprint
 - 4 Resistors (R1-R4) - 0805 SMD
 - 9 LEDs (D1-D9) - 0805 SMD, arranged in 3x3 grid
@@ -90,7 +92,7 @@ This:
 1. Loads the unrouted PCB
 2. Parses components and net assignments
 3. Uses A* pathfinding to route connections
-4. Saves the routed result to `charlieplex_3x3_routed.kicad_pcb`
+4. Saves the routed result to `output/charlieplex_3x3_routed.kicad_pcb`
 
 **Note:** Due to the dense charlieplex topology, some nets may not be routable on a
 2-layer board. This is expected behavior and demonstrates real-world routing challenges.

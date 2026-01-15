@@ -464,7 +464,7 @@ def main():
         "output",
         nargs="?",
         default=None,
-        help="Output file path (default: usb_joystick.kicad_sch)",
+        help="Output file path (default: output/usb_joystick.kicad_sch)",
     )
     parser.add_argument(
         "-v",
@@ -478,7 +478,7 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path(__file__).parent / "usb_joystick.kicad_sch"
+        output_path = Path(__file__).parent / "output" / "usb_joystick.kicad_sch"
 
     try:
         success = create_usb_joystick_schematic(output_path, verbose=args.verbose)

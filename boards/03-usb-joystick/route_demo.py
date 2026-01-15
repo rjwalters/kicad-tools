@@ -12,7 +12,7 @@ Usage:
     python route_demo.py [input_pcb] [output_pcb]
 
 Example:
-    python route_demo.py usb_joystick.kicad_pcb usb_joystick_routed.kicad_pcb
+    python route_demo.py output/usb_joystick.kicad_pcb output/usb_joystick_routed.kicad_pcb
 """
 
 import os
@@ -57,8 +57,8 @@ def main():
     """Run the routing demo."""
     # Parse arguments
     demo_dir = Path(__file__).parent
-    input_pcb = sys.argv[1] if len(sys.argv) > 1 else "usb_joystick.kicad_pcb"
-    output_pcb = sys.argv[2] if len(sys.argv) > 2 else "usb_joystick_routed.kicad_pcb"
+    input_pcb = sys.argv[1] if len(sys.argv) > 1 else "output/usb_joystick.kicad_pcb"
+    output_pcb = sys.argv[2] if len(sys.argv) > 2 else "output/usb_joystick_routed.kicad_pcb"
 
     input_path = demo_dir / input_pcb
     output_path = demo_dir / output_pcb

@@ -243,7 +243,7 @@ def main():
         "output",
         nargs="?",
         default=None,
-        help="Output file path (default: charlieplex_3x3.kicad_sch)",
+        help="Output file path (default: output/charlieplex_3x3.kicad_sch)",
     )
     parser.add_argument(
         "-v",
@@ -257,7 +257,7 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path(__file__).parent / "charlieplex_3x3.kicad_sch"
+        output_path = Path(__file__).parent / "output" / "charlieplex_3x3.kicad_sch"
 
     try:
         success = create_charlieplex_schematic(output_path, verbose=args.verbose)
