@@ -324,6 +324,106 @@ class TestAuditExitCodes:
         assert result in [0, 1, 2]
 
 
+class TestAuditPathResolution:
+    """Tests for PCB path resolution when given project file."""
+
+    def test_resolve_pcb_from_project_kct(self, tmp_path: Path):
+        """Test that audit resolves PCB path from project.kct artifacts."""
+        # Create directory structure matching issue #749
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        # Create a minimal routed PCB file
+        routed_pcb = output_dir / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create unrouted PCB file (shouldn't be used)
+        unrouted_pcb = output_dir / "test.kicad_pcb"
+        unrouted_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project.kct in parent directory
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text(
+            """kct_version: "1.0"
+project:
+  name: "Test"
+  artifacts:
+    pcb: "output/test_routed.kicad_pcb"
+"""
+        )
+
+        # Create project file
+        project_file = output_dir / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Initialize audit with project file
+        audit = ManufacturingAudit(project_file)
+
+        # Should resolve to the routed PCB from project.kct
+        assert audit.pcb_path == routed_pcb
+
+    def test_resolve_pcb_fallback_to_routed_suffix(self, tmp_path: Path):
+        """Test that audit falls back to *_routed.kicad_pcb if no project.kct."""
+        # Create routed PCB
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create unrouted PCB
+        unrouted_pcb = tmp_path / "test.kicad_pcb"
+        unrouted_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project file (no project.kct)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Initialize audit with project file
+        audit = ManufacturingAudit(project_file)
+
+        # Should fallback to *_routed.kicad_pcb
+        assert audit.pcb_path == routed_pcb
+
+    def test_resolve_pcb_default_no_routed(self, tmp_path: Path):
+        """Test that audit uses default path when no routed PCB exists."""
+        # Create only unrouted PCB
+        unrouted_pcb = tmp_path / "test.kicad_pcb"
+        unrouted_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project file (no project.kct, no *_routed.kicad_pcb)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Initialize audit with project file
+        audit = ManufacturingAudit(project_file)
+
+        # Should default to <basename>.kicad_pcb
+        assert audit.pcb_path == unrouted_pcb
+
+
 class TestAuditJsonSchema:
     """Tests for audit command JSON output schema."""
 
