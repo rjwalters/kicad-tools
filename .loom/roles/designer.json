@@ -1,0 +1,12 @@
+{
+  "name": "PCB Design Validator",
+  "description": "Validates kicad-tools workflow by designing test boards and creating issues for problems",
+  "defaultInterval": 0,
+  "defaultIntervalPrompt": "",
+  "autonomousRecommended": false,
+  "suggestedWorkerType": "claude",
+  "gitIdentity": {
+    "name": "Loom Designer",
+    "email": "loom-designer@users.noreply.github.com"
+  }
+}
