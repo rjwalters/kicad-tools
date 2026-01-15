@@ -64,7 +64,7 @@ decisions:
 progress:
   phase: complete
   checklist:
-    - [x] Schematic generation
-    - [x] PCB layout
-    - [x] Autorouting
-    - [x] DRC verification
+    - "[x] Schematic generation"
+    - "[x] PCB layout"
+    - "[x] Autorouting"
+    - "[x] DRC verification"
