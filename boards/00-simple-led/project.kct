@@ -49,16 +49,22 @@ requirements:
 decisions:
   - topic: Resistor value
     choice: 330 ohm
+    date: "2025-01-10"
+    phase: schematic
     rationale: |
       Standard E24 value closest to ideal (5V - 2V) / 10mA = 300 ohm.
       Provides approximately 9mA LED current, which is safe and visible.
   - topic: LED footprint
     choice: 5mm THT
+    date: "2025-01-10"
+    phase: schematic
     rationale: |
       Through-hole LED is visible and easy to assemble manually.
       Good for prototyping and educational purposes.
   - topic: Resistor footprint
     choice: 0805 SMD
+    date: "2025-01-10"
+    phase: schematic
     rationale: |
       Common size, easy to hand-solder, demonstrates mixed THT/SMD design.
 
