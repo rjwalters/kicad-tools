@@ -186,6 +186,7 @@ class SchematicElementsMixin:
         snap: bool = True,
         auto_layout: bool = False,
         auto_footprint: bool = False,
+        properties: dict[str, str] = None,
     ) -> SymbolInstance:
         """Add a symbol to the schematic.
 
@@ -200,6 +201,9 @@ class SchematicElementsMixin:
             auto_layout: If True, automatically adjust position to avoid overlaps
             auto_footprint: If True, automatically select footprint for passive
                 components based on value and the configured profile
+            properties: Optional dict of custom symbol properties (e.g.,
+                {"Thermal_Rth_JC": "0.5", "Power_Dissipation": "5W"}).
+                These are stored as hidden KiCad symbol properties.
 
         Returns:
             SymbolInstance with pin_position() method
@@ -215,6 +219,13 @@ class SchematicElementsMixin:
             sym = sch.add_symbol(
                 "Device:C", x=100, y=50, ref="C1",
                 value="100nF", auto_footprint=True
+            )
+
+            # Add with custom properties for thermal analysis
+            sym = sch.add_symbol(
+                "Device:Q_NMOS", x=100, y=50, ref="Q1",
+                value="IRLZ44N",
+                properties={"Thermal_Rth_JC": "0.5", "Power_Dissipation": "5W"}
             )
         """
         # Apply grid snapping if enabled
@@ -257,6 +268,7 @@ class SchematicElementsMixin:
             reference=ref,
             value=value or sym_def.name,
             footprint=effective_footprint,
+            properties=properties or {},
         )
 
         self.symbols.append(instance)
