@@ -1194,13 +1194,11 @@ class Autorouter:
 
                                 # Route the failed net first (it now has priority)
                                 routes = self._route_net_negotiated(failed_net, present_factor)
-                                failed_net_success = False
                                 if routes:
                                     net_routes[failed_net] = routes
                                     for route in routes:
                                         self.grid.mark_route_usage(route)
                                         self.routes.append(route)
-                                    failed_net_success = True
                                     targeted_ripup_count += 1
 
                                 # Always re-route the other nets (even if failed net didn't route)
