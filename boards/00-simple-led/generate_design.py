@@ -99,8 +99,8 @@ def create_led_schematic(output_dir: Path) -> Path:
         value="LED",
         footprint="LED_THT:LED_D5.0mm",
     )
-    d1_pin1 = d1.pin_position("1")  # Anode (positive)
-    d1_pin2 = d1.pin_position("2")  # Cathode (negative, to GND)
+    d1_pin1 = d1.pin_position("1")  # Cathode (K, negative)
+    d1_pin2 = d1.pin_position("2")  # Anode (A, positive)
     print(f"   D1: LED at ({d1.x}, {d1.y})")
 
     # =========================================================================
@@ -162,11 +162,11 @@ def create_led_schematic(output_dir: Path) -> Path:
     sch.add_junction(x_r1, rail_vcc_y)
     print("   R1 -> VCC rail")
 
-    # R1 Pin 2 to D1 Pin 1 (Anode) - internal connection
+    # R1 Pin 2 to D1 Pin 1 (Cathode) - LED_ANODE net
     sch.add_wire(r1_pin2, d1_pin1)
     print("   R1 <-> D1 (internal connection)")
 
-    # D1 Pin 2 (Cathode) to GND rail
+    # D1 Pin 2 (Anode) to GND rail
     sch.add_wire(d1_pin2, (x_d1, rail_gnd_y))
     sch.add_junction(x_d1, rail_gnd_y)
     print("   D1 -> GND rail")
@@ -354,11 +354,16 @@ def create_led_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_led(ref: str, pos: tuple, anode_net: str, cathode_net: str) -> str:
-        """Generate a 5mm through-hole LED footprint."""
+        """Generate a 5mm through-hole LED footprint.
+
+        Pin assignments per KiCad LED_THT:LED_D5.0mm convention:
+        - Pin 1 (rectangular pad) = Cathode (K)
+        - Pin 2 (circular pad) = Anode (A)
+        """
         x, y = pos
         anode_num = NETS[anode_net]
         cathode_num = NETS[cathode_net]
-        # LED pitch: 2.54mm between anode and cathode
+        # LED pitch: 2.54mm between cathode and anode
         pitch = 2.54 / 2
 
         return f"""  (footprint "LED_THT:LED_D5.0mm"
@@ -371,8 +376,8 @@ def create_led_pcb(output_dir: Path) -> Path:
     (fp_text value "LED" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" thru_hole rect (at {-pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
-    (pad "2" thru_hole circle (at {pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
+    (pad "1" thru_hole rect (at {-pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {cathode_num} "{cathode_net}"))
+    (pad "2" thru_hole circle (at {pitch:.3f} 0 90) (size 1.8 1.8) (drill 0.9) (layers "*.Cu" "*.Mask") (net {anode_num} "{anode_net}"))
   )"""
 
     # Build the PCB file
