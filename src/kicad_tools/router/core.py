@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from kicad_tools.explain.decisions import DecisionStore
     from kicad_tools.physics import Stackup, TransmissionLine
     from kicad_tools.progress import ProgressCallback
 
@@ -235,6 +238,7 @@ class Autorouter:
         stackup: Stackup | None = None,
         physics_enabled: bool = True,
         force_python: bool = False,
+        record_decisions: bool = False,
     ):
         """Initialize the autorouter.
 
@@ -250,6 +254,7 @@ class Autorouter:
             physics_enabled: Enable physics-based calculations (default True)
             force_python: If True, force use of Python backend even if C++ is
                 available. Default False (use C++ when available for 10-100x speedup).
+            record_decisions: If True, record routing decisions for later querying.
         """
         self.rules = rules or DesignRules()
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
@@ -282,6 +287,14 @@ class Autorouter:
 
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
+
+        # Decision recording (Issue #829)
+        self.record_decisions = record_decisions
+        self._decision_store: "DecisionStore | None" = None
+        if record_decisions:
+            from kicad_tools.explain.decisions import DecisionStore
+
+            self._decision_store = DecisionStore()
 
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
@@ -597,7 +610,94 @@ class Autorouter:
             new_routes = mst_router.route_net_star(pad_objs, mark_route, record_failure)
 
         routes.extend(new_routes)
+
+        # Record routing decision if enabled
+        if self.record_decisions and routes:
+            self._record_routing_decision(net, routes)
+
         return routes
+
+    def _record_routing_decision(self, net: int, routes: list[Route]) -> None:
+        """Record a routing decision for a net."""
+        if not self._decision_store:
+            return
+
+        from kicad_tools.explain.decisions import Decision
+
+        net_name = self.net_names.get(net, f"Net_{net}")
+
+        # Calculate total route metrics
+        total_length = sum(
+            sum(
+                ((s.end_x - s.start_x) ** 2 + (s.end_y - s.start_y) ** 2) ** 0.5
+                for s in route.segments
+            )
+            for route in routes
+        )
+        total_vias = sum(len(route.vias) for route in routes)
+        total_segments = sum(len(route.segments) for route in routes)
+
+        # Determine rationale based on net class
+        net_class = self.net_class_map.get(net_name)
+        rationale_parts = []
+
+        if net_class:
+            if net_class.priority <= 1:
+                rationale_parts.append(f"High-priority net ({net_class.__class__.__name__})")
+            rationale_parts.append(f"Routed with {net_class.min_trace_width}mm min trace width")
+            if net_class.clearance:
+                rationale_parts.append(f"{net_class.clearance}mm clearance")
+
+        if total_vias > 0:
+            rationale_parts.append(f"Used {total_vias} via(s) for layer transitions")
+
+        if not rationale_parts:
+            rationale_parts.append("Standard routing using MST algorithm")
+
+        rationale = "; ".join(rationale_parts)
+
+        # Get pads involved
+        pads_for_net = self.nets.get(net, [])
+        components = list(set(ref for ref, _pin in pads_for_net))
+
+        decision = Decision.create(
+            action="route",
+            components=components,
+            nets=[net_name],
+            rationale=rationale,
+            decided_by="autorouter",
+            metrics={
+                "total_length_mm": round(total_length, 3),
+                "via_count": total_vias,
+                "segment_count": total_segments,
+                "route_count": len(routes),
+            },
+        )
+
+        self._decision_store.record(decision)
+
+    def get_decision_store(self) -> "DecisionStore | None":
+        """Get the decision store for this autorouter.
+
+        Returns:
+            DecisionStore if record_decisions was enabled, None otherwise.
+        """
+        return self._decision_store
+
+    def save_decisions(self, path: "Path") -> bool:
+        """Save routing decisions to a file.
+
+        Args:
+            path: Path to save the decisions JSON file.
+
+        Returns:
+            True if saved successfully, False if no decisions recorded.
+        """
+        if not self._decision_store:
+            return False
+
+        self._decision_store.save(path)
+        return True
 
     def _get_net_priority(self, net_id: int) -> tuple[int, int]:
         """Get routing priority for a net (lower = higher priority)."""

@@ -150,6 +150,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_vias_parser(subparsers)
     _add_parts_parser(subparsers)
     _add_datasheet_parser(subparsers)
+    _add_decisions_parser(subparsers)
     _add_placement_parser(subparsers)
     _add_config_parser(subparsers)
     _add_interactive_parser(subparsers)
@@ -1155,6 +1156,55 @@ def _add_datasheet_parser(subparsers) -> None:
     ds_info = datasheet_subparsers.add_parser("info", help="Show PDF information")
     ds_info.add_argument("pdf", help="Path to PDF file")
     ds_info.add_argument("--format", choices=["text", "json"], default="text")
+
+
+def _add_decisions_parser(subparsers) -> None:
+    """Add decisions subcommand parser with its subcommands."""
+    decisions_parser = subparsers.add_parser(
+        "decisions", help="Query design decisions (placement and routing rationale)"
+    )
+    decisions_subparsers = decisions_parser.add_subparsers(
+        dest="decisions_command", help="Decision commands"
+    )
+
+    # decisions show
+    decisions_show = decisions_subparsers.add_parser("show", help="Show decisions matching filters")
+    decisions_show.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_show.add_argument(
+        "-c", "--component", help="Filter by component reference (e.g., U1)"
+    )
+    decisions_show.add_argument("-n", "--net", help="Filter by net name (e.g., USB_D+)")
+    decisions_show.add_argument(
+        "-a",
+        "--action",
+        choices=["place", "route", "move", "reroute", "delete"],
+        help="Filter by action type",
+    )
+    decisions_show.add_argument("-f", "--format", choices=["text", "json", "tree"], default="text")
+    decisions_show.add_argument(
+        "-l", "--limit", type=int, default=20, help="Max decisions to show (default: 20)"
+    )
+
+    # decisions list
+    decisions_list = decisions_subparsers.add_parser("list", help="List summary of all decisions")
+    decisions_list.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_list.add_argument("-f", "--format", choices=["text", "json"], default="text")
+
+    # decisions explain-placement
+    decisions_explain_place = decisions_subparsers.add_parser(
+        "explain-placement", help="Explain why a component is placed where it is"
+    )
+    decisions_explain_place.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_explain_place.add_argument("component", help="Component reference (e.g., U1)")
+    decisions_explain_place.add_argument("-f", "--format", choices=["text", "json"], default="text")
+
+    # decisions explain-route
+    decisions_explain_route = decisions_subparsers.add_parser(
+        "explain-route", help="Explain why a net was routed the way it was"
+    )
+    decisions_explain_route.add_argument("pcb", help="Path to .kicad_pcb file")
+    decisions_explain_route.add_argument("net", help="Net name (e.g., USB_D+)")
+    decisions_explain_route.add_argument("-f", "--format", choices=["text", "json"], default="text")
 
 
 def _add_placement_parser(subparsers) -> None:
