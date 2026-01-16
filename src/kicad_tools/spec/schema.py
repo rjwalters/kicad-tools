@@ -286,11 +286,13 @@ class Suggestions(BaseModel):
 class Decision(BaseModel):
     """Design decision with rationale."""
 
-    date: datetime.date = Field(..., description="Decision date")
-    phase: DesignPhase | str = Field(..., description="Design phase when decision was made")
     topic: str = Field(..., description="Decision topic")
     choice: str = Field(..., description="Chosen option")
     rationale: str = Field(..., description="Reasoning for the decision")
+    date: datetime.date | None = Field(default=None, description="Decision date")
+    phase: DesignPhase | str | None = Field(
+        default=None, description="Design phase when decision was made"
+    )
     alternatives: list[str] | None = Field(
         default=None, description="Alternative options considered"
     )

@@ -365,6 +365,26 @@ class TestDecisions:
         assert spec.decisions[0].choice == "LM7805"
         assert len(spec.decisions[0].alternatives) == 2
 
+    def test_decision_optional_date_and_phase(self):
+        """Test that date and phase fields are optional on Decision.
+
+        Validates fix for issue #806: project.kct files should not require
+        date and phase fields on decisions.
+        """
+        from kicad_tools.spec import Decision
+
+        # Should not raise ValidationError even without date and phase
+        decision = Decision(
+            topic="Resistor value",
+            choice="330 ohm",
+            rationale="Standard E24 value closest to ideal",
+        )
+
+        assert decision.topic == "Resistor value"
+        assert decision.choice == "330 ohm"
+        assert decision.date is None
+        assert decision.phase is None
+
 
 class TestProgress:
     """Tests for progress tracking."""
