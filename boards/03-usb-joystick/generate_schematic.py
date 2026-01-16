@@ -464,7 +464,7 @@ def main():
         "output",
         nargs="?",
         default=None,
-        help="Output file path (default: output/usb_joystick.kicad_sch)",
+        help="Output file path or directory (default: output/usb_joystick.kicad_sch)",
     )
     parser.add_argument(
         "-v",
@@ -475,10 +475,17 @@ def main():
 
     args = parser.parse_args()
 
+    # Default output filename
+    default_filename = "usb_joystick.kicad_sch"
+
     if args.output:
         output_path = Path(args.output)
+        # If user passes a directory, auto-append the default filename
+        if output_path.is_dir():
+            output_path = output_path / default_filename
+            print(f"Note: Directory provided, using {output_path}")
     else:
-        output_path = Path(__file__).parent / "output" / "usb_joystick.kicad_sch"
+        output_path = Path(__file__).parent / "output" / default_filename
 
     try:
         success = create_usb_joystick_schematic(output_path, verbose=args.verbose)

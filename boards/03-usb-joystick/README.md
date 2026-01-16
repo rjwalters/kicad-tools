@@ -86,7 +86,22 @@ This design demonstrates routing of different signal classes:
 
 For more control over individual steps, you can run Python scripts directly.
 
-### Step 1: Generate the PCB
+### Step 1: Generate the Schematic
+
+```bash
+# Default output (recommended)
+python3 generate_schematic.py
+
+# Or specify an output directory (auto-appends filename)
+python3 generate_schematic.py output/
+
+# Or specify an explicit file path
+python3 generate_schematic.py output/usb_joystick.kicad_sch
+```
+
+Creates `output/usb_joystick.kicad_sch` with all components and wiring.
+
+### Step 2: Generate the PCB
 
 ```bash
 python3 generate_pcb.py
@@ -94,7 +109,7 @@ python3 generate_pcb.py
 
 Creates `output/usb_joystick.kicad_pcb` with all components placed and nets defined.
 
-### Step 2: Run the Autorouter
+### Step 3: Run the Autorouter
 
 ```bash
 python3 route_demo.py
@@ -111,7 +126,7 @@ signal types. The autorouter demonstrates its capabilities but may not complete 
 routes on a 2-layer board. This is realistic for complex designs requiring manual
 intervention or additional layers.
 
-### Step 3: View in KiCad (Optional)
+### Step 4: View in KiCad (Optional)
 
 Open `usb_joystick_routed.kicad_pcb` in KiCad to visualize the routes.
 
