@@ -1,0 +1,85 @@
+# OSH Park Manufacturing Capabilities
+# Reference: https://docs.oshpark.com/services/
+
+manufacturer: OSH Park
+url: https://docs.oshpark.com/services/
+last_updated: "2024-01"
+
+rules:
+  trace_clearance:
+    title: Minimum Trace Clearance
+    spec_section: "Design Rules > Clearance"
+    values:
+      2_layer: 0.15mm  # 6 mil
+      4_layer: 0.15mm  # 6 mil
+    severity: error
+    explanation: |
+      OSH Park uses a 6 mil minimum clearance for all services.
+      This is the edge-to-edge distance between copper features.
+      Maintaining adequate clearance prevents shorts and improves yield.
+    fix_templates:
+      - "Increase spacing by at least {delta}mm to meet 6 mil minimum"
+      - "Use design rule check with OSH Park rules enabled"
+    related_rules:
+      - trace_width
+
+  trace_width:
+    title: Minimum Trace Width
+    spec_section: "Design Rules > Trace Width"
+    values:
+      2_layer: 0.15mm  # 6 mil
+      4_layer: 0.127mm  # 5 mil
+    severity: error
+    explanation: |
+      Minimum trace width is 6 mil (0.15mm) for 2-layer and 5 mil (0.127mm)
+      for 4-layer boards. Thinner traces may not etch reliably and have
+      lower current capacity.
+    fix_templates:
+      - "Increase trace width to at least {required}mm"
+      - "For power traces, calculate width using IPC-2152"
+    related_rules:
+      - trace_clearance
+
+  via_drill:
+    title: Minimum Via Drill Size
+    spec_section: "Design Rules > Drill Size"
+    values:
+      standard: 0.254mm  # 10 mil
+    severity: error
+    explanation: |
+      OSH Park's minimum drill size is 10 mil (0.254mm). Smaller vias
+      require their premium services with additional cost.
+    fix_templates:
+      - "Increase via drill size to at least {required}mm (10 mil)"
+      - "Consider via-in-pad designs if space is constrained"
+    related_rules:
+      - via_annular_ring
+
+  via_annular_ring:
+    title: Minimum Via Annular Ring
+    spec_section: "Design Rules > Annular Ring"
+    values:
+      standard: 0.127mm  # 5 mil
+    severity: error
+    explanation: |
+      The copper ring around vias must be at least 5 mil (0.127mm).
+      This ensures reliable connections even with drilling tolerances.
+    fix_templates:
+      - "Increase via pad size to achieve {required}mm annular ring"
+      - "Via pad diameter should be drill + 2×annular ring"
+    related_rules:
+      - via_drill
+
+  edge_clearance:
+    title: Minimum Copper to Board Edge
+    spec_section: "Design Rules > Edge Clearance"
+    values:
+      standard: 0.381mm  # 15 mil
+    severity: error
+    explanation: |
+      Copper features must be at least 15 mil (0.381mm) from the board
+      edge. This prevents copper exposure during board routing.
+    fix_templates:
+      - "Move copper at least {required}mm from board edge"
+      - "Draw board outline 15 mil inside your actual copper boundary"
+    related_rules: []

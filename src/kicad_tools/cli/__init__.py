@@ -387,7 +387,47 @@ def _dispatch_command(args) -> int:
     elif args.command == "run":
         return run_run_command(args)
 
+    elif args.command == "explain":
+        return _run_explain_command(args)
+
     return 0
+
+
+def _run_explain_command(args) -> int:
+    """Run the explain command."""
+    from .explain_cmd import main as explain_cmd
+
+    sub_argv = []
+
+    # Add rule if provided
+    if hasattr(args, "explain_rule") and args.explain_rule:
+        sub_argv.append(args.explain_rule)
+
+    # Handle flags
+    if hasattr(args, "explain_list") and args.explain_list:
+        sub_argv.append("--list")
+    if hasattr(args, "explain_search") and args.explain_search:
+        sub_argv.extend(["--search", args.explain_search])
+    if hasattr(args, "explain_value") and args.explain_value is not None:
+        sub_argv.extend(["--value", str(args.explain_value)])
+    if hasattr(args, "explain_required") and args.explain_required is not None:
+        sub_argv.extend(["--required", str(args.explain_required)])
+    if hasattr(args, "explain_unit") and args.explain_unit != "mm":
+        sub_argv.extend(["--unit", args.explain_unit])
+    if hasattr(args, "explain_net1") and args.explain_net1:
+        sub_argv.extend(["--net1", args.explain_net1])
+    if hasattr(args, "explain_net2") and args.explain_net2:
+        sub_argv.extend(["--net2", args.explain_net2])
+    if hasattr(args, "explain_drc_report") and args.explain_drc_report:
+        sub_argv.extend(["--drc-report", args.explain_drc_report])
+    if hasattr(args, "explain_format") and args.explain_format != "text":
+        sub_argv.extend(["--format", args.explain_format])
+    if hasattr(args, "explain_net") and args.explain_net:
+        sub_argv.extend(["--net", args.explain_net])
+    if hasattr(args, "explain_interface") and args.explain_interface:
+        sub_argv.extend(["--interface", args.explain_interface])
+
+    return explain_cmd(sub_argv)
 
 
 def symbols_main() -> int:

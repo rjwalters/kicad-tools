@@ -169,6 +169,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_spec_parser(subparsers)
     _add_benchmark_parser(subparsers)
     _add_run_parser(subparsers)
+    _add_explain_parser(subparsers)
 
     return parser
 
@@ -2681,4 +2682,108 @@ def _add_run_parser(subparsers) -> None:
         nargs="*",
         metavar="ARGS",
         help="Arguments to pass to the script",
+    )
+
+
+def _add_explain_parser(subparsers) -> None:
+    """Add explain subcommand parser for design rule explanations."""
+    explain_parser = subparsers.add_parser(
+        "explain",
+        help="Explain design rules and DRC violations",
+        description=(
+            "Explain design rules with spec references and fix suggestions. "
+            "Can explain individual rules, search for rules, or explain violations "
+            "from a DRC report."
+        ),
+    )
+
+    # Main argument - rule ID
+    explain_parser.add_argument(
+        "explain_rule",
+        nargs="?",
+        metavar="RULE",
+        help="Rule ID to explain (e.g., trace_clearance, via_drill)",
+    )
+
+    # Discovery options
+    explain_parser.add_argument(
+        "--list",
+        "-l",
+        action="store_true",
+        dest="explain_list",
+        help="List all available rule IDs",
+    )
+    explain_parser.add_argument(
+        "--search",
+        "-s",
+        metavar="QUERY",
+        dest="explain_search",
+        help="Search for rules matching a query",
+    )
+
+    # Context values
+    explain_parser.add_argument(
+        "--value",
+        "-v",
+        type=float,
+        dest="explain_value",
+        help="Current/actual value for contextualized explanation",
+    )
+    explain_parser.add_argument(
+        "--required",
+        "-r",
+        type=float,
+        dest="explain_required",
+        help="Required/minimum value",
+    )
+    explain_parser.add_argument(
+        "--unit",
+        "-u",
+        default="mm",
+        dest="explain_unit",
+        help="Unit of measurement (default: mm)",
+    )
+    explain_parser.add_argument(
+        "--net1",
+        dest="explain_net1",
+        help="First net name for context",
+    )
+    explain_parser.add_argument(
+        "--net2",
+        dest="explain_net2",
+        help="Second net name for context",
+    )
+
+    # DRC report integration
+    explain_parser.add_argument(
+        "--drc-report",
+        "-d",
+        metavar="FILE",
+        dest="explain_drc_report",
+        help="Path to DRC report file to explain all violations",
+    )
+
+    # Output format
+    explain_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "tree", "json", "markdown"],
+        default="text",
+        dest="explain_format",
+        help="Output format (default: text)",
+    )
+
+    # Interface/net explanation
+    explain_parser.add_argument(
+        "--net",
+        "-n",
+        metavar="NAME",
+        dest="explain_net",
+        help="Explain constraints for a specific net",
+    )
+    explain_parser.add_argument(
+        "--interface",
+        "-i",
+        dest="explain_interface",
+        help="Specify interface type for net (usb, i2c, spi)",
     )

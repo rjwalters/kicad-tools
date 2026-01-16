@@ -17,6 +17,13 @@ from kicad_tools.mcp.tools.context import (
     record_decision,
     restore_checkpoint,
 )
+from kicad_tools.mcp.tools.explain import (
+    explain_drc_violations,
+    explain_net,
+    explain_rule,
+    list_available_rules,
+    search_available_rules,
+)
 from kicad_tools.mcp.tools.export import export_gerbers
 from kicad_tools.mcp.tools.patterns import (
     adapt_pattern,
@@ -34,6 +41,9 @@ __all__ = [
     "analyze_board",
     "annotate_decision",
     "create_checkpoint",
+    "explain_drc_violations",
+    "explain_net",
+    "explain_rule",
     "export_gerbers",
     "get_decision_history",
     "get_drc_violations",
@@ -42,9 +52,11 @@ __all__ = [
     "get_session_summary",
     "get_unrouted_nets",
     "list_available_components",
+    "list_available_rules",
     "measure_clearance",
     "record_decision",
     "restore_checkpoint",
     "route_net",
+    "search_available_rules",
     "validate_pattern",
 ]

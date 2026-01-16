@@ -1,0 +1,178 @@
+# JLCPCB Manufacturing Capabilities
+# Reference: https://jlcpcb.com/capabilities/pcb-capabilities
+
+manufacturer: JLCPCB
+url: https://jlcpcb.com/capabilities/pcb-capabilities
+last_updated: "2024-01"
+
+rules:
+  trace_clearance:
+    title: Minimum Trace Clearance
+    spec_section: "PCB Specifications > Minimum Clearance"
+    values:
+      2_layer: 0.2mm
+      4_layer: 0.15mm
+      6_layer: 0.15mm
+    severity: error
+    explanation: |
+      Manufacturing process limits prevent reliable etching below these
+      clearance values. Insufficient clearance may cause shorts or
+      unreliable connections due to copper bridging during etching.
+    fix_templates:
+      - "Increase spacing by at least {delta}mm to meet minimum clearance"
+      - "Move {net1} trace further from {net2}"
+      - "Consider using a narrower trace width to create more routing space"
+    related_rules:
+      - trace_width
+      - via_clearance
+
+  trace_width:
+    title: Minimum Trace Width
+    spec_section: "PCB Specifications > Minimum Trace"
+    values:
+      2_layer: 0.127mm  # 5 mil
+      4_layer: 0.1mm    # 4 mil
+    severity: error
+    explanation: |
+      Trace width affects current carrying capacity and manufacturability.
+      Traces narrower than the minimum may break during etching or fail
+      under current load. For high-current traces, use the IPC-2152
+      calculator to determine appropriate widths.
+    fix_templates:
+      - "Increase trace width to at least {required}mm"
+      - "For high-current nets, calculate width using IPC-2152 standards"
+    related_rules:
+      - trace_clearance
+      - current_capacity
+
+  via_drill:
+    title: Minimum Via Drill Size
+    spec_section: "PCB Specifications > Minimum Via Drill"
+    values:
+      standard: 0.3mm
+      advanced: 0.2mm
+    severity: error
+    explanation: |
+      Via drill size is limited by the mechanical drilling process.
+      Smaller holes require more expensive laser drilling. The standard
+      capability uses mechanical drills which have size limitations.
+    fix_templates:
+      - "Increase via drill size to at least {required}mm"
+      - "Use laser drilling (additional cost) for vias smaller than 0.3mm"
+    related_rules:
+      - via_annular_ring
+      - via_clearance
+
+  via_annular_ring:
+    title: Minimum Via Annular Ring
+    spec_section: "PCB Specifications > Minimum Annular Ring"
+    values:
+      standard: 0.15mm
+      advanced: 0.1mm
+    severity: error
+    explanation: |
+      The annular ring is the copper pad around the via hole. It must be
+      large enough to ensure reliable electrical connection even with
+      drilling tolerances. Insufficient annular ring can cause open circuits.
+    fix_templates:
+      - "Increase via pad size to achieve at least {required}mm annular ring"
+      - "Annular ring = (pad diameter - drill diameter) / 2"
+    related_rules:
+      - via_drill
+
+  via_clearance:
+    title: Minimum Via to Trace Clearance
+    spec_section: "PCB Specifications > Via Clearance"
+    values:
+      2_layer: 0.254mm
+      4_layer: 0.2mm
+    severity: error
+    explanation: |
+      Vias require additional clearance from traces due to the copper
+      plating process that extends slightly beyond the pad area.
+      Insufficient clearance can cause shorts.
+    fix_templates:
+      - "Move via at least {delta}mm away from nearby traces"
+      - "Increase via clearance in design rules"
+    related_rules:
+      - trace_clearance
+      - via_annular_ring
+
+  edge_clearance:
+    title: Minimum Copper to Board Edge Clearance
+    spec_section: "PCB Specifications > Edge Clearance"
+    values:
+      standard: 0.3mm
+      v_cut: 0.4mm
+    severity: error
+    explanation: |
+      Copper must maintain minimum distance from the board edge to prevent
+      exposure during routing and to ensure board integrity. V-cut
+      panelization requires larger clearance due to the cutting process.
+    fix_templates:
+      - "Move copper at least {required}mm from board edge"
+      - "For V-cut panels, use 0.4mm minimum clearance"
+    related_rules:
+      - outline
+
+  hole_to_hole:
+    title: Minimum Hole to Hole Spacing
+    spec_section: "PCB Specifications > Hole Spacing"
+    values:
+      standard: 0.5mm
+    severity: error
+    explanation: |
+      Adjacent holes must maintain minimum spacing to prevent mechanical
+      weakness in the board material and to allow proper drilling without
+      tool deflection.
+    fix_templates:
+      - "Increase hole spacing to at least {required}mm"
+      - "Consider using a single larger hole if possible"
+    related_rules:
+      - via_drill
+      - via_clearance
+
+  silkscreen_clearance:
+    title: Silkscreen to Pad Clearance
+    spec_section: "PCB Specifications > Silkscreen"
+    values:
+      standard: 0.15mm
+    severity: warning
+    explanation: |
+      Silkscreen must not overlap exposed copper (pads, vias) as the ink
+      will not adhere properly to solder mask and can interfere with
+      soldering. Keep silkscreen away from SMD pads and exposed vias.
+    fix_templates:
+      - "Move silkscreen element at least {required}mm from pads"
+      - "Reduce silkscreen text size or use abbreviations"
+    related_rules:
+      - solder_mask_expansion
+
+  solder_mask_expansion:
+    title: Solder Mask Expansion
+    spec_section: "PCB Specifications > Solder Mask"
+    values:
+      standard: 0.05mm
+    severity: warning
+    explanation: |
+      Solder mask expansion determines how much the mask opening extends
+      beyond the pad. Proper expansion ensures good solder wetting while
+      providing insulation between adjacent pads.
+    fix_templates:
+      - "Set solder mask expansion to {required}mm in pad properties"
+    related_rules:
+      - silkscreen_clearance
+
+  board_thickness:
+    title: Board Thickness Options
+    spec_section: "PCB Specifications > Board Thickness"
+    values:
+      standard: [0.8mm, 1.0mm, 1.2mm, 1.6mm, 2.0mm]
+    severity: info
+    explanation: |
+      JLCPCB offers standard board thicknesses. 1.6mm is the most common
+      and economical choice. Thinner boards are useful for space-constrained
+      designs but may be more fragile.
+    fix_templates:
+      - "Select a supported board thickness from the standard options"
+    related_rules: []
