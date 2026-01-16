@@ -424,6 +424,7 @@ class NegotiatedRouter:
 
         # Re-route the failed net first (it now has priority with cleared path)
         failed_pads = pads_by_net.get(failed_net, [])
+        failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
             routes = self.route_net_negotiated(
                 failed_pads, present_cost_factor, mark_route_callback
@@ -433,9 +434,10 @@ class NegotiatedRouter:
                 for route in routes:
                     self.grid.mark_route_usage(route)
                     routes_list.append(route)
+                failed_net_success = True  # Failed net was successfully routed
 
         # Re-route the displaced nets
-        success = True
+        success = failed_net_success  # Issue #858: Start with failed net success
         for net in nets_to_ripup:
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
