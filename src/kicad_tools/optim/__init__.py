@@ -154,6 +154,13 @@ from kicad_tools.optim.thermal import (
     detect_thermal_constraints,
     get_thermal_summary,
 )
+from kicad_tools.optim.workflow import (
+    OptimizationResult,
+    OptimizationWorkflow,
+    RoutabilityComparison,
+    RoutabilityInfo,
+    WorkflowConfig,
+)
 
 __all__ = [
     # Alignment
@@ -254,4 +261,10 @@ __all__ = [
     "generate_placement_suggestions",
     "explain_placement",
     "suggest_improvement",
+    # Optimization workflow
+    "OptimizationResult",
+    "OptimizationWorkflow",
+    "WorkflowConfig",
+    "RoutabilityInfo",
+    "RoutabilityComparison",
 ]
