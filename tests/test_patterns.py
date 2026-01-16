@@ -1,28 +1,58 @@
-"""Tests for pattern validation, adaptation, and schema types."""
+"""
+Tests for pattern validation, adaptation, and schema types.
+
+Includes tests for:
+- Schema types (Placement, PlacementRule, PatternSpec)
+- Validation (PatternValidator, ValidationViolation)
+- Adaptation (PatternAdapter, AdaptedPatternParams)
+- Constraint patterns (SPI, UART, Ethernet, Analog, Protection)
+"""
 
 import pytest
 
+from kicad_tools.intent import InterfaceCategory
 from kicad_tools.patterns import (
+    # Validation and adaptation
     AdaptedPatternParams,
-    BuckPattern,
     ComponentRequirements,
-    CrystalPattern,
-    I2CPattern,
-    LDOPattern,
-    OscillatorPattern,
     PatternAdapter,
     PatternSpec,
     PatternValidationResult,
     PatternValidator,
     PatternViolation,
+    ValidationViolation,
+    get_component_requirements,
+    list_components,
+    # Schema types
     Placement,
     PlacementPriority,
     PlacementRule,
     RoutingConstraint,
+    # Placement patterns
+    BuckPattern,
+    CrystalPattern,
+    I2CPattern,
+    LDOPattern,
+    OscillatorPattern,
     USBPattern,
-    ValidationViolation,
-    get_component_requirements,
-    list_components,
+    # Constraint pattern base classes
+    ConstraintPlacementRule,
+    ConstraintPriority,
+    ConstraintRoutingRule,
+    IntentPattern,
+    # Constraint patterns
+    SPIPattern,
+    UARTPattern,
+    EthernetPattern,
+    ADCInputFilter,
+    DACOutputFilter,
+    OpAmpCircuit,
+    SensorInterface,
+    ESDProtection,
+    OvercurrentProtection,
+    OvervoltageProtection,
+    ReversePolarityProtection,
+    ThermalShutdown,
 )
 
 
@@ -905,3 +935,396 @@ class TestPCBPatternHelpers:
         )
         assert violation is not None
         assert "too close" in violation.message
+
+# =============================================================================
+# Constraint Pattern Base Class Tests
+# =============================================================================
+
+
+class TestConstraintPatternBase:
+    """Tests for the IntentPattern base class and related types."""
+
+    def test_constraint_priority_values(self):
+        """Test that ConstraintPriority enum has expected values."""
+        assert ConstraintPriority.CRITICAL.value == "critical"
+        assert ConstraintPriority.RECOMMENDED.value == "recommended"
+        assert ConstraintPriority.OPTIONAL.value == "optional"
+
+    def test_constraint_placement_rule_creation(self):
+        """Test ConstraintPlacementRule dataclass creation."""
+        rule = ConstraintPlacementRule(
+            name="test_rule",
+            description="A test placement rule",
+            priority=ConstraintPriority.CRITICAL,
+            component_refs=["U1", "C1"],
+            params={"max_distance_mm": 5.0},
+        )
+        assert rule.name == "test_rule"
+        assert rule.priority == ConstraintPriority.CRITICAL
+        assert rule.component_refs == ["U1", "C1"]
+        assert rule.params["max_distance_mm"] == 5.0
+
+    def test_constraint_routing_rule_creation(self):
+        """Test ConstraintRoutingRule dataclass creation."""
+        rule = ConstraintRoutingRule(
+            name="test_routing",
+            description="A test routing rule",
+            net_pattern="SPI_*",
+            params={"max_mm": 100.0},
+        )
+        assert rule.name == "test_routing"
+        assert rule.net_pattern == "SPI_*"
+        assert rule.params["max_mm"] == 100.0
+
+
+# =============================================================================
+# SPI Pattern Tests
+# =============================================================================
+
+
+class TestSPIPattern:
+    """Tests for SPIPattern."""
+
+    def test_create_standard_spi(self):
+        """Test creating a standard speed SPI pattern."""
+        spi = SPIPattern(speed="standard", cs_count=1)
+        assert spi.name == "spi_standard"
+        assert spi.category == InterfaceCategory.BUS
+
+    def test_create_high_speed_spi(self):
+        """Test creating a high-speed SPI pattern."""
+        spi = SPIPattern(speed="high", cs_count=2)
+        assert spi.name == "spi_high"
+        assert spi.category == InterfaceCategory.BUS
+
+    def test_spi_invalid_speed(self):
+        """Test that invalid speed raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid speed"):
+            SPIPattern(speed="ultra")
+
+    def test_spi_invalid_cs_count(self):
+        """Test that invalid CS count raises ValueError."""
+        with pytest.raises(ValueError, match="cs_count must be 1-8"):
+            SPIPattern(speed="standard", cs_count=10)
+
+    def test_spi_placement_rules(self):
+        """Test SPI placement rules generation."""
+        spi = SPIPattern(speed="high", cs_count=1)
+        rules = spi.get_placement_rules()
+        assert len(rules) >= 2
+        assert any(r.name == "clock_near_master" for r in rules)
+        assert any(r.name == "decoupling_near_slave" for r in rules)
+
+    def test_spi_routing_rules(self):
+        """Test SPI routing rules generation."""
+        spi = SPIPattern(speed="high", cs_count=1)
+        rules = spi.get_routing_rules()
+        assert len(rules) >= 2
+        assert any(r.name == "max_trace_length" for r in rules)
+
+    def test_spi_validate(self):
+        """Test SPI pattern validation."""
+        spi = SPIPattern(speed="standard", cs_count=2)
+        errors = spi.validate(nets=["CLK", "MOSI", "MISO", "CS0", "CS1"])
+        assert len(errors) == 0
+        errors = spi.validate(nets=["CLK", "MOSI"])
+        assert len(errors) > 0
+
+    def test_spi_derive_constraints(self):
+        """Test SPI constraint derivation."""
+        spi = SPIPattern(speed="high", cs_count=1)
+        nets = ["SPI_CLK", "SPI_MOSI", "SPI_MISO", "SPI_CS"]
+        constraints = spi.derive_constraints(nets)
+        assert len(constraints) >= 2
+        assert any(c.type == "max_length" for c in constraints)
+
+
+# =============================================================================
+# UART Pattern Tests
+# =============================================================================
+
+
+class TestUARTPattern:
+    """Tests for UARTPattern."""
+
+    def test_create_standard_uart(self):
+        """Test creating a standard UART pattern."""
+        uart = UARTPattern(baud_rate=115200)
+        assert uart.name == "uart_115200"
+        assert uart.category == InterfaceCategory.SINGLE_ENDED
+
+    def test_uart_placement_rules(self):
+        """Test UART placement rules generation."""
+        uart = UARTPattern(baud_rate=921600)
+        rules = uart.get_placement_rules()
+        assert len(rules) >= 1
+
+    def test_uart_routing_rules(self):
+        """Test UART routing rules generation."""
+        uart = UARTPattern(baud_rate=115200)
+        rules = uart.get_routing_rules()
+        assert len(rules) >= 2
+
+    def test_uart_validate(self):
+        """Test UART pattern validation."""
+        uart = UARTPattern(baud_rate=115200)
+        errors = uart.validate(nets=["TX", "RX"])
+        assert len(errors) == 0
+
+    def test_uart_derive_constraints(self):
+        """Test UART constraint derivation."""
+        uart = UARTPattern(baud_rate=115200)
+        constraints = uart.derive_constraints(["UART_TX", "UART_RX"])
+        assert len(constraints) >= 1
+
+
+# =============================================================================
+# Ethernet Pattern Tests
+# =============================================================================
+
+
+class TestEthernetPattern:
+    """Tests for EthernetPattern."""
+
+    def test_create_100base_tx(self):
+        """Test creating 100BASE-TX Ethernet pattern."""
+        eth = EthernetPattern(speed="100base_tx")
+        assert eth.name == "ethernet_100base_tx"
+        assert eth.category == InterfaceCategory.DIFFERENTIAL
+
+    def test_ethernet_invalid_speed(self):
+        """Test that invalid speed raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid speed"):
+            EthernetPattern(speed="10gbase_t")
+
+    def test_ethernet_placement_rules(self):
+        """Test Ethernet placement rules generation."""
+        eth = EthernetPattern(speed="100base_tx")
+        rules = eth.get_placement_rules()
+        assert len(rules) >= 4
+
+    def test_ethernet_routing_rules(self):
+        """Test Ethernet routing rules generation."""
+        eth = EthernetPattern(speed="1000base_t")
+        rules = eth.get_routing_rules()
+        assert len(rules) >= 4
+
+    def test_ethernet_validate(self):
+        """Test Ethernet pattern validation."""
+        eth = EthernetPattern(speed="100base_tx")
+        errors = eth.validate(nets=["TXP", "TXN", "RXP", "RXN"])
+        assert len(errors) == 0
+
+    def test_ethernet_derive_constraints(self):
+        """Test Ethernet constraint derivation."""
+        eth = EthernetPattern(speed="100base_tx")
+        nets = ["ETH_TXP", "ETH_TXN", "ETH_RXP", "ETH_RXN"]
+        constraints = eth.derive_constraints(nets)
+        assert len(constraints) >= 3
+
+
+# =============================================================================
+# ADC Input Filter Pattern Tests
+# =============================================================================
+
+
+class TestADCInputFilter:
+    """Tests for ADCInputFilter pattern."""
+
+    def test_create_rc_filter(self):
+        """Test creating an RC filter pattern."""
+        adc = ADCInputFilter(cutoff_hz=10000, order=1, topology="rc")
+        assert "adc_filter_rc" in adc.name
+
+    def test_adc_invalid_cutoff(self):
+        """Test that invalid cutoff frequency raises ValueError."""
+        with pytest.raises(ValueError, match="cutoff_hz must be positive"):
+            ADCInputFilter(cutoff_hz=-1000)
+
+    def test_adc_placement_rules(self):
+        """Test ADC filter placement rules."""
+        adc = ADCInputFilter(cutoff_hz=10000, topology="active")
+        rules = adc.get_placement_rules()
+        assert len(rules) >= 2
+
+    def test_adc_derive_constraints(self):
+        """Test ADC filter constraint derivation."""
+        adc = ADCInputFilter(cutoff_hz=10000)
+        constraints = adc.derive_constraints(["ADC_IN"])
+        assert len(constraints) >= 2
+
+
+# =============================================================================
+# Op-Amp Circuit Pattern Tests
+# =============================================================================
+
+
+class TestOpAmpCircuit:
+    """Tests for OpAmpCircuit pattern."""
+
+    def test_create_buffer(self):
+        """Test creating a buffer op-amp pattern."""
+        opamp = OpAmpCircuit(topology="buffer")
+        assert opamp.name == "opamp_buffer"
+
+    def test_opamp_invalid_topology(self):
+        """Test that invalid topology raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid topology"):
+            OpAmpCircuit(topology="integrator")
+
+    def test_opamp_placement_rules(self):
+        """Test op-amp placement rules."""
+        opamp = OpAmpCircuit(topology="non_inverting", gain=100.0)
+        rules = opamp.get_placement_rules()
+        assert len(rules) >= 2
+
+
+# =============================================================================
+# Sensor Interface Pattern Tests
+# =============================================================================
+
+
+class TestSensorInterface:
+    """Tests for SensorInterface pattern."""
+
+    def test_create_thermistor(self):
+        """Test creating a thermistor interface pattern."""
+        sensor = SensorInterface(sensor_type="thermistor")
+        assert sensor.name == "sensor_thermistor"
+
+    def test_sensor_invalid_type(self):
+        """Test that invalid sensor type raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid sensor_type"):
+            SensorInterface(sensor_type="accelerometer")
+
+
+# =============================================================================
+# DAC Output Filter Pattern Tests
+# =============================================================================
+
+
+class TestDACOutputFilter:
+    """Tests for DACOutputFilter pattern."""
+
+    def test_create_dac_filter(self):
+        """Test creating a DAC output filter pattern."""
+        dac = DACOutputFilter(cutoff_hz=20000, order=2, topology="rc")
+        assert "dac_filter" in dac.name
+
+    def test_dac_invalid_cutoff(self):
+        """Test that invalid cutoff raises ValueError."""
+        with pytest.raises(ValueError, match="cutoff_hz must be positive"):
+            DACOutputFilter(cutoff_hz=0)
+
+
+# =============================================================================
+# ESD Protection Pattern Tests
+# =============================================================================
+
+
+class TestESDProtection:
+    """Tests for ESDProtection pattern."""
+
+    def test_create_basic_esd(self):
+        """Test creating a basic ESD protection pattern."""
+        esd = ESDProtection(lines=["USB_DP", "USB_DM"], protection_level="basic")
+        assert "esd_basic" in esd.name
+
+    def test_esd_empty_lines(self):
+        """Test that empty lines raises ValueError."""
+        with pytest.raises(ValueError, match="lines cannot be empty"):
+            ESDProtection(lines=[])
+
+    def test_esd_placement_rules(self):
+        """Test ESD protection placement rules."""
+        esd = ESDProtection(lines=["D+", "D-"], protection_level="enhanced")
+        rules = esd.get_placement_rules()
+        assert len(rules) >= 3
+
+
+# =============================================================================
+# Overcurrent Protection Pattern Tests
+# =============================================================================
+
+
+class TestOvercurrentProtection:
+    """Tests for OvercurrentProtection pattern."""
+
+    def test_create_fuse_protection(self):
+        """Test creating a fuse-based protection pattern."""
+        ocp = OvercurrentProtection(topology="fuse", max_current=2.0)
+        assert "overcurrent_fuse" in ocp.name
+
+    def test_ocp_invalid_topology(self):
+        """Test that invalid topology raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid topology"):
+            OvercurrentProtection(topology="circuit_breaker", max_current=1.0)
+
+    def test_ocp_placement_rules(self):
+        """Test overcurrent protection placement rules."""
+        ocp = OvercurrentProtection(topology="efuse", max_current=3.0)
+        rules = ocp.get_placement_rules()
+        assert len(rules) >= 2
+
+
+# =============================================================================
+# Reverse Polarity Protection Pattern Tests
+# =============================================================================
+
+
+class TestReversePolarityProtection:
+    """Tests for ReversePolarityProtection pattern."""
+
+    def test_create_diode_protection(self):
+        """Test creating a diode-based protection pattern."""
+        rprot = ReversePolarityProtection(topology="diode", max_current=2.0)
+        assert "reverse_polarity_diode" in rprot.name
+
+    def test_rprot_invalid_topology(self):
+        """Test that invalid topology raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid topology"):
+            ReversePolarityProtection(topology="npn", max_current=1.0)
+
+
+# =============================================================================
+# Overvoltage Protection Pattern Tests
+# =============================================================================
+
+
+class TestOvervoltageProtection:
+    """Tests for OvervoltageProtection pattern."""
+
+    def test_create_tvs_protection(self):
+        """Test creating a TVS-based protection pattern."""
+        ovp = OvervoltageProtection(topology="tvs", clamp_voltage=6.0)
+        assert "overvoltage_tvs" in ovp.name
+
+    def test_ovp_invalid_topology(self):
+        """Test that invalid topology raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid topology"):
+            OvervoltageProtection(topology="spark_gap", clamp_voltage=5.0)
+
+    def test_ovp_validate(self):
+        """Test overvoltage protection validation."""
+        ovp = OvervoltageProtection(topology="tvs", clamp_voltage=5.4)
+        errors = ovp.validate(nominal_voltage=5.0)
+        assert len(errors) > 0
+
+
+# =============================================================================
+# Thermal Shutdown Pattern Tests
+# =============================================================================
+
+
+class TestThermalShutdown:
+    """Tests for ThermalShutdown pattern."""
+
+    def test_create_ntc_thermal(self):
+        """Test creating an NTC-based thermal pattern."""
+        thermal = ThermalShutdown(sensor_type="ntc", shutdown_temp_c=85.0)
+        assert "thermal_shutdown_ntc" in thermal.name
+
+    def test_thermal_invalid_sensor(self):
+        """Test that invalid sensor type raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid sensor_type"):
+            ThermalShutdown(sensor_type="rtd")

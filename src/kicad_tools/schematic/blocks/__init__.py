@@ -97,6 +97,36 @@ from .timing import (
     create_mclk_oscillator,
 )
 
+# Analog blocks
+from .analog import (
+    ADCInputFilterBlock,
+    OpAmpBlock,
+    ThermistorSense,
+    VoltageDividerSense,
+    create_adc_filter,
+    create_opamp_buffer,
+    create_opamp_gain,
+    create_temperature_sense,
+    create_voltage_sense,
+)
+
+# Protection blocks
+from .protection import (
+    ESDProtectionBlock,
+    FuseBlock,
+    OvervoltageClampBlock,
+    PTCResetBlock,
+    ReversePolarityBlock,
+    ThermalCutoffBlock,
+    create_esd_protection,
+    create_fuse,
+    create_overvoltage_clamp,
+    create_ptc_fuse,
+    create_reverse_polarity_diode,
+    create_reverse_polarity_pfet,
+    create_thermal_cutoff,
+)
+
 __all__ = [
     # Base classes
     "Port",
@@ -155,4 +185,28 @@ __all__ = [
     "create_half_bridge",
     "create_3phase_inverter",
     "create_current_sense",
+    # Analog
+    "ADCInputFilterBlock",
+    "OpAmpBlock",
+    "ThermistorSense",
+    "VoltageDividerSense",
+    "create_adc_filter",
+    "create_opamp_buffer",
+    "create_opamp_gain",
+    "create_temperature_sense",
+    "create_voltage_sense",
+    # Protection
+    "ESDProtectionBlock",
+    "FuseBlock",
+    "OvervoltageClampBlock",
+    "PTCResetBlock",
+    "ReversePolarityBlock",
+    "ThermalCutoffBlock",
+    "create_esd_protection",
+    "create_fuse",
+    "create_overvoltage_clamp",
+    "create_ptc_fuse",
+    "create_reverse_polarity_diode",
+    "create_reverse_polarity_pfet",
+    "create_thermal_cutoff",
 ]
