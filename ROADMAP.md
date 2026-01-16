@@ -15,7 +15,7 @@ file manipulation. We complement KiCad—we don't replace it.
 
 ---
 
-## Current State (v0.9.0)
+## Current State (v0.10.0)
 
 The complete agent PCB design workflow is now supported:
 
@@ -30,6 +30,7 @@ The complete agent PCB design workflow is now supported:
 | Export for manufacturing | `AssemblyPackage` (via kicad-cli) | v0.2.0 |
 | AI agent integration | MCP server, sessions | v0.8.0 |
 | Design intent & feedback | `intent` module, incremental DRC | v0.9.0 |
+| Pattern library & explanations | `patterns`, `explain` modules | v0.10.0 |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
 
@@ -43,9 +44,9 @@ we plan to address them:
 | Challenge | Description | Solution |
 |-----------|-------------|----------|
 | Incomplete Information | Tools don't understand design intent | ✅ Design Intent System (v0.9) |
-| Combinatorial Explosion | Huge placement/routing solution space | Pattern Library (v0.10) |
+| Combinatorial Explosion | Huge placement/routing solution space | ✅ Pattern Library (v0.10) |
 | Feedback Latency | Problems discovered late in process | ✅ Continuous Validation (v0.9) |
-| Knowledge Gap | Agents lack PCB design expertise | Patterns + Explanations (v0.10) |
+| Knowledge Gap | Agents lack PCB design expertise | ✅ Patterns + Explanations (v0.10) |
 | Communication Overhead | Verbose state, repeated context | ✅ Context Persistence (v0.9) |
 
 ---
@@ -111,7 +112,7 @@ continuous feedback.
 
 ---
 
-### v0.10.0 - Pattern Library & Explanations
+### v0.10.0 - Pattern Library & Explanations ✅ RELEASED
 
 **Focus**: Encode expert PCB design knowledge for agent use.
 
@@ -119,11 +120,11 @@ Agents shouldn't solve USB layout from first principles every time. A curated
 library of validated design patterns accelerates iteration and improves quality.
 
 **Design Pattern Library**
-- [ ] Pattern schema with placement rules and constraints
+- [x] Pattern schema with placement rules and constraints
   ```python
-  from kicad_tools.patterns import USBDevicePattern
+  from kicad_tools.patterns import USBPattern
 
-  pattern = USBDevicePattern(
+  pattern = USBPattern(
       speed="high_speed",
       connector="type_c",
       esd_protection=True
@@ -131,31 +132,31 @@ library of validated design patterns accelerates iteration and improves quality.
   placements = pattern.get_placements(connector_at=(10, 50))
   # Returns validated placement meeting USB spec
   ```
-- [ ] Core patterns:
+- [x] Core patterns:
   - Power: LDO, buck converter, battery charging, reverse polarity
   - Interfaces: USB 2.0/3.0, SPI, I2C, UART, Ethernet, HDMI
   - MCU: Bypass caps, crystal, debug header, reset circuit
   - Analog: ADC filtering, op-amp configs, sensor interfaces
   - Protection: ESD, TVS, overcurrent, thermal shutdown
-- [ ] Pattern validation (verify instantiated pattern meets specs)
-- [ ] Pattern adaptation (customize for specific components)
-- [ ] User-defined patterns with validation rules
+- [x] Pattern validation (verify instantiated pattern meets specs)
+- [x] Pattern adaptation (customize for specific components)
+- [x] User-defined patterns with validation rules
 
 **Explanation System**
-- [ ] Queryable explanations for DRC rules
+- [x] Queryable explanations for DRC rules
   ```python
   explain("trace_length", net="USB_D+")
   # Returns: {"explanation": "USB 2.0 high-speed signals require...",
   #           "spec_reference": "USB 2.0 section 7.1.5",
   #           "current_value": 45.2, "target_range": [40, 50]}
   ```
-- [ ] Design decision rationale tracking
-- [ ] Spec references for all constraints
-- [ ] Common mistake detection with explanations
-- [ ] Learning resources for unfamiliar patterns
+- [x] Design decision rationale tracking
+- [x] Spec references for all constraints
+- [x] Common mistake detection with explanations
+- [x] Learning resources for unfamiliar patterns
 
 **Multi-Resolution Abstraction**
-- [ ] High-level operations for common tasks
+- [x] High-level operations for common tasks
   ```python
   # High level - declarative
   design.add_subsystem("power_supply",
@@ -168,8 +169,8 @@ library of validated design patterns accelerates iteration and improves quality.
   # Low level - explicit (existing API)
   session.apply_move("U_REG", x=10, y=50)
   ```
-- [ ] Automatic decomposition of high-level commands
-- [ ] Consistent results across abstraction levels
+- [x] Automatic decomposition of high-level commands
+- [x] Consistent results across abstraction levels
 
 ---
 

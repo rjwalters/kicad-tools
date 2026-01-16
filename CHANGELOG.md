@@ -5,6 +5,92 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-01-16
+
+### Added
+
+#### Design Pattern Library (`patterns/`)
+
+Encode expert PCB design knowledge for agent use. Agents can instantiate validated patterns instead of solving common layouts from first principles.
+
+- **Pattern Schema** (#823) - Foundational schema for PCB patterns with placement rules
+  - `PCBPattern` base class for placement-based patterns
+  - `IntentPattern` base class for constraint-based patterns
+  - `Placement`, `PlacementRule`, `RoutingConstraint` schema types
+  - Validation and spec compliance checking
+
+- **Core Patterns** (#824) - Comprehensive library of validated design patterns
+  - **Power**: `LDOPattern`, `BuckPattern` with thermal and decoupling placement
+  - **Timing**: `CrystalPattern`, `OscillatorPattern` with load capacitor placement
+  - **Interface**: `USBPattern`, `I2CPattern`, `SPIPattern`, `UARTPattern`, `EthernetPattern`
+  - **Analog**: `ADCInputFilter`, `DACOutputFilter`, `OpAmpCircuit`, `SensorInterface`
+  - **Protection**: `ESDProtection`, `OvercurrentProtection`, `OvervoltageProtection`, `ReversePolarityProtection`, `ThermalShutdown`
+
+- **Pattern Validation & Adaptation** (#825)
+  - `PatternValidator` checks instantiated patterns meet spec requirements
+  - `PatternAdapter` generates pattern parameters for specific components
+  - Component requirements database for automatic parameter lookup
+  - Validation checks: distance, presence, trace length, value matching
+
+- **User-Defined Patterns** (#826)
+  - YAML pattern definitions with `PatternLoader`
+  - Pattern definition DSL: `define_pattern()`, `placement_rule()`, `routing_constraint()`
+  - `PatternRegistry` for registering and discovering patterns
+  - Custom validation checks via `register_check()`
+
+#### Explanation System (`explain/`)
+
+Queryable explanations for design rules with spec references and fix suggestions.
+
+- **Queryable Explanations** (#827)
+  - `explain(rule_id, context)` returns contextualized rule explanations
+  - `explain_violations(violations)` attaches explanations to DRC results
+  - `explain_net_constraints(net)` explains why nets have certain constraints
+  - Spec references with document name, section, and URL
+  - Auto-generated fix suggestions with calculated deltas
+
+- **Common Mistake Detection** (#828)
+  - `MistakeDetector` identifies common PCB design mistakes
+  - `detect_mistakes(pcb)` scans design for typical errors
+  - Categories: decoupling, thermal, signal integrity, power distribution
+  - Each mistake includes explanation and fix suggestions
+
+- **Design Decision Rationale** (#829)
+  - `DecisionStore` tracks design decisions with rationale
+  - `record_decision()` captures why choices were made
+  - `PlacementRationale`, `RoutingRationale` for structured tracking
+  - `explain_placement()`, `explain_route()` retrieve decision context
+  - Persistent storage for decision history
+
+#### Multi-Resolution Abstraction (`design/`)
+
+High-level operations that decompose into low-level commands automatically.
+
+- **Multi-Resolution API** (#830)
+  - **High-level**: `design.add_subsystem("power_supply", components=[...], near_edge="left")`
+  - **Medium-level**: `optimizer.group_components(refs, strategy="power_supply")`
+  - **Low-level**: `session.apply_move("U_REG", x=10, y=50)` (existing API)
+  - Automatic decomposition of high-level commands
+  - Consistent results across abstraction levels
+
+- **Subsystem Types** (`design/subsystems.py`)
+  - `POWER_SUPPLY`, `MCU_CORE`, `CONNECTOR`, `TIMING`, `ANALOG_INPUT`, `INTERFACE`
+  - Optimization goals: thermal, routing, compact, signal integrity, mechanical
+  - Built-in placement hints and typical component lists
+
+- **Command Decomposition** (`design/decomposition.py`)
+  - Breaks high-level operations into atomic moves
+  - Pattern-aware placement strategies
+  - Constraint propagation from subsystem to component level
+
+### Changed
+
+- **MCP Types Refactored** (#857) - Split `mcp/types.py` into domain-specific modules
+  - `types/assembly.py`, `types/board.py`, `types/clearance.py`, `types/drc.py`
+  - `types/gerber.py`, `types/intent.py`, `types/placement.py`, `types/routing.py`
+  - `types/session.py`, `types/warnings.py`, `types/drc_delta.py`
+  - Improved maintainability and reduced file size
+
 ## [0.9.3] - 2026-01-06
 
 ### Fixed
