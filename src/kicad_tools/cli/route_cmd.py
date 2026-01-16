@@ -795,7 +795,20 @@ def main(argv: list[str] | None = None) -> int:
     _interrupt_state["interrupted"] = False
     signal.signal(signal.SIGINT, _handle_interrupt)
 
-    nets_to_route = len([n for n in router.nets if n > 0])
+    # Count nets by category for accurate status reporting (Issue #812)
+    # - Multi-pad nets: 2+ pads, need actual routing
+    # - Single-pad nets: 1 pad, trivially complete (no routing needed)
+    # - Power nets: skipped via skip_nets, handled by copper pours
+    multi_pad_nets = []
+    single_pad_nets = []
+    for net_num, pads in router.nets.items():
+        if net_num > 0:  # Skip net 0 (unconnected)
+            if len(pads) >= 2:
+                multi_pad_nets.append(net_num)
+            elif len(pads) == 1:
+                single_pad_nets.append(net_num)
+    nets_to_route = len(multi_pad_nets)  # Only multi-pad nets need routing
+    power_nets_skipped = len(skip_nets)
 
     if not quiet:
         print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
@@ -804,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
             f"  Backend:    {backend_info['active']} (C++ available: {backend_info['available']})"
         )
         print(f"  Total nets: {len(net_map)}")
-        print(f"  Nets to route: {nets_to_route}")
+        print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
 
         if args.verbose:
             print("\n  Net breakdown:")
@@ -1161,13 +1174,21 @@ def main(argv: list[str] | None = None) -> int:
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
 
+    # Build summary suffix for net breakdown (Issue #812)
+    summary_parts = []
+    if len(single_pad_nets) > 0:
+        summary_parts.append(f"{len(single_pad_nets)} single-pad")
+    if power_nets_skipped > 0:
+        summary_parts.append(f"{power_nets_skipped} power skipped")
+    summary_suffix = f" ({', '.join(summary_parts)})" if summary_parts else ""
+
     if not quiet:
         print("\n" + "=" * 60)
         if all_nets_routed and drc_passed:
             if drc_ran and drc_errors == 0:
-                print("SUCCESS: All nets routed, DRC passed!")
+                print(f"SUCCESS: All signal nets routed, DRC passed!{summary_suffix}")
             else:
-                print("SUCCESS: All nets routed!")
+                print(f"SUCCESS: All signal nets routed!{summary_suffix}")
                 if not drc_ran and not args.skip_drc and not args.dry_run:
                     print("  Note: Run 'kct check' to validate before manufacturing")
         elif all_nets_routed and not drc_passed:
@@ -1175,9 +1196,11 @@ def main(argv: list[str] | None = None) -> int:
             print("=" * 60)
             print()
             print("Net Statistics:")
-            print(f"  Nets attempted:  {nets_to_route}")
+            print(f"  Multi-pad nets:  {nets_to_route}")
             print(f"  Nets connected:  {stats['nets_routed']} (topologically complete)")
             print("  Nets DRC-clean:  0 (manufacturing blocked)")
+            if len(single_pad_nets) > 0 or power_nets_skipped > 0:
+                print(f"  Also:{summary_suffix}")
             print()
             print("DRC Summary:")
             print(f"  Violations: {drc_errors}")
@@ -1193,7 +1216,9 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print(f"  Run 'kct check {output_path} --mfr {args.manufacturer}' for full details")
         else:
-            print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
+            print(
+                f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} signal nets{summary_suffix}"
+            )
             print("  Some nets may require manual routing or a different strategy.")
             if drc_ran and drc_errors > 0:
                 print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
