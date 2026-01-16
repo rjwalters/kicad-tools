@@ -193,12 +193,13 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
 
     # Add labels for oscillator connections
+    # Wire stubs must be added BEFORE labels to avoid "label not on wire" warnings
     in_pos = xtal.port("IN")
     out_pos = xtal.port("OUT")
-    sch.add_label("OSC_IN", in_pos[0] - 10, in_pos[1], rotation=0)
     sch.add_wire(in_pos, (in_pos[0] - 10, in_pos[1]))
-    sch.add_label("OSC_OUT", out_pos[0] + 10, out_pos[1], rotation=0)
+    sch.add_label("OSC_IN", in_pos[0] - 10, in_pos[1], rotation=0)
     sch.add_wire(out_pos, (out_pos[0] + 10, out_pos[1]))
+    sch.add_label("OSC_OUT", out_pos[0] + 10, out_pos[1], rotation=0)
     print("   Added OSC_IN and OSC_OUT labels")
 
     # =========================================================================
@@ -479,10 +480,10 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd rect (at -3.15 2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS['+5V']} "+5V"))
-    (pad "2" smd rect (at -3.15 0) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS['GND']} "GND"))
-    (pad "3" smd rect (at -3.15 -2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS['+3.3V']} "+3.3V"))
-    (pad "2" smd rect (at 3.15 0) (size 2 3.8) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS['GND']} "GND"))
+    (pad "1" smd rect (at -3.15 2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
+    (pad "2" smd rect (at -3.15 0) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
+    (pad "3" smd rect (at -3.15 -2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
+    (pad "2" smd rect (at 3.15 0) (size 2 3.8) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
     def generate_cap_0805(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
@@ -517,8 +518,8 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" thru_hole circle (at -2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS['OSC_IN']} "OSC_IN"))
-    (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS['OSC_OUT']} "OSC_OUT"))
+    (pad "1" thru_hole circle (at -2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_IN"]} "OSC_IN"))
+    (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net {NETS["OSC_OUT"]} "OSC_OUT"))
   )"""
 
     def generate_led_0805(ref: str, pos: tuple) -> str:
@@ -534,8 +535,8 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "LED" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS['USER_LED']} "USER_LED"))
-    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS['GND']} "GND"))
+    (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["USER_LED"]} "USER_LED"))
+    (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {NETS["GND"]} "GND"))
   )"""
 
     def generate_resistor_0805(ref: str, pos: tuple, value: str, net1: str, net2: str) -> str:
@@ -571,12 +572,12 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "SWD" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
-    (pad "1" thru_hole rect (at 0 {-2.5*pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS['+3.3V']} "+3.3V"))
-    (pad "2" thru_hole oval (at 0 {-1.5*pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS['SWDIO']} "SWDIO"))
-    (pad "3" thru_hole oval (at 0 {-0.5*pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS['SWCLK']} "SWCLK"))
-    (pad "4" thru_hole oval (at 0 {0.5*pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS['SWO']} "SWO"))
-    (pad "5" thru_hole oval (at 0 {1.5*pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS['NRST']} "NRST"))
-    (pad "6" thru_hole oval (at 0 {2.5*pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS['GND']} "GND"))
+    (pad "1" thru_hole rect (at 0 {-2.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["+3.3V"]} "+3.3V"))
+    (pad "2" thru_hole oval (at 0 {-1.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWDIO"]} "SWDIO"))
+    (pad "3" thru_hole oval (at 0 {-0.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWCLK"]} "SWCLK"))
+    (pad "4" thru_hole oval (at 0 {0.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWO"]} "SWO"))
+    (pad "5" thru_hole oval (at 0 {1.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["NRST"]} "NRST"))
+    (pad "6" thru_hole oval (at 0 {2.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["GND"]} "GND"))
   )"""
 
     # Build the PCB file
