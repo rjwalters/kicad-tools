@@ -26,10 +26,10 @@ from kicad_tools.schematic.blocks import (
     CrystalOscillator,
     CurrentSenseShunt,
     DebugHeader,
-    DecouplingCaps,
     GateDriverBlock,
     LEDIndicator,
     ThreePhaseInverter,
+    create_5v_buck,
 )
 from kicad_tools.schematic.models.schematic import Schematic
 
@@ -74,7 +74,6 @@ def create_bldc_controller(output_dir: Path) -> None:
     X_MCU = 200  # MCU section
     X_GATE_DRV = 280  # Gate driver
     X_PHASE_A = 25  # Phase A half-bridge
-    X_PHASE_B = 100  # Phase B half-bridge
     X_PHASE_C = 175  # Phase C half-bridge
     X_CONNECTORS = 260  # Connectors section
 
@@ -188,54 +187,29 @@ def create_bldc_controller(output_dir: Path) -> None:
     # =========================================================================
     print("\n3. Adding buck converter (24V → 5V)...")
 
-    # Note: Using simplified buck converter representation
-    # In a real design, use the full LM2596 module schematic
-    sch.add_text(
-        "Buck Converter Module\nLM2596 24V→5V\n(See datasheet for full schematic)",
+    # Create 5V buck converter using BuckConverter block
+    # This creates the full LM2596 module with all supporting components:
+    # - Regulator IC (U1)
+    # - Input/output capacitors (C3, C4)
+    # - Inductor (L1)
+    # - Schottky diode (D2) for async topology
+    buck = create_5v_buck(
+        sch,
         x=X_BUCK,
-        y=95,
-    )
-
-    # Input capacitor (represents buck input)
-    c_buck_in = sch.add_symbol(
-        "Device:C",
-        x=X_BUCK - 15,
-        y=120,
-        ref="C3",
-        value="100uF",
-    )
-
-    # Output capacitor (represents buck output)
-    c_buck_out = sch.add_symbol(
-        "Device:C",
-        x=X_BUCK + 35,
-        y=120,
-        ref="C4",
-        value="220uF",
-    )
-
-    # Inductor for buck
-    inductor = sch.add_symbol(
-        "Device:L",
-        x=X_BUCK + 10,
         y=100,
-        ref="L1",
-        value="33uH",
+        ref="U1",
+        input_voltage=24.0,
+        cap_ref_start=3,  # C3, C4
     )
-    print(f"   Buck regulator: L1 + caps (simplified)")
-
-    # Wire inductor to 5V rail (output)
-    l_2 = inductor.pin_position("2")
-    sch.add_wire(l_2, (l_2[0], RAIL_5V))
-    sch.add_junction(l_2[0], RAIL_5V)
-
-    # Wire inductor input side to VMOTOR via text block
-    l_1 = inductor.pin_position("1")
-    sch.add_wire(l_1, (l_1[0], RAIL_VMOTOR))
-    sch.add_junction(l_1[0], RAIL_VMOTOR)
-
-    sch.wire_decoupling_cap(c_buck_in, RAIL_VMOTOR, RAIL_GND)
-    sch.wire_decoupling_cap(c_buck_out, RAIL_5V, RAIL_GND)
+    buck.connect_to_rails(
+        vin_rail_y=RAIL_VMOTOR,
+        vout_rail_y=RAIL_5V,
+        gnd_rail_y=RAIL_GND,
+    )
+    print(f"   Buck regulator: {buck.regulator.reference} (LM2596-5.0)")
+    print(f"   Inductor: {buck.inductor.reference} = 33uH")
+    print(f"   Diode: {buck.diode.reference} = SS34 (Schottky)")
+    print(f"   Estimated efficiency: {buck.get_efficiency_estimate() * 100:.0f}%")
 
     # =========================================================================
     # Section 4: LDO (5V → 3.3V)
@@ -350,8 +324,8 @@ def create_bldc_controller(output_dir: Path) -> None:
     )
     gate_driver.connect_to_rails(vcc_rail_y=RAIL_5V, gnd_rail_y=RAIL_GND)
     print("   Gate driver: DRV8301 (GateDriverBlock)")
-    print(f"   Bootstrap caps: C12, C13, C14")
-    print(f"   Bypass caps: C15, C16")
+    print("   Bootstrap caps: C12, C13, C14")
+    print("   Bypass caps: C15, C16")
 
     # =========================================================================
     # Section 7: Power Stage (using ThreePhaseInverter and CurrentSenseShunt)
@@ -543,7 +517,7 @@ def create_bldc_controller(output_dir: Path) -> None:
     print(f"\nOutput files in: {output_dir.absolute()}")
     print("\nComponent summary:")
     print("   Power input: J1, F1, D1, C1-C2")
-    print("   Buck (24V→5V): L1, C3-C4")
+    print("   Buck (24V→5V): U1, L1, D2, C3-C4")
     print("   LDO (5V→3.3V): U2, C5-C6")
     print("   MCU: C7-C9, Y1 (C10-C11)")
     print("   Gate driver: C12-C16 (bootstrap/bypass)")

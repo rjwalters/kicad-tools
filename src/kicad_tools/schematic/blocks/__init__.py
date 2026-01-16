@@ -60,21 +60,6 @@ from .mcu import (
     create_stm32_boot,
 )
 
-# Power blocks
-from .power import (
-    BarrelJackInput,
-    BatteryInput,
-    DecouplingCaps,
-    LDOBlock,
-    USBPowerInput,
-    VoltageDivider,
-    create_3v3_ldo,
-    create_12v_barrel_jack,
-    create_lipo_battery,
-    create_usb_power,
-    create_voltage_divider,
-)
-
 # Motor control blocks
 from .motor import (
     CurrentSenseShunt,
@@ -84,6 +69,25 @@ from .motor import (
     create_3phase_inverter,
     create_current_sense,
     create_half_bridge,
+)
+
+# Power blocks
+from .power import (
+    BarrelJackInput,
+    BatteryInput,
+    BuckConverter,
+    DecouplingCaps,
+    LDOBlock,
+    USBPowerInput,
+    VoltageDivider,
+    create_3v3_buck,
+    create_3v3_ldo,
+    create_5v_buck,
+    create_12v_barrel_jack,
+    create_12v_buck,
+    create_lipo_battery,
+    create_usb_power,
+    create_voltage_divider,
 )
 
 # Timing blocks
@@ -104,11 +108,15 @@ __all__ = [
     # Power
     "DecouplingCaps",
     "LDOBlock",
+    "BuckConverter",
     "BarrelJackInput",
     "USBPowerInput",
     "BatteryInput",
     "VoltageDivider",
     "create_3v3_ldo",
+    "create_3v3_buck",
+    "create_5v_buck",
+    "create_12v_buck",
     "create_12v_barrel_jack",
     "create_usb_power",
     "create_lipo_battery",
