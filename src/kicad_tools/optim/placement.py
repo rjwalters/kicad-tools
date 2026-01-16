@@ -58,6 +58,7 @@ class PlacementOptimizer:
         self,
         board_outline: Polygon,
         config: PlacementConfig | None = None,
+        record_decisions: bool = False,
     ):
         """
         Initialize the optimizer.
@@ -65,6 +66,7 @@ class PlacementOptimizer:
         Args:
             board_outline: Polygon defining the board boundary
             config: Optimization parameters
+            record_decisions: If True, record placement decisions for later querying
         """
         self.board_outline = board_outline
         self.config = config or PlacementConfig()
@@ -81,6 +83,15 @@ class PlacementOptimizer:
         self.board_edges = BoardEdges.from_polygon(board_outline)
         self._edge_constraints: dict[str, EdgeConstraint] = {}
 
+        # Decision recording
+        self.record_decisions = record_decisions
+        self._decision_store: "DecisionStore | None" = None
+        self._initial_positions: dict[str, tuple[float, float, float]] = {}
+        if record_decisions:
+            from kicad_tools.explain.decisions import DecisionStore
+
+            self._decision_store = DecisionStore()
+
     @classmethod
     def from_pcb(
         cls,
@@ -90,6 +101,7 @@ class PlacementOptimizer:
         enable_clustering: bool | None = None,
         edge_detect: bool = False,
         edge_constraints: list[EdgeConstraint] | None = None,
+        record_decisions: bool = False,
     ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -103,6 +115,7 @@ class PlacementOptimizer:
                               If None, uses config.cluster_enabled.
             edge_detect: If True, auto-detect edge components (connectors, etc.)
             edge_constraints: Manual list of edge constraints to apply
+            record_decisions: If True, record placement decisions for later querying
         """
         fixed_refs = set(fixed_refs or [])
 
@@ -132,7 +145,7 @@ class PlacementOptimizer:
                     max_y - min_y,
                 )
 
-        optimizer = cls(board, config)
+        optimizer = cls(board, config, record_decisions=record_decisions)
 
         # Add components
         for fp in pcb.footprints:
@@ -332,6 +345,10 @@ class PlacementOptimizer:
         """Add a component to the optimizer."""
         self.components.append(comp)
         self._component_map[comp.ref] = comp
+
+        # Capture initial position for decision recording
+        if self.record_decisions:
+            self._initial_positions[comp.ref] = (comp.x, comp.y, comp.rotation)
 
     def get_component(self, ref: str) -> Component | None:
         """Get component by reference."""
@@ -1567,6 +1584,9 @@ class PlacementOptimizer:
         Updates the footprint positions in the PCB's S-expression tree.
         After calling this, use pcb.save() to write to a file.
 
+        If record_decisions is enabled, this also records placement decisions
+        for each component that was moved.
+
         Args:
             pcb: PCB object to update
 
@@ -1577,7 +1597,109 @@ class PlacementOptimizer:
         for comp in self.components:
             if pcb.update_footprint_position(comp.ref, comp.x, comp.y, comp.rotation):
                 updated += 1
+
+                # Record decision if enabled and component moved
+                if self.record_decisions and self._decision_store:
+                    self._record_placement_decision(comp)
+
+        # Save decisions alongside PCB if we have a path
+        if self.record_decisions and self._decision_store and updated > 0:
+            from pathlib import Path
+
+            from kicad_tools.explain.decisions import get_decisions_path
+
+            pcb_path = Path(pcb.path) if hasattr(pcb, "path") and pcb.path else None
+            if pcb_path:
+                decisions_path = get_decisions_path(pcb_path)
+                self._decision_store.save(decisions_path)
+
         return updated
+
+    def _record_placement_decision(self, comp: Component) -> None:
+        """Record a placement decision for a component."""
+        if not self._decision_store:
+            return
+
+        from kicad_tools.explain.decisions import Alternative, Decision
+
+        # Get initial position
+        initial = self._initial_positions.get(comp.ref, (0.0, 0.0, 0.0))
+        initial_x, initial_y, initial_rot = initial
+
+        # Check if component actually moved
+        moved = (
+            abs(comp.x - initial_x) > 0.01
+            or abs(comp.y - initial_y) > 0.01
+            or abs(comp.rotation - initial_rot) > 0.1
+        )
+
+        if not moved and not comp.fixed:
+            return
+
+        # Determine if this is a "place" or "move" action
+        action = "move" if not comp.fixed else "place"
+
+        # Build rationale based on optimizer context
+        rationale_parts = []
+
+        # Check edge constraints
+        if comp.ref in self._edge_constraints:
+            edge_constraint = self._edge_constraints[comp.ref]
+            rationale_parts.append(f"Placed at {edge_constraint.edge.value} edge per constraint")
+
+        # Check cluster membership
+        for cluster in self.clusters:
+            if comp.ref in cluster.component_refs:
+                rationale_parts.append(f"Part of {cluster.name} functional cluster")
+                break
+
+        # Check thermal constraints
+        thermal_props = self._thermal_props.get(comp.ref)
+        if thermal_props and thermal_props.thermal_class == ThermalClass.HIGH_POWER:
+            rationale_parts.append(
+                "High-power component placed near board edge for thermal dissipation"
+            )
+
+        if not rationale_parts:
+            rationale_parts.append("Optimized position via force-directed placement")
+
+        rationale = "; ".join(rationale_parts)
+
+        # Create alternative showing original position
+        alternatives = []
+        if moved:
+            alternatives.append(
+                Alternative(
+                    description=f"Original position ({initial_x:.2f}, {initial_y:.2f})",
+                    rejected_because="Force-directed optimization found better position",
+                )
+            )
+
+        # Build constraints satisfied
+        constraints_satisfied = []
+        if comp.ref in self._edge_constraints:
+            constraints_satisfied.append("edge_placement")
+        for cluster in self.clusters:
+            if comp.ref in cluster.component_refs:
+                constraints_satisfied.append(f"cluster_{cluster.name}")
+
+        decision = Decision.create(
+            action=action,
+            components=[comp.ref],
+            position=(comp.x, comp.y),
+            rationale=rationale,
+            decided_by="optimizer",
+            alternatives_considered=alternatives,
+            constraints_satisfied=constraints_satisfied,
+            metrics={
+                "rotation": comp.rotation,
+                "moved_distance": (
+                    ((comp.x - initial_x) ** 2 + (comp.y - initial_y) ** 2) ** 0.5 if moved else 0.0
+                ),
+            },
+        )
+
+        self._decision_store.record(decision)
 
     def total_wire_length(self) -> float:
         """Compute total estimated wire length (spring lengths)."""

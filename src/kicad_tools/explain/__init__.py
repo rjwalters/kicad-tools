@@ -27,6 +27,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+# Decision tracking imports
+from .decisions import (
+    Alternative,
+    Decision,
+    DecisionStore,
+    PlacementRationale,
+    RoutingRationale,
+    get_decisions_path,
+)
 from .formatters import (
     FORMATTERS,
     VIOLATION_FORMATTERS,
@@ -47,6 +56,14 @@ from .models import (
     InterfaceSpec,
     RuleExplanation,
     SpecReference,
+)
+from .rationale import (
+    explain_placement,
+    explain_route,
+    get_decision_store,
+    get_decisions,
+    record_decision,
+    save_decisions,
 )
 from .registry import ExplanationRegistry
 
@@ -80,6 +97,19 @@ __all__ = [
     "format_violations",
     "FORMATTERS",
     "VIOLATION_FORMATTERS",
+    # Decision tracking
+    "Decision",
+    "DecisionStore",
+    "Alternative",
+    "PlacementRationale",
+    "RoutingRationale",
+    "get_decisions_path",
+    "record_decision",
+    "get_decisions",
+    "explain_placement",
+    "explain_route",
+    "get_decision_store",
+    "save_decisions",
 ]
 
 
@@ -123,10 +153,7 @@ def explain(
         if matches:
             explanation = matches[0]
         else:
-            raise ValueError(
-                f"Unknown rule: {rule_id!r}. "
-                f"Use list_rules() to see available rules."
-            )
+            raise ValueError(f"Unknown rule: {rule_id!r}. Use list_rules() to see available rules.")
 
     # Extract values from context
     current_value = context.get("value") or context.get("current_value")
@@ -346,13 +373,9 @@ def _generate_fix_suggestions(
                 f"Increase spacing by at least {delta:.3f}{unit} to meet minimum clearance"
             )
         elif "width" in rule_id or "trace" in rule_id:
-            suggestions.append(
-                f"Increase width to at least {required_value}{unit}"
-            )
+            suggestions.append(f"Increase width to at least {required_value}{unit}")
         elif "via" in rule_id:
-            suggestions.append(
-                f"Adjust via size to meet {required_value}{unit} minimum"
-            )
+            suggestions.append(f"Adjust via size to meet {required_value}{unit} minimum")
         else:
             suggestions.append(
                 f"Adjust value from {current_value}{unit} to at least {required_value}{unit}"
@@ -428,8 +451,7 @@ def _create_generic_explanation(violation: Any) -> ExplanationResult:
     return ExplanationResult(
         rule=rule_id,
         title=rule_id.replace("_", " ").title(),
-        explanation=f"This violation indicates a design rule check failure. "
-        f"Message: {message}",
+        explanation=f"This violation indicates a design rule check failure. Message: {message}",
         severity=getattr(violation, "severity", "error"),
         fix_suggestions=["Review the design at the indicated location and adjust accordingly."],
     )

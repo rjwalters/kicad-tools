@@ -20,6 +20,7 @@ from .benchmark import run_benchmark_command
 from .build import run_build_command
 from .config import run_config_command, run_interactive_command
 from .datasheet import run_datasheet_command
+from .decisions import run_decisions_command
 from .estimate import run_estimate_command
 from .footprint import run_footprint_command
 from .impedance import run_impedance_command
@@ -75,6 +76,8 @@ __all__ = [
     "run_parts_command",
     # Datasheet
     "run_datasheet_command",
+    # Decisions
+    "run_decisions_command",
     # Reasoning
     "run_reason_command",
     # Placement

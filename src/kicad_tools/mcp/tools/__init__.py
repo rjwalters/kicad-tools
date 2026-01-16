@@ -17,6 +17,14 @@ from kicad_tools.mcp.tools.context import (
     record_decision,
     restore_checkpoint,
 )
+from kicad_tools.mcp.tools.design import (
+    add_subsystem,
+    group_components,
+    list_available_subsystem_types,
+    plan_subsystem,
+    validate_design,
+    validate_move,
+)
 from kicad_tools.mcp.tools.explain import (
     explain_drc_violations,
     explain_net,
@@ -42,6 +50,7 @@ from kicad_tools.mcp.tools.routing import (
 
 __all__ = [
     "adapt_pattern",
+    "add_subsystem",
     "analyze_board",
     "annotate_decision",
     "create_checkpoint",
@@ -56,13 +65,18 @@ __all__ = [
     "get_session_context",
     "get_session_summary",
     "get_unrouted_nets",
+    "group_components",
     "list_available_components",
     "list_available_rules",
+    "list_available_subsystem_types",
     "list_mistake_categories",
     "measure_clearance",
+    "plan_subsystem",
     "record_decision",
     "restore_checkpoint",
     "route_net",
     "search_available_rules",
+    "validate_design",
+    "validate_move",
     "validate_pattern",
 ]
