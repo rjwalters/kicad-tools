@@ -346,7 +346,7 @@ class BarrelJackInput(CircuitBlock):
         jack_symbol: str = "Connector:Barrel_Jack_Switch",
         pfet_symbol: str = "Device:Q_PMOS_GSD",
         diode_symbol: str = "Device:D_Schottky",
-        cap_symbol: str = "Device:CP",
+        cap_symbol: str = "Device:C_Polarized",
     ):
         """
         Create a barrel jack power input block.
@@ -1240,7 +1240,7 @@ class BuckConverter(CircuitBlock):
         c_in_x = x + input_cap_offset
         c_in_ref = f"C{cap_ref_start}"
         self.input_cap = sch.add_symbol(
-            "Device:CP", c_in_x, y + 15, c_in_ref, input_cap, auto_footprint=auto_footprint
+            "Device:C_Polarized", c_in_x, y + 15, c_in_ref, input_cap, auto_footprint=auto_footprint
         )
 
         # Place inductor
@@ -1253,7 +1253,12 @@ class BuckConverter(CircuitBlock):
         c_out_x = x + output_cap_offset
         c_out_ref = f"C{cap_ref_start + 1}"
         self.output_cap = sch.add_symbol(
-            "Device:CP", c_out_x, y + 15, c_out_ref, output_cap, auto_footprint=auto_footprint
+            "Device:C_Polarized",
+            c_out_x,
+            y + 15,
+            c_out_ref,
+            output_cap,
+            auto_footprint=auto_footprint,
         )
 
         # Store all components
