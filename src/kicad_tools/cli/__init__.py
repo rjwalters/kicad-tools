@@ -52,6 +52,7 @@ from .commands import (
     run_config_command,
     run_constraints_command,
     run_datasheet_command,
+    run_decisions_command,
     run_estimate_command,
     run_fix_footprints_command,
     run_footprint_command,
@@ -293,6 +294,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "datasheet":
         return run_datasheet_command(args)
+
+    elif args.command == "decisions":
+        return run_decisions_command(args)
 
     elif args.command == "zones":
         return run_zones_command(args)
