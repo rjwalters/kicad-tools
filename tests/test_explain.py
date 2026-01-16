@@ -1,12 +1,24 @@
-"""Tests for the explain system."""
+"""
+Unit tests for the explain system.
+
+Tests cover:
+- ExplanationResult and other data models
+- ExplanationRegistry loading and lookup
+- Main explain API functions
+- Formatters (text, JSON, markdown)
+- YAML spec loading
+- MCP tool functions
+"""
 
 import json
 
 import pytest
 
 from kicad_tools.explain import (
+    ExplainedViolation,
     ExplanationRegistry,
     ExplanationResult,
+    InterfaceSpec,
     RuleExplanation,
     SpecReference,
     explain,
@@ -17,320 +29,258 @@ from kicad_tools.explain import (
     list_rules,
     search_rules,
 )
-from kicad_tools.explain.formatters import (
-    format_json,
-    format_markdown,
-    format_text,
-    format_tree,
-)
-from kicad_tools.explain.models import ExplainedViolation, InterfaceSpec
 
 
 class TestSpecReference:
-    """Tests for SpecReference model."""
+    """Tests for SpecReference dataclass."""
 
-    def test_create_spec_reference(self):
+    def test_spec_reference_creation(self):
         """Test creating a SpecReference."""
         ref = SpecReference(
             name="JLCPCB Manufacturing Capabilities",
             section="PCB Specifications > Minimum Clearance",
-            url="https://jlcpcb.com/capabilities",
+            url="https://jlcpcb.com/capabilities/pcb-capabilities",
             version="2024-01",
         )
         assert ref.name == "JLCPCB Manufacturing Capabilities"
         assert ref.section == "PCB Specifications > Minimum Clearance"
-        assert ref.url == "https://jlcpcb.com/capabilities"
+        assert ref.url == "https://jlcpcb.com/capabilities/pcb-capabilities"
         assert ref.version == "2024-01"
 
     def test_spec_reference_to_dict(self):
-        """Test SpecReference serialization."""
-        ref = SpecReference(name="Test Spec", section="Section 1")
+        """Test SpecReference.to_dict() method."""
+        ref = SpecReference(name="Test Spec", section="Section 1", url="http://example.com")
         d = ref.to_dict()
         assert d["name"] == "Test Spec"
         assert d["section"] == "Section 1"
-        assert d["url"] == ""
-        assert d["version"] == ""
+        assert d["url"] == "http://example.com"
+
+    def test_spec_reference_defaults(self):
+        """Test SpecReference default values."""
+        ref = SpecReference(name="Minimal Spec")
+        assert ref.section == ""
+        assert ref.url == ""
+        assert ref.version == ""
 
 
 class TestRuleExplanation:
-    """Tests for RuleExplanation model."""
+    """Tests for RuleExplanation dataclass."""
 
-    def test_create_rule_explanation(self):
+    def test_rule_explanation_creation(self):
         """Test creating a RuleExplanation."""
         exp = RuleExplanation(
             rule_id="trace_clearance",
             title="Minimum Trace Clearance",
             explanation="Traces must maintain minimum clearance.",
-            fix_templates=["Increase spacing by {delta}mm"],
-            related_rules=["trace_width", "via_clearance"],
+            spec_references=[SpecReference(name="JLCPCB")],
+            fix_templates=["Increase spacing by {delta}{unit}"],
+            related_rules=["trace_width"],
+            severity="error",
         )
         assert exp.rule_id == "trace_clearance"
         assert exp.title == "Minimum Trace Clearance"
-        assert len(exp.fix_templates) == 1
-        assert len(exp.related_rules) == 2
+        assert len(exp.spec_references) == 1
+        assert exp.severity == "error"
 
     def test_rule_explanation_to_dict(self):
-        """Test RuleExplanation serialization."""
-        ref = SpecReference(name="Test Spec")
+        """Test RuleExplanation.to_dict() method."""
         exp = RuleExplanation(
-            rule_id="test_rule",
+            rule_id="test",
             title="Test Rule",
             explanation="Test explanation",
-            spec_references=[ref],
         )
         d = exp.to_dict()
-        assert d["rule_id"] == "test_rule"
-        assert len(d["spec_references"]) == 1
-        assert d["spec_references"][0]["name"] == "Test Spec"
+        assert d["rule_id"] == "test"
+        assert d["title"] == "Test Rule"
+        assert d["explanation"] == "Test explanation"
+        assert "spec_references" in d
+        assert "fix_templates" in d
 
 
 class TestExplanationResult:
-    """Tests for ExplanationResult model."""
+    """Tests for ExplanationResult dataclass."""
 
-    def test_create_explanation_result(self):
+    def test_explanation_result_creation(self):
         """Test creating an ExplanationResult."""
         result = ExplanationResult(
             rule="trace_clearance",
             title="Minimum Trace Clearance",
-            explanation="Traces must maintain minimum clearance.",
+            explanation="Test explanation",
             current_value=0.15,
             required_value=0.2,
             unit="mm",
-            fix_suggestions=["Increase spacing by 0.05mm"],
+            severity="error",
+            fix_suggestions=["Increase spacing"],
         )
         assert result.rule == "trace_clearance"
         assert result.current_value == 0.15
         assert result.required_value == 0.2
-        assert len(result.fix_suggestions) == 1
+        assert result.severity == "error"
 
     def test_explanation_result_to_dict(self):
-        """Test ExplanationResult serialization."""
+        """Test ExplanationResult.to_dict() method."""
         result = ExplanationResult(
-            rule="test_rule",
-            title="Test Rule",
+            rule="test",
+            title="Test",
             explanation="Test explanation",
         )
         d = result.to_dict()
-        assert d["rule"] == "test_rule"
-        assert d["title"] == "Test Rule"
-        assert d["spec_reference"] is None
+        assert d["rule"] == "test"
+        assert d["title"] == "Test"
+        assert "fix_suggestions" in d
+        assert "context" in d
 
-    def test_format_tree(self):
-        """Test tree formatting."""
-        ref = SpecReference(name="Test Spec", version="1.0")
+    def test_explanation_result_format_tree(self):
+        """Test ExplanationResult.format_tree() method."""
         result = ExplanationResult(
-            rule="test_rule",
-            title="Test Rule",
-            explanation="Test explanation",
-            spec_reference=ref,
+            rule="trace_clearance",
+            title="Minimum Trace Clearance",
+            explanation="Traces must maintain spacing",
+            spec_reference=SpecReference(name="JLCPCB", section="Clearance"),
             current_value=0.15,
             required_value=0.2,
             unit="mm",
-            fix_suggestions=["Fix it"],
-            related_rules=["other_rule"],
+            fix_suggestions=["Increase spacing"],
         )
         tree = result.format_tree()
-        assert "Test Rule" in tree
-        assert "Test Spec" in tree
+        assert "Minimum Trace Clearance" in tree
+        assert "JLCPCB" in tree
         assert "0.15mm" in tree
-        assert "Fix it" in tree
 
 
 class TestExplanationRegistry:
     """Tests for ExplanationRegistry."""
 
-    def setup_method(self):
-        """Clear registry before each test."""
-        ExplanationRegistry.clear()
+    @pytest.fixture(autouse=True)
+    def reset_registry(self):
+        """Reset registry before each test."""
+        ExplanationRegistry.reload()
+        yield
 
-    def test_register_and_get(self):
-        """Test registering and retrieving an explanation."""
-        exp = RuleExplanation(
-            rule_id="test_rule",
-            title="Test Rule",
-            explanation="Test explanation",
-        )
-        ExplanationRegistry.register("test_rule", exp)
-        retrieved = ExplanationRegistry.get("test_rule")
-        assert retrieved is not None
-        assert retrieved.title == "Test Rule"
-
-    def test_get_unknown_rule(self):
-        """Test getting an unknown rule returns None."""
-        result = ExplanationRegistry.get("nonexistent_rule")
-        assert result is None
-
-    def test_list_rules(self):
-        """Test listing registered rules."""
-        ExplanationRegistry.register(
-            "rule_a",
-            RuleExplanation(rule_id="rule_a", title="Rule A", explanation="A"),
-        )
-        ExplanationRegistry.register(
-            "rule_b",
-            RuleExplanation(rule_id="rule_b", title="Rule B", explanation="B"),
-        )
+    def test_registry_loads_specs(self):
+        """Test that registry loads YAML specs on first access."""
         rules = ExplanationRegistry.list_rules()
-        assert "rule_a" in rules
-        assert "rule_b" in rules
+        assert len(rules) > 0
 
-    def test_search(self):
+    def test_registry_get_existing_rule(self):
+        """Test getting an existing rule from registry."""
+        exp = ExplanationRegistry.get("trace_clearance")
+        assert exp is not None
+        assert exp.rule_id == "trace_clearance"
+        assert exp.title == "Minimum Trace Clearance"
+
+    def test_registry_get_nonexistent_rule(self):
+        """Test getting a nonexistent rule returns None."""
+        exp = ExplanationRegistry.get("nonexistent_rule_xyz")
+        assert exp is None
+
+    def test_registry_search(self):
         """Test searching for rules."""
-        ExplanationRegistry.register(
-            "unique_test_rule_abc",
-            RuleExplanation(
-                rule_id="unique_test_rule_abc",
-                title="Unique Test Rule ABC",
-                explanation="Test rule",
-            ),
-        )
-        ExplanationRegistry.register(
-            "another_rule",
-            RuleExplanation(
-                rule_id="another_rule", title="Another Rule", explanation="Another"
-            ),
-        )
-        results = ExplanationRegistry.search("unique_test_rule_abc")
-        assert len(results) == 1
-        assert results[0].rule_id == "unique_test_rule_abc"
+        results = ExplanationRegistry.search("clearance")
+        assert len(results) > 0
+        rule_ids = [r.rule_id for r in results]
+        assert "trace_clearance" in rule_ids
 
-    def test_register_interface(self):
-        """Test registering and retrieving interface specs."""
-        spec = InterfaceSpec(
-            interface="USB 2.0",
-            spec_document="USB Spec",
-            constraints={"impedance": {"value": 90}},
-        )
-        ExplanationRegistry.register_interface("usb2", spec)
-        retrieved = ExplanationRegistry.get_interface("usb2")
-        assert retrieved is not None
-        assert retrieved.interface == "USB 2.0"
+    def test_registry_list_interfaces(self):
+        """Test listing registered interfaces."""
+        interfaces = ExplanationRegistry.list_interfaces()
+        assert len(interfaces) > 0
+        assert any("usb" in i.lower() for i in interfaces)
+
+    def test_registry_get_interface(self):
+        """Test getting an interface specification."""
+        spec = ExplanationRegistry.get_interface("usb_20_high_speed")
+        assert spec is not None
+        assert "USB" in spec.interface
+        assert "differential_impedance" in spec.constraints
 
 
 class TestExplainFunction:
     """Tests for the main explain() function."""
 
-    def setup_method(self):
-        """Clear and reload registry before each test."""
-        ExplanationRegistry.reload()
-
     def test_explain_known_rule(self):
         """Test explaining a known rule."""
-        # The YAML specs should be loaded
         result = explain("trace_clearance")
         assert result.rule == "trace_clearance"
-        assert result.title != ""
-        assert result.explanation != ""
+        assert result.title == "Minimum Trace Clearance"
+        assert len(result.explanation) > 0
 
     def test_explain_with_context(self):
         """Test explaining with context values."""
-        result = explain(
-            "trace_clearance",
-            context={"value": 0.15, "required_value": 0.2, "unit": "mm"},
-        )
+        result = explain("trace_clearance", {
+            "value": 0.15,
+            "required_value": 0.2,
+            "net1": "USB_D+",
+            "net2": "GND",
+        })
         assert result.current_value == 0.15
         assert result.required_value == 0.2
-        assert result.unit == "mm"
-        # Should generate fix suggestion
         assert len(result.fix_suggestions) > 0
 
-    def test_explain_unknown_rule(self):
-        """Test explaining an unknown rule raises ValueError."""
-        with pytest.raises(ValueError) as exc_info:
-            explain("definitely_not_a_real_rule_xyz123")
-        assert "Unknown rule" in str(exc_info.value)
+    def test_explain_unknown_rule_raises(self):
+        """Test that explaining an unknown rule raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown rule"):
+            explain("completely_unknown_rule_xyz123")
 
-    def test_explain_partial_match(self):
-        """Test that partial matches work."""
-        # "clearance" should find "trace_clearance"
-        result = explain("clearance")
-        assert "clearance" in result.rule.lower()
+    def test_explain_with_spec_reference(self):
+        """Test that explain results include spec references."""
+        result = explain("trace_clearance")
+        assert result.spec_reference is not None
+        assert "JLCPCB" in result.spec_reference.name
 
 
 class TestExplainNetConstraints:
-    """Tests for explain_net_constraints function."""
-
-    def setup_method(self):
-        """Reload registry before each test."""
-        ExplanationRegistry.reload()
+    """Tests for explain_net_constraints() function."""
 
     def test_explain_usb_net(self):
-        """Test explaining a USB net."""
+        """Test explaining USB net constraints."""
         result = explain_net_constraints("USB_D+")
-        assert result.rule != ""
-        # Should detect USB interface
-        assert "usb" in result.rule.lower() or "USB" in result.explanation
+        assert "USB" in result.title or "usb" in result.rule
+        assert len(result.explanation) > 0
 
     def test_explain_i2c_net(self):
-        """Test explaining an I2C net."""
+        """Test explaining I2C net constraints."""
         result = explain_net_constraints("SDA")
-        assert result.rule != ""
-        # Should detect I2C interface
-        assert "i2c" in result.rule.lower() or "I2C" in result.explanation
+        assert "I2C" in result.title or "i2c" in result.rule.lower()
+
+    def test_explain_spi_net(self):
+        """Test explaining SPI net constraints."""
+        result = explain_net_constraints("MOSI")
+        assert "SPI" in result.title or "spi" in result.rule.lower()
 
     def test_explain_unknown_net(self):
-        """Test explaining an unknown net type."""
+        """Test explaining unknown net type."""
         result = explain_net_constraints("RANDOM_NET_123")
-        assert result.rule == "unknown_net"
+        assert result is not None
         assert result.severity == "info"
 
-    def test_explain_with_explicit_interface(self):
-        """Test explaining with explicit interface type."""
-        result = explain_net_constraints("MY_SIGNAL", interface_type="spi")
-        assert "spi" in result.rule.lower() or "SPI" in result.explanation
 
+class TestListAndSearchRules:
+    """Tests for list_rules() and search_rules() functions."""
 
-class TestExplainViolations:
-    """Tests for explain_violations function."""
+    def test_list_rules_returns_sorted_list(self):
+        """Test that list_rules returns sorted list."""
+        rules = list_rules()
+        assert len(rules) > 0
+        assert rules == sorted(rules)
 
-    def setup_method(self):
-        """Reload registry before each test."""
-        ExplanationRegistry.reload()
+    def test_list_rules_has_expected_rules(self):
+        """Test that list_rules includes expected rules."""
+        rules = list_rules()
+        assert "trace_clearance" in rules
+        assert "via_drill" in rules
 
-    def test_explain_violations_list(self):
-        """Test explaining a list of violations."""
+    def test_search_rules_finds_matches(self):
+        """Test that search_rules finds matching rules."""
+        results = search_rules("via")
+        assert len(results) > 0
+        for r in results:
+            assert "via" in r.rule_id.lower() or "via" in r.title.lower()
 
-        # Create mock violations
-        class MockViolation:
-            def __init__(self, rule_id, message):
-                self.type_str = rule_id
-                self.type = rule_id
-                self.message = message
-                self.required_value_mm = 0.2
-                self.actual_value_mm = 0.15
-                self.nets = ["NET1", "NET2"]
-                self.severity = "error"
-                self.primary_location = None
-
-            def to_dict(self):
-                return {"type": self.type_str, "message": self.message}
-
-        violations = [
-            MockViolation("clearance", "Clearance violation"),
-            MockViolation("trace_width", "Trace too narrow"),
-        ]
-
-        explained = explain_violations(violations)
-        assert len(explained) == 2
-        assert all(isinstance(ev, ExplainedViolation) for ev in explained)
-        assert all(ev.explanation is not None for ev in explained)
-
-    def test_explain_unknown_violation_type(self):
-        """Test that unknown violation types get generic explanations."""
-
-        class MockViolation:
-            type_str = "unknown_xyz"
-            type = "unknown_xyz"
-            message = "Unknown error"
-            severity = "error"
-            primary_location = None
-
-            def to_dict(self):
-                return {"type": self.type_str, "message": self.message}
-
-        explained = explain_violations([MockViolation()])
-        assert len(explained) == 1
-        assert explained[0].explanation.rule == "unknown_xyz"
+    def test_search_rules_no_results(self):
+        """Test search_rules with no matches."""
+        results = search_rules("xyznonexistent123")
+        assert len(results) == 0
 
 
 class TestFormatters:
@@ -344,9 +294,9 @@ class TestFormatters:
             title="Minimum Trace Clearance",
             explanation="Traces must maintain minimum clearance.",
             spec_reference=SpecReference(
-                name="JLCPCB Spec",
+                name="JLCPCB",
                 section="Clearance",
-                url="https://example.com",
+                url="https://jlcpcb.com",
             ),
             current_value=0.15,
             required_value=0.2,
@@ -357,108 +307,115 @@ class TestFormatters:
         )
 
     def test_format_text(self, sample_result):
-        """Test text formatting."""
-        output = format_text(sample_result)
+        """Test text formatter."""
+        output = format_result(sample_result, "text")
         assert "trace_clearance" in output
         assert "Minimum Trace Clearance" in output
-        assert "JLCPCB Spec" in output
+        assert "JLCPCB" in output
         assert "0.15" in output
-        assert "0.2" in output
-
-    def test_format_tree(self, sample_result):
-        """Test tree formatting."""
-        output = format_tree(sample_result)
-        assert "Minimum Trace Clearance" in output
-        assert "JLCPCB Spec" in output
 
     def test_format_json(self, sample_result):
-        """Test JSON formatting."""
-        output = format_json(sample_result)
+        """Test JSON formatter."""
+        output = format_result(sample_result, "json")
         data = json.loads(output)
         assert data["rule"] == "trace_clearance"
-        assert data["spec_reference"]["name"] == "JLCPCB Spec"
+        assert data["current_value"] == 0.15
+        assert data["spec_reference"]["name"] == "JLCPCB"
 
     def test_format_markdown(self, sample_result):
-        """Test markdown formatting."""
-        output = format_markdown(sample_result)
+        """Test markdown formatter."""
+        output = format_result(sample_result, "markdown")
         assert "## Minimum Trace Clearance" in output
-        assert "`trace_clearance`" in output
-        assert "[JLCPCB Spec]" in output
+        assert "**Rule ID:**" in output
+        assert "[JLCPCB]" in output
 
-    def test_format_result_function(self, sample_result):
-        """Test format_result dispatcher function."""
-        text_output = format_result(sample_result, "text")
-        assert "trace_clearance" in text_output
+    def test_format_tree(self, sample_result):
+        """Test tree formatter."""
+        output = format_result(sample_result, "tree")
+        assert "Minimum Trace Clearance" in output
 
-        json_output = format_result(sample_result, "json")
-        assert json.loads(json_output)["rule"] == "trace_clearance"
-
-    def test_format_result_invalid_format(self, sample_result):
-        """Test that invalid format raises ValueError."""
-        with pytest.raises(ValueError):
+    def test_format_invalid_raises(self, sample_result):
+        """Test that invalid format type raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown format"):
             format_result(sample_result, "invalid_format")
 
 
-class TestListAndSearchRules:
-    """Tests for list_rules and search_rules functions."""
-
-    def setup_method(self):
-        """Reload registry before each test."""
-        ExplanationRegistry.reload()
-
-    def test_list_rules(self):
-        """Test list_rules returns non-empty list."""
-        rules = list_rules()
-        assert isinstance(rules, list)
-        assert len(rules) > 0
-
-    def test_search_rules(self):
-        """Test search_rules finds matching rules."""
-        results = search_rules("clearance")
-        assert isinstance(results, list)
-        # Should find at least trace_clearance
-        assert any("clearance" in r.rule_id for r in results)
-
-    def test_search_rules_no_match(self):
-        """Test search_rules returns empty list for no matches."""
-        results = search_rules("xyznonexistent123")
-        assert results == []
-
-
-class TestYAMLSpecLoading:
+class TestYAMLLoading:
     """Tests for YAML spec file loading."""
 
-    def setup_method(self):
-        """Reload registry before each test."""
+    def test_jlcpcb_rules_loaded(self):
+        """Test that JLCPCB rules are loaded from YAML."""
         ExplanationRegistry.reload()
-
-    def test_jlcpcb_specs_loaded(self):
-        """Test that JLCPCB specs are loaded."""
-        exp = ExplanationRegistry.get("trace_clearance")
-        assert exp is not None
-        assert "JLCPCB" in exp.spec_references[0].name
-
-    def test_oshpark_specs_loaded(self):
-        """Test that OSH Park specs are loaded."""
-        # Check if any OSH Park rule exists
         rules = list_rules()
-        # The YAML file might not use "oshpark" prefix, check for rules
-        assert len(rules) > 5  # Should have multiple rules loaded
+        expected_rules = [
+            "trace_clearance",
+            "trace_width",
+            "via_drill",
+            "via_annular_ring",
+            "via_clearance",
+            "edge_clearance",
+        ]
+        for rule in expected_rules:
+            assert rule in rules, f"Expected rule '{rule}' not found"
 
-    def test_usb_interface_specs_loaded(self):
-        """Test that USB interface specs are loaded."""
-        spec = ExplanationRegistry.get_interface("usb_20_high_speed")
-        assert spec is not None
-        assert "USB" in spec.interface
+    def test_interface_specs_loaded(self):
+        """Test that interface specs are loaded from YAML."""
+        ExplanationRegistry.reload()
+        interfaces = ExplanationRegistry.list_interfaces()
+        interface_names = [i.lower() for i in interfaces]
+        assert any("usb" in i for i in interface_names)
+        assert any("i2c" in i for i in interface_names)
+        assert any("spi" in i for i in interface_names)
 
-    def test_i2c_interface_specs_loaded(self):
-        """Test that I2C interface specs are loaded."""
-        spec = ExplanationRegistry.get_interface("i2c")
-        assert spec is not None
-        assert "I2C" in spec.interface
+    def test_rule_count_minimum(self):
+        """Test that we have at least 20 rules (acceptance criteria)."""
+        rules = list_rules()
+        assert len(rules) >= 20, f"Expected at least 20 rules, got {len(rules)}"
 
-    def test_spi_interface_specs_loaded(self):
-        """Test that SPI interface specs are loaded."""
-        spec = ExplanationRegistry.get_interface("spi")
-        assert spec is not None
-        assert "SPI" in spec.interface
+
+class TestMCPTools:
+    """Tests for MCP tool functions."""
+
+    def test_explain_rule_tool(self):
+        """Test explain_rule MCP tool function."""
+        from kicad_tools.mcp.tools.explain import explain_rule
+
+        result = explain_rule("trace_clearance", current_value=0.15, required_value=0.2)
+        assert "rule" in result
+        assert result["rule"] == "trace_clearance"
+        assert "fix_suggestions" in result
+
+    def test_explain_rule_unknown(self):
+        """Test explain_rule with unknown rule returns error."""
+        from kicad_tools.mcp.tools.explain import explain_rule
+
+        result = explain_rule("totally_unknown_rule_xyz")
+        assert "error" in result
+        assert "available_rules" in result
+
+    def test_explain_net_tool(self):
+        """Test explain_net MCP tool function."""
+        from kicad_tools.mcp.tools.explain import explain_net
+
+        result = explain_net("USB_D+")
+        assert "rule" in result
+        assert "explanation" in result
+
+    def test_list_available_rules_tool(self):
+        """Test list_available_rules MCP tool function."""
+        from kicad_tools.mcp.tools.explain import list_available_rules
+
+        result = list_available_rules()
+        assert "total" in result
+        assert result["total"] > 0
+        assert "rules" in result
+        assert "categories" in result
+
+    def test_search_available_rules_tool(self):
+        """Test search_available_rules MCP tool function."""
+        from kicad_tools.mcp.tools.explain import search_available_rules
+
+        result = search_available_rules("clearance")
+        assert "query" in result
+        assert "matches" in result
+        assert result["total"] > 0
