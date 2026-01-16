@@ -2542,9 +2542,14 @@ class Autorouter:
     def detect_dense_packages(self) -> list[PackageInfo]:
         """Detect dense packages that need escape routing.
 
-        Identifies components with pin pitch < 0.5mm or pin count > 48,
-        which typically require special escape routing patterns to
-        achieve full routability.
+        Identifies components where pin pitch is too small for traces to
+        pass between adjacent pins, or where pin count exceeds 48. Uses
+        the design rules (trace width and clearance) to calculate the
+        minimum pitch needed for routing.
+
+        For example, a TQFP-32 with 0.8mm pitch may need escape routing
+        when using 0.2mm traces with 0.2mm clearance, because the
+        required routing space (2 * 0.4mm = 0.8mm) equals the pin pitch.
 
         Returns:
             List of PackageInfo for dense packages
@@ -2564,9 +2569,13 @@ class Autorouter:
                 component_pads[ref] = []
             component_pads[ref].append(pad)
 
-        # Check each component
+        # Check each component using design rules for dynamic threshold
         for ref, pads in component_pads.items():
-            if is_dense_package(pads):
+            if is_dense_package(
+                pads,
+                trace_width=self.rules.trace_width,
+                clearance=self.rules.trace_clearance,
+            ):
                 info = self._escape.analyze_package(pads)
                 dense_packages.append(info)
 
