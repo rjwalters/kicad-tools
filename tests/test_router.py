@@ -3086,12 +3086,14 @@ class TestLoadPcbForRoutingDrcCompliance:
         pcb_file = tmp_path / "test_drc.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
-        # Use rules with bad grid resolution
-        rules = DesignRules(grid_resolution=0.25, trace_clearance=0.2)
+        # Use rules with grid > recommended (clearance/2) but <= clearance
+        # This triggers a warning in non-strict mode, not an error
+        # grid=0.15, clearance=0.2: recommended=0.1, so grid > recommended but grid <= clearance
+        rules = DesignRules(grid_resolution=0.15, trace_clearance=0.2)
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            router, net_map = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=True)
+            router, net_map = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=True, strict_drc=False)
 
             # Should emit a warning
             assert len(w) >= 1

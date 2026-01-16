@@ -1320,7 +1320,7 @@ class TestSilkscreenRules:
                     text="U1",
                     position=(0.0, -2.0),
                     layer="F.SilkS",  # Silkscreen layer
-                    font_size=(0.5, 0.5),  # Below minimum of 0.8mm
+                    font_size=(0.5, 0.5),  # Below JLCPCB minimum of 1.0mm
                     font_thickness=0.1,
                 ),
             ],
@@ -1340,7 +1340,7 @@ class TestSilkscreenRules:
         assert results.violations[0].rule_id == "silkscreen_text_height"
         assert results.violations[0].severity == "warning"
         assert results.violations[0].actual_value == pytest.approx(0.5)
-        assert results.violations[0].required_value == pytest.approx(0.8)
+        assert results.violations[0].required_value == pytest.approx(1.0)  # JLCPCB spec
 
     def test_silkscreen_text_height_no_violation(self):
         """Test no violation for silkscreen text at/above minimum height."""

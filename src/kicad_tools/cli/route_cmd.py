@@ -697,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
                 edge_clearance=args.edge_clearance,
                 layer_stack=layer_stack,
                 force_python=force_python,
+                validate_drc=not args.force,
+                strict_drc=False,  # Only fail on hard constraint (grid > clearance)
             )
     except Exception as e:
         print(f"Error loading PCB: {e}", file=sys.stderr)

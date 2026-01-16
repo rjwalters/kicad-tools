@@ -25,7 +25,7 @@ from kicad_tools.design import (
     get_subsystem_definition,
     list_subsystem_types,
 )
-from kicad_tools.exceptions import SessionNotFoundError
+from kicad_tools.mcp.errors import SessionNotFoundError
 
 if TYPE_CHECKING:
     pass
