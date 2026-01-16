@@ -33,6 +33,14 @@ from .formatters import (
     format_result,
     format_violations,
 )
+from .mistakes import (
+    Mistake,
+    MistakeCategory,
+    MistakeCheck,
+    MistakeDetector,
+    detect_mistakes,
+    get_default_checks,
+)
 from .models import (
     ExplainedViolation,
     ExplanationResult,
@@ -52,6 +60,13 @@ __all__ = [
     "explain_net_constraints",
     "list_rules",
     "search_rules",
+    # Mistake detection
+    "Mistake",
+    "MistakeCategory",
+    "MistakeCheck",
+    "MistakeDetector",
+    "detect_mistakes",
+    "get_default_checks",
     # Models
     "ExplanationResult",
     "ExplainedViolation",
