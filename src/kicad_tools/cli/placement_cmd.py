@@ -9,10 +9,16 @@ Usage:
     kicad-tools placement distribute board.kicad_pcb -c LED1,LED2,LED3 --spacing 5.0
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.optim import OptimizationResult, OptimizationWorkflow
 
 from kicad_tools.placement import (
     Conflict,
@@ -919,15 +925,12 @@ def cmd_optimize(args) -> int:
     """Optimize component placement for routability."""
     from kicad_tools.cli.progress import spinner
     from kicad_tools.optim import (
-        EvolutionaryPlacementOptimizer,
-        PlacementConfig,
-        PlacementOptimizer,
-        add_keepout_zones,
+        OptimizationWorkflow,
+        WorkflowConfig,
         detect_keepout_zones,
         load_constraints_from_yaml,
         load_keepout_zones_from_yaml,
     )
-    from kicad_tools.optim.evolutionary import EvolutionaryConfig
     from kicad_tools.schema.pcb import PCB
 
     quiet = getattr(args, "quiet", False)
@@ -974,7 +977,7 @@ def cmd_optimize(args) -> int:
         return _cmd_optimize_routing_aware(args, pcb_path, quiet, output_format)
 
     # Parse fixed components
-    fixed_refs = []
+    fixed_refs: list[str] = []
     if args.fixed:
         fixed_refs = [r.strip() for r in args.fixed.split(",") if r.strip()]
 
@@ -1049,186 +1052,58 @@ def cmd_optimize(args) -> int:
         if keepout_zones:
             print(f"Keepout zones: {len(keepout_zones)}")
 
+    # Create workflow configuration
+    workflow_config = WorkflowConfig(
+        strategy=strategy,
+        grid=args.grid,
+        iterations=args.iterations,
+        verbose=args.verbose,
+        thermal=getattr(args, "thermal", False),
+        generations=getattr(args, "generations", 100),
+        population=getattr(args, "population", 50),
+        enable_clustering=enable_clustering,
+        edge_detect=edge_detect,
+        fixed_refs=fixed_refs,
+    )
+
+    # Create and run workflow
+    workflow = OptimizationWorkflow(
+        pcb=pcb,
+        config=workflow_config,
+        constraints=constraints,
+        keepout_zones=keepout_zones,
+    )
+
     try:
-        if strategy == "force-directed":
-            # Physics-based optimization
-            config = PlacementConfig(
-                grid_size=args.grid if args.grid > 0 else 0.0,
-                rotation_grid=90.0,
-                thermal_enabled=getattr(args, "thermal", False),
-            )
+        # Progress callback for verbose mode
+        def callback(iteration: int, value: float) -> None:
+            if args.verbose:
+                if strategy == "force-directed" and iteration % 100 == 0:
+                    print(f"  Iteration {iteration}: energy={value:.4f}")
+                elif strategy in ("evolutionary", "hybrid"):
+                    print(f"  Generation {iteration}: fitness={value:.2f}")
 
-            with spinner("Creating optimizer from PCB...", quiet=quiet):
-                optimizer = PlacementOptimizer.from_pcb(
-                    pcb,
-                    config=config,
-                    fixed_refs=fixed_refs,
-                    enable_clustering=enable_clustering,
-                    edge_detect=edge_detect,
-                )
+        # Print pre-optimization info
+        if not quiet:
+            _print_pre_optimization_info(workflow, args, constraints)
 
-            # Add constraints if loaded
-            if constraints:
-                optimizer.add_grouping_constraints(constraints)
+        with spinner(f"Running {strategy} optimization...", quiet=quiet):
+            opt_result = workflow.run(callback=callback if args.verbose else None)
 
-            # Add keepout zones to optimizer
-            if keepout_zones:
-                zones_added = add_keepout_zones(optimizer, keepout_zones)
-                if not quiet:
-                    print(f"  - Added {zones_added} keepout zones")
-
-            if not quiet:
-                print(f"Optimizing {len(optimizer.components)} components...")
-                print(f"  - {len(optimizer.springs)} net connections")
-                if enable_clustering and optimizer.clusters:
-                    print(f"  - {len(optimizer.clusters)} functional clusters detected")
-                if constraints:
-                    print(f"  - {len(constraints)} grouping constraints")
-                print(f"  - {len(optimizer.keepouts)} keepout zones")
-                print(f"  - Max iterations: {args.iterations}")
-                if config.thermal_enabled:
-                    heat_sources = optimizer.get_heat_sources()
-                    heat_sensitive = optimizer.get_heat_sensitive()
-                    print(
-                        f"  - Thermal mode: {len(heat_sources)} heat sources, {len(heat_sensitive)} heat-sensitive"
-                    )
-
-            # Run simulation with progress
-            def callback(iteration: int, energy: float):
-                if args.verbose and iteration % 100 == 0:
-                    print(f"  Iteration {iteration}: energy={energy:.4f}")
-
-            with spinner(
-                f"Running force-directed optimization ({args.iterations} iterations)...",
-                quiet=quiet,
-            ):
-                iterations_run = optimizer.run(
-                    iterations=args.iterations, callback=callback if args.verbose else None
-                )
-
-            result["iterations"] = iterations_run
-
-            # Snap to grid
-            if args.grid > 0:
-                optimizer.snap_to_grid(args.grid, 90.0)
-
-            if not quiet:
-                print(f"\nConverged after {iterations_run} iterations")
-                print(f"Total wire length: {optimizer.total_wire_length():.2f} mm")
-                print(f"System energy: {optimizer.compute_energy():.4f}")
-
-                # Report constraint violations if any
-                if constraints:
-                    violations = optimizer.validate_constraints()
-                    if violations:
-                        print(f"\nConstraint violations ({len(violations)}):")
-                        for v in violations:
-                            print(f"  - {v}")
-                    else:
-                        print("\nAll grouping constraints satisfied!")
-
-        elif strategy == "evolutionary":
-            # Genetic algorithm optimization
-            config = EvolutionaryConfig(
-                generations=args.generations,
-                population_size=args.population,
-                grid_snap=args.grid if args.grid > 0 else 0.127,
-            )
-
-            with spinner("Creating evolutionary optimizer from PCB...", quiet=quiet):
-                optimizer = EvolutionaryPlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
-                )
-
-            # Add keepout zones to optimizer
-            if keepout_zones:
-                zones_added = add_keepout_zones(optimizer, keepout_zones)
-                if not quiet:
-                    print(f"  - Added {zones_added} keepout zones")
-
-            if not quiet:
-                print(f"Optimizing {len(optimizer.components)} components...")
-                if enable_clustering and optimizer.clusters:
-                    print(f"  - {len(optimizer.clusters)} functional clusters detected")
-                print(f"  - Generations: {args.generations}")
-                print(f"  - Population: {args.population}")
-                print(f"  - Keepout zones: {len(optimizer.keepouts)}")
-
-            def callback(gen: int, best):
-                if args.verbose:
-                    print(f"  Generation {gen}: fitness={best.fitness:.2f}")
-
-            with spinner(
-                f"Running evolutionary optimization ({args.generations} generations)...",
-                quiet=quiet,
-            ):
-                best = optimizer.optimize(
-                    generations=args.generations,
-                    population_size=args.population,
-                    callback=callback if args.verbose else None,
-                )
-
-            result["iterations"] = args.generations
-
-            if not quiet:
-                print(f"\nBest fitness: {best.fitness:.2f}")
-                print(optimizer.report())
-
-        elif strategy == "hybrid":
-            # Evolutionary + physics refinement
-            config = EvolutionaryConfig(
-                generations=args.generations,
-                population_size=args.population,
-                grid_snap=args.grid if args.grid > 0 else 0.127,
-            )
-
-            physics_config = PlacementConfig(
-                grid_size=args.grid if args.grid > 0 else 0.0,
-                rotation_grid=90.0,
-            )
-
-            with spinner("Creating hybrid optimizer from PCB...", quiet=quiet):
-                evo_optimizer = EvolutionaryPlacementOptimizer.from_pcb(
-                    pcb, config=config, fixed_refs=fixed_refs, enable_clustering=enable_clustering
-                )
-
-            # Add keepout zones to optimizer
-            if keepout_zones:
-                zones_added = add_keepout_zones(evo_optimizer, keepout_zones)
-                if not quiet:
-                    print(f"  - Added {zones_added} keepout zones")
-
-            if not quiet:
-                print(f"Optimizing {len(evo_optimizer.components)} components...")
-                if enable_clustering and evo_optimizer.clusters:
-                    print(f"  - {len(evo_optimizer.clusters)} functional clusters detected")
-                print(f"  - Phase 1: Evolutionary ({args.generations} generations)")
-                print(f"  - Phase 2: Physics refinement ({args.iterations} iterations)")
-                print(f"  - Keepout zones: {len(evo_optimizer.keepouts)}")
-
-            def callback(gen: int, best):
-                if args.verbose:
-                    print(f"  Generation {gen}: fitness={best.fitness:.2f}")
-
-            with spinner("Running hybrid optimization...", quiet=quiet):
-                optimizer = evo_optimizer.optimize_hybrid(
-                    evolutionary_generations=args.generations,
-                    population_size=args.population,
-                    physics_iterations=args.iterations,
-                    physics_config=physics_config,
-                    callback=callback if args.verbose else None,
-                )
-
-            result["iterations"] = args.generations + args.iterations
-
-            if not quiet:
-                print(f"\nTotal wire length: {optimizer.total_wire_length():.2f} mm")
-                print(f"System energy: {optimizer.compute_energy():.4f}")
-
-        else:
+        if not opt_result.success:
             if output_format != "json":
-                print(f"Error: Unknown strategy '{strategy}'", file=sys.stderr)
-            return output_result(False, f"Unknown strategy: {strategy}")
+                print(f"Error during optimization: {opt_result.message}", file=sys.stderr)
+            return output_result(False, opt_result.message)
+
+        # Update result dict from workflow result
+        result["iterations"] = opt_result.iterations
+        result["components"] = opt_result.components
+        result["wire_length_mm"] = round(opt_result.wire_length_mm, 2)
+        result["energy"] = round(opt_result.energy, 4)
+        result["constraint_violations"] = opt_result.constraint_violations
+
+        if not quiet:
+            _print_post_optimization_info(workflow, opt_result, constraints)
 
     except Exception as e:
         if output_format != "json":
@@ -1239,21 +1114,11 @@ def cmd_optimize(args) -> int:
                 traceback.print_exc()
         return output_result(False, f"Error during optimization: {e}")
 
-    # Populate result with optimization metrics
-    result["components"] = len(optimizer.components)
-    result["wire_length_mm"] = round(optimizer.total_wire_length(), 2)
-    result["energy"] = round(optimizer.compute_energy(), 4)
-
-    # Get constraint violations if any
-    if constraints and hasattr(optimizer, "validate_constraints"):
-        violations = optimizer.validate_constraints()
-        result["constraint_violations"] = violations if violations else []
-
     # Dry run - just report
     if args.dry_run:
         if not quiet:
             print("\n(Dry run - no changes made)")
-            print(optimizer.report())
+            print(workflow.get_report())
         result["message"] = "Dry run - no changes made"
         return output_result(True)
 
@@ -1265,7 +1130,8 @@ def cmd_optimize(args) -> int:
         before_rate, before_nets, before_problems = _estimate_routability(pcb_path, quiet)
         if not quiet:
             print(
-                f"  Before: {before_rate * 100:.0f}% estimated routability ({before_nets} nets, {before_problems} problem nets)"
+                f"  Before: {before_rate * 100:.0f}% estimated routability "
+                f"({before_nets} nets, {before_problems} problem nets)"
             )
 
     # Write results
@@ -1273,8 +1139,7 @@ def cmd_optimize(args) -> int:
 
     try:
         with spinner("Writing optimized placement...", quiet=quiet):
-            updated = optimizer.write_to_pcb(pcb)
-            pcb.save(str(output_path))
+            updated = workflow.save(output_path)
 
         result["components_updated"] = updated
         result["output_path"] = str(output_path)
@@ -1311,7 +1176,8 @@ def cmd_optimize(args) -> int:
 
         if not quiet:
             print(
-                f"  After: {after_rate * 100:.0f}% estimated routability ({after_nets} nets, {after_problems} problem nets)"
+                f"  After: {after_rate * 100:.0f}% estimated routability "
+                f"({after_nets} nets, {after_problems} problem nets)"
             )
 
             # Compare and warn if worse
@@ -1333,6 +1199,61 @@ def cmd_optimize(args) -> int:
 
     result["message"] = "Optimization completed successfully"
     return output_result(True)
+
+
+def _print_pre_optimization_info(
+    workflow: OptimizationWorkflow,
+    args,
+    constraints: list,
+) -> None:
+    """Print optimization setup information."""
+    config = workflow.config
+
+    # Print basic info from config (optimizer isn't created until run())
+    print(f"Optimizing with strategy: {config.strategy}")
+    if config.fixed_refs:
+        print(f"  - Fixed components: {', '.join(config.fixed_refs)}")
+    if config.enable_clustering:
+        print("  - Functional clustering: enabled")
+    if config.edge_detect:
+        print("  - Edge detection: enabled")
+    if workflow.keepout_zones:
+        print(f"  - Keepout zones: {len(workflow.keepout_zones)}")
+    if constraints:
+        print(f"  - Grouping constraints: {len(constraints)}")
+    if config.strategy == "force-directed":
+        print(f"  - Max iterations: {config.iterations}")
+        if config.thermal:
+            print("  - Thermal mode: enabled")
+    elif config.strategy == "evolutionary":
+        print(f"  - Generations: {config.generations}")
+        print(f"  - Population: {config.population}")
+    elif config.strategy == "hybrid":
+        print(f"  - Phase 1: Evolutionary ({config.generations} generations)")
+        print(f"  - Phase 2: Physics refinement ({config.iterations} iterations)")
+
+
+def _print_post_optimization_info(
+    workflow: OptimizationWorkflow,
+    opt_result: OptimizationResult,
+    constraints: list,
+) -> None:
+    """Print optimization results information."""
+    _ = workflow  # unused but passed for consistency with pre-optimization info
+    print(f"\nOptimized {opt_result.components} components")
+    print(f"Converged after {opt_result.iterations} iterations")
+    print(f"Total wire length: {opt_result.wire_length_mm:.2f} mm")
+    print(f"System energy: {opt_result.energy:.4f}")
+
+    # Report constraint violations if any
+    if constraints:
+        violations = opt_result.constraint_violations
+        if violations:
+            print(f"\nConstraint violations ({len(violations)}):")
+            for v in violations:
+                print(f"  - {v}")
+        else:
+            print("\nAll grouping constraints satisfied!")
 
 
 def output_table(conflicts: list[Conflict], verbose: bool = False):
