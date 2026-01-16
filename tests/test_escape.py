@@ -242,6 +242,46 @@ class TestIsDensePackage:
         """Empty list is not dense."""
         assert is_dense_package([]) is False
 
+    def test_tqfp32_08mm_pitch_with_clearance(self):
+        """TQFP-32 with 0.8mm pitch is dense when clearance requirements are considered.
+
+        With 0.2mm trace and 0.2mm clearance, the routing space needed between
+        pins is 2 * (0.2 + 0.2) = 0.8mm, which equals the pin pitch, meaning
+        there's no room to route between adjacent pins.
+
+        Issue #795: This package was NOT being detected as dense without
+        considering clearance requirements.
+        """
+        pads = create_qfp_pads(8, pitch=0.8)  # 32 pins, 0.8mm pitch
+        assert len(pads) == 32
+
+        # Without design rules, 0.8mm pitch is NOT dense (threshold is 0.5mm)
+        assert is_dense_package(pads) is False
+
+        # WITH design rules, 0.8mm pitch IS dense because:
+        # threshold = 2 * (trace_width + clearance) = 2 * (0.2 + 0.2) = 0.8mm
+        # and 0.8mm pitch < 0.8mm threshold
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is True
+
+    def test_wide_pitch_not_dense_with_clearance(self):
+        """Package with wide pitch is not dense even with clearance requirements."""
+        pads = create_sop_pads(16, pitch=1.27)  # Standard SOP
+        assert len(pads) == 16
+
+        # 1.27mm pitch > 2 * (0.2 + 0.2) = 0.8mm threshold, so not dense
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is False
+
+    def test_dynamic_threshold_tight_clearance(self):
+        """Tighter clearance requirements make more packages dense."""
+        pads = create_qfp_pads(10, pitch=1.0)  # 40 pins, 1.0mm pitch
+        assert len(pads) == 40
+
+        # With small clearance, not dense: 2 * (0.15 + 0.15) = 0.6mm < 1.0mm
+        assert is_dense_package(pads, trace_width=0.15, clearance=0.15) is False
+
+        # With larger clearance, becomes dense: 2 * (0.25 + 0.3) = 1.1mm > 1.0mm
+        assert is_dense_package(pads, trace_width=0.25, clearance=0.3) is True
+
 
 class TestDetectPackageType:
     """Tests for detect_package_type function."""

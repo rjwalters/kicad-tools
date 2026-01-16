@@ -127,17 +127,32 @@ def is_dense_package(
     pads: list[Pad],
     pin_pitch_threshold: float = 0.5,
     pin_count_threshold: int = 48,
+    trace_width: float | None = None,
+    clearance: float | None = None,
 ) -> bool:
     """Detect if a set of pads represents a dense package.
 
     A package is considered dense if:
-    - Pin pitch < 0.5mm, OR
+    - Pin pitch is too small for traces to pass between pins, OR
+    - Pin pitch < 0.5mm (when no clearance info provided), OR
     - Pin count > 48
+
+    When trace_width and clearance are provided, the threshold is calculated
+    dynamically: a package is dense if there's insufficient space between
+    adjacent pins to route a trace. This accounts for the fact that packages
+    like TQFP-32 with 0.8mm pitch may need escape routing when clearance
+    requirements are strict.
 
     Args:
         pads: List of pads from a single component
-        pin_pitch_threshold: Maximum pin pitch to be considered dense (mm)
+        pin_pitch_threshold: Maximum pin pitch to be considered dense (mm).
+            This is overridden by dynamic calculation when trace_width and
+            clearance are provided.
         pin_count_threshold: Minimum pin count to be considered dense
+        trace_width: Trace width in mm. When provided with clearance,
+            calculates dynamic threshold.
+        clearance: Trace-to-pad clearance in mm. When provided with
+            trace_width, calculates dynamic threshold.
 
     Returns:
         True if the package is dense and needs escape routing
@@ -151,7 +166,23 @@ def is_dense_package(
 
     # Calculate minimum pin pitch
     min_pitch = _calculate_min_pitch(pads)
-    if min_pitch > 0 and min_pitch < pin_pitch_threshold:
+    if min_pitch <= 0:
+        return False
+
+    # Dynamic threshold based on design rules
+    # A trace needs: trace_width + clearance on each side from adjacent pins
+    # So minimum pitch to route between pins is: 2 * (trace_width/2 + clearance) + trace_width
+    # Simplified: 2 * trace_width + 2 * clearance = 2 * (trace_width + clearance)
+    if trace_width is not None and clearance is not None:
+        # Calculate the minimum pitch needed to fit a trace between pins
+        # Each pin needs clearance + half the trace width on the routing side
+        # So for two adjacent pins: 2 * (clearance + trace_width/2) + trace_width
+        # This equals: 2*clearance + 2*trace_width = 2*(clearance + trace_width)
+        dynamic_threshold = 2 * (trace_width + clearance)
+        if min_pitch < dynamic_threshold:
+            return True
+    elif min_pitch < pin_pitch_threshold:
+        # Fall back to static threshold when no design rules provided
         return True
 
     return False
@@ -221,11 +252,17 @@ def detect_package_type(pads: list[Pad]) -> PackageType:
     return PackageType.UNKNOWN
 
 
-def get_package_info(pads: list[Pad]) -> PackageInfo:
+def get_package_info(
+    pads: list[Pad],
+    trace_width: float | None = None,
+    clearance: float | None = None,
+) -> PackageInfo:
     """Get comprehensive information about a package.
 
     Args:
         pads: List of pads from a single component
+        trace_width: Optional trace width for dynamic dense detection
+        clearance: Optional clearance for dynamic dense detection
 
     Returns:
         PackageInfo with detected characteristics
@@ -264,7 +301,7 @@ def get_package_info(pads: list[Pad]) -> PackageInfo:
         pin_count=len(pads),
         pin_pitch=pin_pitch,
         bounding_box=bounding_box,
-        is_dense=is_dense_package(pads),
+        is_dense=is_dense_package(pads, trace_width=trace_width, clearance=clearance),
         rows=rows,
         cols=cols,
     )
@@ -486,7 +523,11 @@ class EscapeRouter:
         Returns:
             PackageInfo with detected characteristics
         """
-        return get_package_info(pads)
+        return get_package_info(
+            pads,
+            trace_width=self.rules.trace_width,
+            clearance=self.rules.trace_clearance,
+        )
 
     def generate_escapes(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate escape routes for all pins of a package.
