@@ -1,15 +1,20 @@
 """
 PCB Pattern Library for KiCad.
 
-This module provides PCB placement patterns that encapsulate best practices
-for laying out common circuit topologies. Each pattern defines:
+This module provides two types of PCB patterns:
 
-- Component roles and their relationships
-- Placement rules with distance constraints
-- Routing constraints for critical nets
-- Validation logic to check implementations
+1. **Placement Patterns** (inherit from PCBPattern in base.py):
+   - Focus on physical component placement calculations
+   - Provide `get_placements()` and `validate()` methods
+   - Examples: LDOPattern, BuckPattern, CrystalPattern, USBPattern, I2CPattern
 
-Usage::
+2. **Constraint Patterns** (inherit from IntentPattern in constraints.py):
+   - Focus on design rules and DRC constraint derivation
+   - Integrate with the intent system
+   - Provide `get_placement_rules()`, `get_routing_rules()`, `derive_constraints()`
+   - Examples: SPIPattern, UARTPattern, EthernetPattern, ADCInputFilter, ESDProtection
+
+Usage (Placement Pattern)::
 
     from kicad_tools.patterns import LDOPattern
 
@@ -21,149 +26,51 @@ Usage::
 
     # Get recommended PCB placements relative to anchor
     placements = pattern.get_placements(regulator_at=(50, 30))
-    # Returns:
-    # {
-    #   "input_cap": Placement(position=(48, 32), rotation=0, ...),
-    #   "output_cap_1": Placement(position=(52, 32), rotation=0, ...),
-    #   "output_cap_2": Placement(position=(52, 34), rotation=0, ...),
-    # }
 
-    # Map pattern roles to actual component references
-    pattern.set_component_map({
-        "regulator": "U1",
-        "input_cap": "C1",
-        "output_cap_1": "C2",
-        "output_cap_2": "C3",
-    })
+Usage (Constraint Pattern)::
 
-    # Validate an existing PCB layout
-    violations = pattern.validate("board.kicad_pcb")
+    from kicad_tools.patterns import SPIPattern, ESDProtection
 
-User-Defined Patterns
----------------------
+    # Create an SPI pattern for high-speed operation
+    spi = SPIPattern(speed="high", cs_count=2)
 
-You can define custom patterns in two ways:
+    # Get placement guidelines
+    rules = spi.get_placement_rules()
 
-1. YAML Definition::
-
-    # patterns/my_sensor.yaml
-    name: temperature_sensor
-    description: NTC thermistor with filtering
-
-    components:
-      - role: thermistor
-        reference_prefix: RT
-      - role: filter_cap
-        reference_prefix: C
-
-    placement_rules:
-      - component: filter_cap
-        relative_to: thermistor
-        max_distance_mm: 5
-
-    # Load and use
-    from kicad_tools.patterns import PatternRegistry
-    PatternRegistry.load_yaml("patterns/my_sensor.yaml")
-    pattern = PatternRegistry.get("temperature_sensor")
-
-2. Python Decorator::
-
-    from kicad_tools.patterns import define_pattern, placement_rule
-
-    @define_pattern
-    class MySensorPattern:
-        components = ["sensor", "cap"]
-        placement_rules = [
-            placement_rule("cap", relative_to="sensor", max_distance_mm=5.0),
-        ]
+    # Get constraints for the intent system
+    constraints = spi.derive_constraints(
+        nets=["SPI_CLK", "SPI_MOSI", "SPI_MISO", "SPI_CS0"]
+    )
 
 Validation:
     Use PatternValidator to check that instantiated patterns meet their
     design requirements including placement rules, routing constraints,
     and component values.
 
-    >>> from kicad_tools.patterns import PatternValidator
-    >>> from kicad_tools.schema.pcb import PCB
-    >>>
-    >>> pcb = PCB.load("board.kicad_pcb")
-    >>> validator = PatternValidator()
-    >>> result = validator.validate_ldo_pattern(
-    ...     pcb,
-    ...     regulator="U1",
-    ...     input_cap="C1",
-    ...     output_caps=["C2", "C3"],
-    ... )
-    >>> for violation in result:
-    ...     print(f"{violation.severity}: {violation.message}")
-
 Adaptation:
     Use PatternAdapter to generate pattern parameters for specific components
     by loading requirements from the component database.
 
-    >>> from kicad_tools.patterns import PatternAdapter
-    >>>
-    >>> adapter = PatternAdapter()
-    >>> params = adapter.adapt_ldo_pattern("AMS1117-3.3")
-    >>> print(params.parameters)
-    {'input_cap': '10uF', 'output_caps': ['10uF', '100nF'], ...}
-
-Component Database:
-    Query component requirements directly using get_component_requirements().
-
-    >>> from kicad_tools.patterns import get_component_requirements
-    >>>
-    >>> reqs = get_component_requirements("AMS1117-3.3")
-    >>> print(f"Input cap: {reqs.input_cap_min_uf}uF")
-    Input cap: 10.0uF
-
-Available Patterns:
-
-Power Supply:
-    - LDOPattern: Low-dropout regulator with decoupling
-    - BuckPattern: Buck converter with proper hot loop layout
-
-Timing:
-    - CrystalPattern: Crystal oscillator with load capacitors
-    - OscillatorPattern: External oscillator module
-
-Interfaces:
-    - USBPattern: USB interface with ESD protection
-    - I2CPattern: I2C bus with pull-ups
-
-Schema Types:
-    - Placement: Computed position with rationale
-    - PlacementRule: Rule for component positioning
-    - RoutingConstraint: Constraint for trace routing
-    - PatternSpec: Complete pattern specification
-    - PatternViolation: Validation result
-
-User-Defined Pattern Support:
-    - PatternRegistry: Register and retrieve patterns by name
-    - PatternLoader: Load patterns from YAML files
-    - define_pattern: Decorator for Python pattern definitions
-    - Validation checks: ComponentDistanceCheck, ValueMatchCheck, etc.
+User-Defined Patterns:
+    Custom patterns can be defined via YAML files or using the pattern
+    definition DSL.
 """
+
+# Analog patterns (constraint-based)
+from .analog import (
+    ADCInputFilter,
+    DACOutputFilter,
+    OpAmpCircuit,
+    SensorInterface,
+)
 
 # Validation and adaptation
 from kicad_tools.patterns.adaptation import (
     AdaptedPatternParams,
     PatternAdapter,
 )
-from kicad_tools.patterns.components import (
-    ComponentRequirements,
-    get_component_requirements,
-    list_components,
-)
-from kicad_tools.patterns.validation import (
-    PatternValidationResult,
-    PatternValidator,
-    ViolationSeverity,
-)
-from kicad_tools.patterns.validation import (
-    PatternViolation as ValidationViolation,
-)
 
-# Base class
+# Base classes
 from .base import PCBPattern
 
 # Validation checks
@@ -179,6 +86,17 @@ from .checks import (
     get_check,
     register_check,
 )
+from kicad_tools.patterns.components import (
+    ComponentRequirements,
+    get_component_requirements,
+    list_components,
+)
+from .constraints import (
+    ConstraintPlacementRule,
+    ConstraintPriority,
+    ConstraintRoutingRule,
+    IntentPattern,
+)
 
 # Pattern definition DSL
 from .dsl import (
@@ -189,14 +107,34 @@ from .dsl import (
     routing_constraint,
 )
 
-# Interface patterns
-from .interface import I2CPattern, USBPattern
+# Interface patterns (both placement and constraint-based)
+from .interface import (
+    # Constraint patterns
+    EthernetConfig,
+    EthernetPattern,
+    # Placement patterns
+    I2CPattern,
+    SPIConfig,
+    SPIPattern,
+    UARTConfig,
+    UARTPattern,
+    USBPattern,
+)
 
 # YAML pattern loader
 from .loader import PatternLoader, YAMLPattern
 
-# Power patterns
+# Power patterns (placement-based)
 from .power import BuckPattern, LDOPattern
+
+# Protection patterns (constraint-based)
+from .protection import (
+    ESDProtection,
+    OvercurrentProtection,
+    OvervoltageProtection,
+    ReversePolarityProtection,
+    ThermalShutdown,
+)
 
 # Pattern registry
 from .registry import PatternRegistry, register_pattern
@@ -209,8 +147,16 @@ from .schema import (
     RoutingConstraint,
 )
 
-# Timing patterns
+# Timing patterns (placement-based)
 from .timing import CrystalPattern, OscillatorPattern
+from kicad_tools.patterns.validation import (
+    PatternValidationResult,
+    PatternValidator,
+    ViolationSeverity,
+)
+from kicad_tools.patterns.validation import (
+    PatternViolation as ValidationViolation,
+)
 
 __all__ = [
     # Schema types
@@ -220,17 +166,40 @@ __all__ = [
     "PatternSpec",
     "PatternViolation",
     "RoutingConstraint",
-    # Base class
+    # Base classes (placement)
     "PCBPattern",
+    # Base classes (constraint)
+    "IntentPattern",
+    "ConstraintPlacementRule",
+    "ConstraintRoutingRule",
+    "ConstraintPriority",
     # Power patterns
     "LDOPattern",
     "BuckPattern",
     # Timing patterns
     "CrystalPattern",
     "OscillatorPattern",
-    # Interface patterns
+    # Interface patterns (placement)
     "USBPattern",
     "I2CPattern",
+    # Interface patterns (constraint)
+    "SPIPattern",
+    "SPIConfig",
+    "UARTPattern",
+    "UARTConfig",
+    "EthernetPattern",
+    "EthernetConfig",
+    # Analog patterns
+    "ADCInputFilter",
+    "DACOutputFilter",
+    "OpAmpCircuit",
+    "SensorInterface",
+    # Protection patterns
+    "ESDProtection",
+    "OvercurrentProtection",
+    "OvervoltageProtection",
+    "ReversePolarityProtection",
+    "ThermalShutdown",
     # Pattern registry
     "PatternRegistry",
     "register_pattern",
