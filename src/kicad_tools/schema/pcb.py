@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 
 from kicad_tools.sexp import SExp
 
-from ..core.sexp_file import load_pcb, save_pcb
+from ..core.sexp_file import load_footprint, load_pcb, save_pcb
+from ..footprints.library_path import (
+    detect_kicad_library_path,
+    guess_standard_library,
+    parse_library_id,
+)
 
 if TYPE_CHECKING:
     from ..query.footprints import FootprintList
@@ -1477,6 +1482,238 @@ class PCB:
             return True
 
         return False
+
+    def add_footprint_from_file(
+        self,
+        kicad_mod_path: str | Path,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float = 0.0,
+        layer: str = "F.Cu",
+        value: str = "",
+    ) -> Footprint:
+        """
+        Add a footprint from a .kicad_mod file to the PCB.
+
+        Loads a footprint from a KiCad footprint file and adds it to the PCB
+        at the specified position with the given reference designator.
+
+        Args:
+            kicad_mod_path: Path to the .kicad_mod footprint file
+            reference: Reference designator for the component (e.g., "U1", "C1")
+            x: X position in mm
+            y: Y position in mm
+            rotation: Rotation angle in degrees (default: 0)
+            layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
+            value: Component value (e.g., "100nF", "10k")
+
+        Returns:
+            The Footprint object that was added to the PCB
+
+        Raises:
+            FileNotFoundError: If the footprint file doesn't exist
+            FileFormatError: If the file is not a valid footprint
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> fp = pcb.add_footprint_from_file(
+            ...     "MyFootprints.pretty/SOT-23.kicad_mod",
+            ...     reference="U1",
+            ...     x=50.0,
+            ...     y=30.0,
+            ...     rotation=90,
+            ...     value="LM317"
+            ... )
+        """
+        # Load the footprint from file
+        fp_sexp = load_footprint(kicad_mod_path)
+
+        # Generate a new UUID for this footprint instance
+        new_uuid = str(uuid.uuid4())
+
+        # Update the UUID in the footprint
+        uuid_node = fp_sexp.find("uuid")
+        if uuid_node:
+            uuid_node.set_value(0, new_uuid)
+        else:
+            # Add UUID if not present
+            fp_sexp.append(SExp.list("uuid", new_uuid))
+
+        # Update position (at x y rotation)
+        at_node = fp_sexp.find("at")
+        if at_node:
+            at_node.set_value(0, x)
+            at_node.set_value(1, y)
+            if rotation != 0.0:
+                if len(at_node.values) >= 3:
+                    at_node.set_value(2, rotation)
+                else:
+                    at_node.add(rotation)
+        else:
+            # Create at node
+            at_sexp = SExp.list("at", x, y)
+            if rotation != 0.0:
+                at_sexp.add(rotation)
+            fp_sexp.append(at_sexp)
+
+        # Update layer
+        layer_node = fp_sexp.find("layer")
+        if layer_node:
+            layer_node.set_value(0, layer)
+        else:
+            fp_sexp.append(SExp.list("layer", layer))
+
+        # Update reference and value - try KiCad 8+ property format first
+        ref_updated = False
+        val_updated = False
+
+        for prop in fp_sexp.find_all("property"):
+            prop_name = prop.get_string(0)
+            if prop_name == "Reference":
+                prop.set_value(1, reference)
+                ref_updated = True
+            elif prop_name == "Value":
+                prop.set_value(1, value)
+                val_updated = True
+
+        # Fall back to KiCad 7 fp_text format
+        for fp_text in fp_sexp.find_all("fp_text"):
+            text_type = fp_text.get_string(0)
+            if text_type == "reference" and not ref_updated:
+                fp_text.set_value(1, reference)
+                ref_updated = True
+            elif text_type == "value" and not val_updated:
+                fp_text.set_value(1, value)
+                val_updated = True
+
+        # If reference/value weren't found, add them as KiCad 8+ properties
+        if not ref_updated:
+            ref_prop = SExp.list("property", "Reference", reference)
+            ref_prop.append(SExp.list("at", 0.0, -1.5))
+            ref_prop.append(SExp.list("layer", layer.replace(".Cu", ".SilkS")))
+            ref_prop.append(SExp.list("uuid", str(uuid.uuid4())))
+            effects = SExp.list("effects")
+            font = SExp.list("font")
+            font.append(SExp.list("size", 1.0, 1.0))
+            font.append(SExp.list("thickness", 0.15))
+            effects.append(font)
+            ref_prop.append(effects)
+            fp_sexp.append(ref_prop)
+
+        if not val_updated:
+            val_prop = SExp.list("property", "Value", value)
+            val_prop.append(SExp.list("at", 0.0, 1.5))
+            val_prop.append(SExp.list("layer", layer.replace(".Cu", ".Fab")))
+            val_prop.append(SExp.list("uuid", str(uuid.uuid4())))
+            effects = SExp.list("effects")
+            font = SExp.list("font")
+            font.append(SExp.list("size", 1.0, 1.0))
+            font.append(SExp.list("thickness", 0.15))
+            effects.append(font)
+            val_prop.append(effects)
+            fp_sexp.append(val_prop)
+
+        # Append footprint to PCB S-expression tree
+        self._sexp.append(fp_sexp)
+
+        # Parse and add to internal footprints list
+        footprint = Footprint.from_sexp(fp_sexp)
+        self._footprints.append(footprint)
+
+        return footprint
+
+    def add_footprint(
+        self,
+        library_id: str,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float = 0.0,
+        layer: str = "F.Cu",
+        value: str = "",
+    ) -> Footprint:
+        """
+        Add a footprint from KiCad standard libraries to the PCB.
+
+        Loads a footprint from KiCad's standard library installation and adds
+        it to the PCB at the specified position.
+
+        Args:
+            library_id: Footprint identifier in "Library:Footprint" format
+                       (e.g., "Capacitor_SMD:C_0805_2012Metric")
+                       If library is omitted, it will be guessed from the footprint name.
+            reference: Reference designator for the component (e.g., "U1", "C1")
+            x: X position in mm
+            y: Y position in mm
+            rotation: Rotation angle in degrees (default: 0)
+            layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
+            value: Component value (e.g., "100nF", "10k")
+
+        Returns:
+            The Footprint object that was added to the PCB
+
+        Raises:
+            FileNotFoundError: If the footprint cannot be found in the library
+            ValueError: If the library path cannot be detected
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> fp = pcb.add_footprint(
+            ...     library_id="Capacitor_SMD:C_0805_2012Metric",
+            ...     reference="C1",
+            ...     x=50.0,
+            ...     y=30.0,
+            ...     value="100nF"
+            ... )
+
+            # With automatic library guessing
+            >>> fp = pcb.add_footprint(
+            ...     library_id="C_0402_1005Metric",  # Will guess Capacitor_SMD
+            ...     reference="C2",
+            ...     x=60.0,
+            ...     y=30.0,
+            ...     value="10nF"
+            ... )
+        """
+        # Parse library_id to extract library name and footprint name
+        library_name, footprint_name = parse_library_id(library_id)
+
+        # If no library specified, try to guess it
+        if library_name is None:
+            library_name = guess_standard_library(footprint_name)
+            if library_name is None:
+                raise ValueError(
+                    f"Cannot determine library for footprint '{footprint_name}'. "
+                    "Please specify the library explicitly using 'Library:Footprint' format."
+                )
+
+        # Detect KiCad library path
+        lib_paths = detect_kicad_library_path()
+        if not lib_paths.found:
+            raise ValueError(
+                "KiCad footprint library path not found. "
+                "Set KICAD_FOOTPRINT_DIR environment variable or install KiCad."
+            )
+
+        # Get the footprint file path
+        fp_path = lib_paths.get_footprint_file(library_name, footprint_name)
+        if fp_path is None:
+            raise FileNotFoundError(
+                f"Footprint '{footprint_name}' not found in library '{library_name}'. "
+                f"Searched in: {lib_paths.footprints_path}"
+            )
+
+        # Delegate to add_footprint_from_file
+        return self.add_footprint_from_file(
+            kicad_mod_path=fp_path,
+            reference=reference,
+            x=x,
+            y=y,
+            rotation=rotation,
+            layer=layer,
+            value=value,
+        )
 
     def save(self, path: str | Path) -> None:
         """
