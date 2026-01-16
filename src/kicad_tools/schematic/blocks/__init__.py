@@ -75,6 +75,17 @@ from .power import (
     create_voltage_divider,
 )
 
+# Motor control blocks
+from .motor import (
+    CurrentSenseShunt,
+    GateDriverBlock,
+    HalfBridge,
+    ThreePhaseInverter,
+    create_3phase_inverter,
+    create_current_sense,
+    create_half_bridge,
+)
+
 # Timing blocks
 from .timing import (
     CrystalOscillator,
@@ -128,4 +139,12 @@ __all__ = [
     "create_generic_boot",
     "create_reset_button",
     "create_stm32_boot",
+    # Motor control
+    "HalfBridge",
+    "ThreePhaseInverter",
+    "CurrentSenseShunt",
+    "GateDriverBlock",
+    "create_half_bridge",
+    "create_3phase_inverter",
+    "create_current_sense",
 ]

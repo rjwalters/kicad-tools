@@ -11,8 +11,11 @@ from kicad_tools.schematic.blocks import (
     CANTransceiver,
     CircuitBlock,
     CrystalOscillator,
+    CurrentSenseShunt,
     DebugHeader,
     DecouplingCaps,
+    GateDriverBlock,
+    HalfBridge,
     I2CPullups,
     LDOBlock,
     LEDIndicator,
@@ -20,16 +23,20 @@ from kicad_tools.schematic.blocks import (
     OscillatorBlock,
     Port,
     ResetButton,
+    ThreePhaseInverter,
     USBConnector,
     USBPowerInput,
     VoltageDivider,
+    create_3phase_inverter,
     create_3v3_ldo,
     create_12v_barrel_jack,
     create_can_transceiver_mcp2551,
     create_can_transceiver_sn65hvd230,
     create_can_transceiver_tja1050,
+    create_current_sense,
     create_esp32_boot,
     create_generic_boot,
+    create_half_bridge,
     create_i2c_pullups,
     create_jtag_header,
     create_lipo_battery,
@@ -3041,3 +3048,435 @@ class TestCANTransceiverFactoryFunctions:
         assert isinstance(can, CANTransceiver)
         assert can.transceiver_type == "TJA1050"
         assert can.get_voltage() == 5.0
+
+
+# =============================================================================
+# Motor Control Block Tests
+# =============================================================================
+
+
+class TestHalfBridgeMocked:
+    """Tests for HalfBridge with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            # Mock MOSFET pins: D (drain), G (gate), S (source)
+            comp.pin_position.side_effect = lambda name: {
+                "D": (x, y - 10),
+                "G": (x - 10, y),
+                "S": (x, y + 10),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.add_label = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_half_bridge_creation(self, mock_schematic):
+        """Create half-bridge without bootstrap."""
+        hb = HalfBridge(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref_start=1,
+            mosfet_value="IRLZ44N",
+        )
+
+        assert hb.schematic == mock_schematic
+        assert hb.x == 100
+        assert hb.y == 100
+        assert "Q_HS" in hb.components
+        assert "Q_LS" in hb.components
+        assert hb.has_bootstrap is False
+
+    def test_half_bridge_ports(self, mock_schematic):
+        """Half-bridge has required ports."""
+        hb = HalfBridge(mock_schematic, x=100, y=100)
+
+        assert "VIN" in hb.ports
+        assert "VOUT" in hb.ports
+        assert "GND" in hb.ports
+        assert "GATE_HS" in hb.ports
+        assert "GATE_LS" in hb.ports
+
+    def test_half_bridge_with_bootstrap(self, mock_schematic):
+        """Create half-bridge with bootstrap circuit."""
+        hb = HalfBridge(
+            mock_schematic,
+            x=100,
+            y=100,
+            bootstrap_cap="100nF",
+        )
+
+        assert hb.has_bootstrap is True
+        assert "C_BOOT" in hb.components
+        assert "D_BOOT" in hb.components
+        assert "VBOOT" in hb.ports
+
+    def test_half_bridge_wires_mosfets(self, mock_schematic):
+        """Half-bridge wires HS source to LS drain."""
+        HalfBridge(mock_schematic, x=100, y=100)
+        # Verify add_wire was called to connect MOSFETs
+        assert mock_schematic.add_wire.called
+
+    def test_half_bridge_connect_to_rails(self, mock_schematic):
+        """Connect half-bridge to power rails."""
+        hb = HalfBridge(mock_schematic, x=100, y=100)
+        hb.connect_to_rails(vin_rail_y=30, gnd_rail_y=200)
+
+        # Should add wires to connect to rails
+        wire_calls = mock_schematic.add_wire.call_count
+        assert wire_calls >= 2  # VIN and GND connections
+
+    def test_half_bridge_connect_with_junctions(self, mock_schematic):
+        """Connect half-bridge adds junctions."""
+        hb = HalfBridge(mock_schematic, x=100, y=100)
+        hb.connect_to_rails(vin_rail_y=30, gnd_rail_y=200, add_junctions=True)
+
+        assert mock_schematic.add_junction.called
+
+
+class TestThreePhaseInverterMocked:
+    """Tests for ThreePhaseInverter with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "D": (x, y - 10),
+                "G": (x - 10, y),
+                "S": (x, y + 10),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.add_label = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_three_phase_inverter_creation(self, mock_schematic):
+        """Create three-phase inverter."""
+        inverter = ThreePhaseInverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            mosfet_value="IRLZ44N",
+        )
+
+        assert inverter.schematic == mock_schematic
+        assert len(inverter.half_bridges) == 3
+        assert inverter.phase_labels == ["A", "B", "C"]
+
+    def test_three_phase_inverter_creates_six_mosfets(self, mock_schematic):
+        """Inverter creates 6 MOSFETs (3 half-bridges × 2)."""
+        inverter = ThreePhaseInverter(mock_schematic, x=100, y=100)
+
+        # Each half-bridge has 2 MOSFETs
+        total_mosfets = sum(1 for hb in inverter.half_bridges for k in hb.components if "Q_" in k)
+        assert total_mosfets == 6
+
+    def test_three_phase_inverter_ports(self, mock_schematic):
+        """Inverter has all required ports."""
+        inverter = ThreePhaseInverter(mock_schematic, x=100, y=100)
+
+        assert "VIN" in inverter.ports
+        assert "GND" in inverter.ports
+        assert "PHASE_A" in inverter.ports
+        assert "PHASE_B" in inverter.ports
+        assert "PHASE_C" in inverter.ports
+        assert "GATE_HS_A" in inverter.ports
+        assert "GATE_LS_A" in inverter.ports
+
+    def test_three_phase_inverter_custom_labels(self, mock_schematic):
+        """Inverter supports custom phase labels."""
+        inverter = ThreePhaseInverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            phase_labels=["U", "V", "W"],
+        )
+
+        assert inverter.phase_labels == ["U", "V", "W"]
+        assert "PHASE_U" in inverter.ports
+        assert "PHASE_V" in inverter.ports
+        assert "PHASE_W" in inverter.ports
+
+    def test_three_phase_inverter_adds_labels(self, mock_schematic):
+        """Inverter adds phase output labels."""
+        ThreePhaseInverter(mock_schematic, x=100, y=100)
+        # Should add label for each phase
+        assert mock_schematic.add_label.call_count >= 3
+
+    def test_three_phase_inverter_connect_to_rails(self, mock_schematic):
+        """Connect inverter to power rails."""
+        inverter = ThreePhaseInverter(mock_schematic, x=100, y=100)
+        inverter.connect_to_rails(vin_rail_y=30, gnd_rail_y=200)
+
+        # Should connect all three half-bridges
+        assert mock_schematic.add_wire.called
+        assert mock_schematic.add_junction.called
+
+
+class TestCurrentSenseShuntMocked:
+    """Tests for CurrentSenseShunt with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+                "IN+": (x - 10, y - 5),
+                "IN-": (x - 10, y + 5),
+                "OUT": (x + 10, y),
+                "VS": (x, y - 10),
+                "GND": (x, y + 10),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_current_sense_creation(self, mock_schematic):
+        """Create current sense shunt."""
+        sense = CurrentSenseShunt(
+            mock_schematic,
+            x=100,
+            y=100,
+            shunt_value="10mR",
+        )
+
+        assert sense.schematic == mock_schematic
+        assert sense.x == 100
+        assert sense.y == 100
+        assert "R_SHUNT" in sense.components
+        assert sense.has_amplifier is False
+
+    def test_current_sense_ports(self, mock_schematic):
+        """Current sense has required ports."""
+        sense = CurrentSenseShunt(mock_schematic, x=100, y=100)
+
+        assert "IN_POS" in sense.ports
+        assert "IN_NEG" in sense.ports
+        assert "GND" in sense.ports
+
+    def test_current_sense_with_amplifier(self, mock_schematic):
+        """Create current sense with amplifier."""
+        sense = CurrentSenseShunt(
+            mock_schematic,
+            x=100,
+            y=100,
+            amplifier=True,
+            gain=20,
+        )
+
+        assert sense.has_amplifier is True
+        assert "CSA" in sense.components
+        assert "OUT" in sense.ports
+        assert len(sense.bypass_caps) > 0
+
+    def test_current_sense_connect_to_rails(self, mock_schematic):
+        """Connect current sense to rails."""
+        sense = CurrentSenseShunt(mock_schematic, x=100, y=100)
+        sense.connect_to_rails(gnd_rail_y=200)
+
+        assert mock_schematic.add_wire.called
+
+    def test_current_sense_with_amp_connect_to_rails(self, mock_schematic):
+        """Connect current sense with amplifier to rails."""
+        sense = CurrentSenseShunt(mock_schematic, x=100, y=100, amplifier=True)
+        sense.connect_to_rails(gnd_rail_y=200, vcc_rail_y=50)
+
+        # Should wire bypass caps
+        assert mock_schematic.wire_decoupling_cap.called
+
+    def test_current_sense_voltage_output(self, mock_schematic):
+        """Calculate expected output voltage."""
+        sense = CurrentSenseShunt(
+            mock_schematic,
+            x=100,
+            y=100,
+            shunt_value="10mR",
+            amplifier=True,
+            gain=20,
+        )
+
+        # 1A through 10mR = 10mV, × 20 gain = 200mV
+        output = sense.get_voltage_output(1.0)
+        assert output == pytest.approx(0.2, rel=0.01)
+
+    def test_current_sense_parse_milliohms(self, mock_schematic):
+        """Parse milliohm resistance values."""
+        sense = CurrentSenseShunt(mock_schematic, x=100, y=100, shunt_value="5mR")
+        # 1A through 5mR = 5mV
+        output = sense.get_voltage_output(1.0)
+        assert output == pytest.approx(0.005, rel=0.01)
+
+
+class TestGateDriverBlockMocked:
+    """Tests for GateDriverBlock with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.add_text = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_gate_driver_creation(self, mock_schematic):
+        """Create gate driver block."""
+        driver = GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            driver_type="3-phase",
+            value="DRV8301",
+        )
+
+        assert driver.schematic == mock_schematic
+        assert driver.driver_type == "3-phase"
+        assert len(driver.bootstrap_caps) == 3
+        assert len(driver.bypass_caps) == 2
+
+    def test_gate_driver_half_bridge_type(self, mock_schematic):
+        """Create half-bridge gate driver."""
+        driver = GateDriverBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            driver_type="half-bridge",
+        )
+
+        assert driver.driver_type == "half-bridge"
+        assert len(driver.bootstrap_caps) == 1
+
+    def test_gate_driver_ports(self, mock_schematic):
+        """Gate driver has required ports."""
+        driver = GateDriverBlock(mock_schematic, x=100, y=100)
+
+        assert "VCC" in driver.ports
+        assert "GND" in driver.ports
+        assert "BOOT_A" in driver.ports
+        assert "GATE_HS_A" in driver.ports
+        assert "GATE_LS_A" in driver.ports
+
+    def test_gate_driver_connect_to_rails(self, mock_schematic):
+        """Connect gate driver to power rails."""
+        driver = GateDriverBlock(mock_schematic, x=100, y=100)
+        driver.connect_to_rails(vcc_rail_y=50, gnd_rail_y=200)
+
+        # Should wire bypass caps
+        assert mock_schematic.wire_decoupling_cap.called
+
+
+class TestMotorControlFactoryFunctions:
+    """Tests for motor control factory functions."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            comp.pin_position.side_effect = lambda name: {
+                "D": (x, y - 10),
+                "G": (x - 10, y),
+                "S": (x, y + 10),
+                "A": (x - 5, y),
+                "K": (x + 5, y),
+                "1": (x, y - 5),
+                "2": (x, y + 5),
+                "IN+": (x - 10, y - 5),
+                "IN-": (x - 10, y + 5),
+                "OUT": (x + 10, y),
+                "VS": (x, y - 10),
+                "GND": (x, y + 10),
+            }.get(name, (x, y))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.add_label = Mock()
+        sch.add_text = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_create_half_bridge(self, mock_schematic):
+        """Create half-bridge via factory."""
+        hb = create_half_bridge(mock_schematic, x=100, y=100)
+        assert isinstance(hb, HalfBridge)
+        assert hb.has_bootstrap is False
+
+    def test_create_half_bridge_with_bootstrap(self, mock_schematic):
+        """Create half-bridge with bootstrap via factory."""
+        hb = create_half_bridge(mock_schematic, x=100, y=100, with_bootstrap=True)
+        assert hb.has_bootstrap is True
+
+    def test_create_3phase_inverter(self, mock_schematic):
+        """Create 3-phase inverter via factory."""
+        inverter = create_3phase_inverter(mock_schematic, x=100, y=100)
+        assert isinstance(inverter, ThreePhaseInverter)
+        assert len(inverter.half_bridges) == 3
+
+    def test_create_3phase_inverter_with_bootstrap(self, mock_schematic):
+        """Create 3-phase inverter with bootstrap via factory."""
+        inverter = create_3phase_inverter(mock_schematic, x=100, y=100, with_bootstrap=True)
+        # Each half-bridge should have bootstrap
+        for hb in inverter.half_bridges:
+            assert hb.has_bootstrap is True
+
+    def test_create_current_sense(self, mock_schematic):
+        """Create current sense via factory."""
+        sense = create_current_sense(mock_schematic, x=100, y=100)
+        assert isinstance(sense, CurrentSenseShunt)
+        assert sense.has_amplifier is False
+
+    def test_create_current_sense_with_amplifier(self, mock_schematic):
+        """Create current sense with amplifier via factory."""
+        sense = create_current_sense(mock_schematic, x=100, y=100, with_amplifier=True, gain=50)
+        assert sense.has_amplifier is True
+        assert sense.gain == 50

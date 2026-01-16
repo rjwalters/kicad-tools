@@ -1,0 +1,190 @@
+kct_version: "1.0"
+
+project:
+  name: "BLDC Motor Controller"
+  revision: "A"
+  author: "kicad-tools"
+  description: |
+    Three-phase brushless DC motor controller demonstrating thermal management,
+    high-current routing, and power electronics design patterns.
+  artifacts:
+    schematic: "output/bldc_controller.kicad_sch"
+    pcb: "output/bldc_controller.kicad_pcb"
+    routed: "output/bldc_controller_routed.kicad_pcb"
+
+intent:
+  summary: |
+    Advanced test board for validating kicad-tools thermal analysis,
+    zone generation, and high-current trace routing capabilities.
+
+  use_cases:
+    - "Validate ThermalAnalyzer with power MOSFET dissipation"
+    - "Test ZoneGenerator for power plane creation"
+    - "Exercise net class differentiation (power vs signal)"
+    - "Demonstrate multi-voltage domain power supply design"
+
+  interfaces:
+    power_input:
+      type: "DC barrel/screw terminal"
+      voltage: "12-24V"
+      current: "15A max"
+
+    motor_output:
+      type: "3-phase BLDC"
+      phases: ["U", "V", "W"]
+      current: "10A per phase continuous"
+
+    hall_sensors:
+      type: "digital"
+      signals: ["HALL_A", "HALL_B", "HALL_C"]
+      voltage: "3.3V logic"
+
+    debug:
+      type: "SWD"
+      signals: ["SWDIO", "SWCLK", "NRST"]
+
+requirements:
+  electrical:
+    input_voltage:
+      min: 12
+      max: 24
+      unit: "V"
+
+    motor_current:
+      continuous: 10
+      peak: 15
+      unit: "A"
+
+    power_domains:
+      - name: "VMOTOR"
+        voltage: "12-24V"
+        description: "Motor power bus"
+      - name: "VDD_5V"
+        voltage: "5V"
+        description: "Gate driver supply"
+      - name: "VDD_3V3"
+        voltage: "3.3V"
+        description: "MCU and logic"
+
+  thermal:
+    max_ambient: 40
+    max_junction: 125
+    unit: "C"
+    notes: |
+      MOSFETs require thermal vias and copper pour for heat dissipation.
+      Expect 1-2W per MOSFET at full load.
+
+  mechanical:
+    board_size:
+      width: 60
+      height: 80
+      unit: "mm"
+    mounting: "4x M3 corner holes"
+
+  manufacturing:
+    layers: 2
+    min_trace: 0.2
+    min_space: 0.2
+    min_drill: 0.3
+    copper_weight: "2oz"
+    unit: "mm"
+    notes: "2oz copper recommended for motor phase traces"
+
+suggestions:
+  components:
+    gate_driver:
+      part: "DRV8301"
+      package: "QFN-56"
+      notes: "Integrated 3-phase gate driver with current sense amps"
+
+    mosfets:
+      part: "IRLZ44N"
+      package: "TO-220"
+      notes: "Logic-level N-channel, 55V 47A, Rds(on) 22mΩ"
+      alternative: "IRF3205 for higher current"
+
+    current_sense:
+      part: "Shunt resistor"
+      value: "0.005Ω"
+      package: "2512"
+      power: "1W"
+
+    buck_regulator:
+      part: "LM2596"
+      notes: "Simple switcher, 24V→5V @ 3A"
+
+    ldo:
+      part: "AMS1117-3.3"
+      notes: "5V→3.3V for MCU"
+
+    mcu:
+      part: "STM32G431"
+      package: "LQFP-48"
+      notes: "Motor control timers, 170MHz, integrated op-amps"
+
+  layout:
+    power_stage:
+      - "Place MOSFETs in H-bridge configuration near motor connector"
+      - "Use thermal vias under MOSFET tab (min 6 per device)"
+      - "Ground plane on bottom layer for heat spreading"
+      - "Keep gate drive traces short (<10mm)"
+
+    current_sense:
+      - "Use Kelvin connection to shunt resistors"
+      - "Route sense traces away from switching nodes"
+      - "Place sense amplifier close to shunts"
+
+    power_supply:
+      - "Separate motor power from logic power at input"
+      - "Use star-ground topology"
+      - "Bulk capacitors near power input and MOSFETs"
+
+    signal_integrity:
+      - "Keep PWM traces away from sense traces"
+      - "Use ground guard traces around sensitive signals"
+
+decisions:
+  - id: "discrete-mosfets"
+    description: "Use discrete MOSFETs instead of integrated driver"
+    rationale: |
+      Discrete MOSFETs provide better thermal visibility for testing
+      ThermalAnalyzer. TO-220 package has well-characterized thermal
+      properties and requires explicit thermal management.
+    alternatives:
+      - "Integrated half-bridge ICs (e.g., IR2184 + dual MOSFET)"
+      - "Smart power modules"
+
+  - id: "2-layer-board"
+    description: "Use 2-layer PCB instead of 4-layer"
+    rationale: |
+      Tests routing capability on constrained layer count.
+      Requires careful copper pour management for power delivery.
+      More challenging thermal design validates thermal analysis.
+    alternatives:
+      - "4-layer with dedicated power planes"
+
+  - id: "through-hole-power"
+    description: "Use through-hole for power components"
+    rationale: |
+      TO-220 MOSFETs and through-hole screw terminals are
+      common in motor control. Tests mixed SMD/THT routing.
+
+progress:
+  phase: "design"
+  checklist:
+    - task: "Create schematic"
+      status: "pending"
+    - task: "Run ERC"
+      status: "pending"
+    - task: "Create PCB"
+      status: "pending"
+    - task: "Place components"
+      status: "pending"
+    - task: "Add zones"
+      status: "pending"
+    - task: "Route traces"
+      status: "pending"
+    - task: "Run thermal analysis"
+      status: "pending"
+    - task: "Run DRC"
+      status: "pending"
