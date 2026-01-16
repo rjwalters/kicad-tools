@@ -136,6 +136,7 @@ from .optimizer import (
     OptimizationStats,
     TraceOptimizer,
 )  # noqa: F401 - optimizer is now a package
+from .output import show_routing_summary
 from .parallel import (
     BoundingBox,
     NetGroup,
@@ -369,4 +370,6 @@ __all__ = [
     "classify_and_apply_rules",
     "is_differential_pair_name",
     "find_differential_partner",
+    # Output and Diagnostics
+    "show_routing_summary",
 ]

@@ -29,6 +29,7 @@ from kicad_tools.router import (
     DesignRules,
     create_net_class_map,
     load_pcb_for_routing,
+    show_routing_summary,
 )
 from kicad_tools.router.optimizer import GridCollisionChecker, OptimizationConfig, TraceOptimizer
 
@@ -258,9 +259,10 @@ def main():
         print("  Review DRC errors before manufacturing.")
     else:
         print(f"PARTIAL: Routed {stats['nets_routed']}/{total_nets} nets")
-        print("  Some nets may require manual routing or a different strategy.")
         if not drc_passed:
             print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
+        # Show comprehensive routing summary with successes, failures, and suggestions
+        show_routing_summary(router, net_map, total_nets)
     print("=" * 60)
 
     # Return success only if all nets routed AND DRC passed
