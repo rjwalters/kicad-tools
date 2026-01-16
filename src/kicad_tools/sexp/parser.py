@@ -277,46 +277,7 @@ class SExp:
             lines.append(f"{tabs}(")
 
         # Determine if this node forces structured children on separate lines
-        force_structured_on_lines = self.name in {
-            "kicad_sch",
-            "kicad_pcb",
-            "lib_symbols",
-            "symbol",
-            "footprint",
-            "title_block",
-            "sheet",
-            "sheet_instances",
-            "instances",
-            "project",
-            "effects",
-            "general",
-            "layers",
-            "layer",
-            "stackup",
-            "setup",
-            "pcbplotparams",
-            "gr_rect",
-            "gr_circle",
-            "gr_line",
-            "gr_text",
-            "gr_arc",
-            "gr_poly",
-            "zone",
-            "segment",
-            "via",
-            "pad",
-            "fp_text",
-            "fp_line",
-            "fp_circle",
-            "net",
-            "property",
-            "wire",
-            "junction",
-            "label",
-            "hierarchical_label",
-            "stroke",
-            "font",
-        }
+        force_structured_on_lines = self.name in _FORCE_STRUCTURED_ON_LINES
 
         # Track if we've started putting things on new lines
         started_new_lines = False
@@ -365,58 +326,7 @@ class SExp:
             return True
 
         # Never inline top-level or major structural elements
-        never_inline = {
-            # Top-level containers
-            "kicad_sch",
-            "kicad_pcb",
-            "lib_symbols",
-            "symbol",
-            "footprint",
-            "title_block",
-            "sheet",
-            "sheet_instances",
-            "instances",
-            "project",
-            "path",
-            "property",
-            "effects",
-            "font",
-            "pin",
-            "rectangle",
-            "fill",
-            "polyline",
-            "arc",
-            "circle",
-            "text",
-            "wire",
-            "junction",
-            "label",
-            "hierarchical_label",
-            "global_label",
-            "no_connect",
-            # PCB-specific
-            "general",
-            "layers",
-            "layer",
-            "stackup",
-            "setup",
-            "pcbplotparams",
-            "net",
-            "gr_rect",
-            "gr_circle",
-            "gr_line",
-            "gr_text",
-            "zone",
-            "segment",
-            "via",
-            "pad",
-            "fp_text",
-            "fp_line",
-            "fp_circle",
-            # Common nested structures
-            "stroke",
-        }
-        if self.name in never_inline:
+        if self.name in _NEVER_INLINE:
             return False
 
         # Simple nodes with only atoms (and short enough)
@@ -848,6 +758,80 @@ _WHITESPACE = frozenset(" \t\n\r")
 _ATOM_TERMINATORS = frozenset(" \t\n\r()")
 _COMMENT_CHARS = frozenset("#;")
 _ESCAPE_MAP = {"n": "\n", "t": "\t", "r": "\r"}
+
+# =============================================================================
+# Element classification constants for serialization formatting
+#
+# These sets control how S-expressions are formatted when serialized:
+# - _STRUCTURAL_ELEMENTS: Common elements shared between formatting rules
+# - _FORCE_STRUCTURED_ON_LINES: Elements whose children go on separate lines
+# - _NEVER_INLINE: Elements that should never be rendered inline
+# =============================================================================
+
+# Base set of structural elements common to both formatting rules
+_STRUCTURAL_ELEMENTS = frozenset({
+    # Top-level containers
+    "kicad_sch",
+    "kicad_pcb",
+    "lib_symbols",
+    "symbol",
+    "footprint",
+    "title_block",
+    "sheet",
+    "sheet_instances",
+    "instances",
+    "project",
+    # Common structural elements
+    "effects",
+    "font",
+    "property",
+    "wire",
+    "junction",
+    "label",
+    "hierarchical_label",
+    "stroke",
+    # PCB-specific structural elements
+    "general",
+    "layers",
+    "layer",
+    "stackup",
+    "setup",
+    "pcbplotparams",
+    "net",
+    "gr_rect",
+    "gr_circle",
+    "gr_line",
+    "gr_text",
+    "zone",
+    "segment",
+    "via",
+    "pad",
+    "fp_text",
+    "fp_line",
+    "fp_circle",
+})
+
+# Elements that force structured children on separate lines (used in to_string())
+# Includes all structural elements plus graphic primitives that need line breaks
+_FORCE_STRUCTURED_ON_LINES = _STRUCTURAL_ELEMENTS | frozenset({
+    "gr_arc",
+    "gr_poly",
+})
+
+# Elements that should never be rendered inline (used in _should_inline())
+# Includes all structural elements plus symbol/schematic primitives
+_NEVER_INLINE = _STRUCTURAL_ELEMENTS | frozenset({
+    "path",
+    "pin",
+    "rectangle",
+    "fill",
+    "polyline",
+    "arc",
+    "circle",
+    "text",
+    "global_label",
+    "no_connect",
+})
 
 
 class Parser:
