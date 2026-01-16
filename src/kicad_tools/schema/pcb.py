@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -778,6 +779,238 @@ class PCB:
         """Load PCB from file."""
         sexp = load_pcb(path)
         return cls(sexp)
+
+    @classmethod
+    def create(
+        cls,
+        width: float = 100.0,
+        height: float = 100.0,
+        layers: int = 2,
+        title: str = "",
+        revision: str = "1.0",
+        company: str = "",
+        board_date: str | None = None,
+    ) -> PCB:
+        """Create a new blank PCB from scratch.
+
+        This creates a minimal but valid KiCad PCB file with:
+        - Board outline on Edge.Cuts layer
+        - Layer definitions (2 or 4 copper layers)
+        - Basic design rules
+        - Title block information
+
+        Args:
+            width: Board width in mm (default 100.0)
+            height: Board height in mm (default 100.0)
+            layers: Number of copper layers (2 or 4, default 2)
+            title: Board title for title block
+            revision: Board revision (default "1.0")
+            company: Company name for title block
+            board_date: Date string (default: today's date in YYYY-MM-DD format)
+
+        Returns:
+            A new PCB instance ready for adding footprints and traces.
+
+        Raises:
+            ValueError: If layers is not 2 or 4
+
+        Example:
+            >>> pcb = PCB.create(width=160, height=100, layers=4, title="My Board")
+            >>> pcb.save("my_board.kicad_pcb")
+        """
+        if layers not in (2, 4):
+            raise ValueError(f"Layers must be 2 or 4, got {layers}")
+
+        if board_date is None:
+            board_date = date.today().isoformat()
+
+        sexp = cls._build_blank_pcb_sexp(
+            width=width,
+            height=height,
+            layers=layers,
+            title=title,
+            revision=revision,
+            company=company,
+            board_date=board_date,
+        )
+        return cls(sexp)
+
+    @staticmethod
+    def _build_blank_pcb_sexp(
+        width: float,
+        height: float,
+        layers: int,
+        title: str,
+        revision: str,
+        company: str,
+        board_date: str,
+    ) -> SExp:
+        """Build the S-expression for a blank PCB."""
+        pcb = SExp.list("kicad_pcb")
+
+        # Version and generator info
+        pcb.append(SExp.list("version", 20240108))
+        pcb.append(SExp.list("generator", "kicad_tools"))
+        pcb.append(SExp.list("generator_version", "8.0"))
+
+        # General settings
+        pcb.append(
+            SExp.list(
+                "general",
+                SExp.list("thickness", 1.6),
+                SExp.list("legacy_teardrops", "no"),
+            )
+        )
+
+        # Paper size
+        pcb.append(SExp.list("paper", "A4"))
+
+        # Title block
+        pcb.append(
+            SExp.list(
+                "title_block",
+                SExp.list("title", title),
+                SExp.list("date", board_date),
+                SExp.list("rev", revision),
+                SExp.list("company", company),
+            )
+        )
+
+        # Layers
+        pcb.append(PCB._build_layers_sexp(layers))
+
+        # Setup with design rules
+        pcb.append(PCB._build_setup_sexp(layers))
+
+        # Empty net (required)
+        pcb.append(SExp.list("net", 0, ""))
+
+        # Board outline on Edge.Cuts
+        pcb.append(PCB._build_board_outline_sexp(width, height))
+
+        return pcb
+
+    @staticmethod
+    def _build_layers_sexp(num_layers: int) -> SExp:
+        """Build the layers definition S-expression."""
+        layers_node = SExp.list("layers")
+
+        # Copper layers
+        layers_node.append(SExp.list("0", "F.Cu", "signal"))
+        if num_layers == 4:
+            layers_node.append(SExp.list("1", "In1.Cu", "signal"))
+            layers_node.append(SExp.list("2", "In2.Cu", "signal"))
+        layers_node.append(SExp.list("31", "B.Cu", "signal"))
+
+        # Technical layers (always present)
+        layers_node.append(SExp.list("32", "B.Adhes", "user", "B.Adhesive"))
+        layers_node.append(SExp.list("33", "F.Adhes", "user", "F.Adhesive"))
+        layers_node.append(SExp.list("34", "B.Paste", "user"))
+        layers_node.append(SExp.list("35", "F.Paste", "user"))
+        layers_node.append(SExp.list("36", "B.SilkS", "user", "B.Silkscreen"))
+        layers_node.append(SExp.list("37", "F.SilkS", "user", "F.Silkscreen"))
+        layers_node.append(SExp.list("38", "B.Mask", "user"))
+        layers_node.append(SExp.list("39", "F.Mask", "user"))
+        layers_node.append(SExp.list("40", "Dwgs.User", "user", "User.Drawings"))
+        layers_node.append(SExp.list("44", "Edge.Cuts", "user"))
+        layers_node.append(SExp.list("46", "B.CrtYd", "user", "B.Courtyard"))
+        layers_node.append(SExp.list("47", "F.CrtYd", "user", "F.Courtyard"))
+        layers_node.append(SExp.list("48", "B.Fab", "user"))
+        layers_node.append(SExp.list("49", "F.Fab", "user"))
+
+        return layers_node
+
+    @staticmethod
+    def _build_setup_sexp(num_layers: int) -> SExp:
+        """Build the setup/design rules S-expression."""
+        setup = SExp.list("setup")
+
+        # Stackup for multi-layer boards
+        if num_layers == 4:
+            stackup = SExp.list("stackup")
+            stackup.append(SExp.list("layer", "F.SilkS", SExp.list("type", "Top Silk Screen")))
+            stackup.append(SExp.list("layer", "F.Paste", SExp.list("type", "Top Solder Paste")))
+            stackup.append(
+                SExp.list(
+                    "layer", "F.Mask", SExp.list("type", "Top Solder Mask"), SExp.list("thickness", 0.01)
+                )
+            )
+            stackup.append(
+                SExp.list("layer", "F.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "dielectric 1",
+                    SExp.list("type", "prepreg"),
+                    SExp.list("thickness", 0.2),
+                    SExp.list("material", "FR4"),
+                    SExp.list("epsilon_r", 4.5),
+                    SExp.list("loss_tangent", 0.02),
+                )
+            )
+            stackup.append(
+                SExp.list("layer", "In1.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "dielectric 2",
+                    SExp.list("type", "core"),
+                    SExp.list("thickness", 1.0),
+                    SExp.list("material", "FR4"),
+                    SExp.list("epsilon_r", 4.5),
+                    SExp.list("loss_tangent", 0.02),
+                )
+            )
+            stackup.append(
+                SExp.list("layer", "In2.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "dielectric 3",
+                    SExp.list("type", "prepreg"),
+                    SExp.list("thickness", 0.2),
+                    SExp.list("material", "FR4"),
+                    SExp.list("epsilon_r", 4.5),
+                    SExp.list("loss_tangent", 0.02),
+                )
+            )
+            stackup.append(
+                SExp.list("layer", "B.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+            )
+            stackup.append(
+                SExp.list(
+                    "layer",
+                    "B.Mask",
+                    SExp.list("type", "Bottom Solder Mask"),
+                    SExp.list("thickness", 0.01),
+                )
+            )
+            stackup.append(SExp.list("layer", "B.Paste", SExp.list("type", "Bottom Solder Paste")))
+            stackup.append(SExp.list("layer", "B.SilkS", SExp.list("type", "Bottom Silk Screen")))
+            stackup.append(SExp.list("copper_finish", "ENIG"))
+            stackup.append(SExp.list("dielectric_constraints", "no"))
+            setup.append(stackup)
+
+        # Basic design rules
+        setup.append(SExp.list("pad_to_mask_clearance", 0))
+
+        return setup
+
+    @staticmethod
+    def _build_board_outline_sexp(width: float, height: float) -> SExp:
+        """Build a rectangular board outline on Edge.Cuts layer."""
+        return SExp.list(
+            "gr_rect",
+            SExp.list("start", 0, 0),
+            SExp.list("end", width, height),
+            SExp.list("stroke", SExp.list("width", 0.1), SExp.list("type", "default")),
+            SExp.list("fill", "none"),
+            SExp.list("layer", "Edge.Cuts"),
+            SExp.list("uuid", str(uuid.uuid4())),
+        )
 
     def _parse(self):
         """Parse the PCB data structure."""
