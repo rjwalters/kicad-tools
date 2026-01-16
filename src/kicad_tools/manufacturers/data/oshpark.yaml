@@ -1,5 +1,6 @@
 # OSHPark Design Rules Configuration
-# Source: https://docs.oshpark.com/design-tools/
+# Source: https://docs.oshpark.com/services/
+# Last verified: 2026-01-16
 #
 # All measurements in millimeters unless otherwise noted.
 # Note: OSHPark is PCB-only, no assembly services.

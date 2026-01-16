@@ -1,9 +1,12 @@
 # Seeed Fusion Design Rules Configuration
 # Source: https://www.seeedstudio.com/fusion_pcb.html
 #         https://support.seeedstudio.com/knowledgebase/articles/447362-fusion-pcb-specification
+# Last verified: 2026-01-16
 #
 # All measurements in millimeters unless otherwise noted.
-# Note: Seeed values are slightly more conservative than JLCPCB.
+# Note: Seeed offers comparable capabilities to JLCPCB with some differences:
+#       - More conservative trace/clearance for 2-layer (6 mil vs 5 mil)
+#       - Supports 1oz inner copper for 4-layer 2oz boards (vs JLCPCB's 0.5oz)
 
 design_rules:
   2layer_1oz:
