@@ -8,6 +8,7 @@ from kicad_tools.schematic.blocks import (
     BarrelJackInput,
     BatteryInput,
     BootModeSelector,
+    BuckConverter,
     CANTransceiver,
     CircuitBlock,
     CrystalOscillator,
@@ -28,8 +29,11 @@ from kicad_tools.schematic.blocks import (
     USBPowerInput,
     VoltageDivider,
     create_3phase_inverter,
+    create_3v3_buck,
     create_3v3_ldo,
+    create_5v_buck,
     create_12v_barrel_jack,
+    create_12v_buck,
     create_can_transceiver_mcp2551,
     create_can_transceiver_sn65hvd230,
     create_can_transceiver_tja1050,
@@ -704,6 +708,214 @@ class TestLDOBlockMocked:
         # Second call is GND label
         assert calls[1][0][0] == "AGND"
         assert calls[1][1]["shape"] == "passive"
+
+
+class TestBuckConverterMocked:
+    """Tests for BuckConverter with mocked schematic."""
+
+    @pytest.fixture
+    def mock_schematic(self):
+        """Create mock schematic."""
+        sch = Mock()
+
+        def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            comp = Mock()
+            rotation = kwargs.get("rotation", 0)
+
+            # Regulator IC pins
+            if "LM2596" in str(symbol) or "Regulator" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "VIN": (x - 15, y),
+                    "IN": (x - 15, y),  # Alternative pin name
+                    "OUT": (x + 15, y),
+                    "SW": (x + 15, y),
+                    "VOUT": (x + 15, y),
+                    "GND": (x, y + 10),
+                    "VSS": (x, y + 10),  # Alternative
+                    "FB": (x + 5, y + 5),
+                    "ON/OFF": (x - 5, y + 5),
+                }.get(name, (0, 0))
+            # Inductor pins
+            elif "Device:L" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x - 5, y),
+                    "2": (x + 5, y),
+                }.get(name, (0, 0))
+            # Diode pins (may be rotated)
+            elif "Schottky" in str(symbol) or "D_" in str(symbol):
+                if rotation == 90:
+                    comp.pin_position.side_effect = lambda name: {
+                        "A": (x, y + 5),  # Anode (bottom when rotated)
+                        "K": (x, y - 5),  # Cathode (top when rotated)
+                    }.get(name, (0, 0))
+                else:
+                    comp.pin_position.side_effect = lambda name: {
+                        "A": (x - 5, y),
+                        "K": (x + 5, y),
+                    }.get(name, (0, 0))
+            # Resistor pins
+            elif "Device:R" in str(symbol):
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            # Capacitor pins (default)
+            else:
+                comp.pin_position.side_effect = lambda name: {
+                    "1": (x, y - 5),
+                    "2": (x, y + 5),
+                }.get(name, (0, 0))
+            return comp
+
+        sch.add_symbol = Mock(side_effect=create_mock_component)
+        sch.add_wire = Mock()
+        sch.add_junction = Mock()
+        sch.wire_to_rail = Mock()
+        sch.wire_decoupling_cap = Mock()
+        return sch
+
+    def test_buck_converter_creation(self, mock_schematic):
+        """Create basic buck converter."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            value="LM2596-5.0",
+            input_voltage=24.0,
+            output_voltage=5.0,
+        )
+
+        assert buck.schematic == mock_schematic
+        assert buck.x == 100
+        assert buck.y == 100
+        assert buck.input_voltage == 24.0
+        assert buck.output_voltage == 5.0
+        assert buck.topology == "async"
+        assert "VIN" in buck.ports
+        assert "VOUT" in buck.ports
+        assert "GND" in buck.ports
+        assert "SW" in buck.ports
+
+    def test_buck_converter_components_async(self, mock_schematic):
+        """Buck converter has all components for async topology."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            topology="async",
+        )
+
+        assert "REGULATOR" in buck.components
+        assert "C_IN" in buck.components
+        assert "C_OUT" in buck.components
+        assert "L" in buck.components
+        assert "D" in buck.components  # Schottky diode for async
+
+    def test_buck_converter_components_sync(self, mock_schematic):
+        """Buck converter for sync topology has no external diode."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            topology="sync",
+        )
+
+        assert "REGULATOR" in buck.components
+        assert "C_IN" in buck.components
+        assert "C_OUT" in buck.components
+        assert "L" in buck.components
+        assert "D" not in buck.components  # No external diode for sync
+
+    def test_buck_converter_with_feedback_divider(self, mock_schematic):
+        """Buck converter with feedback resistor divider."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            feedback_divider=True,
+            r_top="10k",
+            r_bottom="3.3k",
+        )
+
+        assert buck.has_feedback_divider is True
+        assert "R_FB_TOP" in buck.components
+        assert "R_FB_BOTTOM" in buck.components
+
+    def test_buck_converter_efficiency_estimate_async(self, mock_schematic):
+        """Async topology efficiency estimate."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=24.0,
+            output_voltage=5.0,
+            topology="async",
+        )
+
+        eff = buck.get_efficiency_estimate()
+        # Async buck typically 80-90% efficient
+        assert 0.80 <= eff <= 0.90
+
+    def test_buck_converter_efficiency_estimate_sync(self, mock_schematic):
+        """Sync topology efficiency estimate."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            input_voltage=12.0,
+            output_voltage=5.0,
+            topology="sync",
+        )
+
+        eff = buck.get_efficiency_estimate()
+        # Sync buck typically 90-95% efficient
+        assert 0.90 <= eff <= 0.95
+
+    def test_buck_converter_connect_to_rails(self, mock_schematic):
+        """Connect buck converter to rails."""
+        buck = BuckConverter(
+            mock_schematic,
+            x=100,
+            y=100,
+            topology="async",
+        )
+
+        buck.connect_to_rails(
+            vin_rail_y=30,
+            vout_rail_y=50,
+            gnd_rail_y=200,
+        )
+
+        # Should wire decoupling caps
+        assert mock_schematic.wire_decoupling_cap.call_count >= 2
+
+    def test_create_5v_buck(self, mock_schematic):
+        """Create 5V buck converter with factory."""
+        buck = create_5v_buck(mock_schematic, x=100, y=100, ref="U1")
+
+        assert isinstance(buck, BuckConverter)
+        assert buck.output_voltage == 5.0
+        assert buck.topology == "async"
+
+    def test_create_3v3_buck(self, mock_schematic):
+        """Create 3.3V buck converter with factory."""
+        buck = create_3v3_buck(mock_schematic, x=100, y=100, ref="U1")
+
+        assert isinstance(buck, BuckConverter)
+        assert buck.output_voltage == 3.3
+        assert buck.topology == "async"
+
+    def test_create_12v_buck(self, mock_schematic):
+        """Create 12V buck converter with factory."""
+        buck = create_12v_buck(mock_schematic, x=100, y=100, ref="U1")
+
+        assert isinstance(buck, BuckConverter)
+        assert buck.output_voltage == 12.0
+        assert buck.topology == "async"
 
 
 class TestOscillatorBlockMocked:
