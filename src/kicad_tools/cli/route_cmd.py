@@ -242,92 +242,6 @@ def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: boo
         return "n"
 
 
-def show_failure_diagnostics(
-    router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False
-) -> None:
-    """Show detailed diagnostics for failed routes.
-
-    Args:
-        router: The Autorouter instance
-        net_map: Mapping of net names to net IDs
-        nets_to_route: Total number of nets that should be routed
-        quiet: If True, skip output
-    """
-    if quiet:
-        return
-
-    # Find unrouted nets
-    routed_net_ids = {route.net for route in router.routes}
-    all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - routed_net_ids
-
-    if not unrouted_ids:
-        return
-
-    print(f"\n{'=' * 60}")
-    print("ROUTING FAILURE DIAGNOSTICS")
-    print(f"{'=' * 60}")
-
-    # Get net name mapping
-    reverse_net = {v: k for k, v in net_map.items()}
-
-    # Group recorded failures by net
-    failures_by_net: dict[int, list] = {}
-    for failure in getattr(router, "routing_failures", []):
-        if failure.net not in failures_by_net:
-            failures_by_net[failure.net] = []
-        failures_by_net[failure.net].append(failure)
-
-    # Collect all blocking components for suggestions
-    all_blocking_components: set[str] = set()
-
-    print(f"\nFailed nets ({len(unrouted_ids)}):\n")
-
-    for net_id in sorted(unrouted_ids):
-        net_name = reverse_net.get(net_id, f"Net_{net_id}")
-        net_failures = failures_by_net.get(net_id, [])
-
-        # Determine failure reason
-        if net_failures:
-            # Use recorded failure information
-            failure = net_failures[0]  # First failure gives the reason
-            reason = failure.reason
-            for f in net_failures:
-                all_blocking_components.update(f.blocking_components)
-        else:
-            reason = "No path found"
-
-        print(f"  - {net_name}: {reason}")
-
-        # Show failed connections if there are multiple
-        if len(net_failures) > 1:
-            for f in net_failures[:3]:  # Show first 3 failed connections
-                src = f"{f.source_pad[0]}.{f.source_pad[1]}"
-                tgt = f"{f.target_pad[0]}.{f.target_pad[1]}"
-                print(f"      {src} -> {tgt}: {f.reason}")
-            if len(net_failures) > 3:
-                print(f"      ... and {len(net_failures) - 3} more failed connections")
-
-    # Show suggestions based on failure analysis
-    print("\nSuggestions:")
-
-    if all_blocking_components:
-        comp_list = ", ".join(sorted(all_blocking_components)[:5])
-        if len(all_blocking_components) > 5:
-            comp_list += f" and {len(all_blocking_components) - 5} more"
-        print(f"  - Reposition blocking components: {comp_list}")
-
-    # Check if multi-layer routing might help
-    num_layers = getattr(router.grid, "num_layers", 2)
-    if num_layers <= 2:
-        print("  - Consider using more layers for additional routing space")
-
-    print("  - Try negotiated routing: kct route --algorithm negotiated")
-    print("  - Try Monte Carlo routing: kct route --algorithm monte-carlo --trials 20")
-
-    print(f"\n{'=' * 60}")
-
-
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -690,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
         RoutabilityAnalyzer,
         is_cpp_available,
         load_pcb_for_routing,
+        show_routing_summary,
     )
     from kicad_tools.router.io import detect_layer_stack
 
@@ -1194,12 +1109,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  Run 'kct check {output_path} --mfr {args.manufacturer}' for full details")
         else:
             print(f"PARTIAL: Routed {stats['nets_routed']}/{nets_to_route} nets")
-            print("  Some nets may require manual routing or a different strategy.")
             if drc_ran and drc_errors > 0:
                 print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
 
-            # Show detailed failure diagnostics
-            show_failure_diagnostics(router, net_map, nets_to_route, quiet=quiet)
+            # Show comprehensive routing summary with successes, failures, and suggestions
+            show_routing_summary(router, net_map, nets_to_route, quiet=quiet)
 
     # Exit codes:
     # 0 = All nets routed AND (DRC passed OR DRC not run)
