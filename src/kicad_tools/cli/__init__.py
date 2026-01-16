@@ -394,6 +394,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "explain":
         return _run_explain_command(args)
 
+    elif args.command == "detect-mistakes":
+        return _run_detect_mistakes_command(args)
+
     return 0
 
 
@@ -432,6 +435,33 @@ def _run_explain_command(args) -> int:
         sub_argv.extend(["--interface", args.explain_interface])
 
     return explain_cmd(sub_argv)
+
+
+def _run_detect_mistakes_command(args) -> int:
+    """Run the detect-mistakes command."""
+    from .mistakes_cmd import main as mistakes_cmd
+
+    sub_argv = []
+
+    # Add PCB file if provided
+    if hasattr(args, "mistakes_pcb") and args.mistakes_pcb:
+        sub_argv.append(args.mistakes_pcb)
+
+    # Handle flags
+    if hasattr(args, "mistakes_list_categories") and args.mistakes_list_categories:
+        sub_argv.append("--list-categories")
+    if hasattr(args, "mistakes_category") and args.mistakes_category:
+        sub_argv.extend(["--category", args.mistakes_category])
+    if hasattr(args, "mistakes_severity") and args.mistakes_severity:
+        sub_argv.extend(["--severity", args.mistakes_severity])
+    if hasattr(args, "mistakes_format") and args.mistakes_format != "table":
+        sub_argv.extend(["--format", args.mistakes_format])
+    if hasattr(args, "mistakes_strict") and args.mistakes_strict:
+        sub_argv.append("--strict")
+    if hasattr(args, "mistakes_verbose") and args.mistakes_verbose:
+        sub_argv.append("--verbose")
+
+    return mistakes_cmd(sub_argv)
 
 
 def symbols_main() -> int:

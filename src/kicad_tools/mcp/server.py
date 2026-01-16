@@ -32,6 +32,10 @@ from kicad_tools.mcp.tools.export import (
     export_gerbers,
     validate_assembly_bom,
 )
+from kicad_tools.mcp.tools.mistakes import (
+    detect_mistakes,
+    list_mistake_categories,
+)
 from kicad_tools.mcp.tools.placement import placement_analyze
 from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
 from kicad_tools.mcp.tools.patterns import (
@@ -88,6 +92,7 @@ class MCPServer:
         self._register_clearance_tools()
         self._register_routing_tools()
         self._register_pattern_tools()
+        self._register_mistake_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -1070,6 +1075,75 @@ class MCPServer:
     def _handle_list_components(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle list_pattern_components tool call."""
         return list_available_components(params.get("component_type"))
+
+    def _register_mistake_tools(self) -> None:
+        """Register PCB design mistake detection tools."""
+        self.tools["detect_mistakes"] = ToolDefinition(
+            name="detect_mistakes",
+            description=(
+                "Detect common PCB design mistakes with educational explanations. "
+                "Analyzes a PCB file and identifies issues like bypass capacitor "
+                "placement, crystal trace length, differential pair skew, power "
+                "trace width, thermal pad connections, via-in-pad, acid traps, "
+                "and tombstoning risks. Each mistake includes an explanation "
+                "of why it's a problem and how to fix it."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Path to .kicad_pcb file to analyze",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Only check specific category",
+                        "enum": [
+                            "bypass_capacitor",
+                            "crystal_oscillator",
+                            "differential_pair",
+                            "power_trace",
+                            "thermal_management",
+                            "via_placement",
+                            "manufacturability",
+                        ],
+                    },
+                    "severity": {
+                        "type": "string",
+                        "description": "Only show issues of this severity or higher",
+                        "enum": ["error", "warning", "info"],
+                    },
+                },
+                "required": ["pcb_path"],
+            },
+            handler=self._handle_detect_mistakes,
+        )
+
+        self.tools["list_mistake_categories"] = ToolDefinition(
+            name="list_mistake_categories",
+            description=(
+                "List all available mistake detection categories. "
+                "Returns information about each category of design mistakes "
+                "that can be detected, along with the number of checks."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            handler=self._handle_list_mistake_categories,
+        )
+
+    def _handle_detect_mistakes(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle detect_mistakes tool call."""
+        return detect_mistakes(
+            pcb_path=params["pcb_path"],
+            category=params.get("category"),
+            severity=params.get("severity"),
+        )
+
+    def _handle_list_mistake_categories(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle list_mistake_categories tool call."""
+        return list_mistake_categories()
 
     def get_tools_list(self) -> list[dict[str, Any]]:
         """Get list of available tools for MCP discovery."""

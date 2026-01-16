@@ -33,6 +33,10 @@ from kicad_tools.mcp.tools.explain import (
     search_available_rules,
 )
 from kicad_tools.mcp.tools.export import export_gerbers
+from kicad_tools.mcp.tools.mistakes import (
+    detect_mistakes,
+    list_mistake_categories,
+)
 from kicad_tools.mcp.tools.patterns import (
     adapt_pattern,
     get_requirements,
@@ -50,6 +54,7 @@ __all__ = [
     "analyze_board",
     "annotate_decision",
     "create_checkpoint",
+    "detect_mistakes",
     "explain_drc_violations",
     "explain_net",
     "explain_rule",
@@ -64,6 +69,7 @@ __all__ = [
     "list_available_components",
     "list_available_rules",
     "list_available_subsystem_types",
+    "list_mistake_categories",
     "measure_clearance",
     "plan_subsystem",
     "record_decision",

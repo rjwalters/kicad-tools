@@ -171,6 +171,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_benchmark_parser(subparsers)
     _add_run_parser(subparsers)
     _add_explain_parser(subparsers)
+    _add_detect_mistakes_parser(subparsers)
 
     return parser
 
@@ -2836,4 +2837,89 @@ def _add_explain_parser(subparsers) -> None:
         "-i",
         dest="explain_interface",
         help="Specify interface type for net (usb, i2c, spi)",
+    )
+
+
+def _add_detect_mistakes_parser(subparsers) -> None:
+    """Add detect-mistakes subcommand parser for PCB design mistake detection."""
+    mistakes_parser = subparsers.add_parser(
+        "detect-mistakes",
+        help="Detect common PCB design mistakes with educational explanations",
+        description=(
+            "Detect common PCB design mistakes like bypass capacitor placement, "
+            "crystal trace length, differential pair skew, and more. Each mistake "
+            "includes an explanation and fix suggestion."
+        ),
+    )
+
+    # Main argument - PCB file
+    mistakes_parser.add_argument(
+        "mistakes_pcb",
+        nargs="?",
+        metavar="PCB",
+        help="Path to .kicad_pcb file to analyze",
+    )
+
+    # Category filter
+    mistakes_parser.add_argument(
+        "--category",
+        "-c",
+        dest="mistakes_category",
+        choices=[
+            "bypass_capacitor",
+            "crystal_oscillator",
+            "differential_pair",
+            "power_trace",
+            "thermal_management",
+            "emi_shielding",
+            "decoupling",
+            "grounding",
+            "via_placement",
+            "manufacturability",
+        ],
+        help="Only check specific category",
+    )
+
+    # Severity filter
+    mistakes_parser.add_argument(
+        "--severity",
+        "-s",
+        dest="mistakes_severity",
+        choices=["error", "warning", "info"],
+        help="Only show issues of this severity or higher",
+    )
+
+    # Output format
+    mistakes_parser.add_argument(
+        "--format",
+        "-f",
+        dest="mistakes_format",
+        choices=["table", "json", "tree", "summary"],
+        default="table",
+        help="Output format (default: table)",
+    )
+
+    # Strict mode
+    mistakes_parser.add_argument(
+        "--strict",
+        action="store_true",
+        dest="mistakes_strict",
+        help="Exit with error code on warnings",
+    )
+
+    # List categories
+    mistakes_parser.add_argument(
+        "--list-categories",
+        action="store_true",
+        dest="mistakes_list_categories",
+        help="List available check categories and exit",
+    )
+
+    # Verbose output
+    mistakes_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        dest="mistakes_verbose",
+        help="Show detailed information",
     )
