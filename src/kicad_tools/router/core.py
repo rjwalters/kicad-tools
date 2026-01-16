@@ -658,7 +658,7 @@ class Autorouter:
 
         # Get pads involved
         pads_for_net = self.nets.get(net, [])
-        components = list(set(ref for ref, _pin in pads_for_net))
+        components = list({ref for ref, _pin in pads_for_net})
 
         decision = Decision.create(
             action="route",
