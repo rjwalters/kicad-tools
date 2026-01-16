@@ -293,6 +293,7 @@ class SymbolInstance:
     unit: int = 1
     uuid_str: str = field(default_factory=lambda: str(uuid.uuid4()))
     footprint: str = ""
+    properties: dict[str, str] = field(default_factory=dict)
 
     def pin_position(self, pin_name_or_number: str) -> tuple[float, float]:
         """Get absolute position of a pin after placement and rotation.
@@ -461,6 +462,10 @@ class SymbolInstance:
         sym.append(symbol_property_node("Footprint", self.footprint, self.x, self.y, hide=True))
         sym.append(symbol_property_node("Datasheet", "~", self.x, self.y, hide=True))
 
+        # Add custom properties (hidden by default)
+        for prop_name, prop_value in self.properties.items():
+            sym.append(symbol_property_node(prop_name, prop_value, self.x, self.y, hide=True))
+
         # Add pin UUIDs
         for pin in self.symbol_def.pins:
             sym.append(pin_uuid_node(pin.number, str(uuid.uuid4())))
@@ -482,6 +487,20 @@ class SymbolInstance:
         y = _fmt_coord(self.y)
         ref_y = _fmt_coord(self.y - 5.08)
         val_y = _fmt_coord(self.y - 2.54)
+
+        # Generate custom properties (hidden by default)
+        custom_props = ""
+        for prop_name, prop_value in self.properties.items():
+            custom_props += f'''\t\t(property "{prop_name}" "{prop_value}"
+\t\t\t(at {x} {y} 0)
+\t\t\t(effects
+\t\t\t\t(font
+\t\t\t\t\t(size 1.27 1.27)
+\t\t\t\t)
+\t\t\t\t(hide yes)
+\t\t\t)
+\t\t)
+'''
 
         return f'''\t(symbol
 \t\t(lib_id "{self.symbol_def.lib_id}")
@@ -526,7 +545,7 @@ class SymbolInstance:
 \t\t\t\t(hide yes)
 \t\t\t)
 \t\t)
-{pin_uuids}
+{custom_props}{pin_uuids}
 \t\t(instances
 \t\t\t(project "{project_name}"
 \t\t\t\t(path "{sheet_path}"
