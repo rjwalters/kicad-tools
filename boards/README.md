@@ -40,17 +40,28 @@ kct build boards/01-voltage-divider --mfr jlcpcb
 - ⚠️ Needs optimization - Works but may have routing challenges or require post-processing
 - 🚧 Work in progress - Incomplete implementation
 
+## Prerequisites for Manual Build
+
+Before running board generation scripts directly, set up the development environment:
+
+```bash
+# From repository root
+uv sync --extra dev
+```
+
+This installs kicad-tools and all dependencies. See the [main README](../README.md#development) for details.
+
 ## Advanced: Manual Build
 
 For more control, you can run individual Python scripts directly:
 
 ```bash
-# Run any board's generation script
-cd boards/01-voltage-divider
-python3 generate_design.py
-
-# Or use uv from the repo root
+# Run any board's generation script (from repo root)
 uv run python boards/01-voltage-divider/generate_design.py
+
+# Or activate the virtual environment first
+source .venv/bin/activate  # Linux/macOS
+python boards/01-voltage-divider/generate_design.py
 ```
 
 ### Post-Build Commands

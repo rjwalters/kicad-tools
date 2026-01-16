@@ -67,12 +67,13 @@ With 4 GPIO pins, we can drive 4*(4-1) = 12 LEDs. This demo uses 9 for a 3x3 gri
 
 ## Advanced: Manual Build
 
-For more control over individual steps, you can run Python scripts directly.
+For more control over individual steps, you can run Python scripts directly. See [Prerequisites](../README.md#prerequisites-for-manual-build) for environment setup.
 
 ### Step 1: Generate the PCB
 
 ```bash
-python3 generate_pcb.py
+# From repository root
+uv run python boards/02-charlieplex-led/generate_pcb.py
 ```
 
 This creates `output/charlieplex_3x3.kicad_pcb` with:
@@ -85,7 +86,8 @@ This creates `output/charlieplex_3x3.kicad_pcb` with:
 ### Step 2: Run the Autorouter
 
 ```bash
-python3 route_demo.py
+# From repository root
+uv run python boards/02-charlieplex-led/route_demo.py
 ```
 
 This:
