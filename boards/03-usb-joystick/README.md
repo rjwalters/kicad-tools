@@ -84,19 +84,19 @@ This design demonstrates routing of different signal classes:
 
 ## Advanced: Manual Build
 
-For more control over individual steps, you can run Python scripts directly.
+For more control over individual steps, you can run Python scripts directly. See [Prerequisites](../README.md#prerequisites-for-manual-build) for environment setup.
 
 ### Step 1: Generate the Schematic
 
 ```bash
-# Default output (recommended)
-python3 generate_schematic.py
+# From repository root (default output)
+uv run python boards/03-usb-joystick/generate_schematic.py
 
 # Or specify an output directory (auto-appends filename)
-python3 generate_schematic.py output/
+uv run python boards/03-usb-joystick/generate_schematic.py output/
 
 # Or specify an explicit file path
-python3 generate_schematic.py output/usb_joystick.kicad_sch
+uv run python boards/03-usb-joystick/generate_schematic.py output/usb_joystick.kicad_sch
 ```
 
 Creates `output/usb_joystick.kicad_sch` with all components and wiring.
@@ -104,7 +104,8 @@ Creates `output/usb_joystick.kicad_sch` with all components and wiring.
 ### Step 2: Generate the PCB
 
 ```bash
-python3 generate_pcb.py
+# From repository root
+uv run python boards/03-usb-joystick/generate_pcb.py
 ```
 
 Creates `output/usb_joystick.kicad_pcb` with all components placed and nets defined.
@@ -112,7 +113,8 @@ Creates `output/usb_joystick.kicad_pcb` with all components placed and nets defi
 ### Step 3: Run the Autorouter
 
 ```bash
-python3 route_demo.py
+# From repository root
+uv run python boards/03-usb-joystick/route_demo.py
 ```
 
 This:

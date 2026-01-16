@@ -57,12 +57,13 @@ Two 10k resistors divide the 5V input to produce 2.5V output (50% division ratio
 
 ## Advanced: Manual Build
 
-For more control, run the Python script directly.
+For more control, run the Python script directly. See [Prerequisites](../README.md#prerequisites-for-manual-build) for environment setup.
 
 ### Step 1: Generate the Design
 
 ```bash
-python3 generate_design.py
+# From repository root
+uv run python boards/01-voltage-divider/generate_design.py
 ```
 
 This creates:
