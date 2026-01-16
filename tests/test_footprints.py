@@ -1,33 +1,5 @@
 """Tests for the footprints module."""
 
-import importlib
-import sys
-import warnings
-
-import pytest
-
-
-class TestFootprintsImport:
-    """Tests for importing the footprints module."""
-
-    def test_import_emits_warning(self):
-        """Test that importing footprints emits a FutureWarning."""
-        # Clear all footprints-related modules from cache to force reimport
-        modules_to_remove = [key for key in sys.modules if key.startswith("kicad_tools.footprints")]
-        for mod in modules_to_remove:
-            del sys.modules[mod]
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            # Import and reload to ensure warning is triggered
-            import kicad_tools.footprints
-
-            importlib.reload(kicad_tools.footprints)
-            # Check that a FutureWarning was emitted
-            future_warnings = [x for x in w if issubclass(x.category, FutureWarning)]
-            assert len(future_warnings) >= 1
-            assert "experimental" in str(future_warnings[0].message).lower()
-
 
 class TestPadType:
     """Tests for PadType enum."""
@@ -273,15 +245,69 @@ class TestFootprint:
         assert fp.pads[0].number == "1"
         assert fp.pads[1].number == "2"
 
-    def test_to_sexp_not_implemented(self):
+    def test_to_sexp_minimal(self):
+        """Test to_sexp() with a minimal footprint."""
         from kicad_tools.footprints import Footprint
 
         fp = Footprint(name="test")
+        sexp = fp.to_sexp()
 
-        with pytest.raises(NotImplementedError) as excinfo:
-            fp.to_sexp()
+        assert "(footprint" in sexp
+        assert '"test"' in sexp
+        assert "(version 20240108)" in sexp
+        assert '(generator "kicad-tools")' in sexp
+        assert '(layer "F.Cu")' in sexp
+        assert "(attr smd)" in sexp
 
-        assert "not yet implemented" in str(excinfo.value).lower()
+    def test_to_sexp_with_description_and_tags(self):
+        """Test to_sexp() with description and tags."""
+        from kicad_tools.footprints import Footprint
+
+        fp = Footprint(
+            name="C_0402_1005Metric",
+            description="Capacitor SMD 0402",
+            tags="capacitor smd 0402",
+        )
+        sexp = fp.to_sexp()
+
+        assert '(descr "Capacitor SMD 0402")' in sexp
+        assert '(tags "capacitor smd 0402")' in sexp
+
+    def test_to_sexp_with_pads(self):
+        """Test to_sexp() with pads."""
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
+
+        fp = Footprint(name="C_0402_1005Metric")
+        fp.add_pad(
+            Pad(
+                number="1",
+                pad_type=PadType.SMD,
+                shape=PadShape.ROUNDRECT,
+                position=(-0.48, 0),
+                size=(0.56, 0.62),
+                layers=[Layer.F_CU, Layer.F_PASTE, Layer.F_MASK],
+            )
+        )
+        fp.add_pad(
+            Pad(
+                number="2",
+                pad_type=PadType.SMD,
+                shape=PadShape.ROUNDRECT,
+                position=(0.48, 0),
+                size=(0.56, 0.62),
+                layers=[Layer.F_CU, Layer.F_PASTE, Layer.F_MASK],
+            )
+        )
+
+        sexp = fp.to_sexp()
+
+        assert '(pad "1" smd roundrect' in sexp
+        assert '(pad "2" smd roundrect' in sexp
+        assert "(at -0.48 0)" in sexp
+        assert "(at 0.48 0)" in sexp
+        assert "(size 0.56 0.62)" in sexp
+        assert '(layers "F.Cu" "F.Paste" "F.Mask")' in sexp
+        assert "(roundrect_rratio 0.25)" in sexp
 
 
 class TestFootprintExports:
@@ -417,3 +443,207 @@ class TestFootprintUsagePatterns:
         assert fp.pads[0].shape == PadShape.RECT  # Pin 1
         assert fp.pads[1].shape == PadShape.OVAL  # Other pins
         assert all(p.drill == 1.0 for p in fp.pads)
+
+
+class TestPadToSexp:
+    """Tests for Pad.to_sexp() method."""
+
+    def test_smd_roundrect_pad_to_sexp(self):
+        """Test S-expression generation for SMD roundrect pad."""
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
+
+        pad = Pad(
+            number="1",
+            pad_type=PadType.SMD,
+            shape=PadShape.ROUNDRECT,
+            position=(-0.48, 0),
+            size=(0.56, 0.62),
+            layers=[Layer.F_CU, Layer.F_PASTE, Layer.F_MASK],
+        )
+        sexp = pad.to_sexp()
+        sexp_str = sexp.to_string(compact=True)
+
+        assert '"1"' in sexp_str
+        assert "smd" in sexp_str
+        assert "roundrect" in sexp_str
+        assert "(roundrect_rratio 0.25)" in sexp_str
+
+    def test_smd_rect_pad_no_roundrect_ratio(self):
+        """Test that rectangular pads don't include roundrect_rratio."""
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
+
+        pad = Pad(
+            number="1",
+            pad_type=PadType.SMD,
+            shape=PadShape.RECT,
+            position=(0, 0),
+            size=(1.0, 0.5),
+            layers=[Layer.F_CU, Layer.F_PASTE, Layer.F_MASK],
+        )
+        sexp = pad.to_sexp()
+        sexp_str = sexp.to_string(compact=True)
+
+        assert "rect" in sexp_str
+        assert "roundrect_rratio" not in sexp_str
+
+    def test_tht_pad_with_drill(self):
+        """Test S-expression generation for THT pad with drill."""
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
+
+        pad = Pad(
+            number="1",
+            pad_type=PadType.THT,
+            shape=PadShape.CIRCLE,
+            position=(0, 0),
+            size=(1.7, 1.7),
+            layers=[Layer.F_CU, Layer.B_CU, Layer.F_MASK, Layer.B_MASK],
+            drill=1.0,
+        )
+        sexp = pad.to_sexp()
+        sexp_str = sexp.to_string(compact=True)
+
+        assert "thru_hole" in sexp_str
+        assert "circle" in sexp_str
+        assert "(drill 1)" in sexp_str
+
+    def test_custom_roundrect_ratio(self):
+        """Test pad with custom roundrect ratio."""
+        from kicad_tools.footprints import Layer, Pad, PadShape, PadType
+
+        pad = Pad(
+            number="1",
+            pad_type=PadType.SMD,
+            shape=PadShape.ROUNDRECT,
+            position=(0, 0),
+            size=(1.0, 0.5),
+            layers=[Layer.F_CU],
+            roundrect_rratio=0.5,
+        )
+        sexp = pad.to_sexp()
+        sexp_str = sexp.to_string(compact=True)
+
+        assert "(roundrect_rratio 0.5)" in sexp_str
+
+
+class TestFootprintToSexpIntegration:
+    """Integration tests for complete footprint S-expression generation."""
+
+    def test_0402_capacitor_footprint(self):
+        """Test generating a complete 0402 capacitor footprint."""
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
+
+        fp = Footprint(
+            name="C_0402_1005Metric",
+            description="Capacitor SMD 0402 (1005 Metric), standard IPC-7351",
+            tags="capacitor smd 0402 1005",
+        )
+        smd_layers = [Layer.F_CU, Layer.F_PASTE, Layer.F_MASK]
+
+        fp.add_pad(
+            Pad(
+                number="1",
+                pad_type=PadType.SMD,
+                shape=PadShape.ROUNDRECT,
+                position=(-0.48, 0),
+                size=(0.56, 0.62),
+                layers=smd_layers,
+            )
+        )
+        fp.add_pad(
+            Pad(
+                number="2",
+                pad_type=PadType.SMD,
+                shape=PadShape.ROUNDRECT,
+                position=(0.48, 0),
+                size=(0.56, 0.62),
+                layers=smd_layers,
+            )
+        )
+
+        sexp = fp.to_sexp()
+
+        # Verify the footprint can be parsed back
+        from kicad_tools.sexp import parse_string
+
+        parsed = parse_string(sexp)
+        assert parsed.name == "footprint"
+        assert parsed.get_first_atom() == "C_0402_1005Metric"
+
+        # Verify pads are present
+        pads = parsed.find_all("pad")
+        assert len(pads) == 2
+
+    def test_tht_header_footprint(self):
+        """Test generating a through-hole header footprint."""
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
+
+        fp = Footprint(
+            name="PinHeader_1x04",
+            description="Pin header 1x4",
+            tags="pin header",
+        )
+        tht_layers = [Layer.F_CU, Layer.B_CU, Layer.F_MASK, Layer.B_MASK]
+
+        for i in range(4):
+            fp.add_pad(
+                Pad(
+                    number=str(i + 1),
+                    pad_type=PadType.THT,
+                    shape=PadShape.CIRCLE,
+                    position=(0, i * 2.54),
+                    size=(1.7, 1.7),
+                    layers=tht_layers,
+                    drill=1.0,
+                )
+            )
+
+        sexp = fp.to_sexp()
+
+        # THT footprints should have through_hole attribute
+        assert "(attr through_hole)" in sexp
+        assert "(drill 1)" in sexp
+
+        # Verify it can be parsed
+        from kicad_tools.sexp import parse_string
+
+        parsed = parse_string(sexp)
+        pads = parsed.find_all("pad")
+        assert len(pads) == 4
+
+    def test_roundtrip_parsing(self):
+        """Test that generated footprint can be parsed and matches original structure."""
+        from kicad_tools.footprints import Footprint, Layer, Pad, PadShape, PadType
+        from kicad_tools.sexp import parse_string
+
+        fp = Footprint(
+            name="Test_Footprint",
+            description="Test description",
+            tags="test tags",
+        )
+        fp.add_pad(
+            Pad(
+                number="A1",
+                pad_type=PadType.SMD,
+                shape=PadShape.RECT,
+                position=(1.5, -2.0),
+                size=(0.8, 1.2),
+                layers=[Layer.F_CU, Layer.F_PASTE, Layer.F_MASK],
+            )
+        )
+
+        sexp_str = fp.to_sexp()
+        parsed = parse_string(sexp_str)
+
+        # Check structure
+        assert parsed.name == "footprint"
+        assert parsed["version"].get_first_atom() == 20240108
+        assert parsed["generator"].get_first_atom() == "kicad-tools"
+        assert parsed["layer"].get_first_atom() == "F.Cu"
+        assert parsed["descr"].get_first_atom() == "Test description"
+        assert parsed["tags"].get_first_atom() == "test tags"
+
+        # Check pad
+        pad = parsed.find("pad")
+        assert pad is not None
+        at_node = pad["at"]
+        assert at_node.get_atoms() == [1.5, -2]
