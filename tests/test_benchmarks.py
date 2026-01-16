@@ -868,13 +868,15 @@ class TestRouterGridScaling:
         pcb_file = tmp_path / "grid_scale.kicad_pcb"
         pcb_file.write_text(small_routable_pcb_content)
 
-        grid_sizes = [0.5, 0.25, 0.1]
+        # Grid resolution must be <= trace_clearance/2 for reliable DRC compliance
+        # Using trace_clearance=0.4mm allows grid sizes up to 0.2mm
+        grid_sizes = [0.2, 0.1, 0.05]
         results = []
 
         for grid in grid_sizes:
             rules = DesignRules(
                 trace_width=0.2,
-                trace_clearance=0.15,
+                trace_clearance=0.4,
                 via_drill=0.3,
                 via_diameter=0.6,
                 grid_resolution=grid,

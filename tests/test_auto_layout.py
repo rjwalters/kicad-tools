@@ -62,19 +62,19 @@ class TestBoundingBox:
     def test_bounding_box_basic(self):
         """Bounding box includes all pin CONNECTION POINT positions plus padding.
 
-        Pin connection points are at the END of pins (base + length in pin direction).
+        In KiCad, pin (x, y) coordinates ARE the wire connection points.
         For the default test symbol:
-        - Pins 1,2: base at x=-5.08, angle=180 (left), length=2.54 -> connection at x=-7.62
-        - Pins 3,4: base at x=+5.08, angle=0 (right), length=2.54 -> connection at x=+7.62
+        - Pins 1,2: connection point at x=-5.08
+        - Pins 3,4: connection point at x=+5.08
         - All pins have y at ±2.54
         """
         sym = make_symbol_instance(x=100.0, y=100.0)
         box = sym.bounding_box(padding=0)
 
-        # Pin connection points at +-7.62 (5.08 base + 2.54 length), +-2.54 (unchanged y)
-        assert box[0] == pytest.approx(100.0 - 7.62, abs=0.01)  # min_x
+        # Pin connection points are at (x, y) = (±5.08, ±2.54)
+        assert box[0] == pytest.approx(100.0 - 5.08, abs=0.01)  # min_x
         assert box[1] == pytest.approx(100.0 - 2.54, abs=0.01)  # min_y
-        assert box[2] == pytest.approx(100.0 + 7.62, abs=0.01)  # max_x
+        assert box[2] == pytest.approx(100.0 + 5.08, abs=0.01)  # max_x
         assert box[3] == pytest.approx(100.0 + 2.54, abs=0.01)  # max_y
 
     def test_bounding_box_with_padding(self):
@@ -82,10 +82,10 @@ class TestBoundingBox:
         sym = make_symbol_instance(x=100.0, y=100.0)
         box = sym.bounding_box(padding=2.54)
 
-        # Pin connection points at +-7.62, +-2.54 relative to center, plus 2.54 padding
-        assert box[0] == pytest.approx(100.0 - 7.62 - 2.54, abs=0.01)
+        # Pin connection points at +-5.08, +-2.54 relative to center, plus 2.54 padding
+        assert box[0] == pytest.approx(100.0 - 5.08 - 2.54, abs=0.01)
         assert box[1] == pytest.approx(100.0 - 2.54 - 2.54, abs=0.01)
-        assert box[2] == pytest.approx(100.0 + 7.62 + 2.54, abs=0.01)
+        assert box[2] == pytest.approx(100.0 + 5.08 + 2.54, abs=0.01)
         assert box[3] == pytest.approx(100.0 + 2.54 + 2.54, abs=0.01)
 
     def test_bounding_box_no_pins(self):
