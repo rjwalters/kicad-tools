@@ -223,7 +223,7 @@ class SchematicElementsMixin:
 
             # Add with custom properties for thermal analysis
             sym = sch.add_symbol(
-                "Device:Q_NMOS_GDS", x=100, y=50, ref="Q1",
+                "Device:Q_NMOS", x=100, y=50, ref="Q1",
                 value="IRLZ44N",
                 properties={"Thermal_Rth_JC": "0.5", "Power_Dissipation": "5W"}
             )
