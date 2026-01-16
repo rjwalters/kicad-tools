@@ -39,6 +39,44 @@ Usage::
     # Validate an existing PCB layout
     violations = pattern.validate("board.kicad_pcb")
 
+User-Defined Patterns
+---------------------
+
+You can define custom patterns in two ways:
+
+1. YAML Definition::
+
+    # patterns/my_sensor.yaml
+    name: temperature_sensor
+    description: NTC thermistor with filtering
+
+    components:
+      - role: thermistor
+        reference_prefix: RT
+      - role: filter_cap
+        reference_prefix: C
+
+    placement_rules:
+      - component: filter_cap
+        relative_to: thermistor
+        max_distance_mm: 5
+
+    # Load and use
+    from kicad_tools.patterns import PatternRegistry
+    PatternRegistry.load_yaml("patterns/my_sensor.yaml")
+    pattern = PatternRegistry.get("temperature_sensor")
+
+2. Python Decorator::
+
+    from kicad_tools.patterns import define_pattern, placement_rule
+
+    @define_pattern
+    class MySensorPattern:
+        components = ["sensor", "cap"]
+        placement_rules = [
+            placement_rule("cap", relative_to="sensor", max_distance_mm=5.0),
+        ]
+
 Validation:
     Use PatternValidator to check that instantiated patterns meet their
     design requirements including placement rules, routing constraints,
@@ -98,6 +136,12 @@ Schema Types:
     - RoutingConstraint: Constraint for trace routing
     - PatternSpec: Complete pattern specification
     - PatternViolation: Validation result
+
+User-Defined Pattern Support:
+    - PatternRegistry: Register and retrieve patterns by name
+    - PatternLoader: Load patterns from YAML files
+    - define_pattern: Decorator for Python pattern definitions
+    - Validation checks: ComponentDistanceCheck, ValueMatchCheck, etc.
 """
 
 # Validation and adaptation
@@ -122,11 +166,40 @@ from kicad_tools.patterns.validation import (
 # Base class
 from .base import PCBPattern
 
+# Validation checks
+from .checks import (
+    CheckContext,
+    ComponentDistanceCheck,
+    ComponentPresentCheck,
+    TraceLengthCheck,
+    ValidationCheck,
+    ValueMatchCheck,
+    ValueRangeCheck,
+    create_check,
+    get_check,
+    register_check,
+)
+
+# Pattern definition DSL
+from .dsl import (
+    define_pattern,
+    get_pattern_from_class,
+    get_pattern_name_from_class,
+    placement_rule,
+    routing_constraint,
+)
+
 # Interface patterns
 from .interface import I2CPattern, USBPattern
 
+# YAML pattern loader
+from .loader import PatternLoader, YAMLPattern
+
 # Power patterns
 from .power import BuckPattern, LDOPattern
+
+# Pattern registry
+from .registry import PatternRegistry, register_pattern
 from .schema import (
     PatternSpec,
     PatternViolation,
@@ -158,6 +231,29 @@ __all__ = [
     # Interface patterns
     "USBPattern",
     "I2CPattern",
+    # Pattern registry
+    "PatternRegistry",
+    "register_pattern",
+    # Pattern loader
+    "PatternLoader",
+    "YAMLPattern",
+    # Pattern definition DSL
+    "define_pattern",
+    "placement_rule",
+    "routing_constraint",
+    "get_pattern_from_class",
+    "get_pattern_name_from_class",
+    # Validation checks
+    "ValidationCheck",
+    "CheckContext",
+    "ComponentDistanceCheck",
+    "ComponentPresentCheck",
+    "TraceLengthCheck",
+    "ValueMatchCheck",
+    "ValueRangeCheck",
+    "get_check",
+    "create_check",
+    "register_check",
     # Validation
     "PatternValidator",
     "PatternValidationResult",

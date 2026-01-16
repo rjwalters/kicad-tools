@@ -1,0 +1,70 @@
+# LED Indicator Pattern
+# Simple LED with current limiting resistor and optional decoupling
+#
+# This pattern defines placement rules for LED indicators driven
+# directly from a GPIO or logic signal.
+#
+# Typical circuit:
+#   GPIO ── R1 (current limit) ── LED ── GND
+#                                  │
+#                                  └── C1 (optional bypass)
+#
+
+name: led_indicator
+description: LED indicator with current limiting
+category: interface
+
+components:
+  - role: led
+    reference_prefix: D
+    # The LED itself
+
+  - role: current_limit_resistor
+    reference_prefix: R
+    # Sets LED current: R = (Vcc - Vf) / I_led
+    # Common values: 330R for 3.3V@10mA, 470R for 5V@10mA
+
+  - role: bypass_cap
+    reference_prefix: C
+    value_range: [100n, 100n]
+    optional: true
+    # Optional bypass for reducing EMI on fast switching
+
+placement_rules:
+  - component: current_limit_resistor
+    relative_to: led
+    max_distance_mm: 5
+    min_distance_mm: 1
+    preferred_angle: 180
+    rationale: "Resistor close to LED for clean current path"
+    priority: high
+
+  - component: bypass_cap
+    relative_to: led
+    max_distance_mm: 3
+    preferred_angle: 90
+    rationale: "Bypass cap near LED for EMI reduction"
+    priority: low
+
+routing_constraints:
+  - net_role: led_drive
+    min_width_mm: 0.25
+    rationale: "Adequate trace width for LED current"
+
+  - net_role: led_ground
+    min_width_mm: 0.25
+    plane_connection: true
+    rationale: "Clean ground return for LED"
+
+validation:
+  - check: component_distance
+    params:
+      from_component: led
+      to_component: current_limit_resistor
+      max_mm: 5
+
+  - check: component_present
+    params:
+      component: current_limit_resistor
+      optional: false
+      rationale: "Current limiting resistor required to protect LED"

@@ -1,0 +1,82 @@
+# Voltage Divider Feedback Pattern
+# Resistor divider for voltage sensing/feedback with filtering
+#
+# This pattern defines placement rules for voltage feedback dividers
+# commonly used in power supply regulation, battery monitoring, and
+# voltage sensing applications.
+#
+# Typical circuit:
+#   VSENSE ── R1 (upper) ──┬── R2 (lower) ── GND
+#                          │
+#                          └── C1 (filter) ── FB_OUT
+#
+
+name: voltage_divider_feedback
+description: Voltage divider with filtering for feedback/sensing
+category: power
+
+components:
+  - role: upper_resistor
+    reference_prefix: R
+    # Determines input impedance and divider ratio
+
+  - role: lower_resistor
+    reference_prefix: R
+    # Sets the feedback voltage level
+
+  - role: filter_cap
+    reference_prefix: C
+    value_range: [10p, 100p]
+    optional: true
+    # Optional high-frequency noise filter
+
+  - role: feedforward_cap
+    reference_prefix: C
+    optional: true
+    # Optional feedforward capacitor for loop compensation
+
+placement_rules:
+  - component: lower_resistor
+    relative_to: upper_resistor
+    max_distance_mm: 3
+    min_distance_mm: 0.5
+    preferred_angle: 90
+    rationale: "Divider resistors close together for matched temperature drift"
+    priority: high
+
+  - component: filter_cap
+    relative_to: lower_resistor
+    max_distance_mm: 3
+    preferred_angle: 0
+    rationale: "Filter cap at divider output node"
+    priority: medium
+
+  - component: feedforward_cap
+    relative_to: upper_resistor
+    max_distance_mm: 4
+    rationale: "Feedforward cap across upper resistor"
+    priority: low
+
+routing_constraints:
+  - net_role: feedback_signal
+    min_width_mm: 0.15
+    max_length_mm: 20
+    rationale: "Keep feedback trace short to minimize noise pickup"
+
+  - net_role: sense_input
+    min_width_mm: 0.2
+    max_length_mm: 30
+    rationale: "Sense input from voltage being measured"
+
+validation:
+  - check: component_distance
+    params:
+      from_component: upper_resistor
+      to_component: lower_resistor
+      max_mm: 3
+
+  - check: value_range
+    params:
+      component: filter_cap
+      min_value: "10p"
+      max_value: "100p"
