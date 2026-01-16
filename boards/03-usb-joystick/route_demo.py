@@ -83,7 +83,7 @@ def _get_routing_params() -> dict[str, float]:
     return {
         "grid_resolution": float(os.environ.get("KCT_ROUTE_GRID", "0.1")),
         "trace_width": float(os.environ.get("KCT_ROUTE_TRACE_WIDTH", "0.2")),
-        "trace_clearance": float(os.environ.get("KCT_ROUTE_CLEARANCE", "0.15")),
+        "trace_clearance": float(os.environ.get("KCT_ROUTE_CLEARANCE", "0.2")),
         "via_drill": float(os.environ.get("KCT_ROUTE_VIA_DRILL", "0.3")),
         "via_diameter": float(os.environ.get("KCT_ROUTE_VIA_DIAMETER", "0.6")),
     }
