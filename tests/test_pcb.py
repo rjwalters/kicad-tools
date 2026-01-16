@@ -499,3 +499,225 @@ class TestPCBQueryMethods:
 
         net = pcb.get_net_by_name("NONEXISTENT_NET")
         assert net is None
+
+
+class TestAddFootprint:
+    """Tests for PCB.add_footprint and add_footprint_from_file methods."""
+
+    # Path to test fixtures
+    FIXTURES_DIR = Path(__file__).parent / "fixtures"
+    TEST_PRETTY_DIR = FIXTURES_DIR / "Test_Library.pretty"
+
+    def test_add_footprint_from_file_basic(self, minimal_pcb):
+        """Test adding a footprint from a .kicad_mod file."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        initial_count = len(pcb.footprints)
+
+        # Add footprint
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+        )
+
+        # Verify footprint was added
+        assert fp is not None
+        assert fp.reference == "C1"
+        assert len(pcb.footprints) == initial_count + 1
+
+    def test_add_footprint_from_file_with_position(self, minimal_pcb):
+        """Test that footprint position is set correctly."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            rotation=90.0,
+        )
+
+        assert fp.position == pytest.approx((50.0, 30.0))
+        assert fp.rotation == pytest.approx(90.0)
+
+    def test_add_footprint_from_file_with_value(self, minimal_pcb):
+        """Test that footprint value is set correctly."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            value="100nF",
+        )
+
+        assert fp.value == "100nF"
+
+    def test_add_footprint_from_file_with_layer(self, minimal_pcb):
+        """Test that footprint layer is set correctly."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            layer="B.Cu",
+        )
+
+        assert fp.layer == "B.Cu"
+
+    def test_add_footprint_from_file_has_pads(self, minimal_pcb):
+        """Test that added footprint has pads."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+        )
+
+        # The C_0402_1005Metric footprint has 2 pads
+        assert len(fp.pads) == 2
+
+    def test_add_footprint_from_file_unique_uuid(self, minimal_pcb):
+        """Test that each added footprint gets a unique UUID."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp1 = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+        )
+        fp2 = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C2",
+            x=60.0,
+            y=30.0,
+        )
+
+        assert fp1.uuid != fp2.uuid
+        assert len(fp1.uuid) > 0
+        assert len(fp2.uuid) > 0
+
+    def test_add_footprint_from_file_get_by_reference(self, minimal_pcb):
+        """Test that added footprint can be found by reference."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+        )
+
+        found = pcb.get_footprint("C1")
+        assert found is not None
+        assert found.reference == "C1"
+
+    def test_add_footprint_from_file_save_roundtrip(self, minimal_pcb, tmp_path):
+        """Test that PCB with added footprint can be saved and reloaded."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            value="100nF",
+        )
+
+        # Save to new file
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        # Reload and verify
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        fp = pcb2.get_footprint("C1")
+        assert fp is not None
+        assert fp.reference == "C1"
+        assert fp.value == "100nF"
+        assert fp.position == pytest.approx((50.0, 30.0))
+
+    def test_add_footprint_from_file_multipad_footprint(self, minimal_pcb):
+        """Test adding a footprint with multiple pads."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        fp = pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "SOT-23-5.kicad_mod",
+            reference="U1",
+            x=80.0,
+            y=25.0,
+            value="LM317",
+        )
+
+        # SOT-23-5 has 5 pads
+        assert len(fp.pads) == 5
+        assert fp.reference == "U1"
+        assert fp.value == "LM317"
+
+    def test_add_footprint_from_file_nonexistent_raises(self, minimal_pcb):
+        """Test that adding a nonexistent file raises an error."""
+        from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        with pytest.raises(KiCadFileNotFoundError):
+            pcb.add_footprint_from_file(
+                kicad_mod_path="/nonexistent/footprint.kicad_mod",
+                reference="C1",
+                x=50.0,
+                y=30.0,
+            )
+
+    def test_add_multiple_footprints(self, minimal_pcb):
+        """Test adding multiple footprints to a PCB."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        initial_count = len(pcb.footprints)
+
+        # Add multiple footprints
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            value="100nF",
+        )
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "R_0603_1608Metric.kicad_mod",
+            reference="R1",
+            x=60.0,
+            y=30.0,
+            value="10k",
+        )
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "SOT-23-5.kicad_mod",
+            reference="U1",
+            x=80.0,
+            y=25.0,
+            value="LM317",
+        )
+
+        assert len(pcb.footprints) == initial_count + 3
+
+        # Verify each can be found
+        assert pcb.get_footprint("C1") is not None
+        assert pcb.get_footprint("R1") is not None
+        assert pcb.get_footprint("U1") is not None
