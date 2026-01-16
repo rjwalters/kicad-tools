@@ -37,6 +37,7 @@ ENV/
 .coverage
 htmlcov/
 coverage.xml
+coverage/
 *.cover
 *.rpt
 
