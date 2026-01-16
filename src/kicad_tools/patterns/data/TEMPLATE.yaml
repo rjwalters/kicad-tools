@@ -1,0 +1,58 @@
+# Template for component requirements YAML file
+# Copy this file and rename to <PART_NUMBER>.yaml
+
+# Component type (required)
+# Options: LDO, LinearRegulator, BuckConverter, BoostConverter, IC
+type: LDO
+
+# Manufacturer name
+manufacturer: Example Corp
+
+# Human-readable description
+description: 3.3V 500mA Low Dropout Regulator
+
+# Input capacitor requirements
+input_cap:
+  min_uf: 10.0           # Minimum capacitance in microfarads
+  max_esr_mohm: 500      # Maximum ESR in milliohms (null if any ESR OK)
+
+# Output capacitor requirements
+output_cap:
+  min_uf: 10.0           # Minimum capacitance in microfarads
+  max_esr_mohm: 500      # Maximum ESR in milliohms (null if any ESR OK)
+
+# Inductor requirements (for switching regulators only)
+# inductor:
+#   min_uh: 33.0          # Minimum inductance in microhenries
+#   max_dcr_mohm: 100     # Maximum DC resistance in milliohms
+
+# Electrical specifications
+dropout_voltage: 0.5     # Dropout voltage in volts (for LDOs)
+max_output_current_ma: 500
+input_voltage_min: 2.5
+input_voltage_max: 12.0
+output_voltage: 3.3
+
+# For switching regulators
+# switching_freq_khz: 1000
+# diode_part_number: SS34  # Recommended catch diode (for async buck)
+
+# Thermal requirements
+thermal_pad:
+  required: false
+  max_junction_temp_c: 125
+
+# Decoupling requirements (for ICs)
+# num_vdd_pins: 4
+# decoupling_caps:
+#   - "4.7uF"
+#   - "100nF"
+#   - "100nF"
+#   - "100nF"
+# max_decoupling_distance_mm: 5.0
+
+# Application notes and warnings
+notes:
+  - Note 1: Any important design considerations
+  - Note 2: Stability requirements
+  - Note 3: Thermal derating information
