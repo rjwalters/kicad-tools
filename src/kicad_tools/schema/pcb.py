@@ -932,11 +932,16 @@ class PCB:
             stackup.append(SExp.list("layer", "F.Paste", SExp.list("type", "Top Solder Paste")))
             stackup.append(
                 SExp.list(
-                    "layer", "F.Mask", SExp.list("type", "Top Solder Mask"), SExp.list("thickness", 0.01)
+                    "layer",
+                    "F.Mask",
+                    SExp.list("type", "Top Solder Mask"),
+                    SExp.list("thickness", 0.01),
                 )
             )
             stackup.append(
-                SExp.list("layer", "F.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+                SExp.list(
+                    "layer", "F.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
             )
             stackup.append(
                 SExp.list(
@@ -950,7 +955,9 @@ class PCB:
                 )
             )
             stackup.append(
-                SExp.list("layer", "In1.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+                SExp.list(
+                    "layer", "In1.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
             )
             stackup.append(
                 SExp.list(
@@ -964,7 +971,9 @@ class PCB:
                 )
             )
             stackup.append(
-                SExp.list("layer", "In2.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+                SExp.list(
+                    "layer", "In2.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
             )
             stackup.append(
                 SExp.list(
@@ -978,7 +987,9 @@ class PCB:
                 )
             )
             stackup.append(
-                SExp.list("layer", "B.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035))
+                SExp.list(
+                    "layer", "B.Cu", SExp.list("type", "copper"), SExp.list("thickness", 0.035)
+                )
             )
             stackup.append(
                 SExp.list(
@@ -1714,6 +1725,182 @@ class PCB:
             layer=layer,
             value=value,
         )
+
+    def add_net(self, net_name: str) -> Net:
+        """
+        Add a new net to the PCB.
+
+        If a net with the same name already exists, returns the existing net.
+
+        Args:
+            net_name: Name of the net (e.g., "GND", "+3V3", "Net-U1-Pad1")
+
+        Returns:
+            The Net object that was added or already existed
+
+        Example:
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> gnd = pcb.add_net("GND")
+            >>> print(gnd.number, gnd.name)
+            1 GND
+        """
+        # Check if net already exists
+        existing = self.get_net_by_name(net_name)
+        if existing:
+            return existing
+
+        # Find the next available net number
+        next_num = max(self._nets.keys(), default=0) + 1
+
+        # Create the net object
+        net = Net(number=next_num, name=net_name)
+        self._nets[next_num] = net
+
+        # Add to the S-expression tree
+        net_sexp = SExp.list("net", next_num, net_name)
+        self._sexp.append(net_sexp)
+
+        return net
+
+    def assign_net_to_footprint_pad(
+        self,
+        reference: str,
+        pad_number: str,
+        net_name: str,
+    ) -> bool:
+        """
+        Assign a net to a specific pad on a footprint.
+
+        This updates both the in-memory footprint data and the underlying
+        S-expression tree for persistence.
+
+        Args:
+            reference: Footprint reference designator (e.g., "U1", "C1")
+            pad_number: Pad number/name (e.g., "1", "2", "A1")
+            net_name: Name of the net to assign (will be created if doesn't exist)
+
+        Returns:
+            True if the pad was found and updated, False otherwise
+
+        Example:
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> pcb.add_footprint("Capacitor_SMD:C_0805_2012Metric", "C1", 50, 50)
+            >>> pcb.assign_net_to_footprint_pad("C1", "1", "GND")
+            True
+        """
+        # Find the footprint in parsed data
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        # Ensure net exists and get its number
+        net = self.add_net(net_name)
+
+        # Update the in-memory pad
+        pad_found = False
+        for pad in fp.pads:
+            if pad.number == pad_number:
+                pad.net_number = net.number
+                pad.net_name = net.name
+                pad_found = True
+                break
+
+        if not pad_found:
+            return False
+
+        # Update the S-expression tree
+        for fp_sexp in self._sexp.find_all("footprint"):
+            # Find the matching footprint by reference
+            ref_value = None
+
+            # KiCad 7 format: fp_text with type "reference"
+            for fp_text in fp_sexp.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    ref_value = fp_text.get_string(1)
+                    break
+
+            # KiCad 8+ format: property with name "Reference"
+            if not ref_value:
+                for prop in fp_sexp.find_all("property"):
+                    if prop.get_string(0) == "Reference":
+                        ref_value = prop.get_string(1)
+                        break
+
+            if ref_value != reference:
+                continue
+
+            # Found the footprint, now find the pad
+            for pad_sexp in fp_sexp.find_all("pad"):
+                if pad_sexp.get_string(0) == pad_number:
+                    # Remove existing net node if present
+                    net_node = pad_sexp.find("net")
+                    if net_node:
+                        pad_sexp.remove(net_node)
+
+                    # Add new net node
+                    new_net_node = SExp.list("net", net.number, net.name)
+                    pad_sexp.append(new_net_node)
+                    return True
+
+        return False
+
+    def assign_nets_from_netlist(self, netlist) -> dict[str, list[str]]:
+        """
+        Assign nets to all footprint pads based on netlist connectivity.
+
+        Iterates through all nets in the netlist and assigns them to the
+        corresponding pads on footprints in the PCB.
+
+        Args:
+            netlist: A Netlist object containing connectivity information
+
+        Returns:
+            Dictionary with statistics:
+            - "assigned": List of successfully assigned pads (format: "REF.PIN")
+            - "missing_footprints": List of references not found in PCB
+            - "missing_pads": List of pads not found (format: "REF.PIN")
+
+        Example:
+            >>> from kicad_tools.operations.netlist import Netlist
+            >>> netlist = Netlist.load("project.kicad_net")
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> # ... add footprints ...
+            >>> result = pcb.assign_nets_from_netlist(netlist)
+            >>> print(f"Assigned {len(result['assigned'])} pads")
+        """
+        stats: dict[str, list[str]] = {
+            "assigned": [],
+            "missing_footprints": [],
+            "missing_pads": [],
+        }
+
+        # Track which footprints we've warned about
+        warned_refs: set[str] = set()
+
+        for net in netlist.nets:
+            # Skip the empty net (net 0)
+            if not net.name:
+                continue
+
+            for node in net.nodes:
+                ref = node.reference
+                pin = node.pin
+
+                # Check if footprint exists
+                fp = self.get_footprint(ref)
+                if not fp:
+                    if ref not in warned_refs:
+                        stats["missing_footprints"].append(ref)
+                        warned_refs.add(ref)
+                    continue
+
+                # Assign net to pad
+                if self.assign_net_to_footprint_pad(ref, pin, net.name):
+                    stats["assigned"].append(f"{ref}.{pin}")
+                else:
+                    stats["missing_pads"].append(f"{ref}.{pin}")
+
+        return stats
 
     def save(self, path: str | Path) -> None:
         """
