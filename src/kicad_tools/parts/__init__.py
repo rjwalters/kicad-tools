@@ -58,7 +58,7 @@ from .importer import (
     LayoutStyle,
     PartImporter,
 )
-from .lcsc import LCSCClient
+from .lcsc import LCSCClient, RateLimiter
 from .models import (
     BOMAvailability,
     PackageType,
@@ -72,6 +72,7 @@ from .models import (
 __all__ = [
     # Client
     "LCSCClient",
+    "RateLimiter",
     # Importer
     "PartImporter",
     "ImportResult",

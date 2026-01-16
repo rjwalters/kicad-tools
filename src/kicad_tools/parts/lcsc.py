@@ -3,13 +3,18 @@ LCSC/JLCPCB parts client.
 
 Fetches parts data from JLCPCB/LCSC for assembly service integration.
 Uses the same API endpoints as the KiCad JLCPCB Plugin.
+
+Includes rate limiting and exponential backoff to handle API rate limits.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
 from datetime import datetime
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from .cache import PartsCache
@@ -27,6 +32,37 @@ if TYPE_CHECKING:
     from ..schema.bom import BOMItem
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimiter:
+    """
+    Thread-safe rate limiter that enforces a minimum interval between requests.
+
+    Uses a simple token bucket algorithm with a single token and configurable
+    refill interval.
+    """
+
+    def __init__(self, min_interval: float = 1.0):
+        """
+        Initialize the rate limiter.
+
+        Args:
+            min_interval: Minimum seconds between requests (default: 1.0)
+        """
+        self.min_interval = min_interval
+        self._last_request_time: float = 0.0
+        self._lock = Lock()
+
+    def wait(self) -> None:
+        """Block until a request is allowed under the rate limit."""
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_time
+            if elapsed < self.min_interval:
+                sleep_time = self.min_interval - elapsed
+                logger.debug(f"Rate limiter sleeping {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+            self._last_request_time = time.monotonic()
 
 
 # JLCPCB API endpoints (same as KiCad JLCPCB Plugin)
@@ -196,6 +232,9 @@ class LCSCClient:
         cache: PartsCache | None = None,
         use_cache: bool = True,
         timeout: float = 30.0,
+        rate_limit: float = 3.0,
+        max_retries: int = 3,
+        base_retry_delay: float = 2.0,
     ):
         """
         Initialize the client.
@@ -204,10 +243,17 @@ class LCSCClient:
             cache: Custom cache instance (default: creates new PartsCache)
             use_cache: Whether to use caching (default: True)
             timeout: Request timeout in seconds
+            rate_limit: Minimum seconds between API requests (default: 3.0)
+                Set to 0 to disable rate limiting.
+            max_retries: Maximum retry attempts on rate limit errors (default: 3)
+            base_retry_delay: Initial delay in seconds before retry (default: 2.0)
         """
         self.cache = cache if cache is not None else PartsCache() if use_cache else None
         self.timeout = timeout
         self._session = None
+        self._rate_limiter = RateLimiter(rate_limit) if rate_limit > 0 else None
+        self._max_retries = max_retries
+        self._base_retry_delay = base_retry_delay
 
     def _get_session(self):
         """Get or create requests session."""
@@ -217,6 +263,84 @@ class LCSCClient:
             self._session = requests.Session()
             self._session.headers.update(self.DEFAULT_HEADERS)
         return self._session
+
+    def _make_request(self, url: str, payload: dict) -> dict | None:
+        """
+        Make a rate-limited request with automatic retry on transient errors.
+
+        Args:
+            url: API endpoint URL
+            payload: JSON payload to send
+
+        Returns:
+            Response JSON data, or None if the request fails after all retries
+        """
+        import requests
+
+        session = self._get_session()
+
+        # Apply rate limiting before making the request
+        if self._rate_limiter:
+            self._rate_limiter.wait()
+
+        last_exception: Exception | None = None
+
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = session.post(url, json=payload, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else 0
+
+                # Only retry on rate limit and server errors
+                if status_code not in (403, 429, 500, 502, 503, 504):
+                    raise
+
+                last_exception = e
+
+                if attempt == self._max_retries:
+                    logger.warning(
+                        f"Max retries ({self._max_retries}) reached, last status: {status_code}"
+                    )
+                    raise
+
+                # Calculate delay with exponential backoff
+                delay = min(
+                    self._base_retry_delay * (2**attempt),
+                    60.0,  # Max 60 second delay
+                )
+
+                # Add jitter (±25% randomization) to prevent thundering herd
+                delay = delay * (0.75 + random.random() * 0.5)
+
+                logger.info(
+                    f"Request failed with {status_code}, retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{self._max_retries})"
+                )
+                time.sleep(delay)
+
+            except requests.RequestException as e:
+                # For connection errors, also retry
+                last_exception = e
+
+                if attempt == self._max_retries:
+                    logger.warning(f"Max retries ({self._max_retries}) reached: {e}")
+                    raise
+
+                delay = min(self._base_retry_delay * (2**attempt), 60.0)
+                delay = delay * (0.75 + random.random() * 0.5)
+
+                logger.info(
+                    f"Request failed ({e}), retrying in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{self._max_retries})"
+                )
+                time.sleep(delay)
+
+        # Should not reach here, but handle edge case
+        if last_exception:
+            raise last_exception
+        return None
 
     @_requires_requests
     def lookup(self, lcsc_part: str, bypass_cache: bool = False) -> Part | None:
@@ -256,22 +380,15 @@ class LCSCClient:
         """Fetch part from JLCPCB API."""
         import requests
 
-        session = self._get_session()
-
-        payload = {
-            "componentCode": lcsc_part,
-        }
+        payload = {"componentCode": lcsc_part}
 
         try:
-            response = session.post(
-                PART_LOOKUP_URL,
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = self._make_request(PART_LOOKUP_URL, payload)
         except requests.RequestException as e:
             logger.warning(f"API request failed for {lcsc_part}: {e}")
+            return None
+
+        if data is None:
             return None
 
         # Check for success
@@ -351,8 +468,6 @@ class LCSCClient:
         """
         import requests
 
-        session = self._get_session()
-
         payload = {
             "keyword": query,
             "pageSize": min(page_size, 100),
@@ -366,19 +481,14 @@ class LCSCClient:
             payload["componentLibraryType"] = "base"
 
         try:
-            response = session.post(
-                SEARCH_URL,
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = self._make_request(SEARCH_URL, payload)
         except requests.RequestException as e:
             logger.error(f"Search request failed: {e}")
             return SearchResult(query=query)
 
-        if data.get("code") != 200:
-            logger.warning(f"Search API returned error: {data.get('message')}")
+        if data is None or data.get("code") != 200:
+            message = data.get("message") if data else "Unknown error"
+            logger.warning(f"Search API returned error: {message}")
             return SearchResult(query=query)
 
         result_data = data.get("data", {})

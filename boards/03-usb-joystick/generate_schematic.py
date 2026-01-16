@@ -76,7 +76,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         comment1="USB game controller with analog joystick",
         comment2="Demonstrates autolayout functionality",
         snap_mode=SnapMode.AUTO,
-        grid=2.54,  # Standard 100mil grid
+        grid=1.27,  # Standard 50mil schematic grid (matches KiCad symbol pins)
     )
 
     # Layout constants
