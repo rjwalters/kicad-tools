@@ -184,12 +184,14 @@ def create_stm32_devboard(output_dir: Path) -> None:
     xtal.connect_to_rails(gnd_rail_y=RAIL_GND)
 
     # Add labels for oscillator connections
+    # Labels must be placed at wire start points (port positions) to avoid ERC errors.
+    # Placing labels at offset endpoints causes "label not on wire" warnings.
     in_pos = xtal.port("IN")
     out_pos = xtal.port("OUT")
-    sch.add_label("OSC_IN", in_pos[0] - 10, in_pos[1], rotation=0)
     sch.add_wire(in_pos, (in_pos[0] - 10, in_pos[1]))
-    sch.add_label("OSC_OUT", out_pos[0] + 10, out_pos[1], rotation=0)
+    sch.add_label("OSC_IN", in_pos[0], in_pos[1], rotation=0)
     sch.add_wire(out_pos, (out_pos[0] + 10, out_pos[1]))
+    sch.add_label("OSC_OUT", out_pos[0], out_pos[1], rotation=0)
     print("   Added OSC_IN and OSC_OUT labels")
 
     # =========================================================================
