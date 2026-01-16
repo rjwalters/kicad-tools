@@ -34,6 +34,12 @@ from kicad_tools.mcp.tools.export import (
 )
 from kicad_tools.mcp.tools.placement import placement_analyze
 from kicad_tools.mcp.tools.routing import get_unrouted_nets, route_net
+from kicad_tools.mcp.tools.patterns import (
+    adapt_pattern,
+    get_requirements,
+    list_available_components,
+    validate_pattern,
+)
 from kicad_tools.mcp.tools.session import (
     apply_move,
     commit_session,
@@ -81,6 +87,7 @@ class MCPServer:
         self._register_context_tools()
         self._register_clearance_tools()
         self._register_routing_tools()
+        self._register_pattern_tools()
 
     def _register_export_tools(self) -> None:
         """Register export-related tools."""
@@ -934,6 +941,135 @@ class MCPServer:
             layer_preference=params.get("layer_preference"),
         )
         return result.to_dict()
+
+    def _register_pattern_tools(self) -> None:
+        """Register pattern validation and adaptation tools."""
+        self.tools["validate_pattern"] = ToolDefinition(
+            name="validate_pattern",
+            description=(
+                "Validate a circuit pattern implementation against design requirements. "
+                "Checks placement rules, routing constraints, and component values for "
+                "patterns like LDO power supplies, decoupling networks, and buck converters. "
+                "Returns violations with severity levels, locations, and fix suggestions."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pcb_path": {
+                        "type": "string",
+                        "description": "Absolute path to .kicad_pcb file",
+                    },
+                    "pattern_type": {
+                        "type": "string",
+                        "description": "Type of pattern to validate",
+                        "enum": ["ldo", "decoupling", "buck"],
+                    },
+                    "components": {
+                        "type": "object",
+                        "description": (
+                            "Pattern-specific component references. "
+                            "For LDO: {regulator, input_cap, output_caps}. "
+                            "For Decoupling: {ic, capacitors}. "
+                            "For Buck: {regulator, inductor, input_cap, output_cap, diode}."
+                        ),
+                    },
+                },
+                "required": ["pcb_path", "pattern_type", "components"],
+            },
+            handler=self._handle_validate_pattern,
+        )
+
+        self.tools["adapt_pattern"] = ToolDefinition(
+            name="adapt_pattern",
+            description=(
+                "Get adapted parameters for a circuit pattern based on component requirements. "
+                "Loads component specifications from the database and generates appropriate "
+                "capacitor values, thermal requirements, and other parameters for the pattern."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern_type": {
+                        "type": "string",
+                        "description": "Type of pattern (LDO, BuckConverter, Decoupling)",
+                    },
+                    "component_mpn": {
+                        "type": "string",
+                        "description": "Manufacturer part number of the main component",
+                    },
+                    "overrides": {
+                        "type": "object",
+                        "description": "Optional parameter overrides",
+                    },
+                },
+                "required": ["pattern_type", "component_mpn"],
+            },
+            handler=self._handle_adapt_pattern,
+        )
+
+        self.tools["get_component_requirements"] = ToolDefinition(
+            name="get_component_requirements",
+            description=(
+                "Get design requirements for a specific component from the database. "
+                "Returns specifications like capacitor requirements, thermal needs, "
+                "dropout voltage, and application notes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "component_mpn": {
+                        "type": "string",
+                        "description": "Manufacturer part number (e.g., 'AMS1117-3.3')",
+                    },
+                },
+                "required": ["component_mpn"],
+            },
+            handler=self._handle_get_requirements,
+        )
+
+        self.tools["list_pattern_components"] = ToolDefinition(
+            name="list_pattern_components",
+            description=(
+                "List components available in the pattern database. "
+                "Optionally filter by component type (LDO, BuckConverter, IC)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "component_type": {
+                        "type": "string",
+                        "description": "Optional filter by type",
+                        "enum": ["LDO", "BuckConverter", "IC", "LinearRegulator"],
+                    },
+                },
+                "required": [],
+            },
+            handler=self._handle_list_components,
+        )
+
+    def _handle_validate_pattern(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle validate_pattern tool call."""
+        return validate_pattern(
+            pcb_path=params["pcb_path"],
+            pattern_type=params["pattern_type"],
+            components=params["components"],
+        )
+
+    def _handle_adapt_pattern(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle adapt_pattern tool call."""
+        return adapt_pattern(
+            pattern_type=params["pattern_type"],
+            component_mpn=params["component_mpn"],
+            overrides=params.get("overrides"),
+        )
+
+    def _handle_get_requirements(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle get_component_requirements tool call."""
+        return get_requirements(params["component_mpn"])
+
+    def _handle_list_components(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle list_pattern_components tool call."""
+        return list_available_components(params.get("component_type"))
 
     def get_tools_list(self) -> list[dict[str, Any]]:
         """Get list of available tools for MCP discovery."""
