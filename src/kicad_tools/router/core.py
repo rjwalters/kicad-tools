@@ -1057,11 +1057,16 @@ class Autorouter:
 
         if timed_out:
             print("  ⚠ Returning partial result due to timeout")
-        elif overflow == 0:
+        elif overflow == 0 and len(net_routes) == total_nets:
+            # Only declare complete if ALL nets were routed AND no conflicts
             print("  No conflicts - routing complete!")
             if progress_callback is not None:
                 progress_callback(1.0, "Routing complete - no conflicts", False)
             return list(self.routes)
+        elif overflow == 0 and len(net_routes) < total_nets:
+            # Some nets failed to route but no overflow - need rip-up
+            failed_count = total_nets - len(net_routes)
+            print(f"  ⚠ {failed_count} net(s) failed to route - attempting recovery")
 
         # Skip iteration loop if already timed out
         if not timed_out:
@@ -1111,6 +1116,18 @@ class Autorouter:
                     self.grid.update_history_costs(history_increment)
 
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
+
+                # Issue #858: Also include nets that completely failed to route
+                # (not in net_routes) - these need recovery via targeted rip-up
+                failed_nets_to_recover = [
+                    n for n in net_order if n not in net_routes and n in pads_by_net
+                ]
+                if failed_nets_to_recover:
+                    # Add failed nets to reroute list if not already present
+                    for failed_net in failed_nets_to_recover:
+                        if failed_net not in nets_to_reroute:
+                            nets_to_reroute.append(failed_net)
+                    print(f"  Including {len(failed_nets_to_recover)} failed net(s) in recovery")
 
                 if use_targeted_ripup:
                     # Targeted rip-up: for each conflicting net, find its specific blockers
@@ -1163,14 +1180,46 @@ class Autorouter:
                             else:
                                 failed_nets.append(failed_net)
                         else:
-                            # No blocking nets found, try regular reroute
-                            routes = self._route_net_negotiated(failed_net, present_factor)
-                            if routes:
-                                net_routes[failed_net] = routes
-                                targeted_ripup_count += 1
-                                for route in routes:
-                                    self.grid.mark_route_usage(route)
-                                    self.routes.append(route)
+                            # Issue #858: No blocking nets found by direct-line check.
+                            # This can happen when blocking traces don't intersect the
+                            # direct path but still prevent routing via clearance/congestion.
+                            # Try ripping up ALL routed nets and re-routing failed net first.
+                            routed_nets = list(net_routes.keys())
+                            if routed_nets and iteration <= 2:  # Try in first few iterations
+                                print(
+                                    f"    No direct blockers found - trying full reorder for net {failed_net}"
+                                )
+                                # Rip up all routed nets
+                                neg_router.rip_up_nets(routed_nets, net_routes, self.routes)
+
+                                # Route the failed net first (it now has priority)
+                                routes = self._route_net_negotiated(failed_net, present_factor)
+                                if routes:
+                                    net_routes[failed_net] = routes
+                                    for route in routes:
+                                        self.grid.mark_route_usage(route)
+                                        self.routes.append(route)
+                                    targeted_ripup_count += 1
+
+                                # Always re-route the other nets (even if failed net didn't route)
+                                for other_net in routed_nets:
+                                    other_routes = self._route_net_negotiated(
+                                        other_net, present_factor
+                                    )
+                                    if other_routes:
+                                        net_routes[other_net] = other_routes
+                                        for route in other_routes:
+                                            self.grid.mark_route_usage(route)
+                                            self.routes.append(route)
+                            else:
+                                # Fallback: try regular reroute
+                                routes = self._route_net_negotiated(failed_net, present_factor)
+                                if routes:
+                                    net_routes[failed_net] = routes
+                                    targeted_ripup_count += 1
+                                    for route in routes:
+                                        self.grid.mark_route_usage(route)
+                                        self.routes.append(route)
 
                     if timed_out:
                         break
@@ -1185,7 +1234,8 @@ class Autorouter:
                     )
 
                     # Check for convergence in targeted mode
-                    if overflow == 0:
+                    # Issue #858: Also check that all nets were routed
+                    if overflow == 0 and len(net_routes) == total_nets:
                         print(f"  Convergence achieved at iteration {iteration}!")
                         break
 
@@ -1258,7 +1308,8 @@ class Autorouter:
                 # Track overflow history for adaptive mode (Issue #633)
                 overflow_history.append(overflow)
 
-                if overflow == 0:
+                # Issue #858: Also check that all nets were routed
+                if overflow == 0 and len(net_routes) == total_nets:
                     print(f"  Convergence achieved at iteration {iteration}!")
                     break
 
