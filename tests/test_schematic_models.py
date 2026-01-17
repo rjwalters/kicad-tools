@@ -577,9 +577,9 @@ class TestSymbolInstance:
 
         pos = inst.pin_position("1")
         # At 90 degrees, (-2.54, 0) rotates to (0, -2.54)
-        # With Y flip in schematic coords: (100+0, 100-(-2.54)) = (100, 102.54)
+        # Both symbol defs and schematics use Y-down: (100+0, 100+(-2.54)) = (100, 97.46)
         assert abs(pos[0] - 100.0) < 0.01
-        assert abs(pos[1] - 102.54) < 0.01
+        assert abs(pos[1] - 97.46) < 0.01
 
     def test_symbol_instance_pin_position_by_number(self, mock_symbol_def):
         """Get pin position by pin number."""
@@ -627,6 +627,39 @@ class TestSymbolInstance:
         positions = inst.all_pin_positions()
         assert "1" in positions
         assert "2" in positions
+
+    def test_pin_position_vertical_ordering(self):
+        """Verify pins maintain correct vertical ordering (issue #889).
+
+        Pins with positive Y in symbol-local coords should have higher screen Y
+        than pins with negative Y, since both symbol defs and schematics use Y-down.
+        """
+        # Create a symbol with pins at different Y positions
+        pins = [
+            Pin(name="TOP", number="1", x=5.08, y=2.54, angle=0, length=2.54, pin_type="passive"),
+            Pin(name="BOTTOM", number="2", x=5.08, y=-2.54, angle=0, length=2.54, pin_type="passive"),
+        ]
+        sym_def = SymbolDef(lib_id="Test:Vertical", name="Vertical", raw_sexp="", pins=pins)
+        inst = SymbolInstance(
+            symbol_def=sym_def,
+            x=100.0,
+            y=100.0,
+            rotation=0,
+            reference="U1",
+            value="Test",
+        )
+
+        top_pos = inst.pin_position("TOP")  # Pin at symbol-local y=+2.54
+        bottom_pos = inst.pin_position("BOTTOM")  # Pin at symbol-local y=-2.54
+
+        # In Y-down coords, higher Y value = lower on screen
+        # TOP pin (+2.54 in symbol) should have HIGHER screen Y than BOTTOM (-2.54)
+        assert top_pos[1] > bottom_pos[1], (
+            f"TOP y={top_pos[1]} should be > BOTTOM y={bottom_pos[1]}"
+        )
+        # Verify exact positions: symbol_pos + pin_pos
+        assert top_pos == (105.08, 102.54)  # 100 + 5.08, 100 + 2.54
+        assert bottom_pos == (105.08, 97.46)  # 100 + 5.08, 100 + (-2.54)
 
     def test_symbol_instance_to_sexp_node(self, mock_symbol_def):
         """SymbolInstance generates valid S-expression node."""
