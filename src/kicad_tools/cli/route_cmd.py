@@ -53,7 +53,12 @@ import argparse
 import math
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.router import Autorouter, LayerStack
 
 # Global state for Ctrl+C handling
 _interrupt_state = {
@@ -314,6 +319,393 @@ def run_post_route_drc(
         return -1, -1  # Indicate failure to run DRC
 
 
+@dataclass
+class LayerEscalationResult:
+    """Result of a layer escalation routing attempt."""
+
+    layer_count: int
+    layer_stack: "LayerStack"
+    router: "Autorouter"
+    net_map: dict
+    nets_routed: int
+    nets_to_route: int
+    completion: float
+    success: bool
+
+
+def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
+    """Update PCB content to have the specified number of copper layers.
+
+    Args:
+        pcb_content: Original PCB file content
+        target_layers: Target number of copper layers (2, 4, or 6)
+
+    Returns:
+        Updated PCB content with correct layer definitions
+    """
+    import re
+
+    # Layer definitions for different stackups
+    layer_defs = {
+        2: [
+            '(0 "F.Cu" signal)',
+            '(31 "B.Cu" signal)',
+        ],
+        4: [
+            '(0 "F.Cu" signal)',
+            '(1 "In1.Cu" signal)',
+            '(2 "In2.Cu" signal)',
+            '(31 "B.Cu" signal)',
+        ],
+        6: [
+            '(0 "F.Cu" signal)',
+            '(1 "In1.Cu" signal)',
+            '(2 "In2.Cu" signal)',
+            '(3 "In3.Cu" signal)',
+            '(4 "In4.Cu" signal)',
+            '(31 "B.Cu" signal)',
+        ],
+    }
+
+    if target_layers not in layer_defs:
+        return pcb_content
+
+    # Find and replace the layers section
+    # KiCad format: (layers (0 "F.Cu" signal) ... )
+    layers_pattern = re.compile(
+        r'(\(layers\s+)([^)]*"(?:F\.Cu|B\.Cu|In\d+\.Cu)"[^)]*\s*)+(\))',
+        re.DOTALL,
+    )
+
+    def replace_layers(match):
+        # Build new layers content
+        new_layers = "\n    ".join(layer_defs[target_layers])
+        return f"(layers\n    {new_layers}\n  )"
+
+    # Check if we need to update
+    current_layers = pcb_content.count('.Cu" signal')
+    if current_layers >= target_layers:
+        return pcb_content
+
+    # Try to find and replace the layers section
+    new_content = layers_pattern.sub(replace_layers, pcb_content)
+
+    # If the pattern didn't match, try a more permissive pattern
+    if new_content == pcb_content:
+        # Alternative pattern for different KiCad versions
+        alt_pattern = re.compile(
+            r'\(layers\s*\n(\s+\(\d+\s+"[^"]+"\s+\w+[^)]*\)\s*\n)+\s*\)',
+            re.MULTILINE,
+        )
+        new_layers_content = "\n    ".join(layer_defs[target_layers])
+        new_content = alt_pattern.sub(
+            f"(layers\n    {new_layers_content}\n  )",
+            pcb_content,
+        )
+
+    return new_content
+
+
+def route_with_layer_escalation(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool = False,
+) -> int:
+    """Route a PCB with automatic layer escalation.
+
+    Tries routing at 2, 4, and 6 layers until success or max is reached.
+
+    Args:
+        pcb_path: Path to input PCB file
+        output_path: Path for output routed PCB file
+        args: Parsed command-line arguments
+        quiet: Suppress output
+
+    Returns:
+        Exit code (0 = success, 1 = failure)
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router import (
+        DesignRules,
+        LayerStack,
+        is_cpp_available,
+        load_pcb_for_routing,
+        show_routing_summary,
+    )
+
+    # Handle backend selection
+    force_python = False
+    if args.backend == "cpp":
+        if not is_cpp_available():
+            print(
+                "Error: C++ backend requested but not available.\n"
+                "Build the C++ extension or use --backend auto/python.\n"
+                "See README for build instructions.",
+                file=sys.stderr,
+            )
+            return 1
+    elif args.backend == "python":
+        force_python = True
+
+    # Configure design rules
+    rules = DesignRules(
+        grid_resolution=args.grid,
+        trace_width=args.trace_width,
+        trace_clearance=args.clearance,
+        via_drill=args.via_drill,
+        via_diameter=args.via_diameter,
+    )
+
+    # Parse skip nets
+    skip_nets = []
+    if args.skip_nets:
+        skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Layer stacks to try (in escalation order)
+    layer_configs = [
+        (2, LayerStack.two_layer()),
+        (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
+        (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
+    ]
+
+    # Filter by max_layers
+    layer_configs = [(n, s) for n, s in layer_configs if n <= args.max_layers]
+
+    if not quiet:
+        print("=" * 60)
+        print("KiCad PCB Autorouter - Layer Escalation Mode")
+        print("=" * 60)
+        print(f"Input:          {pcb_path}")
+        print(f"Output:         {output_path}")
+        print(f"Strategy:       {args.strategy}")
+        print(f"Max layers:     {args.max_layers}")
+        print(f"Min completion: {args.min_completion * 100:.0f}%")
+        if skip_nets:
+            print(f"Skip:           {', '.join(skip_nets)}")
+        print()
+
+    best_result: LayerEscalationResult | None = None
+    successful_result: LayerEscalationResult | None = None
+
+    for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
+        if not quiet:
+            print("=" * 60)
+            print(f"Attempt {attempt_num}: {layer_count} layers")
+            print("=" * 60)
+
+        # Load PCB with this layer stack
+        try:
+            with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
+                router, net_map = load_pcb_for_routing(
+                    str(pcb_path),
+                    skip_nets=skip_nets,
+                    rules=rules,
+                    edge_clearance=args.edge_clearance,
+                    layer_stack=layer_stack,
+                    force_python=force_python,
+                    validate_drc=not args.force,
+                    strict_drc=False,
+                )
+        except Exception as e:
+            if not quiet:
+                print(f"  Error loading PCB: {e}")
+            continue
+
+        # Count nets to route
+        multi_pad_nets = [
+            net_num
+            for net_num, pads in router.nets.items()
+            if net_num > 0 and len(pads) >= 2
+        ]
+        nets_to_route = len(multi_pad_nets)
+
+        if not quiet:
+            print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+            print(f"  Nets to route: {nets_to_route}")
+
+        # Route
+        if not quiet:
+            print(f"\n  Routing ({args.strategy})...")
+
+        try:
+            if args.strategy == "negotiated":
+                router.route_all_negotiated(
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
+            elif args.strategy == "basic":
+                router.route_all()
+            elif args.strategy == "monte-carlo":
+                router.route_all_monte_carlo(
+                    num_trials=args.mc_trials,
+                    verbose=args.verbose and not quiet,
+                )
+        except Exception as e:
+            if not quiet:
+                print(f"  Routing error: {e}")
+            continue
+
+        # Calculate completion
+        stats = router.get_statistics()
+        nets_routed = stats["nets_routed"]
+        completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
+
+        # Create result
+        result = LayerEscalationResult(
+            layer_count=layer_count,
+            layer_stack=layer_stack,
+            router=router,
+            net_map=net_map,
+            nets_routed=nets_routed,
+            nets_to_route=nets_to_route,
+            completion=completion,
+            success=completion >= args.min_completion,
+        )
+
+        # Track best result
+        if best_result is None or completion > best_result.completion:
+            best_result = result
+
+        # Report attempt result
+        status = "SUCCESS" if result.success else "INSUFFICIENT - escalating"
+        if not quiet:
+            print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
+            print(f"  Status: {status}")
+
+        # Check for success
+        if result.success:
+            successful_result = result
+            break
+
+    # Handle results
+    if not quiet:
+        print("\n" + "=" * 60)
+        print("LAYER ESCALATION SUMMARY")
+        print("=" * 60)
+
+    if successful_result:
+        final_result = successful_result
+        if not quiet:
+            print(
+                f"Result: Design routed successfully on {final_result.layer_count} layers "
+                f"({final_result.completion * 100:.0f}% completion)"
+            )
+    elif best_result:
+        final_result = best_result
+        if not quiet:
+            print(
+                f"Result: Best result on {final_result.layer_count} layers "
+                f"({final_result.completion * 100:.0f}% completion)"
+            )
+            print(
+                f"Warning: Did not achieve {args.min_completion * 100:.0f}% completion "
+                f"on any layer count (max: {args.max_layers})"
+            )
+    else:
+        if not quiet:
+            print("Error: No routing attempts succeeded")
+        return 1
+
+    # Optimize traces
+    if not args.no_optimize and final_result.router.routes:
+        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+
+        if not quiet:
+            print("\n--- Optimizing traces ---")
+
+        opt_config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=True,
+            compress_staircase=True,
+            convert_45_corners=True,
+            corner_chamfer_size=0.5,
+            minimize_vias=True,
+        )
+        optimizer = TraceOptimizer(config=opt_config)
+
+        with spinner("Optimizing traces...", quiet=quiet):
+            optimized_routes = []
+            for route in final_result.router.routes:
+                optimized_route = optimizer.optimize_route(route)
+                optimized_routes.append(optimized_route)
+            final_result.router.routes = optimized_routes
+
+    # Save output
+    if args.dry_run:
+        if not quiet:
+            print("\n--- Dry run - not saving ---")
+        return 0
+
+    if not quiet:
+        print("\n--- Saving routed PCB ---")
+
+    with spinner("Saving routed PCB...", quiet=quiet):
+        # Read original PCB content
+        original_content = pcb_path.read_text()
+
+        # Update layer stackup if we escalated
+        if final_result.layer_count > 2:
+            original_content = update_pcb_layer_stackup(
+                original_content, final_result.layer_count
+            )
+
+        # Get route S-expressions
+        route_sexp = final_result.router.to_sexp()
+
+        # Insert routes before final closing parenthesis
+        if route_sexp:
+            output_content = original_content.rstrip().rstrip(")")
+            output_content += f"\n  {route_sexp}\n"
+            output_content += ")\n"
+        else:
+            output_content = original_content
+            if not quiet:
+                print("  Warning: No routes generated!")
+
+        # Update output filename to include layer count
+        if final_result.layer_count > 2:
+            output_path = output_path.with_stem(
+                output_path.stem + f"_{final_result.layer_count}layer"
+            )
+
+        output_path.write_text(output_content)
+
+    if not quiet:
+        print(f"  Saved to: {output_path}")
+        print(f"  Layer count: {final_result.layer_count}")
+
+    # Run DRC validation unless skipped
+    if not args.skip_drc and final_result.nets_routed > 0:
+        run_post_route_drc(
+            output_path=output_path,
+            manufacturer=args.manufacturer,
+            layers=final_result.layer_count,
+            quiet=quiet,
+        )
+
+    # Final summary
+    if not quiet:
+        print("\n" + "=" * 60)
+        if final_result.success:
+            print(
+                f"SUCCESS: Design requires minimum {final_result.layer_count} layers"
+            )
+        else:
+            print(
+                f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
+                f"on {final_result.layer_count} layers"
+            )
+            show_routing_summary(
+                final_result.router,
+                final_result.net_map,
+                final_result.nets_to_route,
+                quiet=quiet,
+            )
+
+    return 0 if final_result.success else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for route command."""
     parser = argparse.ArgumentParser(
@@ -550,6 +942,35 @@ def main(argv: list[str] | None = None) -> int:
         dest="no_optimize",
         help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
     )
+    parser.add_argument(
+        "--auto-layers",
+        action="store_true",
+        help=(
+            "Automatically escalate layer count on routing failure. "
+            "Tries 2 → 4 → 6 layers until routing succeeds or max is reached. "
+            "Reports minimum viable layer count for the design."
+        ),
+    )
+    parser.add_argument(
+        "--max-layers",
+        type=int,
+        default=6,
+        choices=[2, 4, 6],
+        help=(
+            "Maximum layer count for auto-escalation (default: 6). "
+            "Only used with --auto-layers."
+        ),
+    )
+    parser.add_argument(
+        "--min-completion",
+        type=float,
+        default=0.95,
+        help=(
+            "Minimum routing completion rate for success (default: 0.95 = 95%%). "
+            "Only used with --auto-layers. If no layer count achieves this, "
+            "the best result is saved."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -562,11 +983,37 @@ def main(argv: list[str] | None = None) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Validate --auto-layers is not used with explicit --layers
+    if args.auto_layers and args.layers != "auto":
+        print(
+            f"Error: --auto-layers cannot be used with --layers {args.layers}.\n"
+            "Use --auto-layers alone, or use --layers to specify a fixed layer count.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Validate min-completion is between 0 and 1
+    if args.min_completion < 0 or args.min_completion > 1:
+        print(
+            f"Error: --min-completion must be between 0 and 1 (got {args.min_completion}).",
+            file=sys.stderr,
+        )
+        return 1
+
     # Determine output path
     if args.output:
         output_path = Path(args.output)
     else:
         output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
+
+    # Handle auto-layers mode (separate code path)
+    if args.auto_layers:
+        return route_with_layer_escalation(
+            pcb_path=pcb_path,
+            output_path=output_path,
+            args=args,
+            quiet=args.quiet,
+        )
 
     # Parse skip nets
     skip_nets = []
