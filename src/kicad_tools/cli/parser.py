@@ -1764,6 +1764,29 @@ def _add_analyze_parser(subparsers) -> None:
         help="Minimum power threshold in Watts (default: 0.05)",
     )
 
+    # analyze complexity
+    complexity_parser = analyze_subparsers.add_parser(
+        "complexity",
+        help="Analyze routing complexity and predict layer requirements",
+        description="Estimate routing complexity, predict layer count, and identify bottlenecks",
+    )
+    complexity_parser.add_argument("pcb", help="PCB file to analyze (.kicad_pcb)")
+    complexity_parser.add_argument(
+        "--format",
+        "-f",
+        dest="analyze_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    complexity_parser.add_argument(
+        "--grid-size",
+        dest="analyze_grid_size",
+        type=float,
+        default=5.0,
+        help="Grid cell size for density analysis in mm (default: 5.0)",
+    )
+
 
 def _add_constraints_parser(subparsers) -> None:
     """Add constraints subcommand parser with its subcommands."""
