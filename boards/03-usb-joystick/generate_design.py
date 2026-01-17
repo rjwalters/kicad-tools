@@ -592,10 +592,10 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
             )
 
         pads.append(
-            f'    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+            '    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
         )
         pads.append(
-            f'    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+            '    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
         )
 
         pads_str = "\n".join(pads)
@@ -709,10 +709,10 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     ]
 
     print("\n1. Adding footprints...")
-    print(f"   U1 (MCU) at board center")
-    print(f"   J1 (USB-C) at top")
-    print(f"   JOY1 (Joystick) at left")
-    print(f"   Y1 (Crystal) near MCU")
+    print("   U1 (MCU) at board center")
+    print("   J1 (USB-C) at top")
+    print("   JOY1 (Joystick) at left")
+    print("   Y1 (Crystal) near MCU")
 
     button_y = BOARD_ORIGIN_Y + 35
     button_positions = [
@@ -723,7 +723,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     ]
     for ref, pos, net in button_positions:
         parts.append(generate_button(ref, pos, net))
-    print(f"   SW1-SW4 (Buttons) at bottom")
+    print("   SW1-SW4 (Buttons) at bottom")
 
     cap_positions = [
         ("C1", (BOARD_ORIGIN_X + 22, BOARD_ORIGIN_Y + 18), "VCC", "GND"),
@@ -733,7 +733,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     ]
     for ref, pos, net1, net2 in cap_positions:
         parts.append(generate_capacitor(ref, pos, net1, net2))
-    print(f"   C1-C4 (Capacitors) near MCU")
+    print("   C1-C4 (Capacitors) near MCU")
 
     parts.append(")")
 
@@ -830,14 +830,14 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     print("Routing PCB...")
     print("=" * 60)
 
-    # Design rules - Using coarser grid (0.2mm) for reasonable routing speed.
-    # Grid must be <= clearance/2 for DRC compliance.
-    # Note: Fine-pitch QFP routing requires finer grid but takes much longer.
-    # For this demo, partial routing is acceptable - some nets may not route.
+    # Design rules - Using 0.1mm grid for reasonable routing.
+    # Grid must be <= clearance/2 for DRC compliance (0.1 <= 0.2/2 = 0.1 ✓).
+    # These parameters match other demo boards (01-voltage-divider).
+    # Note: Dense TQFP-32 routing is challenging, partial routing is expected.
     rules = DesignRules(
-        grid_resolution=0.2,
+        grid_resolution=0.1,
         trace_width=0.2,
-        trace_clearance=0.4,
+        trace_clearance=0.2,
         via_drill=0.3,
         via_diameter=0.6,
     )
