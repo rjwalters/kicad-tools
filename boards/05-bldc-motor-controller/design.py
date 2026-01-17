@@ -200,12 +200,29 @@ def create_bldc_controller(output_dir: Path) -> None:
         ref="U1",
         input_voltage=24.0,
         cap_ref_start=3,  # C3, C4
+        diode_ref="D2",  # D1 is used for TVS diode
     )
     buck.connect_to_rails(
         vin_rail_y=RAIL_VMOTOR,
         vout_rail_y=RAIL_5V,
         gnd_rail_y=RAIL_GND,
     )
+
+    # Tie the ~ON/OFF pin to GND for always-on operation
+    # The LM2596 ON/OFF pin is active-low: GND = ON, >1.3V = OFF
+    try:
+        on_off_pos = buck.regulator.pin_position("~{ON}/OFF")
+        sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND))
+        sch.add_junction(on_off_pos[0], RAIL_GND)
+    except KeyError:
+        # Some LM2596 symbols may have different pin names
+        try:
+            on_off_pos = buck.regulator.pin_position("ON/OFF")
+            sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND))
+            sch.add_junction(on_off_pos[0], RAIL_GND)
+        except KeyError:
+            pass  # Pin not found, may not be present on this symbol variant
+
     print(f"   Buck regulator: {buck.regulator.reference} (LM2596-5.0)")
     print(f"   Inductor: {buck.inductor.reference} = 33uH")
     print(f"   Diode: {buck.diode.reference} = SS34 (Schottky)")
@@ -372,11 +389,17 @@ def create_bldc_controller(output_dir: Path) -> None:
         # Get the phase output from inverter and wire to shunt
         phase_gnd = inverter.half_bridges[i].port("GND")
         sense_in = sense.port("IN_POS")
+        sense_gnd = sense.port("GND")
         sch.add_wire(phase_gnd, sense_in)
 
-        # Add current sense labels
-        sch.add_label(f"ISENSE_{phase}+", x_phase - 10, sense_in[1], rotation=0)
-        sch.add_label(f"ISENSE_{phase}-", x_phase - 10, sense.port("GND")[1], rotation=0)
+        # Add current sense labels with connecting wires
+        label_x = x_phase - 10
+        # Wire from sense_in to label position for ISENSE+
+        sch.add_wire(sense_in, (label_x, sense_in[1]))
+        sch.add_label(f"ISENSE_{phase}+", label_x, sense_in[1], rotation=0)
+        # Wire from sense GND to label position for ISENSE-
+        sch.add_wire(sense_gnd, (label_x, sense_gnd[1]))
+        sch.add_label(f"ISENSE_{phase}-", label_x, sense_gnd[1], rotation=0)
 
         print(f"   Phase {phase}: Current sense R{10 + i} (CurrentSenseShunt block)")
 
@@ -399,9 +422,16 @@ def create_bldc_controller(output_dir: Path) -> None:
         pin_pos = j_motor.pin_position(str(i + 1))
         # Get phase output from inverter block
         phase_out = inverter.port(f"PHASE_{phase}")
-        # Wire from phase output node to connector
-        sch.add_wire(pin_pos, (phase_out[0] + 15, pin_pos[1]))
-        sch.add_wire((phase_out[0] + 15, pin_pos[1]), (phase_out[0] + 15, Y_POWER_STAGE + 20))
+        # Wire from connector pin horizontally, then down to phase output level,
+        # then connect to the phase output
+        mid_x = phase_out[0] + 15
+        # Horizontal wire from connector pin
+        sch.add_wire(pin_pos, (mid_x, pin_pos[1]))
+        # Vertical wire down to phase output Y level
+        sch.add_wire((mid_x, pin_pos[1]), (mid_x, phase_out[1]))
+        # Horizontal wire to connect to phase output
+        sch.add_wire((mid_x, phase_out[1]), phase_out)
+        sch.add_junction(phase_out[0], phase_out[1])
 
     # =========================================================================
     # Section 9: Hall Sensor Connector
@@ -417,10 +447,25 @@ def create_bldc_controller(output_dir: Path) -> None:
     )
     print(f"   Hall connector: {j_hall.reference}")
 
-    # Add hall signal labels
-    sch.add_label("HALL_A", X_CONNECTORS - 20, 100, rotation=0)
-    sch.add_label("HALL_B", X_CONNECTORS - 20, 105, rotation=0)
-    sch.add_label("HALL_C", X_CONNECTORS - 20, 110, rotation=0)
+    # Wire hall signal pins and add labels
+    # Pins 1-3 are hall signals, pin 4 is VCC, pin 5 is GND
+    hall_labels = ["HALL_A", "HALL_B", "HALL_C"]
+    for i, label in enumerate(hall_labels):
+        pin_pos = j_hall.pin_position(str(i + 1))
+        label_x = X_CONNECTORS - 20
+        # Add wire from pin to label position
+        sch.add_wire(pin_pos, (label_x, pin_pos[1]))
+        sch.add_label(label, label_x, pin_pos[1], rotation=0)
+
+    # Wire hall connector VCC (pin 4) to 3.3V rail
+    hall_vcc_pos = j_hall.pin_position("4")
+    sch.add_wire(hall_vcc_pos, (hall_vcc_pos[0], RAIL_3V3))
+    sch.add_junction(hall_vcc_pos[0], RAIL_3V3)
+
+    # Wire hall connector GND (pin 5) to GND rail
+    hall_gnd_pos = j_hall.pin_position("5")
+    sch.add_wire(hall_gnd_pos, (hall_gnd_pos[0], RAIL_GND))
+    sch.add_junction(hall_gnd_pos[0], RAIL_GND)
 
     # =========================================================================
     # Section 10: Status LEDs
