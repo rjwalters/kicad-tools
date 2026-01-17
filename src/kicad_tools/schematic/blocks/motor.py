@@ -343,9 +343,12 @@ class ThreePhaseInverter(CircuitBlock):
             )
             self.half_bridges.append(hb)
 
-            # Add phase output label
+            # Add phase output label with connecting wire
             phase_pos = hb.port("VOUT")
-            sch.add_label(f"PHASE_{label}", phase_pos[0] + 10, phase_pos[1], rotation=0)
+            label_x = phase_pos[0] + 10
+            # Add wire from phase output to label position
+            sch.add_wire(phase_pos, (label_x, phase_pos[1]))
+            sch.add_label(f"PHASE_{label}", label_x, phase_pos[1], rotation=0)
 
         # Store all components
         self.components = {}

@@ -634,6 +634,7 @@ def create_5v_buck(
     ref: str = "U1",
     input_voltage: float = 24.0,
     cap_ref_start: int = 1,
+    diode_ref: str = "D1",
 ) -> BuckConverter:
     """
     Create a 5V buck converter with sensible defaults.
@@ -648,6 +649,7 @@ def create_5v_buck(
         ref: Regulator reference designator
         input_voltage: Input voltage (typically 12V or 24V)
         cap_ref_start: Starting reference number for capacitors
+        diode_ref: Reference designator for the Schottky diode
 
     Returns:
         BuckConverter instance configured for 5V output.
@@ -672,6 +674,7 @@ def create_5v_buck(
         diode="SS34",
         feedback_divider=False,
         cap_ref_start=cap_ref_start,
+        diode_ref=diode_ref,
     )
 
 
