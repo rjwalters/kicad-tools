@@ -1956,6 +1956,82 @@ class TestRouterPathfinder:
                             f"Segment at y={seg.y1} too close to obstacle"
                         )
 
+    def test_routes_gnd_when_pth_pads_overlap_clearance_zones(self):
+        """Test that router routes GND when PTH pad clearance zones overlap.
+
+        This is a regression test for issue #864. The simple-led board has:
+        - J1: Power connector with PTH pads (VCC on pin 1, GND on pin 2)
+        - R1: SMD resistor (VCC on pin 1, LED_ANODE on pin 2)
+        - D1: LED with PTH pads (GND on pin 1, LED_ANODE on pin 2)
+
+        The GND net connects J1.2 to D1.1. Both are PTH pads, and their
+        clearance zones may overlap. The router should still find a path
+        through same-net clearance zones.
+        """
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        grid = RoutingGrid(25.0, 20.0, rules, origin_x=100.0, origin_y=100.0)
+        router = Router(grid, rules)
+
+        # J1.2 (GND) - PTH pad at (105, 111.27)
+        j1_gnd = Pad(
+            x=105.0,
+            y=111.27,
+            width=1.7,
+            height=1.7,
+            net=3,
+            net_name="GND",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=1.0,
+        )
+
+        # D1.1 (GND) - PTH pad at (120, 108.73) with 90° rotation
+        d1_gnd = Pad(
+            x=118.73,  # 120 - 1.27 due to 90° rotation
+            y=110.0,
+            width=1.8,
+            height=1.8,
+            net=3,
+            net_name="GND",
+            layer=Layer.F_CU,
+            through_hole=True,
+            drill=0.9,
+        )
+
+        grid.add_pad(j1_gnd)
+        grid.add_pad(d1_gnd)
+
+        route = router.route(j1_gnd, d1_gnd)
+
+        # The router should find a route between the two GND pads
+        assert route is not None, "Router should find route for GND net"
+        assert len(route.segments) > 0, "Route should have at least one segment"
+        assert route.net == 3, "Route should be for GND net (net ID 3)"
+
+    def test_same_net_clearance_zones_passable(self):
+        """Test that same-net clearance zones don't block routing.
+
+        Issue #864: When two pads of the same net have overlapping clearance
+        zones, the router should allow traces to pass through since they
+        belong to the same net.
+        """
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        grid = RoutingGrid(20.0, 10.0, rules)
+        router = Router(grid, rules)
+
+        # Create two same-net pads close together (clearance zones will overlap)
+        pad1 = Pad(x=5.0, y=5.0, width=1.0, height=1.0, net=1, net_name="NET1", layer=Layer.F_CU)
+        pad2 = Pad(x=15.0, y=5.0, width=1.0, height=1.0, net=1, net_name="NET1", layer=Layer.F_CU)
+
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        route = router.route(pad1, pad2)
+
+        # Should successfully route between same-net pads
+        assert route is not None, "Should route between same-net pads"
+        assert len(route.segments) > 0
+
 
 # =============================================================================
 # AdaptiveAutorouter Tests
@@ -3093,7 +3169,9 @@ class TestLoadPcbForRoutingDrcCompliance:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            router, net_map = load_pcb_for_routing(str(pcb_file), rules=rules, validate_drc=True, strict_drc=False)
+            router, net_map = load_pcb_for_routing(
+                str(pcb_file), rules=rules, validate_drc=True, strict_drc=False
+            )
 
             # Should emit a warning
             assert len(w) >= 1

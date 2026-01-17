@@ -99,19 +99,30 @@ class Router:
         # This enforces clearance as a hard constraint during routing.
         # Issue #553: Previously only checked trace_width/2, causing DRC violations
         # when traces were placed too close to obstacles.
+        # Issue #864: Use round() before ceil() to avoid floating point errors
+        # causing an extra cell of clearance (e.g., 0.30000000000000004 -> 4 cells
+        # instead of 3 cells).
         self._trace_half_width_cells = max(
             1,
             math.ceil(
-                (self.rules.trace_width / 2 + self.rules.trace_clearance) / self.grid.resolution
+                round(
+                    (self.rules.trace_width / 2 + self.rules.trace_clearance)
+                    / self.grid.resolution,
+                    6,
+                )
             ),
         )
 
         # Pre-calculate via blocking radius in grid cells
         # Via needs diameter/2 + clearance from other objects (pads, traces, vias)
+        # Issue #864: Use round() before ceil() to avoid floating point errors.
         self._via_half_cells = max(
             1,
             math.ceil(
-                (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution
+                round(
+                    (self.rules.via_diameter / 2 + self.rules.via_clearance) / self.grid.resolution,
+                    6,
+                )
             ),
         )
 
@@ -158,11 +169,16 @@ class Router:
                                 return True  # Static obstacle (pad) - block
                             continue  # Allow with cost penalty (routed cell)
                     else:
-                        # Standard mode: block if:
-                        # - Cell is an obstacle (is_obstacle=True) - always block
-                        # - Cell belongs to different net (including net=0 plane nets) - block
-                        # Same-net cells (including pad metal) are passable
-                        if cell.is_obstacle or cell.net != net:
+                        # Standard mode: block if different net or obstacle
+                        # Issue #864: Same-net cells are passable (even overlapping clearance)
+                        # but different-net cells and obstacles (net=0 blocked cells) must block.
+                        if cell.net == net:
+                            pass  # Same net - passable (even if blocked from clearance overlap)
+                        else:
+                            # Different net (cell.net != net) - always blocked
+                            # This includes:
+                            # - Other nets' pad areas (cell.net > 0 and != net)
+                            # - Obstacles with net=0 (keepouts, board edges, etc.)
                             return True
         return False
 
@@ -224,9 +240,12 @@ class Router:
                             return True  # Static obstacle (pad) - block
                         continue  # Allow with cost penalty (routed cell)
                 else:
-                    # Standard mode: block if obstacle or different net
-                    if cell.is_obstacle or cell.net != net:
-                        return True
+                    # Standard mode (same logic as _is_trace_blocked)
+                    # Issue #864: Same-net cells are passable, different nets block
+                    if cell.net == net:
+                        pass  # Same net - passable
+                    else:
+                        return True  # Different net or obstacle - blocked
 
         return False
 
@@ -269,9 +288,12 @@ class Router:
                                 return True  # Static obstacle (pad) - block
                             continue  # Allow with cost penalty (routed cell)
                     else:
-                        # Standard mode: block if obstacle or different net
-                        if cell.is_obstacle or cell.net != net:
-                            return True
+                        # Standard mode (same logic as _is_trace_blocked)
+                        # Issue #864: Same-net cells are passable, different nets block
+                        if cell.net == net:
+                            pass  # Same net - passable
+                        else:
+                            return True  # Different net or obstacle - blocked
         return False
 
     def _get_negotiated_cell_cost(
@@ -583,6 +605,13 @@ class Router:
                     else:
                         # Different net's pad - always block
                         continue
+                else:
+                    # Issue #864: Even when center cell is unblocked, check trace clearance
+                    # The trace has width and must not violate clearance to other nets
+                    # within its radius. Skip this check near pads to allow approach.
+                    if not (is_start_adjacent or is_end_adjacent):
+                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
+                            continue
 
                 # Check zone blocking (other-net zones block routing)
                 if self._is_zone_blocked(nx, ny, nlayer, start.net):
