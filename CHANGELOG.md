@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-01-17
+
+### Fixed
+
+- **Schematic**: Fix `pin_position()` returning inverted Y coordinates (#889)
+  - Pins were being vertically swapped due to incorrect Y-axis negation
+  - This caused KiCad to crash when opening schematics with wires or no_connect flags at affected pin positions
+  - Both symbol definitions and schematics use Y-down coordinates (the code incorrectly assumed symbol defs used Y-up)
+
 ## [0.10.0] - 2026-01-16
 
 ### Added
