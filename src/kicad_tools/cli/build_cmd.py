@@ -128,6 +128,17 @@ def _find_generator_script(directory: Path, script_type: str) -> Path | None:
     return None
 
 
+def _get_expected_pcb_artifact(ctx: BuildContext) -> str | None:
+    """Get the expected PCB artifact path from the project spec.
+
+    Returns:
+        The expected PCB path string if defined in spec, None otherwise.
+    """
+    if ctx.spec and ctx.spec.project.artifacts and ctx.spec.project.artifacts.pcb:
+        return ctx.spec.project.artifacts.pcb
+    return None
+
+
 def _find_artifacts(directory: Path, spec_file: Path | None) -> tuple[Path | None, Path | None]:
     """Find schematic and PCB files in the project directory.
 
@@ -292,12 +303,32 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     if ctx.was_script_executed(script):
         # Re-scan for artifacts that may have been created by the earlier run
         _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
-        return BuildResult(
-            step="pcb",
-            success=True,
-            message=f"Script {script.name} already ran (produces both schematic and PCB)",
-            output_file=pcb,
-        )
+
+        # Verify that a PCB was actually created
+        if pcb and pcb.exists():
+            return BuildResult(
+                step="pcb",
+                success=True,
+                message=f"Script {script.name} already ran (produces both schematic and PCB)",
+                output_file=pcb,
+            )
+        else:
+            # Script ran but didn't produce a PCB - report the failure clearly
+            expected_pcb = _get_expected_pcb_artifact(ctx)
+            if expected_pcb:
+                return BuildResult(
+                    step="pcb",
+                    success=False,
+                    message=f"Script {script.name} ran but expected artifact '{expected_pcb}' was not created. "
+                    f"PCB generation may not be implemented.",
+                )
+            else:
+                return BuildResult(
+                    step="pcb",
+                    success=False,
+                    message=f"Script {script.name} ran but no PCB file was created. "
+                    f"PCB generation may not be implemented.",
+                )
 
     if ctx.dry_run:
         return BuildResult(
@@ -316,6 +347,24 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
 
     # Re-scan for artifacts after generation
     _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
+
+    # Verify that a PCB was actually created (even if script reported success)
+    if success and (not pcb or not pcb.exists()):
+        expected_pcb = _get_expected_pcb_artifact(ctx)
+        if expected_pcb:
+            return BuildResult(
+                step="pcb",
+                success=False,
+                message=f"Script {script.name} completed but expected artifact '{expected_pcb}' was not created. "
+                f"PCB generation may not be implemented.",
+            )
+        else:
+            return BuildResult(
+                step="pcb",
+                success=False,
+                message=f"Script {script.name} completed but no PCB file was created. "
+                f"PCB generation may not be implemented.",
+            )
 
     return BuildResult(
         step="pcb",
