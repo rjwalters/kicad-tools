@@ -277,11 +277,21 @@ def create_usb_joystick_schematic(output_dir: Path) -> Path:
     print("\n7. Adding signal wiring...")
 
     MCU_PIN_MAP = {
-        "1": "VCC", "16": "GND", "17": "VCC", "32": "GND",
-        "29": "USB_D+", "30": "USB_D-",
-        "7": "XTAL1", "8": "XTAL2",
-        "2": "JOY_X", "3": "JOY_Y",
-        "9": "BTN1", "10": "BTN2", "11": "BTN3", "12": "BTN4", "13": "JOY_BTN",
+        "1": "VCC",
+        "16": "GND",
+        "17": "VCC",
+        "32": "GND",
+        "29": "USB_D+",
+        "30": "USB_D-",
+        "7": "XTAL1",
+        "8": "XTAL2",
+        "2": "JOY_X",
+        "3": "JOY_Y",
+        "9": "BTN1",
+        "10": "BTN2",
+        "11": "BTN3",
+        "12": "BTN4",
+        "13": "JOY_BTN",
     }
 
     USB_PIN_MAP = {"1": "VCC", "2": "USB_D-", "3": "USB_D+", "4": "GND"}
@@ -338,12 +348,16 @@ def create_usb_joystick_schematic(output_dir: Path) -> Path:
     # Power symbols
     vcc_pwr = sch.add_power("power:+5V", x=25.4, y=RAIL_VCC, rotation=0)
     sch.add_wire((vcc_pwr.x, vcc_pwr.y), (vcc_pwr.x + WIRE_STUB, vcc_pwr.y), snap=False)
-    sch.add_global_label("VCC", vcc_pwr.x + WIRE_STUB, vcc_pwr.y, shape="input", rotation=180, snap=False)
+    sch.add_global_label(
+        "VCC", vcc_pwr.x + WIRE_STUB, vcc_pwr.y, shape="input", rotation=180, snap=False
+    )
     sch.add_pwr_flag(vcc_pwr.x, vcc_pwr.y)
 
     gnd_pwr = sch.add_power("power:GND", x=25.4, y=RAIL_GND, rotation=180)
     sch.add_wire((gnd_pwr.x, gnd_pwr.y), (gnd_pwr.x + WIRE_STUB, gnd_pwr.y), snap=False)
-    sch.add_global_label("GND", gnd_pwr.x + WIRE_STUB, gnd_pwr.y, shape="input", rotation=180, snap=False)
+    sch.add_global_label(
+        "GND", gnd_pwr.x + WIRE_STUB, gnd_pwr.y, shape="input", rotation=180, snap=False
+    )
     sch.add_pwr_flag(gnd_pwr.x, gnd_pwr.y)
 
     print("   Added VCC and GND power symbols with PWR_FLAG")
@@ -457,14 +471,38 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
         pad_offset = 4.5
 
         pin_nets = {
-            1: ("GND", 3), 2: ("XTAL1", 15), 3: ("XTAL2", 16), 4: ("VCC", 2),
-            5: ("", 0), 6: ("", 0), 7: ("GND", 3), 8: ("VCC", 2),
-            9: ("JOY_X", 8), 10: ("JOY_Y", 9), 11: ("JOY_BTN", 10), 12: ("BTN1", 11),
-            13: ("BTN2", 12), 14: ("BTN3", 13), 15: ("BTN4", 14), 16: ("GND", 3),
-            17: ("VCC", 2), 18: ("", 0), 19: ("", 0), 20: ("", 0),
-            21: ("", 0), 22: ("", 0), 23: ("GND", 3), 24: ("VCC", 2),
-            25: ("GND", 3), 26: ("USB_CC2", 7), 27: ("USB_CC1", 6), 28: ("USB_D-", 5),
-            29: ("USB_D+", 4), 30: ("VBUS", 1), 31: ("", 0), 32: ("GND", 3),
+            1: ("GND", 3),
+            2: ("XTAL1", 15),
+            3: ("XTAL2", 16),
+            4: ("VCC", 2),
+            5: ("", 0),
+            6: ("", 0),
+            7: ("GND", 3),
+            8: ("VCC", 2),
+            9: ("JOY_X", 8),
+            10: ("JOY_Y", 9),
+            11: ("JOY_BTN", 10),
+            12: ("BTN1", 11),
+            13: ("BTN2", 12),
+            14: ("BTN3", 13),
+            15: ("BTN4", 14),
+            16: ("GND", 3),
+            17: ("VCC", 2),
+            18: ("", 0),
+            19: ("", 0),
+            20: ("", 0),
+            21: ("", 0),
+            22: ("", 0),
+            23: ("GND", 3),
+            24: ("VCC", 2),
+            25: ("GND", 3),
+            26: ("USB_CC2", 7),
+            27: ("USB_CC1", 6),
+            28: ("USB_D-", 5),
+            29: ("USB_D+", 4),
+            30: ("VBUS", 1),
+            31: ("", 0),
+            32: ("GND", 3),
         }
 
         def pin_offset(i):
@@ -476,28 +514,36 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
             net_name, net_num = pin_nets[pin]
             net_str = f'(net {net_num} "{net_name}")' if net_name else ""
             py = pin_offset(i)
-            pads.append(f'    (pad "{pin}" smd rect (at {-pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+            pads.append(
+                f'    (pad "{pin}" smd rect (at {-pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+            )
 
         for i in range(8):
             pin = i + 9
             net_name, net_num = pin_nets[pin]
             net_str = f'(net {net_num} "{net_name}")' if net_name else ""
             px = pin_offset(i)
-            pads.append(f'    (pad "{pin}" smd rect (at {px:.3f} {pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+            pads.append(
+                f'    (pad "{pin}" smd rect (at {px:.3f} {pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+            )
 
         for i in range(8):
             pin = i + 17
             net_name, net_num = pin_nets[pin]
             net_str = f'(net {net_num} "{net_name}")' if net_name else ""
             py = pin_offset(i)
-            pads.append(f'    (pad "{pin}" smd rect (at {pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+            pads.append(
+                f'    (pad "{pin}" smd rect (at {pad_offset:.3f} {py:.3f}) (size 1.2 0.5) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+            )
 
         for i in range(8):
             pin = i + 25
             net_name, net_num = pin_nets[pin]
             net_str = f'(net {net_num} "{net_name}")' if net_name else ""
             px = -pin_offset(i)
-            pads.append(f'    (pad "{pin}" smd rect (at {px:.3f} {-pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+            pads.append(
+                f'    (pad "{pin}" smd rect (at {px:.3f} {-pad_offset:.3f}) (size 0.5 1.2) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+            )
 
         pads_str = "\n".join(pads)
         return f"""  (footprint "Package_QFP:TQFP-32_7x7mm_P0.8mm"
@@ -518,12 +564,22 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
         y = BOARD_ORIGIN_Y + 5
 
         pins = [
-            ("A1", -2.75, "GND"), ("A4", -1.75, "VBUS"), ("A5", -1.0, "USB_CC1"),
-            ("A6", -0.25, "USB_D+"), ("A7", 0.25, "USB_D-"), ("A8", 1.0, ""),
-            ("A9", 1.75, "VBUS"), ("A12", 2.75, "GND"),
-            ("B1", 2.75, "GND"), ("B4", 1.75, "VBUS"), ("B5", 1.0, "USB_CC2"),
-            ("B6", 0.25, "USB_D+"), ("B7", -0.25, "USB_D-"), ("B8", -1.0, ""),
-            ("B9", -1.75, "VBUS"), ("B12", -2.75, "GND"),
+            ("A1", -2.75, "GND"),
+            ("A4", -1.75, "VBUS"),
+            ("A5", -1.0, "USB_CC1"),
+            ("A6", -0.25, "USB_D+"),
+            ("A7", 0.25, "USB_D-"),
+            ("A8", 1.0, ""),
+            ("A9", 1.75, "VBUS"),
+            ("A12", 2.75, "GND"),
+            ("B1", 2.75, "GND"),
+            ("B4", 1.75, "VBUS"),
+            ("B5", 1.0, "USB_CC2"),
+            ("B6", 0.25, "USB_D+"),
+            ("B7", -0.25, "USB_D-"),
+            ("B8", -1.0, ""),
+            ("B9", -1.75, "VBUS"),
+            ("B12", -2.75, "GND"),
         ]
 
         pads = []
@@ -531,10 +587,16 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
             net_num = NETS.get(net_name, 0)
             net_str = f'(net {net_num} "{net_name}")' if net_name else ""
             py = 0 if pin.startswith("A") else 1.0
-            pads.append(f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.25 0.35) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})')
+            pads.append(
+                f'    (pad "{pin}" smd rect (at {px:.2f} {py:.2f}) (size 0.25 0.35) (layers "F.Cu" "F.Paste" "F.Mask") {net_str})'
+            )
 
-        pads.append(f'    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))')
-        pads.append(f'    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))')
+        pads.append(
+            f'    (pad "S1" thru_hole circle (at -4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+        )
+        pads.append(
+            f'    (pad "S2" thru_hole circle (at 4.3 1.5) (size 1.0 1.0) (drill 0.6) (layers "*.Cu" "*.Mask") (net 3 "GND"))'
+        )
 
         pads_str = "\n".join(pads)
         return f"""  (footprint "Connector_USB:USB_C_Receptacle_GCT_USB4105"
@@ -555,14 +617,19 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
         y = BOARD_ORIGIN_Y + 22
 
         pins = [
-            ("1", -4, 0, "GND"), ("2", -2, 0, "VCC"), ("3", 0, 0, "JOY_X"),
-            ("4", 2, 0, "JOY_Y"), ("5", 4, 0, "JOY_BTN"),
+            ("1", -4, 0, "GND"),
+            ("2", -2, 0, "VCC"),
+            ("3", 0, 0, "JOY_X"),
+            ("4", 2, 0, "JOY_Y"),
+            ("5", 4, 0, "JOY_BTN"),
         ]
 
         pads = []
         for pin, px, py, net_name in pins:
             net_num = NETS[net_name]
-            pads.append(f'    (pad "{pin}" thru_hole circle (at {px} {py}) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net {net_num} "{net_name}"))')
+            pads.append(
+                f'    (pad "{pin}" thru_hole circle (at {px} {py}) (size 1.6 1.6) (drill 1.0) (layers "*.Cu" "*.Mask") (net {net_num} "{net_name}"))'
+            )
 
         pads_str = "\n".join(pads)
         return f"""  (footprint "Module:Joystick_Analog"
@@ -586,10 +653,10 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     (uuid "{generate_uuid()}")
     (at {x} {y})
     (fp_text reference "{ref}" (at 0 -3.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 0.8 0.8) (thickness 0.12)))
+      (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "Button" (at 0 3.5) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 0.8 0.8) (thickness 0.12)))
+      (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" smd rect (at -3.1 0) (size 1.8 1.4) (layers "F.Cu" "F.Paste" "F.Mask") (net {net_num} "{net_name}"))
     (pad "2" smd rect (at 3.1 0) (size 1.8 1.4) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "GND"))
@@ -603,10 +670,10 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     (uuid "{generate_uuid()}")
     (at {x} {y})
     (fp_text reference "Y1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 0.8 0.8) (thickness 0.12)))
+      (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "16MHz" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 0.8 0.8) (thickness 0.12)))
+      (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" thru_hole circle (at -2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net 15 "XTAL1"))
     (pad "2" thru_hole circle (at 2.44 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (net 16 "XTAL2"))
@@ -621,10 +688,10 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     (uuid "{generate_uuid()}")
     (at {x} {y})
     (fp_text reference "{ref}" (at 0 -1.2) (layer "F.SilkS") (uuid "{generate_uuid()}")
-      (effects (font (size 0.5 0.5) (thickness 0.1)))
+      (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "100nF" (at 0 1.2) (layer "F.Fab") (uuid "{generate_uuid()}")
-      (effects (font (size 0.5 0.5) (thickness 0.1)))
+      (effects (font (size 1 1) (thickness 0.15)))
     )
     (pad "1" smd roundrect (at -0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net1_num} "{net1}"))
     (pad "2" smd roundrect (at 0.48 0) (size 0.56 0.62) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {net2_num} "{net2}"))
@@ -687,6 +754,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
 # =============================================================================
 # Project, ERC, Routing, DRC
 # =============================================================================
+
 
 def create_project(output_dir: Path, project_name: str) -> Path:
     """Create a KiCad project file."""
@@ -752,7 +820,11 @@ def run_erc(sch_path: Path) -> bool:
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB using the autorouter."""
     from kicad_tools.router import DesignRules, create_net_class_map, load_pcb_for_routing
-    from kicad_tools.router.optimizer import GridCollisionChecker, OptimizationConfig, TraceOptimizer
+    from kicad_tools.router.optimizer import (
+        GridCollisionChecker,
+        OptimizationConfig,
+        TraceOptimizer,
+    )
 
     print("\n" + "=" * 60)
     print("Routing PCB...")
@@ -890,6 +962,7 @@ def run_drc(pcb_path: Path) -> bool:
 # =============================================================================
 # Main Entry Point
 # =============================================================================
+
 
 def main() -> int:
     """Main entry point."""
