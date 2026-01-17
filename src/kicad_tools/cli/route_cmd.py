@@ -1705,6 +1705,25 @@ def main(argv: list[str] | None = None) -> int:
             "Default: manufacturer minimum (e.g., 0.127mm for JLCPCB)."
         ),
     )
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help=(
+            "Show detailed routing failure diagnostics. For each failed net, "
+            "reports the specific failure reason, blocking obstacles, coordinates, "
+            "and actionable suggestions. Failures are grouped by cause for analysis."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Output format for routing diagnostics: "
+            "'text' = human-readable output (default); "
+            "'json' = JSON output for tooling and automation."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -1811,6 +1830,7 @@ def main(argv: list[str] | None = None) -> int:
         RoutabilityAnalyzer,
         is_cpp_available,
         load_pcb_for_routing,
+        print_routing_diagnostics_json,
         show_routing_summary,
     )
     from kicad_tools.router.io import detect_layer_stack
@@ -2400,7 +2420,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  Additionally, {drc_errors} DRC violation(s) detected.")
 
             # Show comprehensive routing summary with successes, failures, and suggestions
-            show_routing_summary(router, net_map, nets_to_route, quiet=quiet)
+            # Use JSON format if requested
+            if args.format == "json":
+                print_routing_diagnostics_json(router, net_map, nets_to_route)
+            else:
+                # Verbose mode shows detailed path analysis for each failure
+                verbose = args.verbose or args.diagnostics
+                show_routing_summary(router, net_map, nets_to_route, quiet=quiet, verbose=verbose)
 
     # Exit codes:
     # 0 = All nets routed AND (DRC passed OR DRC not run)

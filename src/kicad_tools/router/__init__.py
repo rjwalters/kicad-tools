@@ -146,7 +146,11 @@ from .optimizer import (
     OptimizationStats,
     TraceOptimizer,
 )  # noqa: F401 - optimizer is now a package
-from .output import show_routing_summary
+from .output import (
+    get_routing_diagnostics_json,
+    print_routing_diagnostics_json,
+    show_routing_summary,
+)
 from .parallel import (
     BoundingBox,
     NetGroup,
@@ -382,6 +386,8 @@ __all__ = [
     "find_differential_partner",
     # Output and Diagnostics
     "show_routing_summary",
+    "get_routing_diagnostics_json",
+    "print_routing_diagnostics_json",
     # Manufacturer Limits and Adaptive Rules
     "MfrLimits",
     "RelaxationTier",

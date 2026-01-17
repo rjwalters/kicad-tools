@@ -32,7 +32,12 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
-from .failure_analysis import CongestionMap, FailureAnalysis, RootCauseAnalyzer
+from .failure_analysis import (
+    CongestionMap,
+    FailureAnalysis,
+    FailureCause,
+    RootCauseAnalyzer,
+)
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
@@ -68,18 +73,44 @@ class RoutingFailure:
         net_name: Human-readable net name
         source_pad: Source pad (ref, pin) tuple
         target_pad: Target pad (ref, pin) tuple
+        source_coords: Source pad coordinates (x, y) in mm
+        target_coords: Target pad coordinates (x, y) in mm
         blocking_nets: Set of net IDs that blocked this route
         blocking_components: Components blocking the path (e.g., "U1", "R4")
         reason: Human-readable failure reason
+        failure_cause: Categorized failure cause from FailureCause enum
+        analysis: Detailed failure analysis from RootCauseAnalyzer (optional)
     """
 
     net: int
     net_name: str
     source_pad: tuple[str, str]
     target_pad: tuple[str, str]
+    source_coords: tuple[float, float] | None = None
+    target_coords: tuple[float, float] | None = None
     blocking_nets: set[int] = field(default_factory=set)
     blocking_components: list[str] = field(default_factory=list)
     reason: str = "No path found"
+    failure_cause: FailureCause = FailureCause.UNKNOWN
+    analysis: FailureAnalysis | None = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        result = {
+            "net": self.net,
+            "net_name": self.net_name,
+            "source_pad": {"ref": self.source_pad[0], "pin": self.source_pad[1]},
+            "target_pad": {"ref": self.target_pad[0], "pin": self.target_pad[1]},
+            "source_coords": list(self.source_coords) if self.source_coords else None,
+            "target_coords": list(self.target_coords) if self.target_coords else None,
+            "blocking_nets": list(self.blocking_nets),
+            "blocking_components": self.blocking_components,
+            "reason": self.reason,
+            "failure_cause": self.failure_cause.value,
+        }
+        if self.analysis:
+            result["analysis"] = self.analysis.to_dict()
+        return result
 
 
 # Re-export for backward compatibility
@@ -290,7 +321,7 @@ class Autorouter:
 
         # Decision recording (Issue #829)
         self.record_decisions = record_decisions
-        self._decision_store: "DecisionStore | None" = None
+        self._decision_store: DecisionStore | None = None
         if record_decisions:
             from kicad_tools.explain.decisions import DecisionStore
 
@@ -569,7 +600,11 @@ class Autorouter:
             self.routes.append(route)
 
         def record_failure(source_pad: Pad, target_pad: Pad):
-            """Record a routing failure for diagnostics."""
+            """Record a routing failure with detailed diagnostics."""
+            # Get pad coordinates
+            source_coords = (source_pad.x, source_pad.y)
+            target_coords = (target_pad.x, target_pad.y)
+
             # Find blocking nets using the router's analysis
             blocking_nets = self.router.find_blocking_nets(source_pad, target_pad)
 
@@ -582,25 +617,82 @@ class Autorouter:
                         blocking_components.append(ref)
                         break  # One component per net is enough
 
-            # Determine failure reason
-            if blocking_nets:
-                if len(blocking_nets) == 1:
+            # Run root cause analysis for detailed diagnostics
+            analyzer = RootCauseAnalyzer()
+            net_name = self.net_names.get(net, f"Net_{net}")
+            analysis = analyzer.analyze_routing_failure(
+                grid=self.grid,
+                start=source_coords,
+                end=target_coords,
+                net=net_name,
+            )
+            failure_cause = analysis.root_cause
+
+            # Check for pad accessibility issues (pad not on grid)
+            src_gx, src_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
+            tgt_gx, tgt_gy = self.grid.world_to_grid(target_pad.x, target_pad.y)
+            src_world = self.grid.grid_to_world(src_gx, src_gy)
+            tgt_world = self.grid.grid_to_world(tgt_gx, tgt_gy)
+
+            # Check if pads are far from grid points (> 1/2 grid resolution)
+            src_dist = ((source_pad.x - src_world[0]) ** 2 + (source_pad.y - src_world[1]) ** 2) ** 0.5
+            tgt_dist = ((target_pad.x - tgt_world[0]) ** 2 + (target_pad.y - tgt_world[1]) ** 2) ** 0.5
+            grid_threshold = self.grid.resolution / 2
+
+            if src_dist > grid_threshold or tgt_dist > grid_threshold:
+                failure_cause = FailureCause.PIN_ACCESS
+                if src_dist > grid_threshold:
                     reason = (
-                        f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                        f"PAD_INACCESSIBLE: {source_pad.ref}.{source_pad.pin} "
+                        f"at ({source_pad.x:.2f}, {source_pad.y:.2f}) not on "
+                        f"routing grid ({self.grid.resolution}mm)"
                     )
                 else:
-                    reason = f"Blocked by {len(blocking_nets)} nets"
+                    reason = (
+                        f"PAD_INACCESSIBLE: {target_pad.ref}.{target_pad.pin} "
+                        f"at ({target_pad.x:.2f}, {target_pad.y:.2f}) not on "
+                        f"routing grid ({self.grid.resolution}mm)"
+                    )
+            elif failure_cause == FailureCause.BLOCKED_PATH:
+                if blocking_components:
+                    reason = f"BLOCKED_BY_COMPONENT: Path blocked by {', '.join(blocking_components)}"
+                else:
+                    reason = "BLOCKED_BY_COMPONENT: Path blocked by component keepout"
+            elif failure_cause == FailureCause.CONGESTION:
+                reason = f"CONGESTION: Routing channel saturated (score: {analysis.congestion_score:.0%})"
+            elif failure_cause == FailureCause.CLEARANCE:
+                reason = (
+                    f"CLEARANCE_VIOLATION: Cannot meet clearance requirements "
+                    f"(margin: {analysis.clearance_margin:.2f}mm)"
+                )
+            elif failure_cause == FailureCause.KEEPOUT:
+                reason = "KEEPOUT: Path crosses keepout zone"
+            elif failure_cause == FailureCause.LAYER_CONFLICT:
+                reason = "LAYER_CONSTRAINT: Requires layer not available"
             else:
-                reason = "No path found (congestion or obstacles)"
+                # Fallback to basic blocking info
+                if blocking_nets:
+                    if len(blocking_nets) == 1:
+                        reason = (
+                            f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
+                        )
+                    else:
+                        reason = f"Blocked by {len(blocking_nets)} nets"
+                else:
+                    reason = "No path found (congestion or obstacles)"
 
             failure = RoutingFailure(
                 net=net,
-                net_name=self.net_names.get(net, f"Net_{net}"),
+                net_name=net_name,
                 source_pad=(source_pad.ref, source_pad.pin),
                 target_pad=(target_pad.ref, target_pad.pin),
+                source_coords=source_coords,
+                target_coords=target_coords,
                 blocking_nets=blocking_nets,
                 blocking_components=blocking_components,
                 reason=reason,
+                failure_cause=failure_cause,
+                analysis=analysis,
             )
             self.routing_failures.append(failure)
 
@@ -676,7 +768,7 @@ class Autorouter:
 
         self._decision_store.record(decision)
 
-    def get_decision_store(self) -> "DecisionStore | None":
+    def get_decision_store(self) -> DecisionStore | None:
         """Get the decision store for this autorouter.
 
         Returns:
@@ -684,7 +776,7 @@ class Autorouter:
         """
         return self._decision_store
 
-    def save_decisions(self, path: "Path") -> bool:
+    def save_decisions(self, path: Path) -> bool:
         """Save routing decisions to a file.
 
         Args:
