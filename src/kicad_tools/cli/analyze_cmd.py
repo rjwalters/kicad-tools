@@ -1,12 +1,15 @@
 """Analyze command for PCB analysis tools.
 
 Provides analysis subcommands:
+- `analyze complexity`: Pre-routing complexity estimation and layer prediction
 - `analyze congestion`: Routing congestion analysis
 - `analyze trace-lengths`: Trace length analysis for timing-critical nets
 - `analyze signal-integrity`: Signal integrity analysis (crosstalk and impedance)
 - `analyze thermal`: Thermal analysis and hotspot detection
 
 Usage:
+    kicad-tools analyze complexity board.kicad_pcb
+    kicad-tools analyze complexity board.kicad_pcb --format json
     kicad-tools analyze congestion board.kicad_pcb
     kicad-tools analyze congestion board.kicad_pcb --format json
     kicad-tools analyze trace-lengths board.kicad_pcb
@@ -28,6 +31,8 @@ from rich.console import Console
 from rich.table import Table
 
 from kicad_tools.analysis import (
+    ComplexityAnalyzer,
+    ComplexityRating,
     CongestionAnalyzer,
     RiskLevel,
     Severity,
@@ -210,6 +215,36 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress informational output",
     )
 
+    # Complexity subcommand
+    complexity_parser = subparsers.add_parser(
+        "complexity",
+        help="Analyze routing complexity and predict layer requirements",
+        description="Estimate routing complexity, predict layer count, and identify bottlenecks",
+    )
+    complexity_parser.add_argument(
+        "pcb",
+        help="PCB file to analyze (.kicad_pcb)",
+    )
+    complexity_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    complexity_parser.add_argument(
+        "--grid-size",
+        type=float,
+        default=5.0,
+        help="Grid cell size for density analysis in mm (default: 5.0)",
+    )
+    complexity_parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress informational output",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -230,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "thermal":
         return _run_thermal_analysis(args)
+
+    if args.subcommand == "complexity":
+        return _run_complexity_analysis(args)
 
     return 0
 
@@ -892,6 +930,212 @@ def _print_thermal_hotspot(console: Console, hotspot, index: int) -> None:
             console.print(f"    • {suggestion}")
 
     console.print()
+
+
+# ============================================================================
+# Complexity Analysis
+# ============================================================================
+
+
+def _run_complexity_analysis(args: argparse.Namespace) -> int:
+    """Run complexity analysis on a PCB."""
+    pcb_path = Path(args.pcb)
+
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    if pcb_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
+        return 1
+
+    # Load PCB
+    try:
+        pcb = PCB.load(str(pcb_path))
+    except Exception as e:
+        print(f"Error loading PCB: {e}", file=sys.stderr)
+        return 1
+
+    # Run analysis
+    analyzer = ComplexityAnalyzer(grid_size=args.grid_size)
+    report = analyzer.analyze(pcb)
+
+    # Output results
+    if args.format == "json":
+        _output_complexity_json(report)
+    else:
+        _output_complexity_text(report, pcb_path.name, quiet=args.quiet)
+
+    # Return based on complexity
+    if report.complexity_rating in (ComplexityRating.EXTREME, ComplexityRating.COMPLEX):
+        return 1
+    return 0
+
+
+def _output_complexity_json(report) -> None:
+    """Output complexity report as JSON."""
+    print(json.dumps(report.to_dict(), indent=2))
+
+
+def _output_complexity_text(report, filename: str, quiet: bool = False) -> None:
+    """Output complexity report as formatted text."""
+    console = Console()
+
+    if not quiet:
+        console.print(f"\n[bold]Pre-Routing Complexity Analysis: {filename}[/bold]\n")
+
+    # Header with board info
+    console.print("=" * 60)
+    console.print("[bold]Board Information[/bold]")
+    console.print("=" * 60)
+    console.print(
+        f"Size: {report.board_width_mm:.1f}mm x {report.board_height_mm:.1f}mm "
+        f"({report.board_area_mm2:.0f} mm²)"
+    )
+    console.print()
+
+    # Metrics table
+    metrics_table = Table(title="Metrics", show_header=False)
+    metrics_table.add_column("Metric", style="dim")
+    metrics_table.add_column("Value")
+
+    metrics_table.add_row("Total pads", str(report.total_pads))
+    metrics_table.add_row("Total nets", str(report.total_nets))
+    pad_density = report.total_pads / report.board_area_mm2 if report.board_area_mm2 > 0 else 0
+    metrics_table.add_row("Pad density", f"{pad_density:.3f} pads/mm²")
+    metrics_table.add_row("Max region density", f"{report.max_pin_density:.3f} pads/mm²")
+    metrics_table.add_row("Estimated crossings", str(report.crossing_number))
+    if report.differential_pair_count > 0:
+        metrics_table.add_row("Differential pairs", str(report.differential_pair_count))
+    if report.high_speed_net_count > 0:
+        metrics_table.add_row("High-speed nets", str(report.high_speed_net_count))
+
+    console.print(metrics_table)
+    console.print()
+
+    # Complexity scores
+    console.print("=" * 60)
+    console.print("[bold]Complexity Scores[/bold]")
+    console.print("=" * 60)
+
+    def score_bar(score: float) -> str:
+        """Create a visual score bar."""
+        filled = int(score / 5)
+        return "#" * filled + "-" * (20 - filled)
+
+    score_colors = {
+        (0, 30): "green",
+        (30, 60): "yellow",
+        (60, 80): "red",
+        (80, 101): "red bold",
+    }
+
+    def get_color(score: float) -> str:
+        for (low, high), color in score_colors.items():
+            if low <= score < high:
+                return color
+        return "white"
+
+    console.print(
+        f"  Density:   [{get_color(report.density_score)}]"
+        f"[{score_bar(report.density_score)}][/{get_color(report.density_score)}] "
+        f"{report.density_score:.0f}/100"
+    )
+    console.print(
+        f"  Crossings: [{get_color(report.crossing_score)}]"
+        f"[{score_bar(report.crossing_score)}][/{get_color(report.crossing_score)}] "
+        f"{report.crossing_score:.0f}/100"
+    )
+    console.print(
+        f"  Channels:  [{get_color(100 - report.channel_score)}]"
+        f"[{score_bar(100 - report.channel_score)}][/{get_color(100 - report.channel_score)}] "
+        f"{100 - report.channel_score:.0f}/100"
+    )
+    console.print()
+
+    # Overall rating
+    rating_colors = {
+        ComplexityRating.TRIVIAL: "green",
+        ComplexityRating.SIMPLE: "green",
+        ComplexityRating.MODERATE: "yellow",
+        ComplexityRating.COMPLEX: "red",
+        ComplexityRating.EXTREME: "red bold",
+    }
+    rating_color = rating_colors[report.complexity_rating]
+    console.print(
+        f"  Overall:   [{rating_color}]{report.overall_score:.0f}/100 - "
+        f"{report.complexity_rating.value.upper()}[/{rating_color}]"
+    )
+    console.print()
+
+    # Layer predictions table
+    console.print("=" * 60)
+    console.print("[bold]Layer Predictions[/bold]")
+    console.print("=" * 60)
+
+    pred_table = Table()
+    pred_table.add_column("Layers", justify="center")
+    pred_table.add_column("Probability", justify="center")
+    pred_table.add_column("Recommended", justify="center")
+    pred_table.add_column("Notes", style="dim")
+
+    for pred in report.layer_predictions:
+        prob_pct = pred.success_probability * 100
+        if prob_pct >= 70:
+            prob_style = "green"
+        elif prob_pct >= 40:
+            prob_style = "yellow"
+        else:
+            prob_style = "red"
+
+        rec_str = "[green]Yes[/green]" if pred.recommended else "No"
+        pred_table.add_row(
+            str(pred.layer_count),
+            f"[{prob_style}]{prob_pct:.0f}%[/{prob_style}]",
+            rec_str,
+            pred.notes,
+        )
+
+    console.print(pred_table)
+    console.print()
+
+    console.print(
+        f"[bold]Recommendation: Start with {report.min_layers_predicted} layers"
+        + (" or use --auto-layers" if report.min_layers_predicted > 2 else "")
+        + "[/bold]"
+    )
+    console.print()
+
+    # Bottlenecks
+    if report.bottlenecks:
+        console.print("=" * 60)
+        console.print("[bold]Bottlenecks Identified[/bold]")
+        console.print("=" * 60)
+
+        for i, bottleneck in enumerate(report.bottlenecks[:5], 1):
+            x, y = bottleneck.position
+            console.print(
+                f"  {i}. [cyan]{bottleneck.component_ref}[/cyan] at ({x:.1f}, {y:.1f})"
+            )
+            console.print(f"     {bottleneck.description}")
+            console.print(
+                f"     Pins: {bottleneck.pin_count}, "
+                f"Density: {bottleneck.pin_density:.2f} pins/mm², "
+                f"Channels: {bottleneck.available_channels}"
+            )
+
+        console.print()
+
+    # Recommendations
+    if report.recommendations and not quiet:
+        console.print("=" * 60)
+        console.print("[bold]Recommendations[/bold]")
+        console.print("=" * 60)
+
+        for rec in report.recommendations:
+            console.print(f"  • {rec}")
+
+        console.print()
 
 
 if __name__ == "__main__":
