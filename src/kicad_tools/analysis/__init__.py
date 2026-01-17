@@ -1,6 +1,7 @@
 """PCB analysis tools.
 
 This module provides analysis tools for PCB designs:
+- Pre-routing complexity estimation and layer prediction
 - Routing congestion analysis
 - Density calculations
 - Problem area identification
@@ -9,6 +10,13 @@ This module provides analysis tools for PCB designs:
 - Thermal analysis and hotspot detection
 """
 
+from .complexity import (
+    Bottleneck,
+    ComplexityAnalyzer,
+    ComplexityRating,
+    LayerPrediction,
+    RoutingComplexity,
+)
 from .congestion import CongestionAnalyzer, CongestionReport, Severity
 from .net_status import (
     NetStatus,
@@ -36,13 +44,22 @@ from .trace_length import (
 )
 
 __all__ = [
+    "Bottleneck",
+    "ComplexityAnalyzer",
+    "ComplexityRating",
     "CongestionAnalyzer",
     "CongestionReport",
     "CrosstalkRisk",
     "DifferentialPairReport",
     "ImpedanceDiscontinuity",
+    "LayerPrediction",
+    "NetStatus",
+    "NetStatusAnalyzer",
+    "NetStatusResult",
+    "PadInfo",
     "PowerEstimator",
     "RiskLevel",
+    "RoutingComplexity",
     "Severity",
     "SignalIntegrityAnalyzer",
     "ThermalAnalyzer",
@@ -51,8 +68,4 @@ __all__ = [
     "ThermalSource",
     "TraceLengthAnalyzer",
     "TraceLengthReport",
-    "NetStatusAnalyzer",
-    "NetStatusResult",
-    "NetStatus",
-    "PadInfo",
 ]

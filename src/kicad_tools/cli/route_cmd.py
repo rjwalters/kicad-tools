@@ -1801,6 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     # Import router modules
+    from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating
     from kicad_tools.router import (
         BusRoutingConfig,
         BusRoutingMode,
@@ -1813,6 +1814,7 @@ def main(argv: list[str] | None = None) -> int:
         show_routing_summary,
     )
     from kicad_tools.router.io import detect_layer_stack
+    from kicad_tools.schema.pcb import PCB
 
     # Handle backend selection
     force_python = False
@@ -1951,6 +1953,58 @@ def main(argv: list[str] | None = None) -> int:
 
     # Analyze routability if requested
     if args.analyze:
+        # Run pre-routing complexity analysis first
+        if not quiet:
+            print("\n--- Pre-Routing Complexity Analysis ---")
+        try:
+            pcb_for_analysis = PCB.load(str(pcb_path))
+            complexity_analyzer = ComplexityAnalyzer()
+            complexity = complexity_analyzer.analyze(pcb_for_analysis)
+
+            # Show complexity summary
+            print(f"\n{'=' * 60}")
+            print("COMPLEXITY ANALYSIS")
+            print(f"{'=' * 60}")
+            print(
+                f"Board: {complexity.board_width_mm:.1f}mm x {complexity.board_height_mm:.1f}mm"
+            )
+            print(
+                f"Pads: {complexity.total_pads}, Nets: {complexity.total_nets}"
+            )
+
+            # Show complexity rating with color
+            rating_symbols = {
+                ComplexityRating.TRIVIAL: "[TRIVIAL]",
+                ComplexityRating.SIMPLE: "[SIMPLE]",
+                ComplexityRating.MODERATE: "[MODERATE]",
+                ComplexityRating.COMPLEX: "[COMPLEX]",
+                ComplexityRating.EXTREME: "[EXTREME]",
+            }
+            print(
+                f"Complexity: {complexity.overall_score:.0f}/100 - "
+                f"{rating_symbols[complexity.complexity_rating]}"
+            )
+
+            # Show layer predictions
+            print("\nLayer Predictions:")
+            for pred in complexity.layer_predictions:
+                rec_str = " (recommended)" if pred.recommended else ""
+                print(
+                    f"  {pred.layer_count} layers: {pred.success_probability * 100:.0f}% success{rec_str}"
+                )
+
+            # Show bottlenecks
+            if complexity.bottlenecks:
+                print(f"\nBottlenecks ({len(complexity.bottlenecks)}):")
+                for bottleneck in complexity.bottlenecks[:3]:
+                    print(
+                        f"  - {bottleneck.component_ref}: {bottleneck.description}"
+                    )
+
+            print(f"{'=' * 60}")
+        except Exception as e:
+            print(f"Warning: Complexity analysis failed: {e}", file=sys.stderr)
+
         if not quiet:
             print("\n--- Routability Analysis ---")
         try:
