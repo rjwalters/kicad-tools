@@ -6,6 +6,45 @@ from unittest.mock import patch
 import pytest
 
 
+class TestIsRunningFromSource:
+    """Tests for is_running_from_source function."""
+
+    def test_returns_true_when_module_in_source_root(self):
+        """Should return True when kicad_tools module is under source root."""
+        from kicad_tools.dev import is_running_from_source
+
+        # When running tests from the repo, we're running from source
+        # (either via uv run, pytest, or editable install)
+        result = is_running_from_source()
+        # This test runs from source, so should be True
+        assert result is True
+
+    def test_returns_false_when_source_root_not_found(self):
+        """Should return False when source root cannot be found."""
+        from kicad_tools.dev import is_running_from_source
+
+        with patch("kicad_tools.dev.find_source_root", return_value=None):
+            result = is_running_from_source()
+            assert result is False
+
+    def test_returns_false_when_module_outside_source_root(self, tmp_path: Path):
+        """Should return False when module is not under source root."""
+        from kicad_tools.dev import is_running_from_source
+
+        # Mock find_source_root to return a different directory
+        with patch("kicad_tools.dev.find_source_root", return_value=tmp_path):
+            result = is_running_from_source()
+            assert result is False
+
+    def test_returns_false_on_exception(self):
+        """Should return False on any exception."""
+        from kicad_tools.dev import is_running_from_source
+
+        with patch("kicad_tools.dev.find_source_root", side_effect=Exception("fail")):
+            result = is_running_from_source()
+            assert result is False
+
+
 class TestGetInstalledVersion:
     """Tests for get_installed_version function."""
 
@@ -120,6 +159,33 @@ version = "99.99.99"
 class TestWarnIfStale:
     """Tests for warn_if_stale function."""
 
+    def test_skips_warning_when_running_from_source(self, tmp_path: Path, capsys):
+        """Should skip warning when running from source (editable/uv run)."""
+        from kicad_tools import dev
+        from kicad_tools.dev import warn_if_stale
+
+        # Reset warning state
+        dev._warned = False
+
+        # Create pyproject.toml with different version (would normally warn)
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            """
+[project]
+name = "kicad-tools"
+version = "99.99.99"
+"""
+        )
+
+        # Mock is_running_from_source to return True
+        with patch("kicad_tools.dev.is_running_from_source", return_value=True):
+            result = warn_if_stale(tmp_path)
+            assert result is True
+
+            # No warning should be printed
+            captured = capsys.readouterr()
+            assert "mismatch" not in captured.err.lower()
+
     def test_returns_true_when_versions_match(self, tmp_path: Path, capsys):
         """Should return True and not print warning when versions match."""
         from kicad_tools import dev
@@ -163,12 +229,14 @@ version = "99.99.99"
 """
         )
 
-        result = warn_if_stale(tmp_path)
-        assert result is False
+        # Mock is_running_from_source to return False so warning is shown
+        with patch("kicad_tools.dev.is_running_from_source", return_value=False):
+            result = warn_if_stale(tmp_path)
+            assert result is False
 
-        captured = capsys.readouterr()
-        assert "mismatch" in captured.err.lower()
-        assert "99.99.99" in captured.err
+            captured = capsys.readouterr()
+            assert "mismatch" in captured.err.lower()
+            assert "99.99.99" in captured.err
 
     def test_only_warns_once_without_force(self, tmp_path: Path, capsys):
         """Should only warn once unless force=True."""
@@ -187,20 +255,22 @@ version = "99.99.99"
 """
         )
 
-        # First call should warn
-        warn_if_stale(tmp_path)
-        captured1 = capsys.readouterr()
-        assert "mismatch" in captured1.err.lower()
+        # Mock is_running_from_source to return False so warnings are shown
+        with patch("kicad_tools.dev.is_running_from_source", return_value=False):
+            # First call should warn
+            warn_if_stale(tmp_path)
+            captured1 = capsys.readouterr()
+            assert "mismatch" in captured1.err.lower()
 
-        # Second call should not warn (already warned)
-        warn_if_stale(tmp_path)
-        captured2 = capsys.readouterr()
-        assert "mismatch" not in captured2.err.lower()
+            # Second call should not warn (already warned)
+            warn_if_stale(tmp_path)
+            captured2 = capsys.readouterr()
+            assert "mismatch" not in captured2.err.lower()
 
-        # With force=True, should warn again
-        warn_if_stale(tmp_path, force=True)
-        captured3 = capsys.readouterr()
-        assert "mismatch" in captured3.err.lower()
+            # With force=True, should warn again
+            warn_if_stale(tmp_path, force=True)
+            captured3 = capsys.readouterr()
+            assert "mismatch" in captured3.err.lower()
 
 
 class TestRequireSourceVersion:
