@@ -18,6 +18,35 @@ from pathlib import Path
 _warned = False
 
 
+def is_running_from_source() -> bool:
+    """Check if kicad_tools is being executed from the source directory.
+
+    This happens in editable installs (pip install -e .) or when using
+    uv run, where the source directory is used directly rather than
+    a separately installed copy.
+
+    Returns:
+        True if running from source, False otherwise.
+    """
+    try:
+        import kicad_tools
+
+        module_path = Path(kicad_tools.__file__).resolve()
+        source_root = find_source_root()
+
+        if source_root is None:
+            return False
+
+        # Check if the module is under the source root
+        try:
+            module_path.relative_to(source_root)
+            return True
+        except ValueError:
+            return False
+    except Exception:
+        return False
+
+
 def get_installed_version() -> str:
     """Get the version of the installed kicad-tools package.
 
@@ -140,12 +169,16 @@ def warn_if_stale(source_dir: Path | None = None, force: bool = False) -> bool:
     but is running scripts from the source repo, the imports will use
     the pipx version which may be stale.
 
+    The warning is suppressed when running from source (via `uv run`
+    or editable install), since the source IS what's being executed.
+
     Args:
         source_dir: Path to source directory, or None to auto-detect.
         force: If True, always check and warn even if already warned.
 
     Returns:
-        True if versions match (or source not found), False if mismatch.
+        True if versions match (or source not found or running from source),
+        False if mismatch detected.
 
     Example:
         # At the top of a board generation script
@@ -155,6 +188,12 @@ def warn_if_stale(source_dir: Path | None = None, force: bool = False) -> bool:
     global _warned
 
     if _warned and not force:
+        return True
+
+    # Skip warning if running from source (editable install or uv run)
+    # In this case, the source IS what's executing, so version mismatch
+    # from metadata is not relevant
+    if is_running_from_source():
         return True
 
     match, installed, source = check_version_match(source_dir)
