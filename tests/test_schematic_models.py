@@ -577,7 +577,7 @@ class TestSymbolInstance:
 
         pos = inst.pin_position("1")
         # At 90 degrees, (-2.54, 0) rotates to (0, -2.54)
-        # Both symbol defs and schematics use Y-down: (100+0, 100+(-2.54)) = (100, 97.46)
+        # Both schematic and symbol use Y-down: (100+0, 100+(-2.54)) = (100, 97.46)
         assert abs(pos[0] - 100.0) < 0.01
         assert abs(pos[1] - 97.46) < 0.01
 
@@ -1717,6 +1717,67 @@ class TestSymbolInstanceAdvanced:
         # Should find VCC even with lowercase
         pos = inst.pin_position("vcc")
         assert pos is not None
+
+    def test_pin_position_vertical_ordering(self):
+        """Verify pins maintain correct vertical ordering (issue #889).
+
+        This test ensures that pins with positive Y in symbol-local coordinates
+        result in higher Y in schematic coordinates, and vice versa. The bug was
+        that Y coordinates were incorrectly negated, swapping vertical positions.
+        """
+        # Create a symbol with pins at different Y positions (like a gate driver)
+        pins = [
+            Pin(
+                name="OUTH",
+                number="1",
+                x=10.16,
+                y=2.54,  # Positive Y in symbol
+                angle=0,
+                length=2.54,
+                pin_type="output",
+            ),
+            Pin(
+                name="OUTL",
+                number="2",
+                x=10.16,
+                y=-2.54,  # Negative Y in symbol
+                angle=0,
+                length=2.54,
+                pin_type="output",
+            ),
+        ]
+        sym_def = SymbolDef(
+            lib_id="Driver_FET:TestGateDriver",
+            name="TestGateDriver",
+            raw_sexp="",
+            pins=pins,
+        )
+
+        # Place symbol at a known position with no rotation
+        inst = SymbolInstance(
+            symbol_def=sym_def,
+            x=320.04,
+            y=35.56,
+            rotation=0,
+            reference="U1",
+            value="TestGateDriver",
+        )
+
+        outh_pos = inst.pin_position("OUTH")
+        outl_pos = inst.pin_position("OUTL")
+
+        # In Y-down screen coords, positive symbol Y should result in higher screen Y
+        # OUTH (symbol y=+2.54) should have HIGHER screen Y than OUTL (symbol y=-2.54)
+        assert outh_pos[1] > outl_pos[1], (
+            f"OUTH y={outh_pos[1]} should be > OUTL y={outl_pos[1]}. "
+            "Pins appear to be vertically swapped due to incorrect Y negation."
+        )
+
+        # Verify exact positions
+        # OUTH: x = 320.04 + 10.16 = 330.2, y = 35.56 + 2.54 = 38.1
+        # OUTL: x = 320.04 + 10.16 = 330.2, y = 35.56 + (-2.54) = 33.02
+        assert outh_pos == (330.2, 38.1), f"OUTH position incorrect: {outh_pos}"
+        assert outl_pos == (330.2, 33.02), f"OUTL position incorrect: {outl_pos}"
 
 
 class TestSchematicAutoLayout:
