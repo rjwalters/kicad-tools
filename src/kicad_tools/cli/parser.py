@@ -843,6 +843,31 @@ def _add_route_parser(subparsers) -> None:
         default=0.95,
         help="Minimum routing completion rate for success (default: 0.95 = 95%%)",
     )
+    route_parser.add_argument(
+        "--adaptive-rules",
+        action="store_true",
+        help=(
+            "Automatically relax design rules on routing failure. "
+            "Tries progressively relaxed trace widths and clearances "
+            "until routing succeeds or manufacturer limits are reached."
+        ),
+    )
+    route_parser.add_argument(
+        "--min-trace",
+        type=float,
+        help="Minimum trace width floor for adaptive rules (mm)",
+    )
+    route_parser.add_argument(
+        "--min-clearance-floor",
+        type=float,
+        help="Minimum clearance floor for adaptive rules (mm)",
+    )
+    route_parser.add_argument(
+        "--manufacturer",
+        "--mfr",
+        default="jlcpcb",
+        help="Manufacturer for DRC validation and adaptive rules (default: jlcpcb)",
+    )
 
 
 def _add_reason_parser(subparsers) -> None:

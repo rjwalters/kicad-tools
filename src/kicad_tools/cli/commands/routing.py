@@ -108,6 +108,14 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--max-layers", str(args.max_layers)])
     if getattr(args, "min_completion", 0.95) != 0.95:
         sub_argv.extend(["--min-completion", str(args.min_completion)])
+    if getattr(args, "adaptive_rules", False):
+        sub_argv.append("--adaptive-rules")
+    if getattr(args, "min_trace", None) is not None:
+        sub_argv.extend(["--min-trace", str(args.min_trace)])
+    if getattr(args, "min_clearance_floor", None) is not None:
+        sub_argv.extend(["--min-clearance-floor", str(args.min_clearance_floor)])
+    if getattr(args, "manufacturer", "jlcpcb") != "jlcpcb":
+        sub_argv.extend(["--manufacturer", args.manufacturer])
     return route_main(sub_argv)
 
 
