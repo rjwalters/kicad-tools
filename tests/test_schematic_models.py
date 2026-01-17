@@ -637,7 +637,9 @@ class TestSymbolInstance:
         # Create a symbol with pins at different Y positions
         pins = [
             Pin(name="TOP", number="1", x=5.08, y=2.54, angle=0, length=2.54, pin_type="passive"),
-            Pin(name="BOTTOM", number="2", x=5.08, y=-2.54, angle=0, length=2.54, pin_type="passive"),
+            Pin(
+                name="BOTTOM", number="2", x=5.08, y=-2.54, angle=0, length=2.54, pin_type="passive"
+            ),
         ]
         sym_def = SymbolDef(lib_id="Test:Vertical", name="Vertical", raw_sexp="", pins=pins)
         inst = SymbolInstance(
@@ -2165,6 +2167,141 @@ class TestSymbolDefParsing:
         nodes = sym_def.to_sexp_nodes()
         assert len(nodes) == 1
         assert nodes[0].name == "symbol"
+
+    def test_split_symbol_definitions_single(self):
+        """Split single symbol definition from raw_sexp."""
+        raw_sexp = '(symbol "Test" (property "Name" "value"))'
+        parts = SymbolDef._split_symbol_definitions(raw_sexp)
+        assert len(parts) == 1
+        assert parts[0] == raw_sexp
+
+    def test_split_symbol_definitions_multiple(self):
+        """Split multiple symbol definitions (inheritance) from raw_sexp."""
+        raw_sexp = '(symbol "Parent" (prop "A"))\n(symbol "Child" (extends "Parent"))'
+        parts = SymbolDef._split_symbol_definitions(raw_sexp)
+        assert len(parts) == 2
+        assert parts[0] == '(symbol "Parent" (prop "A"))'
+        assert parts[1] == '(symbol "Child" (extends "Parent"))'
+
+    def test_split_symbol_definitions_nested_parens(self):
+        """Handle deeply nested parentheses correctly (issue #892).
+
+        The previous regex-based approach failed on complex symbols with
+        many nested structures like pins and properties.
+
+        Note: Unit symbols (like Complex_0_1) are nested inside their parent,
+        so they should be part of the same definition, not separate.
+        """
+        # Simulate a complex symbol with deeply nested structures
+        raw_sexp = """(symbol "Complex"
+            (property "Reference" "U")
+            (property "Value" "Test")
+            (symbol "Complex_0_1"
+                (pin input line (at -10 5 0) (length 5)
+                    (name "IN" (effects (font (size 1.27 1.27))))
+                    (number "1" (effects (font (size 1.27 1.27))))
+                )
+                (pin output line (at 10 5 0) (length 5)
+                    (name "OUT" (effects (font (size 1.27 1.27))))
+                    (number "2" (effects (font (size 1.27 1.27))))
+                )
+            )
+        )"""
+        parts = SymbolDef._split_symbol_definitions(raw_sexp)
+        # Should return 1 part - the entire symbol including nested unit symbols
+        assert len(parts) == 1
+        assert '(symbol "Complex"' in parts[0]
+        assert '(symbol "Complex_0_1"' in parts[0]  # Unit is inside parent
+
+    def test_split_symbol_definitions_quoted_parens(self):
+        """Handle parentheses inside quoted strings correctly."""
+        raw_sexp = '(symbol "Test(1)" (property "Desc" "Has (parens)"))'
+        parts = SymbolDef._split_symbol_definitions(raw_sexp)
+        assert len(parts) == 1
+        assert parts[0] == raw_sexp
+
+    def test_split_symbol_definitions_escaped_quotes(self):
+        """Handle escaped quotes inside strings."""
+        raw_sexp = r'(symbol "Test" (property "Name" "Value with \"quotes\""))'
+        parts = SymbolDef._split_symbol_definitions(raw_sexp)
+        assert len(parts) == 1
+
+    def test_to_sexp_nodes_fallback_complex_symbol(self):
+        """Parse complex symbol using raw_sexp fallback (issue #892).
+
+        When _sexp_node is None (registry path), to_sexp_nodes() must
+        properly parse complex symbols with nested structures.
+
+        Note: Unit symbols are nested inside their parent, so the entire
+        symbol (including units) is one top-level definition.
+        """
+        # Complex raw_sexp that would fail with regex approach
+        raw_sexp = """(symbol "TestSym"
+            (property "Reference" "U" (at 0 0 0) (effects (font (size 1.27 1.27))))
+            (property "Value" "TestSym" (at 0 0 0) (effects (font (size 1.27 1.27))))
+            (symbol "TestSym_0_1"
+                (pin input line (at -10 0 0) (length 2.54)
+                    (name "IN" (effects (font (size 1.27 1.27))))
+                    (number "1" (effects (font (size 1.27 1.27))))
+                )
+            )
+        )"""
+
+        sym_def = SymbolDef(
+            lib_id="Test:TestSym",
+            name="TestSym",
+            raw_sexp=raw_sexp,
+            _sexp_node=None,  # Force fallback path
+        )
+
+        nodes = sym_def.to_sexp_nodes()
+        # Should successfully parse the symbol (unit is nested inside)
+        assert len(nodes) == 1
+        assert nodes[0].name == "symbol"
+        # Symbol should have library prefix
+        assert "Test:TestSym" in nodes[0].to_string()
+        # Nested unit symbol should also be present
+        assert "TestSym_0_1" in nodes[0].to_string()
+
+    def test_to_sexp_nodes_fallback_inherited_symbol(self):
+        """Parse inherited symbol using raw_sexp fallback.
+
+        Symbols that extend a parent require both parent and child
+        definitions to be embedded in lib_symbols.
+
+        Note: The parent has a nested unit symbol, but that's inside
+        the parent definition. So we have 2 top-level symbols:
+        1. Parent (with nested unit)
+        2. Child (extends parent)
+        """
+        raw_sexp = """(symbol "ParentSym"
+            (property "Reference" "U")
+            (symbol "ParentSym_0_1"
+                (pin passive line (at 0 0 0) (length 2.54)
+                    (name "~")
+                    (number "1")
+                )
+            )
+        )
+        (symbol "ChildSym"
+            (extends "ParentSym")
+            (property "Reference" "U")
+            (property "Value" "ChildSym")
+        )"""
+
+        sym_def = SymbolDef(
+            lib_id="Test:ChildSym",
+            name="ChildSym",
+            raw_sexp=raw_sexp,
+            _sexp_node=None,  # Force fallback path
+        )
+
+        nodes = sym_def.to_sexp_nodes()
+        # Should parse both: parent (with its nested unit) and child
+        assert len(nodes) == 2
+        # Both should have library prefix
+        assert "Test:ParentSym" in nodes[0].to_string()
+        assert "Test:ChildSym" in nodes[1].to_string()
 
 
 class TestSymbolInstanceFromSexp:

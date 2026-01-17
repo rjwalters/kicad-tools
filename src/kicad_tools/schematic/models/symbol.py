@@ -248,28 +248,68 @@ class SymbolDef:
             # Fall back to parsing raw_sexp string
             from kicad_tools.sexp import parse_string
 
-            # Parse the raw_sexp which may contain multiple symbols
-            # wrapped each (symbol ...) in parsing
-            parts = re.findall(
-                r'\(symbol\s+"[^"]+(?:_\d+_\d+)?"[^)]*(?:\([^)]*\)[^)]*)*\)', self.raw_sexp
-            )
-            for part in parts:
+            # Split raw_sexp into individual (symbol ...) definitions
+            # using parenthesis counting for proper nested structure handling
+            symbol_texts = self._split_symbol_definitions(self.raw_sexp)
+
+            for text in symbol_texts:
                 try:
-                    parsed = parse_string(part)
+                    parsed = parse_string(text)
                     nodes.append(self._add_prefix_to_node(parsed, lib_name))
                 except Exception:
                     # If parsing fails, skip this part
                     pass
 
-            # If no parts found, try parsing the whole thing
-            if not nodes:
-                try:
-                    parsed = parse_string(self.raw_sexp)
-                    nodes.append(self._add_prefix_to_node(parsed, lib_name))
-                except Exception:
-                    pass
-
         return nodes
+
+    @staticmethod
+    def _split_symbol_definitions(raw_sexp: str) -> list[str]:
+        """Split raw_sexp into individual (symbol ...) definitions.
+
+        Uses parenthesis counting to properly handle nested structures,
+        which is necessary for complex symbols with many pins and properties.
+        The previous regex-based approach failed on deeply nested symbols.
+        """
+        definitions = []
+        i = 0
+        while i < len(raw_sexp):
+            # Find start of next symbol definition
+            match = raw_sexp.find("(symbol", i)
+            if match == -1:
+                break
+
+            # Find the end of this symbol definition by counting parens
+            start = match
+            depth = 0
+            j = start
+            in_string = False
+            escape_next = False
+
+            while j < len(raw_sexp):
+                char = raw_sexp[j]
+
+                if escape_next:
+                    escape_next = False
+                elif char == "\\":
+                    escape_next = True
+                elif char == '"' and not escape_next:
+                    in_string = not in_string
+                elif not in_string:
+                    if char == "(":
+                        depth += 1
+                    elif char == ")":
+                        depth -= 1
+                        if depth == 0:
+                            # Found the matching close paren
+                            definitions.append(raw_sexp[start : j + 1])
+                            i = j + 1
+                            break
+                j += 1
+            else:
+                # Reached end without finding close paren - malformed, skip rest
+                break
+
+        return definitions
 
     def get_embedded_sexp(self) -> str:
         """Get the symbol definition formatted for embedding in schematic.
