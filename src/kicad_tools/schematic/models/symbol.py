@@ -357,19 +357,18 @@ class SymbolInstance:
         conn_x, conn_y = pin.connection_point()
 
         # Apply rotation transformation
-        # Note: KiCad schematic uses Y-down, but symbol definitions use Y-up
-        # So we negate the Y component when translating
+        # Note: Both KiCad schematics and symbol definitions use Y-down coordinates
         rad = math.radians(self.rotation)
         cos_r = math.cos(rad)
         sin_r = math.sin(rad)
 
-        # Rotate connection point around origin (in symbol's Y-up coordinate system)
+        # Rotate connection point around origin
         rx = conn_x * cos_r - conn_y * sin_r
         ry = conn_x * sin_r + conn_y * cos_r
 
-        # Translate to symbol position (flip Y for schematic's Y-down system)
+        # Translate to symbol position
         # Round to 2 decimal places for consistent wire matching
-        return (round(self.x + rx, 2), round(self.y - ry, 2))
+        return (round(self.x + rx, 2), round(self.y + ry, 2))
 
     def all_pin_positions(self) -> dict[str, tuple[float, float]]:
         """Get positions of all pins."""
