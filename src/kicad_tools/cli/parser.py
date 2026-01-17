@@ -822,6 +822,27 @@ def _add_route_parser(subparsers) -> None:
         dest="no_optimize",
         help="Alias for --no-optimize (keep raw grid-step segments for debugging)",
     )
+    route_parser.add_argument(
+        "--auto-layers",
+        action="store_true",
+        help=(
+            "Automatically escalate layer count on routing failure. "
+            "Tries 2 -> 4 -> 6 layers until routing succeeds or max is reached."
+        ),
+    )
+    route_parser.add_argument(
+        "--max-layers",
+        type=int,
+        default=6,
+        choices=[2, 4, 6],
+        help="Maximum layer count for auto-escalation (default: 6)",
+    )
+    route_parser.add_argument(
+        "--min-completion",
+        type=float,
+        default=0.95,
+        help="Minimum routing completion rate for success (default: 0.95 = 95%%)",
+    )
 
 
 def _add_reason_parser(subparsers) -> None:
