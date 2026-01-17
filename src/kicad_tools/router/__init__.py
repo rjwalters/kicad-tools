@@ -114,6 +114,16 @@ from .length import (
     ViolationType,
     create_match_group,
 )
+from .mfr_limits import (
+    MFR_JLCPCB,
+    MFR_LIMITS,
+    MFR_OSHPARK,
+    MFR_PCBWAY,
+    MfrLimits,
+    RelaxationTier,
+    get_mfr_limits,
+    get_relaxation_tiers,
+)
 from .net_class import (
     NET_CLASS_PATTERNS,
     SYMBOL_INDICATORS,
@@ -372,4 +382,13 @@ __all__ = [
     "find_differential_partner",
     # Output and Diagnostics
     "show_routing_summary",
+    # Manufacturer Limits and Adaptive Rules
+    "MfrLimits",
+    "RelaxationTier",
+    "MFR_LIMITS",
+    "MFR_JLCPCB",
+    "MFR_OSHPARK",
+    "MFR_PCBWAY",
+    "get_mfr_limits",
+    "get_relaxation_tiers",
 ]

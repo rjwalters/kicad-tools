@@ -333,6 +333,25 @@ class LayerEscalationResult:
     success: bool
 
 
+@dataclass
+class RuleRelaxationResult:
+    """Result of a rule relaxation routing attempt."""
+
+    tier: int
+    trace_width: float
+    clearance: float
+    via_drill: float
+    via_diameter: float
+    tier_description: str
+    router: "Autorouter"
+    net_map: dict
+    nets_routed: int
+    nets_to_route: int
+    completion: float
+    success: bool
+    layer_count: int = 2  # May be set by layer escalation integration
+
+
 def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
     """Update PCB content to have the specified number of copper layers.
 
@@ -514,9 +533,7 @@ def route_with_layer_escalation(
 
         # Count nets to route
         multi_pad_nets = [
-            net_num
-            for net_num, pads in router.nets.items()
-            if net_num > 0 and len(pads) >= 2
+            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
         ]
         nets_to_route = len(multi_pad_nets)
 
@@ -646,9 +663,7 @@ def route_with_layer_escalation(
 
         # Update layer stackup if we escalated
         if final_result.layer_count > 2:
-            original_content = update_pcb_layer_stackup(
-                original_content, final_result.layer_count
-            )
+            original_content = update_pcb_layer_stackup(original_content, final_result.layer_count)
 
         # Get route S-expressions
         route_sexp = final_result.router.to_sexp()
@@ -688,13 +703,705 @@ def route_with_layer_escalation(
     if not quiet:
         print("\n" + "=" * 60)
         if final_result.success:
-            print(
-                f"SUCCESS: Design requires minimum {final_result.layer_count} layers"
-            )
+            print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
         else:
             print(
                 f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
                 f"on {final_result.layer_count} layers"
+            )
+            show_routing_summary(
+                final_result.router,
+                final_result.net_map,
+                final_result.nets_to_route,
+                quiet=quiet,
+            )
+
+    return 0 if final_result.success else 1
+
+
+def route_with_rule_relaxation(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool = False,
+) -> int:
+    """Route a PCB with automatic design rule relaxation.
+
+    Tries routing with progressively relaxed design rules (trace width,
+    clearance) until success or manufacturer minimum limits are reached.
+
+    Args:
+        pcb_path: Path to input PCB file
+        output_path: Path for output routed PCB file
+        args: Parsed command-line arguments
+        quiet: Suppress output
+
+    Returns:
+        Exit code (0 = success, 1 = failure)
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router import (
+        DesignRules,
+        LayerStack,
+        get_relaxation_tiers,
+        is_cpp_available,
+        load_pcb_for_routing,
+        show_routing_summary,
+    )
+    from kicad_tools.router.io import detect_layer_stack
+
+    # Handle backend selection
+    force_python = False
+    if args.backend == "cpp":
+        if not is_cpp_available():
+            print(
+                "Error: C++ backend requested but not available.\n"
+                "Build the C++ extension or use --backend auto/python.\n"
+                "See README for build instructions.",
+                file=sys.stderr,
+            )
+            return 1
+    elif args.backend == "python":
+        force_python = True
+
+    # Parse skip nets
+    skip_nets = []
+    if args.skip_nets:
+        skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Get relaxation tiers
+    tiers = get_relaxation_tiers(
+        initial_trace_width=args.trace_width,
+        initial_clearance=args.clearance,
+        initial_via_drill=args.via_drill,
+        initial_via_diameter=args.via_diameter,
+        manufacturer=args.manufacturer,
+        min_trace_floor=args.min_trace,
+        min_clearance_floor=args.min_clearance_floor,
+    )
+
+    # Determine layer stack
+    if args.layers == "auto":
+        pcb_text = pcb_path.read_text()
+        layer_stack = detect_layer_stack(pcb_text)
+    else:
+        layer_stack_map = {
+            "2": LayerStack.two_layer(),
+            "4": LayerStack.four_layer_sig_gnd_pwr_sig(),
+            "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr(),
+            "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
+        }
+        layer_stack = layer_stack_map[args.layers]
+
+    if not quiet:
+        print("=" * 60)
+        print("KiCad PCB Autorouter - Adaptive Rules Mode")
+        print("=" * 60)
+        print(f"Input:          {pcb_path}")
+        print(f"Output:         {output_path}")
+        print(f"Strategy:       {args.strategy}")
+        print(f"Manufacturer:   {args.manufacturer}")
+        print(f"Min completion: {args.min_completion * 100:.0f}%")
+        print(f"Relaxation tiers: {len(tiers)}")
+        if skip_nets:
+            print(f"Skip:           {', '.join(skip_nets)}")
+        print()
+
+    best_result: RuleRelaxationResult | None = None
+    successful_result: RuleRelaxationResult | None = None
+
+    for tier in tiers:
+        if not quiet:
+            print("=" * 60)
+            print(f"Attempt {tier.tier + 1}: {tier.description}")
+            print(f"  trace={tier.trace_width:.3f}mm, clearance={tier.clearance:.3f}mm")
+            print("=" * 60)
+
+        # Configure design rules for this tier
+        rules = DesignRules(
+            grid_resolution=args.grid,
+            trace_width=tier.trace_width,
+            trace_clearance=tier.clearance,
+            via_drill=tier.via_drill,
+            via_diameter=tier.via_diameter,
+        )
+
+        # Load PCB
+        try:
+            with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
+                router, net_map = load_pcb_for_routing(
+                    str(pcb_path),
+                    skip_nets=skip_nets,
+                    rules=rules,
+                    edge_clearance=args.edge_clearance,
+                    layer_stack=layer_stack,
+                    force_python=force_python,
+                    validate_drc=not args.force,
+                    strict_drc=False,
+                )
+        except Exception as e:
+            if not quiet:
+                print(f"  Error loading PCB: {e}")
+            continue
+
+        # Count nets to route
+        multi_pad_nets = [
+            net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
+        ]
+        nets_to_route = len(multi_pad_nets)
+
+        if not quiet:
+            print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+            print(f"  Nets to route: {nets_to_route}")
+
+        # Route
+        if not quiet:
+            print(f"\n  Routing ({args.strategy})...")
+
+        try:
+            if args.strategy == "negotiated":
+                router.route_all_negotiated(
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
+            elif args.strategy == "basic":
+                router.route_all()
+            elif args.strategy == "monte-carlo":
+                router.route_all_monte_carlo(
+                    num_trials=args.mc_trials,
+                    verbose=args.verbose and not quiet,
+                )
+        except Exception as e:
+            if not quiet:
+                print(f"  Routing error: {e}")
+            continue
+
+        # Calculate completion
+        stats = router.get_statistics()
+        nets_routed = stats["nets_routed"]
+        completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
+
+        # Create result
+        result = RuleRelaxationResult(
+            tier=tier.tier,
+            trace_width=tier.trace_width,
+            clearance=tier.clearance,
+            via_drill=tier.via_drill,
+            via_diameter=tier.via_diameter,
+            tier_description=tier.description,
+            router=router,
+            net_map=net_map,
+            nets_routed=nets_routed,
+            nets_to_route=nets_to_route,
+            completion=completion,
+            success=completion >= args.min_completion,
+            layer_count=layer_stack.num_layers,
+        )
+
+        # Track best result
+        if best_result is None or completion > best_result.completion:
+            best_result = result
+
+        # Report attempt result
+        status = "SUCCESS" if result.success else "INSUFFICIENT - relaxing rules"
+        if not quiet:
+            print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
+            print(f"  Status: {status}")
+
+        # Check for success
+        if result.success:
+            successful_result = result
+            break
+
+    # Handle results
+    if not quiet:
+        print("\n" + "=" * 60)
+        print("ADAPTIVE RULES SUMMARY")
+        print("=" * 60)
+
+    if successful_result:
+        final_result = successful_result
+        if not quiet:
+            print(
+                f"Result: Design routed successfully with relaxed rules "
+                f"({final_result.completion * 100:.0f}% completion)"
+            )
+            print("\nFinal design rules:")
+            print(f"  Trace width: {final_result.trace_width:.3f}mm (was {args.trace_width}mm)")
+            print(f"  Clearance:   {final_result.clearance:.3f}mm (was {args.clearance}mm)")
+            if final_result.tier > 0:
+                print(f"\n  Note: Rules were relaxed ({final_result.tier_description})")
+    elif best_result:
+        final_result = best_result
+        if not quiet:
+            print(
+                f"Result: Best result at tier {final_result.tier} "
+                f"({final_result.completion * 100:.0f}% completion)"
+            )
+            print(
+                f"Warning: Did not achieve {args.min_completion * 100:.0f}% completion "
+                f"even at manufacturer minimum tolerances"
+            )
+    else:
+        if not quiet:
+            print("Error: No routing attempts succeeded")
+        return 1
+
+    # Check if at manufacturer minimum
+    from kicad_tools.router import get_mfr_limits
+
+    mfr = get_mfr_limits(args.manufacturer)
+    at_minimum = (
+        final_result.trace_width <= mfr.min_trace + 0.001
+        and final_result.clearance <= mfr.min_clearance + 0.001
+    )
+    if at_minimum and not quiet:
+        print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
+        print("Consider adding layers for more manufacturing margin.")
+
+    # Optimize traces
+    if not args.no_optimize and final_result.router.routes:
+        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+
+        if not quiet:
+            print("\n--- Optimizing traces ---")
+
+        opt_config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=True,
+            compress_staircase=True,
+            convert_45_corners=True,
+            corner_chamfer_size=0.5,
+            minimize_vias=True,
+        )
+        optimizer = TraceOptimizer(config=opt_config)
+
+        with spinner("Optimizing traces...", quiet=quiet):
+            optimized_routes = []
+            for route in final_result.router.routes:
+                optimized_route = optimizer.optimize_route(route)
+                optimized_routes.append(optimized_route)
+            final_result.router.routes = optimized_routes
+
+    # Save output
+    if args.dry_run:
+        if not quiet:
+            print("\n--- Dry run - not saving ---")
+        return 0
+
+    if not quiet:
+        print("\n--- Saving routed PCB ---")
+
+    with spinner("Saving routed PCB...", quiet=quiet):
+        # Read original PCB content
+        original_content = pcb_path.read_text()
+
+        # Get route S-expressions
+        route_sexp = final_result.router.to_sexp()
+
+        # Insert routes before final closing parenthesis
+        if route_sexp:
+            output_content = original_content.rstrip().rstrip(")")
+            output_content += f"\n  {route_sexp}\n"
+            output_content += ")\n"
+        else:
+            output_content = original_content
+            if not quiet:
+                print("  Warning: No routes generated!")
+
+        output_path.write_text(output_content)
+
+    if not quiet:
+        print(f"  Saved to: {output_path}")
+        print(f"  Final trace width: {final_result.trace_width:.3f}mm")
+        print(f"  Final clearance: {final_result.clearance:.3f}mm")
+
+    # Run DRC validation unless skipped
+    if not args.skip_drc and final_result.nets_routed > 0:
+        run_post_route_drc(
+            output_path=output_path,
+            manufacturer=args.manufacturer,
+            layers=final_result.layer_count,
+            quiet=quiet,
+        )
+
+    # Final summary
+    if not quiet:
+        print("\n" + "=" * 60)
+        if final_result.success:
+            print("SUCCESS: Routing complete with adaptive rules")
+            if final_result.tier > 0:
+                print(
+                    f"  Note: Relaxed from tier 0 to tier {final_result.tier} "
+                    f"({final_result.tier_description})"
+                )
+        else:
+            print(
+                f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
+                f"at tier {final_result.tier}"
+            )
+            show_routing_summary(
+                final_result.router,
+                final_result.net_map,
+                final_result.nets_to_route,
+                quiet=quiet,
+            )
+
+    return 0 if final_result.success else 1
+
+
+def route_with_combined_escalation(
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool = False,
+) -> int:
+    """Route a PCB with combined layer and rule escalation (2D search).
+
+    Implements a 2D search across both layer counts and design rule tiers
+    to find the minimum viable configuration.
+
+    Args:
+        pcb_path: Path to input PCB file
+        output_path: Path for output routed PCB file
+        args: Parsed command-line arguments
+        quiet: Suppress output
+
+    Returns:
+        Exit code (0 = success, 1 = failure)
+    """
+    from kicad_tools.cli.progress import spinner
+    from kicad_tools.router import (
+        DesignRules,
+        LayerStack,
+        get_relaxation_tiers,
+        is_cpp_available,
+        load_pcb_for_routing,
+        show_routing_summary,
+    )
+
+    # Handle backend selection
+    force_python = False
+    if args.backend == "cpp":
+        if not is_cpp_available():
+            print(
+                "Error: C++ backend requested but not available.\n"
+                "Build the C++ extension or use --backend auto/python.\n"
+                "See README for build instructions.",
+                file=sys.stderr,
+            )
+            return 1
+    elif args.backend == "python":
+        force_python = True
+
+    # Parse skip nets
+    skip_nets = []
+    if args.skip_nets:
+        skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Get relaxation tiers
+    tiers = get_relaxation_tiers(
+        initial_trace_width=args.trace_width,
+        initial_clearance=args.clearance,
+        initial_via_drill=args.via_drill,
+        initial_via_diameter=args.via_diameter,
+        manufacturer=args.manufacturer,
+        min_trace_floor=args.min_trace,
+        min_clearance_floor=args.min_clearance_floor,
+    )
+
+    # Layer stacks to try (in escalation order)
+    layer_configs = [
+        (2, LayerStack.two_layer()),
+        (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
+        (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
+    ]
+
+    # Filter by max_layers
+    layer_configs = [(n, s) for n, s in layer_configs if n <= args.max_layers]
+
+    if not quiet:
+        print("=" * 60)
+        print("KiCad PCB Autorouter - Combined Escalation Mode")
+        print("=" * 60)
+        print(f"Input:          {pcb_path}")
+        print(f"Output:         {output_path}")
+        print(f"Strategy:       {args.strategy}")
+        print(f"Manufacturer:   {args.manufacturer}")
+        print(f"Max layers:     {args.max_layers}")
+        print(f"Min completion: {args.min_completion * 100:.0f}%")
+        print(f"Rule tiers:     {len(tiers)}")
+        print(f"Layer configs:  {[n for n, _ in layer_configs]}")
+        if skip_nets:
+            print(f"Skip:           {', '.join(skip_nets)}")
+        print()
+        print("Search matrix:")
+        print("         ", end="")
+        for n, _ in layer_configs:
+            print(f" {n}L    ", end="")
+        print()
+
+    best_result: RuleRelaxationResult | None = None
+    successful_result: RuleRelaxationResult | None = None
+    results_matrix: dict[tuple[int, int], float] = {}  # (tier, layers) -> completion
+
+    # 2D search: prioritize fewer layers first, then stricter rules
+    for layer_count, layer_stack in layer_configs:
+        for tier in tiers:
+            if not quiet:
+                print(
+                    f"\nTrying: {layer_count} layers, tier {tier.tier} "
+                    f"(trace={tier.trace_width:.2f}mm, clearance={tier.clearance:.2f}mm)"
+                )
+
+            # Configure design rules for this tier
+            rules = DesignRules(
+                grid_resolution=args.grid,
+                trace_width=tier.trace_width,
+                trace_clearance=tier.clearance,
+                via_drill=tier.via_drill,
+                via_diameter=tier.via_diameter,
+            )
+
+            # Load PCB
+            try:
+                with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
+                    router, net_map = load_pcb_for_routing(
+                        str(pcb_path),
+                        skip_nets=skip_nets,
+                        rules=rules,
+                        edge_clearance=args.edge_clearance,
+                        layer_stack=layer_stack,
+                        force_python=force_python,
+                        validate_drc=not args.force,
+                        strict_drc=False,
+                    )
+            except Exception as e:
+                if not quiet:
+                    print(f"  Error loading PCB: {e}")
+                results_matrix[(tier.tier, layer_count)] = 0.0
+                continue
+
+            # Count nets to route
+            multi_pad_nets = [
+                net_num for net_num, pads in router.nets.items() if net_num > 0 and len(pads) >= 2
+            ]
+            nets_to_route = len(multi_pad_nets)
+
+            # Route
+            try:
+                if args.strategy == "negotiated":
+                    router.route_all_negotiated(
+                        max_iterations=args.iterations,
+                        timeout=args.timeout,
+                    )
+                elif args.strategy == "basic":
+                    router.route_all()
+                elif args.strategy == "monte-carlo":
+                    router.route_all_monte_carlo(
+                        num_trials=args.mc_trials,
+                        verbose=args.verbose and not quiet,
+                    )
+            except Exception as e:
+                if not quiet:
+                    print(f"  Routing error: {e}")
+                results_matrix[(tier.tier, layer_count)] = 0.0
+                continue
+
+            # Calculate completion
+            stats = router.get_statistics()
+            nets_routed = stats["nets_routed"]
+            completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
+            results_matrix[(tier.tier, layer_count)] = completion
+
+            if not quiet:
+                print(f"  Routed: {nets_routed}/{nets_to_route} ({completion * 100:.0f}%)")
+
+            # Create result
+            result = RuleRelaxationResult(
+                tier=tier.tier,
+                trace_width=tier.trace_width,
+                clearance=tier.clearance,
+                via_drill=tier.via_drill,
+                via_diameter=tier.via_diameter,
+                tier_description=tier.description,
+                router=router,
+                net_map=net_map,
+                nets_routed=nets_routed,
+                nets_to_route=nets_to_route,
+                completion=completion,
+                success=completion >= args.min_completion,
+                layer_count=layer_count,
+            )
+
+            # Track best result
+            if best_result is None or completion > best_result.completion:
+                best_result = result
+
+            # Check for success (first success wins - minimum config)
+            if result.success:
+                successful_result = result
+                break
+
+        # If we found a successful config at this layer count, stop
+        if successful_result:
+            break
+
+    # Print results matrix
+    if not quiet:
+        print("\n" + "=" * 60)
+        print("SEARCH MATRIX RESULTS")
+        print("=" * 60)
+        print("         ", end="")
+        for n, _ in layer_configs:
+            print(f" {n}L     ", end="")
+        print()
+        for tier in tiers:
+            print(f"Tier {tier.tier}:  ", end="")
+            for n, _ in layer_configs:
+                comp = results_matrix.get((tier.tier, n), 0.0)
+                if comp >= args.min_completion:
+                    print(f" {comp * 100:3.0f}%✓  ", end="")
+                else:
+                    print(f" {comp * 100:3.0f}%   ", end="")
+            print()
+
+    # Handle results
+    if not quiet:
+        print("\n" + "=" * 60)
+        print("COMBINED ESCALATION SUMMARY")
+        print("=" * 60)
+
+    if successful_result:
+        final_result = successful_result
+        if not quiet:
+            print(
+                f"Result: Minimum viable configuration found\n"
+                f"  Layers: {final_result.layer_count}\n"
+                f"  Tier: {final_result.tier} ({final_result.tier_description})\n"
+                f"  Completion: {final_result.completion * 100:.0f}%"
+            )
+            print("\nFinal design rules:")
+            print(f"  Trace width: {final_result.trace_width:.3f}mm")
+            print(f"  Clearance:   {final_result.clearance:.3f}mm")
+    elif best_result:
+        final_result = best_result
+        if not quiet:
+            print(
+                f"Result: Best result at {final_result.layer_count} layers, "
+                f"tier {final_result.tier} ({final_result.completion * 100:.0f}% completion)"
+            )
+            print(
+                f"Warning: Did not achieve {args.min_completion * 100:.0f}% completion "
+                f"in any configuration"
+            )
+    else:
+        if not quiet:
+            print("Error: No routing attempts succeeded")
+        return 1
+
+    # Check if at manufacturer minimum
+    from kicad_tools.router import get_mfr_limits
+
+    mfr = get_mfr_limits(args.manufacturer)
+    at_minimum = (
+        final_result.trace_width <= mfr.min_trace + 0.001
+        and final_result.clearance <= mfr.min_clearance + 0.001
+    )
+    if at_minimum and not quiet:
+        print(f"\nWARNING: Design uses {args.manufacturer.upper()} minimum tolerances.")
+        print("Consider redesigning placement for more margin.")
+
+    # Optimize traces
+    if not args.no_optimize and final_result.router.routes:
+        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+
+        if not quiet:
+            print("\n--- Optimizing traces ---")
+
+        opt_config = OptimizationConfig(
+            merge_collinear=True,
+            eliminate_zigzags=True,
+            compress_staircase=True,
+            convert_45_corners=True,
+            corner_chamfer_size=0.5,
+            minimize_vias=True,
+        )
+        optimizer = TraceOptimizer(config=opt_config)
+
+        with spinner("Optimizing traces...", quiet=quiet):
+            optimized_routes = []
+            for route in final_result.router.routes:
+                optimized_route = optimizer.optimize_route(route)
+                optimized_routes.append(optimized_route)
+            final_result.router.routes = optimized_routes
+
+    # Save output
+    if args.dry_run:
+        if not quiet:
+            print("\n--- Dry run - not saving ---")
+        return 0
+
+    if not quiet:
+        print("\n--- Saving routed PCB ---")
+
+    with spinner("Saving routed PCB...", quiet=quiet):
+        # Read original PCB content
+        original_content = pcb_path.read_text()
+
+        # Update layer stackup if we escalated
+        if final_result.layer_count > 2:
+            original_content = update_pcb_layer_stackup(original_content, final_result.layer_count)
+
+        # Get route S-expressions
+        route_sexp = final_result.router.to_sexp()
+
+        # Insert routes before final closing parenthesis
+        if route_sexp:
+            output_content = original_content.rstrip().rstrip(")")
+            output_content += f"\n  {route_sexp}\n"
+            output_content += ")\n"
+        else:
+            output_content = original_content
+            if not quiet:
+                print("  Warning: No routes generated!")
+
+        # Update output filename to include layer count and tier
+        if final_result.layer_count > 2 or final_result.tier > 0:
+            suffix = ""
+            if final_result.layer_count > 2:
+                suffix += f"_{final_result.layer_count}layer"
+            output_path = output_path.with_stem(output_path.stem + suffix)
+
+        output_path.write_text(output_content)
+
+    if not quiet:
+        print(f"  Saved to: {output_path}")
+        print(f"  Layer count: {final_result.layer_count}")
+        print(f"  Final trace width: {final_result.trace_width:.3f}mm")
+        print(f"  Final clearance: {final_result.clearance:.3f}mm")
+
+    # Run DRC validation unless skipped
+    if not args.skip_drc and final_result.nets_routed > 0:
+        run_post_route_drc(
+            output_path=output_path,
+            manufacturer=args.manufacturer,
+            layers=final_result.layer_count,
+            quiet=quiet,
+        )
+
+    # Final summary
+    if not quiet:
+        print("\n" + "=" * 60)
+        if final_result.success:
+            print(
+                f"SUCCESS: Minimum viable config = {final_result.layer_count} layers + "
+                f"tier {final_result.tier} rules"
+            )
+        else:
+            print(
+                f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
+                f"at {final_result.layer_count} layers, tier {final_result.tier}"
             )
             show_routing_summary(
                 final_result.router,
@@ -957,8 +1664,7 @@ def main(argv: list[str] | None = None) -> int:
         default=6,
         choices=[2, 4, 6],
         help=(
-            "Maximum layer count for auto-escalation (default: 6). "
-            "Only used with --auto-layers."
+            "Maximum layer count for auto-escalation (default: 6). Only used with --auto-layers."
         ),
     )
     parser.add_argument(
@@ -969,6 +1675,34 @@ def main(argv: list[str] | None = None) -> int:
             "Minimum routing completion rate for success (default: 0.95 = 95%%). "
             "Only used with --auto-layers. If no layer count achieves this, "
             "the best result is saved."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-rules",
+        action="store_true",
+        help=(
+            "Automatically relax design rules on routing failure. "
+            "Tries progressively relaxed trace widths and clearances "
+            "until routing succeeds or manufacturer limits are reached. "
+            "Reports which rules were relaxed and warns if minimum tolerances used."
+        ),
+    )
+    parser.add_argument(
+        "--min-trace",
+        type=float,
+        help=(
+            "Minimum trace width floor for adaptive rules (mm). "
+            "Prevents relaxation below this value. "
+            "Default: manufacturer minimum (e.g., 0.127mm for JLCPCB)."
+        ),
+    )
+    parser.add_argument(
+        "--min-clearance-floor",
+        type=float,
+        help=(
+            "Minimum clearance floor for adaptive rules (mm). "
+            "Prevents relaxation below this value. "
+            "Default: manufacturer minimum (e.g., 0.127mm for JLCPCB)."
         ),
     )
 
@@ -992,6 +1726,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # Validate --adaptive-rules is not used with explicit --layers (unless also using --auto-layers)
+    if args.adaptive_rules and args.layers != "auto" and not args.auto_layers:
+        print(
+            f"Error: --adaptive-rules cannot be used with --layers {args.layers}.\n"
+            "Use --adaptive-rules alone, with --auto-layers, or use --layers for fixed config.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Validate min-completion is between 0 and 1
     if args.min_completion < 0 or args.min_completion > 1:
         print(
@@ -1007,8 +1750,24 @@ def main(argv: list[str] | None = None) -> int:
         output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
 
     # Handle auto-layers mode (separate code path)
-    if args.auto_layers:
+    if args.auto_layers and args.adaptive_rules:
+        # Combined 2D search: layers + rules
+        return route_with_combined_escalation(
+            pcb_path=pcb_path,
+            output_path=output_path,
+            args=args,
+            quiet=args.quiet,
+        )
+    elif args.auto_layers:
         return route_with_layer_escalation(
+            pcb_path=pcb_path,
+            output_path=output_path,
+            args=args,
+            quiet=args.quiet,
+        )
+    elif args.adaptive_rules:
+        # Adaptive rules only (fixed layer count)
+        return route_with_rule_relaxation(
             pcb_path=pcb_path,
             output_path=output_path,
             args=args,
