@@ -438,3 +438,152 @@ class TestSExpFileIO:
         sexp = SExp("not_kicad_symbol_lib")
         with pytest.raises(FileFormatError):
             save_symbol_lib(sexp, tmp_path / "bad.kicad_sym")
+
+
+class TestSExpInsertMethods:
+    """Tests for SExp node insertion methods (insert, insert_after, insert_before)."""
+
+    def test_insert_at_beginning(self):
+        """Insert node at beginning of children list."""
+        sexp = parse_sexp("(root (a) (b) (c))")
+        new_node = SExp("new")
+        sexp.insert(0, new_node)
+        assert sexp.children[0].name == "new"
+        assert sexp.children[1].name == "a"
+        assert len(sexp.children) == 4
+
+    def test_insert_at_middle(self):
+        """Insert node in middle of children list."""
+        sexp = parse_sexp("(root (a) (b) (c))")
+        new_node = SExp("new")
+        sexp.insert(2, new_node)
+        assert sexp.children[0].name == "a"
+        assert sexp.children[1].name == "b"
+        assert sexp.children[2].name == "new"
+        assert sexp.children[3].name == "c"
+
+    def test_insert_at_end(self):
+        """Insert node at end of children list."""
+        sexp = parse_sexp("(root (a) (b) (c))")
+        new_node = SExp("new")
+        sexp.insert(3, new_node)
+        assert sexp.children[2].name == "c"
+        assert sexp.children[3].name == "new"
+
+    def test_insert_negative_index(self):
+        """Insert node using negative index."""
+        sexp = parse_sexp("(root (a) (b) (c))")
+        new_node = SExp("new")
+        sexp.insert(-1, new_node)  # Insert before last element
+        assert sexp.children[-2].name == "new"
+        assert sexp.children[-1].name == "c"
+
+    def test_insert_returns_child(self):
+        """Insert should return the inserted child."""
+        sexp = SExp("root")
+        new_node = SExp("new")
+        result = sexp.insert(0, new_node)
+        assert result is new_node
+
+    def test_insert_after_existing_node(self):
+        """Insert node after an existing node by name."""
+        sexp = parse_sexp("(root (layer) (uuid) (property))")
+        at_node = SExp("at")
+        at_node.add(50)
+        at_node.add(30)
+        sexp.insert_after("layer", at_node)
+        assert sexp.children[0].name == "layer"
+        assert sexp.children[1].name == "at"
+        assert sexp.children[2].name == "uuid"
+
+    def test_insert_after_last_node(self):
+        """Insert after the last child with matching name."""
+        sexp = parse_sexp("(root (a) (b))")
+        new_node = SExp("new")
+        sexp.insert_after("b", new_node)
+        assert sexp.children[-1].name == "new"
+
+    def test_insert_after_returns_child(self):
+        """insert_after should return the inserted child."""
+        sexp = parse_sexp("(root (a))")
+        new_node = SExp("new")
+        result = sexp.insert_after("a", new_node)
+        assert result is new_node
+
+    def test_insert_after_not_found(self):
+        """insert_after raises KeyError when target not found."""
+        sexp = parse_sexp("(root (a) (b))")
+        new_node = SExp("new")
+        with pytest.raises(KeyError, match="No child named 'missing'"):
+            sexp.insert_after("missing", new_node)
+
+    def test_insert_before_existing_node(self):
+        """Insert node before an existing node by name."""
+        sexp = parse_sexp("(root (layer) (property) (pad))")
+        at_node = SExp("at")
+        at_node.add(50)
+        at_node.add(30)
+        sexp.insert_before("property", at_node)
+        assert sexp.children[0].name == "layer"
+        assert sexp.children[1].name == "at"
+        assert sexp.children[2].name == "property"
+
+    def test_insert_before_first_node(self):
+        """Insert before the first child."""
+        sexp = parse_sexp("(root (a) (b))")
+        new_node = SExp("new")
+        sexp.insert_before("a", new_node)
+        assert sexp.children[0].name == "new"
+        assert sexp.children[1].name == "a"
+
+    def test_insert_before_returns_child(self):
+        """insert_before should return the inserted child."""
+        sexp = parse_sexp("(root (a))")
+        new_node = SExp("new")
+        result = sexp.insert_before("a", new_node)
+        assert result is new_node
+
+    def test_insert_before_not_found(self):
+        """insert_before raises KeyError when target not found."""
+        sexp = parse_sexp("(root (a) (b))")
+        new_node = SExp("new")
+        with pytest.raises(KeyError, match="No child named 'missing'"):
+            sexp.insert_before("missing", new_node)
+
+    def test_footprint_structure_use_case(self):
+        """Test the specific footprint use case from issue #912.
+
+        KiCad expects footprints to have a specific structure where
+        (at ...) comes early in the tree, not at the end.
+        """
+        # Simulate a footprint with (at) missing
+        footprint = parse_sexp("""(footprint "Library:Name"
+            (layer "F.Cu")
+            (uuid "abc123")
+            (property "Reference" "U1")
+            (property "Value" "Chip")
+            (pad 1 smd rect)
+        )""")
+
+        # Create (at 50 30 0) node
+        at_node = SExp("at")
+        at_node.add(50)
+        at_node.add(30)
+        at_node.add(0)
+
+        # Insert after uuid (which is the correct KiCad position)
+        footprint.insert_after("uuid", at_node)
+
+        # Verify structure - get only named children
+        child_names = [c.name for c in footprint.children if c.name]
+        assert child_names == ["layer", "uuid", "at", "property", "property", "pad"]
+
+        # Verify the at node is in the right place (after uuid)
+        # First child is the atom "Library:Name", so named children start at index 1
+        # children[0] = "Library:Name" (atom)
+        # children[1] = layer
+        # children[2] = uuid
+        # children[3] = at (newly inserted)
+        assert footprint.children[3].name == "at"
+        at_values = footprint.children[3].get_atoms()
+        assert at_values == [50, 30, 0]
