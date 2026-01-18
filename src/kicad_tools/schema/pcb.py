@@ -1910,3 +1910,201 @@ class PCB:
             path: Path to save to (.kicad_pcb)
         """
         save_pcb(self._sexp, path)
+
+    def import_from_netlist(
+        self,
+        netlist,
+        placement_start: tuple[float, float] = (10.0, 10.0),
+        placement_spacing: float = 15.0,
+        columns: int = 10,
+    ) -> dict[str, list[str]]:
+        """
+        Import footprints and assign nets from a netlist.
+
+        Adds all footprints referenced in the netlist to the PCB and
+        assigns net connections to their pads. Footprints are placed
+        in a grid pattern starting from the placement_start position.
+
+        Args:
+            netlist: A Netlist object containing components and connectivity
+            placement_start: Starting (x, y) position for footprint placement
+            placement_spacing: Spacing between footprints in mm
+            columns: Number of footprints per row in the grid
+
+        Returns:
+            Dictionary with statistics:
+            - "footprints_added": List of references successfully added
+            - "footprints_skipped": List of references skipped (no footprint spec)
+            - "footprints_failed": List of references that failed to add
+            - "nets_assigned": Number of pad-net assignments made
+            - "nets_failed": List of failed pad-net assignments (format: "REF.PIN")
+
+        Example:
+            >>> from kicad_tools.operations.netlist import Netlist
+            >>> netlist = Netlist.load("project.kicad_net")
+            >>> pcb = PCB.create(width=100, height=100)
+            >>> result = pcb.import_from_netlist(netlist)
+            >>> print(f"Added {len(result['footprints_added'])} footprints")
+        """
+        stats: dict[str, list[str]] = {
+            "footprints_added": [],
+            "footprints_skipped": [],
+            "footprints_failed": [],
+            "nets_assigned": [],
+            "nets_failed": [],
+        }
+
+        # Track grid position for footprint placement
+        x, y = placement_start
+        col = 0
+
+        # Add footprints from netlist components
+        for comp in netlist.components:
+            ref = comp.reference
+            value = comp.value
+            footprint_id = comp.footprint
+
+            # Skip components without footprint specification
+            if not footprint_id:
+                stats["footprints_skipped"].append(ref)
+                continue
+
+            # Skip if footprint already exists
+            if self.get_footprint(ref):
+                stats["footprints_skipped"].append(ref)
+                continue
+
+            try:
+                self.add_footprint(
+                    library_id=footprint_id,
+                    reference=ref,
+                    x=x,
+                    y=y,
+                    rotation=0.0,
+                    layer="F.Cu",
+                    value=value,
+                )
+                stats["footprints_added"].append(ref)
+
+                # Advance to next grid position
+                col += 1
+                if col >= columns:
+                    col = 0
+                    x = placement_start[0]
+                    y += placement_spacing
+                else:
+                    x += placement_spacing
+
+            except (FileNotFoundError, ValueError) as e:
+                # Footprint not found in library or invalid
+                stats["footprints_failed"].append(f"{ref}: {e}")
+
+        # Assign nets to pads
+        net_result = self.assign_nets_from_netlist(netlist)
+        stats["nets_assigned"] = net_result["assigned"]
+        stats["nets_failed"] = net_result["missing_pads"]
+
+        return stats
+
+    def import_from_schematic(
+        self,
+        schematic_path: str | Path,
+        placement_start: tuple[float, float] = (10.0, 10.0),
+        placement_spacing: float = 15.0,
+        columns: int = 10,
+    ) -> dict[str, list[str]]:
+        """
+        Import footprints and assign nets from a schematic file.
+
+        Exports a netlist from the schematic using kicad-cli, then imports
+        all footprints and assigns net connections. This is the programmatic
+        equivalent of KiCad's "Update PCB from Schematic" (F8) operation.
+
+        Args:
+            schematic_path: Path to the .kicad_sch schematic file
+            placement_start: Starting (x, y) position for footprint placement
+            placement_spacing: Spacing between footprints in mm
+            columns: Number of footprints per row in the grid
+
+        Returns:
+            Dictionary with statistics (same as import_from_netlist)
+
+        Raises:
+            FileNotFoundError: If schematic file or kicad-cli not found
+            RuntimeError: If netlist export fails
+
+        Example:
+            >>> pcb = PCB.create(width=160, height=100)
+            >>> result = pcb.import_from_schematic("project.kicad_sch")
+            >>> print(f"Added {len(result['footprints_added'])} footprints")
+            >>> pcb.save("project.kicad_pcb")
+        """
+        from ..operations.netlist import export_netlist
+
+        # Export netlist from schematic
+        netlist = export_netlist(schematic_path)
+
+        # Import using the netlist
+        return self.import_from_netlist(
+            netlist,
+            placement_start=placement_start,
+            placement_spacing=placement_spacing,
+            columns=columns,
+        )
+
+    @classmethod
+    def from_schematic(
+        cls,
+        schematic_path: str | Path,
+        width: float = 100.0,
+        height: float = 100.0,
+        layers: int = 2,
+        placement_start: tuple[float, float] = (10.0, 10.0),
+        placement_spacing: float = 15.0,
+        columns: int = 10,
+    ) -> tuple[PCB, dict[str, list[str]]]:
+        """
+        Create a new PCB from a schematic file.
+
+        Creates a blank PCB with the specified dimensions, then imports
+        all footprints and net assignments from the schematic.
+
+        Args:
+            schematic_path: Path to the .kicad_sch schematic file
+            width: Board width in mm
+            height: Board height in mm
+            layers: Number of copper layers (2 or 4)
+            placement_start: Starting (x, y) position for footprint placement
+            placement_spacing: Spacing between footprints in mm
+            columns: Number of footprints per row in the grid
+
+        Returns:
+            Tuple of (PCB instance, import statistics dict)
+
+        Raises:
+            FileNotFoundError: If schematic file or kicad-cli not found
+            RuntimeError: If netlist export fails
+            ValueError: If layers is not 2 or 4
+
+        Example:
+            >>> pcb, stats = PCB.from_schematic(
+            ...     "project.kicad_sch",
+            ...     width=160,
+            ...     height=100,
+            ...     layers=4
+            ... )
+            >>> print(f"Created PCB with {len(stats['footprints_added'])} components")
+            >>> pcb.save("project.kicad_pcb")
+        """
+        # Create blank PCB
+        pcb = cls.create(width=width, height=height, layers=layers)
+
+        # Import from schematic
+        stats = pcb.import_from_schematic(
+            schematic_path,
+            placement_start=placement_start,
+            placement_spacing=placement_spacing,
+            columns=columns,
+        )
+
+        return pcb, stats
