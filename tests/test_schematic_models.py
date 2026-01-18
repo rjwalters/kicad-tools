@@ -2266,13 +2266,12 @@ class TestSymbolDefParsing:
     def test_to_sexp_nodes_fallback_inherited_symbol(self):
         """Parse inherited symbol using raw_sexp fallback.
 
-        Symbols that extend a parent require both parent and child
-        definitions to be embedded in lib_symbols.
+        Symbols that extend a parent are now flattened into a single
+        self-contained symbol. The parent's elements (unit symbols, settings)
+        are merged into the child, and the extends clause is removed.
 
-        Note: The parent has a nested unit symbol, but that's inside
-        the parent definition. So we have 2 top-level symbols:
-        1. Parent (with nested unit)
-        2. Child (extends parent)
+        This is necessary because KiCad's schematic parser doesn't support
+        extends in embedded lib_symbols.
         """
         raw_sexp = """(symbol "ParentSym"
             (property "Reference" "U")
@@ -2297,11 +2296,99 @@ class TestSymbolDefParsing:
         )
 
         nodes = sym_def.to_sexp_nodes()
-        # Should parse both: parent (with its nested unit) and child
-        assert len(nodes) == 2
-        # Both should have library prefix
-        assert "Test:ParentSym" in nodes[0].to_string()
-        assert "Test:ChildSym" in nodes[1].to_string()
+        # Should return a single flattened symbol
+        assert len(nodes) == 1
+
+        output = nodes[0].to_string()
+        # Should have library-prefixed child name
+        assert "Test:ChildSym" in output
+        # Should have unit symbol renamed from parent
+        assert "ChildSym_0_1" in output
+        # Should NOT have extends clause (it's been flattened)
+        assert "extends" not in output
+        # Should have child's property overrides
+        assert "ChildSym" in output  # Value property
+
+    def test_flatten_preserves_all_elements(self):
+        """Verify flattening preserves all parent elements correctly.
+
+        This test verifies that:
+        1. Settings (pin_names, exclude_from_sim, etc.) are inherited from parent
+        2. Properties are inherited, with child overriding parent
+        3. Unit symbols are copied and renamed
+        4. The extends clause is removed
+        """
+        raw_sexp = """(symbol "Parent"
+            (pin_names (offset 0))
+            (exclude_from_sim no)
+            (in_bom yes)
+            (on_board yes)
+            (property "Reference" "D")
+            (property "Value" "Parent")
+            (property "Footprint" "Package_TO_SOT_SMD:TO-269AA")
+            (property "Description" "Parent description")
+            (symbol "Parent_0_1"
+                (polyline
+                    (pts (xy -5.08 0) (xy 0 -5.08))
+                    (stroke (width 0) (type default))
+                    (fill (type none))
+                )
+            )
+            (symbol "Parent_1_1"
+                (pin passive line (at -7.62 0 0) (length 2.54)
+                    (name "~")
+                    (number "1")
+                )
+            )
+        )
+        (symbol "Child"
+            (extends "Parent")
+            (property "Reference" "D")
+            (property "Value" "Child")
+            (property "Datasheet" "http://example.com/child.pdf")
+        )"""
+
+        sym_def = SymbolDef(
+            lib_id="Test:Child",
+            name="Child",
+            raw_sexp=raw_sexp,
+            _sexp_node=None,
+        )
+
+        nodes = sym_def.to_sexp_nodes()
+        assert len(nodes) == 1
+
+        output = nodes[0].to_string()
+
+        # Verify main symbol name is library-prefixed
+        assert '"Test:Child"' in output
+
+        # Verify extends is removed
+        assert "extends" not in output
+
+        # Verify settings from parent are present
+        assert "pin_names" in output
+        assert "exclude_from_sim" in output
+        assert "in_bom" in output
+        assert "on_board" in output
+
+        # Verify child's properties override parent
+        assert 'property "Value" "Child"' in output
+        # Verify child's additional property is present
+        assert "http://example.com/child.pdf" in output
+        # Verify parent's property that child didn't override is present
+        assert "Package_TO_SOT_SMD:TO-269AA" in output
+
+        # Verify unit symbols are renamed from Parent_X_X to Child_X_X
+        assert "Child_0_1" in output
+        assert "Child_1_1" in output
+        # Verify parent's unit names are NOT in output
+        assert "Parent_0_1" not in output
+        assert "Parent_1_1" not in output
+
+        # Verify graphical elements from parent are present
+        assert "polyline" in output
+        assert "pin" in output
 
 
 class TestSymbolInstanceFromSexp:

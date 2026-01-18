@@ -190,16 +190,25 @@ class SymbolDef:
         find_pins(sym_node)
         return pins
 
-    def _add_prefix_to_node(self, node: SExp, lib_name: str) -> SExp:
+    def _add_prefix_to_node(self, node: SExp, lib_name: str, skip_extends: bool = False) -> SExp:
         """Clone a symbol node and add library prefix to symbol names.
 
         Recursively walks the SExp tree and prefixes:
         - Main symbol name: (symbol "Name" ...) -> (symbol "Lib:Name" ...)
         - Extends references: (extends "Parent") -> (extends "Lib:Parent")
         - Child symbol names (but NOT unit symbols like Name_0_1)
+
+        Args:
+            node: The SExp node to process
+            lib_name: Library name to use as prefix
+            skip_extends: If True, omit extends nodes entirely (for flattening)
         """
         if node.is_atom:
             return node  # Atoms are returned as-is
+
+        # Skip extends nodes when flattening
+        if skip_extends and node.name == "extends":
+            return None
 
         # Clone the list node
         new_node = SExp.list(node.name)
@@ -226,15 +235,174 @@ class SymbolDef:
                     new_node.append(child)
             else:
                 # Recursively process list children
-                new_node.append(self._add_prefix_to_node(child, lib_name))
+                result = self._add_prefix_to_node(child, lib_name, skip_extends)
+                if result is not None:
+                    new_node.append(result)
 
         return new_node
+
+    def _flatten_with_parent(self, child_node: SExp, parent_node: SExp) -> SExp:
+        """Flatten an inherited symbol by merging parent elements into child.
+
+        When KiCad symbols use (extends "ParentName"), they inherit:
+        - All graphical elements (polylines, rectangles, circles, arcs, text)
+        - All pins
+        - Settings like pin_names, exclude_from_sim, in_bom, on_board
+
+        The child can override properties but inherits everything else.
+
+        This method creates a self-contained symbol suitable for embedding
+        in a schematic's lib_symbols section, which doesn't support extends.
+
+        Args:
+            child_node: The child symbol SExp node (has extends clause)
+            parent_node: The parent symbol SExp node
+
+        Returns:
+            A new SExp node with parent elements merged into child
+        """
+        # Get the child's name (first atom child of symbol node)
+        child_name = None
+        for child in child_node.children:
+            if child.is_atom:
+                child_name = str(child.value)
+                break
+
+        parent_name = None
+        for child in parent_node.children:
+            if child.is_atom:
+                parent_name = str(child.value)
+                break
+
+        if not child_name or not parent_name:
+            # Can't flatten without names, return child as-is
+            return child_node
+
+        # Start with a new symbol node using the child's name
+        flattened = SExp.list("symbol")
+        flattened.append(SExp.atom(child_name))
+
+        # Collect child's elements, skipping extends
+        child_settings = {}  # name -> node for settings like pin_names
+        child_properties = {}  # property name -> node
+        child_other = []  # other elements from child
+
+        for elem in child_node.children:
+            if elem.is_atom:
+                continue  # Skip the symbol name, already added
+            if elem.name == "extends":
+                continue  # Skip extends clause
+            elif elem.name == "property":
+                # Track properties by their name
+                atoms = elem.get_atoms()
+                if atoms:
+                    child_properties[str(atoms[0])] = elem
+            elif elem.name in (
+                "pin_names",
+                "exclude_from_sim",
+                "in_bom",
+                "on_board",
+                "pin_numbers",
+            ):
+                child_settings[elem.name] = elem
+            else:
+                child_other.append(elem)
+
+        # Collect parent's elements
+        parent_settings = {}
+        parent_properties = {}
+        parent_unit_symbols = []  # Unit symbols like ParentName_0_1
+        parent_other = []
+
+        for elem in parent_node.children:
+            if elem.is_atom:
+                continue  # Skip the symbol name
+            elif elem.name == "property":
+                atoms = elem.get_atoms()
+                if atoms:
+                    parent_properties[str(atoms[0])] = elem
+            elif elem.name in (
+                "pin_names",
+                "exclude_from_sim",
+                "in_bom",
+                "on_board",
+                "pin_numbers",
+            ):
+                parent_settings[elem.name] = elem
+            elif elem.name == "symbol":
+                # This is a unit symbol like ParentName_0_1
+                parent_unit_symbols.append(elem)
+            else:
+                parent_other.append(elem)
+
+        # Add settings: child overrides parent
+        for name in ("pin_names", "pin_numbers", "exclude_from_sim", "in_bom", "on_board"):
+            if name in child_settings:
+                flattened.append(child_settings[name])
+            elif name in parent_settings:
+                flattened.append(parent_settings[name])
+
+        # Add properties: child overrides parent
+        all_prop_names = set(parent_properties.keys()) | set(child_properties.keys())
+        for prop_name in all_prop_names:
+            if prop_name in child_properties:
+                flattened.append(child_properties[prop_name])
+            else:
+                flattened.append(parent_properties[prop_name])
+
+        # Add other elements from parent (arcs, circles, etc.)
+        for elem in parent_other:
+            flattened.append(elem)
+
+        # Add unit symbols from parent, renaming them to use child's name
+        for unit_sym in parent_unit_symbols:
+            renamed = self._rename_unit_symbol(unit_sym, parent_name, child_name)
+            flattened.append(renamed)
+
+        # Add any other elements from child (shouldn't normally be any)
+        for elem in child_other:
+            flattened.append(elem)
+
+        return flattened
+
+    def _rename_unit_symbol(self, unit_sym: SExp, old_name: str, new_name: str) -> SExp:
+        """Rename a unit symbol from ParentName_N_N to ChildName_N_N.
+
+        Args:
+            unit_sym: The unit symbol SExp node
+            old_name: Parent symbol name
+            new_name: Child symbol name
+
+        Returns:
+            New SExp node with renamed symbol
+        """
+        new_unit = SExp.list("symbol")
+
+        for child in unit_sym.children:
+            if child.is_atom:
+                # This is the unit name, e.g., "ParentName_0_1"
+                unit_name = str(child.value)
+                if unit_name.startswith(old_name + "_"):
+                    # Replace parent name with child name
+                    suffix = unit_name[len(old_name) :]
+                    new_unit.append(SExp.atom(new_name + suffix))
+                else:
+                    new_unit.append(child)
+            else:
+                # Copy other children as-is
+                new_unit.append(child)
+
+        return new_unit
 
     def to_sexp_nodes(self) -> list[SExp]:
         """Get symbol definition(s) as SExp nodes for embedding.
 
-        Returns a list because symbols with inheritance require both
-        parent and child symbol definitions.
+        Returns a list of SExp nodes ready for embedding in lib_symbols.
+
+        When a symbol uses inheritance (extends), this method flattens the
+        symbol by copying all elements from the parent into the child and
+        removing the extends clause. This is necessary because KiCad's
+        schematic parser doesn't support extends in embedded lib_symbols.
         """
         lib_name = self.lib_id.split(":")[0]
         nodes = []
@@ -242,8 +410,11 @@ class SymbolDef:
         # If we have parsed SExp nodes, use them directly
         if self._sexp_node:
             if self._parent_node:
-                nodes.append(self._add_prefix_to_node(self._parent_node, lib_name))
-            nodes.append(self._add_prefix_to_node(self._sexp_node, lib_name))
+                # Flatten inherited symbol: merge parent into child
+                flattened = self._flatten_with_parent(self._sexp_node, self._parent_node)
+                nodes.append(self._add_prefix_to_node(flattened, lib_name))
+            else:
+                nodes.append(self._add_prefix_to_node(self._sexp_node, lib_name))
         else:
             # Fall back to parsing raw_sexp string
             from kicad_tools.sexp import parse_string
@@ -252,13 +423,29 @@ class SymbolDef:
             # using parenthesis counting for proper nested structure handling
             symbol_texts = self._split_symbol_definitions(self.raw_sexp)
 
-            for text in symbol_texts:
+            if len(symbol_texts) >= 2:
+                # We have parent + child - need to flatten
                 try:
-                    parsed = parse_string(text)
-                    nodes.append(self._add_prefix_to_node(parsed, lib_name))
+                    parent_parsed = parse_string(symbol_texts[0])
+                    child_parsed = parse_string(symbol_texts[-1])
+                    flattened = self._flatten_with_parent(child_parsed, parent_parsed)
+                    nodes.append(self._add_prefix_to_node(flattened, lib_name))
                 except Exception:
-                    # If parsing fails, skip this part
-                    pass
+                    # If flattening fails, fall back to emitting all symbols
+                    for text in symbol_texts:
+                        try:
+                            parsed = parse_string(text)
+                            nodes.append(self._add_prefix_to_node(parsed, lib_name))
+                        except Exception:
+                            pass
+            else:
+                # Single symbol, no inheritance
+                for text in symbol_texts:
+                    try:
+                        parsed = parse_string(text)
+                        nodes.append(self._add_prefix_to_node(parsed, lib_name))
+                    except Exception:
+                        pass
 
         return nodes
 
