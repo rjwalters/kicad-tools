@@ -721,3 +721,52 @@ class TestAddFootprint:
         assert pcb.get_footprint("C1") is not None
         assert pcb.get_footprint("R1") is not None
         assert pcb.get_footprint("U1") is not None
+
+    def test_add_footprint_at_node_position_in_sexp(self, minimal_pcb, tmp_path):
+        """Test that (at) node is positioned correctly after (layer) in S-expression.
+
+        This tests the fix for issue #910 where add_footprint() was appending
+        the (at) node at the end of the footprint S-expression instead of
+        immediately after the (layer) node. KiCad expects this specific ordering.
+        """
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # Add footprint with specific position
+        pcb.add_footprint_from_file(
+            kicad_mod_path=self.TEST_PRETTY_DIR / "C_0402_1005Metric.kicad_mod",
+            reference="C1",
+            x=50.0,
+            y=30.0,
+            rotation=45.0,
+        )
+
+        # Save to file
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        # Read raw content and verify structure
+        content = output_path.read_text()
+
+        # Find the footprint section
+        fp_start = content.find('(footprint "C_0402_1005Metric"')
+        assert fp_start != -1, "Footprint not found in saved file"
+
+        # Extract the footprint section (find matching closing paren)
+        fp_content = content[fp_start:fp_start + 2000]  # Enough for the footprint
+
+        # Verify (at) appears after (layer) and before other elements
+        layer_pos = fp_content.find('(layer "F.Cu")')
+        at_pos = fp_content.find("(at 50 30 45)")
+        assert layer_pos != -1, "(layer) node not found"
+        assert at_pos != -1, "(at) node with correct values not found"
+        assert at_pos > layer_pos, "(at) node should appear after (layer) node"
+
+        # Verify (at) is not at the very end (before closing paren of footprint)
+        # This checks that it wasn't just appended to the end
+        descr_pos = fp_content.find("(descr")
+        tags_pos = fp_content.find("(tags")
+        if descr_pos != -1:
+            assert at_pos < descr_pos, "(at) should appear before (descr)"
+        if tags_pos != -1:
+            assert at_pos < tags_pos, "(at) should appear before (tags)"

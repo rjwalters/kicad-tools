@@ -1551,29 +1551,42 @@ class PCB:
             # Add UUID if not present
             fp_sexp.append(SExp.list("uuid", new_uuid))
 
-        # Update position (at x y rotation)
-        at_node = fp_sexp.find("at")
-        if at_node:
-            at_node.set_value(0, x)
-            at_node.set_value(1, y)
-            if rotation != 0.0:
-                if len(at_node.values) >= 3:
-                    at_node.set_value(2, rotation)
-                else:
-                    at_node.add(rotation)
-        else:
-            # Create at node
-            at_sexp = SExp.list("at", x, y)
-            if rotation != 0.0:
-                at_sexp.add(rotation)
-            fp_sexp.append(at_sexp)
-
-        # Update layer
+        # Update layer first (at node must come after layer)
         layer_node = fp_sexp.find("layer")
         if layer_node:
             layer_node.set_value(0, layer)
         else:
-            fp_sexp.append(SExp.list("layer", layer))
+            # Create layer node - library footprints always have this, but be safe
+            layer_node = SExp.list("layer", layer)
+            fp_sexp.append(layer_node)
+
+        # Update position (at x y rotation)
+        # Library footprints (.kicad_mod) don't have a top-level (at) node -
+        # that's only present in placed footprints within a PCB file.
+        # We must create the (at) node and insert it immediately after (layer)
+        # for KiCad to recognize it properly.
+        at_node = fp_sexp.find("at")
+        if at_node:
+            # Remove existing at node - we'll insert a fresh one in the correct position
+            fp_sexp.remove(at_node)
+
+        # Create new at node with position
+        at_sexp = SExp.list("at", x, y)
+        if rotation != 0.0:
+            at_sexp.add(rotation)
+
+        # Find layer node's index and insert at node immediately after it
+        layer_index = None
+        for i, child in enumerate(fp_sexp.children):
+            if not child.is_atom and child.name == "layer":
+                layer_index = i
+                break
+
+        if layer_index is not None:
+            fp_sexp.children.insert(layer_index + 1, at_sexp)
+        else:
+            # Fallback: append to end (shouldn't happen for valid footprints)
+            fp_sexp.append(at_sexp)
 
         # Update reference and value - try KiCad 8+ property format first
         ref_updated = False
