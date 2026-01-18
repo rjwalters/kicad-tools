@@ -16,6 +16,7 @@ For complete board designs, see the [boards/](../boards/) directory.
 | [06-intelligent-placement](06-intelligent-placement/) | v0.6.0 intelligent placement for AI agents | Clustering, edge detection, thermal, sessions |
 | [07-design-feedback](07-design-feedback/) | v0.7.0 design feedback for AI agents | Rich errors, congestion, thermal, cost estimation |
 | [08-label-based-schematic](08-label-based-schematic/) | Label-based schematic generation | Hierarchical labels, net connections |
+| [09-manufacturing-export](09-manufacturing-export/) | End-to-end manufacturing output | Gerbers, BOM, PnP, JLCPCB, PCBWay |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 | [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
@@ -155,6 +156,25 @@ cost = estimate_manufacturing_cost(pcb, bom, quantity=10)
 print(f"Per board: ${cost.per_board:.2f}")
 ```
 
+### 09 - Manufacturing Export
+
+Generate complete manufacturing packages for PCB assembly services.
+
+```python
+from kicad_tools.export import AssemblyPackage
+
+# One-liner: Create all files for JLCPCB
+pkg = AssemblyPackage.create(
+    pcb="board.kicad_pcb",
+    schematic="board.kicad_sch",
+    manufacturer="jlcpcb",
+)
+result = pkg.export("output/")
+print(f"BOM: {result.bom_path}")
+print(f"CPL: {result.pnp_path}")
+print(f"Gerbers: {result.gerber_path}")
+```
+
 ### LLM Routing
 
 Integrate LLMs for semantic PCB layout decisions.
@@ -237,7 +257,7 @@ Verify all examples work:
 cd examples
 
 # Run all Python examples
-for script in */analyze.py **/generate_bom.py **/check_drc.py; do
+for script in */analyze.py **/generate_bom.py **/check_drc.py **/export_manufacturing.py; do
     echo "Running $script..."
     python "$script"
 done
