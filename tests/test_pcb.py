@@ -1233,3 +1233,270 @@ class TestSilkscreenManagement:
                         assert text.hidden is True
                     if fp.reference == "U1":
                         assert text.font_size == pytest.approx((0.9, 0.9))
+
+
+class TestTraceRoutingAPI:
+    """Tests for the trace routing API (add_trace, add_via, routing_status)."""
+
+    def test_add_trace_between_coordinates(self, tmp_path):
+        """Test adding a trace between two coordinate positions."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_net("TestNet")
+
+        segments = pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.3,
+            layer="F.Cu",
+            net="TestNet",
+        )
+
+        assert len(segments) == 1
+        seg = segments[0]
+        assert seg.start == (10.0, 10.0)
+        assert seg.end == (50.0, 10.0)
+        assert seg.width == 0.3
+        assert seg.layer == "F.Cu"
+        assert seg.net_number > 0
+
+        # Verify the segment is in the PCB
+        assert len(pcb.segments) == 1
+
+    def test_add_trace_with_waypoints(self, tmp_path):
+        """Test adding a trace with intermediate waypoints."""
+        pcb = PCB.create(width=100, height=100)
+
+        segments = pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 50.0),
+            width=0.25,
+            layer="F.Cu",
+            net="Signal1",
+            waypoints=[(30.0, 10.0), (30.0, 50.0)],
+        )
+
+        # Should create 3 segments: start->wp1, wp1->wp2, wp2->end
+        assert len(segments) == 3
+        assert segments[0].start == (10.0, 10.0)
+        assert segments[0].end == (30.0, 10.0)
+        assert segments[1].start == (30.0, 10.0)
+        assert segments[1].end == (30.0, 50.0)
+        assert segments[2].start == (30.0, 50.0)
+        assert segments[2].end == (50.0, 50.0)
+
+    def test_add_trace_persists_on_save(self, tmp_path):
+        """Test that added traces persist after save/reload."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.25,
+            layer="F.Cu",
+            net="TestNet",
+        )
+
+        # Save and reload
+        output_path = tmp_path / "with_trace.kicad_pcb"
+        pcb.save(str(output_path))
+
+        pcb2 = PCB.load(str(output_path))
+        assert len(pcb2.segments) == 1
+        seg = pcb2.segments[0]
+        assert seg.start == pytest.approx((10.0, 10.0))
+        assert seg.end == pytest.approx((50.0, 10.0))
+        assert seg.width == pytest.approx(0.25)
+        assert seg.layer == "F.Cu"
+
+    def test_add_via_basic(self, tmp_path):
+        """Test adding a via at a position."""
+        pcb = PCB.create(width=100, height=100)
+
+        via = pcb.add_via(
+            x=50.0,
+            y=30.0,
+            size=0.6,
+            drill=0.3,
+            layers=("F.Cu", "B.Cu"),
+            net="VCC",
+        )
+
+        assert via.position == (50.0, 30.0)
+        assert via.size == 0.6
+        assert via.drill == 0.3
+        assert via.layers == ["F.Cu", "B.Cu"]
+        assert via.net_number > 0
+
+        # Verify the via is in the PCB
+        assert len(pcb.vias) == 1
+
+    def test_add_via_persists_on_save(self, tmp_path):
+        """Test that added vias persist after save/reload."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_via(x=25.0, y=25.0, size=0.8, drill=0.4, net="GND")
+
+        # Save and reload
+        output_path = tmp_path / "with_via.kicad_pcb"
+        pcb.save(str(output_path))
+
+        pcb2 = PCB.load(str(output_path))
+        assert len(pcb2.vias) == 1
+        via = pcb2.vias[0]
+        assert via.position == pytest.approx((25.0, 25.0))
+        assert via.size == pytest.approx(0.8)
+        assert via.drill == pytest.approx(0.4)
+
+    def test_routing_status_empty_pcb(self, tmp_path):
+        """Test routing_status on a PCB with no traces."""
+        pcb = PCB.create(width=100, height=100)
+
+        status = pcb.routing_status()
+
+        assert status["segments"] == 0
+        assert status["vias"] == 0
+        assert status["trace_length_mm"] == 0.0
+        assert len(status["nets_with_traces"]) == 0
+
+    def test_routing_status_with_traces(self, tmp_path):
+        """Test routing_status with added traces."""
+        pcb = PCB.create(width=100, height=100)
+
+        # Add a 40mm horizontal trace
+        pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.25,
+            layer="F.Cu",
+            net="TestNet",
+        )
+
+        # Add a via
+        pcb.add_via(x=30.0, y=20.0, net="TestNet")
+
+        status = pcb.routing_status()
+
+        assert status["segments"] == 1
+        assert status["vias"] == 1
+        assert status["trace_length_mm"] == pytest.approx(40.0)
+        assert len(status["nets_with_traces"]) >= 1
+
+    def test_get_pad_position_no_rotation(self, minimal_pcb):
+        """Test get_pad_position for a footprint with no rotation."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # Get the first footprint's pad position
+        fp = pcb.footprints[0]
+        if fp.pads:
+            pos = pcb.get_pad_position(fp.reference, fp.pads[0].number)
+            assert pos is not None
+            # Position should be footprint position + pad offset
+            expected_x = fp.position[0] + fp.pads[0].position[0]
+            expected_y = fp.position[1] + fp.pads[0].position[1]
+            assert pos[0] == pytest.approx(expected_x)
+            assert pos[1] == pytest.approx(expected_y)
+
+    def test_get_pad_position_not_found(self, minimal_pcb):
+        """Test get_pad_position returns None for missing pad."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # Non-existent footprint
+        assert pcb.get_pad_position("NONEXISTENT", "1") is None
+
+        # Non-existent pad on existing footprint
+        fp = pcb.footprints[0]
+        assert pcb.get_pad_position(fp.reference, "999") is None
+
+    def test_get_ratsnest_empty(self, tmp_path):
+        """Test get_ratsnest on a PCB with no multi-pad nets."""
+        pcb = PCB.create(width=100, height=100)
+
+        ratsnest = pcb.get_ratsnest()
+
+        # No footprints means no ratsnest
+        assert ratsnest == []
+
+    def test_segment_to_sexp(self):
+        """Test Segment.to_sexp() produces valid S-expression."""
+        from kicad_tools.schema.pcb import Segment
+
+        seg = Segment(
+            start=(10.0, 20.0),
+            end=(30.0, 40.0),
+            width=0.25,
+            layer="F.Cu",
+            net_number=5,
+        )
+
+        sexp = seg.to_sexp()
+
+        assert sexp.name == "segment"
+        start = sexp.find("start")
+        assert start is not None
+        assert start.get_float(0) == 10.0
+        assert start.get_float(1) == 20.0
+
+        end = sexp.find("end")
+        assert end is not None
+        assert end.get_float(0) == 30.0
+        assert end.get_float(1) == 40.0
+
+        width = sexp.find("width")
+        assert width is not None
+        assert width.get_float(0) == 0.25
+
+        layer = sexp.find("layer")
+        assert layer is not None
+        assert layer.get_string(0) == "F.Cu"
+
+        net = sexp.find("net")
+        assert net is not None
+        assert net.get_int(0) == 5
+
+        # UUID should be auto-generated
+        uuid_node = sexp.find("uuid")
+        assert uuid_node is not None
+        assert len(uuid_node.get_string(0)) > 0
+
+    def test_via_to_sexp(self):
+        """Test Via.to_sexp() produces valid S-expression."""
+        from kicad_tools.schema.pcb import Via
+
+        via = Via(
+            position=(50.0, 60.0),
+            size=0.6,
+            drill=0.3,
+            layers=["F.Cu", "B.Cu"],
+            net_number=3,
+        )
+
+        sexp = via.to_sexp()
+
+        assert sexp.name == "via"
+
+        at = sexp.find("at")
+        assert at is not None
+        assert at.get_float(0) == 50.0
+        assert at.get_float(1) == 60.0
+
+        size = sexp.find("size")
+        assert size is not None
+        assert size.get_float(0) == 0.6
+
+        drill = sexp.find("drill")
+        assert drill is not None
+        assert drill.get_float(0) == 0.3
+
+        layers = sexp.find("layers")
+        assert layers is not None
+        assert layers.get_string(0) == "F.Cu"
+        assert layers.get_string(1) == "B.Cu"
+
+        net = sexp.find("net")
+        assert net is not None
+        assert net.get_int(0) == 3
+
+        # UUID should be auto-generated
+        uuid_node = sexp.find("uuid")
+        assert uuid_node is not None
+        assert len(uuid_node.get_string(0)) > 0
