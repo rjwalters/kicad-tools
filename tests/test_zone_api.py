@@ -8,9 +8,6 @@ These tests verify the copper pour zone management APIs including:
 - Zone querying
 """
 
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from kicad_tools.pcb import Keepout, PCBEditor, Point, Zone
