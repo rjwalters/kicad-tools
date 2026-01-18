@@ -184,6 +184,26 @@ class PlacementAnalyzer:
         from kicad_tools.schema import PCB
 
         pcb = PCB.load(str(pcb_path))
+        self._load_pcb_from_instance(pcb, courtyard_margin)
+
+        if self.verbose:
+            print(f"Loaded {len(self._components)} components from {pcb_path}")
+            if self._board_edge:
+                print(
+                    f"Board edge: ({self._board_edge.min_x:.2f}, {self._board_edge.min_y:.2f}) to "
+                    f"({self._board_edge.max_x:.2f}, {self._board_edge.max_y:.2f})"
+                )
+
+    def _load_pcb_from_instance(self, pcb, courtyard_margin: float):
+        """Load component information from an existing PCB instance.
+
+        This allows checking collisions on a PCB that's already loaded in memory,
+        without having to save and reload from disk.
+
+        Args:
+            pcb: A PCB instance (from kicad_tools.schema)
+            courtyard_margin: Margin to add around pads for courtyard calculation
+        """
         self._components = []
 
         for fp in pcb.footprints:
@@ -193,13 +213,36 @@ class PlacementAnalyzer:
         # Try to extract board edge from segments on Edge.Cuts layer
         self._board_edge = self._extract_board_edge(pcb)
 
-        if self.verbose:
-            print(f"Loaded {len(self._components)} components from {pcb_path}")
-            if self._board_edge:
-                print(
-                    f"Board edge: ({self._board_edge.min_x:.2f}, {self._board_edge.min_y:.2f}) to "
-                    f"({self._board_edge.max_x:.2f}, {self._board_edge.max_y:.2f})"
-                )
+    def _find_conflicts_internal(self, rules: DesignRules) -> list[Conflict]:
+        """Find conflicts using already-loaded component data.
+
+        This is used by PCB methods that have already loaded components
+        via _load_pcb_from_instance().
+
+        Args:
+            rules: Design rules for conflict detection
+
+        Returns:
+            List of detected conflicts
+        """
+        # Generate component pairs that need checking
+        pairs_to_check = [
+            (c1, c2)
+            for c1, c2 in itertools.combinations(self._components, 2)
+            if self._same_layer(c1, c2)
+        ]
+
+        # Check pairs (using single worker for internal use)
+        conflicts = self._check_pairs_parallel(pairs_to_check, rules, max_workers=1)
+
+        # Check edge clearance
+        if self._board_edge:
+            conflicts.extend(self._check_edge_clearance(rules.min_edge_clearance))
+
+        # Sort by severity then location
+        conflicts.sort(key=lambda c: (c.severity.value, c.location.x, c.location.y))
+
+        return conflicts
 
     def _footprint_to_component(self, fp, courtyard_margin: float) -> ComponentInfo:
         """Convert a Footprint to ComponentInfo."""
