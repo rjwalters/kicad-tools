@@ -523,6 +523,19 @@ class Segment:
 
         return seg
 
+    def to_sexp(self) -> SExp:
+        """Convert segment to S-expression for serialization."""
+        seg_sexp = SExp.list("segment")
+        seg_sexp.append(SExp.list("start", self.start[0], self.start[1]))
+        seg_sexp.append(SExp.list("end", self.end[0], self.end[1]))
+        seg_sexp.append(SExp.list("width", self.width))
+        seg_sexp.append(SExp.list("layer", self.layer))
+        seg_sexp.append(SExp.list("net", self.net_number))
+        if not self.uuid:
+            self.uuid = str(uuid.uuid4())
+        seg_sexp.append(SExp.list("uuid", self.uuid))
+        return seg_sexp
+
 
 @dataclass
 class Via:
@@ -564,6 +577,21 @@ class Via:
             via.uuid = uuid.get_string(0) or ""
 
         return via
+
+    def to_sexp(self) -> SExp:
+        """Convert via to S-expression for serialization."""
+        via_sexp = SExp.list("via")
+        via_sexp.append(SExp.list("at", self.position[0], self.position[1]))
+        via_sexp.append(SExp.list("size", self.size))
+        via_sexp.append(SExp.list("drill", self.drill))
+        # Build layers list
+        layers_sexp = SExp.list("layers", *self.layers)
+        via_sexp.append(layers_sexp)
+        via_sexp.append(SExp.list("net", self.net_number))
+        if not self.uuid:
+            self.uuid = str(uuid.uuid4())
+        via_sexp.append(SExp.list("uuid", self.uuid))
+        return via_sexp
 
 
 @dataclass
@@ -2318,6 +2346,301 @@ class PCB:
         self._sexp.append(net_sexp)
 
         return net
+
+    def get_pad_position(
+        self, reference: str, pad_number: str
+    ) -> tuple[float, float] | None:
+        """
+        Get the absolute board position of a pad on a footprint.
+
+        Calculates the absolute position by combining the footprint position
+        with the pad's local offset, accounting for footprint rotation.
+
+        Args:
+            reference: Footprint reference designator (e.g., "U1", "C1")
+            pad_number: Pad number/name (e.g., "1", "2", "A1")
+
+        Returns:
+            Tuple of (x, y) in mm if found, None if footprint or pad not found
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pos = pcb.get_pad_position("U1", "1")
+            >>> print(f"Pad at ({pos[0]:.2f}, {pos[1]:.2f})")
+        """
+        import math
+
+        fp = self.get_footprint(reference)
+        if not fp:
+            return None
+
+        for pad in fp.pads:
+            if pad.number == pad_number:
+                # Apply rotation to pad offset
+                rot_rad = math.radians(fp.rotation)
+                cos_r = math.cos(rot_rad)
+                sin_r = math.sin(rot_rad)
+
+                # Rotate pad position around footprint center
+                pad_x, pad_y = pad.position
+                rotated_x = pad_x * cos_r - pad_y * sin_r
+                rotated_y = pad_x * sin_r + pad_y * cos_r
+
+                # Add footprint position
+                abs_x = fp.position[0] + rotated_x
+                abs_y = fp.position[1] + rotated_y
+                return (abs_x, abs_y)
+
+        return None
+
+    def add_trace(
+        self,
+        start: tuple[float, float] | tuple[str, str],
+        end: tuple[float, float] | tuple[str, str],
+        width: float = 0.25,
+        layer: str = "F.Cu",
+        net: str | None = None,
+        waypoints: list[tuple[float, float]] | None = None,
+    ) -> list[Segment]:
+        """
+        Add a trace (one or more segments) between two points or pads.
+
+        Routes a trace from start to end, optionally through waypoints.
+        When pad references are used, the net is automatically determined.
+
+        Args:
+            start: Start position as (x, y) tuple or pad reference as (reference, pad_number)
+            end: End position as (x, y) tuple or pad reference as (reference, pad_number)
+            width: Trace width in mm (default 0.25)
+            layer: Copper layer name (default "F.Cu")
+            net: Net name for the trace. Auto-detected from pads if not specified.
+            waypoints: Optional list of (x, y) intermediate points
+
+        Returns:
+            List of Segment objects that were created
+
+        Raises:
+            ValueError: If pad references are invalid or positions cannot be determined
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Route between two pads
+            >>> pcb.add_trace(("U1", "1"), ("C1", "1"), width=0.25, layer="F.Cu")
+            >>> # Route between coordinates with waypoints
+            >>> pcb.add_trace((50, 30), (60, 30), waypoints=[(55, 35)])
+            >>> pcb.save("board.kicad_pcb")
+        """
+        # Resolve start position
+        if isinstance(start[0], str):
+            ref, pad = start[0], start[1]
+            start_pos = self.get_pad_position(ref, pad)
+            if start_pos is None:
+                raise ValueError(f"Cannot find pad {pad} on footprint {ref}")
+            # Auto-detect net from pad if not specified
+            if net is None:
+                fp = self.get_footprint(ref)
+                if fp:
+                    for p in fp.pads:
+                        if p.number == pad and p.net_name:
+                            net = p.net_name
+                            break
+        else:
+            start_pos = (float(start[0]), float(start[1]))
+
+        # Resolve end position
+        if isinstance(end[0], str):
+            ref, pad = end[0], end[1]
+            end_pos = self.get_pad_position(ref, pad)
+            if end_pos is None:
+                raise ValueError(f"Cannot find pad {pad} on footprint {ref}")
+            # Auto-detect net from pad if not specified
+            if net is None:
+                fp = self.get_footprint(ref)
+                if fp:
+                    for p in fp.pads:
+                        if p.number == pad and p.net_name:
+                            net = p.net_name
+                            break
+        else:
+            end_pos = (float(end[0]), float(end[1]))
+
+        # Get net number
+        net_number = 0
+        if net:
+            net_obj = self.add_net(net)
+            net_number = net_obj.number
+
+        # Build list of points: start -> waypoints -> end
+        points = [start_pos]
+        if waypoints:
+            points.extend(waypoints)
+        points.append(end_pos)
+
+        # Create segments between consecutive points
+        segments = []
+        for i in range(len(points) - 1):
+            seg = Segment(
+                start=points[i],
+                end=points[i + 1],
+                width=width,
+                layer=layer,
+                net_number=net_number,
+                uuid=str(uuid.uuid4()),
+            )
+            segments.append(seg)
+            self._segments.append(seg)
+            self._sexp.append(seg.to_sexp())
+
+        return segments
+
+    def add_via(
+        self,
+        x: float,
+        y: float,
+        size: float = 0.6,
+        drill: float = 0.3,
+        layers: tuple[str, str] = ("F.Cu", "B.Cu"),
+        net: str | None = None,
+    ) -> Via:
+        """
+        Add a via at the specified position.
+
+        Vias connect traces between copper layers. Default parameters create
+        a standard through-hole via suitable for most designs.
+
+        Args:
+            x: X position in mm
+            y: Y position in mm
+            size: Via pad size in mm (default 0.6)
+            drill: Via drill diameter in mm (default 0.3)
+            layers: Tuple of layer names to connect (default ("F.Cu", "B.Cu"))
+            net: Net name for the via (optional)
+
+        Returns:
+            The Via object that was created
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.add_via(50, 30, net="GND")
+            >>> pcb.save("board.kicad_pcb")
+        """
+        net_number = 0
+        if net:
+            net_obj = self.add_net(net)
+            net_number = net_obj.number
+
+        via = Via(
+            position=(x, y),
+            size=size,
+            drill=drill,
+            layers=list(layers),
+            net_number=net_number,
+            uuid=str(uuid.uuid4()),
+        )
+        self._vias.append(via)
+        self._sexp.append(via.to_sexp())
+
+        return via
+
+    def routing_status(self) -> dict:
+        """
+        Get routing statistics for the PCB.
+
+        Returns information about traces, vias, and unrouted connections
+        (ratsnest) that can be used to assess routing completion.
+
+        Returns:
+            Dictionary with routing statistics:
+            - segments: Number of trace segments
+            - vias: Number of vias
+            - trace_length_mm: Total trace length in mm
+            - nets_with_traces: Set of net numbers that have traces
+            - unrouted_pads: List of (reference, pad, net) for pads without traces
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> status = pcb.routing_status()
+            >>> print(f"Segments: {status['segments']}, Vias: {status['vias']}")
+            >>> print(f"Total trace length: {status['trace_length_mm']:.1f} mm")
+        """
+        import math
+
+        # Count segments and calculate total length
+        total_length = 0.0
+        nets_with_traces: set[int] = set()
+
+        for seg in self._segments:
+            dx = seg.end[0] - seg.start[0]
+            dy = seg.end[1] - seg.start[1]
+            total_length += math.sqrt(dx * dx + dy * dy)
+            if seg.net_number > 0:
+                nets_with_traces.add(seg.net_number)
+
+        # Add vias to nets with traces
+        for via in self._vias:
+            if via.net_number > 0:
+                nets_with_traces.add(via.net_number)
+
+        # Find unrouted pads (pads with nets that have no traces)
+        unrouted_pads = []
+        for fp in self._footprints:
+            for pad in fp.pads:
+                if pad.net_number > 0 and pad.net_number not in nets_with_traces:
+                    unrouted_pads.append((fp.reference, pad.number, pad.net_name))
+
+        return {
+            "segments": len(self._segments),
+            "vias": len(self._vias),
+            "trace_length_mm": total_length,
+            "nets_with_traces": nets_with_traces,
+            "unrouted_pads": unrouted_pads,
+        }
+
+    def get_ratsnest(self) -> list[dict]:
+        """
+        Get the ratsnest (unrouted connections) for the PCB.
+
+        Returns a list of connections that need to be routed, showing which
+        pads need to be connected together on each net.
+
+        Returns:
+            List of dictionaries, each containing:
+            - net: Net name
+            - net_number: Net number
+            - pads: List of (reference, pad_number, x, y) tuples for pads in the net
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> for connection in pcb.get_ratsnest():
+            ...     print(f"{connection['net']}: {len(connection['pads'])} pads")
+        """
+        # Group pads by net
+        nets_pads: dict[int, list[tuple[str, str, float, float]]] = {}
+
+        for fp in self._footprints:
+            for pad in fp.pads:
+                if pad.net_number > 0:
+                    pos = self.get_pad_position(fp.reference, pad.number)
+                    if pos:
+                        if pad.net_number not in nets_pads:
+                            nets_pads[pad.net_number] = []
+                        nets_pads[pad.net_number].append(
+                            (fp.reference, pad.number, pos[0], pos[1])
+                        )
+
+        # Build result with net names
+        result = []
+        for net_num, pads in nets_pads.items():
+            if len(pads) >= 2:  # Only include nets with multiple pads
+                net = self.get_net(net_num)
+                net_name = net.name if net else ""
+                result.append({
+                    "net": net_name,
+                    "net_number": net_num,
+                    "pads": pads,
+                })
+
+        return result
 
     def assign_net_to_footprint_pad(
         self,
