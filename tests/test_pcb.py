@@ -501,6 +501,118 @@ class TestPCBQueryMethods:
         assert net is None
 
 
+class TestUpdateFootprintPosition:
+    """Tests for PCB.update_footprint_position method."""
+
+    def test_update_position_basic(self, routing_test_pcb, tmp_path):
+        """Test updating footprint position persists after save/reload."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        # Verify footprint exists
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+
+        # Update position
+        new_x, new_y = 140.0, 120.0
+        result = pcb.update_footprint_position("R1", new_x, new_y)
+        assert result is True
+
+        # Verify in memory
+        fp = pcb.get_footprint("R1")
+        assert fp.position == pytest.approx((new_x, new_y))
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        # Verify position persisted
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.position == pytest.approx((new_x, new_y))
+
+    def test_update_position_with_rotation_existing(self, routing_test_pcb, tmp_path):
+        """Test updating position with rotation when at node already has rotation."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        # First set a rotation, then update with different rotation
+        pcb.update_footprint_position("R1", 135.0, 115.0, rotation=45.0)
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        # Now update again with new rotation
+        pcb2.update_footprint_position("R1", 140.0, 120.0, rotation=90.0)
+
+        # Save and reload again
+        output_path2 = tmp_path / "output2.kicad_pcb"
+        pcb2.save(output_path2)
+
+        doc3 = load_pcb(str(output_path2))
+        pcb3 = PCB(doc3)
+
+        # Verify both position and rotation persisted
+        fp3 = pcb3.get_footprint("R1")
+        assert fp3 is not None
+        assert fp3.position == pytest.approx((140.0, 120.0))
+        assert fp3.rotation == pytest.approx(90.0)
+
+    def test_update_position_with_rotation_new(self, routing_test_pcb, tmp_path):
+        """Test updating position with rotation when at node has no rotation.
+
+        This is a regression test for issue #915 where rotation was not
+        persisted when the footprint's at node didn't already have a rotation
+        value.
+        """
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        # The R1 footprint starts without rotation (at 135 115)
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+        # Initial rotation should be 0 or unset
+        assert fp.rotation == pytest.approx(0.0, abs=0.1)
+
+        # Update with non-zero rotation
+        new_x, new_y, new_rot = 140.0, 120.0, 45.0
+        result = pcb.update_footprint_position("R1", new_x, new_y, rotation=new_rot)
+        assert result is True
+
+        # Verify in memory
+        fp = pcb.get_footprint("R1")
+        assert fp.position == pytest.approx((new_x, new_y))
+        assert fp.rotation == pytest.approx(new_rot)
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        # Verify position AND rotation persisted
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.position == pytest.approx((new_x, new_y))
+        assert fp2.rotation == pytest.approx(new_rot)
+
+    def test_update_position_nonexistent_footprint(self, routing_test_pcb):
+        """Test that updating nonexistent footprint returns False."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        result = pcb.update_footprint_position("NONEXISTENT", 100.0, 100.0)
+        assert result is False
+
+
 class TestAddFootprint:
     """Tests for PCB.add_footprint and add_footprint_from_file methods."""
 
@@ -753,7 +865,7 @@ class TestAddFootprint:
         assert fp_start != -1, "Footprint not found in saved file"
 
         # Extract the footprint section (find matching closing paren)
-        fp_content = content[fp_start:fp_start + 2000]  # Enough for the footprint
+        fp_content = content[fp_start : fp_start + 2000]  # Enough for the footprint
 
         # Verify (at) appears after (layer) and before other elements
         layer_pos = fp_content.find('(layer "F.Cu")')
