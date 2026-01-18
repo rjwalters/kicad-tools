@@ -6,6 +6,7 @@ Provides validation and statistics functionality.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..grid import is_on_grid, snap_to_grid
@@ -13,6 +14,35 @@ from ..logging import _log_debug, _log_info, _log_warning
 
 if TYPE_CHECKING:
     pass
+
+
+@dataclass
+class PowerNetIssue:
+    """Represents an issue with power net connectivity.
+
+    Power nets in KiCad require a "power output" pin to drive them.
+    Power symbols (like power:+3.3V, power:GND) have power INPUT pins
+    that expect to be driven by a power OUTPUT somewhere on the net.
+
+    Common issue types:
+    - "not_driven": Power net has input pins but no output driving it
+    - "multiple_outputs": Multiple power outputs on same net (potential conflict)
+    - "isolated": Power symbol not connected to its named net
+    """
+
+    net: str
+    issue_type: str
+    message: str
+    locations: list[tuple[float, float]] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "net": self.net,
+            "type": self.issue_type,
+            "message": self.message,
+            "locations": self.locations,
+        }
 
 
 class SchematicValidationMixin:
@@ -385,6 +415,243 @@ class SchematicValidationMixin:
                 return True
 
         return False
+
+    def validate_power_nets(self) -> list[PowerNetIssue]:
+        """Check that all power nets are properly driven.
+
+        Power symbols in KiCad (like power:+3.3V, power:GND) have power INPUT
+        pins. They connect to the global net by name, but they need to be
+        driven by a power OUTPUT pin somewhere on that net.
+
+        This method validates power net connectivity by:
+        1. Building a connectivity graph of all connected points
+        2. Finding all power symbols and the nets they define
+        3. For each power net, checking if there's a power OUTPUT pin driving it
+        4. Reporting issues for power input pins on nets without power outputs
+
+        Returns:
+            List of PowerNetIssue objects describing:
+            - Power input pins not connected to any power output
+            - Multiple power outputs driving same net (potential conflict)
+            - Power symbols not connected to their named net (isolated)
+
+        Example:
+            >>> issues = sch.validate_power_nets()
+            >>> for issue in issues:
+            ...     print(f"{issue.net}: {issue.message}")
+            +3.3V: Power net +3.3V has 5 power input symbols but no power output.
+        """
+        issues = []
+
+        # Build connectivity graph using Union-Find
+        # Each point is represented as a rounded (x, y) tuple
+        parent = {}
+
+        def find(p):
+            """Find root of point p in Union-Find structure."""
+            if p not in parent:
+                parent[p] = p
+            if parent[p] != p:
+                parent[p] = find(parent[p])  # Path compression
+            return parent[p]
+
+        def union(p1, p2):
+            """Union two points in the connectivity graph."""
+            r1, r2 = find(p1), find(p2)
+            if r1 != r2:
+                parent[r1] = r2
+
+        # Connect wire endpoints
+        for wire in self.wires:
+            p1 = (round(wire.x1, 2), round(wire.y1, 2))
+            p2 = (round(wire.x2, 2), round(wire.y2, 2))
+            union(p1, p2)
+
+        # Connect junctions to create T-connections
+        wire_segments = []
+        for wire in self.wires:
+            p1 = (round(wire.x1, 2), round(wire.y1, 2))
+            p2 = (round(wire.x2, 2), round(wire.y2, 2))
+            wire_segments.append((p1, p2))
+
+        for junc in self.junctions:
+            junc_pos = (round(junc.x, 2), round(junc.y, 2))
+            # Connect junction to any wire segment it's on
+            for seg_start, seg_end in wire_segments:
+                if self._point_on_segment(junc_pos, seg_start, seg_end):
+                    union(junc_pos, seg_start)
+                    union(junc_pos, seg_end)
+                elif junc_pos == seg_start or junc_pos == seg_end:
+                    union(junc_pos, seg_start)
+                    union(junc_pos, seg_end)
+
+        # Connect symbol pins to wires
+        for sym in self.symbols:
+            for pin in sym.symbol_def.pins:
+                pos = sym.pin_position(pin.number)
+                pos_rounded = (round(pos[0], 2), round(pos[1], 2))
+                # Check if this pin touches a wire endpoint
+                for seg_start, seg_end in wire_segments:
+                    if pos_rounded == seg_start or pos_rounded == seg_end:
+                        union(pos_rounded, seg_start)
+                        break
+                    elif self._point_on_segment(pos_rounded, seg_start, seg_end):
+                        union(pos_rounded, seg_start)
+                        break
+
+        # Connect power symbols to wires
+        for pwr in self.power_symbols:
+            pwr_pos = (round(pwr.x, 2), round(pwr.y, 2))
+            for seg_start, seg_end in wire_segments:
+                if pwr_pos == seg_start or pwr_pos == seg_end:
+                    union(pwr_pos, seg_start)
+                    break
+                elif self._point_on_segment(pwr_pos, seg_start, seg_end):
+                    union(pwr_pos, seg_start)
+                    break
+
+        # Now analyze power net connectivity
+        # Group power symbols by their net name (e.g., "+3.3V", "GND")
+        power_nets: dict[str, list[tuple[float, float]]] = {}
+        for pwr in self.power_symbols:
+            net_name = pwr.lib_id.split(":")[1] if ":" in pwr.lib_id else pwr.lib_id
+            pwr_pos = (round(pwr.x, 2), round(pwr.y, 2))
+            if net_name not in power_nets:
+                power_nets[net_name] = []
+            power_nets[net_name].append(pwr_pos)
+
+        # Find all power output pins on symbols (these drive the net)
+        # Map: net_root -> list of (symbol_ref, pin_name, position)
+        power_outputs: dict[tuple, list[tuple[str, str, tuple]]] = {}
+        power_inputs_by_root: dict[tuple, list[tuple[str, str, tuple]]] = {}
+
+        for sym in self.symbols:
+            for pin in sym.symbol_def.pins:
+                if pin.pin_type == "power_out":
+                    pos = sym.pin_position(pin.number)
+                    pos_rounded = (round(pos[0], 2), round(pos[1], 2))
+                    root = find(pos_rounded)
+                    if root not in power_outputs:
+                        power_outputs[root] = []
+                    power_outputs[root].append((sym.reference, pin.name or pin.number, pos_rounded))
+                elif pin.pin_type == "power_in":
+                    pos = sym.pin_position(pin.number)
+                    pos_rounded = (round(pos[0], 2), round(pos[1], 2))
+                    root = find(pos_rounded)
+                    if root not in power_inputs_by_root:
+                        power_inputs_by_root[root] = []
+                    power_inputs_by_root[root].append(
+                        (sym.reference, pin.name or pin.number, pos_rounded)
+                    )
+
+        # Check each power net
+        for net_name, positions in power_nets.items():
+            # Find the root of each power symbol position
+            net_roots = set()
+            for pos in positions:
+                net_roots.add(find(pos))
+
+            # Check if any power output is on these nets
+            has_power_output = False
+            output_count = 0
+            for root in net_roots:
+                if root in power_outputs:
+                    has_power_output = True
+                    output_count += len(power_outputs[root])
+
+            if not has_power_output:
+                # Check if this net is connected to anything at all
+                # (a completely isolated power symbol is a different problem)
+                is_connected = any(find(pos) != pos for pos in positions)
+
+                if is_connected or len(positions) > 1:
+                    # Power net exists but has no power output driving it
+                    issues.append(
+                        PowerNetIssue(
+                            net=net_name,
+                            issue_type="not_driven",
+                            message=(
+                                f"Power net {net_name} has {len(positions)} power input symbol(s) "
+                                f"but no power output. Consider adding a {net_name} power symbol "
+                                "connected to the regulator output or use PWR_FLAG."
+                            ),
+                            locations=positions,
+                        )
+                    )
+                else:
+                    # Single isolated power symbol - this is a more severe problem
+                    issues.append(
+                        PowerNetIssue(
+                            net=net_name,
+                            issue_type="isolated",
+                            message=(
+                                f"Power symbol {net_name} at {positions[0]} is not connected "
+                                "to any wire or other component."
+                            ),
+                            locations=positions,
+                        )
+                    )
+
+            elif output_count > 1:
+                # Multiple power outputs on same net - potential conflict
+                # This is a warning rather than an error since it might be intentional
+                all_output_locations = []
+                for root in net_roots:
+                    if root in power_outputs:
+                        all_output_locations.extend(out[2] for out in power_outputs[root])
+
+                issues.append(
+                    PowerNetIssue(
+                        net=net_name,
+                        issue_type="multiple_outputs",
+                        message=(
+                            f"Power net {net_name} has {output_count} power outputs. "
+                            "Multiple power outputs on the same net may indicate a conflict."
+                        ),
+                        locations=all_output_locations,
+                    )
+                )
+
+        # Also check for power input pins on symbols that aren't connected to any power net
+        for root, input_pins in power_inputs_by_root.items():
+            # Skip if this root has a power output or power symbol
+            if root in power_outputs:
+                continue
+
+            # Check if any power symbol is on this net
+            has_power_symbol = False
+            for net_name, positions in power_nets.items():
+                for pos in positions:
+                    if find(pos) == root:
+                        has_power_symbol = True
+                        break
+                if has_power_symbol:
+                    break
+
+            if not has_power_symbol:
+                # Power input pins not connected to any power net
+                for sym_ref, pin_name, pos in input_pins:
+                    issues.append(
+                        PowerNetIssue(
+                            net="(unconnected)",
+                            issue_type="undriven_input",
+                            message=(
+                                f"Power input pin {pin_name} on {sym_ref} at {pos} "
+                                "is not connected to any power net or power output."
+                            ),
+                            locations=[pos],
+                        )
+                    )
+
+        # Log summary
+        if issues:
+            _log_warning(f"Power net validation found {len(issues)} issue(s)")
+            for issue in issues:
+                _log_debug(f"  {issue.net}: {issue.message}")
+        else:
+            _log_info("Power net validation passed with no issues")
+
+        return issues
 
     def get_statistics(self) -> dict:
         """Get schematic statistics useful for agents."""
