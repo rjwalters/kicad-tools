@@ -23,6 +23,8 @@ from .elements import GlobalLabel, HierarchicalLabel, Junction, Label, NoConnect
 from .symbol import SymbolInstance
 
 if TYPE_CHECKING:
+    from kicad_tools.erc import ERCReport
+
     from .schematic import Schematic
 
 
@@ -317,6 +319,83 @@ class SchematicIOMixin:
         path = Path(path)
         content = self.to_sexp()
         path.write_text(content)
+        # Store the path for later use (e.g., run_erc)
+        self._saved_path = path
         _log_info(
             f"Wrote schematic to {path} ({len(self.symbols)} symbols, {len(self.wires)} wires)"
         )
+
+    def run_erc(self, output_path: str | Path | None = None) -> ERCReport:
+        """Run KiCad ERC on this schematic.
+
+        Invokes kicad-cli to run electrical rules check and returns
+        the parsed report with violations, errors, and warnings.
+
+        The schematic must be saved to disk first via write().
+
+        Args:
+            output_path: Optional path for ERC report file.
+                        If None, uses a temporary file that is cleaned up.
+
+        Returns:
+            Parsed ERCReport with violations, errors, warnings.
+
+        Raises:
+            KiCadCLIError: If kicad-cli is not found or fails.
+            ValueError: If schematic has not been saved to disk.
+
+        Example::
+
+            sch = Schematic("My Design")
+            sch.add_symbol("Device:R", 100, 50, "R1", "10k")
+            sch.write("design.kicad_sch")
+
+            report = sch.run_erc()
+            if report.error_count > 0:
+                for error in report.errors:
+                    print(f"ERC Error: {error.type} at {error.location_str}")
+        """
+        from kicad_tools.cli.runner import run_erc as cli_run_erc
+        from kicad_tools.erc import ERCReport
+        from kicad_tools.exceptions import KiCadCLIError
+
+        # Get the saved path
+        saved_path = getattr(self, "_saved_path", None)
+        if saved_path is None:
+            raise ValueError(
+                "Schematic must be saved to disk before running ERC. "
+                "Use write() to save the schematic first."
+            )
+
+        if not saved_path.exists():
+            raise ValueError(f"Schematic file not found: {saved_path}")
+
+        # Convert output_path to Path if provided
+        output = Path(output_path) if output_path else None
+
+        # Run ERC via kicad-cli
+        result = cli_run_erc(saved_path, output_path=output)
+
+        if not result.success:
+            raise KiCadCLIError(
+                f"ERC failed: {result.stderr}",
+                context={
+                    "schematic": str(saved_path),
+                    "return_code": result.return_code,
+                },
+                suggestions=[
+                    "Ensure KiCad 8+ is installed",
+                    "On macOS: brew install --cask kicad",
+                    "On Linux: Check your package manager for kicad",
+                ],
+            )
+
+        # Parse the report
+        try:
+            report = ERCReport.load(result.output_path)
+        finally:
+            # Clean up temp file if we created one
+            if output_path is None and result.output_path:
+                result.output_path.unlink(missing_ok=True)
+
+        return report

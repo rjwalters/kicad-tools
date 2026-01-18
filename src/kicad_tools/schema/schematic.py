@@ -19,6 +19,7 @@ from .symbol import SymbolInstance
 from .wire import Junction, Wire
 
 if TYPE_CHECKING:
+    from ..erc import ERCReport
     from ..query.symbols import SymbolList
 
 
@@ -301,3 +302,74 @@ class Schematic:
     def __repr__(self) -> str:
         path_str = str(self._path) if self._path else "unsaved"
         return f"Schematic({path_str}, symbols={len(self.symbols)}, wires={len(self.wires)})"
+
+    # ERC operations
+
+    def run_erc(self, output_path: str | Path | None = None) -> ERCReport:
+        """Run KiCad ERC on this schematic.
+
+        Invokes kicad-cli to run electrical rules check and returns
+        the parsed report with violations, errors, and warnings.
+
+        Args:
+            output_path: Optional path for ERC report file.
+                        If None, uses a temporary file that is cleaned up.
+
+        Returns:
+            Parsed ERCReport with violations, errors, warnings.
+
+        Raises:
+            KiCadCLIError: If kicad-cli is not found or fails.
+            ValueError: If schematic has no path (not saved to disk).
+
+        Example::
+
+            sch = Schematic.load("design.kicad_sch")
+            report = sch.run_erc()
+            if report.error_count > 0:
+                for error in report.errors:
+                    print(f"ERC Error: {error.type} at {error.location_str}")
+        """
+        from ..cli.runner import run_erc as cli_run_erc
+        from ..erc import ERCReport
+        from ..exceptions import KiCadCLIError
+
+        # Schematic must be saved to disk for kicad-cli
+        if self._path is None:
+            raise ValueError(
+                "Schematic must be saved to disk before running ERC. "
+                "Use save() to write the schematic first."
+            )
+
+        if not self._path.exists():
+            raise ValueError(f"Schematic file not found: {self._path}")
+
+        # Convert output_path to Path if provided
+        output = Path(output_path) if output_path else None
+
+        # Run ERC via kicad-cli
+        result = cli_run_erc(self._path, output_path=output)
+
+        if not result.success:
+            raise KiCadCLIError(
+                f"ERC failed: {result.stderr}",
+                context={
+                    "schematic": str(self._path),
+                    "return_code": result.return_code,
+                },
+                suggestions=[
+                    "Ensure KiCad 8+ is installed",
+                    "On macOS: brew install --cask kicad",
+                    "On Linux: Check your package manager for kicad",
+                ],
+            )
+
+        # Parse the report
+        try:
+            report = ERCReport.load(result.output_path)
+        finally:
+            # Clean up temp file if we created one
+            if output_path is None and result.output_path:
+                result.output_path.unlink(missing_ok=True)
+
+        return report
