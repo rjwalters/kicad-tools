@@ -12,6 +12,7 @@ from .elements import (
     Wire,
     WireCollision,
 )
+from .netlist_mixin import PinRef
 from .pin import Pin
 from .schematic import Schematic, SnapMode
 from .symbol import SymbolDef, SymbolInstance
@@ -20,6 +21,7 @@ from .validation_mixin import PowerNetIssue
 __all__ = [
     # Pin
     "Pin",
+    "PinRef",
     # Symbol
     "SymbolDef",
     "SymbolInstance",

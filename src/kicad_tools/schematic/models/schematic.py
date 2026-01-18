@@ -11,6 +11,7 @@ This module composes functionality from specialized mixins:
 - SchematicLayoutMixin: Auto-layout and overlap detection
 - SchematicModificationMixin: Removing elements
 - SchematicValidationMixin: Validation and statistics
+- SchematicNetlistMixin: Netlist extraction and connectivity queries
 """
 
 import uuid
@@ -33,6 +34,7 @@ from .elements_mixin import SchematicElementsMixin
 from .io_mixin import SchematicIOMixin
 from .layout_mixin import SchematicLayoutMixin
 from .modification_mixin import SchematicModificationMixin
+from .netlist_mixin import SchematicNetlistMixin
 from .query_mixin import SchematicQueryMixin
 from .symbol import SymbolDef, SymbolInstance
 from .validation_mixin import SchematicValidationMixin
@@ -56,6 +58,7 @@ class Schematic(
     SchematicLayoutMixin,
     SchematicModificationMixin,
     SchematicValidationMixin,
+    SchematicNetlistMixin,
 ):
     """KiCad schematic document.
 
@@ -70,6 +73,7 @@ class Schematic(
     - Layout: suggest_position(), find_overlapping_symbols()
     - Modification: remove_symbol(), remove_wire(), remove_net(), etc.
     - Validation: validate(), get_statistics()
+    - Netlist: extract_netlist(), get_net_for_pin(), pins_on_net(), are_connected()
 
     Example:
         # Create a new schematic
@@ -82,6 +86,10 @@ class Schematic(
         sch = Schematic.load("existing.kicad_sch")
         sch.add_symbol("Device:C", 200, 100, "C1", "100nF")
         sch.write("existing.kicad_sch")
+
+        # Query connectivity
+        assert sch.are_connected("U1", "VO", "C1", "1")
+        print(sch.pins_on_net("+3.3V"))
     """
 
     def __init__(
