@@ -843,9 +843,15 @@ class PCB:
     - Zones (copper pours)
     """
 
-    def __init__(self, sexp: SExp):
-        """Initialize from parsed S-expression data."""
+    def __init__(self, sexp: SExp, path: str | Path | None = None):
+        """Initialize from parsed S-expression data.
+
+        Args:
+            sexp: Parsed S-expression data
+            path: Optional path to the PCB file (used for export operations)
+        """
         self._sexp = sexp
+        self._path: Path | None = Path(path) if path else None
         self._layers: dict[int, Layer] = {}
         self._nets: dict[int, Net] = {}
         self._footprints: list[Footprint] = []
@@ -861,10 +867,18 @@ class PCB:
         self._parse()
 
     @classmethod
-    def load(cls, path: str) -> PCB:
-        """Load PCB from file."""
-        sexp = load_pcb(path)
-        return cls(sexp)
+    def load(cls, path: str | Path) -> PCB:
+        """Load PCB from file.
+
+        Args:
+            path: Path to .kicad_pcb file
+
+        Returns:
+            PCB instance with path stored for export operations
+        """
+        path = Path(path)
+        sexp = load_pcb(str(path))
+        return cls(sexp, path)
 
     @classmethod
     def create(
@@ -2782,14 +2796,425 @@ class PCB:
 
         return stats
 
-    def save(self, path: str | Path) -> None:
+    @property
+    def path(self) -> Path | None:
+        """Path to the PCB file (if loaded from file or saved).
+
+        This is used by export methods to locate the PCB file for kicad-cli.
+        Returns None if the PCB was created in memory and never saved.
+        """
+        return self._path
+
+    def save(self, path: str | Path | None = None) -> None:
         """
         Save the PCB to a file.
 
         Args:
-            path: Path to save to (.kicad_pcb)
+            path: Path to save to (.kicad_pcb). If None, uses the original
+                  path from load() or the last save location.
+
+        Raises:
+            ValueError: If no path provided and PCB has no stored path
         """
+        if path is None:
+            if self._path is None:
+                raise ValueError(
+                    "No path specified and PCB has no stored path. "
+                    "Provide a path or use PCB.load() to load from a file."
+                )
+            path = self._path
+        else:
+            path = Path(path)
+            self._path = path
+
         save_pcb(self._sexp, path)
+
+    # =========================================================================
+    # Manufacturing Export Methods
+    # =========================================================================
+
+    def export_gerbers(
+        self,
+        output_dir: str | Path,
+        *,
+        manufacturer: str = "jlcpcb",
+        layers: list[str] | None = None,
+        include_drill: bool = True,
+        create_zip: bool = False,
+    ) -> Path:
+        """
+        Export Gerber files for PCB fabrication.
+
+        Uses kicad-cli to generate Gerber files with manufacturer-specific settings.
+
+        Args:
+            output_dir: Directory for output files
+            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark")
+            layers: Specific layers to export (default: all copper + required layers)
+            include_drill: Include drill files (default: True)
+            create_zip: Create a zip archive of all files (default: False)
+
+        Returns:
+            Path to output directory (or zip file if create_zip=True)
+
+        Raises:
+            ValueError: If PCB has no stored path (save first)
+            ExportError: If kicad-cli fails
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_gerbers("./gerbers", manufacturer="jlcpcb")
+            >>> # Or with zip output
+            >>> pcb.export_gerbers("./output", manufacturer="jlcpcb", create_zip=True)
+        """
+        from ..export import GerberConfig, GerberExporter
+
+        pcb_path = self._require_path("export_gerbers")
+
+        exporter = GerberExporter(pcb_path)
+
+        if manufacturer.lower() in ("jlcpcb", "pcbway", "oshpark"):
+            result = exporter.export_for_manufacturer(
+                manufacturer.lower(),
+                output_dir,
+            )
+        else:
+            config = GerberConfig(
+                output_dir=Path(output_dir),
+                layers=layers or [],
+                generate_drill=include_drill,
+                create_zip=create_zip,
+            )
+            result = exporter.export(config, output_dir)
+
+        return result
+
+    def export_drill(
+        self,
+        output_dir: str | Path,
+        *,
+        format: str = "excellon",
+        units: str = "mm",
+        merge_pth_npth: bool = False,
+    ) -> Path:
+        """
+        Export drill files (Excellon format).
+
+        Args:
+            output_dir: Directory for output files
+            format: Drill format ("excellon" or "gerber_x2")
+            units: Units ("mm" or "inch")
+            merge_pth_npth: Merge plated and non-plated holes (default: False)
+
+        Returns:
+            Path to output directory containing drill files
+
+        Raises:
+            ValueError: If PCB has no stored path
+            ExportError: If kicad-cli fails
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_drill("./gerbers", merge_pth_npth=False)
+        """
+        from ..export import GerberConfig, GerberExporter
+
+        pcb_path = self._require_path("export_drill")
+
+        config = GerberConfig(
+            output_dir=Path(output_dir),
+            generate_drill=True,
+            drill_format=format,
+            merge_pth_npth=merge_pth_npth,
+            # Don't generate gerbers, only drill
+            layers=[],
+            include_edge_cuts=False,
+            include_silkscreen=False,
+            include_soldermask=False,
+            include_solderpaste=False,
+        )
+
+        exporter = GerberExporter(pcb_path)
+        return exporter.export(config, output_dir)
+
+    def export_bom(
+        self,
+        output: str | Path,
+        *,
+        schematic_path: str | Path | None = None,
+        format: str = "csv",
+        manufacturer: str = "generic",
+    ) -> Path:
+        """
+        Export Bill of Materials (BOM).
+
+        Generates a BOM from the associated schematic file.
+
+        Args:
+            output: Output file path
+            schematic_path: Path to schematic file. If not provided, looks for
+                           a .kicad_sch file with the same name as the PCB.
+            format: Output format ("csv", "jlcpcb", "pcbway", "seeed")
+            manufacturer: Manufacturer format preset
+
+        Returns:
+            Path to generated BOM file
+
+        Raises:
+            ValueError: If schematic not found
+            ExportError: If BOM generation fails
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_bom("bom.csv")
+            >>> # JLCPCB format
+            >>> pcb.export_bom("bom_jlcpcb.csv", format="jlcpcb")
+        """
+        from ..export import BOMExportConfig, export_bom as _export_bom
+        from ..schema.bom import extract_bom
+
+        # Find schematic
+        if schematic_path is None:
+            pcb_path = self._require_path("export_bom")
+            schematic_path = pcb_path.with_suffix(".kicad_sch")
+            if not schematic_path.exists():
+                raise ValueError(
+                    f"Schematic not found at {schematic_path}. "
+                    "Provide schematic_path explicitly."
+                )
+        else:
+            schematic_path = Path(schematic_path)
+            if not schematic_path.exists():
+                raise ValueError(f"Schematic not found: {schematic_path}")
+
+        # Extract BOM from schematic
+        bom = extract_bom(schematic_path)
+        items = bom.items
+
+        # Determine manufacturer format
+        mfr = manufacturer.lower()
+        if format.lower() in ("jlcpcb", "pcbway", "seeed"):
+            mfr = format.lower()
+
+        config = BOMExportConfig()
+        bom_csv = _export_bom(items, mfr, config)
+
+        # Write to file
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(bom_csv)
+
+        return output_path
+
+    def export_placement(
+        self,
+        output: str | Path,
+        *,
+        format: str = "csv",
+        manufacturer: str = "generic",
+        side: str | None = None,
+    ) -> Path:
+        """
+        Export pick-and-place (CPL) file for SMT assembly.
+
+        Args:
+            output: Output file path
+            format: Output format ("csv", "jlcpcb", "pcbway")
+            manufacturer: Manufacturer format preset
+            side: Export only "top" or "bottom" side (default: both)
+
+        Returns:
+            Path to generated placement file
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_placement("placement.csv")
+            >>> # JLCPCB format
+            >>> pcb.export_placement("cpl_jlcpcb.csv", format="jlcpcb")
+        """
+        from ..export import PnPExportConfig, export_pnp as _export_pnp
+
+        footprints = list(self.footprints)
+
+        # Filter by side if specified
+        if side:
+            layer = "F.Cu" if side.lower() == "top" else "B.Cu"
+            footprints = [fp for fp in footprints if fp.layer == layer]
+
+        # Determine manufacturer format
+        mfr = manufacturer.lower()
+        if format.lower() in ("jlcpcb", "pcbway"):
+            mfr = format.lower()
+
+        config = PnPExportConfig()
+        pnp_csv = _export_pnp(footprints, mfr, config)
+
+        # Write to file
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(pnp_csv)
+
+        return output_path
+
+    def export_manufacturing(
+        self,
+        output_dir: str | Path,
+        *,
+        manufacturer: str = "jlcpcb",
+        schematic_path: str | Path | None = None,
+        include_assembly: bool = True,
+        create_zip: bool = True,
+    ) -> dict[str, str | None]:
+        """
+        Export complete manufacturing package.
+
+        Generates all files needed for PCB fabrication and assembly:
+        - Gerber files (copper, silkscreen, solder mask, outline)
+        - Drill files (PTH and NPTH)
+        - BOM (if include_assembly=True)
+        - Pick-and-place/CPL (if include_assembly=True)
+
+        Args:
+            output_dir: Directory for output files
+            manufacturer: Target manufacturer ("jlcpcb", "pcbway", "oshpark", "seeed")
+            schematic_path: Path to schematic (required for BOM/assembly)
+            include_assembly: Include BOM and placement files (default: True)
+            create_zip: Create zip archive ready for upload (default: True)
+
+        Returns:
+            Dictionary with paths to generated files:
+            {
+                "gerbers": "./output/gerbers.zip",
+                "drill": "./output/gerbers.zip",  # Included in gerbers
+                "bom": "./output/bom.csv",
+                "placement": "./output/cpl.csv",
+                "zip": "./output/manufacturing.zip"
+            }
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> result = pcb.export_manufacturing("./manufacturing", manufacturer="jlcpcb")
+            >>> print(f"Upload {result['zip']} to JLCPCB")
+        """
+        from ..export import AssemblyConfig, AssemblyPackage
+
+        pcb_path = self._require_path("export_manufacturing")
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Find schematic if needed
+        if include_assembly:
+            if schematic_path is None:
+                schematic_path = pcb_path.with_suffix(".kicad_sch")
+            else:
+                schematic_path = Path(schematic_path)
+
+            if not schematic_path.exists():
+                include_assembly = False
+
+        # Configure and export
+        config = AssemblyConfig(
+            output_dir=output_path,
+            include_bom=include_assembly,
+            include_pnp=include_assembly,
+            include_gerbers=True,
+        )
+
+        pkg = AssemblyPackage(
+            pcb_path=pcb_path,
+            schematic_path=schematic_path if include_assembly else None,
+            manufacturer=manufacturer,
+            config=config,
+        )
+        pkg_result = pkg.export(output_path)
+
+        # Build result dictionary
+        result: dict[str, str | None] = {
+            "gerbers": str(pkg_result.gerber_path) if pkg_result.gerber_path else None,
+            "drill": str(pkg_result.gerber_path) if pkg_result.gerber_path else None,
+            "bom": str(pkg_result.bom_path) if pkg_result.bom_path else None,
+            "placement": str(pkg_result.pnp_path) if pkg_result.pnp_path else None,
+        }
+
+        # Create combined zip if requested
+        if create_zip:
+            import zipfile
+
+            zip_path = output_path / f"{manufacturer}_manufacturing.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in output_path.iterdir():
+                    if file_path.is_file() and file_path != zip_path:
+                        zf.write(file_path, file_path.name)
+                # Include gerber subdirectory if exists
+                gerber_dir = output_path / "gerbers"
+                if gerber_dir.is_dir():
+                    for file_path in gerber_dir.iterdir():
+                        if file_path.is_file():
+                            zf.write(file_path, f"gerbers/{file_path.name}")
+
+            result["zip"] = str(zip_path)
+        else:
+            result["zip"] = None
+
+        return result
+
+    def export_gerbers_zip(
+        self,
+        output: str | Path,
+        *,
+        manufacturer: str = "jlcpcb",
+        include_drill: bool = True,
+    ) -> Path:
+        """
+        Export Gerbers and drill files as a single zip archive.
+
+        Convenience method for quick export of fabrication files ready
+        for upload to PCB manufacturers.
+
+        Args:
+            output: Output zip file path
+            manufacturer: Manufacturer preset ("jlcpcb", "pcbway", "oshpark")
+            include_drill: Include drill files in zip (default: True)
+
+        Returns:
+            Path to generated zip file
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.export_gerbers_zip("gerbers.zip", manufacturer="jlcpcb")
+        """
+        import tempfile
+
+        from ..export import GerberExporter
+
+        pcb_path = self._require_path("export_gerbers_zip")
+        output_path = Path(output)
+
+        # Export to temp directory, then zip
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            exporter = GerberExporter(pcb_path)
+            exporter.export_for_manufacturer(manufacturer.lower(), temp_path)
+
+            # Create zip
+            import zipfile
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in temp_path.iterdir():
+                    if file_path.is_file():
+                        zf.write(file_path, file_path.name)
+
+        return output_path
+
+    def _require_path(self, method_name: str) -> Path:
+        """Ensure PCB has a stored path for export operations."""
+        if self._path is None:
+            raise ValueError(
+                f"{method_name}() requires a PCB file path. "
+                "Either load the PCB with PCB.load() or save it first with pcb.save()."
+            )
+        return self._path
 
     def import_from_netlist(
         self,
