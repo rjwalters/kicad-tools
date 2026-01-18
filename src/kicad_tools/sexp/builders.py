@@ -453,6 +453,75 @@ def zone_node(
     return zone
 
 
+def keepout_node(
+    points: list[tuple[float, float]],
+    layers: list[str],
+    no_tracks: bool = True,
+    no_vias: bool = True,
+    no_pour: bool = True,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB keepout zone S-expression.
+
+    Keepout zones prevent copper pours, tracks, and/or vias in the specified area.
+
+    Args:
+        points: List of (x, y) boundary points
+        layers: List of layer names this keepout applies to
+        no_tracks: Prevent tracks in this area
+        no_vias: Prevent vias in this area
+        no_pour: Prevent copper pour in this area
+        uuid_str: Unique identifier
+
+    Example output:
+        (zone
+            (net 0)
+            (net_name "")
+            (layers "F.Cu" "B.Cu")
+            (uuid "...")
+            (hatch edge 0.5)
+            (connect_pads (clearance 0))
+            (min_thickness 0.25)
+            (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour not_allowed))
+            (fill yes)
+            (polygon (pts (xy X Y) ...))
+        )
+    """
+    # Build polygon points
+    pts_children = [xy(x, y) for x, y in points]
+    polygon = SExp.list("polygon", SExp.list("pts", *pts_children))
+
+    # Build layers node
+    layers_node = SExp.list("layers", *layers)
+
+    zone = SExp.list(
+        "zone",
+        SExp.list("net", 0),
+        SExp.list("net_name", ""),
+        layers_node,
+        uuid_node(uuid_str),
+        SExp.list("hatch", "edge", 0.5),
+    )
+
+    # Add keepout settings
+    keepout = SExp.list(
+        "keepout",
+        SExp.list("tracks", "not_allowed" if no_tracks else "allowed"),
+        SExp.list("vias", "not_allowed" if no_vias else "allowed"),
+        SExp.list("pads", "allowed"),  # Pads are typically allowed
+        SExp.list("copperpour", "not_allowed" if no_pour else "allowed"),
+    )
+    zone.append(keepout)
+
+    # Add minimal zone properties
+    zone.append(SExp.list("connect_pads", SExp.list("clearance", 0)))
+    zone.append(SExp.list("min_thickness", 0.25))
+    zone.append(SExp.list("fill", "yes"))
+    zone.append(polygon)
+
+    return zone
+
+
 def footprint_at_node(x: float, y: float, rotation: float = 0) -> SExp:
     """Build an 'at' node for footprint positioning."""
     if rotation != 0:
