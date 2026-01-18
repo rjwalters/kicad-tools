@@ -6,6 +6,52 @@ from unittest.mock import Mock, patch
 
 from kicad_tools.cli import netlist_cmd
 from kicad_tools.operations.netlist import Netlist, NetlistComponent, NetlistNet, NetNode
+from kicad_tools.sexp import parse_sexp
+
+
+class TestNetNodeFromSexp:
+    """Tests for NetNode.from_sexp() parsing."""
+
+    def test_from_sexp_parses_reference_from_ref_node(self):
+        """Test that reference is correctly parsed from (ref ...) child node.
+
+        This tests the fix for issue #923 where NetNode.from_sexp() was
+        incorrectly trying to get the reference as a direct string value
+        instead of from the (ref ...) child node.
+        """
+        sexp = parse_sexp('(node (ref "R1") (pin "1"))')
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == "R1"
+        assert node.pin == "1"
+
+    def test_from_sexp_parses_all_fields(self):
+        """Test that all node fields are correctly parsed."""
+        sexp = parse_sexp('(node (ref "U1") (pin "3") (pinfunction "VCC") (pintype "power_in"))')
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == "U1"
+        assert node.pin == "3"
+        assert node.pin_function == "VCC"
+        assert node.pin_type == "power_in"
+
+    def test_from_sexp_handles_missing_optional_fields(self):
+        """Test parsing when optional fields are missing."""
+        sexp = parse_sexp('(node (ref "C1") (pin "2"))')
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == "C1"
+        assert node.pin == "2"
+        assert node.pin_function == ""
+        assert node.pin_type == ""
+
+    def test_from_sexp_handles_empty_node(self):
+        """Test parsing an empty node."""
+        sexp = parse_sexp("(node)")
+        node = NetNode.from_sexp(sexp)
+
+        assert node.reference == ""
+        assert node.pin == ""
 
 
 class TestNetlistCmdHelpers:
