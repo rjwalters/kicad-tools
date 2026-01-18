@@ -15,6 +15,7 @@ Block-based layout is available via the ``blocks`` subpackage:
 
 from .editor import (
     AudioLayoutRules,
+    Keepout,
     PCBEditor,
     Point,
     SeeedFusion4Layer,
@@ -38,6 +39,7 @@ __all__ = [
     "Track",
     "Via",
     "Zone",
+    "Keepout",
     "PCBEditor",
     "SeeedFusion4Layer",
     "AudioLayoutRules",

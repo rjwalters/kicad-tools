@@ -94,7 +94,20 @@ class Via:
 
 @dataclass
 class Zone:
-    """Copper pour zone."""
+    """Copper pour zone.
+
+    Attributes:
+        net: Net number
+        net_name: Net name (e.g., "GND", "+3.3V")
+        layer: Copper layer (e.g., "F.Cu", "B.Cu", "In1.Cu")
+        points: Boundary polygon points
+        priority: Zone fill priority (higher fills later)
+        min_thickness: Minimum copper thickness in mm
+        clearance: Clearance to other nets in mm
+        thermal_gap: Thermal relief gap in mm
+        thermal_bridge_width: Thermal relief spoke width in mm
+        uuid_str: Unique identifier
+    """
 
     net: int
     net_name: str
@@ -102,6 +115,9 @@ class Zone:
     points: list[Point]
     priority: int = 0
     min_thickness: float = 0.2
+    clearance: float = 0.2
+    thermal_gap: float = 0.3
+    thermal_bridge_width: float = 0.3
     uuid_str: str = field(default_factory=lambda: str(uuid_module.uuid4()))
 
     def to_sexp_node(self) -> SExp:
@@ -115,6 +131,47 @@ class Zone:
             self.uuid_str,
             self.priority,
             self.min_thickness,
+            self.clearance,
+            self.thermal_gap,
+            self.thermal_bridge_width,
+        )
+
+
+@dataclass
+class Keepout:
+    """Zone keepout area.
+
+    Keepout zones prevent copper pours, tracks, and/or vias in the specified area.
+    Used for antenna clearance, mechanical restrictions, and routing constraints.
+
+    Attributes:
+        points: Boundary polygon points
+        layers: List of layers this keepout applies to
+        no_tracks: Prevent tracks in this area
+        no_vias: Prevent vias in this area
+        no_pour: Prevent copper pour in this area
+        uuid_str: Unique identifier
+    """
+
+    points: list[Point]
+    layers: list[str] = field(default_factory=lambda: ["F.Cu", "B.Cu"])
+    no_tracks: bool = True
+    no_vias: bool = True
+    no_pour: bool = True
+    uuid_str: str = field(default_factory=lambda: str(uuid_module.uuid4()))
+
+    def to_sexp_node(self) -> SExp:
+        """Build S-expression node for this keepout zone."""
+        from kicad_tools.sexp.builders import keepout_node
+
+        point_tuples = [(p.x, p.y) for p in self.points]
+        return keepout_node(
+            point_tuples,
+            self.layers,
+            self.no_tracks,
+            self.no_vias,
+            self.no_pour,
+            self.uuid_str,
         )
 
 
@@ -304,29 +361,65 @@ class PCBEditor:
         self,
         net_name: str,
         layer: str,
-        boundary: list[tuple[float, float]],
+        boundary: list[tuple[float, float]] | str | None = None,
         priority: int = 0,
+        clearance: float = 0.3,
+        min_thickness: float = 0.25,
+        thermal_gap: float = 0.5,
+        thermal_spoke_width: float = 0.5,
         insert: bool = True,
     ) -> Zone:
-        """
-        Add a copper pour zone.
+        """Add a copper pour zone.
 
         Args:
-            net_name: Net for the zone (e.g., "GND")
-            layer: Copper layer
-            boundary: Zone boundary points
+            net_name: Net for the zone (e.g., "GND", "+3.3V")
+            layer: Copper layer (e.g., "F.Cu", "B.Cu", "In1.Cu")
+            boundary: Zone boundary points, "board_outline" to use board edge,
+                      or None for default board bounds
             priority: Zone fill priority (higher fills later)
+            clearance: Clearance to other nets in mm
+            min_thickness: Minimum copper thickness in mm
+            thermal_gap: Thermal relief gap in mm
+            thermal_spoke_width: Thermal relief spoke width in mm
             insert: If True, insert into document immediately
 
         Returns:
             Zone object created
+
+        Example::
+
+            # Add GND pour on bottom layer
+            pcb.add_zone(
+                net="GND",
+                layer="B.Cu",
+                boundary=[(0, 0), (200, 0), (200, 120), (0, 120)],
+                clearance=0.3,
+                min_thickness=0.25
+            )
+
+            # Add zone with thermal relief settings
+            pcb.add_zone(
+                net="GND",
+                layer="B.Cu",
+                boundary="board_outline",
+                thermal_gap=0.5,
+                thermal_spoke_width=0.5
+            )
         """
+        # Handle boundary parameter
+        if boundary == "board_outline" or boundary is None:
+            boundary = self._get_board_outline()
+
         zone = Zone(
             net=self.get_net_number(net_name),
             net_name=net_name,
             layer=layer,
             points=[Point(*p) for p in boundary],
             priority=priority,
+            clearance=clearance,
+            min_thickness=min_thickness,
+            thermal_gap=thermal_gap,
+            thermal_bridge_width=thermal_spoke_width,
         )
 
         if insert and self.doc:
@@ -334,14 +427,293 @@ class PCBEditor:
 
         return zone
 
+    def add_keepout(
+        self,
+        boundary: list[tuple[float, float]],
+        layers: list[str] | None = None,
+        no_tracks: bool = True,
+        no_vias: bool = True,
+        no_pour: bool = True,
+        insert: bool = True,
+    ) -> Keepout:
+        """Add a keepout zone.
+
+        Keepout zones prevent copper pours, tracks, and/or vias in the specified area.
+        Used for antenna clearance, mechanical restrictions, and routing constraints.
+
+        Args:
+            boundary: Zone boundary points [(x1, y1), (x2, y2), ...]
+            layers: List of layers this keepout applies to (default: ["F.Cu", "B.Cu"])
+            no_tracks: Prevent tracks in this area
+            no_vias: Prevent vias in this area
+            no_pour: Prevent copper pour in this area
+            insert: If True, insert into document immediately
+
+        Returns:
+            Keepout object created
+
+        Example::
+
+            # Add keepout area (no copper)
+            pcb.add_keepout(
+                boundary=[(50, 50), (70, 50), (70, 70), (50, 70)],
+                layers=["F.Cu", "B.Cu"],
+                no_tracks=True,
+                no_vias=True,
+                no_pour=True
+            )
+        """
+        if layers is None:
+            layers = ["F.Cu", "B.Cu"]
+
+        keepout = Keepout(
+            points=[Point(*p) for p in boundary],
+            layers=layers,
+            no_tracks=no_tracks,
+            no_vias=no_vias,
+            no_pour=no_pour,
+        )
+
+        if insert and self.doc:
+            self.doc.append(keepout.to_sexp_node())
+
+        return keepout
+
+    def get_zones(self) -> list[dict]:
+        """Get all zones from the PCB.
+
+        Returns:
+            List of zone information dictionaries with keys:
+            - net: Net name
+            - layer: Layer name
+            - priority: Zone priority
+            - polygon: List of boundary points
+
+        Example::
+
+            for zone in pcb.get_zones():
+                print(f"{zone['net']} on {zone['layer']}")
+        """
+        zones = []
+        if not self.doc:
+            return zones
+
+        for zone_sexp in self.doc.find_all("zone"):
+            # Skip keepout zones (they have net 0 and a keepout child)
+            if zone_sexp.find("keepout"):
+                continue
+
+            zone_info = {
+                "net": "",
+                "layer": "",
+                "priority": 0,
+                "polygon": [],
+            }
+
+            if net_name := zone_sexp.find("net_name"):
+                zone_info["net"] = net_name.get_string(0) or ""
+            if layer := zone_sexp.find("layer"):
+                zone_info["layer"] = layer.get_string(0) or ""
+            if priority := zone_sexp.find("priority"):
+                zone_info["priority"] = priority.get_int(0) or 0
+
+            # Parse polygon points
+            if polygon := zone_sexp.find("polygon"):
+                if pts := polygon.find("pts"):
+                    for xy in pts.find_all("xy"):
+                        x = xy.get_float(0) or 0.0
+                        y = xy.get_float(1) or 0.0
+                        zone_info["polygon"].append((x, y))
+
+            zones.append(zone_info)
+
+        return zones
+
+    def add_standard_gnd_pour(
+        self,
+        layer: str = "B.Cu",
+        insert: bool = True,
+    ) -> Zone:
+        """Add a standard GND pour covering the board.
+
+        Convenience method for adding a GND zone using the board outline
+        with sensible defaults for thermal relief.
+
+        Args:
+            layer: Target copper layer (default: "B.Cu" for bottom)
+            insert: If True, insert into document immediately
+
+        Returns:
+            Zone object created
+
+        Example::
+
+            # Common pattern: GND pour on bottom
+            pcb.add_standard_gnd_pour()
+        """
+        return self.add_zone(
+            net_name="GND",
+            layer=layer,
+            boundary="board_outline",
+            priority=0,
+            clearance=0.3,
+            min_thickness=0.25,
+            thermal_gap=0.5,
+            thermal_spoke_width=0.5,
+            insert=insert,
+        )
+
+    def setup_4layer_stackup(
+        self,
+        gnd_layer: str = "In1.Cu",
+        vcc_layer: str = "In2.Cu",
+        vcc_net: str = "+3.3V",
+        insert: bool = True,
+    ) -> list[Zone]:
+        """Set up standard 4-layer PCB power plane stackup.
+
+        Creates GND and VCC zones on inner layers following best practices:
+        - Signal-GND-VCC-Signal stackup
+        - GND on layer below top signals (In1.Cu)
+        - VCC on layer above bottom signals (In2.Cu)
+
+        Args:
+            gnd_layer: GND plane layer (default: "In1.Cu")
+            vcc_layer: VCC plane layer (default: "In2.Cu")
+            vcc_net: Power net name (default: "+3.3V")
+            insert: If True, insert into document immediately
+
+        Returns:
+            List of Zone objects created [gnd_zone, vcc_zone]
+
+        Example::
+
+            # 4-layer pattern: Signal-GND-VCC-Signal
+            zones = pcb.setup_4layer_stackup(
+                gnd_layer="In1.Cu",
+                vcc_layer="In2.Cu"
+            )
+        """
+        zones = []
+
+        # GND plane (higher priority fills on top)
+        gnd_zone = self.add_zone(
+            net_name="GND",
+            layer=gnd_layer,
+            boundary="board_outline",
+            priority=1,
+            clearance=0.3,
+            min_thickness=0.25,
+            thermal_gap=0.3,
+            thermal_spoke_width=0.3,
+            insert=insert,
+        )
+        zones.append(gnd_zone)
+
+        # VCC plane (lower priority, fills first)
+        vcc_zone = self.add_zone(
+            net_name=vcc_net,
+            layer=vcc_layer,
+            boundary="board_outline",
+            priority=0,
+            clearance=0.3,
+            min_thickness=0.25,
+            thermal_gap=0.3,
+            thermal_spoke_width=0.3,
+            insert=insert,
+        )
+        zones.append(vcc_zone)
+
+        return zones
+
+    def _get_board_outline(self) -> list[tuple[float, float]]:
+        """Get board outline from Edge.Cuts layer or estimate from footprints.
+
+        Returns:
+            List of (x, y) points forming the board outline
+        """
+        # Try to extract from Edge.Cuts layer
+        if self.doc:
+            edge_lines = []
+            for line in self.doc.find_all("gr_line"):
+                layer = line.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    start = line.find("start")
+                    end = line.find("end")
+                    if start and end:
+                        edge_lines.append(
+                            (
+                                (start.get_float(0) or 0.0, start.get_float(1) or 0.0),
+                                (end.get_float(0) or 0.0, end.get_float(1) or 0.0),
+                            )
+                        )
+
+            if edge_lines:
+                # Build polygon from connected line segments
+                polygon = [edge_lines[0][0], edge_lines[0][1]]
+                used = {0}
+
+                while len(used) < len(edge_lines):
+                    current_end = polygon[-1]
+                    found = False
+                    for i, (start, end) in enumerate(edge_lines):
+                        if i in used:
+                            continue
+                        # Check if this segment connects
+                        if self._points_close(current_end, start):
+                            polygon.append(end)
+                            used.add(i)
+                            found = True
+                            break
+                        elif self._points_close(current_end, end):
+                            polygon.append(start)
+                            used.add(i)
+                            found = True
+                            break
+                    if not found:
+                        break
+
+                if len(polygon) >= 3:
+                    return polygon
+
+        # Fallback: estimate from footprint positions
+        min_x, min_y = float("inf"), float("inf")
+        max_x, max_y = float("-inf"), float("-inf")
+
+        for ref, fp_info in self.footprints.items():
+            x, y = fp_info["x"], fp_info["y"]
+            min_x = min(min_x, x - 5)
+            min_y = min(min_y, y - 5)
+            max_x = max(max_x, x + 5)
+            max_y = max(max_y, y + 5)
+
+        if min_x != float("inf"):
+            return [
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+            ]
+
+        # Final fallback: default rectangle
+        return [(0, 0), (100, 0), (100, 100), (0, 100)]
+
+    def _points_close(
+        self, p1: tuple[float, float], p2: tuple[float, float], tolerance: float = 0.01
+    ) -> bool:
+        """Check if two points are close within tolerance."""
+        return abs(p1[0] - p2[0]) < tolerance and abs(p1[1] - p2[1]) < tolerance
+
     def create_ground_pour(
         self,
         layer: str = "In1.Cu",
         boundary: list[tuple[float, float]] | None = None,
         insert: bool = True,
     ) -> Zone:
-        """
-        Generate a ground plane pour.
+        """Generate a ground plane pour.
+
+        .. deprecated::
+            Use :meth:`add_standard_gnd_pour` or :meth:`add_zone` instead.
 
         Args:
             layer: Target copper layer (usually inner layer for 4-layer)
@@ -353,7 +725,7 @@ class PCBEditor:
         """
         # Default to full board pour
         if boundary is None:
-            boundary = [(0, 0), (65, 0), (65, 56), (0, 56)]
+            boundary = self._get_board_outline()
 
         return self.add_zone("GND", layer, boundary, priority=0, insert=insert)
 
