@@ -58,6 +58,11 @@ class Pad:
     drill: float = 0.0
     uuid: str = ""
 
+    @property
+    def net(self) -> int:
+        """Net ID (alias for net_number for API consistency)."""
+        return self.net_number
+
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Pad | None:
         """Parse pad from S-expression."""
