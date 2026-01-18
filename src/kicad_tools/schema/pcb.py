@@ -830,6 +830,21 @@ class Setup:
     copper_finish: str = ""
 
 
+# Paper sizes in mm (width, height) - KiCad uses landscape orientation
+PAPER_SIZES: dict[str, tuple[float, float]] = {
+    "A4": (297.0, 210.0),
+    "A3": (420.0, 297.0),
+    "A2": (594.0, 420.0),
+    "A1": (841.0, 594.0),
+    "A0": (1189.0, 841.0),
+    "A": (279.4, 215.9),  # US Letter
+    "B": (431.8, 279.4),  # US Tabloid
+    "C": (558.8, 431.8),
+    "D": (863.6, 558.8),
+    "E": (1117.6, 863.6),
+}
+
+
 class PCB:
     """KiCad PCB document.
 
@@ -890,11 +905,13 @@ class PCB:
         revision: str = "1.0",
         company: str = "",
         board_date: str | None = None,
+        paper: str = "A4",
+        center: bool = True,
     ) -> PCB:
         """Create a new blank PCB from scratch.
 
         This creates a minimal but valid KiCad PCB file with:
-        - Board outline on Edge.Cuts layer
+        - Board outline on Edge.Cuts layer (centered on drawing sheet by default)
         - Layer definitions (2 or 4 copper layers)
         - Basic design rules
         - Title block information
@@ -907,12 +924,17 @@ class PCB:
             revision: Board revision (default "1.0")
             company: Company name for title block
             board_date: Date string (default: today's date in YYYY-MM-DD format)
+            paper: Paper size for drawing sheet (default "A4"). Supported sizes:
+                   A4, A3, A2, A1, A0, A (US Letter), B, C, D, E
+            center: If True, center the board on the drawing sheet (default True).
+                    If False, place the board at origin (0, 0).
 
         Returns:
             A new PCB instance ready for adding footprints and traces.
 
         Raises:
             ValueError: If layers is not 2 or 4
+            ValueError: If paper size is not recognized
 
         Example:
             >>> pcb = PCB.create(width=160, height=100, layers=4, title="My Board")
@@ -921,8 +943,22 @@ class PCB:
         if layers not in (2, 4):
             raise ValueError(f"Layers must be 2 or 4, got {layers}")
 
+        if paper not in PAPER_SIZES:
+            raise ValueError(
+                f"Unknown paper size '{paper}'. "
+                f"Supported sizes: {', '.join(sorted(PAPER_SIZES.keys()))}"
+            )
+
         if board_date is None:
             board_date = date.today().isoformat()
+
+        # Calculate board origin based on centering preference
+        if center:
+            paper_width, paper_height = PAPER_SIZES[paper]
+            origin_x = (paper_width - width) / 2
+            origin_y = (paper_height - height) / 2
+        else:
+            origin_x, origin_y = 0.0, 0.0
 
         sexp = cls._build_blank_pcb_sexp(
             width=width,
@@ -932,6 +968,9 @@ class PCB:
             revision=revision,
             company=company,
             board_date=board_date,
+            paper=paper,
+            origin_x=origin_x,
+            origin_y=origin_y,
         )
         return cls(sexp)
 
@@ -944,6 +983,9 @@ class PCB:
         revision: str,
         company: str,
         board_date: str,
+        paper: str,
+        origin_x: float,
+        origin_y: float,
     ) -> SExp:
         """Build the S-expression for a blank PCB."""
         pcb = SExp.list("kicad_pcb")
@@ -963,7 +1005,7 @@ class PCB:
         )
 
         # Paper size
-        pcb.append(SExp.list("paper", "A4"))
+        pcb.append(SExp.list("paper", paper))
 
         # Title block
         pcb.append(
@@ -986,7 +1028,7 @@ class PCB:
         pcb.append(SExp.list("net", 0, ""))
 
         # Board outline on Edge.Cuts
-        pcb.append(PCB._build_board_outline_sexp(width, height))
+        pcb.append(PCB._build_board_outline_sexp(width, height, origin_x, origin_y))
 
         return pcb
 
@@ -1111,12 +1153,14 @@ class PCB:
         return setup
 
     @staticmethod
-    def _build_board_outline_sexp(width: float, height: float) -> SExp:
+    def _build_board_outline_sexp(
+        width: float, height: float, origin_x: float, origin_y: float
+    ) -> SExp:
         """Build a rectangular board outline on Edge.Cuts layer."""
         return SExp.list(
             "gr_rect",
-            SExp.list("start", 0, 0),
-            SExp.list("end", width, height),
+            SExp.list("start", origin_x, origin_y),
+            SExp.list("end", origin_x + width, origin_y + height),
             SExp.list("stroke", SExp.list("width", 0.1), SExp.list("type", "default")),
             SExp.list("fill", "none"),
             SExp.list("layer", "Edge.Cuts"),
