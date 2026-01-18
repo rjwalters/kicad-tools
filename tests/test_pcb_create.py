@@ -167,3 +167,94 @@ class TestPCBCreate:
         assert summary["nets"] == 1  # Just the empty net
         assert summary["segments"] == 0
         assert summary["vias"] == 0
+
+    def test_nets_inserted_before_footprints(self, tmp_path: Path):
+        """Test that nets are inserted before footprints in S-expression.
+
+        This is a regression test for issue #936: KiCad reports 'Invalid net ID'
+        errors when nets are placed after footprints in the file.
+        """
+        pcb = PCB.create(width=100, height=100)
+
+        # Add a footprint first
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=50.0,
+            y=50.0,
+        )
+
+        # Now add a net - this should be inserted BEFORE the footprint
+        net = pcb.add_net("GND")
+        assert net.number == 1
+        assert net.name == "GND"
+
+        # Verify the order in the S-expression tree
+        # Find positions of nets and footprints
+        last_net_pos = -1
+        first_footprint_pos = -1
+
+        for i, child in enumerate(pcb._sexp.children):
+            if child.name == "net":
+                last_net_pos = i
+            elif child.name == "footprint" and first_footprint_pos == -1:
+                first_footprint_pos = i
+
+        # Nets should come before footprints
+        assert last_net_pos >= 0, "No nets found"
+        assert first_footprint_pos >= 0, "No footprints found"
+        assert last_net_pos < first_footprint_pos, (
+            f"Net at position {last_net_pos} should be before "
+            f"footprint at position {first_footprint_pos}"
+        )
+
+        # Save and reload to verify the file is valid
+        output_path = tmp_path / "net_order_test.kicad_pcb"
+        pcb.save(output_path)
+
+        # Reload and verify nets are still correct
+        reloaded = PCB.load(str(output_path))
+        assert 1 in reloaded.nets
+        assert reloaded.nets[1].name == "GND"
+
+    def test_multiple_nets_inserted_in_order(self, tmp_path: Path):
+        """Test that multiple nets are inserted in sequence before footprints."""
+        pcb = PCB.create(width=100, height=100)
+
+        # Add footprints first
+        pcb.add_footprint("Resistor_SMD:R_0603_1608Metric", "R1", 50.0, 50.0)
+        pcb.add_footprint("Capacitor_SMD:C_0603_1608Metric", "C1", 60.0, 50.0)
+
+        # Add multiple nets
+        net_gnd = pcb.add_net("GND")
+        net_vcc = pcb.add_net("VCC")
+        net_signal = pcb.add_net("SIG1")
+
+        assert net_gnd.number == 1
+        assert net_vcc.number == 2
+        assert net_signal.number == 3
+
+        # Verify all nets are before all footprints
+        net_positions = []
+        footprint_positions = []
+
+        for i, child in enumerate(pcb._sexp.children):
+            if child.name == "net":
+                net_positions.append(i)
+            elif child.name == "footprint":
+                footprint_positions.append(i)
+
+        # All nets should be before all footprints
+        max_net_pos = max(net_positions)
+        min_footprint_pos = min(footprint_positions)
+        assert max_net_pos < min_footprint_pos, (
+            f"Last net at {max_net_pos} should be before "
+            f"first footprint at {min_footprint_pos}"
+        )
+
+        # Save and verify the file
+        output_path = tmp_path / "multiple_nets_test.kicad_pcb"
+        pcb.save(output_path)
+
+        reloaded = PCB.load(str(output_path))
+        assert len(reloaded.nets) == 4  # Including net 0

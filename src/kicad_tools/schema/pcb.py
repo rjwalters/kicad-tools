@@ -2355,9 +2355,33 @@ class PCB:
         net = Net(number=next_num, name=net_name)
         self._nets[next_num] = net
 
-        # Add to the S-expression tree
+        # Add to the S-expression tree - insert after the last net, not at the end
+        # KiCad requires nets to be declared before footprints
         net_sexp = SExp.list("net", next_num, net_name)
-        self._sexp.append(net_sexp)
+
+        # Find the position of the last net in the S-expression
+        last_net_index = -1
+        for i, child in enumerate(self._sexp.children):
+            if child.name == "net":
+                last_net_index = i
+
+        if last_net_index >= 0:
+            # Insert after the last net
+            self._sexp.children.insert(last_net_index + 1, net_sexp)
+        else:
+            # No nets found (shouldn't happen since net 0 is always present)
+            # Find the first footprint and insert before it
+            first_footprint_index = -1
+            for i, child in enumerate(self._sexp.children):
+                if child.name == "footprint":
+                    first_footprint_index = i
+                    break
+
+            if first_footprint_index >= 0:
+                self._sexp.children.insert(first_footprint_index, net_sexp)
+            else:
+                # No footprints either, just append
+                self._sexp.append(net_sexp)
 
         return net
 
