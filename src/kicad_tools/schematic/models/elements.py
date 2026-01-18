@@ -1,7 +1,7 @@
 """
 KiCad Schematic Element Models
 
-Wire, Junction, Label, HierarchicalLabel, GlobalLabel, and PowerSymbol classes.
+Wire, Junction, Label, HierarchicalLabel, GlobalLabel, PowerSymbol, and WireCollision classes.
 """
 
 import uuid
@@ -75,6 +75,35 @@ class Wire:
             x2=round(float(p2_atoms[0]), 2),
             y2=round(float(p2_atoms[1]), 2),
             uuid_str=str(uuid_str),
+        )
+
+
+@dataclass
+class WireCollision:
+    """Represents a wire endpoint collision with an existing wire segment.
+
+    This occurs when a wire endpoint lands on the interior of another wire
+    segment (not at its endpoints), potentially creating an unintended
+    electrical connection in KiCad.
+
+    Attributes:
+        endpoint: The (x, y) coordinates of the colliding endpoint
+        endpoint_type: Whether this is the "start" or "end" of the colliding wire
+        colliding_wire: The wire that has the endpoint collision
+        target_wire: The existing wire being collided with
+    """
+
+    endpoint: tuple[float, float]
+    endpoint_type: str  # "start" or "end"
+    colliding_wire: Wire
+    target_wire: Wire
+
+    def __str__(self) -> str:
+        """Return a human-readable description of the collision."""
+        return (
+            f"Wire {self.endpoint_type} at ({self.endpoint[0]}, {self.endpoint[1]}) "
+            f"lands on wire from ({self.target_wire.x1}, {self.target_wire.y1}) to "
+            f"({self.target_wire.x2}, {self.target_wire.y2})"
         )
 
 

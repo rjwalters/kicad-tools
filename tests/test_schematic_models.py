@@ -2120,6 +2120,180 @@ class TestSchematicValidationAdvanced:
         assert "VCC_3V3" in disconnected[0]["message"]
 
 
+class TestWireCollisionDetection:
+    """Tests for wire endpoint collision detection."""
+
+    def test_point_on_wire_segment_interior_horizontal(self):
+        """Detect point on interior of horizontal wire."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)
+
+        wire = sch.wires[0]
+
+        # Point in the middle - interior
+        assert sch._point_on_wire_segment_interior(50, 100, wire) is True
+
+        # Point at endpoints - not interior
+        assert sch._point_on_wire_segment_interior(0, 100, wire) is False
+        assert sch._point_on_wire_segment_interior(100, 100, wire) is False
+
+        # Point off wire entirely
+        assert sch._point_on_wire_segment_interior(50, 200, wire) is False
+
+    def test_point_on_wire_segment_interior_vertical(self):
+        """Detect point on interior of vertical wire."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((50, 0), (50, 100), snap=False, warn_on_collision=False)
+
+        wire = sch.wires[0]
+
+        # Point in the middle - interior
+        assert sch._point_on_wire_segment_interior(50, 50, wire) is True
+
+        # Point at endpoints - not interior
+        assert sch._point_on_wire_segment_interior(50, 0, wire) is False
+        assert sch._point_on_wire_segment_interior(50, 100, wire) is False
+
+    def test_find_wire_collisions_for_point(self):
+        """Find multiple wires that a point collides with."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)  # Horizontal
+        sch.add_wire((50, 0), (50, 200), snap=False, warn_on_collision=False)  # Vertical
+
+        # Point at intersection is interior of both wires
+        collisions = sch._find_wire_collisions_for_point(50, 100)
+        assert len(collisions) == 2
+
+        # Point on only horizontal wire
+        collisions = sch._find_wire_collisions_for_point(25, 100)
+        assert len(collisions) == 1
+        assert collisions[0].x1 == 0  # The horizontal wire
+
+        # Point not on any wire
+        collisions = sch._find_wire_collisions_for_point(200, 200)
+        assert len(collisions) == 0
+
+    def test_add_wire_warns_on_collision(self):
+        """add_wire() warns when endpoint lands on existing wire interior."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)
+
+        # Adding wire that ends on existing wire interior should warn
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sch.add_wire((50, 50), (50, 100), snap=False, warn_on_collision=True)
+
+            # Should have 1 warning for the endpoint at (50, 100)
+            collision_warnings = [x for x in w if "lands on existing wire" in str(x.message)]
+            assert len(collision_warnings) == 1
+            assert "(50, 100)" in str(collision_warnings[0].message)
+
+    def test_add_wire_no_warn_when_disabled(self):
+        """add_wire() doesn't warn when warn_on_collision=False."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)
+
+        # Adding wire with warnings disabled
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sch.add_wire((50, 50), (50, 100), snap=False, warn_on_collision=False)
+
+            collision_warnings = [x for x in w if "lands on existing wire" in str(x.message)]
+            assert len(collision_warnings) == 0
+
+    def test_add_wire_no_warn_at_endpoint(self):
+        """add_wire() doesn't warn when connecting to existing wire endpoint."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)
+
+        # Adding wire that connects to endpoint (100, 100) - should NOT warn
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sch.add_wire((100, 100), (100, 200), snap=False, warn_on_collision=True)
+
+            collision_warnings = [x for x in w if "lands on existing wire" in str(x.message)]
+            assert len(collision_warnings) == 0
+
+    def test_check_wire_collisions_no_collisions(self):
+        """check_wire_collisions() returns empty list when no collisions."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Two wires connected at endpoints
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)
+        sch.add_wire((100, 100), (100, 200), snap=False, warn_on_collision=False)
+
+        collisions = sch.check_wire_collisions()
+        assert len(collisions) == 0
+
+    def test_check_wire_collisions_detects_t_junction(self):
+        """check_wire_collisions() detects T-junction on wire interior."""
+        from kicad_tools.schematic.models import WireCollision
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Horizontal wire
+        sch.add_wire((0, 100), (100, 100), snap=False, warn_on_collision=False)
+
+        # Vertical wire ending on horizontal wire's interior
+        sch.add_wire((50, 50), (50, 100), snap=False, warn_on_collision=False)
+
+        collisions = sch.check_wire_collisions()
+        assert len(collisions) == 1
+
+        collision = collisions[0]
+        assert isinstance(collision, WireCollision)
+        assert collision.endpoint == (50, 100)
+        assert collision.endpoint_type == "end"
+        # The colliding wire is the vertical one
+        assert collision.colliding_wire.x1 == 50
+        # The target wire is the horizontal one
+        assert collision.target_wire.y1 == 100
+
+    def test_check_wire_collisions_multiple_collisions(self):
+        """check_wire_collisions() detects multiple collisions."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Long horizontal wire
+        sch.add_wire((0, 100), (200, 100), snap=False, warn_on_collision=False)
+
+        # Two wires ending on the horizontal wire
+        sch.add_wire((50, 50), (50, 100), snap=False, warn_on_collision=False)
+        sch.add_wire((150, 50), (150, 100), snap=False, warn_on_collision=False)
+
+        collisions = sch.check_wire_collisions()
+        assert len(collisions) == 2
+
+        # Both should be end collisions at y=100
+        endpoints = {c.endpoint for c in collisions}
+        assert (50, 100) in endpoints
+        assert (150, 100) in endpoints
+
+    def test_wire_collision_str(self):
+        """WireCollision has a useful string representation."""
+        from kicad_tools.schematic.models import Wire, WireCollision
+
+        wire1 = Wire.between((0, 100), (100, 100))
+        wire2 = Wire.between((50, 50), (50, 100))
+
+        collision = WireCollision(
+            endpoint=(50, 100),
+            endpoint_type="end",
+            colliding_wire=wire2,
+            target_wire=wire1,
+        )
+
+        s = str(collision)
+        assert "(50, 100)" in s
+        assert "end" in s
+        assert "0" in s and "100" in s  # target wire coordinates
+
+
 class TestSymbolDefParsing:
     """Tests for SymbolDef parsing methods."""
 

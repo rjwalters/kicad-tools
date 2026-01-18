@@ -82,6 +82,55 @@ class SchematicElementsMixin:
                 return True
         return False
 
+    def _point_on_wire_segment_interior(
+        self, x: float, y: float, wire: Wire, tolerance: float = POINT_TOLERANCE
+    ) -> bool:
+        """Check if a point lies strictly INSIDE a wire segment (not at endpoints).
+
+        This is used to detect wire endpoint collisions that would create
+        unintentional connections when a new wire's endpoint lands on an
+        existing wire's interior.
+
+        Args:
+            x, y: Point coordinates
+            wire: Wire to check against
+            tolerance: Maximum distance from wire to be considered "on" it
+
+        Returns:
+            True if point is on the interior of the wire segment (not at endpoints)
+        """
+        # First check if point is on the wire at all
+        if not self._point_on_wire(x, y, wire, tolerance):
+            return False
+
+        # Check if point is at either endpoint (within tolerance)
+        dist_to_start = ((x - wire.x1) ** 2 + (y - wire.y1) ** 2) ** 0.5
+        dist_to_end = ((x - wire.x2) ** 2 + (y - wire.y2) ** 2) ** 0.5
+
+        # If point is close to either endpoint, it's not in the interior
+        if dist_to_start < tolerance or dist_to_end < tolerance:
+            return False
+
+        return True
+
+    def _find_wire_collisions_for_point(
+        self, x: float, y: float, tolerance: float = POINT_TOLERANCE
+    ) -> list[Wire]:
+        """Find all wires where the given point lands on their interior.
+
+        Args:
+            x, y: Point coordinates
+            tolerance: Maximum distance from wire to be considered "on" it
+
+        Returns:
+            List of wires where the point is on the wire's interior
+        """
+        collisions = []
+        for wire in self.wires:
+            if self._point_on_wire_segment_interior(x, y, wire, tolerance):
+                collisions.append(wire)
+        return collisions
+
     def _find_nearest_wire_point(
         self, x: float, y: float
     ) -> tuple[tuple[float, float] | None, float]:
@@ -354,7 +403,13 @@ class SchematicElementsMixin:
         """
         return self.add_power("power:PWR_FLAG", x, y, rotation=0)
 
-    def add_wire(self, p1: tuple[float, float], p2: tuple[float, float], snap: bool = True) -> Wire:
+    def add_wire(
+        self,
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        snap: bool = True,
+        warn_on_collision: bool = True,
+    ) -> Wire:
         """Add a wire between two points.
 
         IMPORTANT - Wire Connectivity Rule:
@@ -368,6 +423,9 @@ class SchematicElementsMixin:
             p1: Start point (x, y)
             p2: End point (x, y)
             snap: Whether to apply grid snapping (default: True)
+            warn_on_collision: If True (default), emit a warning when wire endpoints
+                land on the interior of existing wire segments. This detects potential
+                unintended connections that often cause ERC errors.
 
         Returns:
             The Wire created
@@ -383,9 +441,15 @@ class SchematicElementsMixin:
             sch.add_wire((100, 50), (100, 100)) # Vertical meets at same point
             sch.add_junction(100, 50)           # Visual indicator (optional)
 
+        Warning:
+            When warn_on_collision is True and a wire endpoint lands on an existing
+            wire's interior, a warning is emitted. This helps catch bugs where wire
+            paths accidentally intersect unrelated nets, causing silent shorts.
+
         See Also:
             - add_junction(): Add visual indicator at wire connections
             - wire_to_rail(): Higher-level helper that handles segmentation
+            - check_wire_collisions(): Validate all wires for endpoint collisions
             - README.md in this module for detailed connectivity documentation
         """
         # Apply grid snapping if enabled
@@ -393,24 +457,45 @@ class SchematicElementsMixin:
             p1 = self._snap_point(p1, "wire start")
             p2 = self._snap_point(p2, "wire end")
 
+        # Check for endpoint collisions with existing wires
+        if warn_on_collision and self.wires:
+            for point, name in [(p1, "start"), (p2, "end")]:
+                collisions = self._find_wire_collisions_for_point(point[0], point[1])
+                for colliding_wire in collisions:
+                    warnings.warn(
+                        f"Wire {name} endpoint ({point[0]}, {point[1]}) lands on existing wire "
+                        f"segment from ({colliding_wire.x1}, {colliding_wire.y1}) to "
+                        f"({colliding_wire.x2}, {colliding_wire.y2}), creating unintended connection. "
+                        f"Consider using segmented rails or checking wire routing.",
+                        stacklevel=2,
+                    )
+
         wire = Wire.between(p1, p2)
         self.wires.append(wire)
         _log_debug(f"Added wire from ({p1[0]}, {p1[1]}) to ({p2[0]}, {p2[1]})")
         return wire
 
-    def add_wire_path(self, *points: tuple[float, float], snap: bool = True) -> list[Wire]:
+    def add_wire_path(
+        self,
+        *points: tuple[float, float],
+        snap: bool = True,
+        warn_on_collision: bool = True,
+    ) -> list[Wire]:
         """Add a series of connected wire segments.
 
         Args:
             points: Sequence of (x, y) points to connect
             snap: Whether to apply grid snapping (default: True)
+            warn_on_collision: If True (default), warn when endpoints land on existing wires
 
         Returns:
             List of wires created
         """
         wires = []
         for i in range(len(points) - 1):
-            wires.append(self.add_wire(points[i], points[i + 1], snap=snap))
+            wires.append(
+                self.add_wire(points[i], points[i + 1], snap=snap, warn_on_collision=warn_on_collision)
+            )
         return wires
 
     def add_junction(self, x: float, y: float, snap: bool = True) -> Junction:

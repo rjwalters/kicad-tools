@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from ..grid import is_on_grid, snap_to_grid
 from ..logging import _log_debug, _log_info, _log_warning
+from .elements import WireCollision
 
 if TYPE_CHECKING:
     pass
@@ -399,6 +400,78 @@ class SchematicValidationMixin:
             "power_nets": sorted({p.lib_id.split(":")[1] for p in self.power_symbols}),
             "net_labels": sorted({lbl.text for lbl in self.labels}),
         }
+
+    def check_wire_collisions(self) -> list[WireCollision]:
+        """Find all wire endpoint collisions that may be unintentional.
+
+        This method checks all wires in the schematic and identifies cases where
+        a wire's endpoint lands on the interior of another wire segment (not at
+        its endpoints). Such collisions often indicate routing errors that cause
+        unintended electrical connections.
+
+        Returns:
+            List of WireCollision objects describing each collision found.
+            Each collision includes:
+            - The endpoint coordinates
+            - Whether it's a start or end endpoint
+            - The wire with the colliding endpoint
+            - The wire being collided with
+
+        Example:
+            collisions = sch.check_wire_collisions()
+            for collision in collisions:
+                print(f"Collision: {collision}")
+                print(f"  Wire endpoint at {collision.endpoint}")
+                print(f"  Lands on wire from ({collision.target_wire.x1}, {collision.target_wire.y1})")
+
+        Note:
+            This method does NOT detect intentional T-connections where wire
+            endpoints meet at the same point. It only flags cases where an
+            endpoint lands in the middle of another wire segment.
+
+        See Also:
+            - add_wire(): Can warn on collision when adding individual wires
+            - validate(): Includes wire connectivity checks in full validation
+        """
+        collisions = []
+
+        for wire in self.wires:
+            # Check start endpoint
+            start = (wire.x1, wire.y1)
+            for other_wire in self.wires:
+                if other_wire is wire:
+                    continue
+                if self._point_on_wire_segment_interior(start[0], start[1], other_wire):
+                    collisions.append(
+                        WireCollision(
+                            endpoint=start,
+                            endpoint_type="start",
+                            colliding_wire=wire,
+                            target_wire=other_wire,
+                        )
+                    )
+
+            # Check end endpoint
+            end = (wire.x2, wire.y2)
+            for other_wire in self.wires:
+                if other_wire is wire:
+                    continue
+                if self._point_on_wire_segment_interior(end[0], end[1], other_wire):
+                    collisions.append(
+                        WireCollision(
+                            endpoint=end,
+                            endpoint_type="end",
+                            colliding_wire=wire,
+                            target_wire=other_wire,
+                        )
+                    )
+
+        if collisions:
+            _log_warning(f"Found {len(collisions)} wire endpoint collision(s)")
+            for collision in collisions:
+                _log_debug(f"  {collision}")
+
+        return collisions
 
 
 def summarize_issues_by_type(issues: list[dict]) -> dict[str, list[dict]]:
