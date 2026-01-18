@@ -161,6 +161,11 @@ from kicad_tools.optim.workflow import (
     RoutabilityInfo,
     WorkflowConfig,
 )
+from kicad_tools.optim.zones import (
+    PlacementZone,
+    assign_zone,
+    expand_regex_pattern,
+)
 
 __all__ = [
     # Alignment
@@ -267,4 +272,8 @@ __all__ = [
     "WorkflowConfig",
     "RoutabilityInfo",
     "RoutabilityComparison",
+    # Zone-based placement
+    "PlacementZone",
+    "assign_zone",
+    "expand_regex_pattern",
 ]
