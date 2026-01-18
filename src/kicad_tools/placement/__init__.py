@@ -18,7 +18,14 @@ Usage:
     fixes = fixer.suggest_fixes(conflicts)
 """
 
-from .analyzer import PlacementAnalyzer
+from .analyzer import DesignRules, PlacementAnalyzer
+from .collision import (
+    CollisionResult,
+    DRCResult,
+    DRCViolation,
+    PlacementCollision,
+    PlacementValidationResult,
+)
 from .conflict import (
     Conflict,
     ConflictSeverity,
@@ -28,10 +35,16 @@ from .conflict import (
 from .fixer import PlacementFixer
 
 __all__ = [
-    "PlacementAnalyzer",
-    "PlacementFixer",
+    "CollisionResult",
     "Conflict",
-    "ConflictType",
     "ConflictSeverity",
+    "ConflictType",
+    "DesignRules",
+    "DRCResult",
+    "DRCViolation",
+    "PlacementAnalyzer",
+    "PlacementCollision",
     "PlacementFix",
+    "PlacementFixer",
+    "PlacementValidationResult",
 ]

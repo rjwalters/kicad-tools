@@ -2123,3 +2123,395 @@ class PCB:
         )
 
         return pcb, stats
+
+    # =========================================================================
+    # Collision Detection and DRC Methods
+    # =========================================================================
+
+    def check_placement_collision(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+        *,
+        clearance: float = 0.2,
+        courtyard_margin: float = 0.25,
+    ):
+        """
+        Check if placing a component at the given position would cause a collision.
+
+        This temporarily updates the component's position in memory, checks for
+        conflicts, then restores the original position.
+
+        Args:
+            reference: Reference designator of the component to check (e.g., "U1")
+            x: Proposed X position in mm
+            y: Proposed Y position in mm
+            rotation: Proposed rotation in degrees (optional, uses current if None)
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_margin: Courtyard margin in mm (default: 0.25)
+
+        Returns:
+            CollisionResult with collision details if any, or no_collision if safe
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> result = pcb.check_placement_collision("U1", x=50, y=50)
+            >>> if result.has_collision:
+            ...     print(f"Would collide with: {result.other_ref}")
+            ...     print(f"Clearance needed: {result.required_clearance}mm")
+            ...     print(f"Actual clearance: {result.actual_clearance}mm")
+        """
+        from ..placement import CollisionResult, DesignRules, PlacementAnalyzer
+
+        # Find the footprint
+        fp = self.get_footprint(reference)
+        if not fp:
+            return CollisionResult(
+                has_collision=False,
+                message=f"Component {reference} not found",
+            )
+
+        # Save original position
+        orig_x, orig_y = fp.position
+        orig_rot = fp.rotation
+
+        # Temporarily update position (in memory only)
+        fp.position = (x, y)
+        if rotation is not None:
+            fp.rotation = rotation
+
+        try:
+            # Create analyzer and check conflicts
+            analyzer = PlacementAnalyzer()
+            rules = DesignRules(
+                min_pad_clearance=clearance,
+                courtyard_margin=courtyard_margin,
+            )
+
+            # Load this PCB's components
+            analyzer._load_pcb_from_instance(self, courtyard_margin)
+
+            # Check all pairs involving this component
+            components = analyzer.get_components()
+            target_comp = next(
+                (c for c in components if c.reference == reference), None
+            )
+
+            if not target_comp:
+                return CollisionResult.no_collision()
+
+            for other_comp in components:
+                if other_comp.reference == reference:
+                    continue
+
+                # Check for conflicts between target and other
+                conflicts = analyzer._check_pair((target_comp, other_comp), rules)
+
+                if conflicts:
+                    # Return the first conflict found
+                    return CollisionResult.from_conflict(conflicts[0])
+
+            return CollisionResult.no_collision()
+
+        finally:
+            # Restore original position
+            fp.position = (orig_x, orig_y)
+            fp.rotation = orig_rot
+
+    def validate_placements(
+        self,
+        placements: dict[str, tuple[float, float, float]],
+        *,
+        clearance: float = 0.2,
+        courtyard_margin: float = 0.25,
+    ):
+        """
+        Validate a batch of proposed placements before committing.
+
+        Checks all proposed placements for conflicts with each other and
+        with existing components.
+
+        Args:
+            placements: Dictionary mapping reference to (x, y, rotation) tuples
+                e.g., {"U1": (50, 50, 0), "C1": (52, 50, 90), ...}
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_margin: Courtyard margin in mm (default: 0.25)
+
+        Returns:
+            PlacementValidationResult with all detected issues
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> placements = {"U1": (50, 50, 0), "C1": (52, 50, 0)}
+            >>> result = pcb.validate_placements(placements)
+            >>> for issue in result.collisions:
+            ...     print(f"{issue.ref1} <-> {issue.ref2}: {issue.violation_type}")
+        """
+        from ..placement import (
+            DesignRules,
+            PlacementAnalyzer,
+            PlacementCollision,
+            PlacementValidationResult,
+        )
+
+        # Save original positions
+        original_positions: dict[str, tuple[float, float, float]] = {}
+        for ref in placements:
+            fp = self.get_footprint(ref)
+            if fp:
+                original_positions[ref] = (fp.position[0], fp.position[1], fp.rotation)
+
+        # Apply proposed positions temporarily
+        for ref, (x, y, rot) in placements.items():
+            fp = self.get_footprint(ref)
+            if fp:
+                fp.position = (x, y)
+                fp.rotation = rot
+
+        try:
+            # Run conflict analysis
+            analyzer = PlacementAnalyzer()
+            rules = DesignRules(
+                min_pad_clearance=clearance,
+                courtyard_margin=courtyard_margin,
+            )
+
+            analyzer._load_pcb_from_instance(self, courtyard_margin)
+            conflicts = analyzer._find_conflicts_internal(rules)
+
+            # Build result
+            collisions = [PlacementCollision.from_conflict(c) for c in conflicts]
+
+            return PlacementValidationResult(
+                is_valid=len(collisions) == 0,
+                total_placements=len(placements),
+                collision_count=len(collisions),
+                collisions=collisions,
+            )
+
+        finally:
+            # Restore original positions
+            for ref, (x, y, rot) in original_positions.items():
+                fp = self.get_footprint(ref)
+                if fp:
+                    fp.position = (x, y)
+                    fp.rotation = rot
+
+    def run_drc(
+        self,
+        *,
+        clearance: float = 0.2,
+        courtyard_margin: float = 0.25,
+        edge_clearance: float = 0.3,
+        hole_to_hole: float = 0.5,
+    ):
+        """
+        Run design rule check on the current PCB state.
+
+        Checks for placement conflicts including:
+        - Pad clearance violations
+        - Courtyard overlaps
+        - Edge clearance violations
+        - Hole-to-hole violations
+
+        Args:
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_margin: Courtyard margin in mm (default: 0.25)
+            edge_clearance: Minimum edge clearance in mm (default: 0.3)
+            hole_to_hole: Minimum hole-to-hole distance in mm (default: 0.5)
+
+        Returns:
+            DRCResult with all violations and summary counts
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> result = pcb.run_drc()
+            >>> print(f"Clearance violations: {result.clearance_count}")
+            >>> print(f"Courtyard overlaps: {result.courtyard_count}")
+            >>> for violation in result.violations:
+            ...     print(f"{violation.type}: {violation.description}")
+        """
+        from ..placement import (
+            ConflictType,
+            DesignRules,
+            DRCResult,
+            DRCViolation,
+            PlacementAnalyzer,
+        )
+
+        analyzer = PlacementAnalyzer()
+        rules = DesignRules(
+            min_pad_clearance=clearance,
+            courtyard_margin=courtyard_margin,
+            min_edge_clearance=edge_clearance,
+            min_hole_to_hole=hole_to_hole,
+        )
+
+        analyzer._load_pcb_from_instance(self, courtyard_margin)
+        conflicts = analyzer._find_conflicts_internal(rules)
+
+        # Convert to DRC violations and count by type
+        violations = []
+        clearance_count = 0
+        courtyard_count = 0
+        edge_count = 0
+        hole_count = 0
+
+        for conflict in conflicts:
+            violations.append(DRCViolation.from_conflict(conflict))
+
+            if conflict.type == ConflictType.PAD_CLEARANCE:
+                clearance_count += 1
+            elif conflict.type == ConflictType.COURTYARD_OVERLAP:
+                courtyard_count += 1
+            elif conflict.type == ConflictType.EDGE_CLEARANCE:
+                edge_count += 1
+            elif conflict.type == ConflictType.HOLE_TO_HOLE:
+                hole_count += 1
+
+        return DRCResult(
+            passed=len(violations) == 0,
+            violation_count=len(violations),
+            clearance_count=clearance_count,
+            courtyard_count=courtyard_count,
+            edge_clearance_count=edge_count,
+            hole_to_hole_count=hole_count,
+            violations=violations,
+        )
+
+    def set_design_rules(
+        self,
+        clearance: float = 0.2,
+        courtyard_clearance: float = 0.25,
+        silkscreen_clearance: float = 0.15,
+        edge_clearance: float = 0.3,
+        hole_to_hole: float = 0.5,
+    ):
+        """
+        Set design rules for collision detection and DRC.
+
+        These rules are stored on the PCB instance and used as defaults
+        for collision checking and DRC operations.
+
+        Args:
+            clearance: Minimum pad clearance in mm (default: 0.2)
+            courtyard_clearance: Courtyard margin in mm (default: 0.25)
+            silkscreen_clearance: Silkscreen clearance in mm (default: 0.15)
+            edge_clearance: Minimum edge clearance in mm (default: 0.3)
+            hole_to_hole: Minimum hole-to-hole distance in mm (default: 0.5)
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> pcb.set_design_rules(
+            ...     clearance=0.2,
+            ...     courtyard_clearance=0.25,
+            ...     silkscreen_clearance=0.15
+            ... )
+            >>> # Now collision checks use these rules by default
+            >>> result = pcb.run_drc()
+        """
+        from ..placement import DesignRules
+
+        self._design_rules = DesignRules(
+            min_pad_clearance=clearance,
+            courtyard_margin=courtyard_clearance,
+            min_edge_clearance=edge_clearance,
+            min_hole_to_hole=hole_to_hole,
+        )
+
+    def place_footprint_safe(
+        self,
+        reference: str,
+        x: float,
+        y: float,
+        rotation: float | None = None,
+        *,
+        min_clearance: float = 0.2,
+        auto_adjust: bool = True,
+        max_adjustment: float = 5.0,
+    ) -> tuple[bool, tuple[float, float] | None, str]:
+        """
+        Place a footprint with automatic collision avoidance.
+
+        Attempts to place the footprint at the given position. If a collision
+        would occur and auto_adjust is True, tries to find a nearby position
+        that avoids the collision.
+
+        Args:
+            reference: Reference designator of the component (e.g., "U1")
+            x: Desired X position in mm
+            y: Desired Y position in mm
+            rotation: Rotation in degrees (optional)
+            min_clearance: Minimum clearance to maintain in mm (default: 0.2)
+            auto_adjust: If True, automatically adjust position to avoid collision
+            max_adjustment: Maximum distance to adjust position in mm (default: 5.0)
+
+        Returns:
+            Tuple of:
+            - success: True if placement succeeded (with or without adjustment)
+            - final_position: (x, y) of final position, or None if failed
+            - message: Description of what happened
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> success, pos, msg = pcb.place_footprint_safe(
+            ...     "C1", x=50, y=50, min_clearance=0.2
+            ... )
+            >>> if success:
+            ...     print(f"Placed at {pos}")
+            >>> else:
+            ...     print(f"Failed: {msg}")
+        """
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False, None, f"Component {reference} not found"
+
+        # Check if proposed position is clear
+        result = self.check_placement_collision(
+            reference, x, y, rotation, clearance=min_clearance
+        )
+
+        if not result.has_collision:
+            # Position is clear, apply it
+            self.update_footprint_position(reference, x, y, rotation)
+            return True, (x, y), "Placed at requested position"
+
+        if not auto_adjust:
+            return (
+                False,
+                None,
+                f"Collision with {result.other_ref}: {result.message}",
+            )
+
+        # Try to find a clear position nearby
+        import math
+
+        # Try positions in expanding circles
+        for radius in [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]:
+            if radius > max_adjustment:
+                break
+
+            for angle in range(0, 360, 45):
+                rad = math.radians(angle)
+                test_x = x + radius * math.cos(rad)
+                test_y = y + radius * math.sin(rad)
+
+                test_result = self.check_placement_collision(
+                    reference, test_x, test_y, rotation, clearance=min_clearance
+                )
+
+                if not test_result.has_collision:
+                    self.update_footprint_position(reference, test_x, test_y, rotation)
+                    return (
+                        True,
+                        (test_x, test_y),
+                        f"Adjusted by {radius:.1f}mm to avoid collision with {result.other_ref}",
+                    )
+
+        return (
+            False,
+            None,
+            f"Could not find clear position within {max_adjustment}mm",
+        )
