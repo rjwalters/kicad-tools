@@ -1500,3 +1500,139 @@ class TestTraceRoutingAPI:
         uuid_node = sexp.find("uuid")
         assert uuid_node is not None
         assert len(uuid_node.get_string(0)) > 0
+
+
+class TestPCBCreate:
+    """Tests for PCB.create() method."""
+
+    def test_create_centers_board_by_default(self):
+        """Test that PCB.create() centers the board on the drawing sheet by default."""
+        # A4 paper is 297 x 210mm
+        # Board is 200 x 120mm
+        # Offset X: (297 - 200) / 2 = 48.5mm
+        # Offset Y: (210 - 120) / 2 = 45mm
+        pcb = PCB.create(width=200, height=120)
+
+        # Find the board outline (gr_rect on Edge.Cuts)
+        gr_rect = pcb._sexp.find("gr_rect")
+        assert gr_rect is not None
+
+        start = gr_rect.find("start")
+        end = gr_rect.find("end")
+        assert start is not None
+        assert end is not None
+
+        # Check origin is centered
+        assert start.get_float(0) == pytest.approx(48.5)
+        assert start.get_float(1) == pytest.approx(45.0)
+
+        # Check end is offset by board dimensions
+        assert end.get_float(0) == pytest.approx(248.5)  # 48.5 + 200
+        assert end.get_float(1) == pytest.approx(165.0)  # 45 + 120
+
+    def test_create_no_centering(self):
+        """Test that center=False places board at origin."""
+        pcb = PCB.create(width=100, height=80, center=False)
+
+        gr_rect = pcb._sexp.find("gr_rect")
+        assert gr_rect is not None
+
+        start = gr_rect.find("start")
+        end = gr_rect.find("end")
+
+        # Check origin is at (0, 0)
+        assert start.get_float(0) == pytest.approx(0.0)
+        assert start.get_float(1) == pytest.approx(0.0)
+
+        # Check end is at (width, height)
+        assert end.get_float(0) == pytest.approx(100.0)
+        assert end.get_float(1) == pytest.approx(80.0)
+
+    def test_create_with_a3_paper(self):
+        """Test centering on A3 paper."""
+        # A3 paper is 420 x 297mm
+        # Board is 200 x 150mm
+        # Offset X: (420 - 200) / 2 = 110mm
+        # Offset Y: (297 - 150) / 2 = 73.5mm
+        pcb = PCB.create(width=200, height=150, paper="A3")
+
+        # Check paper size was set correctly
+        paper = pcb._sexp.find("paper")
+        assert paper is not None
+        assert paper.get_string(0) == "A3"
+
+        gr_rect = pcb._sexp.find("gr_rect")
+        start = gr_rect.find("start")
+        end = gr_rect.find("end")
+
+        assert start.get_float(0) == pytest.approx(110.0)
+        assert start.get_float(1) == pytest.approx(73.5)
+        assert end.get_float(0) == pytest.approx(310.0)  # 110 + 200
+        assert end.get_float(1) == pytest.approx(223.5)  # 73.5 + 150
+
+    def test_create_with_us_letter_paper(self):
+        """Test centering on US Letter (A) paper."""
+        # US Letter is 279.4 x 215.9mm
+        # Board is 100 x 100mm
+        # Offset X: (279.4 - 100) / 2 = 89.7mm
+        # Offset Y: (215.9 - 100) / 2 = 57.95mm
+        pcb = PCB.create(width=100, height=100, paper="A")
+
+        paper = pcb._sexp.find("paper")
+        assert paper.get_string(0) == "A"
+
+        gr_rect = pcb._sexp.find("gr_rect")
+        start = gr_rect.find("start")
+
+        assert start.get_float(0) == pytest.approx(89.7)
+        assert start.get_float(1) == pytest.approx(57.95)
+
+    def test_create_invalid_paper_raises_error(self):
+        """Test that invalid paper size raises ValueError."""
+        with pytest.raises(ValueError) as exc_info:
+            PCB.create(width=100, height=100, paper="InvalidSize")
+
+        assert "Unknown paper size 'InvalidSize'" in str(exc_info.value)
+        assert "A4" in str(exc_info.value)  # Should list supported sizes
+
+    def test_create_large_board_negative_offset(self):
+        """Test that boards larger than paper result in negative offsets (still valid)."""
+        # A4 paper is 297 x 210mm
+        # Board is 400 x 300mm (larger than paper)
+        # Offset X: (297 - 400) / 2 = -51.5mm
+        # Offset Y: (210 - 300) / 2 = -45mm
+        pcb = PCB.create(width=400, height=300, paper="A4")
+
+        gr_rect = pcb._sexp.find("gr_rect")
+        start = gr_rect.find("start")
+
+        assert start.get_float(0) == pytest.approx(-51.5)
+        assert start.get_float(1) == pytest.approx(-45.0)
+
+    def test_create_preserves_all_parameters(self):
+        """Test that all create() parameters still work with centering."""
+        pcb = PCB.create(
+            width=160,
+            height=100,
+            layers=4,
+            title="Test Board",
+            revision="2.0",
+            company="Test Co",
+            paper="A3",
+            center=True,
+        )
+
+        # Verify title block
+        title_block = pcb._sexp.find("title_block")
+        assert title_block is not None
+        assert title_block.find("title").get_string(0) == "Test Board"
+        assert title_block.find("rev").get_string(0) == "2.0"
+        assert title_block.find("company").get_string(0) == "Test Co"
+
+        # Verify 4 copper layers
+        layers = pcb._sexp.find("layers")
+        layer_names = [child.get_string(0) for child in layers.iter_children()]
+        assert "F.Cu" in layer_names
+        assert "In1.Cu" in layer_names
+        assert "In2.Cu" in layer_names
+        assert "B.Cu" in layer_names
