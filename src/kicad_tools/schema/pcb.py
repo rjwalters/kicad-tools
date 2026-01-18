@@ -22,6 +22,7 @@ from ..footprints.library_path import (
 )
 
 if TYPE_CHECKING:
+    from ..manufacturers import DesignRules
     from ..query.footprints import FootprintList
 
 
@@ -150,6 +151,57 @@ class FootprintText:
         # UUID
         if uuid := sexp.find("uuid"):
             fp_text.uuid = uuid.get_string(0) or ""
+
+        # Effects (font size and thickness)
+        if effects := sexp.find("effects"):
+            if effects.find("hide"):
+                fp_text.hidden = True
+            if font := effects.find("font"):
+                if size := font.find("size"):
+                    w = size.get_float(0) or 1.0
+                    h = size.get_float(1) or w
+                    fp_text.font_size = (w, h)
+                if thickness := font.find("thickness"):
+                    fp_text.font_thickness = thickness.get_float(0) or 0.15
+
+        return fp_text
+
+    @classmethod
+    def _from_property_sexp(cls, sexp: SExp, text_type: str) -> FootprintText:
+        """Parse footprint text from property S-expression (KiCad 8+ format).
+
+        Property nodes have a different structure than fp_text nodes:
+        (property "Reference" "U1" (at 0 -4) (layer "F.SilkS") (effects ...))
+        """
+        text = sexp.get_string(1) or ""
+
+        fp_text = cls(
+            text_type=text_type,
+            text=text,
+            position=(0.0, 0.0),
+            layer="",
+            font_size=(1.0, 1.0),
+            font_thickness=0.15,
+        )
+
+        # Position
+        if at := sexp.find("at"):
+            x = at.get_float(0) or 0.0
+            y = at.get_float(1) or 0.0
+            fp_text.position = (x, y)
+
+        # Layer
+        if layer := sexp.find("layer"):
+            fp_text.layer = layer.get_string(0) or ""
+
+        # UUID
+        if uuid := sexp.find("uuid"):
+            fp_text.uuid = uuid.get_string(0) or ""
+
+        # Hidden check - property format uses (hide yes) directly on the property
+        if hide := sexp.find("hide"):
+            hide_val = hide.get_string(0)
+            fp_text.hidden = hide_val == "yes"
 
         # Effects (font size and thickness)
         if effects := sexp.find("effects"):
@@ -410,8 +462,14 @@ class Footprint:
             prop_value = prop.get_string(1) or ""
             if prop_name == "Reference":
                 fp.reference = prop_value
+                # Also create FootprintText for validation
+                fp_text = FootprintText._from_property_sexp(prop, "reference")
+                fp.texts.append(fp_text)
             elif prop_name == "Value":
                 fp.value = prop_value
+                # Also create FootprintText for validation
+                fp_text = FootprintText._from_property_sexp(prop, "value")
+                fp.texts.append(fp_text)
 
         # Pads
         for pad_sexp in sexp.find_all("pad"):
@@ -1495,6 +1553,490 @@ class PCB:
             return True
 
         return False
+
+    # Silkscreen management methods
+
+    def set_reference_visibility(
+        self,
+        reference: str | None = None,
+        *,
+        visible: bool = True,
+        pattern: str | None = None,
+    ) -> int:
+        """
+        Set visibility of reference designators on silkscreen.
+
+        Can target a specific reference, all references, or references matching
+        a glob pattern.
+
+        Args:
+            reference: Specific reference designator (e.g., "U1"). If None,
+                      applies to all footprints (or those matching pattern).
+            visible: True to show, False to hide the reference designator.
+            pattern: Glob pattern to match references (e.g., "C*" for all
+                    capacitors, "U?" for single-digit ICs). Ignored if
+                    reference is specified.
+
+        Returns:
+            Number of references updated.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Hide all reference designators
+            >>> pcb.set_reference_visibility(visible=False)
+            >>> # Hide just capacitors
+            >>> pcb.set_reference_visibility(pattern="C*", visible=False)
+            >>> # Show specific reference
+            >>> pcb.set_reference_visibility("U1", visible=True)
+        """
+        import fnmatch
+
+        count = 0
+
+        # Determine which references to update
+        refs_to_update: set[str] = set()
+        if reference is not None:
+            refs_to_update.add(reference)
+        elif pattern is not None:
+            for fp in self._footprints:
+                if fnmatch.fnmatch(fp.reference, pattern):
+                    refs_to_update.add(fp.reference)
+        else:
+            # All footprints
+            refs_to_update = {fp.reference for fp in self._footprints}
+
+        # Update S-expression tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            # Get reference from this footprint
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref not in refs_to_update:
+                continue
+
+            # Update visibility in fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    self._set_text_visibility(fp_text, visible)
+                    count += 1
+
+            # Update visibility in property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    self._set_text_visibility(prop, visible)
+                    count += 1
+
+        # Update parsed footprint objects
+        for fp in self._footprints:
+            if fp.reference in refs_to_update:
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        text.hidden = not visible
+
+        return count
+
+    def _get_footprint_reference(self, fp_sexp: SExp) -> str:
+        """Extract reference designator from footprint S-expression."""
+        # Try KiCad 7 format first (fp_text)
+        for fp_text in fp_sexp.find_all("fp_text"):
+            if fp_text.get_string(0) == "reference":
+                return fp_text.get_string(1) or ""
+
+        # Try KiCad 8+ format (property)
+        for prop in fp_sexp.find_all("property"):
+            if prop.get_string(0) == "Reference":
+                return prop.get_string(1) or ""
+
+        return ""
+
+    def _set_text_visibility(self, text_sexp: SExp, visible: bool) -> None:
+        """Set visibility on a text S-expression node."""
+        effects = text_sexp.find("effects")
+        if effects is None:
+            # Create effects node if needed
+            effects = SExp.list("effects")
+            font = SExp.list("font")
+            font.append(SExp.list("size", 1.0, 1.0))
+            font.append(SExp.list("thickness", 0.15))
+            effects.append(font)
+            text_sexp.append(effects)
+
+        # Find existing hide node
+        hide_node = effects.find("hide")
+
+        if visible:
+            # Remove hide node if present
+            if hide_node is not None:
+                effects.remove(hide_node)
+        else:
+            # Add hide node if not present
+            if hide_node is None:
+                effects.append(SExp.list("hide", "yes"))
+
+    def move_reference(
+        self,
+        reference: str,
+        offset: tuple[float, float] = (0.0, 0.0),
+        *,
+        absolute: tuple[float, float] | None = None,
+        layer: str | None = None,
+    ) -> bool:
+        """
+        Move a reference designator's silkscreen text.
+
+        Args:
+            reference: Reference designator to move (e.g., "U1").
+            offset: (dx, dy) offset from current position in mm.
+                   Ignored if absolute is specified.
+            absolute: Absolute (x, y) position in mm, relative to the
+                     footprint origin. If specified, offset is ignored.
+            layer: Optional new layer (e.g., "F.SilkS", "F.Fab").
+                  If None, layer is unchanged.
+
+        Returns:
+            True if reference was found and updated.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Move U1 reference up by 5mm
+            >>> pcb.move_reference("U1", offset=(0, -5))
+            >>> # Move to absolute position
+            >>> pcb.move_reference("U1", absolute=(2.0, -3.0))
+            >>> # Move to fab layer (hidden from manufacturing)
+            >>> pcb.move_reference("U1", layer="F.Fab")
+        """
+        # Find footprint in S-expression tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref != reference:
+                continue
+
+            # Found the footprint - update reference text
+            updated = False
+
+            # Update fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    self._move_text_element(fp_text, offset, absolute, layer)
+                    updated = True
+
+            # Update property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    self._move_text_element(prop, offset, absolute, layer)
+                    updated = True
+
+            # Update parsed footprint object
+            if updated:
+                for fp in self._footprints:
+                    if fp.reference == reference:
+                        for text in fp.texts:
+                            if text.text_type == "reference":
+                                if absolute is not None:
+                                    text.position = absolute
+                                else:
+                                    text.position = (
+                                        text.position[0] + offset[0],
+                                        text.position[1] + offset[1],
+                                    )
+                                if layer is not None:
+                                    text.layer = layer
+                        break
+
+            return updated
+
+        return False
+
+    def _move_text_element(
+        self,
+        text_sexp: SExp,
+        offset: tuple[float, float],
+        absolute: tuple[float, float] | None,
+        layer: str | None,
+    ) -> None:
+        """Move a text element's position and optionally change its layer."""
+        # Update position
+        at_node = text_sexp.find("at")
+        if at_node is None:
+            # Create at node with default position
+            at_node = SExp.list("at", 0.0, 0.0)
+            text_sexp.append(at_node)
+
+        if absolute is not None:
+            at_node.set_value(0, absolute[0])
+            at_node.set_value(1, absolute[1])
+        else:
+            current_x = at_node.get_float(0) or 0.0
+            current_y = at_node.get_float(1) or 0.0
+            at_node.set_value(0, current_x + offset[0])
+            at_node.set_value(1, current_y + offset[1])
+
+        # Update layer if specified
+        if layer is not None:
+            layer_node = text_sexp.find("layer")
+            if layer_node is not None:
+                layer_node.set_value(0, layer)
+            else:
+                text_sexp.append(SExp.list("layer", layer))
+
+    def set_silkscreen_font(
+        self,
+        size: float | tuple[float, float] = 1.0,
+        thickness: float = 0.15,
+        *,
+        pattern: str | None = None,
+        text_types: tuple[str, ...] = ("reference",),
+    ) -> int:
+        """
+        Set font size for silkscreen text on all footprints.
+
+        Args:
+            size: Font size in mm. Can be a single value (used for both
+                 width and height) or a (width, height) tuple.
+            thickness: Stroke thickness in mm.
+            pattern: Glob pattern to match references (e.g., "C*" for all
+                    capacitors). If None, applies to all footprints.
+            text_types: Which text types to update. Default is ("reference",).
+                       Can include "reference", "value", "user".
+
+        Returns:
+            Number of text elements updated.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Set smaller font for all references
+            >>> pcb.set_silkscreen_font(size=0.8, thickness=0.15)
+            >>> # Set font for just capacitor values
+            >>> pcb.set_silkscreen_font(
+            ...     size=0.6, pattern="C*", text_types=("value",)
+            ... )
+        """
+        import fnmatch
+
+        if isinstance(size, (int, float)):
+            font_size = (float(size), float(size))
+        else:
+            font_size = size
+
+        count = 0
+
+        # Determine which references to update
+        refs_to_update: set[str] = set()
+        if pattern is not None:
+            for fp in self._footprints:
+                if fnmatch.fnmatch(fp.reference, pattern):
+                    refs_to_update.add(fp.reference)
+        else:
+            refs_to_update = {fp.reference for fp in self._footprints}
+
+        # Update S-expression tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref not in refs_to_update:
+                continue
+
+            # Update fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                text_type = fp_text.get_string(0)
+                if text_type in text_types:
+                    self._set_text_font(fp_text, font_size, thickness)
+                    count += 1
+
+            # Update property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                prop_name = prop.get_string(0)
+                if (
+                    (prop_name == "Reference" and "reference" in text_types)
+                    or (prop_name == "Value" and "value" in text_types)
+                ):
+                    self._set_text_font(prop, font_size, thickness)
+                    count += 1
+
+        # Update parsed footprint objects
+        for fp in self._footprints:
+            if fp.reference in refs_to_update:
+                for text in fp.texts:
+                    if text.text_type in text_types:
+                        text.font_size = font_size
+                        text.font_thickness = thickness
+
+        return count
+
+    def _set_text_font(
+        self,
+        text_sexp: SExp,
+        size: tuple[float, float],
+        thickness: float,
+    ) -> None:
+        """Set font properties on a text S-expression node."""
+        effects = text_sexp.find("effects")
+        if effects is None:
+            effects = SExp.list("effects")
+            text_sexp.append(effects)
+
+        font = effects.find("font")
+        if font is None:
+            font = SExp.list("font")
+            effects.append(font)
+
+        # Update or create size node
+        size_node = font.find("size")
+        if size_node is not None:
+            size_node.set_value(0, size[0])
+            size_node.set_value(1, size[1])
+        else:
+            font.append(SExp.list("size", size[0], size[1]))
+
+        # Update or create thickness node
+        thickness_node = font.find("thickness")
+        if thickness_node is not None:
+            thickness_node.set_value(0, thickness)
+        else:
+            font.append(SExp.list("thickness", thickness))
+
+    def move_references_to_layer(
+        self,
+        layer: str,
+        *,
+        pattern: str | None = None,
+    ) -> int:
+        """
+        Move all reference designators to a different layer.
+
+        Useful for moving references to the fabrication layer (F.Fab)
+        so they don't appear on manufactured silkscreen.
+
+        Args:
+            layer: Target layer (e.g., "F.Fab", "F.SilkS").
+            pattern: Glob pattern to match references (e.g., "C*" for all
+                    capacitors). If None, applies to all footprints.
+
+        Returns:
+            Number of references moved.
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> # Move all references to fab layer
+            >>> pcb.move_references_to_layer("F.Fab")
+            >>> # Move just capacitor references to fab
+            >>> pcb.move_references_to_layer("F.Fab", pattern="C*")
+        """
+        import fnmatch
+
+        count = 0
+
+        # Determine which references to update
+        refs_to_update: set[str] = set()
+        if pattern is not None:
+            for fp in self._footprints:
+                if fnmatch.fnmatch(fp.reference, pattern):
+                    refs_to_update.add(fp.reference)
+        else:
+            refs_to_update = {fp.reference for fp in self._footprints}
+
+        # Update S-expression tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref not in refs_to_update:
+                continue
+
+            # Update fp_text nodes (KiCad 7 format)
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    layer_node = fp_text.find("layer")
+                    if layer_node is not None:
+                        layer_node.set_value(0, layer)
+                    else:
+                        fp_text.append(SExp.list("layer", layer))
+                    count += 1
+
+            # Update property nodes (KiCad 8+ format)
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    layer_node = prop.find("layer")
+                    if layer_node is not None:
+                        layer_node.set_value(0, layer)
+                    else:
+                        prop.append(SExp.list("layer", layer))
+                    count += 1
+
+        # Update parsed footprint objects
+        for fp in self._footprints:
+            if fp.reference in refs_to_update:
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        text.layer = layer
+
+        return count
+
+    def validate_silkscreen(
+        self,
+        design_rules: DesignRules | None = None,
+    ) -> list[dict]:
+        """
+        Validate silkscreen elements and return issues.
+
+        Checks for common silkscreen problems including:
+        - Text height too small for manufacturing
+        - Line width too thin
+        - Silkscreen overlapping exposed pads
+
+        Args:
+            design_rules: Manufacturing design rules. If None, uses
+                         default JLCPCB-compatible rules.
+
+        Returns:
+            List of issue dictionaries with keys:
+            - type: Issue type (e.g., "text_height", "over_pad")
+            - reference: Reference designator or element identifier
+            - description: Human-readable description
+            - location: (x, y) position in mm
+            - layer: Layer name
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> issues = pcb.validate_silkscreen()
+            >>> for issue in issues:
+            ...     print(f"{issue['type']}: {issue['reference']} - {issue['description']}")
+        """
+        from ..manufacturers import DesignRules as DR
+        from ..validate.rules.silkscreen import check_all_silkscreen
+
+        if design_rules is None:
+            # Use default JLCPCB-compatible rules
+            design_rules = DR(
+                min_trace_width_mm=0.127,
+                min_clearance_mm=0.127,
+                min_via_drill_mm=0.3,
+                min_via_diameter_mm=0.5,
+                min_annular_ring_mm=0.127,
+                min_silkscreen_width_mm=0.15,
+                min_silkscreen_height_mm=0.8,
+            )
+
+        results = check_all_silkscreen(self, design_rules)
+
+        issues = []
+        for violation in results.violations:
+            issues.append({
+                "type": violation.rule_id.replace("silkscreen_", ""),
+                "reference": violation.items[0] if violation.items else "",
+                "description": violation.message,
+                "location": violation.location,
+                "layer": violation.layer,
+            })
+
+        return issues
 
     def add_footprint_from_file(
         self,

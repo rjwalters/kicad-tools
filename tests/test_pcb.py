@@ -882,3 +882,354 @@ class TestAddFootprint:
             assert at_pos < descr_pos, "(at) should appear before (descr)"
         if tags_pos != -1:
             assert at_pos < tags_pos, "(at) should appear before (tags)"
+
+
+class TestSilkscreenManagement:
+    """Tests for silkscreen management APIs (issue #924)."""
+
+    # Multi-footprint PCB fixture for silkscreen tests
+    PCB_WITH_REFS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user "B.Silkscreen")
+    (37 "F.SilkS" user "F.Silkscreen")
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-r1") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val-r1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 110 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-c1") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab") (uuid "val-c1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0402"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (at 120 100)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-c2") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "10uF" (at 0 1.5 0) (layer "F.Fab") (uuid "val-c2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+  (footprint "Package_SO:SOIC-8"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000004")
+    (at 100 120)
+    (property "Reference" "U1" (at 0 -4 0) (layer "F.SilkS") (uuid "ref-u1") (effects (font (size 1 1) (thickness 0.15))))
+    (property "Value" "LM358" (at 0 4 0) (layer "F.Fab") (uuid "val-u1"))
+    (pad "1" smd rect (at -2.7 -1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+)"""
+
+    @pytest.fixture
+    def pcb_with_refs(self, tmp_path: Path) -> Path:
+        """Create a PCB with multiple footprints for silkscreen testing."""
+        pcb_file = tmp_path / "silkscreen_test.kicad_pcb"
+        pcb_file.write_text(self.PCB_WITH_REFS)
+        return pcb_file
+
+    def test_set_reference_visibility_all_hide(self, pcb_with_refs):
+        """Test hiding all reference designators."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.set_reference_visibility(visible=False)
+
+        # Should update all 4 footprints
+        assert count == 4
+
+        # Verify parsed objects are updated
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    assert text.hidden is True
+
+    def test_set_reference_visibility_specific(self, pcb_with_refs):
+        """Test hiding a specific reference designator."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.set_reference_visibility("R1", visible=False)
+
+        assert count == 1
+
+        # Verify only R1 is hidden
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    if fp.reference == "R1":
+                        assert text.hidden is True
+                    else:
+                        assert text.hidden is False
+
+    def test_set_reference_visibility_pattern(self, pcb_with_refs):
+        """Test hiding references matching a pattern."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.set_reference_visibility(pattern="C*", visible=False)
+
+        # Should update C1 and C2
+        assert count == 2
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    if fp.reference.startswith("C"):
+                        assert text.hidden is True
+                    else:
+                        assert text.hidden is False
+
+    def test_set_reference_visibility_show_after_hide(self, pcb_with_refs):
+        """Test showing references after hiding them."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        # Hide all
+        pcb.set_reference_visibility(visible=False)
+        # Show one
+        count = pcb.set_reference_visibility("U1", visible=True)
+
+        assert count == 1
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    if fp.reference == "U1":
+                        assert text.hidden is False
+                    else:
+                        assert text.hidden is True
+
+    def test_move_reference_offset(self, pcb_with_refs):
+        """Test moving reference with offset."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        # Get original position
+        original_pos = None
+        for fp in pcb.footprints:
+            if fp.reference == "R1":
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        original_pos = text.position
+                        break
+                break
+
+        result = pcb.move_reference("R1", offset=(2.0, -3.0))
+
+        assert result is True
+
+        # Verify position changed
+        for fp in pcb.footprints:
+            if fp.reference == "R1":
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        assert text.position[0] == pytest.approx(original_pos[0] + 2.0)
+                        assert text.position[1] == pytest.approx(original_pos[1] - 3.0)
+                        break
+                break
+
+    def test_move_reference_absolute(self, pcb_with_refs):
+        """Test moving reference to absolute position."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        result = pcb.move_reference("C1", absolute=(5.0, -4.0))
+
+        assert result is True
+
+        for fp in pcb.footprints:
+            if fp.reference == "C1":
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        assert text.position == pytest.approx((5.0, -4.0))
+                        break
+                break
+
+    def test_move_reference_with_layer(self, pcb_with_refs):
+        """Test moving reference with layer change."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        result = pcb.move_reference("U1", offset=(0.0, 0.0), layer="F.Fab")
+
+        assert result is True
+
+        for fp in pcb.footprints:
+            if fp.reference == "U1":
+                for text in fp.texts:
+                    if text.text_type == "reference":
+                        assert text.layer == "F.Fab"
+                        break
+                break
+
+    def test_move_reference_not_found(self, pcb_with_refs):
+        """Test moving non-existent reference returns False."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        result = pcb.move_reference("NONEXISTENT", offset=(1.0, 1.0))
+
+        assert result is False
+
+    def test_set_silkscreen_font_all(self, pcb_with_refs):
+        """Test setting font for all references."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.set_silkscreen_font(size=0.8, thickness=0.12)
+
+        assert count == 4
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    assert text.font_size == pytest.approx((0.8, 0.8))
+                    assert text.font_thickness == pytest.approx(0.12)
+
+    def test_set_silkscreen_font_pattern(self, pcb_with_refs):
+        """Test setting font for pattern-matched references."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.set_silkscreen_font(size=0.6, thickness=0.1, pattern="C*")
+
+        assert count == 2
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    if fp.reference.startswith("C"):
+                        assert text.font_size == pytest.approx((0.6, 0.6))
+                    else:
+                        # Original size
+                        assert text.font_size == pytest.approx((1.0, 1.0))
+
+    def test_set_silkscreen_font_tuple_size(self, pcb_with_refs):
+        """Test setting font with different width and height."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.set_silkscreen_font(size=(0.7, 0.9), thickness=0.15)
+
+        assert count == 4
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    assert text.font_size == pytest.approx((0.7, 0.9))
+
+    def test_move_references_to_layer_all(self, pcb_with_refs):
+        """Test moving all references to a different layer."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.move_references_to_layer("F.Fab")
+
+        assert count == 4
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    assert text.layer == "F.Fab"
+
+    def test_move_references_to_layer_pattern(self, pcb_with_refs):
+        """Test moving pattern-matched references to different layer."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        count = pcb.move_references_to_layer("F.Fab", pattern="R*")
+
+        assert count == 1
+
+        for fp in pcb.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    if fp.reference.startswith("R"):
+                        assert text.layer == "F.Fab"
+                    else:
+                        assert text.layer == "F.SilkS"
+
+    def test_validate_silkscreen_returns_list(self, pcb_with_refs):
+        """Test that validate_silkscreen returns a list of issues."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        issues = pcb.validate_silkscreen()
+
+        # Returns a list (may be empty for valid PCB)
+        assert isinstance(issues, list)
+
+    def test_validate_silkscreen_small_font(self, pcb_with_refs):
+        """Test that validate_silkscreen detects small font."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        # Set very small font (below minimum)
+        pcb.set_silkscreen_font(size=0.5, thickness=0.1)
+
+        from kicad_tools.manufacturers import DesignRules
+
+        rules = DesignRules(
+            min_trace_width_mm=0.127,
+            min_clearance_mm=0.127,
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.5,
+            min_annular_ring_mm=0.127,
+            min_silkscreen_height_mm=0.8,
+            min_silkscreen_width_mm=0.15,
+        )
+        issues = pcb.validate_silkscreen(design_rules=rules)
+
+        # Should detect font height issues
+        text_height_issues = [i for i in issues if i["type"] == "text_height"]
+        assert len(text_height_issues) > 0
+
+    def test_silkscreen_changes_persist_on_save(self, pcb_with_refs, tmp_path):
+        """Test that silkscreen changes persist after save/reload."""
+        doc = load_pcb(str(pcb_with_refs))
+        pcb = PCB(doc)
+
+        # Make changes
+        pcb.set_reference_visibility("R1", visible=False)
+        pcb.move_reference("C1", offset=(1.0, -2.0))
+        pcb.set_silkscreen_font(size=0.9, thickness=0.12, pattern="U*")
+
+        # Save
+        output_path = tmp_path / "modified.kicad_pcb"
+        pcb.save(str(output_path))
+
+        # Reload
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        # Verify changes persisted
+        for fp in pcb2.footprints:
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    if fp.reference == "R1":
+                        assert text.hidden is True
+                    if fp.reference == "U1":
+                        assert text.font_size == pytest.approx((0.9, 0.9))
