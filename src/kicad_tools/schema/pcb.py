@@ -1486,10 +1486,12 @@ class PCB:
                 at_node.set_value(1, y)
                 if rotation is not None:
                     # Handle cases where rotation may or may not exist
-                    if len(at_node.values) >= 3:
+                    if len(at_node.children) >= 3:
                         at_node.set_value(2, rotation)
                     elif rotation != 0.0:
-                        at_node.values.append(rotation)
+                        # Use add() instead of values.append() since values
+                        # is a read-only property that returns a new list
+                        at_node.add(rotation)
             return True
 
         return False
