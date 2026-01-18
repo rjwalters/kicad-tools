@@ -94,10 +94,14 @@ class NetNode:
     @classmethod
     def from_sexp(cls, sexp: SExp) -> NetNode:
         """Parse node from netlist S-expression."""
-        ref = sexp.get_string(0) or ""
+        ref = ""
         pin = ""
         pin_function = ""
         pin_type = ""
+
+        # Reference is in (ref "...") child node in KiCad netlist format
+        if ref_node := sexp.find("ref"):
+            ref = ref_node.get_string(0) or ""
 
         if pin_node := sexp.find("pin"):
             pin = pin_node.get_string(0) or ""
