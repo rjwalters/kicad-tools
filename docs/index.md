@@ -17,6 +17,7 @@ Step-by-step guides for common tasks:
 
 | Guide | Description |
 |-------|-------------|
+| [Schematic to PCB Workflow](guides/schematic-to-pcb-workflow.md) | Complete workflow from schematic to manufactured PCB |
 | [Schematic Analysis](guides/schematic-analysis.md) | Parse schematics, query symbols, trace nets |
 | [DRC & Validation](guides/drc-and-validation.md) | Run design rule checks with manufacturer rules |
 | [Manufacturing Export](guides/manufacturing-export.md) | Generate Gerbers, BOM, pick-and-place files |

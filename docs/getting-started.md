@@ -168,6 +168,7 @@ See the [MCP Documentation](mcp/README.md) for full setup instructions.
 
 Now that you have kicad-tools installed, explore these guides:
 
+- **[Schematic to PCB Workflow](guides/schematic-to-pcb-workflow.md)** - Complete workflow from schematic to manufactured PCB
 - **[Schematic Analysis](guides/schematic-analysis.md)** - Deep dive into symbols, nets, and BOM generation
 - **[DRC & Validation](guides/drc-and-validation.md)** - Validate designs against fabrication limits
 - **[Manufacturing Export](guides/manufacturing-export.md)** - Export for JLCPCB and other fabs

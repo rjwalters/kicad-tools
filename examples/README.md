@@ -12,6 +12,7 @@ For complete board designs, see the [boards/](../boards/) directory.
 | [02-bom-generation](02-bom-generation/) | Extract Bill of Materials | BOM extraction, grouping, export |
 | [03-drc-checking](03-drc-checking/) | Parse DRC reports, check manufacturer rules | DRC parsing, manufacturer validation |
 | [04-autorouter](04-autorouter/) | Routing strategy comparisons | Routing algorithms, Monte Carlo, congestion |
+| [05-schematic-to-pcb-workflow](05-schematic-to-pcb-workflow/) | Complete workflow from schematic to PCB | Project class, cross-reference, placement, routing |
 | [06-intelligent-placement](06-intelligent-placement/) | v0.6.0 intelligent placement for AI agents | Clustering, edge detection, thermal, sessions |
 | [07-design-feedback](07-design-feedback/) | v0.7.0 design feedback for AI agents | Rich errors, congestion, thermal, cost estimation |
 | [08-label-based-schematic](08-label-based-schematic/) | Label-based schematic generation | Hierarchical labels, net connections |
@@ -83,6 +84,24 @@ from kicad_tools.router import load_pcb_for_routing, DesignRules
 
 router, _ = load_pcb_for_routing("board.kicad_pcb", rules=rules)
 router.route_all_monte_carlo(num_trials=10)
+```
+
+### 05 - Schematic to PCB Workflow
+
+Complete workflow from project creation to manufacturing export.
+
+```python
+from kicad_tools import Project
+
+# Create new project
+project = Project.create("my_board", directory="./designs/")
+
+# Cross-reference schematic and PCB
+result = project.cross_reference()
+
+# Route and export
+project.route(skip_nets=["GND"])
+project.export_gerbers("output/", manufacturer="jlcpcb")
 ```
 
 ### 06 - Intelligent Placement (v0.6.0)
