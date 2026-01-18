@@ -213,6 +213,70 @@ class SExp:
         self.children.append(child)
         return child
 
+    def insert(self, index: int, child: SExp) -> SExp:
+        """Insert a child node at a specific index.
+
+        Args:
+            index: Position to insert at (0-indexed). Negative indices count
+                   from the end, like Python lists.
+            child: The SExp node to insert.
+
+        Returns:
+            The inserted child node.
+
+        Example:
+            # Insert (at 50 30 0) at position 3
+            footprint.insert(3, at_node)
+        """
+        self.children.insert(index, child)
+        return child
+
+    def insert_after(self, name: str, child: SExp) -> SExp:
+        """Insert a child node after the first child with the given name.
+
+        Args:
+            name: Name of the child to insert after.
+            child: The SExp node to insert.
+
+        Returns:
+            The inserted child node.
+
+        Raises:
+            KeyError: If no child with the given name exists.
+
+        Example:
+            # Insert (at 50 30 0) after (layer "F.Cu")
+            footprint.insert_after("layer", at_node)
+        """
+        for i, c in enumerate(self.children):
+            if c.name == name:
+                self.children.insert(i + 1, child)
+                return child
+        raise KeyError(f"No child named '{name}' to insert after")
+
+    def insert_before(self, name: str, child: SExp) -> SExp:
+        """Insert a child node before the first child with the given name.
+
+        Args:
+            name: Name of the child to insert before.
+            child: The SExp node to insert.
+
+        Returns:
+            The inserted child node.
+
+        Raises:
+            KeyError: If no child with the given name exists.
+
+        Example:
+            # Insert (at 50 30 0) before (property "Reference" ...)
+            footprint.insert_before("property", at_node)
+        """
+        for i, c in enumerate(self.children):
+            if c.name == name:
+                self.children.insert(i, child)
+                return child
+        raise KeyError(f"No child named '{name}' to insert before")
+
     def remove(self, child: SExp) -> bool:
         """Remove a child node."""
         try:
