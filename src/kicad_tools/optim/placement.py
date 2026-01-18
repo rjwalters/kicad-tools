@@ -37,6 +37,7 @@ from kicad_tools.optim.thermal import (
 )
 
 if TYPE_CHECKING:
+    from kicad_tools.optim.zones import PlacementZone
     from kicad_tools.schema.pcb import PCB
 
 __all__ = ["PlacementOptimizer"]
@@ -85,7 +86,7 @@ class PlacementOptimizer:
 
         # Decision recording
         self.record_decisions = record_decisions
-        self._decision_store: "DecisionStore | None" = None
+        self._decision_store: DecisionStore | None = None
         self._initial_positions: dict[str, tuple[float, float, float]] = {}
         if record_decisions:
             from kicad_tools.explain.decisions import DecisionStore
@@ -374,6 +375,118 @@ class PlacementOptimizer:
             constraints: List of grouping constraints to add
         """
         self.grouping_constraints.extend(constraints)
+
+    def add_zone(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+    ) -> PlacementZone:
+        """
+        Add a named placement zone.
+
+        Creates a rectangular zone that can have components assigned to it.
+        Components in the zone will be constrained to stay within the zone
+        during optimization.
+
+        Args:
+            name: Unique identifier for the zone
+            x: X coordinate of the zone's bottom-left corner (mm)
+            y: Y coordinate of the zone's bottom-left corner (mm)
+            width: Zone width (mm)
+            height: Zone height (mm)
+
+        Returns:
+            The created PlacementZone object
+
+        Example::
+
+            optimizer = PlacementOptimizer.from_pcb(pcb)
+            zone = optimizer.add_zone("power", x=10, y=10, width=50, height=30)
+            optimizer.assign_to_zone("power", pattern=r"C[0-9]+")
+        """
+        from kicad_tools.optim.zones import PlacementZone
+
+        zone = PlacementZone(name=name, x=x, y=y, width=width, height=height)
+
+        # Store zone for later reference
+        if not hasattr(self, "_zones"):
+            self._zones: dict[str, PlacementZone] = {}
+        self._zones[name] = zone
+
+        return zone
+
+    def assign_to_zone(
+        self,
+        zone_name: str,
+        *,
+        pattern: str | None = None,
+        references: list[str] | None = None,
+    ) -> list[str]:
+        """
+        Assign components to a named placement zone.
+
+        Components can be assigned by regex pattern or explicit reference list.
+        The zone constraint keeps assigned components within the zone during
+        optimization.
+
+        Args:
+            zone_name: Name of the zone to assign components to
+            pattern: Regex pattern to match component references
+                    (e.g., "C1[0-6][0-9]" for C100-C169)
+            references: Explicit list of component references to assign
+
+        Returns:
+            List of component references that were assigned
+
+        Raises:
+            ValueError: If zone not found, or neither pattern nor references
+                       specified
+
+        Example::
+
+            optimizer.add_zone("supercaps", x=10, y=10, width=120, height=50)
+
+            # Assign by regex pattern
+            optimizer.assign_to_zone("supercaps", pattern=r"C1[0-6][0-9]")
+
+            # Or assign by explicit references
+            optimizer.assign_to_zone("power", references=["U1", "U2", "U3"])
+        """
+        from kicad_tools.optim.zones import assign_zone
+
+        if not hasattr(self, "_zones") or zone_name not in self._zones:
+            raise ValueError(f"Zone '{zone_name}' not found. Use add_zone() first.")
+
+        zone = self._zones[zone_name]
+        return assign_zone(self, zone, pattern=pattern, references=references)
+
+    def get_zone(self, name: str) -> PlacementZone | None:
+        """
+        Get a placement zone by name.
+
+        Args:
+            name: Zone name
+
+        Returns:
+            PlacementZone if found, None otherwise
+        """
+        if not hasattr(self, "_zones"):
+            return None
+        return self._zones.get(name)
+
+    def get_zones(self) -> list[PlacementZone]:
+        """
+        Get all registered placement zones.
+
+        Returns:
+            List of all PlacementZone objects
+        """
+        if not hasattr(self, "_zones"):
+            return []
+        return list(self._zones.values())
 
     def validate_constraints(self) -> list[ConstraintViolation]:
         """
