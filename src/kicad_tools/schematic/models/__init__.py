@@ -14,6 +14,7 @@ from .elements import (
 from .pin import Pin
 from .schematic import Schematic, SnapMode
 from .symbol import SymbolDef, SymbolInstance
+from .validation_mixin import PowerNetIssue
 
 __all__ = [
     # Pin
@@ -30,4 +31,6 @@ __all__ = [
     # Schematic
     "Schematic",
     "SnapMode",
+    # Validation
+    "PowerNetIssue",
 ]
