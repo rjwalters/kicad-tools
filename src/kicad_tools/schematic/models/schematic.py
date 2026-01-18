@@ -15,6 +15,7 @@ This module composes functionality from specialized mixins:
 
 import uuid
 from enum import Enum
+from pathlib import Path
 
 from kicad_tools.sexp import SExp
 
@@ -153,6 +154,9 @@ class Schematic(
         # Track continuous rails for T-connection warnings
         # Each entry: (y, x_start, x_end) for horizontal rails
         self._continuous_rails: list[tuple[float, float, float]] = []
+
+        # Track the saved path for operations like run_erc()
+        self._saved_path: Path | None = None
 
     @property
     def sheet_path(self) -> str:

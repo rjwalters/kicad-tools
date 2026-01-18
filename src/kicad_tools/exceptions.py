@@ -722,6 +722,27 @@ class ExportError(KiCadToolsError):
     pass
 
 
+class KiCadCLIError(KiCadToolsError):
+    """
+    KiCad CLI operation failed.
+
+    Raised when kicad-cli is not found or a CLI command fails.
+
+    Example::
+
+        raise KiCadCLIError(
+            "kicad-cli not found",
+            context={"command": "sch erc"},
+            suggestions=[
+                "Install KiCad 8 from https://www.kicad.org/download/",
+                "On macOS: brew install --cask kicad"
+            ]
+        )
+    """
+
+    pass
+
+
 class SExpSnippetExtractor:
     """
     Extract S-expression snippets for error context.
@@ -1192,6 +1213,7 @@ __all__ = [
     "ComponentError",
     "ConfigurationError",
     "ExportError",
+    "KiCadCLIError",
     # Snippet extraction
     "SExpSnippetExtractor",
     # Error accumulation
