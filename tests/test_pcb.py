@@ -50,6 +50,32 @@ def test_pcb_footprints(minimal_pcb: Path):
     assert len(fp.pads) == 2
 
 
+def test_pcb_pad_nets(minimal_pcb: Path):
+    """Parse pad net assignments.
+
+    Issue #938: PCB loader must populate pad.net attribute for routing.
+    """
+    doc = load_pcb(str(minimal_pcb))
+    pcb = PCB(doc)
+
+    fp = pcb.footprints[0]
+    assert len(fp.pads) == 2
+
+    # Pad 1 should have net 1 (GND)
+    pad1 = fp.pads[0]
+    assert pad1.number == "1"
+    assert pad1.net == 1  # The .net property (alias for net_number)
+    assert pad1.net_number == 1
+    assert pad1.net_name == "GND"
+
+    # Pad 2 should have net 2 (+3.3V)
+    pad2 = fp.pads[1]
+    assert pad2.number == "2"
+    assert pad2.net == 2
+    assert pad2.net_number == 2
+    assert pad2.net_name == "+3.3V"
+
+
 def test_pcb_traces(minimal_pcb: Path):
     """Parse PCB traces."""
     doc = load_pcb(str(minimal_pcb))
