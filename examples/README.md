@@ -17,6 +17,7 @@ For complete board designs, see the [boards/](../boards/) directory.
 | [07-design-feedback](07-design-feedback/) | v0.7.0 design feedback for AI agents | Rich errors, congestion, thermal, cost estimation |
 | [08-label-based-schematic](08-label-based-schematic/) | Label-based schematic generation | Hierarchical labels, net connections |
 | [09-manufacturing-export](09-manufacturing-export/) | End-to-end manufacturing output | Gerbers, BOM, PnP, JLCPCB, PCBWay |
+| [10-complete-kct-workflow](10-complete-kct-workflow/) | Complete .kct to manufacturing workflow | Project spec, schematic gen, PCB, routing, export |
 | [llm-routing](llm-routing/) | LLM-driven PCB layout decisions | Reasoning agent, command vocabulary, feedback loops |
 | [agent-integration](agent-integration/) | AI agent tool definitions and examples | Claude tools, OpenAI functions, error handling |
 
@@ -173,6 +174,40 @@ result = pkg.export("output/")
 print(f"BOM: {result.bom_path}")
 print(f"CPL: {result.pnp_path}")
 print(f"Gerbers: {result.gerber_path}")
+```
+
+### 10 - Complete KCT Workflow
+
+End-to-end workflow from `.kct` project specification to manufacturable PCB.
+
+```python
+from kicad_tools.spec import load_spec
+from kicad_tools.schematic.models.schematic import Schematic
+from kicad_tools.export import AssemblyPackage
+
+# Load project specification
+spec = load_spec("project.kct")
+
+# Generate schematic programmatically
+sch = Schematic(title=spec.project.name)
+sch.add_symbol("Device:R", x=100, y=50, ref="R1", value="330")
+sch.add_symbol("Device:LED", x=140, y=65, ref="D1", value="LED")
+sch.write("output/led_indicator.kicad_sch")
+
+# Export manufacturing files
+pkg = AssemblyPackage.create(
+    pcb="output/led_indicator_routed.kicad_pcb",
+    schematic="output/led_indicator.kicad_sch",
+    manufacturer="jlcpcb",
+)
+result = pkg.export("output/jlcpcb/")
+```
+
+Or use the CLI:
+
+```bash
+# One command builds everything
+kct build .
 ```
 
 ### LLM Routing
