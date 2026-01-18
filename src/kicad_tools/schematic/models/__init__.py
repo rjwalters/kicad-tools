@@ -10,6 +10,7 @@ from .elements import (
     Label,
     PowerSymbol,
     Wire,
+    WireCollision,
 )
 from .pin import Pin
 from .schematic import Schematic, SnapMode
@@ -24,6 +25,7 @@ __all__ = [
     "SymbolInstance",
     # Elements
     "Wire",
+    "WireCollision",
     "Junction",
     "Label",
     "HierarchicalLabel",
