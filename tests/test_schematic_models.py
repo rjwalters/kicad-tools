@@ -2166,6 +2166,84 @@ class TestSymbolDefParsing:
         assert len(nodes) == 1
         assert nodes[0].name == "symbol"
 
+    def test_extract_symbol_sexps_simple(self):
+        """Extract simple symbol from raw_sexp string."""
+        sym_def = SymbolDef(lib_id="Test:Sym", name="Sym", raw_sexp="")
+        raw = '(symbol "Test" (property "name" "value"))'
+        parts = sym_def._extract_symbol_sexps(raw)
+        assert len(parts) == 1
+        assert parts[0] == '(symbol "Test" (property "name" "value"))'
+
+    def test_extract_symbol_sexps_multiple(self):
+        """Extract multiple symbols from raw_sexp string."""
+        sym_def = SymbolDef(lib_id="Test:Sym", name="Sym", raw_sexp="")
+        raw = '(symbol "A" (pin "1")) (symbol "B" (pin "2"))'
+        parts = sym_def._extract_symbol_sexps(raw)
+        assert len(parts) == 2
+        assert parts[0] == '(symbol "A" (pin "1"))'
+        assert parts[1] == '(symbol "B" (pin "2"))'
+
+    def test_extract_symbol_sexps_deeply_nested(self):
+        """Extract symbol with deeply nested parentheses (issue #894).
+
+        This tests the fix for the regex that couldn't handle nested structures
+        like polylines with multiple points and pins with nested properties.
+        """
+        sym_def = SymbolDef(lib_id="Test:Sym", name="Sym", raw_sexp="")
+        # Simulate a deeply nested symbol like Diode_Bridge:MB6S
+        raw = '''(symbol "MB2S" (pin_names (offset 0))
+          (polyline (pts (xy 0 0) (xy 1 1) (xy 2 2)))
+          (polyline (pts (xy 3 3) (xy 4 4)))
+          (pin passive line (at -5.08 2.54 0) (length 2.54)
+            (name "~" (effects (font (size 1.27 1.27))))
+            (number "1" (effects (font (size 1.27 1.27)))))
+          (pin passive line (at 5.08 2.54 180) (length 2.54)
+            (name "~" (effects (font (size 1.27 1.27))))
+            (number "2" (effects (font (size 1.27 1.27))))))'''
+        parts = sym_def._extract_symbol_sexps(raw)
+        assert len(parts) == 1
+        # Verify the entire symbol was captured, not truncated
+        assert parts[0].startswith('(symbol "MB2S"')
+        assert parts[0].endswith(")")
+        # Should contain all the pins
+        assert "(number \"1\"" in parts[0]
+        assert "(number \"2\"" in parts[0]
+
+    def test_extract_symbol_sexps_with_unit_symbols(self):
+        """Extract parent symbol and unit symbols."""
+        sym_def = SymbolDef(lib_id="Test:Sym", name="Sym", raw_sexp="")
+        raw = '''(symbol "IC" (property "Reference" "U"))
+(symbol "IC_0_1" (polyline (pts (xy 0 0) (xy 1 1))))
+(symbol "IC_1_1" (pin input line (at 0 0 0) (length 2.54)))'''
+        parts = sym_def._extract_symbol_sexps(raw)
+        assert len(parts) == 3
+        assert '"IC"' in parts[0]
+        assert '"IC_0_1"' in parts[1]
+        assert '"IC_1_1"' in parts[2]
+
+    def test_to_sexp_nodes_from_raw_sexp_nested(self):
+        """to_sexp_nodes correctly parses deeply nested raw_sexp (issue #894)."""
+        # Create a SymbolDef without _sexp_node to force raw_sexp parsing
+        raw = '''(symbol "TestSym" (pin_names (offset 0))
+          (polyline (pts (xy 0 0) (xy 1 1) (xy 2 2)))
+          (pin passive line (at -5.08 2.54 0) (length 2.54)
+            (name "A" (effects (font (size 1.27 1.27))))
+            (number "1" (effects (font (size 1.27 1.27))))))'''
+        sym_def = SymbolDef(
+            lib_id="Test:TestSym",
+            name="TestSym",
+            raw_sexp=raw,
+            _sexp_node=None,  # Force raw_sexp fallback
+        )
+
+        nodes = sym_def.to_sexp_nodes()
+        assert len(nodes) == 1
+        assert nodes[0].name == "symbol"
+        # Verify the symbol was fully parsed - check for nested content
+        symbol_str = nodes[0].to_string()
+        assert "polyline" in symbol_str
+        assert "pin" in symbol_str
+
 
 class TestSymbolInstanceFromSexp:
     """Tests for SymbolInstance.from_sexp parsing."""

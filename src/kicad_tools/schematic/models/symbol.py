@@ -230,6 +230,39 @@ class SymbolDef:
 
         return new_node
 
+    def _extract_symbol_sexps(self, raw: str) -> list[str]:
+        """Extract (symbol ...) S-expression strings using proper parenthesis matching.
+
+        This method correctly handles deeply nested parentheses by tracking depth,
+        unlike regex which fails on complex symbols with nested polylines and pins.
+
+        Args:
+            raw: Raw S-expression string that may contain multiple symbol definitions
+
+        Returns:
+            List of complete (symbol ...) S-expression strings
+        """
+        parts = []
+        i = 0
+        while i < len(raw):
+            # Look for start of a symbol definition
+            if raw[i : i + 8] == "(symbol ":
+                # Find matching closing paren by tracking depth
+                depth = 1
+                start = i
+                i += 1  # Move past the opening paren
+                while i < len(raw) and depth > 0:
+                    if raw[i] == "(":
+                        depth += 1
+                    elif raw[i] == ")":
+                        depth -= 1
+                    i += 1
+                if depth == 0:
+                    parts.append(raw[start:i])
+            else:
+                i += 1
+        return parts
+
     def to_sexp_nodes(self) -> list[SExp]:
         """Get symbol definition(s) as SExp nodes for embedding.
 
@@ -249,10 +282,8 @@ class SymbolDef:
             from kicad_tools.sexp import parse_string
 
             # Parse the raw_sexp which may contain multiple symbols
-            # wrapped each (symbol ...) in parsing
-            parts = re.findall(
-                r'\(symbol\s+"[^"]+(?:_\d+_\d+)?"[^)]*(?:\([^)]*\)[^)]*)*\)', self.raw_sexp
-            )
+            # Extract symbol definitions using proper parenthesis matching
+            parts = self._extract_symbol_sexps(self.raw_sexp)
             for part in parts:
                 try:
                     parsed = parse_string(part)
