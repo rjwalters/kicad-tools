@@ -983,7 +983,8 @@ def load_pcb_for_routing(
             continue
 
         # Get footprint position
-        at_match = re.search(r"\(at\s+([\d.]+)\s+([\d.]+)(?:\s+([\d.]+))?\)", section)
+        # Note: coordinates can be negative (footprints outside board origin)
+        at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
         if not at_match:
             continue
 
