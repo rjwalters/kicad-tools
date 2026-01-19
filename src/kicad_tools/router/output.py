@@ -82,7 +82,9 @@ def show_routing_summary(
     all_failures: list[RoutingFailure] = []
     for failure in getattr(router, "routing_failures", []):
         if failure.net in unrouted_ids:
-            cause_name = failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+            cause_name = (
+                failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+            )
             failures_by_cause[cause_name].append(failure)
             all_failures.append(failure)
 
@@ -98,7 +100,11 @@ def show_routing_summary(
 
         if net_failures:
             failure = net_failures[0]
-            cause_name = failure.failure_cause.value.upper() if hasattr(failure, "failure_cause") else "UNKNOWN"
+            cause_name = (
+                failure.failure_cause.value.upper()
+                if hasattr(failure, "failure_cause")
+                else "UNKNOWN"
+            )
 
             print(f"\n[✗] {net_name}: FAILED")
             print(f"    Reason: {cause_name}")
@@ -168,7 +174,9 @@ def show_routing_summary(
             count = len({f.net for f in pad_failures})
             grid_res = getattr(router.grid, "resolution", 0.25)
             suggestions_shown += 1
-            print(f"{suggestions_shown}. GRID ALIGNMENT ({count} net{'s' if count != 1 else ''} affected)")
+            print(
+                f"{suggestions_shown}. GRID ALIGNMENT ({count} net{'s' if count != 1 else ''} affected)"
+            )
             print(f"   Some pads don't align with the {grid_res}mm routing grid.")
             print(f"   Try: --grid {grid_res / 2} or adjust pad positions\n")
 
@@ -178,8 +186,12 @@ def show_routing_summary(
             count = len({f.net for f in congestion_failures})
             num_layers = getattr(router.grid, "num_layers", 2)
             suggestions_shown += 1
-            print(f"{suggestions_shown}. CONGESTION ({count} net{'s' if count != 1 else ''} affected)")
-            print(f"   Routing channels are saturated on {num_layers} layer{'s' if num_layers != 1 else ''}.")
+            print(
+                f"{suggestions_shown}. CONGESTION ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print(
+                f"   Routing channels are saturated on {num_layers} layer{'s' if num_layers != 1 else ''}."
+            )
             if num_layers < 4:
                 print("   Try: --layers 4 or --layers 6 for more routing resources\n")
             else:
@@ -193,7 +205,9 @@ def show_routing_summary(
             for f in blocked_failures:
                 all_blocking.update(f.blocking_components)
             suggestions_shown += 1
-            print(f"{suggestions_shown}. COMPONENT BLOCKING ({count} net{'s' if count != 1 else ''} affected)")
+            print(
+                f"{suggestions_shown}. COMPONENT BLOCKING ({count} net{'s' if count != 1 else ''} affected)"
+            )
             print("   Direct paths are blocked by component keepouts.")
             if all_blocking:
                 comp_list = ", ".join(sorted(all_blocking)[:5])
@@ -207,7 +221,9 @@ def show_routing_summary(
         if clearance_failures:
             count = len({f.net for f in clearance_failures})
             suggestions_shown += 1
-            print(f"{suggestions_shown}. CLEARANCE VIOLATIONS ({count} net{'s' if count != 1 else ''} affected)")
+            print(
+                f"{suggestions_shown}. CLEARANCE VIOLATIONS ({count} net{'s' if count != 1 else ''} affected)"
+            )
             print("   Cannot meet trace clearance requirements.")
             print("   Try: --clearance <smaller_value> (check manufacturer limits)\n")
 
@@ -277,13 +293,15 @@ def get_routing_diagnostics_json(
     successful_routes = []
     for net_id in sorted(routed_net_ids):
         net_name = reverse_net.get(net_id, f"Net_{net_id}")
-        successful_routes.append({
-            "net_id": net_id,
-            "net_name": net_name,
-            "status": "routed",
-            "length_mm": round(route_lengths_by_net.get(net_id, 0), 2),
-            "vias": route_vias_by_net.get(net_id, 0),
-        })
+        successful_routes.append(
+            {
+                "net_id": net_id,
+                "net_name": net_name,
+                "status": "routed",
+                "length_mm": round(route_lengths_by_net.get(net_id, 0), 2),
+                "vias": route_vias_by_net.get(net_id, 0),
+            }
+        )
 
     # Build failed routes list with diagnostics
     failed_routes = []
@@ -322,43 +340,53 @@ def get_routing_diagnostics_json(
     grid_res = getattr(router.grid, "resolution", 0.25)
 
     if failures_by_cause.get("pin_access", 0) > 0:
-        suggestions.append({
-            "category": "GRID_ALIGNMENT",
-            "affected_nets": failures_by_cause["pin_access"],
-            "description": f"Some pads don't align with the {grid_res}mm routing grid",
-            "fix": f"--grid {grid_res / 2} or adjust pad positions",
-        })
+        suggestions.append(
+            {
+                "category": "GRID_ALIGNMENT",
+                "affected_nets": failures_by_cause["pin_access"],
+                "description": f"Some pads don't align with the {grid_res}mm routing grid",
+                "fix": f"--grid {grid_res / 2} or adjust pad positions",
+            }
+        )
 
     if failures_by_cause.get("congestion", 0) > 0:
-        suggestions.append({
-            "category": "LAYER_COUNT",
-            "affected_nets": failures_by_cause["congestion"],
-            "description": f"Routing channels saturated on {num_layers} layers",
-            "fix": "--layers 4" if num_layers < 4 else "Increase board area",
-        })
+        suggestions.append(
+            {
+                "category": "LAYER_COUNT",
+                "affected_nets": failures_by_cause["congestion"],
+                "description": f"Routing channels saturated on {num_layers} layers",
+                "fix": "--layers 4" if num_layers < 4 else "Increase board area",
+            }
+        )
 
     if failures_by_cause.get("blocked_path", 0) > 0:
-        suggestions.append({
-            "category": "COMPONENT_BLOCKING",
-            "affected_nets": failures_by_cause["blocked_path"],
-            "description": "Direct paths blocked by component keepouts",
-            "fix": "Reposition components or use vias",
-        })
+        suggestions.append(
+            {
+                "category": "COMPONENT_BLOCKING",
+                "affected_nets": failures_by_cause["blocked_path"],
+                "description": "Direct paths blocked by component keepouts",
+                "fix": "Reposition components or use vias",
+            }
+        )
 
     if failures_by_cause.get("clearance", 0) > 0:
-        suggestions.append({
-            "category": "CLEARANCE",
-            "affected_nets": failures_by_cause["clearance"],
-            "description": "Cannot meet trace clearance requirements",
-            "fix": "--clearance <smaller_value> (check manufacturer limits)",
-        })
+        suggestions.append(
+            {
+                "category": "CLEARANCE",
+                "affected_nets": failures_by_cause["clearance"],
+                "description": "Cannot meet trace clearance requirements",
+                "fix": "--clearance <smaller_value> (check manufacturer limits)",
+            }
+        )
 
     return {
         "summary": {
             "nets_requested": nets_to_route,
             "nets_routed": len(routed_net_ids),
             "nets_failed": len(unrouted_ids),
-            "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1) if nets_to_route > 0 else 0,
+            "success_rate": round(len(routed_net_ids) / nets_to_route * 100, 1)
+            if nets_to_route > 0
+            else 0,
         },
         "failure_breakdown": dict(failures_by_cause),
         "successful_routes": successful_routes,
@@ -383,7 +411,84 @@ def print_routing_diagnostics_json(
     print(json.dumps(diagnostics, indent=2))
 
 
+def format_failed_nets_summary(
+    routing_failures: list[RoutingFailure],
+    max_display: int = 10,
+) -> str:
+    """Format a compact summary of failed routing attempts.
+
+    Produces output like:
+        Failed nets:
+          - Net 33 "Net-(R20-Pad1)": congestion (area too crowded)
+          - Net 35 "Net-(U3-OUTH)": blocked_path (blocked by U1, R4)
+          - Net 41 "PRECHG_NEG": pin_access (pad not on grid)
+
+    Args:
+        routing_failures: List of RoutingFailure objects from router
+        max_display: Maximum number of failures to show (default 10)
+
+    Returns:
+        Formatted string ready for printing, or empty string if no failures.
+    """
+    if not routing_failures:
+        return ""
+
+    # Group failures by net to avoid duplicates (one net may have multiple failed paths)
+    seen_nets: set[int] = set()
+    unique_failures: list[RoutingFailure] = []
+    for failure in routing_failures:
+        if failure.net not in seen_nets:
+            seen_nets.add(failure.net)
+            unique_failures.append(failure)
+
+    if not unique_failures:
+        return ""
+
+    lines = ["Failed nets:"]
+
+    for i, failure in enumerate(unique_failures[:max_display]):
+        # Format: Net ID "name": cause (details)
+        cause = failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
+
+        # Build detail string based on failure type
+        details = ""
+        if failure.blocking_components:
+            blockers = ", ".join(failure.blocking_components[:3])
+            if len(failure.blocking_components) > 3:
+                blockers += f" +{len(failure.blocking_components) - 3} more"
+            details = f"blocked by {blockers}"
+        elif failure.blocking_nets:
+            net_count = len(failure.blocking_nets)
+            details = f"{net_count} blocking net{'s' if net_count != 1 else ''}"
+        elif failure.reason and failure.reason != "No path found":
+            # Use the reason if it's more specific
+            details = failure.reason
+        else:
+            # Provide cause-specific details
+            cause_details = {
+                "congestion": "area too crowded",
+                "blocked_path": "no clear path",
+                "clearance": "clearance violation",
+                "layer_conflict": "wrong layer",
+                "pin_access": "pad not on grid",
+                "length_constraint": "length limit exceeded",
+                "differential_pair": "pair constraint failed",
+                "keepout": "crosses keepout zone",
+            }
+            details = cause_details.get(cause, "no path found")
+
+        lines.append(f'  - Net {failure.net} "{failure.net_name}": {cause} ({details})')
+
+    # Show count of remaining failures if truncated
+    remaining = len(unique_failures) - max_display
+    if remaining > 0:
+        lines.append(f"  ... and {remaining} more failed net{'s' if remaining != 1 else ''}")
+
+    return "\n".join(lines)
+
+
 __all__ = [
+    "format_failed_nets_summary",
     "get_routing_diagnostics_json",
     "print_routing_diagnostics_json",
     "show_routing_summary",

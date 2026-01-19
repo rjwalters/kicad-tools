@@ -7,11 +7,11 @@ if routing fails, trying 2 → 4 → 6 layers until convergence.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .core import Autorouter
+    from .core import Autorouter, RoutingFailure
 
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
@@ -33,6 +33,7 @@ class RoutingResult:
     converged: bool
     iterations_used: int
     statistics: dict
+    routing_failures: list[RoutingFailure] = field(default_factory=list)
 
     @property
     def success_rate(self) -> float:
@@ -265,6 +266,7 @@ class AdaptiveAutorouter:
                 converged=converged,
                 iterations_used=iterations,
                 statistics=router.get_statistics(),
+                routing_failures=getattr(router, "routing_failures", []),
             )
             self._autorouter = router
 

@@ -147,6 +147,7 @@ from .optimizer import (
     TraceOptimizer,
 )  # noqa: F401 - optimizer is now a package
 from .output import (
+    format_failed_nets_summary,
     get_routing_diagnostics_json,
     print_routing_diagnostics_json,
     show_routing_summary,
@@ -385,6 +386,7 @@ __all__ = [
     "is_differential_pair_name",
     "find_differential_partner",
     # Output and Diagnostics
+    "format_failed_nets_summary",
     "show_routing_summary",
     "get_routing_diagnostics_json",
     "print_routing_diagnostics_json",
