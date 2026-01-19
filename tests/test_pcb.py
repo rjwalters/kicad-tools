@@ -1662,3 +1662,171 @@ class TestPCBCreate:
         assert "In1.Cu" in layer_names
         assert "In2.Cu" in layer_names
         assert "B.Cu" in layer_names
+
+    def test_board_origin_property_centered(self):
+        """Test that board_origin returns the correct offset for centered boards."""
+        # A4 paper is 297 x 210mm
+        # Board is 200 x 120mm
+        # Offset X: (297 - 200) / 2 = 48.5mm
+        # Offset Y: (210 - 120) / 2 = 45mm
+        pcb = PCB.create(width=200, height=120)
+
+        assert pcb.board_origin[0] == pytest.approx(48.5)
+        assert pcb.board_origin[1] == pytest.approx(45.0)
+
+    def test_board_origin_property_not_centered(self):
+        """Test that board_origin returns (0, 0) for non-centered boards."""
+        pcb = PCB.create(width=200, height=120, center=False)
+
+        assert pcb.board_origin[0] == pytest.approx(0.0)
+        assert pcb.board_origin[1] == pytest.approx(0.0)
+
+    def test_footprint_position_offset_centered_board(self, tmp_path: Path):
+        """Test that footprint positions are offset by board origin for centered boards.
+
+        This is a regression test for issue #943: Board centering doesn't offset
+        footprint positions. When a board is centered on the drawing sheet,
+        footprint positions specified via update_footprint_position() should be
+        relative to the board origin, not the sheet origin.
+        """
+        # A4 paper is 297 x 210mm
+        # Board is 200 x 120mm
+        # Board origin: (48.5, 45) - centered on A4
+        pcb = PCB.create(width=200, height=120)
+
+        # Add a footprint at board-relative position (50, 30)
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=50.0,
+            y=30.0,
+        )
+
+        # Save and check the file
+        output_path = tmp_path / "centered_board.kicad_pcb"
+        pcb.save(output_path)
+
+        # Read back the file and check the absolute position in the sexp
+        reloaded = PCB.load(str(output_path))
+
+        # Find the footprint in the S-expression tree
+        for child in reloaded._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            # Check if this is R1
+            ref_value = None
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    ref_value = prop.get_string(1)
+                    break
+            if not ref_value:
+                for fp_text in child.find_all("fp_text"):
+                    if fp_text.get_string(0) == "reference":
+                        ref_value = fp_text.get_string(1)
+                        break
+
+            if ref_value == "R1":
+                # Check the (at x y) node - should be sheet-absolute position
+                at_node = child.find("at")
+                assert at_node is not None
+
+                # Expected absolute position: board-relative + board origin
+                # (50, 30) + (48.5, 45) = (98.5, 75)
+                assert at_node.get_float(0) == pytest.approx(98.5)
+                assert at_node.get_float(1) == pytest.approx(75.0)
+                break
+        else:
+            pytest.fail("Footprint R1 not found")
+
+    def test_footprint_position_no_offset_non_centered_board(self, tmp_path: Path):
+        """Test that footprint positions match exactly for non-centered boards."""
+        pcb = PCB.create(width=200, height=120, center=False)
+
+        # Add a footprint at position (50, 30)
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=50.0,
+            y=30.0,
+        )
+
+        # Save and check the file
+        output_path = tmp_path / "non_centered_board.kicad_pcb"
+        pcb.save(output_path)
+
+        # Read back the file and check the position
+        reloaded = PCB.load(str(output_path))
+
+        # Find R1 footprint
+        for child in reloaded._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            ref_value = None
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    ref_value = prop.get_string(1)
+                    break
+            if not ref_value:
+                for fp_text in child.find_all("fp_text"):
+                    if fp_text.get_string(0) == "reference":
+                        ref_value = fp_text.get_string(1)
+                        break
+
+            if ref_value == "R1":
+                at_node = child.find("at")
+                # For non-centered board, position should be exactly as specified
+                assert at_node.get_float(0) == pytest.approx(50.0)
+                assert at_node.get_float(1) == pytest.approx(30.0)
+                break
+        else:
+            pytest.fail("Footprint R1 not found")
+
+    def test_update_footprint_position_applies_offset(self, tmp_path: Path):
+        """Test that update_footprint_position applies board origin offset."""
+        # Create centered board
+        pcb = PCB.create(width=200, height=120)
+
+        # Add footprint at initial position
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=10.0,
+            y=10.0,
+        )
+
+        # Update to new board-relative position
+        result = pcb.update_footprint_position("R1", x=100.0, y=60.0)
+        assert result is True
+
+        # Save and reload
+        output_path = tmp_path / "updated_position.kicad_pcb"
+        pcb.save(output_path)
+        reloaded = PCB.load(str(output_path))
+
+        # Find R1 and check position
+        for child in reloaded._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            ref_value = None
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    ref_value = prop.get_string(1)
+                    break
+            if not ref_value:
+                for fp_text in child.find_all("fp_text"):
+                    if fp_text.get_string(0) == "reference":
+                        ref_value = fp_text.get_string(1)
+                        break
+
+            if ref_value == "R1":
+                at_node = child.find("at")
+                # Board origin is (48.5, 45)
+                # Board-relative (100, 60) -> sheet-absolute (148.5, 105)
+                assert at_node.get_float(0) == pytest.approx(148.5)
+                assert at_node.get_float(1) == pytest.approx(105.0)
+                break
+        else:
+            pytest.fail("Footprint R1 not found")

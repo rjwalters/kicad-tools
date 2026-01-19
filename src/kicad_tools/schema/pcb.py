@@ -884,7 +884,9 @@ class PCB:
         self._graphics: list[BoardGraphic] = []
         self._setup: Setup | None = None
         self._title_block: dict[str, str] = {}
+        self._board_origin: tuple[float, float] = (0.0, 0.0)
         self._parse()
+        self._detect_board_origin()
 
     @classmethod
     def load(cls, path: str | Path) -> PCB:
@@ -1275,6 +1277,35 @@ class PCB:
             value = child.get_string(0) or ""
             self._title_block[child.tag] = value
 
+    def _detect_board_origin(self) -> None:
+        """Detect board origin from Edge.Cuts graphics.
+
+        For PCBs created with PCB.create(center=True), the board outline
+        (gr_rect on Edge.Cuts) starts at an offset from (0, 0). This method
+        detects that offset so footprint positions can be specified relative
+        to the board corner.
+
+        Sets self._board_origin to the start position of the first gr_rect
+        found on Edge.Cuts, or (0, 0) if none found.
+        """
+        # Look for gr_rect on Edge.Cuts layer - this is how PCB.create() makes outlines
+        for graphic in self._graphics:
+            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
+                self._board_origin = graphic.start
+                return
+
+        # Fallback: check for gr_line forming a rectangle on Edge.Cuts
+        # Find the minimum x, y coordinates from all Edge.Cuts lines
+        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
+        if edge_lines:
+            min_x = min(min(line.start[0], line.end[0]) for line in edge_lines)
+            min_y = min(min(line.start[1], line.end[1]) for line in edge_lines)
+            self._board_origin = (min_x, min_y)
+            return
+
+        # No board outline found, use (0, 0)
+        self._board_origin = (0.0, 0.0)
+
     # Public accessors
 
     @property
@@ -1291,6 +1322,26 @@ class PCB:
     def date(self) -> str:
         """Board date."""
         return self._title_block.get("date", "")
+
+    @property
+    def board_origin(self) -> tuple[float, float]:
+        """Board origin offset from drawing sheet origin.
+
+        When a PCB is created with center=True (the default), the board outline
+        is placed at an offset from (0, 0) to center it on the drawing sheet.
+        This property returns that offset.
+
+        Footprint positions specified via update_footprint_position() and
+        add_footprint() are relative to this board origin, so users can specify
+        positions relative to the board corner rather than the sheet origin.
+
+        Returns:
+            Tuple (x, y) of the board origin in mm.
+            For a centered board, this is typically ((paper_width - board_width) / 2,
+            (paper_height - board_height) / 2).
+            For a non-centered board or loaded PCB without detectable origin, (0, 0).
+        """
+        return self._board_origin
 
     @property
     def layers(self) -> dict[int, Layer]:
@@ -1585,10 +1636,16 @@ class PCB:
         """
         Update a footprint's position in the underlying S-expression.
 
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
         Args:
             reference: Reference designator (e.g., "U1")
-            x: New X position in mm
-            y: New Y position in mm
+            x: New X position in mm, relative to board origin
+            y: New Y position in mm, relative to board origin
             rotation: New rotation in degrees (optional)
 
         Returns:
@@ -1599,7 +1656,11 @@ class PCB:
         if not fp:
             return False
 
-        # Update the parsed footprint object
+        # Apply board origin offset to convert board-relative to sheet-absolute
+        abs_x = x + self._board_origin[0]
+        abs_y = y + self._board_origin[1]
+
+        # Update the parsed footprint object with board-relative coordinates
         fp.position = (x, y)
         if rotation is not None:
             fp.rotation = rotation
@@ -1628,11 +1689,11 @@ class PCB:
             if ref_value != reference:
                 continue
 
-            # Found the footprint, update its 'at' node
+            # Found the footprint, update its 'at' node with sheet-absolute coords
             at_node = child.find("at")
             if at_node:
-                at_node.set_value(0, x)
-                at_node.set_value(1, y)
+                at_node.set_value(0, abs_x)
+                at_node.set_value(1, abs_y)
                 if rotation is not None:
                     # Handle cases where rotation may or may not exist
                     if len(at_node.children) >= 3:
@@ -1943,9 +2004,8 @@ class PCB:
             # Update property nodes (KiCad 8+ format)
             for prop in child.find_all("property"):
                 prop_name = prop.get_string(0)
-                if (
-                    (prop_name == "Reference" and "reference" in text_types)
-                    or (prop_name == "Value" and "value" in text_types)
+                if (prop_name == "Reference" and "reference" in text_types) or (
+                    prop_name == "Value" and "value" in text_types
                 ):
                     self._set_text_font(prop, font_size, thickness)
                     count += 1
@@ -2119,13 +2179,15 @@ class PCB:
 
         issues = []
         for violation in results.violations:
-            issues.append({
-                "type": violation.rule_id.replace("silkscreen_", ""),
-                "reference": violation.items[0] if violation.items else "",
-                "description": violation.message,
-                "location": violation.location,
-                "layer": violation.layer,
-            })
+            issues.append(
+                {
+                    "type": violation.rule_id.replace("silkscreen_", ""),
+                    "reference": violation.items[0] if violation.items else "",
+                    "description": violation.message,
+                    "location": violation.location,
+                    "layer": violation.layer,
+                }
+            )
 
         return issues
 
@@ -2145,11 +2207,17 @@ class PCB:
         Loads a footprint from a KiCad footprint file and adds it to the PCB
         at the specified position with the given reference designator.
 
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
         Args:
             kicad_mod_path: Path to the .kicad_mod footprint file
             reference: Reference designator for the component (e.g., "U1", "C1")
-            x: X position in mm
-            y: Y position in mm
+            x: X position in mm, relative to board origin
+            y: Y position in mm, relative to board origin
             rotation: Rotation angle in degrees (default: 0)
             layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
             value: Component value (e.g., "100nF", "10k")
@@ -2205,8 +2273,12 @@ class PCB:
             # Remove existing at node - we'll insert a fresh one in the correct position
             fp_sexp.remove(at_node)
 
-        # Create new at node with position
-        at_sexp = SExp.list("at", x, y)
+        # Apply board origin offset to convert board-relative to sheet-absolute
+        abs_x = x + self._board_origin[0]
+        abs_y = y + self._board_origin[1]
+
+        # Create new at node with position (sheet-absolute coordinates)
+        at_sexp = SExp.list("at", abs_x, abs_y)
         if rotation != 0.0:
             at_sexp.add(rotation)
 
@@ -2278,6 +2350,8 @@ class PCB:
 
         # Parse and add to internal footprints list
         footprint = Footprint.from_sexp(fp_sexp)
+        # Store board-relative position in the footprint object for API consistency
+        footprint.position = (x, y)
         self._footprints.append(footprint)
 
         return footprint
@@ -2298,13 +2372,19 @@ class PCB:
         Loads a footprint from KiCad's standard library installation and adds
         it to the PCB at the specified position.
 
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
         Args:
             library_id: Footprint identifier in "Library:Footprint" format
                        (e.g., "Capacitor_SMD:C_0805_2012Metric")
                        If library is omitted, it will be guessed from the footprint name.
             reference: Reference designator for the component (e.g., "U1", "C1")
-            x: X position in mm
-            y: Y position in mm
+            x: X position in mm, relative to board origin
+            y: Y position in mm, relative to board origin
             rotation: Rotation angle in degrees (default: 0)
             layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
             value: Component value (e.g., "100nF", "10k")
@@ -2434,9 +2514,7 @@ class PCB:
 
         return net
 
-    def get_pad_position(
-        self, reference: str, pad_number: str
-    ) -> tuple[float, float] | None:
+    def get_pad_position(self, reference: str, pad_number: str) -> tuple[float, float] | None:
         """
         Get the absolute board position of a pad on a footprint.
 
@@ -2711,9 +2789,7 @@ class PCB:
                     if pos:
                         if pad.net_number not in nets_pads:
                             nets_pads[pad.net_number] = []
-                        nets_pads[pad.net_number].append(
-                            (fp.reference, pad.number, pos[0], pos[1])
-                        )
+                        nets_pads[pad.net_number].append((fp.reference, pad.number, pos[0], pos[1]))
 
         # Build result with net names
         result = []
@@ -2721,11 +2797,13 @@ class PCB:
             if len(pads) >= 2:  # Only include nets with multiple pads
                 net = self.get_net(net_num)
                 net_name = net.name if net else ""
-                result.append({
-                    "net": net_name,
-                    "net_number": net_num,
-                    "pads": pads,
-                })
+                result.append(
+                    {
+                        "net": net_name,
+                        "net_number": net_num,
+                        "pads": pads,
+                    }
+                )
 
         return result
 
@@ -3052,8 +3130,7 @@ class PCB:
             schematic_path = pcb_path.with_suffix(".kicad_sch")
             if not schematic_path.exists():
                 raise ValueError(
-                    f"Schematic not found at {schematic_path}. "
-                    "Provide schematic_path explicitly."
+                    f"Schematic not found at {schematic_path}. Provide schematic_path explicitly."
                 )
         else:
             schematic_path = Path(schematic_path)
@@ -3303,9 +3380,16 @@ class PCB:
         assigns net connections to their pads. Footprints are placed
         in a grid pattern starting from the placement_start position.
 
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
         Args:
             netlist: A Netlist object containing components and connectivity
-            placement_start: Starting (x, y) position for footprint placement
+            placement_start: Starting (x, y) position for footprint placement,
+                            relative to board origin
             placement_spacing: Spacing between footprints in mm
             columns: Number of footprints per row in the grid
 
@@ -3398,9 +3482,16 @@ class PCB:
         all footprints and assigns net connections. This is the programmatic
         equivalent of KiCad's "Update PCB from Schematic" (F8) operation.
 
+        Coordinates are relative to the board origin. For centered boards
+        (created with center=True, the default), the board origin is offset
+        from the drawing sheet origin. This method automatically applies
+        that offset so users can specify positions relative to the board
+        corner (0, 0 = top-left of board outline).
+
         Args:
             schematic_path: Path to the .kicad_sch schematic file
-            placement_start: Starting (x, y) position for footprint placement
+            placement_start: Starting (x, y) position for footprint placement,
+                            relative to board origin
             placement_spacing: Spacing between footprints in mm
             columns: Number of footprints per row in the grid
 
@@ -3447,12 +3538,18 @@ class PCB:
         Creates a blank PCB with the specified dimensions, then imports
         all footprints and net assignments from the schematic.
 
+        Coordinates are relative to the board origin. For centered boards
+        (the default), the board origin is offset from the drawing sheet origin.
+        This method automatically applies that offset so users can specify
+        positions relative to the board corner (0, 0 = top-left of board outline).
+
         Args:
             schematic_path: Path to the .kicad_sch schematic file
             width: Board width in mm
             height: Board height in mm
             layers: Number of copper layers (2 or 4)
-            placement_start: Starting (x, y) position for footprint placement
+            placement_start: Starting (x, y) position for footprint placement,
+                            relative to board origin
             placement_spacing: Spacing between footprints in mm
             columns: Number of footprints per row in the grid
 
@@ -3558,9 +3655,7 @@ class PCB:
 
             # Check all pairs involving this component
             components = analyzer.get_components()
-            target_comp = next(
-                (c for c in components if c.reference == reference), None
-            )
+            target_comp = next((c for c in components if c.reference == reference), None)
 
             if not target_comp:
                 return CollisionResult.no_collision()
@@ -3832,9 +3927,7 @@ class PCB:
             return False, None, f"Component {reference} not found"
 
         # Check if proposed position is clear
-        result = self.check_placement_collision(
-            reference, x, y, rotation, clearance=min_clearance
-        )
+        result = self.check_placement_collision(reference, x, y, rotation, clearance=min_clearance)
 
         if not result.has_collision:
             # Position is clear, apply it
