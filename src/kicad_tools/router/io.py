@@ -992,8 +992,10 @@ def load_pcb_for_routing(
         fp_y = float(at_match.group(2))
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
-        # Get reference
-        ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', section)
+        # Get reference - try KiCad 9 property format first, then old fp_text format
+        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
+        if not ref_match:
+            ref_match = re.search(r'\(fp_text\s+reference\s+"([^"]+)"', section)
         if not ref_match:
             continue
         ref = ref_match.group(1)
