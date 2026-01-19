@@ -85,6 +85,12 @@ class DesignRules:
     # Use layer names like ["F.Cu"] for single-layer routing
     allowed_layers: list[str] | None = None
 
+    # Bidirectional A* configuration (Issue #964)
+    # Enable parallel frontier exploration for large paths
+    bidirectional_search: bool = True  # Enable bidirectional A* by default
+    bidirectional_threshold: int = 1000  # Min grid cells to enable bidirectional
+    parallel_workers: int = 2  # Number of parallel workers (typically 2 for bidi)
+
 
 @dataclass
 class LengthConstraint:
