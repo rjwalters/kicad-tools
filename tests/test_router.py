@@ -2744,6 +2744,83 @@ class TestLoadPcbForRouting:
         assert pad_u1_1 is not None
         assert pad_u1_1.net == 1  # +5V
 
+    def test_load_pcb_negative_coordinates(self, tmp_path):
+        """Test parsing footprints with negative X/Y coordinates (Issue #942).
+
+        When PCBs have non-standard origins or footprints placed outside the
+        board area, footprint positions can be negative. The parser must handle
+        this correctly.
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (gr_rect (start 0 0) (end 50 40) (layer "Edge.Cuts"))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "SIG")
+  (footprint "Resistor:R_0805"
+    (layer "F.Cu")
+    (at -10 20)
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))
+    (pad 1 smd rect (at -1 0) (size 1.2 1.0) (layers "F.Cu") (net 1 "VCC"))
+    (pad 2 smd rect (at 1 0) (size 1.2 1.0) (layers "F.Cu") (net 2 "GND"))
+  )
+  (footprint "Resistor:R_0805"
+    (layer "F.Cu")
+    (at 25 -15)
+    (fp_text reference "R2" (at 0 -1.5) (layer "F.SilkS"))
+    (pad 1 smd rect (at -1 0) (size 1.2 1.0) (layers "F.Cu") (net 2 "GND"))
+    (pad 2 smd rect (at 1 0) (size 1.2 1.0) (layers "F.Cu") (net 3 "SIG"))
+  )
+  (footprint "Resistor:R_0805"
+    (layer "F.Cu")
+    (at -5 -8 45)
+    (fp_text reference "R3" (at 0 -1.5) (layer "F.SilkS"))
+    (pad 1 smd rect (at -1 0) (size 1.2 1.0) (layers "F.Cu") (net 1 "VCC"))
+    (pad 2 smd rect (at 1 0) (size 1.2 1.0) (layers "F.Cu") (net 3 "SIG"))
+  )
+)
+"""
+        pcb_file = tmp_path / "negative_coords.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        router, net_map = load_pcb_for_routing(str(pcb_file))
+
+        # Should have found all 3 nets
+        assert "VCC" in net_map
+        assert "GND" in net_map
+        assert "SIG" in net_map
+
+        # Should have found all 6 pads (2 from each of R1, R2, R3)
+        assert len(router.pads) == 6, f"Expected 6 pads, got {len(router.pads)}"
+
+        # Check all components were parsed
+        pad_refs = {ref for ref, _ in router.pads.keys()}
+        assert "R1" in pad_refs, "R1 at negative X position not parsed"
+        assert "R2" in pad_refs, "R2 at negative Y position not parsed"
+        assert "R3" in pad_refs, "R3 at negative X,Y with rotation not parsed"
+
+        # Verify pad positions for R1 (at -10, 20)
+        r1_pad1 = router.pads.get(("R1", "1"))
+        r1_pad2 = router.pads.get(("R1", "2"))
+        assert r1_pad1 is not None
+        assert r1_pad2 is not None
+        # R1 pad 1 should be at (-10-1, 20) = (-11, 20)
+        assert abs(r1_pad1.x - (-11)) < 0.01
+        assert abs(r1_pad1.y - 20) < 0.01
+        # R1 pad 2 should be at (-10+1, 20) = (-9, 20)
+        assert abs(r1_pad2.x - (-9)) < 0.01
+        assert abs(r1_pad2.y - 20) < 0.01
+
+        # Verify nets were assigned correctly
+        assert r1_pad1.net == net_map["VCC"]
+        assert r1_pad2.net == net_map["GND"]
+
 
 # =============================================================================
 # DRC Compliance Tests (Issue #267 - Router DRC Compliance)
