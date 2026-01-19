@@ -630,34 +630,34 @@ class Autorouter:
             failure_cause = analysis.root_cause
 
             # Check for pad accessibility issues (pad not on grid)
+            # Use tight threshold (resolution/10) to detect even slightly off-grid pads
+            # that can cause routing failures when snapped to blocked grid points.
+            # Previously resolution/2 missed cases where pads were "slightly" off-grid
+            # but still caused BLOCKED_BY_COMPONENT errors after snapping.
             src_gx, src_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
             tgt_gx, tgt_gy = self.grid.world_to_grid(target_pad.x, target_pad.y)
             src_world = self.grid.grid_to_world(src_gx, src_gy)
             tgt_world = self.grid.grid_to_world(tgt_gx, tgt_gy)
 
-            # Check if pads are far from grid points (> 1/2 grid resolution)
             src_dist = (
                 (source_pad.x - src_world[0]) ** 2 + (source_pad.y - src_world[1]) ** 2
             ) ** 0.5
             tgt_dist = (
                 (target_pad.x - tgt_world[0]) ** 2 + (target_pad.y - tgt_world[1]) ** 2
             ) ** 0.5
-            grid_threshold = self.grid.resolution / 2
+            # Use tighter threshold to catch pads that are "slightly" off-grid
+            grid_threshold = self.grid.resolution / 10
 
-            if src_dist > grid_threshold or tgt_dist > grid_threshold:
+            # Collect all off-grid pads to report them together
+            off_grid_pads: list[str] = []
+            if src_dist > grid_threshold:
+                off_grid_pads.append(f"{source_pad.ref}.{source_pad.pin} off by {src_dist:.3f}mm")
+            if tgt_dist > grid_threshold:
+                off_grid_pads.append(f"{target_pad.ref}.{target_pad.pin} off by {tgt_dist:.3f}mm")
+
+            if off_grid_pads:
                 failure_cause = FailureCause.PIN_ACCESS
-                if src_dist > grid_threshold:
-                    reason = (
-                        f"PAD_INACCESSIBLE: {source_pad.ref}.{source_pad.pin} "
-                        f"at ({source_pad.x:.2f}, {source_pad.y:.2f}) not on "
-                        f"routing grid ({self.grid.resolution}mm)"
-                    )
-                else:
-                    reason = (
-                        f"PAD_INACCESSIBLE: {target_pad.ref}.{target_pad.pin} "
-                        f"at ({target_pad.x:.2f}, {target_pad.y:.2f}) not on "
-                        f"routing grid ({self.grid.resolution}mm)"
-                    )
+                reason = f"PADS_OFF_GRID: {', '.join(off_grid_pads)}"
             elif failure_cause == FailureCause.BLOCKED_PATH:
                 if blocking_components:
                     reason = (
