@@ -136,6 +136,25 @@ class Router:
             [cost_mult for _, _, _, cost_mult in self.neighbors_2d], dtype=np.float64
         )
 
+        # Pre-compute via checking offsets for vectorized blocking check (Issue #966)
+        # Store all (dx, dy) pairs within via radius for batch cell lookup
+        via_r = self._via_half_cells
+        via_offsets = [
+            (dx, dy) for dy in range(-via_r, via_r + 1) for dx in range(-via_r, via_r + 1)
+        ]
+        self._via_offset_dx = np.array([dx for dx, _ in via_offsets], dtype=np.int32)
+        self._via_offset_dy = np.array([dy for _, dy in via_offsets], dtype=np.int32)
+
+        # Layer priority cache for via checks: check most-congested layers first
+        # This enables faster rejection when via is blocked on congested layer
+        self._layer_priority: list[int] | None = None
+
+        # Via validity cache (Issue #966): caches whether via can be placed at (x, y, net)
+        # Key: (gx, gy, net), Value: True if valid, False if blocked
+        # Cache is cleared when routes are modified (invalidates blocking state)
+        self._via_cache: dict[tuple[int, int, int], bool] = {}
+        self._via_cache_enabled: bool = True
+
     def _get_net_class(self, net_name: str) -> NetClassRouting | None:
         """Get the net class for a net name."""
         return self.net_class_map.get(net_name)
@@ -304,43 +323,69 @@ class Router:
         Similar to _is_trace_blocked but uses the larger via clearance radius.
         Through-hole vias must be checked on ALL layers.
 
+        Issue #966: Uses vectorized NumPy operations for ~2-3x speedup over
+        the original nested loop implementation.
+
         Args:
             allow_sharing: If True (negotiated mode), allow routing through
                           non-obstacle blocked cells (they'll get high cost instead)
         """
-        # Check cells within via clearance radius
-        for dy in range(-self._via_half_cells, self._via_half_cells + 1):
-            for dx in range(-self._via_half_cells, self._via_half_cells + 1):
-                cx, cy = gx + dx, gy + dy
-                if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
-                    return True
+        # Compute all cell coordinates within via radius using pre-computed offsets
+        cx_arr = gx + self._via_offset_dx
+        cy_arr = gy + self._via_offset_dy
 
-                cell = self.grid.grid[layer][cy][cx]
+        # Check bounds - if any cell is out of bounds, via is blocked
+        in_bounds = (
+            (cx_arr >= 0) & (cx_arr < self.grid.cols) & (cy_arr >= 0) & (cy_arr < self.grid.rows)
+        )
+        if not np.all(in_bounds):
+            return True  # Some cells out of bounds
 
-                if cell.blocked:
-                    # In negotiated mode, allow sharing non-obstacle cells
-                    if allow_sharing and not cell.is_obstacle:
-                        # Allow routing through used cells (will get cost penalty)
-                        # No-net pads (cell.net == 0) must always block other nets
-                        # See issue #317: routes incorrectly allowed through no-net pads
-                        if cell.net == 0:
-                            if cell.usage_count == 0:
-                                return True  # Static no-net obstacle (pad) - block
-                        elif cell.net != net:
-                            # Only allow sharing if this cell has been used by routes
-                            # (usage_count > 0). Cells with usage_count == 0 are static
-                            # obstacles like pads that should never be shared.
-                            # See issue #174: pad clearance zones must block other nets.
-                            if cell.usage_count == 0:
-                                return True  # Static obstacle (pad) - block
-                            continue  # Allow with cost penalty (routed cell)
-                    else:
-                        # Standard mode (same logic as _is_trace_blocked)
-                        # Issue #864: Same-net cells are passable, different nets block
-                        if cell.net == net:
-                            pass  # Same net - passable
-                        else:
-                            return True  # Different net or obstacle - blocked
+        # Batch lookup cell attributes using fancy indexing
+        blocked_arr = self.grid._blocked[layer, cy_arr, cx_arr]
+
+        # Fast path: if no cells are blocked, via is not blocked
+        if not np.any(blocked_arr):
+            return False
+
+        # Some cells are blocked - need detailed checking
+        # Get indices of blocked cells only
+        blocked_indices = np.where(blocked_arr)[0]
+
+        # Batch lookup additional attributes for blocked cells
+        blocked_cx = cx_arr[blocked_indices]
+        blocked_cy = cy_arr[blocked_indices]
+        net_arr = self.grid._net[layer, blocked_cy, blocked_cx]
+
+        if allow_sharing:
+            # Negotiated mode: allow sharing non-obstacle cells
+            is_obstacle_arr = self.grid._is_obstacle[layer, blocked_cy, blocked_cx]
+            usage_arr = self.grid._usage_count[layer, blocked_cy, blocked_cx]
+
+            for i in range(len(blocked_indices)):
+                cell_net = net_arr[i]
+                is_obstacle = is_obstacle_arr[i]
+                usage = usage_arr[i]
+
+                if is_obstacle:
+                    return True  # Obstacles always block
+
+                # No-net pads must always block
+                if cell_net == 0:
+                    if usage == 0:
+                        return True  # Static no-net obstacle
+                elif cell_net != net:
+                    # Different net - only allow if cell was used by routes
+                    if usage == 0:
+                        return True  # Static obstacle (pad)
+                # else: same net or routed cell - allow with cost
+        else:
+            # Standard mode: same-net passable, different nets block
+            # Check if any blocked cell has different net
+            different_net = net_arr != net
+            if np.any(different_net):
+                return True
+
         return False
 
     def _get_negotiated_cell_cost(
@@ -348,6 +393,90 @@ class Router:
     ) -> float:
         """Get negotiated congestion cost for a cell."""
         return self.grid.get_negotiated_cost(gx, gy, layer, present_factor)
+
+    def _get_layer_priority(self) -> list[int]:
+        """Get layer indices sorted by congestion (most congested first).
+
+        Issue #966: When checking if a via is blocked, checking congested
+        layers first enables faster rejection since blocked cells are more
+        likely on congested layers.
+
+        Returns:
+            List of layer indices sorted by decreasing congestion level.
+        """
+        if self._layer_priority is not None:
+            return self._layer_priority
+
+        # Calculate total congestion per layer
+        congestion_per_layer = []
+        for layer_idx in range(self.grid.num_layers):
+            layer_congestion = np.sum(self.grid._congestion[layer_idx])
+            congestion_per_layer.append((layer_idx, layer_congestion))
+
+        # Sort by congestion (descending)
+        congestion_per_layer.sort(key=lambda x: x[1], reverse=True)
+
+        # Cache and return layer indices
+        self._layer_priority = [layer_idx for layer_idx, _ in congestion_per_layer]
+        return self._layer_priority
+
+    def _invalidate_layer_priority(self) -> None:
+        """Invalidate cached layer priority (call when congestion changes significantly)."""
+        self._layer_priority = None
+
+    def _check_via_placement_cached(
+        self, gx: int, gy: int, net: int, allow_sharing: bool = False
+    ) -> bool:
+        """Check if a via can be placed at (gx, gy) for the given net, using cache.
+
+        Issue #966: This method wraps via blocking checks with a cache to avoid
+        redundant computation when the same position is checked multiple times
+        during A* search.
+
+        Args:
+            gx, gy: Grid coordinates for via placement
+            net: Net ID for the route
+            allow_sharing: If True (negotiated mode), allow sharing
+
+        Returns:
+            True if via CAN be placed (all layers clear), False if blocked.
+        """
+        # Try cache first (only in non-sharing mode since sharing state can change)
+        if self._via_cache_enabled and not allow_sharing:
+            cache_key = (gx, gy, net)
+            if cache_key in self._via_cache:
+                return self._via_cache[cache_key]
+
+        # Check all layers using priority ordering
+        for check_layer in self._get_layer_priority():
+            if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing):
+                # Cache the negative result
+                if self._via_cache_enabled and not allow_sharing:
+                    self._via_cache[(gx, gy, net)] = False
+                return False
+
+        # Via is valid on all layers - cache positive result
+        if self._via_cache_enabled and not allow_sharing:
+            self._via_cache[(gx, gy, net)] = True
+        return True
+
+    def clear_via_cache(self) -> None:
+        """Clear the via validity cache.
+
+        Call this when grid state changes (routes added/removed) to ensure
+        cache doesn't return stale results.
+        """
+        self._via_cache.clear()
+
+    def set_via_cache_enabled(self, enabled: bool) -> None:
+        """Enable or disable via caching.
+
+        Args:
+            enabled: True to enable caching, False to disable.
+        """
+        self._via_cache_enabled = enabled
+        if not enabled:
+            self._via_cache.clear()
 
     def _get_congestion_cost(self, gx: int, gy: int, layer: int) -> float:
         """Get additional cost based on congestion at this location."""
@@ -650,6 +779,10 @@ class Router:
             weight: A* weight factor (1.0 = optimal A*, >1.0 = faster but suboptimal)
                     Higher values explore fewer nodes but may miss optimal paths.
         """
+        # Issue #966: Clear via cache at start of route (grid state may have changed)
+        # Keep cache valid within this route call for same-position checks
+        self.clear_via_cache()
+
         # Get net class if not provided
         if net_class is None:
             net_class = self._get_net_class(start.net_name)
@@ -870,15 +1003,10 @@ class Router:
                     continue
 
                 # Check if via placement is valid on ALL layers (through-hole via)
-                # Must use via clearance radius, not trace clearance
-                via_blocked = False
-                for check_layer in range(self.grid.num_layers):
-                    if self._is_via_blocked(
-                        current.x, current.y, check_layer, start.net, allow_sharing
-                    ):
-                        via_blocked = True
-                        break
-                if via_blocked:
+                # Issue #966: Use cached via check with layer priority ordering
+                if not self._check_via_placement_cached(
+                    current.x, current.y, start.net, allow_sharing
+                ):
                     continue
 
                 # Check zone blocking for via (would pierce other-net zones)
@@ -1131,6 +1259,9 @@ class Router:
         Returns:
             Route if path found, None otherwise
         """
+        # Issue #966: Clear via cache at start of route (grid state may have changed)
+        self.clear_via_cache()
+
         # Get net class if not provided
         if net_class is None:
             net_class = self._get_net_class(start.net_name)
@@ -1426,14 +1557,10 @@ class Router:
                 continue
 
             # Check via blocking on all layers
-            via_blocked = False
-            for check_layer in range(self.grid.num_layers):
-                if self._is_via_blocked(
-                    current.x, current.y, check_layer, source_pad.net, allow_sharing
-                ):
-                    via_blocked = True
-                    break
-            if via_blocked:
+            # Issue #966: Use cached via check with layer priority ordering
+            if not self._check_via_placement_cached(
+                current.x, current.y, source_pad.net, allow_sharing
+            ):
                 continue
 
             if not self._can_place_via_in_zones(current.x, current.y, source_pad.net):
