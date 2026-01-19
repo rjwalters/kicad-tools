@@ -17,6 +17,18 @@ from dataclasses import dataclass, field
 from .layers import Layer
 
 
+def _fmt(val: float) -> int | float:
+    """Format float with 4 decimal precision for PCB output.
+
+    Rounds to 4 decimal places (0.1 micron precision in mm).
+    Returns int if no fractional part for cleaner output.
+    """
+    rounded = round(val, 4)
+    if rounded == int(rounded):
+        return int(rounded)
+    return rounded
+
+
 @dataclass
 class Point:
     """A point in 3D routing space (x, y, layer)."""
@@ -98,8 +110,8 @@ class Via:
         layer_end = self.layers[1].kicad_name
         return f"""(via
 \t\t(at {self.x:.4f} {self.y:.4f})
-\t\t(size {self.diameter})
-\t\t(drill {self.drill})
+\t\t(size {_fmt(self.diameter)})
+\t\t(drill {_fmt(self.drill)})
 \t\t(layers "{layer_start}" "{layer_end}")
 \t\t(net {self.net})
 \t\t(uuid "{uuid.uuid4()}")
@@ -124,7 +136,7 @@ class Segment:
         return f"""(segment
 \t\t(start {self.x1:.4f} {self.y1:.4f})
 \t\t(end {self.x2:.4f} {self.y2:.4f})
-\t\t(width {self.width})
+\t\t(width {_fmt(self.width)})
 \t\t(layer "{self.layer.kicad_name}")
 \t\t(net {self.net})
 \t\t(uuid "{uuid.uuid4()}")
