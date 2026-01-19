@@ -243,6 +243,25 @@ ldo = LDOBlock(sch, ref="U1",
 - [ ] Signal integrity preview (crosstalk, impedance)
 - [ ] Integration hooks for external simulators
 
+**SPICE Simulation Helpers** *(under consideration)*
+- [ ] Netlist export compatible with ngspice/LTspice/Xyce
+- [ ] Simulation orchestration (run ngspice via subprocess, capture results)
+- [ ] Structured result parsing (signals, measurements as Python objects)
+- [ ] High-level validation queries:
+  ```python
+  # Example API shape (exploratory)
+  from kicad_tools.simulation import simulate
+
+  result = simulate.transient(schematic, duration="10ms")
+  stability = simulate.check_stability(schematic, node="VOUT")
+  bandwidth = simulate.measure_bandwidth(schematic, input="VIN", output="VOUT")
+  ```
+- [ ] Common analysis types: DC operating point, AC sweep, transient
+- [ ] SPICE model validation (check components have valid models)
+
+*Goal: Help agents verify designs electrically without building a full simulator.
+Leverage KiCad's ngspice integration and kicad-cli where possible.*
+
 ---
 
 ## Non-Goals
@@ -251,7 +270,7 @@ These are explicitly **not** planned:
 
 - **Schematic capture GUI** - Use KiCad for interactive design
 - **3D rendering** - Use KiCad's 3D viewer
-- **SPICE simulation** - Use dedicated simulators
+- **Full SPICE simulation engine** - Use ngspice/LTspice; we provide orchestration helpers
 - **Gerber generation** - Use kicad-cli (battle-tested, reliable)
 - **Replacing KiCad** - We complement it, not replace it
 
