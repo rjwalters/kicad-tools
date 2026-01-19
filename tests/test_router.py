@@ -4417,3 +4417,147 @@ class TestLoadPcbEdgeClearance:
         layer_idx = router.grid.get_routable_indices()[0]
         gx, gy = router.grid.world_to_grid(0.5, 0.5)
         assert router.grid.grid[layer_idx][gy][gx].blocked is False
+
+
+class TestLoadPcbLayerStackAutoDetection:
+    """Tests for layer stack auto-detection in load_pcb_for_routing (Issue #949)."""
+
+    def test_auto_detects_2_layer_board(self, tmp_path):
+        """Test that 2-layer board is auto-detected from PCB layers section."""
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+)""")
+
+        router, _ = load_pcb_for_routing(str(pcb_file), validate_drc=False)
+
+        # Should auto-detect 2-layer stack
+        assert router.grid.layer_stack.num_layers == 2
+        assert "2-Layer" in router.grid.layer_stack.name
+
+        # Should have correct layer mapping for F.Cu and B.Cu
+        # F.Cu (Layer enum value 0) -> grid index 0
+        # B.Cu (Layer enum value 5) -> grid index 1
+        assert router.grid.layer_to_index(Layer.F_CU.value) == 0
+        assert router.grid.layer_to_index(Layer.B_CU.value) == 1
+
+    def test_auto_detects_4_layer_board(self, tmp_path):
+        """Test that 4-layer board with zones is auto-detected."""
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (zone (net 1) (net_name "GND") (layer "In1.Cu"))
+  (zone (net 2) (net_name "+3.3V") (layer "In2.Cu"))
+)""")
+
+        router, _ = load_pcb_for_routing(str(pcb_file), validate_drc=False)
+
+        # Should auto-detect 4-layer stack
+        assert router.grid.layer_stack.num_layers == 4
+        assert "4-Layer" in router.grid.layer_stack.name
+
+        # Inner layers should be detected as planes
+        assert len(router.grid.layer_stack.plane_layers) == 2
+
+    def test_explicit_layer_stack_overrides_auto_detection(self, tmp_path):
+        """Test that explicit layer_stack parameter overrides auto-detection."""
+        from kicad_tools.router.io import load_pcb_for_routing
+        from kicad_tools.router.layers import LayerStack
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        # PCB has 4 layers defined
+        pcb_file.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+)""")
+
+        # Explicitly request 2-layer stack
+        router, _ = load_pcb_for_routing(
+            str(pcb_file),
+            layer_stack=LayerStack.two_layer(),
+            validate_drc=False,
+        )
+
+        # Should use the explicit 2-layer stack, not auto-detect
+        assert router.grid.layer_stack.num_layers == 2
+
+    def test_layer_mapping_prevents_invalid_layer_error(self, tmp_path):
+        """Test that auto-detection prevents 'Layer value not in stack' errors.
+
+        This is the core fix for Issue #949: When loading a 4-layer PCB without
+        specifying a layer stack, pads on inner layers would have Layer.IN1_CU
+        (value 1) which doesn't exist in the default 2-layer mapping [0, 5].
+
+        With auto-detection, the correct 4-layer mapping is used.
+        """
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        # Create a 4-layer PCB with pads on inner layers
+        pcb_file.write_text("""(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "NET1")
+  (gr_rect (start 100 100) (end 150 140) (layer "Edge.Cuts"))
+  (footprint "Test:R0402"
+    (at 120 120)
+    (property "Reference" "R1")
+    (pad 1 smd rect
+      (at 0 0)
+      (size 0.5 0.5)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "NET1")
+    )
+    (pad 2 smd rect
+      (at 1 0)
+      (size 0.5 0.5)
+      (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "NET1")
+    )
+  )
+)""")
+
+        # This should NOT raise "Layer value not in stack" error
+        # because layer stack is auto-detected
+        router, net_map = load_pcb_for_routing(str(pcb_file), validate_drc=False)
+
+        # Verify pads were loaded successfully
+        assert len(router.pads) == 2
+        assert "NET1" in net_map

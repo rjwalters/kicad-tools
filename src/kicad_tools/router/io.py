@@ -906,7 +906,9 @@ def load_pcb_for_routing(
                         applied (default for backward compatibility).
         layer_stack: Layer stack configuration for routing. Controls how many
                      layers are available for routing and which layers are
-                     planes vs signal layers. If None, defaults to 2-layer.
+                     planes vs signal layers. If None, auto-detects from the
+                     PCB file's layer definitions. This ensures pad layers
+                     match the available routing layers.
                      Use LayerStack.four_layer_sig_gnd_pwr_sig() for 4-layer
                      boards with GND/PWR planes, which routes signals on outer
                      layers (F.Cu, B.Cu) with vias for layer transitions.
@@ -1136,6 +1138,12 @@ def load_pcb_for_routing(
             warn=True,
             strict=strict_drc,
         )
+
+    # Auto-detect layer stack from PCB if not provided (Issue #949)
+    # This ensures pad layers match the available routing layers
+    if layer_stack is None:
+        layer_stack = detect_layer_stack(pcb_text)
+        logger.debug(f"Auto-detected layer stack: {layer_stack.name} ({layer_stack.num_layers} layers)")
 
     router = Autorouter(
         width=board_width,
