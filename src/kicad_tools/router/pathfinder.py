@@ -14,6 +14,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
+
 from .grid import RoutingGrid
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
@@ -124,6 +126,14 @@ class Router:
                     6,
                 )
             ),
+        )
+
+        # Pre-compute neighbor arrays for batch cost computation (Issue #963)
+        # Store offsets and cost multipliers as NumPy arrays for vectorized operations
+        self._neighbor_dx = np.array([dx for dx, _, _, _ in self.neighbors_2d], dtype=np.int32)
+        self._neighbor_dy = np.array([dy for _, dy, _, _ in self.neighbors_2d], dtype=np.int32)
+        self._neighbor_cost_mult = np.array(
+            [cost_mult for _, _, _, cost_mult in self.neighbors_2d], dtype=np.float64
         )
 
     def _get_net_class(self, net_name: str) -> NetClassRouting | None:
@@ -347,6 +357,137 @@ class Router:
             excess = congestion - self.rules.congestion_threshold
             return self.rules.cost_congestion * (1.0 + excess * 2.0)
         return 0.0
+
+    def _batch_congestion_costs(self, current_x: int, current_y: int, layer: int) -> np.ndarray:
+        """Batch compute congestion costs for all 2D neighbors using vectorized NumPy.
+
+        Issue #963: Pre-compute congestion costs for all neighbors in a single
+        batch operation to reduce per-neighbor function call overhead.
+
+        Args:
+            current_x: Current grid x coordinate
+            current_y: Current grid y coordinate
+            layer: Current layer index
+
+        Returns:
+            Array of congestion costs indexed by neighbor offset index.
+            Out-of-bounds neighbors get cost 0 (will be filtered anyway).
+        """
+        # Compute neighbor coordinates
+        nx_arr = current_x + self._neighbor_dx
+        ny_arr = current_y + self._neighbor_dy
+
+        # Bounds mask - identify valid neighbors
+        valid = (
+            (nx_arr >= 0) & (nx_arr < self.grid.cols) & (ny_arr >= 0) & (ny_arr < self.grid.rows)
+        )
+
+        # Convert to congestion grid coordinates
+        congestion_size = self.grid.congestion_size
+        cx_arr = np.minimum(nx_arr // congestion_size, self.grid.congestion_cols - 1)
+        cy_arr = np.minimum(ny_arr // congestion_size, self.grid.congestion_rows - 1)
+
+        # Initialize costs array
+        costs = np.zeros(len(self.neighbors_2d), dtype=np.float64)
+
+        # Get valid indices
+        valid_indices = np.where(valid)[0]
+        if len(valid_indices) == 0:
+            return costs
+
+        # Batch lookup congestion counts using fancy indexing
+        max_cells = congestion_size * congestion_size
+        congestion_counts = self.grid._congestion[
+            layer, cy_arr[valid_indices], cx_arr[valid_indices]
+        ]
+        congestion_levels = np.minimum(1.0, congestion_counts / max_cells)
+
+        # Compute costs where congestion exceeds threshold
+        threshold = self.rules.congestion_threshold
+        exceeds = congestion_levels > threshold
+        excess = np.maximum(0, congestion_levels - threshold)
+        valid_costs = np.where(exceeds, self.rules.cost_congestion * (1.0 + excess * 2.0), 0.0)
+        costs[valid_indices] = valid_costs
+
+        return costs
+
+    def _batch_turn_costs(self, current_direction: tuple[int, int]) -> np.ndarray:
+        """Batch compute turn costs for all 2D neighbors using vectorized NumPy.
+
+        Issue #963: Pre-compute turn costs for all neighbors in a single
+        batch operation.
+
+        Args:
+            current_direction: Current direction as (dx, dy) tuple
+
+        Returns:
+            Array of turn costs indexed by neighbor offset index.
+        """
+        if current_direction == (0, 0):
+            # No current direction - no turn penalty
+            return np.zeros(len(self.neighbors_2d), dtype=np.float64)
+
+        # Check which neighbors match the current direction
+        dx_match = self._neighbor_dx == current_direction[0]
+        dy_match = self._neighbor_dy == current_direction[1]
+        matches = dx_match & dy_match
+
+        # Turn cost where direction doesn't match
+        return np.where(matches, 0.0, self.rules.cost_turn)
+
+    def _batch_negotiated_costs(
+        self,
+        current_x: int,
+        current_y: int,
+        layer: int,
+        present_cost_factor: float,
+        skip_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Batch compute negotiated costs for all 2D neighbors using vectorized NumPy.
+
+        Issue #963: Pre-compute negotiated costs for all neighbors in a single
+        batch operation.
+
+        Args:
+            current_x: Current grid x coordinate
+            current_y: Current grid y coordinate
+            layer: Current layer index
+            present_cost_factor: Multiplier for current sharing penalty
+            skip_mask: Boolean array indicating neighbors to skip (e.g., near pads)
+
+        Returns:
+            Array of negotiated costs indexed by neighbor offset index.
+        """
+        # Compute neighbor coordinates
+        nx_arr = current_x + self._neighbor_dx
+        ny_arr = current_y + self._neighbor_dy
+
+        # Bounds mask combined with skip mask
+        valid = (
+            (nx_arr >= 0)
+            & (nx_arr < self.grid.cols)
+            & (ny_arr >= 0)
+            & (ny_arr < self.grid.rows)
+            & ~skip_mask
+        )
+
+        # Initialize costs array
+        costs = np.zeros(len(self.neighbors_2d), dtype=np.float64)
+
+        # Get valid indices
+        valid_indices = np.where(valid)[0]
+        if len(valid_indices) == 0:
+            return costs
+
+        # Batch lookup usage counts and history costs using fancy indexing
+        usage_counts = self.grid._usage_count[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
+        history_costs = self.grid._history_cost[layer, ny_arr[valid_indices], nx_arr[valid_indices]]
+
+        # Compute present cost + history cost
+        present_costs = present_cost_factor * usage_counts
+        costs[valid_indices] = present_costs + history_costs
+
+        return costs
 
     def _is_zone_cell(self, gx: int, gy: int, layer: int) -> bool:
         """Check if a cell is part of a zone (copper pour)."""
@@ -600,8 +741,16 @@ class Router:
                 # The node stays in closed_set, preventing re-exploration on this layer
                 continue
 
+            # Batch pre-compute costs for all neighbors (Issue #963)
+            # This reduces per-neighbor function call overhead by computing all costs
+            # in vectorized NumPy operations before the neighbor loop
+            batch_congestion_costs = self._batch_congestion_costs(
+                current.x, current.y, current.layer
+            )
+            batch_turn_costs = self._batch_turn_costs(current.direction)
+
             # Explore neighbors
-            for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
+            for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
 
@@ -670,15 +819,12 @@ class Router:
                 if neighbor_key in closed_set:
                     continue
 
-                # Calculate cost - include turn penalty if direction changes
+                # Calculate cost - use batch pre-computed values (Issue #963)
                 new_direction = (dx, dy)
-                turn_cost = 0.0
-                if current.direction != (0, 0) and current.direction != new_direction:
-                    # Direction changed - add turn penalty
-                    turn_cost = self.rules.cost_turn
 
-                # Add congestion cost to actual path cost (g_score)
-                congestion_cost = self._get_congestion_cost(nx, ny, nlayer)
+                # Use batch-computed turn and congestion costs
+                turn_cost = batch_turn_costs[neighbor_idx]
+                congestion_cost = batch_congestion_costs[neighbor_idx]
 
                 # Add negotiated congestion cost if in negotiated mode
                 # Skip for cells adjacent to start/end pads (they're obstacles)
