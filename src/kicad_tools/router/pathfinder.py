@@ -204,49 +204,56 @@ class Router:
         Unlike is_blocked which checks a single cell, this accounts for
         trace width by checking adjacent cells the trace would occupy.
 
+        Uses vectorized NumPy operations for performance (Issue #962).
+        Pre-computed clearance masks enable single-operation blocking checks
+        instead of iterating over (2r+1)² cells per neighbor.
+
         Args:
             allow_sharing: If True (negotiated mode), allow routing through
                           non-obstacle blocked cells (they'll get high cost instead)
         """
-        # Check cells within trace width radius
-        for dy in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
-            for dx in range(-self._trace_half_width_cells, self._trace_half_width_cells + 1):
-                cx, cy = gx + dx, gy + dy
-                if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
-                    return True
+        radius = self._trace_half_width_cells
 
-                cell = self.grid.grid[layer][cy][cx]
+        # Calculate region bounds
+        x1 = gx - radius
+        y1 = gy - radius
+        x2 = gx + radius + 1
+        y2 = gy + radius + 1
 
-                if cell.blocked:
-                    # In negotiated mode, allow sharing non-obstacle cells
-                    if allow_sharing and not cell.is_obstacle:
-                        # Allow routing through used cells (will get cost penalty)
-                        # No-net pads (cell.net == 0) must always block other nets
-                        # See issue #317: routes incorrectly allowed through no-net pads
-                        if cell.net == 0:
-                            if cell.usage_count == 0:
-                                return True  # Static no-net obstacle (pad) - block
-                        elif cell.net != net:
-                            # Only allow sharing if this cell has been used by routes
-                            # (usage_count > 0). Cells with usage_count == 0 are static
-                            # obstacles like pads that should never be shared.
-                            # See issue #174: pad clearance zones must block other nets.
-                            if cell.usage_count == 0:
-                                return True  # Static obstacle (pad) - block
-                            continue  # Allow with cost penalty (routed cell)
-                    else:
-                        # Standard mode: block if different net or obstacle
-                        # Issue #864: Same-net cells are passable (even overlapping clearance)
-                        # but different-net cells and obstacles (net=0 blocked cells) must block.
-                        if cell.net == net:
-                            pass  # Same net - passable (even if blocked from clearance overlap)
-                        else:
-                            # Different net (cell.net != net) - always blocked
-                            # This includes:
-                            # - Other nets' pad areas (cell.net > 0 and != net)
-                            # - Obstacles with net=0 (keepouts, board edges, etc.)
-                            return True
-        return False
+        # Check if region extends outside grid (any out-of-bounds cell blocks)
+        if x1 < 0 or y1 < 0 or x2 > self.grid.cols or y2 > self.grid.rows:
+            return True
+
+        # Extract array slices for the region
+        blocked_region = self.grid._blocked[layer, y1:y2, x1:x2]
+        net_region = self.grid._net[layer, y1:y2, x1:x2]
+
+        if allow_sharing:
+            # Negotiated mode: more complex logic
+            # Block if any cell is:
+            # 1. Blocked AND is_obstacle AND different net
+            # 2. Blocked AND NOT is_obstacle AND different net AND usage_count == 0 (static)
+            obstacle_region = self.grid._is_obstacle[layer, y1:y2, x1:x2]
+            usage_region = self.grid._usage_count[layer, y1:y2, x1:x2]
+
+            # Different net mask (includes net == 0 which are no-net obstacles)
+            different_net = net_region != net
+
+            # Case 1: Blocked obstacles with different net
+            obstacle_blocks = blocked_region & obstacle_region & different_net
+
+            # Case 2: Blocked non-obstacles with different net AND static (usage == 0)
+            static_blocks = (
+                blocked_region & ~obstacle_region & different_net & (usage_region == 0)
+            )
+
+            return bool(np.any(obstacle_blocks | static_blocks))
+        else:
+            # Standard mode: block if any cell is blocked AND has different net
+            # Issue #864: Same-net cells are passable (even overlapping clearance)
+            # but different-net cells and obstacles (net=0 blocked cells) must block.
+            blocked_different_net = blocked_region & (net_region != net)
+            return bool(np.any(blocked_different_net))
 
     def _is_diagonal_corner_blocked(
         self, gx: int, gy: int, dx: int, dy: int, layer: int, net: int, allow_sharing: bool = False
