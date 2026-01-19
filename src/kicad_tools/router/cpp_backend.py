@@ -72,6 +72,9 @@ class CppGrid:
         self.resolution = resolution
         self.origin_x = origin_x
         self.origin_y = origin_y
+        # Initialize layer mappings (identity by default, overridden by from_routing_grid)
+        self._index_to_layer: dict[int, int] = {i: i for i in range(layers)}
+        self._layer_to_index: dict[int, int] = {i: i for i in range(layers)}
 
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
@@ -85,6 +88,10 @@ class CppGrid:
             origin_y=grid.origin_y,
         )
 
+        # Copy layer index mappings for layer conversion
+        cpp_grid._index_to_layer = dict(grid._index_to_layer)
+        cpp_grid._layer_to_index = dict(grid._layer_to_index)
+
         # Copy blocked cells from Python grid to C++ grid
         for layer in range(grid.num_layers):
             for y in range(grid.rows):
@@ -94,6 +101,10 @@ class CppGrid:
                         cpp_grid._impl.mark_blocked(x, y, layer, py_cell.net, py_cell.is_obstacle)
 
         return cpp_grid
+
+    def index_to_layer(self, index: int) -> int:
+        """Convert grid index to Layer enum value."""
+        return self._index_to_layer.get(index, index)
 
     def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
         """Convert world coordinates to grid indices."""
@@ -236,25 +247,30 @@ class CppPathfinder:
         route = Route(net=start.net, net_name=start.net_name)
 
         for cpp_seg in result.segments:
+            # Convert grid index to Layer enum value
+            layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
             seg = Segment(
                 x1=cpp_seg.x1,
                 y1=cpp_seg.y1,
                 x2=cpp_seg.x2,
                 y2=cpp_seg.y2,
                 width=cpp_seg.width,
-                layer=Layer(cpp_seg.layer),
+                layer=Layer(layer_enum_value),
                 net=cpp_seg.net,
                 net_name=start.net_name,
             )
             route.segments.append(seg)
 
         for cpp_via in result.vias:
+            # Convert grid indices to Layer enum values
+            layer_from_value = self._grid.index_to_layer(cpp_via.layer_from)
+            layer_to_value = self._grid.index_to_layer(cpp_via.layer_to)
             via = Via(
                 x=cpp_via.x,
                 y=cpp_via.y,
                 drill=cpp_via.drill,
                 diameter=cpp_via.diameter,
-                layers=(Layer(cpp_via.layer_from), Layer(cpp_via.layer_to)),
+                layers=(Layer(layer_from_value), Layer(layer_to_value)),
                 net=cpp_via.net,
                 net_name=start.net_name,
             )
