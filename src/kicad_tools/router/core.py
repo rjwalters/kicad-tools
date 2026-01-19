@@ -41,6 +41,7 @@ from .failure_analysis import (
 from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
+from .output import format_failed_nets_summary
 from .parallel import ParallelRouter, find_independent_groups
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
 from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
@@ -635,8 +636,12 @@ class Autorouter:
             tgt_world = self.grid.grid_to_world(tgt_gx, tgt_gy)
 
             # Check if pads are far from grid points (> 1/2 grid resolution)
-            src_dist = ((source_pad.x - src_world[0]) ** 2 + (source_pad.y - src_world[1]) ** 2) ** 0.5
-            tgt_dist = ((target_pad.x - tgt_world[0]) ** 2 + (target_pad.y - tgt_world[1]) ** 2) ** 0.5
+            src_dist = (
+                (source_pad.x - src_world[0]) ** 2 + (source_pad.y - src_world[1]) ** 2
+            ) ** 0.5
+            tgt_dist = (
+                (target_pad.x - tgt_world[0]) ** 2 + (target_pad.y - tgt_world[1]) ** 2
+            ) ** 0.5
             grid_threshold = self.grid.resolution / 2
 
             if src_dist > grid_threshold or tgt_dist > grid_threshold:
@@ -655,7 +660,9 @@ class Autorouter:
                     )
             elif failure_cause == FailureCause.BLOCKED_PATH:
                 if blocking_components:
-                    reason = f"BLOCKED_BY_COMPONENT: Path blocked by {', '.join(blocking_components)}"
+                    reason = (
+                        f"BLOCKED_BY_COMPONENT: Path blocked by {', '.join(blocking_components)}"
+                    )
                 else:
                     reason = "BLOCKED_BY_COMPONENT: Path blocked by component keepout"
             elif failure_cause == FailureCause.CONGESTION:
@@ -673,9 +680,7 @@ class Autorouter:
                 # Fallback to basic blocking info
                 if blocking_nets:
                     if len(blocking_nets) == 1:
-                        reason = (
-                            f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
-                        )
+                        reason = f"Blocked by {blocking_components[0] if blocking_components else 'unknown'}"
                     else:
                         reason = f"Blocked by {len(blocking_nets)} nets"
                 else:
@@ -853,6 +858,12 @@ class Autorouter:
         if progress_callback is not None:
             routed_count = len({r.net for r in all_routes})
             progress_callback(1.0, f"Routed {routed_count}/{total_nets} nets", False)
+
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
 
         return all_routes
 
@@ -1444,6 +1455,12 @@ class Autorouter:
         if timed_out:
             print("  ⚠ Stopped due to timeout - returning best partial result")
 
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
+
         if progress_callback is not None:
             status = (
                 "converged"
@@ -1648,6 +1665,12 @@ class Autorouter:
         print(f"  Global routing: {len(corridors)} corridors assigned")
         print(f"  Detailed routing: {successful_nets} nets routed")
         print(f"  Total time: {total_elapsed:.1f}s")
+
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
 
         if progress_callback is not None:
             progress_callback(
@@ -2942,6 +2965,12 @@ class Autorouter:
         print(f"  Total nets routed: {stats['nets_routed']}")
         print(f"  Total segments: {stats['segments']}")
         print(f"  Total vias: {stats['vias']}")
+
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
 
         return all_routes
 
