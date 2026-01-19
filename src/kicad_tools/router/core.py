@@ -42,7 +42,11 @@ from .grid import RoutingGrid
 from .layers import Layer, LayerStack
 from .length import LengthTracker, LengthViolation
 from .output import format_failed_nets_summary
-from .parallel import ParallelRouter, find_independent_groups
+from .parallel import (
+    ParallelRouter,
+    RegionBasedNegotiatedRouter,
+    find_independent_groups,
+)
 from .path import create_intra_ic_routes, reduce_pads_after_intra_ic
 from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .primitives import Obstacle, Pad, Route
@@ -1047,6 +1051,10 @@ class Autorouter:
         use_targeted_ripup: bool = False,
         max_ripups_per_net: int = 3,
         adaptive: bool = True,
+        region_parallel: bool = False,
+        partition_rows: int = 2,
+        partition_cols: int = 2,
+        max_parallel_workers: int = 4,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -1070,6 +1078,12 @@ class Autorouter:
                 - Oscillation detection triggers escape strategies
                 - Early termination when no progress is being made
                 This improves convergence for difficult routing scenarios.
+            region_parallel: If True, use region-based parallelism (Issue #965).
+                Partitions the grid into regions and routes non-adjacent regions
+                in parallel during each iteration, providing 2-3x speedup.
+            partition_rows: Number of region rows for partitioning (default 2)
+            partition_cols: Number of region columns for partitioning (default 2)
+            max_parallel_workers: Maximum parallel workers per region group (default 4)
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -1088,6 +1102,11 @@ class Autorouter:
             print(f"  Present factor: {initial_present_factor} + {present_factor_increment}/iter")
         if use_targeted_ripup:
             print(f"  Targeted rip-up: enabled (max {max_ripups_per_net} ripups/net)")
+        if region_parallel:
+            print(
+                f"  Region parallel: enabled ({partition_rows}x{partition_cols} regions, "
+                f"{max_parallel_workers} workers)"
+            )
         if timeout:
             print(f"  Timeout: {timeout}s")
 
@@ -1100,6 +1119,47 @@ class Autorouter:
         total_nets = len(net_order)
 
         neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
+
+        # Initialize region-based parallel router if enabled (Issue #965)
+        region_router: RegionBasedNegotiatedRouter | None = None
+        if region_parallel:
+            # Enable thread safety on grid for parallel operations
+            if not self.grid.thread_safe:
+                # Recreate grid with thread safety enabled
+                from .grid import RoutingGrid
+
+                old_grid = self.grid
+                self.grid = RoutingGrid(
+                    width=old_grid.width,
+                    height=old_grid.height,
+                    rules=old_grid.rules,
+                    origin_x=old_grid.origin_x,
+                    origin_y=old_grid.origin_y,
+                    layer_stack=old_grid.layer_stack,
+                    expanded_obstacles=old_grid.expanded_obstacles,
+                    resolution_override=old_grid.resolution,
+                    thread_safe=True,
+                )
+                # Copy blocked cells and obstacles from old grid
+                self.grid._blocked = old_grid._blocked.copy()
+                self.grid._net = old_grid._net.copy()
+                self.grid._is_obstacle = old_grid._is_obstacle.copy()
+                self.grid._is_zone = old_grid._is_zone.copy()
+                self.grid._pad_blocked = old_grid._pad_blocked.copy()
+                self.grid._original_net = old_grid._original_net.copy()
+                self.grid._pads = old_grid._pads.copy()
+                # Update router to use new grid
+                self.router.grid = self.grid
+                neg_router = NegotiatedRouter(
+                    self.grid, self.router, self.rules, self.net_class_map
+                )
+
+            region_router = RegionBasedNegotiatedRouter(
+                router=self,
+                partition_rows=partition_rows,
+                partition_cols=partition_cols,
+                max_workers=max_parallel_workers,
+            )
         net_routes: dict[int, list[Route]] = {}
         present_factor = initial_present_factor
         timed_out = False
@@ -1131,25 +1191,48 @@ class Autorouter:
             if not progress_callback(0.0, "Initial routing pass", True):
                 return list(self.routes)
 
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                print(f"  ⚠ Timeout reached at net {i}/{total_nets} ({elapsed_str()})")
-                timed_out = True
-                break
+        # Use region-based parallelism for initial pass if enabled (Issue #965)
+        if region_router is not None:
 
-            # Progress output for every net with percentage
-            net_name = self.net_names.get(net, f"Net {net}")
-            pct = (i / total_nets * 100) if total_nets > 0 else 0
-            print(
-                f"  [{pct:5.1f}%] Routing net {i + 1}/{total_nets}: {net_name}... ({elapsed_str()})"
+            def route_fn_init(net: int, pf: float) -> list[Route]:
+                return self._route_net_negotiated(net, pf)
+
+            def mark_fn_init(route: Route) -> None:
+                self.grid.mark_route_usage(route)
+                self.routes.append(route)
+
+            result = region_router.route_iteration_parallel(
+                nets_to_route=net_order,
+                present_factor=present_factor,
+                route_fn=route_fn_init,
+                mark_route_fn=mark_fn_init,
             )
 
-            routes = self._route_net_negotiated(net, present_factor)
-            if routes:
-                net_routes[net] = routes
-                for route in routes:
-                    self.grid.mark_route_usage(route)
-                    self.routes.append(route)
+            # Update net_routes with results
+            for net in result.successful_nets:
+                net_routes[net] = [r for r in result.routes if r.net == net]
+
+        else:
+            # Sequential routing (original behavior)
+            for i, net in enumerate(net_order):
+                if check_timeout():
+                    print(f"  ⚠ Timeout reached at net {i}/{total_nets} ({elapsed_str()})")
+                    timed_out = True
+                    break
+
+                # Progress output for every net with percentage
+                net_name = self.net_names.get(net, f"Net {net}")
+                pct = (i / total_nets * 100) if total_nets > 0 else 0
+                print(
+                    f"  [{pct:5.1f}%] Routing net {i + 1}/{total_nets}: {net_name}... ({elapsed_str()})"
+                )
+
+                routes = self._route_net_negotiated(net, present_factor)
+                if routes:
+                    net_routes[net] = routes
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        self.routes.append(route)
 
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()
@@ -1382,25 +1465,50 @@ class Autorouter:
 
                     neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
 
-                    rerouted_count = 0
-                    for i, net in enumerate(nets_to_reroute):
-                        if check_timeout():
-                            print(
-                                f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
-                            )
-                            timed_out = True
+                    # Use region-based parallelism if enabled (Issue #965)
+                    if region_router is not None and len(nets_to_reroute) > 1:
+                        # Route using region-based parallelism
+                        def route_fn(net: int, pf: float) -> list[Route]:
+                            return self._route_net_negotiated(net, pf)
+
+                        def mark_fn(route: Route) -> None:
+                            self.grid.mark_route_usage(route)
+                            self.routes.append(route)
+
+                        result = region_router.route_iteration_parallel(
+                            nets_to_route=nets_to_reroute,
+                            present_factor=present_factor,
+                            route_fn=route_fn,
+                            mark_route_fn=mark_fn,
+                        )
+
+                        # Update net_routes with results
+                        for net in result.successful_nets:
+                            # Find the routes for this net from result
+                            net_routes[net] = [r for r in result.routes if r.net == net]
+
+                        rerouted_count = len(result.successful_nets)
+                    else:
+                        # Sequential routing (original behavior)
+                        rerouted_count = 0
+                        for i, net in enumerate(nets_to_reroute):
+                            if check_timeout():
+                                print(
+                                    f"  ⚠ Timeout during reroute at net {i}/{len(nets_to_reroute)} ({elapsed_str()})"
+                                )
+                                timed_out = True
+                                break
+
+                            routes = self._route_net_negotiated(net, present_factor)
+                            if routes:
+                                net_routes[net] = routes
+                                rerouted_count += 1
+                                for route in routes:
+                                    self.grid.mark_route_usage(route)
+                                    self.routes.append(route)
+
+                        if timed_out:
                             break
-
-                        routes = self._route_net_negotiated(net, present_factor)
-                        if routes:
-                            net_routes[net] = routes
-                            rerouted_count += 1
-                            for route in routes:
-                                self.grid.mark_route_usage(route)
-                                self.routes.append(route)
-
-                    if timed_out:
-                        break
 
                     overflow = self.grid.get_total_overflow()
                     overused = self.grid.find_overused_cells()
