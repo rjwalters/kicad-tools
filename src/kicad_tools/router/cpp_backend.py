@@ -278,6 +278,83 @@ class CppPathfinder:
         """Number of nodes explored in last route."""
         return self._impl.nodes_explored
 
+    def find_blocking_nets(
+        self,
+        start: Pad,
+        end: Pad,
+        layer: int | None = None,
+    ) -> set[int]:
+        """Find which nets block the direct path from start to end.
+
+        Uses Bresenham's line algorithm to trace the ideal direct path,
+        then identifies which net IDs are blocking cells along that path.
+        This is used for targeted rip-up in negotiated routing.
+
+        Args:
+            start: Source pad
+            end: Destination pad
+            layer: Optional layer index (uses pad layer if not specified)
+
+        Returns:
+            Set of net IDs that block the path (excluding net 0 and the source net)
+        """
+        blocking_nets: set[int] = set()
+        source_net = start.net
+
+        # Convert to grid coordinates
+        start_gx, start_gy = self._grid._impl.world_to_grid(start.x, start.y)
+        end_gx, end_gy = self._grid._impl.world_to_grid(end.x, end.y)
+
+        if layer is None:
+            layer = start.layer.value % self._grid.num_layers
+
+        # Trace a direct line from start to end using Bresenham's algorithm
+        gx1, gy1 = start_gx, start_gy
+        gx2, gy2 = end_gx, end_gy
+
+        dx = abs(gx2 - gx1)
+        dy = abs(gy2 - gy1)
+        sx = 1 if gx1 < gx2 else -1
+        sy = 1 if gy1 < gy2 else -1
+        err = dx - dy
+        gx, gy = gx1, gy1
+
+        # Determine trace half width in cells (same calculation as C++)
+        trace_half_width_cells = max(
+            1,
+            int(
+                (self._rules.trace_width / 2 + self._rules.trace_clearance)
+                / self._grid.resolution
+                + 0.5
+            ),
+        )
+
+        while True:
+            # Check this cell and nearby cells (accounting for trace width)
+            for check_dy in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                for check_dx in range(-trace_half_width_cells, trace_half_width_cells + 1):
+                    cx, cy = gx + check_dx, gy + check_dy
+                    if 0 <= cx < self._grid.cols and 0 <= cy < self._grid.rows:
+                        if self._grid._impl.is_valid(cx, cy, layer):
+                            cell = self._grid._impl.at(cx, cy, layer)
+                            if cell.blocked and cell.net != source_net and cell.net != 0:
+                                # This cell is blocked by another net's route
+                                if cell.usage_count > 0:
+                                    blocking_nets.add(cell.net)
+
+            if gx == gx2 and gy == gy2:
+                break
+
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                gx += sx
+            if e2 < dx:
+                err += dx
+                gy += sy
+
+        return blocking_nets
+
 
 def create_hybrid_router(
     grid: RoutingGrid,
