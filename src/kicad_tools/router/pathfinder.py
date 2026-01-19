@@ -130,6 +130,43 @@ class Router:
         """Get the net class for a net name."""
         return self.net_class_map.get(net_name)
 
+    def _get_pad_metal_bounds(self, pad: Pad) -> tuple[int, int, int, int]:
+        """Calculate the grid coordinate bounds of a pad's metal area.
+
+        This is used to expand goal regions for off-grid pads, ensuring
+        routes can reach pads even when their centers don't align with
+        the routing grid (Issue #956).
+
+        Returns:
+            (gx_min, gy_min, gx_max, gy_max) grid coordinate bounds
+        """
+        # Calculate effective pad dimensions (same logic as grid._add_pad_unsafe)
+        if pad.through_hole:
+            if pad.width > 0 and pad.height > 0:
+                effective_width = pad.width
+                effective_height = pad.height
+            elif pad.drill > 0:
+                effective_width = pad.drill + 0.7
+                effective_height = effective_width
+            else:
+                effective_width = 1.7
+                effective_height = 1.7
+        else:
+            effective_width = pad.width
+            effective_height = pad.height
+
+        # Metal area bounds in world coordinates
+        metal_x1 = pad.x - effective_width / 2
+        metal_y1 = pad.y - effective_height / 2
+        metal_x2 = pad.x + effective_width / 2
+        metal_y2 = pad.y + effective_height / 2
+
+        # Convert to grid coordinates
+        gx1, gy1 = self.grid.world_to_grid(metal_x1, metal_y1)
+        gx2, gy2 = self.grid.world_to_grid(metal_x2, metal_y2)
+
+        return (gx1, gy1, gx2, gy2)
+
     def _is_trace_blocked(
         self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False
     ) -> bool:
@@ -494,6 +531,11 @@ class Router:
         start_layers = routable_layers if start.through_hole else [start_layer]
         end_layers = routable_layers if end.through_hole else [end_layer]
 
+        # Issue #956: Calculate end pad's metal area bounds for expanded goal check
+        # When pads don't align with the routing grid, we accept reaching any cell
+        # within the pad's metal area, not just the grid-snapped center cell.
+        end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(end)
+
         # Filter start/end layers by allowed_layers constraint (Issue #715)
         if self.rules.allowed_layers is not None:
             start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
@@ -541,8 +583,13 @@ class Router:
                 continue
             closed_set.add(current_key)
 
-            # Goal check - accept any valid end layer for PTH pads
-            if current.x == end_gx and current.y == end_gy and current.layer in end_layers:
+            # Goal check - accept any cell within end pad's metal area (Issue #956)
+            # This handles off-grid pads where the center doesn't align with routing grid
+            if (
+                end_metal_gx1 <= current.x <= end_metal_gx2
+                and end_metal_gy1 <= current.y <= end_metal_gy2
+                and current.layer in end_layers
+            ):
                 route = self._reconstruct_route(current, start, end)
                 if route is not None:
                     return route
