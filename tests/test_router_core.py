@@ -1134,3 +1134,102 @@ class TestSingleLayerRouting:
                     Layer.F_CU,
                     Layer.B_CU,
                 ], f"Segment on {segment.layer}, expected F.Cu or B.Cu"
+
+
+class TestAutorouterOffGridPads:
+    """Tests for routing with off-grid pads (Issue #956).
+
+    When pad centers don't align exactly with the routing grid, the router
+    should still be able to reach the pads by accepting any cell within the
+    pad's metal area as a valid goal, not just the exact grid-snapped center.
+    """
+
+    def test_off_grid_pad_routing(self):
+        """Test that pads with off-grid centers can still be routed.
+
+        Reproduces the scenario from Issue #956 where pads at positions like
+        (203.5875, 121.0) with 0.1mm grid fail to route because the grid-snapped
+        position doesn't exactly match the pad center.
+        """
+        # Use a coarse grid (0.1mm) with off-grid pad positions
+        # Grid resolution = clearance / 2 = 0.254 / 2 = 0.127mm by default
+        # Use custom rules to get exactly 0.1mm grid
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+        # Pad 1: On-grid position (clean 0.1mm increment)
+        # Pad 2: Off-grid position (fractional offset like real boards)
+        pads = [
+            {
+                "number": "1",
+                "x": 10.0,  # On grid
+                "y": 10.0,  # On grid
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.0375,  # Off grid by 0.0375mm
+                "y": 10.025,  # Off grid by 0.025mm
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+        router.add_component("R1", pads)
+
+        # Route should succeed even though pad 2 is off-grid
+        routes = router.route_net(1)
+
+        # Should have at least one route with segments
+        assert len(routes) > 0, "Should route despite off-grid target pad"
+        assert len(routes[0].segments) > 0, "Route should have segments"
+
+        # Verify the route connects to the actual pad positions
+        # First segment should start near pad 1 (10.0, 10.0)
+        # Last segment should end near pad 2 (15.0375, 10.025)
+        first_seg = routes[0].segments[0]
+        last_seg = routes[0].segments[-1]
+
+        # Check that route endpoints are close to pad centers
+        # (route reconstruction connects to actual pad centers)
+        assert abs(first_seg.x1 - 10.0) < 0.2, f"Start X should be near 10.0, got {first_seg.x1}"
+        assert abs(first_seg.y1 - 10.0) < 0.2, f"Start Y should be near 10.0, got {first_seg.y1}"
+        assert abs(last_seg.x2 - 15.0375) < 0.2, f"End X should be near 15.0375, got {last_seg.x2}"
+        assert abs(last_seg.y2 - 10.025) < 0.2, f"End Y should be near 10.025, got {last_seg.y2}"
+
+    def test_both_pads_off_grid(self):
+        """Test routing when both source and target pads are off-grid."""
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+        # Both pads have fractional offsets
+        pads = [
+            {
+                "number": "1",
+                "x": 10.0125,  # Off grid by 0.0125mm
+                "y": 10.0375,  # Off grid by 0.0375mm
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.0625,  # Off grid by 0.0625mm
+                "y": 10.0875,  # Off grid by 0.0875mm
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+        router.add_component("R1", pads)
+
+        routes = router.route_net(1)
+
+        assert len(routes) > 0, "Should route with both pads off-grid"
+        assert len(routes[0].segments) > 0, "Route should have segments"
