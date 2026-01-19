@@ -461,8 +461,10 @@ class Router:
         if self.rules.allowed_layers is None:
             return True  # No restriction
 
-        layer_name = self.grid.index_to_layer(layer_idx)
-        return layer_name in self.rules.allowed_layers
+        # Convert grid index to Layer enum value, then to KiCad name for comparison
+        layer_value = self.grid.index_to_layer(layer_idx)
+        layer = Layer(layer_value)
+        return layer.kicad_name in self.rules.allowed_layers
 
     def _can_place_via_in_zones(self, gx: int, gy: int, net: int) -> bool:
         """Check if via placement is legal considering zones on all layers.
