@@ -2435,12 +2435,13 @@ class PCB:
                 "Set KICAD_FOOTPRINT_DIR environment variable or install KiCad."
             )
 
-        # Get the footprint file path
+        # Get the footprint file path (with fallback search across all libraries)
         fp_path = lib_paths.get_footprint_file(library_name, footprint_name)
         if fp_path is None:
             raise FileNotFoundError(
                 f"Footprint '{footprint_name}' not found in library '{library_name}'. "
-                f"Searched in: {lib_paths.footprints_path}"
+                f"Searched in: {lib_paths.footprints_path} "
+                f"(also searched all available libraries as fallback)"
             )
 
         # Delegate to add_footprint_from_file

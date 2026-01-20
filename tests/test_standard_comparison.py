@@ -100,6 +100,58 @@ class TestLibraryPath:
         # Non-existent footprint
         assert paths.get_footprint_file("Capacitor_SMD", "NonExistent") is None
 
+    def test_get_footprint_file_fallback_search(self, tmp_path):
+        """Test fallback search when library name doesn't match directory."""
+        footprints_dir = tmp_path / "footprints"
+        footprints_dir.mkdir()
+
+        # Create a library with a footprint (different name than expected)
+        converter_lib = footprints_dir / "Converter_ACDC.pretty"
+        converter_lib.mkdir()
+        fp_file = converter_lib / "Converter_ACDC_Hi-Link_HLK-PMxx.kicad_mod"
+        fp_file.write_text("(footprint Converter_ACDC_Hi-Link_HLK-PMxx)")
+
+        paths = LibraryPaths(footprints_path=footprints_dir, source="test")
+
+        # Searching with wrong library name should still find via fallback
+        result = paths.get_footprint_file("WrongLibrary", "Converter_ACDC_Hi-Link_HLK-PMxx")
+        assert result == fp_file
+
+        # Fallback can be disabled
+        result_no_fallback = paths.get_footprint_file(
+            "WrongLibrary", "Converter_ACDC_Hi-Link_HLK-PMxx", fallback_search=False
+        )
+        assert result_no_fallback is None
+
+    def test_find_footprint_by_name(self, tmp_path):
+        """Test searching all libraries for a footprint by name."""
+        footprints_dir = tmp_path / "footprints"
+        footprints_dir.mkdir()
+
+        # Create multiple libraries
+        lib1 = footprints_dir / "Library1.pretty"
+        lib1.mkdir()
+        lib2 = footprints_dir / "Library2.pretty"
+        lib2.mkdir()
+
+        # Put footprint in second library
+        fp_file = lib2 / "SpecialFootprint.kicad_mod"
+        fp_file.write_text("(footprint SpecialFootprint)")
+
+        paths = LibraryPaths(footprints_path=footprints_dir, source="test")
+
+        # Should find footprint in any library
+        result = paths.find_footprint_by_name("SpecialFootprint")
+        assert result == fp_file
+
+        # Non-existent footprint
+        assert paths.find_footprint_by_name("NonExistent") is None
+
+    def test_find_footprint_by_name_no_path(self):
+        """Test find_footprint_by_name when path is None."""
+        paths = LibraryPaths(footprints_path=None, source="test")
+        assert paths.find_footprint_by_name("AnyFootprint") is None
+
 
 class TestGuessStandardLibrary:
     """Tests for guessing standard library from footprint name."""
