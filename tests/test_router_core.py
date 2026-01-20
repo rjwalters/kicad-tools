@@ -1233,3 +1233,70 @@ class TestAutorouterOffGridPads:
 
         assert len(routes) > 0, "Should route with both pads off-grid"
         assert len(routes[0].segments) > 0, "Route should have segments"
+
+    def test_off_grid_pad_near_obstacle(self):
+        """Test routing when off-grid pad's snapped center might be blocked.
+
+        Issue #977: When a pad is off-grid, its grid-snapped center might
+        fall into another component's clearance zone. The expanded start
+        region (all cells within pad's metal area) allows routing to
+        find an alternate entry point.
+
+        Uses force_python=True since this tests Python pathfinder logic.
+        """
+        rules = DesignRules(trace_clearance=0.2, trace_width=0.2)
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
+
+        # Place two nets with pads slightly off-grid and close together
+        # The clearance zones may overlap causing blocked grid cells
+        pads_net1 = [
+            {
+                "number": "1",
+                "x": 10.05,  # Off grid by 0.05mm
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+        pads_net2 = [
+            {
+                "number": "1",
+                "x": 10.05,  # Same X but different Y, close to net1 pad
+                "y": 10.6,  # Just outside clearance but close
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "NET2",
+            },
+            {
+                "number": "2",
+                "x": 15.0,
+                "y": 10.6,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 2,
+                "net_name": "NET2",
+            },
+        ]
+        router.add_component("R1", pads_net1)
+        router.add_component("R2", pads_net2)
+
+        # Both nets should be routable despite off-grid positions
+        routes1 = router.route_net(1)
+        routes2 = router.route_net(2)
+
+        assert len(routes1) > 0, "NET1 should be routed despite off-grid pad"
+        assert len(routes2) > 0, "NET2 should be routed despite off-grid pad"
+        assert len(routes1[0].segments) > 0, "NET1 route should have segments"
+        assert len(routes2[0].segments) > 0, "NET2 route should have segments"

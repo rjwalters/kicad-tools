@@ -812,9 +812,12 @@ class Router:
         start_layers = routable_layers if start.through_hole else [start_layer]
         end_layers = routable_layers if end.through_hole else [end_layer]
 
-        # Issue #956: Calculate end pad's metal area bounds for expanded goal check
+        # Issue #956/#977: Calculate pad metal area bounds for expanded start/goal regions
         # When pads don't align with the routing grid, we accept reaching any cell
         # within the pad's metal area, not just the grid-snapped center cell.
+        # Issue #977: Apply same expansion to START pad - if the grid-snapped center
+        # falls on a cell blocked by another net's clearance, we need alternate entry points.
+        start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2 = self._get_pad_metal_bounds(start)
         end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(end)
 
         # Filter start/end layers by allowed_layers constraint (Issue #715)
@@ -844,12 +847,17 @@ class Router:
             get_congestion_cost=self._get_congestion_cost,
         )
 
-        # Start nodes - add one for each valid start layer
-        for sl in start_layers:
-            start_h = self.heuristic.estimate(start_gx, start_gy, sl, (0, 0), heuristic_context)
-            start_node = AStarNode(start_h, 0, start_gx, start_gy, sl)
-            heapq.heappush(open_set, start_node)
-            g_scores[(start_gx, start_gy, sl)] = 0
+        # Issue #977: Start nodes - add for ALL cells within start pad's metal area
+        # This handles off-grid start pads where the grid-snapped center may be blocked
+        # by another net's clearance zone. By initializing from all metal area cells,
+        # we ensure routing can begin even when some entry points are blocked.
+        for sgx in range(start_metal_gx1, start_metal_gx2 + 1):
+            for sgy in range(start_metal_gy1, start_metal_gy2 + 1):
+                for sl in start_layers:
+                    start_h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), heuristic_context)
+                    start_node = AStarNode(start_h, 0, sgx, sgy, sl)
+                    heapq.heappush(open_set, start_node)
+                    g_scores[(sgx, sgy, sl)] = 0
 
         iterations = 0
         max_iterations = self.grid.cols * self.grid.rows * 4  # Prevent infinite loops
@@ -1155,9 +1163,12 @@ class Router:
         if len(path) < 2:
             return
 
-        # Start from pad center
+        # Start from pad center on the A* start node's layer
+        # Issue #977: With expanded start regions, the A* may start on a different
+        # layer than start_pad.layer (e.g., when allowed_layers constrains routing).
+        # Use the layer from the first path node, not start_pad.layer.
         # current_layer_idx is a grid index (0, 1, ...), not Layer enum value
-        current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
+        current_layer_idx = path[0][2]  # Layer from first A* node
 
         # Issue #972: Inline segment merging - track segment start point and direction
         # to merge collinear cells into single segments
@@ -1421,32 +1432,38 @@ class Router:
         )
 
         # Initialize forward search (start -> end)
+        # Issue #977: Initialize from ALL cells within start pad's metal area
         forward_open: list[AStarNode] = []
         forward_closed: set[tuple[int, int, int]] = set()
         forward_g: dict[tuple[int, int, int], float] = {}
         forward_nodes: dict[tuple[int, int, int], AStarNode] = {}
 
-        for sl in start_layers:
-            h = self.heuristic.estimate(start_gx, start_gy, sl, (0, 0), forward_context)
-            node = AStarNode(h, 0, start_gx, start_gy, sl)
-            heapq.heappush(forward_open, node)
-            key = (start_gx, start_gy, sl)
-            forward_g[key] = 0
-            forward_nodes[key] = node
+        for sgx in range(start_metal_bounds[0], start_metal_bounds[2] + 1):
+            for sgy in range(start_metal_bounds[1], start_metal_bounds[3] + 1):
+                for sl in start_layers:
+                    h = self.heuristic.estimate(sgx, sgy, sl, (0, 0), forward_context)
+                    node = AStarNode(h, 0, sgx, sgy, sl)
+                    heapq.heappush(forward_open, node)
+                    key = (sgx, sgy, sl)
+                    forward_g[key] = 0
+                    forward_nodes[key] = node
 
         # Initialize backward search (end -> start)
+        # Issue #977: Initialize from ALL cells within end pad's metal area
         backward_open: list[AStarNode] = []
         backward_closed: set[tuple[int, int, int]] = set()
         backward_g: dict[tuple[int, int, int], float] = {}
         backward_nodes: dict[tuple[int, int, int], AStarNode] = {}
 
-        for el in end_layers:
-            h = self.heuristic.estimate(end_gx, end_gy, el, (0, 0), backward_context)
-            node = AStarNode(h, 0, end_gx, end_gy, el)
-            heapq.heappush(backward_open, node)
-            key = (end_gx, end_gy, el)
-            backward_g[key] = 0
-            backward_nodes[key] = node
+        for egx in range(end_metal_bounds[0], end_metal_bounds[2] + 1):
+            for egy in range(end_metal_bounds[1], end_metal_bounds[3] + 1):
+                for el in end_layers:
+                    h = self.heuristic.estimate(egx, egy, el, (0, 0), backward_context)
+                    node = AStarNode(h, 0, egx, egy, el)
+                    heapq.heappush(backward_open, node)
+                    key = (egx, egy, el)
+                    backward_g[key] = 0
+                    backward_nodes[key] = node
 
         # Best meeting point tracking
         best_path_cost = float("inf")
