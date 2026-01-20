@@ -1874,7 +1874,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Import progress helpers
-    from kicad_tools.cli.progress import spinner
+    from kicad_tools.cli.progress import flush_print, spinner
 
     quiet = args.quiet
 
@@ -1915,7 +1915,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Load PCB
     if not quiet:
-        print("\n--- Loading PCB ---")
+        flush_print("\n--- Loading PCB ---")
     try:
         with spinner("Loading PCB...", quiet=quiet):
             router, net_map = load_pcb_for_routing(
@@ -1985,12 +1985,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n{'=' * 60}")
             print("COMPLEXITY ANALYSIS")
             print(f"{'=' * 60}")
-            print(
-                f"Board: {complexity.board_width_mm:.1f}mm x {complexity.board_height_mm:.1f}mm"
-            )
-            print(
-                f"Pads: {complexity.total_pads}, Nets: {complexity.total_nets}"
-            )
+            print(f"Board: {complexity.board_width_mm:.1f}mm x {complexity.board_height_mm:.1f}mm")
+            print(f"Pads: {complexity.total_pads}, Nets: {complexity.total_nets}")
 
             # Show complexity rating with color
             rating_symbols = {
@@ -2017,9 +2013,7 @@ def main(argv: list[str] | None = None) -> int:
             if complexity.bottlenecks:
                 print(f"\nBottlenecks ({len(complexity.bottlenecks)}):")
                 for bottleneck in complexity.bottlenecks[:3]:
-                    print(
-                        f"  - {bottleneck.component_ref}: {bottleneck.description}"
-                    )
+                    print(f"  - {bottleneck.component_ref}: {bottleneck.description}")
 
             print(f"{'=' * 60}")
         except Exception as e:
@@ -2141,12 +2135,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Route
     if not quiet:
-        print(f"\n--- Routing ({args.strategy}) ---")
+        flush_print(f"\n--- Routing ({args.strategy}) ---")
         if args.timeout:
-            print(f"  Timeout: {args.timeout}s")
+            flush_print(f"  Timeout: {args.timeout}s")
         if args.profile:
             profile_output = args.profile_output or "route_profile.prof"
-            print(f"  Profiling enabled: {profile_output}")
+            flush_print(f"  Profiling enabled: {profile_output}")
 
     # Define routing function for profiling
     def do_routing():

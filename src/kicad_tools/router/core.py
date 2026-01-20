@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
     from .pathfinder import Router
 
+from kicad_tools.cli.progress import flush_print
+
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import (
     MonteCarloRouter,
@@ -300,6 +302,7 @@ class Autorouter:
         self._force_python = force_python
 
         # Initialize grid and routers using shared helper
+        # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
@@ -362,6 +365,10 @@ class Autorouter:
         This helper centralizes the common pattern of creating a RoutingGrid,
         hybrid router, and ZoneManager. Used by both __init__ and _reset_for_new_trial.
 
+        Issue #972: Automatically uses adaptive grid resolution for large boards
+        to prevent excessive memory usage and improve routing performance.
+        Threshold: 500k cells per layer (matches create_adaptive default).
+
         Args:
             width: Board width in mm
             height: Board height in mm
@@ -371,9 +378,24 @@ class Autorouter:
         Returns:
             Tuple of (RoutingGrid, Router, ZoneManager)
         """
-        grid = RoutingGrid(
-            width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+        # Issue #972: Use adaptive resolution for large boards
+        num_layers = (self.layer_stack or LayerStack.two_layer()).num_layers
+        estimated_cells = (
+            (width / self.rules.grid_resolution)
+            * (height / self.rules.grid_resolution)
+            * num_layers
         )
+        adaptive_threshold = 500_000
+
+        if estimated_cells > adaptive_threshold:
+            # Use adaptive resolution for better performance on large boards
+            grid = RoutingGrid.create_adaptive(
+                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+            )
+        else:
+            grid = RoutingGrid(
+                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+            )
         router = create_hybrid_router(grid, self.rules, force_python=self._force_python)
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
@@ -883,7 +905,7 @@ class Autorouter:
             routes = self.route_net(net)
             all_routes.extend(routes)
             if routes:
-                print(
+                flush_print(
                     f"  Net {net}: {len(routes)} routes, "
                     f"{sum(len(r.segments) for r in routes)} segments, "
                     f"{sum(len(r.vias) for r in routes)} vias"
@@ -1122,8 +1144,8 @@ class Autorouter:
 
         start_time = time.time()
 
-        print("\n=== Negotiated Congestion Routing ===")
-        print(f"  Max iterations: {max_iterations}")
+        flush_print("\n=== Negotiated Congestion Routing ===")
+        flush_print(f"  Max iterations: {max_iterations}")
         if adaptive:
             print("  Mode: Adaptive (Issue #633)")
             print(f"  Present factor: {initial_present_factor} (adaptive)")
@@ -1216,7 +1238,7 @@ class Autorouter:
             elapsed = time.time() - start_time
             return f"{elapsed:.1f}s"
 
-        print("\n--- Iteration 0: Initial routing with sharing ---")
+        flush_print("\n--- Iteration 0: Initial routing with sharing ---")
         if progress_callback is not None:
             if not progress_callback(0.0, "Initial routing pass", True):
                 return list(self.routes)
@@ -1253,7 +1275,7 @@ class Autorouter:
                 # Progress output for every net with percentage
                 net_name = self.net_names.get(net, f"Net {net}")
                 pct = (i / total_nets * 100) if total_nets > 0 else 0
-                print(
+                flush_print(
                     f"  [{pct:5.1f}%] Routing net {i + 1}/{total_nets}: {net_name}... ({elapsed_str()})"
                 )
 
@@ -1267,7 +1289,7 @@ class Autorouter:
         overflow = self.grid.get_total_overflow()
         overused = self.grid.find_overused_cells()
         overflow_history.append(overflow)  # Track for adaptive mode
-        print(
+        flush_print(
             f"  Routed {len(net_routes)}/{total_nets} nets, overflow: {overflow} ({elapsed_str()})"
         )
 
@@ -1307,7 +1329,7 @@ class Autorouter:
                     ):
                         break
 
-                print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
+                flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
 
                 # Calculate adaptive parameters (Issue #633)
                 if adaptive:
@@ -1348,7 +1370,7 @@ class Autorouter:
                 if use_targeted_ripup:
                     # Targeted rip-up: for each conflicting net, find its specific blockers
                     # and only rip up those instead of all conflicting nets at once
-                    print(
+                    flush_print(
                         f"  Using targeted rip-up for {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
                     )
                     targeted_ripup_count = 0
@@ -1444,7 +1466,7 @@ class Autorouter:
                     overused = self.grid.find_overused_cells()
                     # Track overflow for both branches (Issue #633)
                     overflow_history.append(overflow)
-                    print(
+                    flush_print(
                         f"  Targeted rip-up resolved {targeted_ripup_count}/{len(nets_to_reroute)} nets, "
                         f"overflow: {overflow} ({elapsed_str()})"
                     )
@@ -1489,7 +1511,7 @@ class Autorouter:
 
                 else:
                     # Full rip-up: rip up all nets through overused cells
-                    print(
+                    flush_print(
                         f"  Ripping up {len(nets_to_reroute)} nets with conflicts ({elapsed_str()})"
                     )
 
@@ -1542,7 +1564,7 @@ class Autorouter:
 
                     overflow = self.grid.get_total_overflow()
                     overused = self.grid.find_overused_cells()
-                    print(
+                    flush_print(
                         f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} nets, overflow: {overflow} ({elapsed_str()})"
                     )
 
@@ -1991,6 +2013,7 @@ class Autorouter:
         origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
 
         # Recreate grid and routers using shared helper
+        # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
