@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from kicad_tools.physics import Stackup, TransmissionLine
     from kicad_tools.progress import ProgressCallback
 
+    from .pathfinder import Router
+
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import (
     MonteCarloRouter,
@@ -296,11 +298,11 @@ class Autorouter:
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
         self.layer_stack = layer_stack
         self._force_python = force_python
-        self.grid = RoutingGrid(
-            width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
+
+        # Initialize grid and routers using shared helper
+        self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
+            width, height, origin_x, origin_y
         )
-        self.router = create_hybrid_router(self.grid, self.rules, force_python=force_python)
-        self.zone_manager = ZoneManager(self.grid, self.rules)
 
         self.pads: dict[tuple[str, str], Pad] = {}
         self.nets: dict[int, list[tuple[str, str]]] = {}
@@ -347,6 +349,34 @@ class Autorouter:
         except Exception:
             # Stackup or other initialization error
             self._transmission_line = None
+
+    def _create_grid_and_routers(
+        self,
+        width: float,
+        height: float,
+        origin_x: float,
+        origin_y: float,
+    ) -> tuple[RoutingGrid, CppPathfinder | Router, ZoneManager]:
+        """Create routing grid and associated routers.
+
+        This helper centralizes the common pattern of creating a RoutingGrid,
+        hybrid router, and ZoneManager. Used by both __init__ and _reset_for_new_trial.
+
+        Args:
+            width: Board width in mm
+            height: Board height in mm
+            origin_x: X origin offset
+            origin_y: Y origin offset
+
+        Returns:
+            Tuple of (RoutingGrid, Router, ZoneManager)
+        """
+        grid = RoutingGrid(
+            width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+        )
+        router = create_hybrid_router(grid, self.rules, force_python=self._force_python)
+        zone_manager = ZoneManager(grid, self.rules)
+        return grid, router, zone_manager
 
     @property
     def _cpp_grid(self) -> CppGrid | None:
@@ -1960,9 +1990,10 @@ class Autorouter:
         width, height = self.grid.width, self.grid.height
         origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
 
-        self.grid = RoutingGrid(width, height, self.rules, origin_x, origin_y)
-        self.router = create_hybrid_router(self.grid, self.rules, force_python=self._force_python)
-        self.zone_manager = ZoneManager(self.grid, self.rules)
+        # Recreate grid and routers using shared helper
+        self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
+            width, height, origin_x, origin_y
+        )
 
         for pad in self.pads.values():
             self.grid.add_pad(pad)

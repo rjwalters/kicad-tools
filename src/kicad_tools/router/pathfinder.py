@@ -243,9 +243,7 @@ class Router:
             obstacle_blocks = blocked_region & obstacle_region & different_net
 
             # Case 2: Blocked non-obstacles with different net AND static (usage == 0)
-            static_blocks = (
-                blocked_region & ~obstacle_region & different_net & (usage_region == 0)
-            )
+            static_blocks = blocked_region & ~obstacle_region & different_net & (usage_region == 0)
 
             return bool(np.any(obstacle_blocks | static_blocks))
         else:
@@ -1130,32 +1128,27 @@ class Router:
 
         return blocking_nets
 
-    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
-        """Reconstruct the route from A* result with geometric validation.
+    def _convert_path_to_route(
+        self,
+        path: list[tuple[float, float, int, bool]],
+        route: Route,
+        start_pad: Pad,
+        end_pad: Pad,
+    ) -> None:
+        """Convert path points to route segments and vias.
 
-        Issue #750: After reconstructing the route from grid coordinates,
-        validates each segment against original obstacle geometry to catch
-        clearance violations that grid-based checking missed (particularly
-        for diagonal segments that can cut through obstacle corners).
+        This helper method handles the common logic of converting A* path points
+        into Via and Segment objects, adding them to the route. Used by both
+        unidirectional and bidirectional route reconstruction.
 
-        Returns:
-            Route if valid, None if geometric clearance validation fails.
+        Args:
+            path: List of (world_x, world_y, layer_idx, is_via) tuples
+            route: Route object to populate with segments and vias
+            start_pad: Source pad (determines starting position)
+            end_pad: Destination pad (determines final segment endpoint)
         """
-        route = Route(net=start_pad.net, net_name=start_pad.net_name)
-
-        # Collect path points
-        path: list[tuple[float, float, int, bool]] = []
-        node: AStarNode | None = end_node
-        while node:
-            wx, wy = self.grid.grid_to_world(node.x, node.y)
-            path.append((wx, wy, node.layer, node.via_from_parent))
-            node = node.parent
-
-        path.reverse()
-
-        # Convert to segments and vias
         if len(path) < 2:
-            return route
+            return
 
         # Start from pad center
         # current_layer_idx is a grid index (0, 1, ...), not Layer enum value
@@ -1210,24 +1203,66 @@ class Router:
             )
             route.segments.append(seg)
 
+    def _validate_route_clearance(self, route: Route, exclude_net: int) -> bool:
+        """Validate route segments against geometric clearance constraints.
+
+        Issue #750: Grid-based A* checking is approximate; diagonal segments can
+        cut through obstacle corners. This method validates actual geometry to
+        catch clearance violations that grid-based checking missed.
+
+        Args:
+            route: Route to validate
+            exclude_net: Net ID to exclude from clearance checks (the route's own net)
+
+        Returns:
+            True if route passes clearance validation, False otherwise.
+        """
+        for seg in route.segments:
+            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
+                seg, exclude_net=exclude_net
+            )
+            if not is_valid:
+                return False
+        return True
+
+    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
+        """Reconstruct the route from A* result with geometric validation.
+
+        Issue #750: After reconstructing the route from grid coordinates,
+        validates each segment against original obstacle geometry to catch
+        clearance violations that grid-based checking missed (particularly
+        for diagonal segments that can cut through obstacle corners).
+
+        Returns:
+            Route if valid, None if geometric clearance validation fails.
+        """
+        route = Route(net=start_pad.net, net_name=start_pad.net_name)
+
+        # Collect path points
+        path: list[tuple[float, float, int, bool]] = []
+        node: AStarNode | None = end_node
+        while node:
+            wx, wy = self.grid.grid_to_world(node.x, node.y)
+            path.append((wx, wy, node.layer, node.via_from_parent))
+            node = node.parent
+
+        path.reverse()
+
+        # Convert path to segments and vias
+        self._convert_path_to_route(path, route, start_pad, end_pad)
+
         # Validate layer transitions and insert any missing vias
         route.validate_layer_transitions(
             via_drill=self.rules.via_drill,
             via_diameter=self.rules.via_diameter,
         )
 
-        # Issue #750: Geometric clearance validation
-        # Grid-based A* checking is approximate; diagonal segments can cut through
-        # obstacle corners. Validate actual geometry before returning the route.
-        for seg in route.segments:
-            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=start_pad.net
-            )
-            if not is_valid:
-                # Route has clearance violations - reject it
-                # The caller will report "no path found" which is preferable
-                # to returning a route with DRC violations
-                return None
+        # Geometric clearance validation
+        if not self._validate_route_clearance(route, start_pad.net):
+            # Route has clearance violations - reject it
+            # The caller will report "no path found" which is preferable
+            # to returning a route with DRC violations
+            return None
 
         return route
 
@@ -1643,58 +1678,8 @@ class Router:
         # Combine paths
         full_path = forward_path + backward_path
 
-        if len(full_path) < 2:
-            return route
-
-        # Convert to segments and vias (same logic as _reconstruct_route)
-        current_x, current_y = start_pad.x, start_pad.y
-        current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
-
-        for _i, (wx, wy, layer_idx, is_via) in enumerate(full_path):
-            if is_via:
-                via = Via(
-                    x=current_x,
-                    y=current_y,
-                    drill=self.rules.via_drill,
-                    diameter=self.rules.via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
-                    net=start_pad.net,
-                    net_name=start_pad.net_name,
-                )
-                route.vias.append(via)
-                current_layer_idx = layer_idx
-            else:
-                if abs(wx - current_x) > 0.01 or abs(wy - current_y) > 0.01:
-                    seg = Segment(
-                        x1=current_x,
-                        y1=current_y,
-                        x2=wx,
-                        y2=wy,
-                        width=self.rules.trace_width,
-                        layer=Layer(self.grid.index_to_layer(layer_idx)),
-                        net=start_pad.net,
-                        net_name=start_pad.net_name,
-                    )
-                    route.segments.append(seg)
-                    current_x, current_y = wx, wy
-                    current_layer_idx = layer_idx
-
-        # Final segment to end pad
-        if abs(end_pad.x - current_x) > 0.01 or abs(end_pad.y - current_y) > 0.01:
-            seg = Segment(
-                x1=current_x,
-                y1=current_y,
-                x2=end_pad.x,
-                y2=end_pad.y,
-                width=self.rules.trace_width,
-                layer=Layer(self.grid.index_to_layer(current_layer_idx)),
-                net=start_pad.net,
-                net_name=start_pad.net_name,
-            )
-            route.segments.append(seg)
+        # Convert path to segments and vias using shared helper
+        self._convert_path_to_route(full_path, route, start_pad, end_pad)
 
         # Validate layer transitions
         route.validate_layer_transitions(
@@ -1702,13 +1687,9 @@ class Router:
             via_diameter=self.rules.via_diameter,
         )
 
-        # Geometric clearance validation (Issue #750)
-        for seg in route.segments:
-            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=start_pad.net
-            )
-            if not is_valid:
-                return None
+        # Geometric clearance validation using shared helper
+        if not self._validate_route_clearance(route, start_pad.net):
+            return None
 
         return route
 
