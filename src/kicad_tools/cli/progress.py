@@ -20,6 +20,9 @@ Usage:
     # Spinner for operations without measurable progress
     with spinner("Loading PCB...", quiet=args.quiet):
         pcb = load_pcb(path)
+
+    # Immediate flushed output for long operations (no buffering)
+    flush_print(f"Processing net {i}/{total}...")
 """
 
 import sys
@@ -144,6 +147,32 @@ def print_status(message: str, style: str = "bold", quiet: bool = False) -> None
 
     console = _get_stderr_console()
     console.print(message, style=style)
+
+
+def flush_print(*args, quiet: bool = False, **kwargs) -> None:
+    """Print with immediate flush for real-time progress output.
+
+    This function is a drop-in replacement for print() that ensures output
+    is immediately visible, even when stdout is buffered (e.g., when piped
+    or when running long operations). Essential for providing real-time
+    feedback during multi-hour routing operations.
+
+    Args:
+        *args: Arguments passed to print()
+        quiet: If True, nothing is printed
+        **kwargs: Keyword arguments passed to print()
+
+    Example:
+        # Instead of:
+        print(f"  Net {i}: routing...")  # May be buffered
+
+        # Use:
+        flush_print(f"  Net {i}: routing...")  # Immediate output
+    """
+    if quiet:
+        return
+    print(*args, **kwargs)
+    sys.stdout.flush()
 
 
 def _get_stderr_console():
