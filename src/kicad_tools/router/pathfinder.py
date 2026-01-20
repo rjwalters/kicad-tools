@@ -1128,37 +1128,32 @@ class Router:
 
         return blocking_nets
 
-    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
-        """Reconstruct the route from A* result with geometric validation.
+    def _convert_path_to_route(
+        self,
+        path: list[tuple[float, float, int, bool]],
+        route: Route,
+        start_pad: Pad,
+        end_pad: Pad,
+    ) -> None:
+        """Convert path points to route segments and vias.
 
-        Issue #750: After reconstructing the route from grid coordinates,
-        validates each segment against original obstacle geometry to catch
-        clearance violations that grid-based checking missed (particularly
-        for diagonal segments that can cut through obstacle corners).
+        This helper method handles the common logic of converting A* path points
+        into Via and Segment objects, adding them to the route. Used by both
+        unidirectional and bidirectional route reconstruction.
 
         Issue #972: Performance optimization - merge collinear segments inline
         during reconstruction instead of creating segment-per-cell and merging
         later. This reduces segment count from thousands to tens per net,
         significantly improving routing performance for large boards.
 
-        Returns:
-            Route if valid, None if geometric clearance validation fails.
+        Args:
+            path: List of (world_x, world_y, layer_idx, is_via) tuples
+            route: Route object to populate with segments and vias
+            start_pad: Source pad (determines starting position)
+            end_pad: Destination pad (determines final segment endpoint)
         """
-        route = Route(net=start_pad.net, net_name=start_pad.net_name)
-
-        # Collect path points
-        path: list[tuple[float, float, int, bool]] = []
-        node: AStarNode | None = end_node
-        while node:
-            wx, wy = self.grid.grid_to_world(node.x, node.y)
-            path.append((wx, wy, node.layer, node.via_from_parent))
-            node = node.parent
-
-        path.reverse()
-
-        # Convert to segments and vias
         if len(path) < 2:
-            return route
+            return
 
         # Start from pad center
         # current_layer_idx is a grid index (0, 1, ...), not Layer enum value
@@ -1273,24 +1268,66 @@ class Router:
             else:
                 _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
 
+    def _validate_route_clearance(self, route: Route, exclude_net: int) -> bool:
+        """Validate route segments against geometric clearance constraints.
+
+        Issue #750: Grid-based A* checking is approximate; diagonal segments can
+        cut through obstacle corners. This method validates actual geometry to
+        catch clearance violations that grid-based checking missed.
+
+        Args:
+            route: Route to validate
+            exclude_net: Net ID to exclude from clearance checks (the route's own net)
+
+        Returns:
+            True if route passes clearance validation, False otherwise.
+        """
+        for seg in route.segments:
+            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
+                seg, exclude_net=exclude_net
+            )
+            if not is_valid:
+                return False
+        return True
+
+    def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
+        """Reconstruct the route from A* result with geometric validation.
+
+        Issue #750: After reconstructing the route from grid coordinates,
+        validates each segment against original obstacle geometry to catch
+        clearance violations that grid-based checking missed (particularly
+        for diagonal segments that can cut through obstacle corners).
+
+        Returns:
+            Route if valid, None if geometric clearance validation fails.
+        """
+        route = Route(net=start_pad.net, net_name=start_pad.net_name)
+
+        # Collect path points
+        path: list[tuple[float, float, int, bool]] = []
+        node: AStarNode | None = end_node
+        while node:
+            wx, wy = self.grid.grid_to_world(node.x, node.y)
+            path.append((wx, wy, node.layer, node.via_from_parent))
+            node = node.parent
+
+        path.reverse()
+
+        # Convert path to segments and vias
+        self._convert_path_to_route(path, route, start_pad, end_pad)
+
         # Validate layer transitions and insert any missing vias
         route.validate_layer_transitions(
             via_drill=self.rules.via_drill,
             via_diameter=self.rules.via_diameter,
         )
 
-        # Issue #750: Geometric clearance validation
-        # Grid-based A* checking is approximate; diagonal segments can cut through
-        # obstacle corners. Validate actual geometry before returning the route.
-        for seg in route.segments:
-            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=start_pad.net
-            )
-            if not is_valid:
-                # Route has clearance violations - reject it
-                # The caller will report "no path found" which is preferable
-                # to returning a route with DRC violations
-                return None
+        # Geometric clearance validation
+        if not self._validate_route_clearance(route, start_pad.net):
+            # Route has clearance violations - reject it
+            # The caller will report "no path found" which is preferable
+            # to returning a route with DRC violations
+            return None
 
         return route
 
@@ -1708,112 +1745,9 @@ class Router:
         # Combine paths
         full_path = forward_path + backward_path
 
-        if len(full_path) < 2:
-            return route
-
-        # Issue #972: Inline segment merging - track segment start point and direction
-        current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
-        seg_start_x, seg_start_y = start_pad.x, start_pad.y
-        current_x, current_y = seg_start_x, seg_start_y
-        current_direction: tuple[float, float] | None = None
-
-        def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
-            """Normalize direction vector, return None if no movement."""
-            length = (dx * dx + dy * dy) ** 0.5
-            if length < 0.001:
-                return None
-            return (dx / length, dy / length)
-
-        def _same_direction(d1: tuple[float, float] | None, d2: tuple[float, float] | None) -> bool:
-            """Check if two directions are the same (within tolerance)."""
-            if d1 is None or d2 is None:
-                return False
-            return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
-
-        def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
-            """Create and add a segment if there's meaningful distance."""
-            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
-                seg = Segment(
-                    x1=x1,
-                    y1=y1,
-                    x2=x2,
-                    y2=y2,
-                    width=self.rules.trace_width,
-                    layer=Layer(self.grid.index_to_layer(layer_idx)),
-                    net=start_pad.net,
-                    net_name=start_pad.net_name,
-                )
-                route.segments.append(seg)
-
-        for _i, (wx, wy, layer_idx, is_via) in enumerate(full_path):
-            if is_via:
-                # Emit pending segment before via
-                _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
-
-                via = Via(
-                    x=current_x,
-                    y=current_y,
-                    drill=self.rules.via_drill,
-                    diameter=self.rules.via_diameter,
-                    layers=(
-                        Layer(self.grid.index_to_layer(current_layer_idx)),
-                        Layer(self.grid.index_to_layer(layer_idx)),
-                    ),
-                    net=start_pad.net,
-                    net_name=start_pad.net_name,
-                )
-                route.vias.append(via)
-                current_layer_idx = layer_idx
-
-                # Reset segment tracking after via
-                seg_start_x, seg_start_y = current_x, current_y
-                current_direction = None
-            else:
-                dx = wx - current_x
-                dy = wy - current_y
-                new_direction = _normalize_direction(dx, dy)
-
-                if new_direction is not None:
-                    if not _same_direction(current_direction, new_direction):
-                        _emit_segment(
-                            seg_start_x, seg_start_y, current_x, current_y, current_layer_idx
-                        )
-                        seg_start_x, seg_start_y = current_x, current_y
-                        current_direction = new_direction
-
-                    current_x, current_y = wx, wy
-                    current_layer_idx = layer_idx
-
-        # Emit final segment of the path
-        _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
-
-        # Final segment to end pad (if needed)
-        dx = end_pad.x - current_x
-        dy = end_pad.y - current_y
-        if abs(dx) > 0.01 or abs(dy) > 0.01:
-            if route.segments:
-                last_seg = route.segments[-1]
-                last_dx = last_seg.x2 - last_seg.x1
-                last_dy = last_seg.y2 - last_seg.y1
-                last_dir = _normalize_direction(last_dx, last_dy)
-                end_dir = _normalize_direction(dx, dy)
-
-                if _same_direction(last_dir, end_dir):
-                    # Extend last segment to end pad
-                    route.segments[-1] = Segment(
-                        x1=last_seg.x1,
-                        y1=last_seg.y1,
-                        x2=end_pad.x,
-                        y2=end_pad.y,
-                        width=self.rules.trace_width,
-                        layer=last_seg.layer,
-                        net=start_pad.net,
-                        net_name=start_pad.net_name,
-                    )
-                else:
-                    _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
-            else:
-                _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+        # Convert path to segments and vias using shared helper
+        # Issue #972: Helper includes inline segment merging optimization
+        self._convert_path_to_route(full_path, route, start_pad, end_pad)
 
         # Validate layer transitions
         route.validate_layer_transitions(
@@ -1821,13 +1755,9 @@ class Router:
             via_diameter=self.rules.via_diameter,
         )
 
-        # Geometric clearance validation (Issue #750)
-        for seg in route.segments:
-            is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=start_pad.net
-            )
-            if not is_valid:
-                return None
+        # Geometric clearance validation using shared helper
+        if not self._validate_route_clearance(route, start_pad.net):
+            return None
 
         return route
 

@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from kicad_tools.physics import Stackup, TransmissionLine
     from kicad_tools.progress import ProgressCallback
 
+    from .pathfinder import Router
+
 from kicad_tools.cli.progress import flush_print
 
 from .adaptive import AdaptiveAutorouter, RoutingResult
@@ -299,28 +301,11 @@ class Autorouter:
         self.layer_stack = layer_stack
         self._force_python = force_python
 
-        # Issue #972: Automatically use adaptive grid resolution for large boards
-        # to prevent excessive memory usage and improve routing performance.
-        # Threshold: 500k cells per layer (matches create_adaptive default)
-        num_layers = (layer_stack or LayerStack.two_layer()).num_layers
-        estimated_cells = (
-            (width / self.rules.grid_resolution)
-            * (height / self.rules.grid_resolution)
-            * num_layers
+        # Initialize grid and routers using shared helper
+        # Issue #972: Helper includes adaptive grid resolution for large boards
+        self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
+            width, height, origin_x, origin_y
         )
-        adaptive_threshold = 500_000
-
-        if estimated_cells > adaptive_threshold:
-            # Use adaptive resolution for better performance on large boards
-            self.grid = RoutingGrid.create_adaptive(
-                width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
-            )
-        else:
-            self.grid = RoutingGrid(
-                width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
-            )
-        self.router = create_hybrid_router(self.grid, self.rules, force_python=force_python)
-        self.zone_manager = ZoneManager(self.grid, self.rules)
 
         self.pads: dict[tuple[str, str], Pad] = {}
         self.nets: dict[int, list[tuple[str, str]]] = {}
@@ -367,6 +352,53 @@ class Autorouter:
         except Exception:
             # Stackup or other initialization error
             self._transmission_line = None
+
+    def _create_grid_and_routers(
+        self,
+        width: float,
+        height: float,
+        origin_x: float,
+        origin_y: float,
+    ) -> tuple[RoutingGrid, CppPathfinder | Router, ZoneManager]:
+        """Create routing grid and associated routers.
+
+        This helper centralizes the common pattern of creating a RoutingGrid,
+        hybrid router, and ZoneManager. Used by both __init__ and _reset_for_new_trial.
+
+        Issue #972: Automatically uses adaptive grid resolution for large boards
+        to prevent excessive memory usage and improve routing performance.
+        Threshold: 500k cells per layer (matches create_adaptive default).
+
+        Args:
+            width: Board width in mm
+            height: Board height in mm
+            origin_x: X origin offset
+            origin_y: Y origin offset
+
+        Returns:
+            Tuple of (RoutingGrid, Router, ZoneManager)
+        """
+        # Issue #972: Use adaptive resolution for large boards
+        num_layers = (self.layer_stack or LayerStack.two_layer()).num_layers
+        estimated_cells = (
+            (width / self.rules.grid_resolution)
+            * (height / self.rules.grid_resolution)
+            * num_layers
+        )
+        adaptive_threshold = 500_000
+
+        if estimated_cells > adaptive_threshold:
+            # Use adaptive resolution for better performance on large boards
+            grid = RoutingGrid.create_adaptive(
+                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+            )
+        else:
+            grid = RoutingGrid(
+                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+            )
+        router = create_hybrid_router(grid, self.rules, force_python=self._force_python)
+        zone_manager = ZoneManager(grid, self.rules)
+        return grid, router, zone_manager
 
     @property
     def _cpp_grid(self) -> CppGrid | None:
@@ -1980,25 +2012,11 @@ class Autorouter:
         width, height = self.grid.width, self.grid.height
         origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
 
-        # Issue #972: Use adaptive resolution for large boards (same logic as __init__)
-        num_layers = self.grid.num_layers
-        estimated_cells = (
-            (width / self.rules.grid_resolution)
-            * (height / self.rules.grid_resolution)
-            * num_layers
+        # Recreate grid and routers using shared helper
+        # Issue #972: Helper includes adaptive grid resolution for large boards
+        self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
+            width, height, origin_x, origin_y
         )
-        adaptive_threshold = 500_000
-
-        if estimated_cells > adaptive_threshold:
-            self.grid = RoutingGrid.create_adaptive(
-                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
-            )
-        else:
-            self.grid = RoutingGrid(
-                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
-            )
-        self.router = create_hybrid_router(self.grid, self.rules, force_python=self._force_python)
-        self.zone_manager = ZoneManager(self.grid, self.rules)
 
         for pad in self.pads.values():
             self.grid.add_pad(pad)
