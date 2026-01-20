@@ -75,6 +75,8 @@ class CppGrid:
         # Initialize layer mappings (identity by default, overridden by from_routing_grid)
         self._index_to_layer: dict[int, int] = {i: i for i in range(layers)}
         self._layer_to_index: dict[int, int] = {i: i for i in range(layers)}
+        # Routable layer indices (all layers by default, refined by from_routing_grid)
+        self._routable_layers: list[int] = list(range(layers))
 
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
@@ -92,6 +94,9 @@ class CppGrid:
         cpp_grid._index_to_layer = dict(grid._index_to_layer)
         cpp_grid._layer_to_index = dict(grid._layer_to_index)
 
+        # Copy routable layer indices from Python grid
+        cpp_grid._routable_layers = grid.get_routable_indices()
+
         # Copy blocked cells from Python grid to C++ grid
         for layer in range(grid.num_layers):
             for y in range(grid.rows):
@@ -105,6 +110,10 @@ class CppGrid:
     def index_to_layer(self, index: int) -> int:
         """Convert grid index to Layer enum value."""
         return self._index_to_layer.get(index, index)
+
+    def get_routable_indices(self) -> list[int]:
+        """Get indices of routable layers (matching RoutingGrid interface)."""
+        return self._routable_layers
 
     def world_to_grid(self, x: float, y: float) -> tuple[int, int]:
         """Convert world coordinates to grid indices."""
@@ -184,6 +193,25 @@ class CppPathfinder:
         """Set which layers are routable (skip plane layers)."""
         self._impl.set_routable_layers(layers)
 
+    def _is_layer_allowed(self, layer_idx: int) -> bool:
+        """Check if routing on this layer is allowed by allowed_layers constraint.
+
+        Args:
+            layer_idx: Grid layer index
+
+        Returns:
+            True if layer is allowed (or no restriction), False if blocked
+        """
+        from .layers import Layer
+
+        if self._rules.allowed_layers is None:
+            return True  # No restriction
+
+        # Convert grid index to Layer enum value, then to KiCad name for comparison
+        layer_value = self._grid.index_to_layer(layer_idx)
+        layer = Layer(layer_value)
+        return layer.kicad_name in self._rules.allowed_layers
+
     def route(
         self,
         start: Pad,
@@ -223,6 +251,24 @@ class CppPathfinder:
             start_layer = start.layer.value % self._grid.num_layers
         if hasattr(end.layer, "value"):
             end_layer = end.layer.value % self._grid.num_layers
+
+        # Compute start/end layers for through-hole pads if not provided
+        # Through-hole pads can be accessed on any routable layer
+        routable_layers = self._grid.get_routable_indices()
+        if start_layers is None:
+            start_layers = (
+                routable_layers if getattr(start, "through_hole", False) else [start_layer]
+            )
+        if end_layers is None:
+            end_layers = routable_layers if getattr(end, "through_hole", False) else [end_layer]
+
+        # Filter start/end layers by allowed_layers constraint
+        if self._rules.allowed_layers is not None:
+            start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
+            end_layers = [l for l in end_layers if self._is_layer_allowed(l)]
+            # If no valid layers remain, routing is impossible
+            if not start_layers or not end_layers:
+                return None
 
         # Route using C++ implementation
         result = self._impl.route(
@@ -339,8 +385,7 @@ class CppPathfinder:
         trace_half_width_cells = max(
             1,
             int(
-                (self._rules.trace_width / 2 + self._rules.trace_clearance)
-                / self._grid.resolution
+                (self._rules.trace_width / 2 + self._rules.trace_clearance) / self._grid.resolution
                 + 0.5
             ),
         )
