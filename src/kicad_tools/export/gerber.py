@@ -324,11 +324,25 @@ class GerberExporter:
             )
             logger.debug(f"kicad-cli output: {result.stdout}")
         except subprocess.CalledProcessError as e:
-            logger.error(f"kicad-cli failed: {e.stderr}")
+            # Capture both stdout and stderr - kicad-cli may output errors to either
+            error_output = e.stderr.strip() if e.stderr else ""
+            stdout_output = e.stdout.strip() if e.stdout else ""
+            combined_output = error_output or stdout_output or "No error output captured"
+
+            logger.error(f"kicad-cli failed (exit code {e.returncode}): {combined_output}")
             raise ExportError(
                 "Gerber export failed",
-                context={"pcb": str(self.pcb_path), "error": e.stderr},
-                suggestions=["Check the KiCad log for details"],
+                context={
+                    "pcb": str(self.pcb_path),
+                    "exit_code": e.returncode,
+                    "stderr": error_output or "(empty)",
+                    "stdout": stdout_output or "(empty)",
+                },
+                suggestions=[
+                    "Check the KiCad log for details",
+                    "Verify the PCB file is valid and can be opened in KiCad",
+                    "Ensure all layers referenced exist in the PCB",
+                ],
             )
 
     def _export_drill(self, config: GerberConfig, output_dir: Path) -> None:
@@ -366,11 +380,24 @@ class GerberExporter:
             )
             logger.debug(f"kicad-cli output: {result.stdout}")
         except subprocess.CalledProcessError as e:
-            logger.error(f"kicad-cli failed: {e.stderr}")
+            # Capture both stdout and stderr - kicad-cli may output errors to either
+            error_output = e.stderr.strip() if e.stderr else ""
+            stdout_output = e.stdout.strip() if e.stdout else ""
+            combined_output = error_output or stdout_output or "No error output captured"
+
+            logger.error(f"kicad-cli failed (exit code {e.returncode}): {combined_output}")
             raise ExportError(
                 "Drill export failed",
-                context={"pcb": str(self.pcb_path), "error": e.stderr},
-                suggestions=["Check the KiCad log for details"],
+                context={
+                    "pcb": str(self.pcb_path),
+                    "exit_code": e.returncode,
+                    "stderr": error_output or "(empty)",
+                    "stdout": stdout_output or "(empty)",
+                },
+                suggestions=[
+                    "Check the KiCad log for details",
+                    "Verify the PCB file is valid and can be opened in KiCad",
+                ],
             )
 
     def _get_default_layers(self, config: GerberConfig) -> list[str]:
