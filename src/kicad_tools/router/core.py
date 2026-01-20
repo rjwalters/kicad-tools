@@ -296,9 +296,27 @@ class Autorouter:
         self.net_class_map = net_class_map or DEFAULT_NET_CLASS_MAP
         self.layer_stack = layer_stack
         self._force_python = force_python
-        self.grid = RoutingGrid(
-            width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
+
+        # Issue #972: Automatically use adaptive grid resolution for large boards
+        # to prevent excessive memory usage and improve routing performance.
+        # Threshold: 500k cells per layer (matches create_adaptive default)
+        num_layers = (layer_stack or LayerStack.two_layer()).num_layers
+        estimated_cells = (
+            (width / self.rules.grid_resolution)
+            * (height / self.rules.grid_resolution)
+            * num_layers
         )
+        adaptive_threshold = 500_000
+
+        if estimated_cells > adaptive_threshold:
+            # Use adaptive resolution for better performance on large boards
+            self.grid = RoutingGrid.create_adaptive(
+                width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
+            )
+        else:
+            self.grid = RoutingGrid(
+                width, height, self.rules, origin_x, origin_y, layer_stack=layer_stack
+            )
         self.router = create_hybrid_router(self.grid, self.rules, force_python=force_python)
         self.zone_manager = ZoneManager(self.grid, self.rules)
 
@@ -1960,7 +1978,23 @@ class Autorouter:
         width, height = self.grid.width, self.grid.height
         origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
 
-        self.grid = RoutingGrid(width, height, self.rules, origin_x, origin_y)
+        # Issue #972: Use adaptive resolution for large boards (same logic as __init__)
+        num_layers = self.grid.num_layers
+        estimated_cells = (
+            (width / self.rules.grid_resolution)
+            * (height / self.rules.grid_resolution)
+            * num_layers
+        )
+        adaptive_threshold = 500_000
+
+        if estimated_cells > adaptive_threshold:
+            self.grid = RoutingGrid.create_adaptive(
+                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+            )
+        else:
+            self.grid = RoutingGrid(
+                width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
+            )
         self.router = create_hybrid_router(self.grid, self.rules, force_python=self._force_python)
         self.zone_manager = ZoneManager(self.grid, self.rules)
 
