@@ -243,9 +243,7 @@ class Router:
             obstacle_blocks = blocked_region & obstacle_region & different_net
 
             # Case 2: Blocked non-obstacles with different net AND static (usage == 0)
-            static_blocks = (
-                blocked_region & ~obstacle_region & different_net & (usage_region == 0)
-            )
+            static_blocks = blocked_region & ~obstacle_region & different_net & (usage_region == 0)
 
             return bool(np.any(obstacle_blocks | static_blocks))
         else:
@@ -1138,6 +1136,11 @@ class Router:
         clearance violations that grid-based checking missed (particularly
         for diagonal segments that can cut through obstacle corners).
 
+        Issue #972: Performance optimization - merge collinear segments inline
+        during reconstruction instead of creating segment-per-cell and merging
+        later. This reduces segment count from thousands to tens per net,
+        significantly improving routing performance for large boards.
+
         Returns:
             Route if valid, None if geometric clearance validation fails.
         """
@@ -1159,11 +1162,48 @@ class Router:
 
         # Start from pad center
         # current_layer_idx is a grid index (0, 1, ...), not Layer enum value
-        current_x, current_y = start_pad.x, start_pad.y
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
+
+        # Issue #972: Inline segment merging - track segment start point and direction
+        # to merge collinear cells into single segments
+        seg_start_x, seg_start_y = start_pad.x, start_pad.y
+        current_x, current_y = seg_start_x, seg_start_y
+        current_direction: tuple[float, float] | None = None  # (dx_normalized, dy_normalized)
+
+        def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
+            """Normalize direction vector, return None if no movement."""
+            length = (dx * dx + dy * dy) ** 0.5
+            if length < 0.001:
+                return None
+            return (dx / length, dy / length)
+
+        def _same_direction(d1: tuple[float, float] | None, d2: tuple[float, float] | None) -> bool:
+            """Check if two directions are the same (within tolerance)."""
+            if d1 is None or d2 is None:
+                return False
+            # Check if normalized directions match (collinear)
+            return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
+
+        def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
+            """Create and add a segment if there's meaningful distance."""
+            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
+                seg = Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=self.rules.trace_width,
+                    layer=Layer(self.grid.index_to_layer(layer_idx)),
+                    net=start_pad.net,
+                    net_name=start_pad.net_name,
+                )
+                route.segments.append(seg)
 
         for _i, (wx, wy, layer_idx, is_via) in enumerate(path):
             if is_via:
+                # Emit pending segment before via
+                _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+
                 # Add via - convert grid indices back to Layer enum values
                 via = Via(
                     x=current_x,
@@ -1179,36 +1219,59 @@ class Router:
                 )
                 route.vias.append(via)
                 current_layer_idx = layer_idx
+
+                # Reset segment tracking after via
+                seg_start_x, seg_start_y = current_x, current_y
+                current_direction = None
             else:
-                # Add segment if we've moved
-                if abs(wx - current_x) > 0.01 or abs(wy - current_y) > 0.01:
-                    seg = Segment(
-                        x1=current_x,
-                        y1=current_y,
-                        x2=wx,
-                        y2=wy,
-                        width=self.rules.trace_width,
-                        layer=Layer(self.grid.index_to_layer(layer_idx)),
-                        net=start_pad.net,
-                        net_name=start_pad.net_name,
-                    )
-                    route.segments.append(seg)
+                # Check if we've moved
+                dx = wx - current_x
+                dy = wy - current_y
+                new_direction = _normalize_direction(dx, dy)
+
+                if new_direction is not None:
+                    # Direction changed - emit current segment and start new one
+                    if not _same_direction(current_direction, new_direction):
+                        _emit_segment(
+                            seg_start_x, seg_start_y, current_x, current_y, current_layer_idx
+                        )
+                        seg_start_x, seg_start_y = current_x, current_y
+                        current_direction = new_direction
+
                     current_x, current_y = wx, wy
                     current_layer_idx = layer_idx
 
-        # Final segment to end pad
-        if abs(end_pad.x - current_x) > 0.01 or abs(end_pad.y - current_y) > 0.01:
-            seg = Segment(
-                x1=current_x,
-                y1=current_y,
-                x2=end_pad.x,
-                y2=end_pad.y,
-                width=self.rules.trace_width,
-                layer=Layer(self.grid.index_to_layer(current_layer_idx)),
-                net=start_pad.net,
-                net_name=start_pad.net_name,
-            )
-            route.segments.append(seg)
+        # Emit final segment of the path
+        _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+
+        # Final segment to end pad (if needed)
+        dx = end_pad.x - current_x
+        dy = end_pad.y - current_y
+        if abs(dx) > 0.01 or abs(dy) > 0.01:
+            # Check if final segment is collinear with last emitted segment
+            if route.segments:
+                last_seg = route.segments[-1]
+                last_dx = last_seg.x2 - last_seg.x1
+                last_dy = last_seg.y2 - last_seg.y1
+                last_dir = _normalize_direction(last_dx, last_dy)
+                end_dir = _normalize_direction(dx, dy)
+
+                if _same_direction(last_dir, end_dir):
+                    # Extend last segment to end pad
+                    route.segments[-1] = Segment(
+                        x1=last_seg.x1,
+                        y1=last_seg.y1,
+                        x2=end_pad.x,
+                        y2=end_pad.y,
+                        width=self.rules.trace_width,
+                        layer=last_seg.layer,
+                        net=start_pad.net,
+                        net_name=start_pad.net_name,
+                    )
+                else:
+                    _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+            else:
+                _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
 
         # Validate layer transitions and insert any missing vias
         route.validate_layer_transitions(
@@ -1617,6 +1680,8 @@ class Router:
 
         Combines the forward path (start -> meeting) and reversed backward path
         (meeting -> end) into a complete route.
+
+        Issue #972: Uses inline segment merging for performance.
         """
         route = Route(net=start_pad.net, net_name=start_pad.net_name)
 
@@ -1646,12 +1711,45 @@ class Router:
         if len(full_path) < 2:
             return route
 
-        # Convert to segments and vias (same logic as _reconstruct_route)
-        current_x, current_y = start_pad.x, start_pad.y
+        # Issue #972: Inline segment merging - track segment start point and direction
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
+        seg_start_x, seg_start_y = start_pad.x, start_pad.y
+        current_x, current_y = seg_start_x, seg_start_y
+        current_direction: tuple[float, float] | None = None
+
+        def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
+            """Normalize direction vector, return None if no movement."""
+            length = (dx * dx + dy * dy) ** 0.5
+            if length < 0.001:
+                return None
+            return (dx / length, dy / length)
+
+        def _same_direction(d1: tuple[float, float] | None, d2: tuple[float, float] | None) -> bool:
+            """Check if two directions are the same (within tolerance)."""
+            if d1 is None or d2 is None:
+                return False
+            return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
+
+        def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
+            """Create and add a segment if there's meaningful distance."""
+            if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
+                seg = Segment(
+                    x1=x1,
+                    y1=y1,
+                    x2=x2,
+                    y2=y2,
+                    width=self.rules.trace_width,
+                    layer=Layer(self.grid.index_to_layer(layer_idx)),
+                    net=start_pad.net,
+                    net_name=start_pad.net_name,
+                )
+                route.segments.append(seg)
 
         for _i, (wx, wy, layer_idx, is_via) in enumerate(full_path):
             if is_via:
+                # Emit pending segment before via
+                _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+
                 via = Via(
                     x=current_x,
                     y=current_y,
@@ -1666,35 +1764,56 @@ class Router:
                 )
                 route.vias.append(via)
                 current_layer_idx = layer_idx
+
+                # Reset segment tracking after via
+                seg_start_x, seg_start_y = current_x, current_y
+                current_direction = None
             else:
-                if abs(wx - current_x) > 0.01 or abs(wy - current_y) > 0.01:
-                    seg = Segment(
-                        x1=current_x,
-                        y1=current_y,
-                        x2=wx,
-                        y2=wy,
-                        width=self.rules.trace_width,
-                        layer=Layer(self.grid.index_to_layer(layer_idx)),
-                        net=start_pad.net,
-                        net_name=start_pad.net_name,
-                    )
-                    route.segments.append(seg)
+                dx = wx - current_x
+                dy = wy - current_y
+                new_direction = _normalize_direction(dx, dy)
+
+                if new_direction is not None:
+                    if not _same_direction(current_direction, new_direction):
+                        _emit_segment(
+                            seg_start_x, seg_start_y, current_x, current_y, current_layer_idx
+                        )
+                        seg_start_x, seg_start_y = current_x, current_y
+                        current_direction = new_direction
+
                     current_x, current_y = wx, wy
                     current_layer_idx = layer_idx
 
-        # Final segment to end pad
-        if abs(end_pad.x - current_x) > 0.01 or abs(end_pad.y - current_y) > 0.01:
-            seg = Segment(
-                x1=current_x,
-                y1=current_y,
-                x2=end_pad.x,
-                y2=end_pad.y,
-                width=self.rules.trace_width,
-                layer=Layer(self.grid.index_to_layer(current_layer_idx)),
-                net=start_pad.net,
-                net_name=start_pad.net_name,
-            )
-            route.segments.append(seg)
+        # Emit final segment of the path
+        _emit_segment(seg_start_x, seg_start_y, current_x, current_y, current_layer_idx)
+
+        # Final segment to end pad (if needed)
+        dx = end_pad.x - current_x
+        dy = end_pad.y - current_y
+        if abs(dx) > 0.01 or abs(dy) > 0.01:
+            if route.segments:
+                last_seg = route.segments[-1]
+                last_dx = last_seg.x2 - last_seg.x1
+                last_dy = last_seg.y2 - last_seg.y1
+                last_dir = _normalize_direction(last_dx, last_dy)
+                end_dir = _normalize_direction(dx, dy)
+
+                if _same_direction(last_dir, end_dir):
+                    # Extend last segment to end pad
+                    route.segments[-1] = Segment(
+                        x1=last_seg.x1,
+                        y1=last_seg.y1,
+                        x2=end_pad.x,
+                        y2=end_pad.y,
+                        width=self.rules.trace_width,
+                        layer=last_seg.layer,
+                        net=start_pad.net,
+                        net_name=start_pad.net_name,
+                    )
+                else:
+                    _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
+            else:
+                _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
 
         # Validate layer transitions
         route.validate_layer_transitions(
