@@ -448,6 +448,10 @@ def export_netlist(
     else:
         output_path = Path(output_path)
 
+    # Delete existing netlist to ensure fresh export (prevents stale cache issues)
+    if output_path.exists():
+        output_path.unlink()
+
     cmd = [
         str(kicad_cli),
         "sch",
@@ -462,6 +466,20 @@ def export_netlist(
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # Check for kicad-cli crash (SIGSEGV = exit code 139)
+        if result.returncode == 139:
+            raise RuntimeError(
+                "kicad-cli crashed (SIGSEGV). This may be caused by a problematic "
+                "symbol in the schematic. Try removing recently added symbols or "
+                "exporting the netlist manually from KiCad GUI. "
+                "See: https://gitlab.com/kicad/code/kicad/-/issues"
+            )
+
+        # Check for other non-zero exit codes
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() if result.stderr else f"Exit code {result.returncode}"
+            raise RuntimeError(f"kicad-cli failed: {error_msg}")
 
         if not output_path.exists():
             raise RuntimeError(result.stderr or "Netlist export produced no output")
