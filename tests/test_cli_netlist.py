@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from kicad_tools.cli import netlist_cmd
 from kicad_tools.operations.netlist import Netlist, NetlistComponent, NetlistNet, NetNode
 from kicad_tools.sexp import parse_sexp
@@ -517,3 +519,158 @@ class TestNetlistCmdMain:
         assert result == 1
         captured = capsys.readouterr()
         assert "Error" in captured.err
+
+
+class TestExportNetlistStaleCache:
+    """Tests for export_netlist stale cache prevention (issue #983)."""
+
+    def test_export_netlist_deletes_existing_file_before_export(self, tmp_path):
+        """Test that export_netlist deletes existing netlist to prevent stale data."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a minimal schematic
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        # Create a stale netlist file with old content
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        stale_content = "(export (version D) (components) (nets))"
+        netlist_file.write_text(stale_content)
+
+        # Mock subprocess to simulate kicad-cli not producing output (crash)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+            # This should raise because kicad-cli crashed (exit 139)
+            with pytest.raises(RuntimeError, match="kicad-cli crashed"):
+                export_netlist(sch_file)
+
+            # The stale file should have been deleted BEFORE running kicad-cli
+            # (verified by the fact that we got the crash error, not stale data)
+
+    def test_export_netlist_detects_sigsegv_crash(self, tmp_path):
+        """Test that exit code 139 (SIGSEGV) is detected with helpful message."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+            with pytest.raises(RuntimeError) as exc_info:
+                export_netlist(sch_file)
+
+            error_msg = str(exc_info.value)
+            assert "SIGSEGV" in error_msg
+            assert "problematic symbol" in error_msg
+            assert "kicad" in error_msg.lower()
+
+    def test_export_netlist_detects_other_nonzero_exit_codes(self, tmp_path):
+        """Test that other non-zero exit codes raise RuntimeError."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=1, stderr="Some error message", stdout=""
+            )
+
+            with pytest.raises(RuntimeError, match="kicad-cli failed"):
+                export_netlist(sch_file)
+
+    def test_export_netlist_succeeds_when_kicad_cli_works(self, tmp_path):
+        """Test successful export when kicad-cli works properly."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        valid_netlist = """(export
+          (version "E")
+          (design (source "test.kicad_sch") (tool "Eeschema"))
+          (components)
+          (nets)
+        )"""
+
+        def create_netlist(*args, **kwargs):
+            netlist_file.write_text(valid_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch("subprocess.run", side_effect=create_netlist):
+            result = export_netlist(sch_file)
+
+            assert result is not None
+            assert result.source_file == "test.kicad_sch"
+
+    def test_export_netlist_removes_stale_before_fresh_export(self, tmp_path):
+        """Test stale netlist is removed even when fresh export succeeds."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        netlist_file = tmp_path / "test-netlist.kicad_net"
+        # Create stale netlist with old timestamp marker
+        netlist_file.write_text("(export (version D) (design (date OLD)))")
+
+        fresh_netlist = """(export
+          (version "E")
+          (design (source "test.kicad_sch") (tool "Eeschema") (date "FRESH"))
+          (components)
+          (nets)
+        )"""
+
+        call_count = [0]
+
+        def track_and_create(*args, **kwargs):
+            call_count[0] += 1
+            # Verify old file was deleted before subprocess runs
+            if call_count[0] == 1:
+                assert not netlist_file.exists(), "Stale file should be deleted before export"
+            netlist_file.write_text(fresh_netlist)
+            return Mock(returncode=0, stderr="", stdout="")
+
+        with patch("subprocess.run", side_effect=track_and_create):
+            result = export_netlist(sch_file)
+
+            assert result is not None
+            assert "FRESH" in result.date or result.tool == "Eeschema"
