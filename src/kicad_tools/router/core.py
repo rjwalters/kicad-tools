@@ -852,13 +852,62 @@ class Autorouter:
         self._decision_store.save(path)
         return True
 
-    def _get_net_priority(self, net_id: int) -> tuple[int, int]:
-        """Get routing priority for a net (lower = higher priority)."""
+    def _get_net_bounding_box_diagonal(self, net_id: int) -> float:
+        """Calculate the bounding box diagonal distance for a net's pads.
+
+        This provides a fast approximation of net complexity/length.
+        Shorter nets (smaller bounding boxes) are simpler to route and
+        should generally be routed first to leave more routing freedom
+        for longer, more complex nets.
+
+        Args:
+            net_id: The net ID to calculate distance for.
+
+        Returns:
+            Bounding box diagonal in mm, or 0.0 if net has fewer than 2 pads.
+        """
+        pad_keys = self.nets.get(net_id, [])
+        if len(pad_keys) < 2:
+            return 0.0
+
+        # Get all pad coordinates
+        coords = []
+        for key in pad_keys:
+            pad = self.pads.get(key)
+            if pad:
+                coords.append((pad.x, pad.y))
+
+        if len(coords) < 2:
+            return 0.0
+
+        # Calculate bounding box
+        min_x = min(c[0] for c in coords)
+        max_x = max(c[0] for c in coords)
+        min_y = min(c[1] for c in coords)
+        max_y = max(c[1] for c in coords)
+
+        # Return diagonal distance
+        return math.sqrt((max_x - min_x) ** 2 + (max_y - min_y) ** 2)
+
+    def _get_net_priority(self, net_id: int) -> tuple[int, int, float]:
+        """Get routing priority for a net (lower = higher priority).
+
+        Returns a 3-tuple used for sorting:
+        1. Net class priority (1-10, where 1 = highest priority like POWER)
+        2. Pad count (fewer pads = higher priority, simpler nets first)
+        3. Bounding box diagonal (shorter nets first, leaves room for longer nets)
+
+        This ordering strategy routes critical signal classes first (power, clock),
+        then within each class routes simpler/shorter nets before complex/longer ones.
+        This improves overall routing success by giving constrained long nets more
+        routing freedom after simple nets have been routed.
+        """
         net_name = self.net_names.get(net_id, "")
         net_class = self.net_class_map.get(net_name)
         priority = net_class.priority if net_class else 10
         pad_count = len(self.nets.get(net_id, []))
-        return (priority, pad_count)
+        distance = self._get_net_bounding_box_diagonal(net_id)
+        return (priority, pad_count, distance)
 
     def route_all(
         self,

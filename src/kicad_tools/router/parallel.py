@@ -263,7 +263,7 @@ def resolve_parallel_conflicts(
     routes: list[Route],
     conflicts: list[tuple[Route, Route, list[tuple[int, int, int]]]],
     router: Autorouter,
-    priority_fn: Callable[[int], tuple[int, int]] | None = None,
+    priority_fn: Callable[[int], tuple[int, int, float]] | None = None,
 ) -> tuple[list[Route], int]:
     """Resolve conflicts from parallel routes by rerouting losers.
 
