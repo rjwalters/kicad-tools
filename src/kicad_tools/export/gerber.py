@@ -308,10 +308,10 @@ class GerberExporter:
         if config.disable_aperture_macros:
             cmd.append("--disable-aperture-macros")
 
-        # Layer selection
+        # Layer selection - kicad-cli 9.x requires comma-separated list
         layers = config.layers if config.layers else self._get_default_layers(config)
-        for layer in layers:
-            cmd.extend(["--layers", layer])
+        if layers:
+            cmd.extend(["--layers", ",".join(layers)])
 
         logger.debug(f"Running: {' '.join(cmd)}")
 
