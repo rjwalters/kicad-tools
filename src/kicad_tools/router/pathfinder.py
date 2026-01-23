@@ -155,6 +155,96 @@ class Router:
         self._via_cache: dict[tuple[int, int, int], bool] = {}
         self._via_cache_enabled: bool = True
 
+        # Issue #1016: Component pitch cache for per-component clearance
+        # Computed lazily on first use
+        self._component_pitches: dict[str, float] | None = None
+
+        # Issue #1016: Pre-compute trace clearance radii for component-specific clearances
+        # Maps clearance value (mm) to grid cell radius
+        self._clearance_radii: dict[float, int] = {}
+        self._precompute_clearance_radii()
+
+    def _precompute_clearance_radii(self) -> None:
+        """Pre-compute grid cell radii for all component-specific clearances.
+
+        Issue #1016: Pre-computes clearance radii for:
+        - Default trace clearance
+        - Each per-component clearance
+        - Fine-pitch clearance (if configured)
+
+        This allows efficient lookup during routing.
+        """
+        # Always include default clearance
+        clearances = {self.rules.trace_clearance}
+
+        # Add per-component clearances
+        for clearance in self.rules.component_clearances.values():
+            clearances.add(clearance)
+
+        # Add fine-pitch clearance if configured
+        if self.rules.fine_pitch_clearance is not None:
+            clearances.add(self.rules.fine_pitch_clearance)
+
+        # Compute grid cell radius for each clearance value
+        for clearance in clearances:
+            radius = max(
+                1,
+                math.ceil(
+                    round(
+                        (self.rules.trace_width / 2 + clearance) / self.grid.resolution,
+                        6,
+                    )
+                ),
+            )
+            self._clearance_radii[clearance] = radius
+
+    def get_clearance_radius_cells(self, clearance_mm: float) -> int:
+        """Get the trace clearance radius in grid cells for a given clearance.
+
+        Args:
+            clearance_mm: Clearance value in mm
+
+        Returns:
+            Radius in grid cells (at least 1)
+        """
+        # Check cache first
+        if clearance_mm in self._clearance_radii:
+            return self._clearance_radii[clearance_mm]
+
+        # Compute and cache
+        radius = max(
+            1,
+            math.ceil(
+                round(
+                    (self.rules.trace_width / 2 + clearance_mm) / self.grid.resolution,
+                    6,
+                )
+            ),
+        )
+        self._clearance_radii[clearance_mm] = radius
+        return radius
+
+    @property
+    def component_pitches(self) -> dict[str, float]:
+        """Get component pin pitches for automatic fine-pitch detection.
+
+        Issue #1016: Computed lazily on first access and cached.
+        Used for per-component clearance validation.
+
+        Returns:
+            Dict mapping component reference to minimum pin pitch in mm.
+        """
+        if self._component_pitches is None:
+            self._component_pitches = self.grid.compute_component_pitches()
+        return self._component_pitches
+
+    def invalidate_component_pitch_cache(self) -> None:
+        """Invalidate the component pitch cache.
+
+        Call this if pads are added or modified after Router initialization.
+        """
+        self._component_pitches = None
+
     def _get_net_class(self, net_name: str) -> NetClassRouting | None:
         """Get the net class for a net name."""
         return self.net_class_map.get(net_name)
@@ -1328,23 +1418,32 @@ class Router:
             else:
                 _emit_segment(current_x, current_y, end_pad.x, end_pad.y, current_layer_idx)
 
-    def _validate_route_clearance(self, route: Route, exclude_net: int) -> bool:
+    def _validate_route_clearance(
+        self,
+        route: Route,
+        exclude_net: int,
+        component_pitches: dict[str, float] | None = None,
+    ) -> bool:
         """Validate route segments against geometric clearance constraints.
 
         Issue #750: Grid-based A* checking is approximate; diagonal segments can
         cut through obstacle corners. This method validates actual geometry to
         catch clearance violations that grid-based checking missed.
 
+        Issue #1016: Now supports per-component clearance validation via
+        component_pitches dict for automatic fine-pitch detection.
+
         Args:
             route: Route to validate
             exclude_net: Net ID to exclude from clearance checks (the route's own net)
+            component_pitches: Optional dict mapping component ref to pin pitch in mm
 
         Returns:
             True if route passes clearance validation, False otherwise.
         """
         for seg in route.segments:
             is_valid, _clearance, _location = self.grid.validate_segment_clearance(
-                seg, exclude_net=exclude_net
+                seg, exclude_net=exclude_net, component_pitches=component_pitches
             )
             if not is_valid:
                 return False
@@ -1382,8 +1481,10 @@ class Router:
             via_diameter=self.rules.via_diameter,
         )
 
-        # Geometric clearance validation
-        if not self._validate_route_clearance(route, start_pad.net):
+        # Geometric clearance validation (Issue #1016: per-component clearance support)
+        if not self._validate_route_clearance(
+            route, start_pad.net, component_pitches=self.component_pitches
+        ):
             # Route has clearance violations - reject it
             # The caller will report "no path found" which is preferable
             # to returning a route with DRC violations
@@ -1856,8 +1957,10 @@ class Router:
             via_diameter=self.rules.via_diameter,
         )
 
-        # Geometric clearance validation using shared helper
-        if not self._validate_route_clearance(route, start_pad.net):
+        # Geometric clearance validation (Issue #1016: per-component clearance support)
+        if not self._validate_route_clearance(
+            route, start_pad.net, component_pitches=self.component_pitches
+        ):
             return None
 
         return route

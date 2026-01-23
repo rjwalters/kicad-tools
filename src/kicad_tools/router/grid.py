@@ -607,6 +607,7 @@ class RoutingGrid:
         seg: Segment,
         exclude_net: int,
         min_clearance: float | None = None,
+        component_pitches: dict[str, float] | None = None,
     ) -> tuple[bool, float, tuple[float, float] | None]:
         """Validate geometric clearance of a segment against all obstacles.
 
@@ -615,10 +616,17 @@ class RoutingGrid:
         Issue #750: Grid discretization causes diagonal segments to pass through
         obstacle corners that weren't detected during A* search.
 
+        Issue #1016: Now supports per-component clearance overrides. When checking
+        clearance against a pad, uses the clearance for that pad's component
+        (from DesignRules.component_clearances or fine_pitch_clearance).
+
         Args:
             seg: The segment to validate
             exclude_net: Net ID to exclude (same-net elements don't violate clearance)
-            min_clearance: Minimum required clearance (default: rules.trace_clearance)
+            min_clearance: Minimum required clearance (default: rules.trace_clearance).
+                          This is used when no component-specific clearance applies.
+            component_pitches: Optional dict mapping component ref to pin pitch in mm.
+                             Used for automatic fine-pitch clearance detection.
 
         Returns:
             Tuple of (is_valid, actual_clearance, violation_location)
@@ -636,6 +644,7 @@ class RoutingGrid:
 
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
+        has_violation = False  # Issue #1016: track if any violation was found
 
         # Check against all stored pads
         for pad in self._pads:
@@ -651,6 +660,12 @@ class RoutingGrid:
                 if pad_layer_idx != seg_layer_idx:
                     continue
 
+            # Issue #1016: Get per-component clearance if available
+            # When validating against a pad, use the clearance for that component
+            pad_ref = pad.ref
+            pin_pitch = component_pitches.get(pad_ref) if component_pitches else None
+            required_clearance = self.rules.get_clearance_for_component(pad_ref, pin_pitch)
+
             # Calculate distance from segment to pad center
             # Use the pad's larger dimension as radius for conservative check
             pad_radius = max(pad.width, pad.height) / 2
@@ -663,8 +678,11 @@ class RoutingGrid:
 
             if clearance < min_actual_clearance:
                 min_actual_clearance = clearance
-                if clearance < min_clearance:
-                    violation_loc = (pad.x, pad.y)
+
+            # Issue #1016: Check violation against component-specific clearance
+            if clearance < required_clearance:
+                has_violation = True
+                violation_loc = (pad.x, pad.y)
 
         # Check against segments from existing routes
         for route in self.routes:
@@ -694,12 +712,13 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                    if clearance < min_clearance:
-                        # Violation location at midpoint
-                        violation_loc = (
-                            (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
-                            (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
-                        )
+                if clearance < min_clearance:
+                    # Violation location at midpoint
+                    has_violation = True
+                    violation_loc = (
+                        (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
+                        (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
+                    )
 
             # Check against vias from existing routes
             for via in route.vias:
@@ -713,9 +732,11 @@ class RoutingGrid:
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
                     if clearance < min_clearance:
+                        has_violation = True
                         violation_loc = (via.x, via.y)
 
-        is_valid = min_actual_clearance >= min_clearance
+        # Issue #1016: is_valid is True only if no violations were found
+        is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
 
     def _point_to_segment_distance(
@@ -770,6 +791,49 @@ class RoutingGrid:
         d4 = self._point_to_segment_distance(x4, y4, x1, y1, x2, y2)
 
         return min(d1, d2, d3, d4)
+
+    def compute_component_pitches(self) -> dict[str, float]:
+        """Compute minimum pin pitch for each component.
+
+        Issue #1016: Used for automatic fine-pitch clearance detection.
+        Analyzes pad positions to calculate the minimum pitch (center-to-center
+        distance) between adjacent pins for each component.
+
+        Returns:
+            Dictionary mapping component reference to minimum pitch in mm.
+
+        Example:
+            >>> pitches = grid.compute_component_pitches()
+            >>> pitches.get("U1")  # Returns 0.65 for TSSOP-20
+        """
+        import math
+
+        # Group pads by component reference
+        pads_by_ref: dict[str, list[Pad]] = {}
+        for pad in self._pads:
+            ref = pad.ref
+            if ref:
+                if ref not in pads_by_ref:
+                    pads_by_ref[ref] = []
+                pads_by_ref[ref].append(pad)
+
+        # Calculate minimum pitch for each component
+        pitches: dict[str, float] = {}
+        for ref, comp_pads in pads_by_ref.items():
+            if len(comp_pads) < 2:
+                continue
+
+            min_pitch = float("inf")
+            for i, p1 in enumerate(comp_pads):
+                for p2 in comp_pads[i + 1 :]:
+                    dist = math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
+                    if dist > 0.01:  # Ignore overlapping pads
+                        min_pitch = min(min_pitch, dist)
+
+            if min_pitch != float("inf"):
+                pitches[ref] = min_pitch
+
+        return pitches
 
     def mark_route(self, route: Route) -> None:
         """Mark a route's cells as used.
