@@ -3733,9 +3733,6 @@ class Autorouter:
                     self.grid, relaxed_router, relaxed_rules, self.net_class_map
                 )
 
-                # Track routes added by this attempt
-                routes_before = len(self.routes)
-
                 def mark_route(route: Route) -> None:
                     self._mark_route(route)
 
