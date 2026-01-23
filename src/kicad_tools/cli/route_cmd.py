@@ -1757,6 +1757,14 @@ def main(argv: list[str] | None = None) -> int:
             "'json' = JSON output for tooling and automation."
         ),
     )
+    parser.add_argument(
+        "--high-performance",
+        action="store_true",
+        help=(
+            "Use high-performance mode with aggressive parallelization and more trials. "
+            "Uses calibrated settings if available (run 'kicad-tools calibrate' first)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -1794,6 +1802,27 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Apply high-performance settings if requested
+    if getattr(args, "high_performance", False):
+        from kicad_tools.performance import get_performance_config
+
+        perf_config = get_performance_config(high_performance=True)
+
+        # Override defaults with high-performance settings
+        if not args.quiet:
+            print("\n--- High-Performance Mode ---")
+            print(f"  CPU cores:         {perf_config.cpu_cores}")
+            print(f"  Monte Carlo trials: {perf_config.monte_carlo_trials}")
+            print(f"  Parallel workers:   {perf_config.parallel_workers}")
+            print(f"  Max iterations:     {perf_config.negotiated_iterations}")
+            if perf_config.calibrated:
+                print(f"  (Using calibrated settings from {perf_config.calibration_date})")
+            print()
+
+        # Apply to routing parameters
+        args.mc_trials = perf_config.monte_carlo_trials
+        args.iterations = perf_config.negotiated_iterations
 
     # Determine output path
     if args.output:

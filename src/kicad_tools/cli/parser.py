@@ -172,6 +172,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_run_parser(subparsers)
     _add_explain_parser(subparsers)
     _add_detect_mistakes_parser(subparsers)
+    _add_calibrate_parser(subparsers)
 
     return parser
 
@@ -867,6 +868,14 @@ def _add_route_parser(subparsers) -> None:
         "--mfr",
         default="jlcpcb",
         help="Manufacturer for DRC validation and adaptive rules (default: jlcpcb)",
+    )
+    route_parser.add_argument(
+        "--high-performance",
+        action="store_true",
+        help=(
+            "Use high-performance mode with aggressive parallelization and more trials. "
+            "Uses calibrated settings if available (run 'kicad-tools calibrate' first)."
+        ),
     )
 
 
@@ -2991,4 +3000,49 @@ def _add_detect_mistakes_parser(subparsers) -> None:
         action="store_true",
         dest="mistakes_verbose",
         help="Show detailed information",
+    )
+
+
+def _add_calibrate_parser(subparsers) -> None:
+    """Add calibrate subcommand parser."""
+    calibrate_parser = subparsers.add_parser(
+        "calibrate",
+        help="Calibrate routing performance settings for your machine",
+    )
+    calibrate_parser.add_argument(
+        "--show",
+        action="store_true",
+        dest="calibrate_show",
+        help="Show current performance configuration without running calibration",
+    )
+    calibrate_parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        dest="calibrate_benchmark",
+        help="Run full benchmarks with detailed output",
+    )
+    calibrate_parser.add_argument(
+        "--quick",
+        action="store_true",
+        dest="calibrate_quick",
+        help="Run abbreviated calibration (faster but less accurate)",
+    )
+    calibrate_parser.add_argument(
+        "-o",
+        "--output",
+        dest="calibrate_output",
+        help="Output path for configuration file",
+    )
+    calibrate_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="calibrate_json",
+        help="Output configuration as JSON",
+    )
+    calibrate_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        dest="calibrate_verbose",
+        help="Show detailed progress information",
     )
