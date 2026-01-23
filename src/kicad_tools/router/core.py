@@ -3587,6 +3587,207 @@ class Autorouter:
 
         return all_routes
 
+    # =========================================================================
+    # PROGRESSIVE CLEARANCE RELAXATION
+    # =========================================================================
+
+    def route_with_progressive_clearance(
+        self,
+        min_clearance: float | None = None,
+        num_relaxation_levels: int = 3,
+        max_iterations: int = 15,
+        timeout: float | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> tuple[list[Route], dict[int, float]]:
+        """Route all nets with progressive clearance relaxation for failed nets.
+
+        This method first routes all nets with standard clearance, then identifies
+        nets that failed due to clearance violations and retries them with
+        progressively relaxed clearance settings.
+
+        Unlike --adaptive-rules which globally relaxes all rules and reroutes
+        everything, this method only relaxes clearance for specific failed nets,
+        preserving the original clearance for successfully routed nets.
+
+        Args:
+            min_clearance: Minimum clearance floor (default: 50% of original clearance)
+            num_relaxation_levels: Number of relaxation steps to try (default: 3)
+            max_iterations: Max iterations for negotiated routing (default: 15)
+            timeout: Optional timeout in seconds
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Tuple of:
+            - List of all routes (successfully routed nets)
+            - Dict mapping net IDs to the clearance level used (for reporting)
+
+        Example:
+            >>> router = Autorouter(...)
+            >>> routes, relaxed_nets = router.route_with_progressive_clearance(
+            ...     min_clearance=0.08
+            ... )
+            >>> print(f"Nets needing relaxed clearance: {len(relaxed_nets)}")
+        """
+        import time
+
+        from .cpp_backend import create_hybrid_router
+        from .failure_analysis import FailureCause
+
+        start_time = time.time()
+        original_clearance = self.rules.trace_clearance
+
+        # Calculate minimum clearance if not specified
+        if min_clearance is None:
+            min_clearance = original_clearance * 0.5
+
+        # Ensure min_clearance doesn't exceed original
+        min_clearance = min(min_clearance, original_clearance)
+
+        print("\n=== Progressive Clearance Relaxation ===")
+        print(f"  Original clearance: {original_clearance:.3f}mm")
+        print(f"  Minimum clearance: {min_clearance:.3f}mm")
+        print(f"  Relaxation levels: {num_relaxation_levels}")
+
+        # Generate relaxation levels (linear interpolation)
+        relaxation_levels = [
+            original_clearance
+            - i * (original_clearance - min_clearance) / num_relaxation_levels
+            for i in range(num_relaxation_levels + 1)
+        ]
+
+        # Track which nets needed clearance relaxation
+        nets_relaxed: dict[int, float] = {}
+
+        # Pass 1: Route with standard clearance
+        print(f"\n--- Pass 1: Standard clearance ({original_clearance:.3f}mm) ---")
+        self.route_all_negotiated(
+            max_iterations=max_iterations,
+            timeout=timeout,
+            progress_callback=progress_callback,
+            use_targeted_ripup=True,
+            adaptive=True,
+        )
+
+        # Get initial statistics
+        initial_stats = self.get_statistics()
+        nets_routed_initial = initial_stats["nets_routed"]
+
+        # Identify failed nets due to clearance issues
+        clearance_failed_nets: list[int] = []
+        for failure in self.routing_failures:
+            if failure.failure_cause == FailureCause.CLEARANCE:
+                clearance_failed_nets.append(failure.net)
+
+        if not clearance_failed_nets:
+            print(f"\n  All {nets_routed_initial} nets routed successfully!")
+            print("  No clearance relaxation needed.")
+            return list(self.routes), nets_relaxed
+
+        print(f"\n  {len(clearance_failed_nets)} net(s) failed due to clearance constraints")
+
+        # Progressive relaxation passes
+        for level_idx, relaxed_clearance in enumerate(relaxation_levels[1:], start=2):
+            if not clearance_failed_nets:
+                break
+
+            # Check timeout
+            if timeout and (time.time() - start_time) >= timeout:
+                print(f"\n  Timeout reached during relaxation pass {level_idx}")
+                break
+
+            print(
+                f"\n--- Pass {level_idx}: Relaxed clearance ({relaxed_clearance:.3f}mm) ---"
+            )
+            print(f"  Retrying {len(clearance_failed_nets)} failed net(s)")
+
+            # Create relaxed design rules
+            relaxed_rules = DesignRules(
+                grid_resolution=self.rules.grid_resolution,
+                trace_width=self.rules.trace_width,
+                trace_clearance=relaxed_clearance,
+                via_drill=self.rules.via_drill,
+                via_diameter=self.rules.via_diameter,
+                via_clearance=relaxed_clearance,  # Also relax via clearance
+            )
+
+            # Create a relaxed router for these nets
+            relaxed_router = create_hybrid_router(
+                self.grid, relaxed_rules, force_python=self._force_python
+            )
+
+            # Try to route each failed net with relaxed clearance
+            newly_routed: list[int] = []
+            for net in clearance_failed_nets:
+                if net not in self.nets:
+                    continue
+
+                pads = self.nets[net]
+                if len(pads) < 2:
+                    continue
+
+                # Get pad objects
+                pad_objs = [self.pads[p] for p in pads]
+
+                # Create negotiated router with relaxed rules
+                neg_router = NegotiatedRouter(
+                    self.grid, relaxed_router, relaxed_rules, self.net_class_map
+                )
+
+                # Track routes added by this attempt
+                routes_before = len(self.routes)
+
+                def mark_route(route: Route) -> None:
+                    self._mark_route(route)
+
+                # Try to route the net
+                new_routes = neg_router.route_net_negotiated(
+                    pad_objs, present_cost_factor=1.0, mark_route_callback=mark_route
+                )
+
+                if new_routes:
+                    # Success! Record the relaxed clearance used
+                    nets_relaxed[net] = relaxed_clearance
+                    newly_routed.append(net)
+                    self.routes.extend(new_routes)
+
+                    # Remove from routing failures
+                    self.routing_failures = [
+                        f for f in self.routing_failures if f.net != net
+                    ]
+
+                    net_name = self.net_names.get(net, f"Net {net}")
+                    print(
+                        f"    ✓ {net_name} routed with {relaxed_clearance:.3f}mm clearance"
+                    )
+
+            # Update list of failed nets
+            clearance_failed_nets = [n for n in clearance_failed_nets if n not in newly_routed]
+
+            if newly_routed:
+                print(f"  Routed {len(newly_routed)} net(s) at this level")
+
+        # Final summary
+        final_stats = self.get_statistics()
+        total_routed = final_stats["nets_routed"]
+        total_nets = len([n for n in self.nets if n > 0 and len(self.nets[n]) >= 2])
+
+        print("\n=== Progressive Clearance Complete ===")
+        print(f"  Nets routed: {total_routed}/{total_nets}")
+        print(f"  Nets with standard clearance: {total_routed - len(nets_relaxed)}")
+        print(f"  Nets with relaxed clearance: {len(nets_relaxed)}")
+
+        if nets_relaxed:
+            print("\n  Relaxed clearance details:")
+            for net, clearance in sorted(nets_relaxed.items()):
+                net_name = self.net_names.get(net, f"Net {net}")
+                reduction = (1 - clearance / original_clearance) * 100
+                print(f"    {net_name}: {clearance:.3f}mm ({reduction:.0f}% reduction)")
+
+        if clearance_failed_nets:
+            print(f"\n  ⚠ {len(clearance_failed_nets)} net(s) still failed after max relaxation")
+
+        return list(self.routes), nets_relaxed
+
     def get_escape_statistics(self) -> dict:
         """Get statistics about escape routing.
 
