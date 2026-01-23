@@ -548,15 +548,15 @@ class TestExportNetlistStaleCache:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
-            # This should raise because kicad-cli crashed (exit 139)
+            # This should raise because kicad-cli crashed (exit 139), fallback disabled
             with pytest.raises(RuntimeError, match="kicad-cli crashed"):
-                export_netlist(sch_file)
+                export_netlist(sch_file, fallback=False)
 
             # The stale file should have been deleted BEFORE running kicad-cli
             # (verified by the fact that we got the crash error, not stale data)
 
     def test_export_netlist_detects_sigsegv_crash(self, tmp_path):
-        """Test that exit code 139 (SIGSEGV) is detected with helpful message."""
+        """Test that exit code 139 (SIGSEGV) is detected with helpful message when fallback disabled."""
         from kicad_tools.operations.netlist import export_netlist
 
         sch_file = tmp_path / "test.kicad_sch"
@@ -573,7 +573,7 @@ class TestExportNetlistStaleCache:
             mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
             with pytest.raises(RuntimeError) as exc_info:
-                export_netlist(sch_file)
+                export_netlist(sch_file, fallback=False)
 
             error_msg = str(exc_info.value)
             assert "SIGSEGV" in error_msg
@@ -581,7 +581,7 @@ class TestExportNetlistStaleCache:
             assert "kicad" in error_msg.lower()
 
     def test_export_netlist_detects_other_nonzero_exit_codes(self, tmp_path):
-        """Test that other non-zero exit codes raise RuntimeError."""
+        """Test that other non-zero exit codes raise RuntimeError when fallback disabled."""
         from kicad_tools.operations.netlist import export_netlist
 
         sch_file = tmp_path / "test.kicad_sch"
@@ -595,12 +595,10 @@ class TestExportNetlistStaleCache:
         )
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(
-                returncode=1, stderr="Some error message", stdout=""
-            )
+            mock_run.return_value = Mock(returncode=1, stderr="Some error message", stdout="")
 
             with pytest.raises(RuntimeError, match="kicad-cli failed"):
-                export_netlist(sch_file)
+                export_netlist(sch_file, fallback=False)
 
     def test_export_netlist_succeeds_when_kicad_cli_works(self, tmp_path):
         """Test successful export when kicad-cli works properly."""
@@ -674,3 +672,249 @@ class TestExportNetlistStaleCache:
 
             assert result is not None
             assert "FRESH" in result.date or result.tool == "Eeschema"
+
+
+class TestExportNetlistPythonFallback:
+    """Tests for pure Python netlist extraction fallback (issue #988)."""
+
+    def test_fallback_used_when_kicad_cli_crashes(self, tmp_path):
+        """Test that Python fallback is used when kicad-cli crashes with SIGSEGV."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a valid schematic with a symbol
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0)) (in_bom yes) (on_board yes)
+                  (property "Reference" "R" (at 2.032 0 90))
+                  (property "Value" "R" (at 0 0 90))
+                  (property "Footprint" "" (at -1.778 0 90))
+                  (symbol "R_0_1"
+                    (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none))))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000010")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (property "Footprint" "Resistor_SMD:R_0805" (at 0 0 0) (show_name))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            # Simulate SIGSEGV crash
+            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+            # With fallback=True (default), should use Python extraction
+            result = export_netlist(sch_file, fallback=True)
+
+            # Should return a valid Netlist from Python extraction
+            assert result is not None
+            assert "Python fallback" in result.tool
+            assert len(result.components) == 1
+            assert result.components[0].reference == "R1"
+
+    def test_fallback_used_when_kicad_cli_not_found(self, tmp_path):
+        """Test that Python fallback is used when kicad-cli is not found."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        # Create a minimal schematic
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            # With fallback=True, should use Python extraction instead of raising
+            result = export_netlist(sch_file, fallback=True)
+
+            assert result is not None
+            assert "Python fallback" in result.tool
+
+    def test_fallback_disabled_raises_on_crash(self, tmp_path):
+        """Test that fallback=False still raises RuntimeError on crash."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+
+            with pytest.raises(RuntimeError, match="SIGSEGV"):
+                export_netlist(sch_file, fallback=False)
+
+    def test_fallback_disabled_raises_on_cli_not_found(self, tmp_path):
+        """Test that fallback=False raises FileNotFoundError when kicad-cli not found."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=None):
+            with pytest.raises(FileNotFoundError, match="kicad-cli not found"):
+                export_netlist(sch_file, fallback=False)
+
+    def test_fallback_used_when_kicad_cli_fails_with_error(self, tmp_path):
+        """Test that Python fallback is used when kicad-cli returns error."""
+        from kicad_tools.operations.netlist import export_netlist
+
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+            )"""
+        )
+
+        with patch("subprocess.run") as mock_run:
+            # Simulate generic error
+            mock_run.return_value = Mock(returncode=1, stderr="Some error", stdout="")
+
+            result = export_netlist(sch_file, fallback=True)
+
+            assert result is not None
+            assert "Python fallback" in result.tool
+
+
+class TestBuildNetlistFromSchematic:
+    """Tests for build_netlist_from_schematic() function."""
+
+    def test_build_netlist_from_simple_schematic(self, tmp_path):
+        """Test building netlist from a simple schematic."""
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+
+        # Create a schematic with a resistor
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0)) (in_bom yes) (on_board yes)
+                  (property "Reference" "R" (at 2.032 0 90))
+                  (property "Value" "R" (at 0 0 90))
+                  (property "Footprint" "" (at -1.778 0 90))
+                  (symbol "R_0_1"
+                    (rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none))))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000010")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (property "Footprint" "Resistor_SMD:R_0805" (at 0 0 0) (show_name))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
+            )"""
+        )
+
+        result = build_netlist_from_schematic(sch_file)
+
+        assert result is not None
+        assert str(sch_file) in result.source_file
+        assert "Python fallback" in result.tool
+        assert len(result.components) == 1
+        assert result.components[0].reference == "R1"
+        assert result.components[0].value == "10k"
+        assert result.components[0].lib_id == "Device:R"
+
+    def test_build_netlist_from_schematic_not_found(self, tmp_path):
+        """Test that FileNotFoundError is raised for missing schematic."""
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+
+        sch_file = tmp_path / "nonexistent.kicad_sch"
+
+        with pytest.raises(FileNotFoundError, match="Schematic not found"):
+            build_netlist_from_schematic(sch_file)
+
+    def test_build_netlist_extracts_connectivity(self, tmp_path):
+        """Test that connectivity is extracted correctly."""
+        from kicad_tools.operations.netlist import build_netlist_from_schematic
+
+        # Create a schematic with two resistors connected by a labeled wire
+        sch_file = tmp_path / "test.kicad_sch"
+        sch_file.write_text(
+            """(kicad_sch
+              (version 20231120)
+              (generator "test")
+              (uuid "00000000-0000-0000-0000-000000000001")
+              (paper "A4")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0)) (in_bom yes) (on_board yes)
+                  (property "Reference" "R" (at 2.032 0 90))
+                  (property "Value" "R" (at 0 0 90))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+                    (pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27))))))))
+              (symbol (lib_id "Device:R") (at 100 50 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000010")
+                (property "Reference" "R1" (at 101.6 48.26 0))
+                (property "Value" "10k" (at 101.6 50.8 0))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000012")))
+              (symbol (lib_id "Device:R") (at 100 70 0) (unit 1)
+                (in_bom yes) (on_board yes)
+                (uuid "00000000-0000-0000-0000-000000000020")
+                (property "Reference" "R2" (at 101.6 68.26 0))
+                (property "Value" "20k" (at 101.6 70.8 0))
+                (pin "1" (uuid "00000000-0000-0000-0000-000000000021"))
+                (pin "2" (uuid "00000000-0000-0000-0000-000000000022")))
+              (wire (pts (xy 100 53.81) (xy 100 66.19)))
+              (label "NODE_A" (at 100 60 0) (effects (font (size 1.27 1.27))))
+            )"""
+        )
+
+        result = build_netlist_from_schematic(sch_file)
+
+        # Should have 2 components
+        assert len(result.components) == 2
+        refs = {c.reference for c in result.components}
+        assert "R1" in refs
+        assert "R2" in refs
+
+        # Should have nets extracted (at least the NODE_A net connecting R1.2 to R2.1)
+        net_names = {n.name for n in result.nets}
+        assert "NODE_A" in net_names
+
+        # Check the NODE_A net has the correct pins
+        # Note: With the schematic layout, wire connects R1 pin 1 (at y=53.81) to R2 pin 2 (at y=66.19)
+        node_a_net = next(n for n in result.nets if n.name == "NODE_A")
+        pin_refs = {(node.reference, node.pin) for node in node_a_net.nodes}
+        assert ("R1", "1") in pin_refs
+        assert ("R2", "2") in pin_refs

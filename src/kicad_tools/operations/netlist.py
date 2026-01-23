@@ -8,12 +8,15 @@ connectivity information.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_tools.sexp import SExp, parse_sexp
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -409,35 +412,116 @@ def find_kicad_cli() -> Path | None:
     return None
 
 
+def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
+    """
+    Build a Netlist from a schematic using pure Python extraction.
+
+    This provides a fallback when kicad-cli is unavailable or crashes.
+    Uses the Schematic.extract_netlist() method to analyze connectivity
+    directly from the schematic file.
+
+    Args:
+        sch_path: Path to .kicad_sch file
+
+    Returns:
+        Parsed Netlist object
+
+    Raises:
+        FileNotFoundError: If schematic not found
+        ValueError: If schematic parsing fails
+    """
+    # Late import to avoid circular dependencies
+    from kicad_tools.schematic.models import Schematic
+
+    sch_path = Path(sch_path)
+    if not sch_path.exists():
+        raise FileNotFoundError(f"Schematic not found: {sch_path}")
+
+    # Load schematic
+    sch = Schematic.load(str(sch_path))
+
+    # Build components from schematic symbols
+    components: list[NetlistComponent] = []
+    for sym in sch.symbols:
+        # Get footprint from properties or use empty string
+        footprint = ""
+        if hasattr(sym, "footprint") and sym.footprint:
+            footprint = sym.footprint
+        elif hasattr(sym, "properties"):
+            footprint = sym.properties.get("Footprint", "")
+
+        # Get lib_id from symbol definition
+        lib_id = ""
+        if sym.symbol_def and hasattr(sym.symbol_def, "lib_id"):
+            lib_id = sym.symbol_def.lib_id
+
+        components.append(
+            NetlistComponent(
+                reference=sym.reference,
+                value=sym.value,
+                footprint=footprint,
+                lib_id=lib_id,
+            )
+        )
+
+    # Extract connectivity using pure Python
+    net_dict = sch.extract_netlist()
+
+    # Build nets from connectivity data
+    nets: list[NetlistNet] = []
+    for code, (net_name, pins) in enumerate(net_dict.items(), 1):
+        nodes = [NetNode(reference=pin.symbol_ref, pin=pin.pin) for pin in pins]
+        nets.append(
+            NetlistNet(
+                code=code,
+                name=net_name,
+                nodes=nodes,
+            )
+        )
+
+    return Netlist(
+        source_file=str(sch_path),
+        tool="kicad-tools (Python fallback)",
+        components=components,
+        nets=nets,
+    )
+
+
 def export_netlist(
     sch_path: str | Path,
     output_path: str | Path | None = None,
     kicad_cli: str | Path | None = None,
     format: str = "kicadsexpr",
+    fallback: bool = True,
 ) -> Netlist:
     """
-    Export netlist from schematic using kicad-cli.
+    Export netlist from schematic using kicad-cli, with optional Python fallback.
 
     Args:
         sch_path: Path to .kicad_sch file
         output_path: Output path for netlist (optional, uses temp)
         kicad_cli: Path to kicad-cli (auto-detected if not provided)
         format: Netlist format (kicadsexpr, kicadxml)
+        fallback: If True, use pure Python extraction when kicad-cli fails
 
     Returns:
         Parsed Netlist object
 
     Raises:
-        FileNotFoundError: If kicad-cli not found
-        RuntimeError: If export fails
+        FileNotFoundError: If kicad-cli not found (and fallback=False)
+        RuntimeError: If export fails (and fallback=False)
     """
     sch_path = Path(sch_path)
     if not sch_path.exists():
         raise FileNotFoundError(f"Schematic not found: {sch_path}")
 
+    # Try to find kicad-cli
     if kicad_cli is None:
         cli = find_kicad_cli()
         if cli is None:
+            if fallback:
+                logger.warning("kicad-cli not found, using pure Python netlist extraction")
+                return build_netlist_from_schematic(sch_path)
             raise FileNotFoundError("kicad-cli not found. Install KiCad 8.")
         kicad_cli = cli
     else:
@@ -469,6 +553,9 @@ def export_netlist(
 
         # Check for kicad-cli crash (SIGSEGV = exit code 139)
         if result.returncode == 139:
+            if fallback:
+                logger.warning("kicad-cli crashed (SIGSEGV), using pure Python netlist extraction")
+                return build_netlist_from_schematic(sch_path)
             raise RuntimeError(
                 "kicad-cli crashed (SIGSEGV). This may be caused by a problematic "
                 "symbol in the schematic. Try removing recently added symbols or "
@@ -479,12 +566,25 @@ def export_netlist(
         # Check for other non-zero exit codes
         if result.returncode != 0:
             error_msg = result.stderr.strip() if result.stderr else f"Exit code {result.returncode}"
+            if fallback:
+                logger.warning(
+                    f"kicad-cli failed ({error_msg}), using pure Python netlist extraction"
+                )
+                return build_netlist_from_schematic(sch_path)
             raise RuntimeError(f"kicad-cli failed: {error_msg}")
 
         if not output_path.exists():
+            if fallback:
+                logger.warning("kicad-cli produced no output, using pure Python netlist extraction")
+                return build_netlist_from_schematic(sch_path)
             raise RuntimeError(result.stderr or "Netlist export produced no output")
 
         return Netlist.load(output_path)
 
     except subprocess.CalledProcessError as e:
+        if fallback:
+            logger.warning(
+                f"kicad-cli subprocess error ({e}), using pure Python netlist extraction"
+            )
+            return build_netlist_from_schematic(sch_path)
         raise RuntimeError(f"Netlist export failed: {e}")
