@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .core import Autorouter, RoutingFailure
+    from .fine_pitch import FinePitchReport
     from .primitives import Route
 
 
@@ -487,9 +488,35 @@ def format_failed_nets_summary(
     return "\n".join(lines)
 
 
+def show_fine_pitch_warnings(
+    report: FinePitchReport,
+    quiet: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Display fine-pitch component warnings before routing.
+
+    This function displays warnings about fine-pitch ICs that may cause
+    routing difficulties due to grid/clearance constraints. It's designed
+    to be called before routing begins so users can adjust settings.
+
+    Args:
+        report: FinePitchReport from analyze_fine_pitch_components()
+        quiet: If True, skip output (useful for scripting)
+        verbose: If True, show detailed per-pad information
+    """
+    if quiet:
+        return
+
+    if not report.has_warnings:
+        return
+
+    print(report.format_warnings(verbose=verbose))
+
+
 __all__ = [
     "format_failed_nets_summary",
     "get_routing_diagnostics_json",
     "print_routing_diagnostics_json",
+    "show_fine_pitch_warnings",
     "show_routing_summary",
 ]
