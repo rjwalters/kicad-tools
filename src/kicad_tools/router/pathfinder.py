@@ -1293,6 +1293,10 @@ class Router:
         later. This reduces segment count from thousands to tens per net,
         significantly improving routing performance for large boards.
 
+        Issue #1018: Automatic trace neck-down near fine-pitch pads. When
+        min_trace_width is configured, traces taper from normal width to
+        minimum width as they approach fine-pitch pads.
+
         Args:
             path: List of (world_x, world_y, layer_idx, is_via) tuples
             route: Route object to populate with segments and vias
@@ -1315,6 +1319,14 @@ class Router:
         current_x, current_y = seg_start_x, seg_start_y
         current_direction: tuple[float, float] | None = None  # (dx_normalized, dy_normalized)
 
+        # Issue #1018: Get pin pitches for neck-down calculation
+        start_pitch = self.component_pitches.get(start_pad.ref) if start_pad.ref else None
+        end_pitch = self.component_pitches.get(end_pad.ref) if end_pad.ref else None
+
+        # Determine if neck-down applies for each pad
+        start_needs_neckdown = self.rules.should_apply_neck_down(start_pad.ref, start_pitch)
+        end_needs_neckdown = self.rules.should_apply_neck_down(end_pad.ref, end_pitch)
+
         def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
             """Normalize direction vector, return None if no movement."""
             length = (dx * dx + dy * dy) ** 0.5
@@ -1329,15 +1341,56 @@ class Router:
             # Check if normalized directions match (collinear)
             return abs(d1[0] - d2[0]) < 0.01 and abs(d1[1] - d2[1]) < 0.01
 
+        def _distance(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Calculate Euclidean distance between two points."""
+            return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+        def _calculate_segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
+            """Calculate trace width for a segment based on distance to pads.
+
+            Issue #1018: For segments near fine-pitch pads, the width tapers
+            from normal trace width to minimum trace width. The width is
+            determined by the minimum distance from the segment endpoints
+            to either pad that needs neck-down.
+            """
+            # If no neck-down needed at either end, use normal width
+            if not start_needs_neckdown and not end_needs_neckdown:
+                return self.rules.trace_width
+
+            # Calculate distances from segment endpoints to pads
+            min_width = self.rules.trace_width
+
+            # Check start pad influence
+            if start_needs_neckdown:
+                dist_to_start_1 = _distance(x1, y1, start_pad.x, start_pad.y)
+                dist_to_start_2 = _distance(x2, y2, start_pad.x, start_pad.y)
+                # Use minimum distance from either endpoint
+                min_dist_start = min(dist_to_start_1, dist_to_start_2)
+                width_from_start = self.rules.get_neck_down_width(min_dist_start, start_pitch)
+                min_width = min(min_width, width_from_start)
+
+            # Check end pad influence
+            if end_needs_neckdown:
+                dist_to_end_1 = _distance(x1, y1, end_pad.x, end_pad.y)
+                dist_to_end_2 = _distance(x2, y2, end_pad.x, end_pad.y)
+                # Use minimum distance from either endpoint
+                min_dist_end = min(dist_to_end_1, dist_to_end_2)
+                width_from_end = self.rules.get_neck_down_width(min_dist_end, end_pitch)
+                min_width = min(min_width, width_from_end)
+
+            return min_width
+
         def _emit_segment(x1: float, y1: float, x2: float, y2: float, layer_idx: int) -> None:
             """Create and add a segment if there's meaningful distance."""
             if abs(x2 - x1) > 0.01 or abs(y2 - y1) > 0.01:
+                # Issue #1018: Calculate width with neck-down support
+                width = _calculate_segment_width(x1, y1, x2, y2)
                 seg = Segment(
                     x1=x1,
                     y1=y1,
                     x2=x2,
                     y2=y2,
-                    width=self.rules.trace_width,
+                    width=width,
                     layer=Layer(self.grid.index_to_layer(layer_idx)),
                     net=start_pad.net,
                     net_name=start_pad.net_name,
@@ -1403,12 +1456,16 @@ class Router:
 
                 if _same_direction(last_dir, end_dir):
                     # Extend last segment to end pad
+                    # Issue #1018: Recalculate width for the extended segment
+                    extended_width = _calculate_segment_width(
+                        last_seg.x1, last_seg.y1, end_pad.x, end_pad.y
+                    )
                     route.segments[-1] = Segment(
                         x1=last_seg.x1,
                         y1=last_seg.y1,
                         x2=end_pad.x,
                         y2=end_pad.y,
-                        width=self.rules.trace_width,
+                        width=extended_width,
                         layer=last_seg.layer,
                         net=start_pad.net,
                         net_name=start_pad.net_name,
