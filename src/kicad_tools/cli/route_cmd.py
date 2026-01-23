@@ -1709,6 +1709,36 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--progressive-clearance",
+        action="store_true",
+        help=(
+            "Enable progressive clearance relaxation for failed nets. "
+            "Routes all nets with standard clearance first, then retries "
+            "failed nets with progressively relaxed clearance (up to --min-clearance). "
+            "Unlike --adaptive-rules which globally relaxes all rules, this only "
+            "relaxes clearance for specific failed nets. Reports which nets needed "
+            "relaxation and the clearance used."
+        ),
+    )
+    parser.add_argument(
+        "--min-clearance",
+        type=float,
+        help=(
+            "Minimum clearance for progressive relaxation (mm). "
+            "Used with --progressive-clearance to set the floor for relaxation. "
+            "Default: 50%% of --clearance value."
+        ),
+    )
+    parser.add_argument(
+        "--relaxation-levels",
+        type=int,
+        default=3,
+        help=(
+            "Number of progressive relaxation levels (default: 3). "
+            "More levels = finer-grained relaxation steps."
+        ),
+    )
+    parser.add_argument(
         "--diagnostics",
         action="store_true",
         help=(
@@ -2182,10 +2212,22 @@ def main(argv: list[str] | None = None) -> int:
             profile_output = args.profile_output or "route_profile.prof"
             flush_print(f"  Profiling enabled: {profile_output}")
 
+    # Track nets that needed clearance relaxation (for --progressive-clearance)
+    relaxed_nets_report: dict[int, float] = {}
+
     # Define routing function for profiling
     def do_routing():
-        nonlocal diffpair_warnings
-        if args.strategy == "negotiated":
+        nonlocal diffpair_warnings, relaxed_nets_report
+        # Progressive clearance relaxation mode
+        if getattr(args, "progressive_clearance", False):
+            routes, relaxed_nets_report = router.route_with_progressive_clearance(
+                min_clearance=getattr(args, "min_clearance", None),
+                num_relaxation_levels=getattr(args, "relaxation_levels", 3),
+                max_iterations=args.iterations,
+                timeout=args.timeout,
+            )
+            return routes
+        elif args.strategy == "negotiated":
             return router.route_all_negotiated(
                 max_iterations=args.iterations,
                 timeout=args.timeout,
@@ -2308,6 +2350,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n--- Differential Pair Warnings ({len(diffpair_warnings)}) ---")
         for warning in diffpair_warnings:
             print(f"  {warning}")
+
+    # Report nets that needed clearance relaxation (--progressive-clearance mode)
+    if relaxed_nets_report and not quiet:
+        original_clearance = rules.trace_clearance
+        print(f"\n--- Clearance Relaxation Report ({len(relaxed_nets_report)} nets) ---")
+        print(f"  Original clearance: {original_clearance:.3f}mm")
+        for net_id, clearance in sorted(
+            relaxed_nets_report.items(), key=lambda x: x[1]
+        ):
+            net_name = router.net_names.get(net_id, f"Net {net_id}")
+            reduction = (1 - clearance / original_clearance) * 100
+            print(f"  {net_name}: {clearance:.3f}mm ({reduction:.0f}% relaxation)")
 
     # Show preview if requested
     if args.preview:
