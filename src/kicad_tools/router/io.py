@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
+    from .primitives import Pad
+
 from .core import Autorouter
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
@@ -424,6 +426,245 @@ def adjust_grid_for_compliance(
         clearance=clearance,
         was_adjusted=False,
     )
+
+
+@dataclass
+class GridAutoSelection:
+    """Result of automatic grid resolution selection.
+
+    Attributes:
+        resolution: The selected grid resolution in mm
+        off_grid_pads: Number of pads that don't align to the grid
+        total_pads: Total number of pads analyzed
+        off_grid_percentage: Percentage of pads that are off-grid
+        candidates_tried: List of (resolution, off_grid_count) tuples tried
+    """
+
+    resolution: float
+    off_grid_pads: int
+    total_pads: int
+    off_grid_percentage: float
+    candidates_tried: list[tuple[float, int]]
+
+    def summary(self) -> str:
+        """Human-readable summary of the selection."""
+        lines = [
+            f"Selected grid: {self.resolution}mm",
+            f"  Total pads: {self.total_pads}",
+            f"  Off-grid pads: {self.off_grid_pads} ({self.off_grid_percentage:.1f}%)",
+        ]
+        if self.candidates_tried:
+            lines.append("  Candidates analyzed:")
+            for res, off_grid in self.candidates_tried:
+                pct = (off_grid / self.total_pads * 100) if self.total_pads > 0 else 0
+                marker = " <- selected" if res == self.resolution else ""
+                lines.append(f"    {res}mm: {off_grid} off-grid ({pct:.1f}%){marker}")
+        return "\n".join(lines)
+
+
+def _is_on_grid(value: float, resolution: float, threshold: float | None = None) -> bool:
+    """Check if a value aligns to the grid within a threshold.
+
+    Args:
+        value: The coordinate value to check
+        resolution: The grid resolution
+        threshold: Maximum allowed deviation (default: resolution / 10)
+
+    Returns:
+        True if the value is on-grid within the threshold.
+    """
+    if threshold is None:
+        threshold = resolution / 10
+
+    # Calculate distance to nearest grid point
+    remainder = abs(value % resolution)
+    distance_to_grid = min(remainder, resolution - remainder)
+
+    return distance_to_grid <= threshold
+
+
+def auto_select_grid_resolution(
+    pads: list[Pad] | list[PadPosition] | dict[tuple[str, str], Pad],
+    clearance: float,
+    board_width: float | None = None,
+    board_height: float | None = None,
+    max_cells: int = 500_000,
+    candidates: list[float] | None = None,
+) -> GridAutoSelection:
+    """Automatically select optimal grid resolution based on pad positions.
+
+    Analyzes pad positions to find a grid resolution that minimizes off-grid
+    pads while respecting DRC constraints and memory limits.
+
+    Args:
+        pads: List of Pad or PadPosition objects, or dict mapping (ref, pin) to Pad
+        clearance: Required trace clearance in mm (for DRC compliance)
+        board_width: Board width in mm (for memory constraint check)
+        board_height: Board height in mm (for memory constraint check)
+        max_cells: Maximum grid cells to allow (default: 500k for performance)
+        candidates: Optional list of candidate resolutions to try.
+                   Default: [0.5, 0.25, 0.127, 0.1, 0.05]
+
+    Returns:
+        GridAutoSelection with the chosen resolution and analysis details.
+
+    Example:
+        >>> from kicad_tools.router import auto_select_grid_resolution, Pad
+        >>> pads = [Pad(x=2.54, y=5.08, ...), Pad(x=1.27, y=2.54, ...)]
+        >>> result = auto_select_grid_resolution(pads, clearance=0.15)
+        >>> print(f"Use grid: {result.resolution}mm")
+        Use grid: 0.127mm
+        >>> print(result.summary())
+    """
+    # Convert dict to list if needed
+    if isinstance(pads, dict):
+        pad_list: list[Pad] = list(pads.values())
+    else:
+        pad_list = list(pads)
+
+    total_pads = len(pad_list)
+
+    # Default candidate resolutions (common PCB grid values in mm)
+    # 0.5mm = 50mil (coarse), 0.25mm = 10mil, 0.127mm = 5mil (metric),
+    # 0.1mm = 4mil, 0.05mm = 2mil (fine)
+    if candidates is None:
+        candidates = [0.5, 0.25, 0.127, 0.1, 0.05]
+
+    # Sort candidates from coarsest to finest
+    candidates = sorted(candidates, reverse=True)
+
+    # Calculate minimum resolution for DRC compliance
+    min_resolution = clearance / 2
+
+    # Filter candidates: must be DRC-compliant
+    valid_candidates = [c for c in candidates if c <= clearance]
+
+    if not valid_candidates:
+        # All candidates are too coarse, use minimum DRC-compliant resolution
+        valid_candidates = [min_resolution]
+
+    # Further filter by memory constraint if board dimensions provided
+    if board_width is not None and board_height is not None:
+        board_area = board_width * board_height
+        memory_valid = []
+        for res in valid_candidates:
+            cells = board_area / (res * res)
+            if cells <= max_cells:
+                memory_valid.append(res)
+        if memory_valid:
+            valid_candidates = memory_valid
+        # If all are too memory-intensive, keep the coarsest DRC-compliant one
+        elif valid_candidates:
+            valid_candidates = [valid_candidates[0]]
+
+    # Analyze off-grid pads for each candidate
+    candidates_tried: list[tuple[float, int]] = []
+    best_resolution = valid_candidates[0]
+    best_off_grid = total_pads  # Worst case
+
+    for resolution in valid_candidates:
+        off_grid_count = 0
+        for pad in pad_list:
+            x_on_grid = _is_on_grid(pad.x, resolution)
+            y_on_grid = _is_on_grid(pad.y, resolution)
+            if not (x_on_grid and y_on_grid):
+                off_grid_count += 1
+
+        candidates_tried.append((resolution, off_grid_count))
+
+        # Track best resolution (prefer coarser if equal off-grid count)
+        if off_grid_count < best_off_grid:
+            best_off_grid = off_grid_count
+            best_resolution = resolution
+        elif off_grid_count == best_off_grid and resolution > best_resolution:
+            # Prefer coarser resolution when off-grid counts are equal
+            best_resolution = resolution
+
+    off_grid_pct = (best_off_grid / total_pads * 100) if total_pads > 0 else 0.0
+
+    return GridAutoSelection(
+        resolution=best_resolution,
+        off_grid_pads=best_off_grid,
+        total_pads=total_pads,
+        off_grid_percentage=off_grid_pct,
+        candidates_tried=candidates_tried,
+    )
+
+
+@dataclass
+class PadPosition:
+    """Lightweight pad position for grid analysis."""
+
+    x: float
+    y: float
+
+
+def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
+    """Extract pad positions from a KiCad PCB file for grid analysis.
+
+    This is a lightweight alternative to load_pcb_for_routing when you only
+    need pad positions (e.g., for auto_select_grid_resolution).
+
+    Args:
+        pcb_path_or_text: Path to .kicad_pcb file or PCB file contents
+
+    Returns:
+        List of PadPosition objects with x, y coordinates.
+
+    Example:
+        >>> positions = extract_pad_positions("board.kicad_pcb")
+        >>> result = auto_select_grid_resolution(positions, clearance=0.15)
+    """
+    # Read file if path provided
+    if isinstance(pcb_path_or_text, Path):
+        pcb_text = pcb_path_or_text.read_text()
+    elif not pcb_path_or_text.startswith("("):
+        # Looks like a path string
+        pcb_text = Path(pcb_path_or_text).read_text()
+    else:
+        pcb_text = pcb_path_or_text
+
+    positions: list[PadPosition] = []
+
+    # Split by footprint for easier parsing
+    footprint_sections = re.split(r"(?=\(footprint\s)", pcb_text)
+
+    for section in footprint_sections:
+        if not section.startswith("(footprint"):
+            continue
+
+        # Get footprint position and rotation
+        at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
+        if not at_match:
+            continue
+
+        fp_x = float(at_match.group(1))
+        fp_y = float(at_match.group(2))
+        fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
+
+        # Precompute rotation values
+        rot_rad = math.radians(fp_rot)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        # Find all pad blocks
+        pad_blocks = _extract_pad_blocks(section)
+
+        for pad_block in pad_blocks:
+            # Extract at position
+            pad_at = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)", pad_block)
+            if not pad_at:
+                continue
+
+            pad_x = float(pad_at.group(1))
+            pad_y = float(pad_at.group(2))
+
+            # Transform to absolute position
+            abs_x = fp_x + pad_x * cos_r - pad_y * sin_r
+            abs_y = fp_y + pad_x * sin_r + pad_y * cos_r
+
+            positions.append(PadPosition(x=abs_x, y=abs_y))
+
+    return positions
 
 
 def validate_routes(
@@ -1143,7 +1384,9 @@ def load_pcb_for_routing(
     # This ensures pad layers match the available routing layers
     if layer_stack is None:
         layer_stack = detect_layer_stack(pcb_text)
-        logger.debug(f"Auto-detected layer stack: {layer_stack.name} ({layer_stack.num_layers} layers)")
+        logger.debug(
+            f"Auto-detected layer stack: {layer_stack.name} ({layer_stack.num_layers} layers)"
+        )
 
     router = Autorouter(
         width=board_width,
