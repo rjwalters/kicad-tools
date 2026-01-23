@@ -164,6 +164,125 @@ class Router:
         self._clearance_radii: dict[float, int] = {}
         self._precompute_clearance_radii()
 
+        # Issue #1019: Via impact scoring for fine-pitch IC routing
+        # Stores unrouted net pad positions for via impact calculation
+        self._unrouted_pad_positions: list[tuple[float, float, int]] = []  # (x, y, net)
+        self._fine_pitch_pad_positions: list[tuple[float, float, str]] = []  # (x, y, ref)
+        self._via_exclusion_cells: int = 0  # Grid cells for via exclusion zone
+        self._via_impact_enabled: bool = False
+        self._init_via_impact_scoring()
+
+    def _init_via_impact_scoring(self) -> None:
+        """Initialize via impact scoring based on design rules.
+
+        Issue #1019: Sets up via exclusion zones and impact scoring when
+        via_exclusion_from_fine_pitch or via_impact_weight are configured.
+        """
+        # Calculate via exclusion zone in grid cells
+        if self.rules.via_exclusion_from_fine_pitch > 0:
+            self._via_exclusion_cells = max(
+                1,
+                math.ceil(
+                    round(self.rules.via_exclusion_from_fine_pitch / self.grid.resolution, 6)
+                ),
+            )
+
+        # Enable via impact scoring if weight is positive
+        self._via_impact_enabled = self.rules.via_impact_weight > 0
+
+    def set_unrouted_pads(self, unrouted_pads: list[Pad]) -> None:
+        """Set the list of unrouted pad positions for via impact scoring.
+
+        Issue #1019: Called by Autorouter before routing each net to update
+        which pads haven't been connected yet. This enables the via impact
+        scoring to consider whether a via would block access to unrouted pins.
+
+        Args:
+            unrouted_pads: List of Pad objects that haven't been routed yet.
+        """
+        self._unrouted_pad_positions = [(pad.x, pad.y, pad.net) for pad in unrouted_pads]
+
+        # Also identify fine-pitch pads for exclusion zone checking
+        self._fine_pitch_pad_positions = []
+        component_pitches = self.component_pitches
+        for pad in unrouted_pads:
+            ref = pad.ref
+            if ref and ref in component_pitches:
+                pitch = component_pitches[ref]
+                if pitch < self.rules.fine_pitch_threshold:
+                    self._fine_pitch_pad_positions.append((pad.x, pad.y, ref))
+
+    def _get_via_impact_cost(self, wx: float, wy: float, current_net: int) -> float:
+        """Calculate the impact cost of placing a via at the given position.
+
+        Issue #1019: Scores via placement based on how many unrouted net pins
+        would be blocked or have their routing options constrained.
+
+        Args:
+            wx, wy: World coordinates of the proposed via position
+            current_net: Net ID of the current route (excluded from impact)
+
+        Returns:
+            Impact cost (0 if no impact, positive value based on blocked pins)
+        """
+        if not self._via_impact_enabled:
+            return 0.0
+
+        impact = 0.0
+        via_radius = self.rules.via_diameter / 2 + self.rules.via_clearance
+
+        # Count unrouted pins that would be affected by this via
+        for px, py, net in self._unrouted_pad_positions:
+            if net == current_net:
+                continue  # Same net, not impacted
+
+            # Calculate distance from via to pad
+            dist = math.sqrt((wx - px) ** 2 + (wy - py) ** 2)
+
+            # Via blocks routing if it's within via_radius + trace_clearance + trace_width/2
+            # of the pad (prevents traces from reaching the pad)
+            blocking_dist = via_radius + self.rules.trace_clearance + self.rules.trace_width / 2
+
+            if dist < blocking_dist:
+                # Via would directly block access to this pad
+                impact += 10.0
+            elif dist < blocking_dist * 2:
+                # Via constrains routing options but doesn't fully block
+                # Impact decreases linearly with distance
+                impact += 5.0 * (1 - (dist - blocking_dist) / blocking_dist)
+
+        return impact * self.rules.via_impact_weight
+
+    def _is_via_in_exclusion_zone(self, gx: int, gy: int) -> bool:
+        """Check if a via position is within the exclusion zone of any fine-pitch pad.
+
+        Issue #1019: Prevents via placement too close to fine-pitch IC pads,
+        which would block routing to adjacent pins.
+
+        Args:
+            gx, gy: Grid coordinates of the proposed via position
+
+        Returns:
+            True if via is in exclusion zone (should be avoided), False otherwise.
+        """
+        if self._via_exclusion_cells == 0:
+            return False
+
+        if not self._fine_pitch_pad_positions:
+            return False
+
+        # Convert grid position to world coordinates
+        wx, wy = self.grid.grid_to_world(gx, gy)
+
+        exclusion_dist = self._via_exclusion_cells * self.grid.resolution
+
+        for px, py, _ref in self._fine_pitch_pad_positions:
+            dist = math.sqrt((wx - px) ** 2 + (wy - py) ** 2)
+            if dist < exclusion_dist:
+                return True
+
+        return False
+
     def _precompute_clearance_radii(self) -> None:
         """Pre-compute grid cell radii for all component-specific clearances.
 
@@ -1165,6 +1284,11 @@ class Router:
                 if not self._can_place_via_in_zones(current.x, current.y, start.net):
                     continue
 
+                # Issue #1019: Check via exclusion zone near fine-pitch pads
+                # If via is in exclusion zone, skip this position (hard constraint)
+                if self._is_via_in_exclusion_zone(current.x, current.y):
+                    continue
+
                 neighbor_key = (current.x, current.y, new_layer)
                 if neighbor_key in closed_set:
                     continue
@@ -1182,11 +1306,16 @@ class Router:
                 # Add layer preference cost for new layer (Issue #625)
                 layer_pref_mult = self._get_layer_preference_cost(new_layer, net_class)
 
+                # Issue #1019: Add via impact cost for blocking unrouted nets
+                wx, wy = self.grid.grid_to_world(current.x, current.y)
+                via_impact_cost = self._get_via_impact_cost(wx, wy, start.net)
+
                 new_g = (
                     current.g_score
                     + self.rules.cost_via * layer_pref_mult
                     + congestion_cost
                     + negotiated_cost
+                    + via_impact_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:

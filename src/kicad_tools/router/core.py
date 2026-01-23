@@ -625,6 +625,60 @@ class Autorouter:
         """Create direct routes for same-IC pins on the same net."""
         return create_intra_ic_routes(net, pads, self.pads, self.rules)
 
+    def _get_unrouted_pads(self, exclude_net: int | None = None) -> list[Pad]:
+        """Get list of pads that haven't been routed yet.
+
+        Issue #1019: Used for via impact scoring to determine which pads
+        might be blocked by a via placement.
+
+        Args:
+            exclude_net: Net ID to exclude from the list (the net being routed)
+
+        Returns:
+            List of Pad objects that haven't been connected yet.
+        """
+        # Collect all nets that have been fully routed
+        routed_nets: set[int] = set()
+        for route in self.routes:
+            routed_nets.add(route.net)
+
+        # Collect pads from nets that still need routing
+        unrouted_pads = []
+        for net_id, pad_keys in self.nets.items():
+            if net_id == 0:  # Skip unconnected pads
+                continue
+            if net_id == exclude_net:  # Skip the net we're currently routing
+                continue
+            if net_id in routed_nets:  # Skip already routed nets
+                continue
+            if len(pad_keys) < 2:  # Skip single-pad nets
+                continue
+
+            for pad_key in pad_keys:
+                if pad_key in self.pads:
+                    unrouted_pads.append(self.pads[pad_key])
+
+        return unrouted_pads
+
+    def _update_router_unrouted_pads(self, current_net: int) -> None:
+        """Update the router's unrouted pad information for via impact scoring.
+
+        Issue #1019: Called before routing each net to provide the router
+        with information about which pads haven't been routed yet.
+
+        Args:
+            current_net: The net ID being routed (excluded from unrouted list)
+        """
+        # Only update if via impact scoring is enabled
+        if self.rules.via_impact_weight <= 0 and self.rules.via_exclusion_from_fine_pitch <= 0:
+            return
+
+        unrouted_pads = self._get_unrouted_pads(exclude_net=current_net)
+
+        # Update the Router (Python backend) if available
+        if hasattr(self.router, "set_unrouted_pads"):
+            self.router.set_unrouted_pads(unrouted_pads)
+
     def route_net(
         self,
         net: int,
@@ -649,6 +703,9 @@ class Autorouter:
         pads = self.nets[net]
         if len(pads) < 2:
             return []
+
+        # Issue #1019: Update router with unrouted pad info for via impact scoring
+        self._update_router_unrouted_pads(net)
 
         routes: list[Route] = []
 
