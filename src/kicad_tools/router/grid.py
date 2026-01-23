@@ -424,10 +424,17 @@ class RoutingGrid:
         return (max(0, min(gx, self.cols - 1)), max(0, min(gy, self.rows - 1)))
 
     def grid_to_world(self, gx: int, gy: int) -> tuple[float, float]:
-        """Convert grid indices to world coordinates."""
+        """Convert grid indices to world coordinates.
+
+        Coordinates are rounded to 4 decimal places (0.1 micron precision)
+        to avoid floating point representation issues with fine grid resolutions.
+        Without rounding, operations like `75.0 + 7 * 0.025` can produce
+        values like `75.17500000000001` instead of `75.175`, which can cause
+        KiCad to fail loading the PCB file.
+        """
         return (
-            self.origin_x + gx * self.resolution,
-            self.origin_y + gy * self.resolution,
+            round(self.origin_x + gx * self.resolution, 4),
+            round(self.origin_y + gy * self.resolution, 4),
         )
 
     def add_obstacle(self, obs: Obstacle) -> None:
