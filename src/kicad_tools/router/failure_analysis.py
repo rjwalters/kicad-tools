@@ -187,6 +187,39 @@ class PathAttempt:
 
 
 @dataclass
+class PadAccessBlocker:
+    """Information about what's blocking access to a pad.
+
+    Used to provide detailed diagnostics when routing fails due to
+    clearance zones blocking pad entry/exit points.
+    """
+
+    pad_ref: str  # e.g. "U1.13"
+    blocking_net: int  # Net ID of the blocking net
+    blocking_net_name: str  # e.g. "SC_POS_PLUS"
+    blocking_type: str  # "trace", "via", "pad"
+    distance: float  # Distance from pad center to blocking element in mm
+    suggested_clearance: float  # Clearance that would allow access in mm
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "pad_ref": self.pad_ref,
+            "blocking_net": self.blocking_net,
+            "blocking_net_name": self.blocking_net_name,
+            "blocking_type": self.blocking_type,
+            "distance": self.distance,
+            "suggested_clearance": self.suggested_clearance,
+        }
+
+    def __str__(self) -> str:
+        return (
+            f"Pad {self.pad_ref}: blocked by clearance from Net {self.blocking_net} "
+            f'"{self.blocking_net_name}" ({self.blocking_type} at {self.distance:.2f}mm distance)'
+        )
+
+
+@dataclass
 class FailureAnalysis:
     """Detailed analysis of why an operation failed."""
 
@@ -199,6 +232,9 @@ class FailureAnalysis:
 
     # What's blocking
     blocking_elements: list[BlockingElement] = field(default_factory=list)
+
+    # Pad access blockers (for PIN_ACCESS failures)
+    pad_access_blockers: list[PadAccessBlocker] = field(default_factory=list)
 
     # Attempted solutions
     attempted_paths: int = 0
@@ -224,6 +260,7 @@ class FailureAnalysis:
                 "max_y": self.failure_area.max_y,
             },
             "blocking_elements": [e.to_dict() for e in self.blocking_elements],
+            "pad_access_blockers": [b.to_dict() for b in self.pad_access_blockers],
             "attempted_paths": self.attempted_paths,
             "best_attempt": self.best_attempt.to_dict() if self.best_attempt else None,
             "congestion_score": self.congestion_score,
@@ -991,3 +1028,109 @@ class RootCauseAnalyzer:
             )
 
         return suggestions
+
+    def analyze_pad_access_blockers(
+        self,
+        grid: RoutingGrid,
+        pad_x: float,
+        pad_y: float,
+        pad_ref: str,
+        pad_net: int,
+        layer: int,
+        net_names: dict[int, str] | None = None,
+    ) -> list[PadAccessBlocker]:
+        """Analyze what's blocking access to a pad.
+
+        Checks the area around a pad to find which nets' clearance zones
+        are blocking routing access to the pad.
+
+        Args:
+            grid: The routing grid
+            pad_x: Pad center X coordinate in mm
+            pad_y: Pad center Y coordinate in mm
+            pad_ref: Pad reference (e.g., "U1.13")
+            pad_net: Net ID of the pad being accessed
+            layer: Layer index to check
+            net_names: Optional mapping of net ID to net name
+
+        Returns:
+            List of PadAccessBlocker objects describing what's blocking access
+        """
+        net_names = net_names or {}
+        blockers: list[PadAccessBlocker] = []
+        seen_nets: set[int] = set()
+
+        # Get grid coordinates of pad center
+        center_gx, center_gy = grid.world_to_grid(pad_x, pad_y)
+
+        # Search radius in grid cells - check area around pad for blocking nets
+        # Use a radius that covers the trace clearance + trace width
+        search_radius_mm = (
+            grid.rules.trace_clearance + grid.rules.trace_width + grid.rules.trace_clearance
+        )
+        search_radius_cells = int(math.ceil(search_radius_mm / grid.resolution)) + 1
+
+        # Track the closest blocking element for each net
+        net_closest: dict[int, tuple[float, str]] = {}  # net -> (distance, type)
+
+        for dy in range(-search_radius_cells, search_radius_cells + 1):
+            for dx in range(-search_radius_cells, search_radius_cells + 1):
+                gx = center_gx + dx
+                gy = center_gy + dy
+
+                # Skip out-of-bounds cells
+                if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
+                    continue
+
+                cell = grid.grid[layer][gy][gx]
+
+                # Skip unblocked cells or cells belonging to the same net
+                if not cell.blocked:
+                    continue
+                if cell.net == pad_net or cell.net == 0:
+                    continue
+
+                # Calculate world distance from pad center to cell center
+                cell_wx, cell_wy = grid.grid_to_world(gx, gy)
+                distance = math.sqrt((cell_wx - pad_x) ** 2 + (cell_wy - pad_y) ** 2)
+
+                # Determine blocking type
+                if cell.pad_blocked:
+                    blocking_type = "pad"
+                elif cell.usage_count > 0:
+                    blocking_type = "trace"
+                else:
+                    blocking_type = "via"
+
+                # Track closest element for this net
+                net_id = cell.net
+                if net_id not in net_closest or distance < net_closest[net_id][0]:
+                    net_closest[net_id] = (distance, blocking_type)
+
+        # Convert to PadAccessBlocker objects
+        for net_id, (distance, blocking_type) in net_closest.items():
+            if net_id in seen_nets:
+                continue
+            seen_nets.add(net_id)
+
+            net_name = net_names.get(net_id, f"Net_{net_id}")
+
+            # Calculate suggested clearance that would allow access
+            # The minimum clearance would be distance - trace_width/2
+            suggested_clearance = max(0.05, distance - grid.rules.trace_width / 2)
+
+            blockers.append(
+                PadAccessBlocker(
+                    pad_ref=pad_ref,
+                    blocking_net=net_id,
+                    blocking_net_name=net_name,
+                    blocking_type=blocking_type,
+                    distance=distance,
+                    suggested_clearance=suggested_clearance,
+                )
+            )
+
+        # Sort by distance (closest first)
+        blockers.sort(key=lambda b: b.distance)
+
+        return blockers

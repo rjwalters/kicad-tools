@@ -738,7 +738,61 @@ class Autorouter:
 
             if off_grid_pads:
                 failure_cause = FailureCause.PIN_ACCESS
-                reason = f"PADS_OFF_GRID: {', '.join(off_grid_pads)}"
+
+                # Analyze which nets' clearance zones are blocking pad access
+                pad_blockers = []
+                src_layer = self.grid.layer_to_index(source_pad.layer.value)
+                tgt_layer = self.grid.layer_to_index(target_pad.layer.value)
+
+                if src_dist > grid_threshold:
+                    src_blockers = analyzer.analyze_pad_access_blockers(
+                        grid=self.grid,
+                        pad_x=source_pad.x,
+                        pad_y=source_pad.y,
+                        pad_ref=f"{source_pad.ref}.{source_pad.pin}",
+                        pad_net=net,
+                        layer=src_layer,
+                        net_names=self.net_names,
+                    )
+                    pad_blockers.extend(src_blockers)
+
+                if tgt_dist > grid_threshold:
+                    tgt_blockers = analyzer.analyze_pad_access_blockers(
+                        grid=self.grid,
+                        pad_x=target_pad.x,
+                        pad_y=target_pad.y,
+                        pad_ref=f"{target_pad.ref}.{target_pad.pin}",
+                        pad_net=net,
+                        layer=tgt_layer,
+                        net_names=self.net_names,
+                    )
+                    pad_blockers.extend(tgt_blockers)
+
+                # Store blockers in analysis for detailed reporting
+                analysis.pad_access_blockers = pad_blockers
+
+                # Build detailed reason with blocking net information
+                if pad_blockers:
+                    # Group by pad and format
+                    blocker_details = []
+                    for blocker in pad_blockers[:3]:  # Show top 3 blockers
+                        blocker_details.append(
+                            f"{blocker.pad_ref}: blocked by {blocker.blocking_net_name} "
+                            f"({blocker.blocking_type} at {blocker.distance:.2f}mm)"
+                        )
+                    reason = f"PADS_OFF_GRID: {', '.join(off_grid_pads)}"
+                    if blocker_details:
+                        reason += f" | Clearance blocked by: {'; '.join(blocker_details)}"
+
+                    # Add suggestion for minimum clearance
+                    min_clearance = min(b.suggested_clearance for b in pad_blockers)
+                    if min_clearance < self.grid.rules.trace_clearance:
+                        analysis.suggestions.insert(
+                            0,
+                            f"Reduce clearance to {min_clearance:.2f}mm to allow pad access",
+                        )
+                else:
+                    reason = f"PADS_OFF_GRID: {', '.join(off_grid_pads)}"
             elif failure_cause == FailureCause.BLOCKED_PATH:
                 if blocking_components:
                     reason = (
@@ -3650,8 +3704,7 @@ class Autorouter:
 
         # Generate relaxation levels (linear interpolation)
         relaxation_levels = [
-            original_clearance
-            - i * (original_clearance - min_clearance) / num_relaxation_levels
+            original_clearance - i * (original_clearance - min_clearance) / num_relaxation_levels
             for i in range(num_relaxation_levels + 1)
         ]
 
@@ -3695,9 +3748,7 @@ class Autorouter:
                 print(f"\n  Timeout reached during relaxation pass {level_idx}")
                 break
 
-            print(
-                f"\n--- Pass {level_idx}: Relaxed clearance ({relaxed_clearance:.3f}mm) ---"
-            )
+            print(f"\n--- Pass {level_idx}: Relaxed clearance ({relaxed_clearance:.3f}mm) ---")
             print(f"  Retrying {len(clearance_failed_nets)} failed net(s)")
 
             # Create relaxed design rules
@@ -3751,14 +3802,10 @@ class Autorouter:
                     self.routes.extend(new_routes)
 
                     # Remove from routing failures
-                    self.routing_failures = [
-                        f for f in self.routing_failures if f.net != net
-                    ]
+                    self.routing_failures = [f for f in self.routing_failures if f.net != net]
 
                     net_name = self.net_names.get(net, f"Net {net}")
-                    print(
-                        f"    ✓ {net_name} routed with {relaxed_clearance:.3f}mm clearance"
-                    )
+                    print(f"    ✓ {net_name} routed with {relaxed_clearance:.3f}mm clearance")
 
             # Update list of failed nets
             clearance_failed_nets = [n for n in clearance_failed_nets if n not in newly_routed]

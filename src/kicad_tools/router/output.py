@@ -479,6 +479,24 @@ def format_failed_nets_summary(
 
         lines.append(f'  - Net {failure.net} "{failure.net_name}": {cause} ({details})')
 
+        # Add detailed pad access blocker information if available
+        if (
+            hasattr(failure, "analysis")
+            and failure.analysis
+            and hasattr(failure.analysis, "pad_access_blockers")
+            and failure.analysis.pad_access_blockers
+        ):
+            for blocker in failure.analysis.pad_access_blockers[:2]:  # Show top 2 blockers
+                lines.append(
+                    f'    Pad {blocker.pad_ref}: blocked by clearance from "{blocker.blocking_net_name}" '
+                    f"({blocker.blocking_type} at {blocker.distance:.2f}mm distance)"
+                )
+            # Add suggestion if available
+            if failure.analysis.suggestions:
+                for suggestion in failure.analysis.suggestions[:1]:  # Show top suggestion
+                    if "clearance" in suggestion.lower():
+                        lines.append(f"    Suggestion: {suggestion}")
+
     # Show count of remaining failures if truncated
     remaining = len(unique_failures) - max_display
     if remaining > 0:

@@ -10,6 +10,7 @@ from kicad_tools.router.failure_analysis import (
     CongestionMap,
     FailureAnalysis,
     FailureCause,
+    PadAccessBlocker,
     PathAttempt,
     Rectangle,
     RootCauseAnalyzer,
@@ -577,3 +578,172 @@ class TestEdgeCases:
         area = Rectangle(-100, -100, -50, -50)
         congestion = cmap.get_congestion(area)
         assert congestion == 0.0
+
+
+class TestPadAccessBlocker:
+    """Tests for PadAccessBlocker dataclass."""
+
+    def test_pad_access_blocker_creation(self):
+        """Test creating a PadAccessBlocker."""
+        blocker = PadAccessBlocker(
+            pad_ref="U1.13",
+            blocking_net=15,
+            blocking_net_name="SC_POS_PLUS",
+            blocking_type="trace",
+            distance=0.12,
+            suggested_clearance=0.10,
+        )
+
+        assert blocker.pad_ref == "U1.13"
+        assert blocker.blocking_net == 15
+        assert blocker.blocking_net_name == "SC_POS_PLUS"
+        assert blocker.blocking_type == "trace"
+        assert blocker.distance == 0.12
+        assert blocker.suggested_clearance == 0.10
+
+    def test_pad_access_blocker_to_dict(self):
+        """Test converting PadAccessBlocker to dictionary."""
+        blocker = PadAccessBlocker(
+            pad_ref="U2.5",
+            blocking_net=4,
+            blocking_net_name="+3.3V",
+            blocking_type="via",
+            distance=0.08,
+            suggested_clearance=0.06,
+        )
+
+        d = blocker.to_dict()
+        assert d["pad_ref"] == "U2.5"
+        assert d["blocking_net"] == 4
+        assert d["blocking_net_name"] == "+3.3V"
+        assert d["blocking_type"] == "via"
+        assert d["distance"] == 0.08
+        assert d["suggested_clearance"] == 0.06
+
+    def test_pad_access_blocker_str(self):
+        """Test string representation of PadAccessBlocker."""
+        blocker = PadAccessBlocker(
+            pad_ref="U1.13",
+            blocking_net=15,
+            blocking_net_name="SC_POS_PLUS",
+            blocking_type="trace",
+            distance=0.12,
+            suggested_clearance=0.10,
+        )
+
+        s = str(blocker)
+        assert "U1.13" in s
+        assert "SC_POS_PLUS" in s
+        assert "trace" in s
+        assert "0.12" in s
+
+
+class TestAnalyzePadAccessBlockers:
+    """Tests for analyze_pad_access_blockers method."""
+
+    def test_analyze_pad_access_blockers_empty_grid(self, routing_grid: RoutingGrid):
+        """Test analysis on empty grid returns no blockers."""
+        analyzer = RootCauseAnalyzer()
+
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "TestNet"},
+        )
+
+        # Empty grid should have no blockers
+        assert blockers == []
+
+    def test_analyze_pad_access_blockers_with_blocking_pad(self, routing_grid: RoutingGrid):
+        """Test analysis finds blocking pad from different net."""
+        # Add a pad from net 2 near the target location
+        blocking_pad = Pad(
+            x=25.5,  # Very close to 25.0
+            y=25.0,
+            width=1.0,
+            height=1.0,
+            net=2,
+            net_name="BlockingNet",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(blocking_pad)
+
+        analyzer = RootCauseAnalyzer()
+
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "TestNet", 2: "BlockingNet"},
+        )
+
+        # Should find the blocking pad's clearance zone
+        assert len(blockers) >= 1
+        # The blocking element should be from net 2
+        assert any(b.blocking_net == 2 for b in blockers)
+
+    def test_analyze_pad_access_blockers_same_net_not_blocked(
+        self, routing_grid: RoutingGrid
+    ):
+        """Test that same net elements don't count as blockers."""
+        # Add a pad from same net
+        same_net_pad = Pad(
+            x=25.5,
+            y=25.0,
+            width=1.0,
+            height=1.0,
+            net=1,  # Same net as the target
+            net_name="TestNet",
+            layer=Layer.F_CU,
+        )
+        routing_grid.add_pad(same_net_pad)
+
+        analyzer = RootCauseAnalyzer()
+
+        blockers = analyzer.analyze_pad_access_blockers(
+            grid=routing_grid,
+            pad_x=25.0,
+            pad_y=25.0,
+            pad_ref="U1.1",
+            pad_net=1,
+            layer=0,
+            net_names={1: "TestNet"},
+        )
+
+        # Same net should not be reported as a blocker
+        assert not any(b.blocking_net == 1 for b in blockers)
+
+    def test_failure_analysis_includes_pad_access_blockers(self):
+        """Test that FailureAnalysis includes pad_access_blockers field."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.PIN_ACCESS,
+            confidence=0.9,
+            failure_location=(25, 25),
+            failure_area=Rectangle(20, 20, 30, 30),
+            pad_access_blockers=[
+                PadAccessBlocker(
+                    pad_ref="U1.13",
+                    blocking_net=15,
+                    blocking_net_name="SC_POS_PLUS",
+                    blocking_type="trace",
+                    distance=0.12,
+                    suggested_clearance=0.10,
+                )
+            ],
+        )
+
+        assert len(analysis.pad_access_blockers) == 1
+        assert analysis.pad_access_blockers[0].pad_ref == "U1.13"
+
+        # Test to_dict includes pad_access_blockers
+        d = analysis.to_dict()
+        assert "pad_access_blockers" in d
+        assert len(d["pad_access_blockers"]) == 1
+        assert d["pad_access_blockers"][0]["pad_ref"] == "U1.13"
