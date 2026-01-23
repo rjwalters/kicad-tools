@@ -229,9 +229,50 @@ class TestAutorouterNetPriority:
         pads = [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "RANDOM_NET"}]
         router.add_component("R1", pads)
 
-        priority, pad_count = router._get_net_priority(1)
+        priority, pad_count, distance = router._get_net_priority(1)
         assert priority == 10  # Default priority
         assert pad_count == 1
+        assert distance == 0.0  # Single pad has no distance
+
+    def test_get_net_priority_distance_calculation(self, router):
+        """Test that distance is calculated for multi-pad nets."""
+        # Add two pads separated by known distance
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 3.0, "y": 4.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        priority, pad_count, distance = router._get_net_priority(1)
+        assert pad_count == 2
+        # Distance should be sqrt(3^2 + 4^2) = 5.0
+        assert abs(distance - 5.0) < 0.001
+
+    def test_net_ordering_prefers_shorter_nets(self, router):
+        """Test that shorter nets are ordered before longer nets of same class."""
+        # Add a short net (net 1)
+        router.add_component(
+            "R1", [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "SHORT"}]
+        )
+        router.add_component(
+            "R2", [{"number": "1", "x": 1.0, "y": 0.0, "net": 1, "net_name": "SHORT"}]
+        )
+
+        # Add a long net (net 2)
+        router.add_component(
+            "R3", [{"number": "1", "x": 0.0, "y": 10.0, "net": 2, "net_name": "LONG"}]
+        )
+        router.add_component(
+            "R4", [{"number": "1", "x": 10.0, "y": 10.0, "net": 2, "net_name": "LONG"}]
+        )
+
+        p1 = router._get_net_priority(1)
+        p2 = router._get_net_priority(2)
+
+        # Both have same class priority and pad count, but net 1 is shorter
+        assert p1[0] == p2[0]  # Same class priority
+        assert p1[1] == p2[1]  # Same pad count
+        assert p1[2] < p2[2]  # Net 1 has smaller distance
+        assert p1 < p2  # Net 1 should be ordered first
 
 
 class TestAutorouterMonteCarlo:

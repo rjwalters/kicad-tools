@@ -1309,9 +1309,10 @@ class TestAutorouter:
             ],
         )
 
-        priority, pad_count = router._get_net_priority(1)
+        priority, pad_count, distance = router._get_net_priority(1)
         assert priority == 1  # Power net has highest priority
         assert pad_count == 1
+        assert distance == 0.0  # Single pad has no distance
 
     def test_get_net_priority_default(self):
         """Test net priority for unknown nets."""
@@ -1324,8 +1325,9 @@ class TestAutorouter:
             ],
         )
 
-        priority, pad_count = router._get_net_priority(1)
+        priority, pad_count, distance = router._get_net_priority(1)
         assert priority == 10  # Default low priority
+        assert distance == 0.0  # Single pad has no distance
 
     def test_route_all_empty(self):
         """Test route_all with no nets."""

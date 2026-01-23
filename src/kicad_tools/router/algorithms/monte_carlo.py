@@ -38,18 +38,20 @@ class MonteCarloRouter:
 
         Args:
             net_order: Original net order
-            get_priority: Function that takes net_id and returns (priority, pad_count)
+            get_priority: Function that takes net_id and returns priority tuple
+                (e.g., (priority, pad_count, distance))
 
         Returns:
             New net order with shuffled tiers
         """
-        # Group by priority tier
+        # Group by priority tier (use first element of priority tuple)
         tiers: dict[int, list[int]] = {}
         for net in net_order:
-            priority, _ = get_priority(net)
-            if priority not in tiers:
-                tiers[priority] = []
-            tiers[priority].append(net)
+            priority_tuple = get_priority(net)
+            tier = priority_tuple[0]  # First element is the net class priority
+            if tier not in tiers:
+                tiers[tier] = []
+            tiers[tier].append(net)
 
         # Shuffle within each tier and reassemble
         result: list[int] = []
