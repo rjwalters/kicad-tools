@@ -296,8 +296,8 @@ class GerberExporter:
         ]
 
         # Add options
-        if config.use_protel_extensions:
-            cmd.append("--use-drill-file-origin")
+        if not config.use_protel_extensions:
+            cmd.append("--no-protel-ext")
 
         if config.use_aux_origin:
             cmd.append("--use-drill-file-origin")
