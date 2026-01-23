@@ -21,6 +21,7 @@ Thread Safety:
 - Minimal overhead when disabled (default)
 """
 
+import math
 import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Iterator
@@ -507,12 +508,17 @@ class RoutingGrid:
         center_gx, center_gy = self.world_to_grid(pad.x, pad.y)
 
         # Calculate pad metal area bounds (without clearance)
+        # Issue #996: Use ceil/floor to ensure we only mark cells whose CENTER
+        # is inside the metal area, not cells that are merely nearby.
+        # round() would include cells whose center is outside the metal area.
         metal_x1 = pad.x - effective_width / 2
         metal_y1 = pad.y - effective_height / 2
         metal_x2 = pad.x + effective_width / 2
         metal_y2 = pad.y + effective_height / 2
-        metal_gx1, metal_gy1 = self.world_to_grid(metal_x1, metal_y1)
-        metal_gx2, metal_gy2 = self.world_to_grid(metal_x2, metal_y2)
+        metal_gx1 = int(math.ceil((metal_x1 - self.origin_x) / self.resolution))
+        metal_gy1 = int(math.ceil((metal_y1 - self.origin_y) / self.resolution))
+        metal_gx2 = int(math.floor((metal_x2 - self.origin_x) / self.resolution))
+        metal_gy2 = int(math.floor((metal_y2 - self.origin_y) / self.resolution))
 
         for layer_idx in layers_to_block:
             for gy in range(gy1, gy2 + 1):
@@ -520,15 +526,19 @@ class RoutingGrid:
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.grid[layer_idx][gy][gx]
                         cell.blocked = True
-                        # Mark as pad-blocked so route rip-up won't corrupt it
-                        cell.pad_blocked = True
                         cell.original_net = pad.net
 
                         is_metal_area = (
                             metal_gx1 <= gx <= metal_gx2 and metal_gy1 <= gy <= metal_gy2
                         )
 
+                        # Issue #996: Only mark cells in the metal area as pad-blocked,
+                        # not clearance zone cells. This allows the router to distinguish
+                        # between actual pad copper (which must always block) and clearance
+                        # zones (which can be traversed when exiting a pad for sub-grid
+                        # connections). Clearance cells remain blocked but pad_blocked=False.
                         if is_metal_area:
+                            cell.pad_blocked = True
                             if cell.net == 0:
                                 cell.net = pad.net
                             elif cell.net != pad.net and pad.net != 0:
@@ -1550,12 +1560,17 @@ class RoutingGrid:
             layers = [self.layer_to_index(pad.layer.value)]
 
         # Calculate pad metal area bounds (without clearance)
+        # Issue #996: Use ceil/floor to ensure we only mark cells whose CENTER
+        # is inside the metal area, not cells that are merely nearby.
+        # round() would include cells whose center is outside the metal area.
         metal_half_w = effective_width / 2
         metal_half_h = effective_height / 2
         metal_x1, metal_y1 = pad.x - metal_half_w, pad.y - metal_half_h
         metal_x2, metal_y2 = pad.x + metal_half_w, pad.y + metal_half_h
-        metal_gx1, metal_gy1 = self.world_to_grid(metal_x1, metal_y1)
-        metal_gx2, metal_gy2 = self.world_to_grid(metal_x2, metal_y2)
+        metal_gx1 = int(math.ceil((metal_x1 - self.origin_x) / self.resolution))
+        metal_gy1 = int(math.ceil((metal_y1 - self.origin_y) / self.resolution))
+        metal_gx2 = int(math.floor((metal_x2 - self.origin_x) / self.resolution))
+        metal_gy2 = int(math.floor((metal_y2 - self.origin_y) / self.resolution))
 
         # Get center coordinates
         center_gx, center_gy = self.world_to_grid(pad.x, pad.y)
@@ -1564,9 +1579,10 @@ class RoutingGrid:
         for layer_idx in layers:
             # Block the entire clearance zone
             self._blocked[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = True
-            self._pad_blocked[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = True
             self._original_net[layer_idx, gy1 : gy2 + 1, gx1 : gx2 + 1] = pad.net
 
+            # Issue #996: Only mark metal area as pad-blocked, not clearance zone.
+            # This allows the router to distinguish actual pad copper from clearance.
             # Set net for metal area
             metal_gy1_clamped = max(0, metal_gy1)
             metal_gy2_clamped = min(self.rows - 1, metal_gy2)
@@ -1581,6 +1597,9 @@ class RoutingGrid:
             )
             net_slice = self._net[metal_slice]
             self._net[metal_slice] = np.where(net_slice == 0, pad.net, net_slice)
+
+            # Issue #996: Mark only metal area as pad-blocked (not clearance zone)
+            self._pad_blocked[metal_slice] = True
 
             # Mark center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:

@@ -190,9 +190,17 @@ class Router:
         metal_x2 = pad.x + effective_width / 2
         metal_y2 = pad.y + effective_height / 2
 
-        # Convert to grid coordinates
-        gx1, gy1 = self.grid.world_to_grid(metal_x1, metal_y1)
-        gx2, gy2 = self.grid.world_to_grid(metal_x2, metal_y2)
+        # Convert to grid coordinates using ceil/floor to ensure we only include
+        # cells whose CENTER is inside the metal area (Issue #996).
+        # Using round() would include cells that are merely nearby.
+        resolution = self.grid.resolution
+        origin_x = self.grid.origin_x
+        origin_y = self.grid.origin_y
+
+        gx1 = max(0, int(math.ceil((metal_x1 - origin_x) / resolution)))
+        gy1 = max(0, int(math.ceil((metal_y1 - origin_y) / resolution)))
+        gx2 = min(self.grid.cols - 1, int(math.floor((metal_x2 - origin_x) / resolution)))
+        gy2 = min(self.grid.rows - 1, int(math.floor((metal_y2 - origin_y) / resolution)))
 
         return (gx1, gy1, gx2, gy2)
 
@@ -965,8 +973,21 @@ class Router:
                         if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
                             continue
                     else:
-                        # Different net's pad - always block
-                        continue
+                        # Different net's blocked cell
+                        # Issue #996: When exiting a pad's metal area, allow entering
+                        # clearance zones (not actual pad copper). This enables sub-grid
+                        # pad connections where the nearest grid cells are within another
+                        # net's clearance zone but not its copper. The geometric validation
+                        # during route reconstruction will catch actual DRC violations.
+                        is_clearance_only = not cell.pad_blocked  # Not actual pad copper
+                        is_pad_exit = is_exiting_start_pad or is_exiting_end_pad
+                        if is_clearance_only and is_pad_exit:
+                            # Clearance zone cell while exiting pad - allow this move
+                            # to enable the first step out of the pad
+                            pass
+                        else:
+                            # Actual pad copper or not exiting a pad - block
+                            continue
                 else:
                     # Issue #864: Even when center cell is unblocked, check trace clearance
                     # The trace has width and must not violate clearance to other nets
@@ -1670,7 +1691,18 @@ class Router:
                     if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing):
                         continue
                 else:
-                    continue  # Different net's pad
+                    # Different net's blocked cell
+                    # Issue #996: When exiting a pad's metal area, allow entering
+                    # clearance zones (not actual pad copper). This enables sub-grid
+                    # pad connections where the nearest grid cells are within another
+                    # net's clearance zone but not its copper.
+                    is_clearance_only = not cell.pad_blocked
+                    is_pad_exit = is_exiting_source_pad or is_exiting_target_pad
+                    if is_clearance_only and is_pad_exit:
+                        # Clearance zone cell while exiting pad - allow this move
+                        pass
+                    else:
+                        continue  # Actual pad copper or not exiting a pad - block
             else:
                 # Issue #990: Relax blocking check when exiting from pad metal area
                 is_pad_exit_or_approach = (
