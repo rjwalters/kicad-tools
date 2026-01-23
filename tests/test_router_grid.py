@@ -120,6 +120,72 @@ class TestRoutingGridCoordinates:
         assert gx == 378, f"Expected 378 but got {gx} - floating point precision bug"
         assert gy == 378, f"Expected 378 but got {gy} - floating point precision bug"
 
+    def test_grid_to_world_fine_grid_precision(self):
+        """Test that grid_to_world handles fine grid resolutions correctly (Issue #1005).
+
+        With very fine grid resolutions like 0.025mm, floating point arithmetic
+        can produce values like 75.17500000000001 instead of 75.175 due to
+        binary floating point representation issues.
+
+        For example: 75.0 + 7 * 0.025 should equal 75.175
+        But in Python: 75.0 + 7 * 0.025 = 75.17500000000001
+
+        The fix rounds the result to 4 decimal places (0.1 micron precision)
+        to ensure clean coordinate values that KiCad can parse correctly.
+        """
+        rules = DesignRules(grid_resolution=0.025)
+        grid = RoutingGrid(width=50.0, height=50.0, rules=rules, origin_x=75.0, origin_y=75.0)
+
+        # Test multiple grid positions known to cause floating point issues
+        test_cases = [
+            # (gx, gy, expected_x, expected_y)
+            (0, 0, 75.0, 75.0),
+            (1, 1, 75.025, 75.025),
+            (7, 7, 75.175, 75.175),  # 75.0 + 7 * 0.025 = 75.175
+            (100, 100, 77.5, 77.5),
+            (200, 200, 80.0, 80.0),
+            (400, 400, 85.0, 85.0),
+        ]
+
+        for gx, gy, expected_x, expected_y in test_cases:
+            x, y = grid.grid_to_world(gx, gy)
+
+            # Verify the result is exactly the expected value (not close, but exact)
+            assert x == expected_x, (
+                f"grid_to_world({gx}, {gy})[0] = {x!r}, expected {expected_x!r}. "
+                f"Floating point precision issue not fixed."
+            )
+            assert y == expected_y, (
+                f"grid_to_world({gx}, {gy})[1] = {y!r}, expected {expected_y!r}. "
+                f"Floating point precision issue not fixed."
+            )
+
+    def test_grid_to_world_roundtrip_fine_grid(self):
+        """Test world_to_grid -> grid_to_world roundtrip with fine grid.
+
+        This verifies that converting world coordinates to grid and back
+        produces clean, quantized values suitable for PCB output.
+        """
+        rules = DesignRules(grid_resolution=0.025)
+        grid = RoutingGrid(width=50.0, height=50.0, rules=rules, origin_x=75.0, origin_y=75.0)
+
+        # A coordinate that should snap to grid
+        world_x, world_y = 75.175, 75.175
+        gx, gy = grid.world_to_grid(world_x, world_y)
+        back_x, back_y = grid.grid_to_world(gx, gy)
+
+        # Result should be clean (no floating point noise)
+        assert back_x == 75.175, f"Expected 75.175, got {back_x!r}"
+        assert back_y == 75.175, f"Expected 75.175, got {back_y!r}"
+
+        # Verify it's not the raw floating point result
+        raw_x = 75.0 + gx * 0.025
+        if raw_x != 75.175:
+            # If raw calculation has FP noise, our rounded version should be cleaner
+            assert back_x == 75.175, (
+                f"grid_to_world should round to clean value. Raw: {raw_x!r}, got: {back_x!r}"
+            )
+
 
 class TestRoutingGridLayers:
     """Tests for layer management methods."""
