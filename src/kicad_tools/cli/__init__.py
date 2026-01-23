@@ -397,6 +397,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "detect-mistakes":
         return _run_detect_mistakes_command(args)
 
+    elif args.command == "calibrate":
+        return _run_calibrate_command(args)
+
     return 0
 
 
@@ -462,6 +465,29 @@ def _run_detect_mistakes_command(args) -> int:
         sub_argv.append("--verbose")
 
     return mistakes_cmd(sub_argv)
+
+
+def _run_calibrate_command(args) -> int:
+    """Run the calibrate command."""
+    from .calibrate_cmd import main as calibrate_cmd
+
+    sub_argv = []
+
+    # Handle flags
+    if hasattr(args, "calibrate_show") and args.calibrate_show:
+        sub_argv.append("--show")
+    if hasattr(args, "calibrate_benchmark") and args.calibrate_benchmark:
+        sub_argv.append("--benchmark")
+    if hasattr(args, "calibrate_quick") and args.calibrate_quick:
+        sub_argv.append("--quick")
+    if hasattr(args, "calibrate_output") and args.calibrate_output:
+        sub_argv.extend(["-o", args.calibrate_output])
+    if hasattr(args, "calibrate_json") and args.calibrate_json:
+        sub_argv.append("--json")
+    if hasattr(args, "calibrate_verbose") and args.calibrate_verbose:
+        sub_argv.append("--verbose")
+
+    return calibrate_cmd(sub_argv)
 
 
 def symbols_main() -> int:

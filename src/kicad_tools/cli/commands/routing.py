@@ -116,6 +116,8 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--min-clearance-floor", str(args.min_clearance_floor)])
     if getattr(args, "manufacturer", "jlcpcb") != "jlcpcb":
         sub_argv.extend(["--manufacturer", args.manufacturer])
+    if getattr(args, "high_performance", False):
+        sub_argv.append("--high-performance")
     return route_main(sub_argv)
 
 
