@@ -551,6 +551,8 @@ class EscapeRouter:
             PackageType.TQFP,
         ):
             return self._escape_qfp_alternating(package)
+        elif package.package_type == PackageType.SOP:
+            return self._escape_sop_staggered(package)
         else:
             return self._escape_radial(package)
 
@@ -876,6 +878,202 @@ class EscapeRouter:
             via=None,
             ring_index=0,
         )
+
+    def _escape_sop_staggered(self, package: PackageInfo) -> list[EscapeRoute]:
+        """Generate escape routes with staggered vias for SOP/TSSOP/SOIC packages.
+
+        For dual-row packages (SOP, TSSOP, SOIC), pins escape perpendicular to
+        the pin row, with vias placed in a staggered pattern to prevent blocking
+        adjacent pins.
+
+        Pattern (for horizontal dual-row):
+        ```
+        Pin row 1:  [1][2][3][4][5][6][7][8]
+                     |  |  |  |  |  |  |  |
+        Escape:     -+--|--+--|--+--|--+--|
+                     |  |  |  |  |  |  |  |
+        Via row 1:  [V]    [V]    [V]    [V]  (odd pins)
+        Via row 2:     [V]    [V]    [V]    [V] (even pins, offset)
+
+        Pin row 2:  [16][15][14][13][12][11][10][9]
+        ```
+
+        The staggered pattern ensures that vias from one pin don't block the
+        escape path of adjacent pins, allowing all pins to route out successfully.
+
+        Args:
+            package: SOP/TSSOP/SOIC package info
+
+        Returns:
+            List of escape routes with staggered via placement
+        """
+        escapes: list[EscapeRoute] = []
+        center_x, center_y = package.center
+
+        # Separate pads into two rows
+        top_row: list[Pad] = []
+        bottom_row: list[Pad] = []
+        left_col: list[Pad] = []
+        right_col: list[Pad] = []
+
+        # Determine orientation by checking Y vs X spread
+        xs = [p.x for p in package.pads]
+        ys = [p.y for p in package.pads]
+        x_spread = max(xs) - min(xs)
+        y_spread = max(ys) - min(ys)
+
+        is_horizontal = x_spread > y_spread  # pins arranged horizontally (typical SOP)
+
+        if is_horizontal:
+            # Split by Y position
+            for pad in package.pads:
+                if pad.y > center_y:
+                    top_row.append(pad)
+                else:
+                    bottom_row.append(pad)
+            # Sort rows by X position
+            top_row.sort(key=lambda p: p.x)
+            bottom_row.sort(key=lambda p: p.x)
+
+            # Generate escapes for each row
+            escapes.extend(
+                self._create_staggered_row_escapes(
+                    pads=top_row,
+                    direction=EscapeDirection.NORTH,
+                    package=package,
+                )
+            )
+            escapes.extend(
+                self._create_staggered_row_escapes(
+                    pads=bottom_row,
+                    direction=EscapeDirection.SOUTH,
+                    package=package,
+                )
+            )
+        else:
+            # Vertical orientation - split by X position
+            for pad in package.pads:
+                if pad.x > center_x:
+                    right_col.append(pad)
+                else:
+                    left_col.append(pad)
+            # Sort columns by Y position
+            left_col.sort(key=lambda p: p.y)
+            right_col.sort(key=lambda p: p.y)
+
+            # Generate escapes for each column
+            escapes.extend(
+                self._create_staggered_row_escapes(
+                    pads=left_col,
+                    direction=EscapeDirection.WEST,
+                    package=package,
+                )
+            )
+            escapes.extend(
+                self._create_staggered_row_escapes(
+                    pads=right_col,
+                    direction=EscapeDirection.EAST,
+                    package=package,
+                )
+            )
+
+        return escapes
+
+    def _create_staggered_row_escapes(
+        self,
+        pads: list[Pad],
+        direction: EscapeDirection,
+        package: PackageInfo,
+    ) -> list[EscapeRoute]:
+        """Create escape routes for a row of pads with staggered via placement.
+
+        Args:
+            pads: Row of pads sorted by position
+            direction: Primary escape direction (perpendicular to row)
+            package: Package info for bounds
+
+        Returns:
+            List of escape routes with staggered vias
+        """
+        escapes: list[EscapeRoute] = []
+        dx, dy = self._direction_to_vector(direction)
+
+        # Calculate base escape distance and stagger offset
+        base_escape_dist = self.escape_clearance + self.rules.trace_width
+        stagger_offset = self.via_spacing / 2
+
+        for i, pad in enumerate(pads):
+            # Stagger: odd pins get extra offset (two via rows)
+            is_odd = i % 2 == 1
+            escape_dist = base_escape_dist + (stagger_offset if is_odd else 0)
+
+            # Calculate via position (perpendicular to pin row)
+            via_x = pad.x + dx * escape_dist
+            via_y = pad.y + dy * escape_dist
+
+            # Escape point is beyond the via
+            escape_x = via_x + dx * (self.rules.via_diameter + self.rules.trace_clearance)
+            escape_y = via_y + dy * (self.rules.via_diameter + self.rules.trace_clearance)
+
+            # Determine escape layer (alternate layers for denser routing)
+            escape_layer = Layer.B_CU if is_odd else Layer.F_CU
+
+            # Create segments
+            segments: list[Segment] = []
+
+            # Segment from pad to via
+            segments.append(
+                Segment(
+                    x1=pad.x,
+                    y1=pad.y,
+                    x2=via_x,
+                    y2=via_y,
+                    width=self.rules.trace_width,
+                    layer=pad.layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
+                )
+            )
+
+            # Create via
+            via = Via(
+                x=via_x,
+                y=via_y,
+                drill=self.rules.via_drill,
+                diameter=self.rules.via_diameter,
+                layers=(pad.layer, escape_layer),
+                net=pad.net,
+                net_name=pad.net_name,
+            )
+
+            # Segment from via to escape point on escape layer
+            segments.append(
+                Segment(
+                    x1=via_x,
+                    y1=via_y,
+                    x2=escape_x,
+                    y2=escape_y,
+                    width=self.rules.trace_width,
+                    layer=escape_layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
+                )
+            )
+
+            escapes.append(
+                EscapeRoute(
+                    pad=pad,
+                    direction=direction,
+                    escape_point=(escape_x, escape_y),
+                    escape_layer=escape_layer,
+                    via_pos=(via_x, via_y),
+                    segments=segments,
+                    via=via,
+                    ring_index=0,
+                )
+            )
+
+        return escapes
 
     def _escape_radial(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate simple radial escapes for non-dense packages.

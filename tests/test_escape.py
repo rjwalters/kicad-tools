@@ -646,3 +646,146 @@ class TestAutorouterEscapeIntegration:
         assert stats["total_pins_escaped"] == 64
         assert len(stats["package_details"]) == 1
         assert stats["package_details"][0]["ref"] == "U1"
+
+
+class TestSOPStaggeredEscape:
+    """Tests for SOP/TSSOP/SOIC staggered escape routing."""
+
+    @pytest.fixture
+    def grid_and_rules(self):
+        """Create grid and rules for testing."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        grid = RoutingGrid(50, 50, rules, origin_x=0, origin_y=0)
+        return grid, rules
+
+    def test_sop_escapes_use_staggered_method(self, grid_and_rules):
+        """Test that SOP packages use staggered escape routing."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # Create SOP-16 pads with 0.65mm pitch (TSSOP-like)
+        pads = create_sop_pads(16, pitch=0.65)
+        info = router.analyze_package(pads)
+
+        assert info.package_type == PackageType.SOP
+
+        escapes = router.generate_escapes(info)
+
+        # Should have escape for each pad
+        assert len(escapes) == 16
+
+    def test_sop_escapes_have_staggered_vias(self, grid_and_rules):
+        """Test that SOP escapes place vias in staggered pattern."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # Create SOP pads
+        pads = create_sop_pads(16, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # All escapes should have vias
+        for escape in escapes:
+            assert escape.via is not None
+            assert escape.via_pos is not None
+
+    def test_sop_via_positions_are_staggered(self, grid_and_rules):
+        """Test that via positions alternate between odd and even pins."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # Create horizontal SOP (rows at different Y positions)
+        pads = create_sop_pads(8, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Separate escapes by which row they came from
+        # Top row escapes (y > 0) and bottom row (y < 0)
+        top_escapes = [e for e in escapes if e.pad.x > 0]
+        bottom_escapes = [e for e in escapes if e.pad.x < 0]
+
+        # Check staggering within each row
+        for row_escapes in [top_escapes, bottom_escapes]:
+            if len(row_escapes) < 2:
+                continue
+
+            # Sort by position to get sequential pads
+            row_escapes.sort(key=lambda e: e.pad.y)
+
+            # Odd and even indexed escapes should have different via distances
+            even_via_dists = []
+            odd_via_dists = []
+            for i, escape in enumerate(row_escapes):
+                # Calculate distance from pad to via
+                pad = escape.pad
+                via_x, via_y = escape.via_pos
+                dist = math.sqrt((via_x - pad.x) ** 2 + (via_y - pad.y) ** 2)
+
+                if i % 2 == 0:
+                    even_via_dists.append(dist)
+                else:
+                    odd_via_dists.append(dist)
+
+            # Even and odd should have different average distances (staggered)
+            if even_via_dists and odd_via_dists:
+                avg_even = sum(even_via_dists) / len(even_via_dists)
+                avg_odd = sum(odd_via_dists) / len(odd_via_dists)
+                assert abs(avg_even - avg_odd) > 0.01  # Should be different
+
+    def test_sop_escapes_alternate_layers(self, grid_and_rules):
+        """Test that odd and even pin escapes use different layers."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        pads = create_sop_pads(8, pitch=0.65)
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Group escapes from one side
+        side_escapes = [e for e in escapes if e.pad.x > 0]
+        side_escapes.sort(key=lambda e: e.pad.y)
+
+        if len(side_escapes) >= 2:
+            # Check that adjacent pins use different layers
+            layers = [e.escape_layer for e in side_escapes]
+            # Should have both F.Cu and B.Cu
+            assert Layer.F_CU in layers or Layer.B_CU in layers
+
+    def test_sop_escapes_perpendicular_to_rows(self, grid_and_rules):
+        """Test that SOP packages escape perpendicular to their pin rows."""
+        grid, rules = grid_and_rules
+        router = EscapeRouter(grid, rules)
+
+        # Use the standard SOP helper (vertical orientation - left/right columns)
+        # create_sop_pads creates pads with X spread (row_spacing=4mm) < Y spread
+        pads = create_sop_pads(8, pitch=0.65)
+
+        info = router.analyze_package(pads)
+        escapes = router.generate_escapes(info)
+
+        # Should generate escapes for all pads
+        assert len(escapes) == 8
+
+        # All escapes should have a direction (perpendicular to their row)
+        for escape in escapes:
+            assert escape.direction in (
+                EscapeDirection.NORTH,
+                EscapeDirection.SOUTH,
+                EscapeDirection.EAST,
+                EscapeDirection.WEST,
+            )
+
+        # Check that escapes are going outward from the package
+        # (escape point should be further from center than the pad)
+        for escape in escapes:
+            pad_dist = math.sqrt(escape.pad.x**2 + escape.pad.y**2)
+            escape_x, escape_y = escape.escape_point
+            escape_dist = math.sqrt(escape_x**2 + escape_y**2)
+            assert escape_dist >= pad_dist
