@@ -122,11 +122,36 @@ class RoutingFailure:
         return result
 
 
+@dataclass
+class MSTEdgeInfo:
+    """Information about an MST edge for interleaved net ordering.
+
+    Used to track individual edges of N-port nets so they can be
+    interleaved with 2-port nets based on edge length.
+
+    Attributes:
+        net_id: The net this edge belongs to
+        edge_index: Index of this edge in the MST (0 = shortest)
+        source_idx: Index of source pad in pad list
+        target_idx: Index of target pad in pad list
+        distance: Manhattan distance of this edge in mm
+        is_first: Whether this is the first (shortest) edge of the net
+    """
+
+    net_id: int
+    edge_index: int
+    source_idx: int
+    target_idx: int
+    distance: float
+    is_first: bool = False
+
+
 # Re-export for backward compatibility
 __all__ = [
     "Autorouter",
     "AdaptiveAutorouter",
     "Corridor",
+    "MSTEdgeInfo",
     "RoutingFailure",
     "RoutingResult",
     "SparseRouter",
@@ -909,12 +934,174 @@ class Autorouter:
         distance = self._get_net_bounding_box_diagonal(net_id)
         return (priority, pad_count, distance)
 
+    def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
+        """Compute MST edges for a net and return them sorted by distance.
+
+        Pre-computes the minimum spanning tree for N-port nets so that
+        edge distances can be used for interleaved net ordering.
+
+        Args:
+            net_id: The net ID to compute MST for.
+
+        Returns:
+            List of MSTEdgeInfo objects sorted by distance (shortest first).
+            Empty list for 2-port nets (they have exactly one edge).
+        """
+        pad_keys = self.nets.get(net_id, [])
+        if len(pad_keys) <= 2:
+            return []
+
+        # Get pad objects
+        pad_objs = [self.pads[key] for key in pad_keys if key in self.pads]
+        if len(pad_objs) <= 2:
+            return []
+
+        # Build MST using Prim's algorithm (same as MSTRouter.build_mst)
+        n = len(pad_objs)
+        connected: set[int] = {0}
+        unconnected = set(range(1, n))
+        mst_edges: list[tuple[int, int, float]] = []
+
+        while unconnected:
+            best_dist = float("inf")
+            best_edge: tuple[int, int] | None = None
+
+            for i in connected:
+                for j in unconnected:
+                    # Manhattan distance
+                    dist = abs(pad_objs[i].x - pad_objs[j].x) + abs(pad_objs[i].y - pad_objs[j].y)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_edge = (i, j)
+
+            if best_edge:
+                i, j = best_edge
+                mst_edges.append((i, j, best_dist))
+                connected.add(j)
+                unconnected.remove(j)
+
+        # Sort by distance and convert to MSTEdgeInfo
+        mst_edges.sort(key=lambda e: e[2])
+        return [
+            MSTEdgeInfo(
+                net_id=net_id,
+                edge_index=idx,
+                source_idx=edge[0],
+                target_idx=edge[1],
+                distance=edge[2],
+                is_first=(idx == 0),
+            )
+            for idx, edge in enumerate(mst_edges)
+        ]
+
+    def _get_shortest_mst_edge_distance(self, net_id: int) -> float:
+        """Get the distance of the shortest MST edge for an N-port net.
+
+        For interleaved ordering, we treat the shortest MST edge as a
+        "virtual 2-port net" and use its distance for comparison with
+        actual 2-port nets.
+
+        Args:
+            net_id: The net ID to get shortest edge for.
+
+        Returns:
+            Distance of shortest MST edge in mm, or 0.0 if not an N-port net.
+        """
+        edges = self._compute_mst_edges(net_id)
+        if edges:
+            return edges[0].distance
+        return 0.0
+
+    def _get_interleaved_net_order(
+        self, use_interleaving: bool = True
+    ) -> tuple[list[int], dict[int, list[MSTEdgeInfo]]]:
+        """Get net ordering with 2-port and N-port nets interleaved by distance.
+
+        Creates an ordering where the shortest edge of N-port nets is treated
+        as a "virtual 2-port net" and interleaved with actual 2-port nets.
+        This allows short segments of N-port nets to be routed early when
+        they have fewer obstacles.
+
+        Args:
+            use_interleaving: If True, use interleaved ordering. If False,
+                fall back to standard priority ordering (pad_count based).
+
+        Returns:
+            Tuple of:
+            - List of net IDs in routing order
+            - Dict mapping net_id to list of MSTEdgeInfo for N-port nets
+              (used for two-phase routing)
+        """
+        # Group nets by class priority first
+        priority_groups: dict[int, list[int]] = {}
+        for net_id in self.nets.keys():
+            if net_id == 0:  # Skip unconnected nets
+                continue
+            net_name = self.net_names.get(net_id, "")
+            net_class = self.net_class_map.get(net_name)
+            priority = net_class.priority if net_class else 10
+            if priority not in priority_groups:
+                priority_groups[priority] = []
+            priority_groups[priority].append(net_id)
+
+        if not use_interleaving:
+            # Fall back to standard ordering
+            ordered_nets = []
+            for priority in sorted(priority_groups.keys()):
+                nets = priority_groups[priority]
+                nets.sort(key=lambda n: self._get_net_priority(n))
+                ordered_nets.extend(nets)
+            return ordered_nets, {}
+
+        # Pre-compute MST edges for all N-port nets
+        mst_cache: dict[int, list[MSTEdgeInfo]] = {}
+        for net_id in self.nets.keys():
+            if net_id == 0:
+                continue
+            pad_count = len(self.nets.get(net_id, []))
+            if pad_count > 2:
+                edges = self._compute_mst_edges(net_id)
+                if edges:
+                    mst_cache[net_id] = edges
+
+        # Build interleaved ordering within each priority group
+        ordered_nets = []
+
+        for priority in sorted(priority_groups.keys()):
+            nets_in_group = priority_groups[priority]
+
+            # Separate 2-port and N-port nets
+            two_port_nets: list[tuple[float, int]] = []  # (distance, net_id)
+            nport_first_edges: list[tuple[float, int]] = []  # (distance, net_id)
+
+            for net_id in nets_in_group:
+                pad_count = len(self.nets.get(net_id, []))
+                if pad_count == 2:
+                    # 2-port net: use direct distance
+                    distance = self._get_net_bounding_box_diagonal(net_id)
+                    two_port_nets.append((distance, net_id))
+                elif net_id in mst_cache:
+                    # N-port net: use shortest MST edge distance
+                    shortest_edge = mst_cache[net_id][0].distance
+                    nport_first_edges.append((shortest_edge, net_id))
+
+            # Combine and sort by distance
+            combined: list[tuple[float, int]] = two_port_nets + nport_first_edges
+            combined.sort(key=lambda x: x[0])
+
+            # Add to ordered list
+            for _, net_id in combined:
+                ordered_nets.append(net_id)
+
+        return ordered_nets, mst_cache
+
     def route_all(
         self,
         net_order: list[int] | None = None,
         progress_callback: ProgressCallback | None = None,
         parallel: bool = False,
         max_workers: int = 4,
+        interleaved: bool = False,
     ) -> list[Route]:
         """Route all nets in priority order.
 
@@ -926,10 +1113,18 @@ class Autorouter:
                 Can provide 3-4x speedup for boards with many independent nets.
             max_workers: Maximum number of parallel workers (default: 4).
                 Only used when parallel=True.
+            interleaved: If True, use interleaved ordering for N-port nets.
+                The shortest MST edge of each N-port net is treated as a
+                "virtual 2-port net" and interleaved with actual 2-port nets
+                sorted by distance. This gives short segments the best chance
+                of routing before longer routes consume grid space.
 
         Returns:
             List of Route objects for all nets
         """
+        if interleaved:
+            return self.route_all_interleaved(progress_callback=progress_callback)
+
         if parallel:
             return self.route_all_parallel(
                 net_order=net_order,
@@ -971,6 +1166,213 @@ class Autorouter:
                 print(failure_summary)
 
         return all_routes
+
+    def route_all_interleaved(
+        self,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[Route]:
+        """Route all nets using interleaved ordering for N-port nets.
+
+        This routing strategy treats the shortest MST edge of N-port nets
+        as a "virtual 2-port net" and interleaves it with actual 2-port nets
+        sorted by distance. This gives short segments of N-port nets the
+        best chance of routing successfully before longer routes consume
+        grid space.
+
+        The algorithm:
+        1. Pre-compute MST for all N-port nets
+        2. Extract shortest edge from each N-port net's MST
+        3. Create combined pool: 2-port nets + shortest N-port edges
+        4. Sort by edge length and route in that order
+        5. After each N-port's first edge routes, continue with remaining edges
+
+        Args:
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            List of Route objects for all nets
+
+        Example:
+            >>> router = Autorouter(100, 100)
+            >>> # ... add components ...
+            >>> routes = router.route_all_interleaved()
+            >>> # Net B's 3mm edge routes before Net A's 5mm edge
+        """
+        print("\n=== Interleaved Net Routing ===")
+
+        # Get interleaved ordering and MST cache
+        net_order, mst_cache = self._get_interleaved_net_order(use_interleaving=True)
+        nets_to_route = [n for n in net_order if n != 0]
+        total_nets = len(nets_to_route)
+
+        print(f"  Total nets: {total_nets}")
+        print(f"  N-port nets with cached MST: {len(mst_cache)}")
+
+        all_routes: list[Route] = []
+        nport_routed_edges: dict[int, int] = {}  # net_id -> number of edges routed
+
+        for i, net in enumerate(nets_to_route):
+            if progress_callback is not None:
+                progress = i / total_nets if total_nets > 0 else 0.0
+                net_name = self.net_names.get(net, f"Net {net}")
+                if not progress_callback(progress, f"Routing {net_name}", True):
+                    break
+
+            pad_count = len(self.nets.get(net, []))
+
+            if pad_count == 2 or net not in mst_cache:
+                # 2-port net or N-port without MST: route normally
+                routes = self.route_net(net)
+                all_routes.extend(routes)
+                if routes:
+                    flush_print(
+                        f"  Net {net}: {len(routes)} routes, "
+                        f"{sum(len(r.segments) for r in routes)} segments, "
+                        f"{sum(len(r.vias) for r in routes)} vias"
+                    )
+            else:
+                # N-port net: route using cached MST edges in order
+                mst_edges = mst_cache[net]
+                routes = self._route_net_with_mst_edges(net, mst_edges)
+                all_routes.extend(routes)
+                nport_routed_edges[net] = len(mst_edges)
+                if routes:
+                    flush_print(
+                        f"  Net {net} (N-port): {len(routes)} routes, "
+                        f"{sum(len(r.segments) for r in routes)} segments, "
+                        f"{sum(len(r.vias) for r in routes)} vias"
+                    )
+
+        if progress_callback is not None:
+            routed_count = len({r.net for r in all_routes})
+            progress_callback(1.0, f"Routed {routed_count}/{total_nets} nets", False)
+
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
+
+        return all_routes
+
+    def _route_net_with_mst_edges(self, net: int, mst_edges: list[MSTEdgeInfo]) -> list[Route]:
+        """Route an N-port net using pre-computed MST edges.
+
+        Routes the MST edges in order (shortest first), using the cached
+        edge information to avoid recomputing the MST.
+
+        Args:
+            net: Net ID to route
+            mst_edges: Pre-computed MST edges sorted by distance
+
+        Returns:
+            List of Route objects for this net
+        """
+        if net not in self.nets:
+            return []
+
+        pads = self.nets[net]
+        if len(pads) < 2:
+            return []
+
+        routes: list[Route] = []
+
+        # Handle intra-IC connections first
+        intra_routes, connected_indices = self._create_intra_ic_routes(net, pads)
+        for route in intra_routes:
+            self._mark_route(route)
+            routes.append(route)
+            self.routes.append(route)
+
+        # Build reduced pad list for inter-IC routing
+        pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
+        if len(pads_for_routing) < 2:
+            return routes
+
+        pad_objs = [self.pads[p] for p in pads_for_routing]
+
+        # Route MST edges in order (shortest first)
+        # The mst_edges contain indices into the original pad list
+        # We need to map them to pads_for_routing if intra-IC reduced the list
+        if len(pads_for_routing) == len(pads):
+            # No intra-IC reduction, use edges directly
+            for edge in mst_edges:
+                if edge.source_idx < len(pad_objs) and edge.target_idx < len(pad_objs):
+                    source_pad = pad_objs[edge.source_idx]
+                    target_pad = pad_objs[edge.target_idx]
+                    route = self.router.route(source_pad, target_pad)
+
+                    if route:
+                        self._mark_route(route)
+                        self.routes.append(route)
+                        routes.append(route)
+                    else:
+                        self._record_routing_failure(net, source_pad, target_pad)
+        else:
+            # Intra-IC reduced the pad list, rebuild MST for reduced set
+            mst_router = MSTRouter(self.grid, self.router, self.rules, self.net_class_map)
+
+            def mark_route(route: Route):
+                self._mark_route(route)
+                self.routes.append(route)
+
+            def record_failure(source_pad: Pad, target_pad: Pad):
+                self._record_routing_failure(net, source_pad, target_pad)
+
+            mst_routes = mst_router.route_net(pad_objs, mark_route, record_failure)
+            routes.extend(mst_routes)
+
+        return routes
+
+    def _record_routing_failure(self, net: int, source_pad: Pad, target_pad: Pad):
+        """Record a routing failure with diagnostic information.
+
+        Helper method to record failures when routing with pre-computed MST edges.
+
+        Args:
+            net: Net ID
+            source_pad: Source pad object
+            target_pad: Target pad object
+        """
+        source_coords = (source_pad.x, source_pad.y)
+        target_coords = (target_pad.x, target_pad.y)
+
+        # Find blocking nets
+        blocking_nets = self.router.find_blocking_nets(source_pad, target_pad)
+
+        # Map blocking nets to component references
+        blocking_components = []
+        for blocking_net in blocking_nets:
+            for (ref, _pin), pad in self.pads.items():
+                if pad.net == blocking_net and ref not in blocking_components:
+                    blocking_components.append(ref)
+                    break
+
+        # Run root cause analysis
+        analyzer = RootCauseAnalyzer()
+        net_name = self.net_names.get(net, f"Net_{net}")
+        analysis = analyzer.analyze_routing_failure(
+            grid=self.grid,
+            start=source_coords,
+            goal=target_coords,
+            net_id=net,
+            net_name=net_name,
+        )
+
+        failure = RoutingFailure(
+            net=net,
+            net_name=net_name,
+            source_pad=(source_pad.ref, source_pad.pin),
+            target_pad=(target_pad.ref, target_pad.pin),
+            source_coords=source_coords,
+            target_coords=target_coords,
+            blocking_nets=set(blocking_nets),
+            blocking_components=blocking_components,
+            reason=analysis.primary_cause if analysis else "No path found",
+            failure_cause=analysis.failure_cause if analysis else FailureCause.UNKNOWN,
+            analysis=analysis,
+        )
+        self.routing_failures.append(failure)
 
     def route_all_parallel(
         self,

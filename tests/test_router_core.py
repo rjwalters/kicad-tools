@@ -2,7 +2,12 @@
 
 import pytest
 
-from kicad_tools.router.core import AdaptiveAutorouter, Autorouter, RoutingResult
+from kicad_tools.router.core import (
+    AdaptiveAutorouter,
+    Autorouter,
+    MSTEdgeInfo,
+    RoutingResult,
+)
 from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Route, Segment
 from kicad_tools.router.rules import DesignRules
@@ -273,6 +278,186 @@ class TestAutorouterNetPriority:
         assert p1[1] == p2[1]  # Same pad count
         assert p1[2] < p2[2]  # Net 1 has smaller distance
         assert p1 < p2  # Net 1 should be ordered first
+
+
+class TestAutorouterInterleavedOrdering:
+    """Tests for interleaved net ordering with MST-based N-port net handling."""
+
+    @pytest.fixture
+    def router(self):
+        return Autorouter(width=50.0, height=40.0)
+
+    def test_compute_mst_edges_two_port_returns_empty(self, router):
+        """Test that 2-port nets return empty MST edges."""
+        # Add a 2-port net
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 5.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        edges = router._compute_mst_edges(1)
+        assert edges == []
+
+    def test_compute_mst_edges_three_port_net(self, router):
+        """Test MST edge computation for a 3-port net."""
+        # Add a 3-port net in a right triangle (3-4-5 triangle)
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 3.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads3 = [{"number": "1", "x": 3.0, "y": 4.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+        router.add_component("R3", pads3)
+
+        edges = router._compute_mst_edges(1)
+
+        # Should have 2 edges (n-1 for n=3 nodes)
+        assert len(edges) == 2
+
+        # All edges should belong to net 1
+        assert all(e.net_id == 1 for e in edges)
+
+        # First edge should be marked as first
+        assert edges[0].is_first is True
+        assert edges[1].is_first is False
+
+        # Edges should be sorted by distance
+        assert edges[0].distance <= edges[1].distance
+
+        # First edge should be 3mm (Manhattan distance)
+        assert abs(edges[0].distance - 3.0) < 0.001
+
+        # Second edge should be 4mm (Manhattan distance)
+        assert abs(edges[1].distance - 4.0) < 0.001
+
+    def test_get_shortest_mst_edge_distance(self, router):
+        """Test getting shortest MST edge distance."""
+        # Add a 3-port net
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 3.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads3 = [{"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+        router.add_component("R3", pads3)
+
+        distance = router._get_shortest_mst_edge_distance(1)
+        # Shortest edge is 3mm
+        assert abs(distance - 3.0) < 0.001
+
+    def test_get_shortest_mst_edge_distance_two_port(self, router):
+        """Test that 2-port nets return 0.0 for shortest MST edge."""
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 5.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        distance = router._get_shortest_mst_edge_distance(1)
+        assert distance == 0.0
+
+    def test_interleaved_ordering_basic(self, router):
+        """Test interleaved ordering interleaves 2-port and N-port nets by distance."""
+        # Net A: 2-port, distance 5mm (diagonal)
+        pads_a1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "A"}]
+        pads_a2 = [{"number": "1", "x": 3.0, "y": 4.0, "net": 1, "net_name": "A"}]
+        router.add_component("A1", pads_a1)
+        router.add_component("A2", pads_a2)
+
+        # Net B: 3-port, MST edges [3mm, 7mm] (Manhattan distances)
+        pads_b1 = [{"number": "1", "x": 10.0, "y": 0.0, "net": 2, "net_name": "B"}]
+        pads_b2 = [{"number": "1", "x": 13.0, "y": 0.0, "net": 2, "net_name": "B"}]
+        pads_b3 = [{"number": "1", "x": 13.0, "y": 7.0, "net": 2, "net_name": "B"}]
+        router.add_component("B1", pads_b1)
+        router.add_component("B2", pads_b2)
+        router.add_component("B3", pads_b3)
+
+        # Net C: 2-port, distance 4mm (diagonal)
+        pads_c1 = [{"number": "1", "x": 20.0, "y": 0.0, "net": 3, "net_name": "C"}]
+        pads_c2 = [{"number": "1", "x": 22.4, "y": 3.2, "net": 3, "net_name": "C"}]
+        router.add_component("C1", pads_c1)
+        router.add_component("C2", pads_c2)
+
+        net_order, mst_cache = router._get_interleaved_net_order(use_interleaving=True)
+
+        # Net B (3-port) should be in MST cache
+        assert 2 in mst_cache
+        assert len(mst_cache[2]) == 2  # 2 MST edges
+
+        # Order should be: B (3mm), C (4mm), A (5mm)
+        # Because B's shortest MST edge (3mm) < C's distance (4mm) < A's distance (5mm)
+        assert net_order == [2, 3, 1]
+
+    def test_interleaved_ordering_respects_net_class_priority(self, router):
+        """Test that net class priority is respected before interleaving."""
+        from kicad_tools.router.rules import NetClassRouting
+
+        # Create custom net class map with priority
+        net_class_map = {
+            "HIGH": NetClassRouting(name="HIGH", priority=1, trace_width=0.2),
+            "LOW": NetClassRouting(name="LOW", priority=5, trace_width=0.2),
+        }
+        router.net_class_map = net_class_map
+
+        # Net 1: HIGH priority, long distance
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "HIGH"}]
+        pads2 = [{"number": "1", "x": 20.0, "y": 0.0, "net": 1, "net_name": "HIGH"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        # Net 2: LOW priority, short distance
+        pads3 = [{"number": "1", "x": 0.0, "y": 10.0, "net": 2, "net_name": "LOW"}]
+        pads4 = [{"number": "1", "x": 1.0, "y": 10.0, "net": 2, "net_name": "LOW"}]
+        router.add_component("R3", pads3)
+        router.add_component("R4", pads4)
+
+        net_order, _ = router._get_interleaved_net_order(use_interleaving=True)
+
+        # HIGH priority should come first despite longer distance
+        assert net_order[0] == 1  # HIGH priority net
+        assert net_order[1] == 2  # LOW priority net
+
+    def test_interleaved_ordering_disabled(self, router):
+        """Test fallback to standard ordering when interleaving disabled."""
+        # Add a 3-port net
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 5.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads3 = [{"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+        router.add_component("R3", pads3)
+
+        _, mst_cache = router._get_interleaved_net_order(use_interleaving=False)
+
+        # MST cache should be empty when interleaving is disabled
+        assert mst_cache == {}
+
+    def test_mst_edge_info_dataclass(self):
+        """Test MSTEdgeInfo dataclass."""
+        edge = MSTEdgeInfo(
+            net_id=1,
+            edge_index=0,
+            source_idx=0,
+            target_idx=1,
+            distance=5.0,
+            is_first=True,
+        )
+
+        assert edge.net_id == 1
+        assert edge.edge_index == 0
+        assert edge.source_idx == 0
+        assert edge.target_idx == 1
+        assert edge.distance == 5.0
+        assert edge.is_first is True
+
+    def test_route_all_interleaved_parameter(self, router):
+        """Test that route_all accepts interleaved parameter."""
+        # Add simple 2-port net
+        pads1 = [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        pads2 = [{"number": "1", "x": 5.0, "y": 0.0, "net": 1, "net_name": "NET1"}]
+        router.add_component("R1", pads1)
+        router.add_component("R2", pads2)
+
+        # Should not raise error
+        routes = router.route_all(interleaved=True)
+        assert isinstance(routes, list)
 
 
 class TestAutorouterMonteCarlo:
