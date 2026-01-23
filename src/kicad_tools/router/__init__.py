@@ -82,6 +82,13 @@ from .failure_analysis import (
     PathAttempt,
     RootCauseAnalyzer,
 )
+from .fine_pitch import (
+    ComponentGridAnalysis,
+    FinePitchReport,
+    FinePitchSeverity,
+    OffGridPad,
+    analyze_fine_pitch_components,
+)
 from .grid import RoutingGrid
 from .heuristics import (
     CongestionAwareHeuristic,
@@ -154,6 +161,7 @@ from .output import (
     format_failed_nets_summary,
     get_routing_diagnostics_json,
     print_routing_diagnostics_json,
+    show_fine_pitch_warnings,
     show_routing_summary,
 )
 from .parallel import (
@@ -395,6 +403,7 @@ __all__ = [
     "find_differential_partner",
     # Output and Diagnostics
     "format_failed_nets_summary",
+    "show_fine_pitch_warnings",
     "show_routing_summary",
     "get_routing_diagnostics_json",
     "print_routing_diagnostics_json",
@@ -407,4 +416,10 @@ __all__ = [
     "MFR_PCBWAY",
     "get_mfr_limits",
     "get_relaxation_tiers",
+    # Fine-Pitch Component Analysis (Issue #1008)
+    "FinePitchReport",
+    "FinePitchSeverity",
+    "ComponentGridAnalysis",
+    "OffGridPad",
+    "analyze_fine_pitch_components",
 ]

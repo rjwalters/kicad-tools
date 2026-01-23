@@ -2041,6 +2041,22 @@ def main(argv: list[str] | None = None) -> int:
                     pad_count = len(router.nets.get(net_num, []))
                     print(f"    {net_name}: {pad_count} pads")
 
+    # Analyze fine-pitch components for grid compatibility warnings
+    # This runs automatically to warn users about potential routing issues
+    if not quiet:
+        from kicad_tools.router.fine_pitch import analyze_fine_pitch_components
+        from kicad_tools.router.output import show_fine_pitch_warnings
+
+        fine_pitch_report = analyze_fine_pitch_components(
+            pads=router.pads,
+            grid_resolution=args.grid,
+            trace_width=args.trace_width,
+            clearance=args.clearance,
+        )
+        if fine_pitch_report.has_warnings:
+            print("\n--- Fine-Pitch Component Analysis ---")
+            show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)
+
     # Analyze routability if requested
     if args.analyze:
         # Run pre-routing complexity analysis first
@@ -2356,9 +2372,7 @@ def main(argv: list[str] | None = None) -> int:
         original_clearance = rules.trace_clearance
         print(f"\n--- Clearance Relaxation Report ({len(relaxed_nets_report)} nets) ---")
         print(f"  Original clearance: {original_clearance:.3f}mm")
-        for net_id, clearance in sorted(
-            relaxed_nets_report.items(), key=lambda x: x[1]
-        ):
+        for net_id, clearance in sorted(relaxed_nets_report.items(), key=lambda x: x[1]):
             net_name = router.net_names.get(net_id, f"Net {net_id}")
             reduction = (1 - clearance / original_clearance) * 100
             print(f"  {net_name}: {clearance:.3f}mm ({reduction:.0f}% relaxation)")
