@@ -1437,9 +1437,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--grid",
-        type=float,
-        default=0.25,
-        help="Grid resolution in mm (default: 0.25, use 0.1 for dense QFP)",
+        type=str,
+        default="0.25",
+        help=(
+            "Grid resolution in mm or 'auto' for automatic selection "
+            "(default: 0.25, use 0.1 for dense QFP, or 'auto' to analyze pads)"
+        ),
     )
     parser.add_argument(
         "--trace-width",
@@ -1768,6 +1771,37 @@ def main(argv: list[str] | None = None) -> int:
     else:
         output_path = pcb_path.with_stem(pcb_path.stem + "_routed")
 
+    # Resolve grid value: "auto" or numeric
+    # We need to resolve this early, before sub-functions are called
+    grid_auto_result = None
+    if args.grid.lower() == "auto":
+        from kicad_tools.router.io import (
+            auto_select_grid_resolution,
+            extract_pad_positions,
+        )
+
+        if not args.quiet:
+            print("\n--- Auto-selecting grid resolution ---")
+        pad_positions = extract_pad_positions(pcb_path)
+        grid_auto_result = auto_select_grid_resolution(
+            pads=pad_positions,
+            clearance=args.clearance,
+        )
+        # Replace args.grid with resolved float for downstream code
+        args.grid = grid_auto_result.resolution
+        if not args.quiet:
+            print(grid_auto_result.summary())
+            print()
+    else:
+        try:
+            args.grid = float(args.grid)
+        except ValueError:
+            print(
+                f"Error: Invalid grid value '{args.grid}'. Use a number (e.g., 0.25) or 'auto'.",
+                file=sys.stderr,
+            )
+            return 1
+
     # Handle auto-layers mode (separate code path)
     if args.auto_layers and args.adaptive_rules:
         # Combined 2D search: layers + rules
@@ -1797,27 +1831,6 @@ def main(argv: list[str] | None = None) -> int:
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
-
-    # Validate grid resolution vs clearance (prevents DRC violations)
-    if args.grid > args.clearance:
-        recommended_grid = args.clearance / 2
-        if not args.force:
-            print(
-                f"Error: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
-                f"This WILL cause DRC violations.\n\n"
-                f"Options:\n"
-                f"  1. Use a finer grid: --grid {recommended_grid}\n"
-                f"  2. Use --force to override (not recommended)\n",
-                file=sys.stderr,
-            )
-            return 1
-        else:
-            # User forced, continue with warning
-            print(
-                f"Warning: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
-                f"Proceeding anyway due to --force flag. Expect DRC violations.",
-                file=sys.stderr,
-            )
 
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating
@@ -1849,6 +1862,32 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     elif args.backend == "python":
         force_python = True
+
+    # Grid resolution already resolved early in main()
+    # (args.grid is now a float, grid_auto_result set if "auto" was used)
+
+    # Validate grid resolution vs clearance (prevents DRC violations)
+    # Skip validation for auto mode since auto_select_grid_resolution ensures DRC compliance
+    if grid_auto_result is None and args.grid > args.clearance:
+        recommended_grid = args.clearance / 2
+        if not args.force:
+            print(
+                f"Error: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
+                f"This WILL cause DRC violations.\n\n"
+                f"Options:\n"
+                f"  1. Use a finer grid: --grid {recommended_grid}\n"
+                f"  2. Use --grid auto for automatic selection\n"
+                f"  3. Use --force to override (not recommended)\n",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            # User forced, continue with warning
+            print(
+                f"Warning: Grid resolution {args.grid}mm exceeds clearance {args.clearance}mm.\n"
+                f"Proceeding anyway due to --force flag. Expect DRC violations.",
+                file=sys.stderr,
+            )
 
     # Create layer stack from --layers argument (or auto-detect)
     if args.layers == "auto":
@@ -1898,7 +1937,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Edge:     {args.edge_clearance}mm clearance")
         if args.verbose:
             print("\nDesign Rules:")
-            print(f"  Grid resolution: {rules.grid_resolution}mm")
+            grid_mode = " (auto)" if grid_auto_result else ""
+            print(f"  Grid resolution: {rules.grid_resolution}mm{grid_mode}")
             print(f"  Trace width:     {rules.trace_width}mm")
             print(f"  Clearance:       {rules.trace_clearance}mm")
             print(f"  Via drill:       {rules.via_drill}mm")
