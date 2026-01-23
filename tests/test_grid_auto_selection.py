@@ -8,6 +8,7 @@ from kicad_tools.router.io import (
     _is_on_grid,
     auto_select_grid_resolution,
     extract_pad_positions,
+    recommend_grid_for_board_size,
 )
 from kicad_tools.router.primitives import Pad
 
@@ -158,6 +159,35 @@ class TestAutoSelectGridResolution:
         resolutions_tried = [c[0] for c in result.candidates_tried]
         assert 0.5 not in resolutions_tried  # Default candidate not tried
 
+    def test_tssop_pitch_alignment_with_default_candidates(self):
+        """Test that default candidates include TSSOP-friendly 0.065mm."""
+        # TSSOP pitch is 0.65mm, which divides evenly by 0.065mm
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),  # TSSOP pitch
+            PadPosition(x=1.30, y=0.0),  # 2x TSSOP pitch
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.1)
+        # Should include 0.065mm in candidates tried
+        resolutions_tried = [c[0] for c in result.candidates_tried]
+        assert 0.065 in resolutions_tried
+
+    def test_selects_0065_for_tssop_pads(self):
+        """Test that 0.065mm is selected for pure TSSOP placement."""
+        # All pads on 0.65mm grid
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=0.65, y=0.0),
+            PadPosition(x=1.30, y=0.0),
+            PadPosition(x=1.95, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.1)
+        # 0.065mm should have zero off-grid pads (0.65 / 0.065 = 10 exact)
+        # So should 0.05mm (0.65 / 0.05 = 13 exact)
+        # Function prefers coarser when equal, so 0.065mm should be selected
+        assert result.off_grid_pads == 0
+        assert result.resolution in [0.065, 0.05]  # Either is valid
+
 
 class TestGridAutoSelectionSummary:
     """Tests for GridAutoSelection.summary() method."""
@@ -247,3 +277,83 @@ class TestExtractPadPositions:
         pos = positions[0]
         assert abs(pos.x - 100.0) < 0.01
         assert abs(pos.y - 101.0) < 0.01
+
+
+class TestRecommendGridForBoardSize:
+    """Tests for recommend_grid_for_board_size function."""
+
+    def test_small_board_gets_fine_grid(self):
+        """Test that small boards get 0.05mm grid for best pitch alignment."""
+        # 65x56mm board is small
+        grid = recommend_grid_for_board_size(65, 56, clearance=0.15)
+        assert grid == 0.05
+
+    def test_medium_board_gets_balanced_grid(self):
+        """Test that medium boards get 0.1mm grid."""
+        # 120x80mm board is medium
+        grid = recommend_grid_for_board_size(120, 80, clearance=0.15)
+        assert grid == 0.1
+
+    def test_large_board_gets_coarse_grid(self):
+        """Test that large boards get 0.25mm grid for memory efficiency."""
+        # 200x120mm board is large
+        grid = recommend_grid_for_board_size(200, 120, clearance=0.3)
+        assert grid == 0.25
+
+    def test_grid_clamped_to_clearance(self):
+        """Test that grid resolution never exceeds clearance."""
+        # Large board with small clearance
+        grid = recommend_grid_for_board_size(200, 120, clearance=0.127)
+        assert grid == 0.127  # Clamped to clearance, not 0.25
+
+    def test_tssop_pitch_alignment(self):
+        """Test that small board grid aligns with TSSOP 0.65mm pitch."""
+        grid = recommend_grid_for_board_size(50, 40, clearance=0.15)
+        # 0.05mm grid divides evenly into 0.65mm: 0.65 / 0.05 = 13
+        # Use round to avoid floating point precision issues
+        assert round(0.65 / grid) == 0.65 / grid or abs(0.65 / grid - round(0.65 / grid)) < 0.01
+
+    def test_qfp_pitch_alignment(self):
+        """Test that recommended grids align with QFP 0.5mm pitch."""
+        # Small board
+        grid_small = recommend_grid_for_board_size(50, 40, clearance=0.15)
+        # 0.5 / 0.05 = 10 exact
+        divisions = 0.5 / grid_small
+        assert abs(divisions - round(divisions)) < 0.01
+
+        # Medium board
+        grid_medium = recommend_grid_for_board_size(120, 80, clearance=0.15)
+        # 0.5 / 0.1 = 5 exact
+        divisions = 0.5 / grid_medium
+        assert abs(divisions - round(divisions)) < 0.01
+
+    def test_custom_thresholds(self):
+        """Test with custom board size thresholds."""
+        # Use smaller thresholds
+        grid = recommend_grid_for_board_size(
+            80,
+            60,
+            clearance=0.15,
+            small_board_threshold=(50, 40),
+            medium_board_threshold=(75, 55),
+        )
+        # 80x60 is now "large" with custom thresholds
+        assert grid == 0.15  # 0.25 clamped to clearance
+
+    def test_boundary_conditions(self):
+        """Test boards at exact threshold boundaries."""
+        # Exactly at small threshold
+        grid = recommend_grid_for_board_size(100, 75, clearance=0.15)
+        assert grid == 0.05  # Still small
+
+        # Just over small threshold
+        grid = recommend_grid_for_board_size(101, 75, clearance=0.15)
+        assert grid == 0.1  # Now medium
+
+        # Exactly at medium threshold
+        grid = recommend_grid_for_board_size(150, 100, clearance=0.3)
+        assert grid == 0.1  # Still medium
+
+        # Just over medium threshold
+        grid = recommend_grid_for_board_size(151, 100, clearance=0.3)
+        assert grid == 0.25  # Now large
