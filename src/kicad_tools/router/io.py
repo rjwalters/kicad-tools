@@ -525,10 +525,15 @@ def auto_select_grid_resolution(
     total_pads = len(pad_list)
 
     # Default candidate resolutions (common PCB grid values in mm)
-    # 0.5mm = 50mil (coarse), 0.25mm = 10mil, 0.127mm = 5mil (metric),
-    # 0.1mm = 4mil, 0.05mm = 2mil (fine)
+    # These are chosen to align with common footprint pitches:
+    #   - 0.5mm: QFP (0.5mm pitch), 0805/0603 (1.0mm pitch)
+    #   - 0.25mm: QFP, through-hole (2.54mm / 0.25 = 10.16, close enough)
+    #   - 0.127mm: SOIC (1.27mm pitch), through-hole (2.54mm / 0.127 = 20)
+    #   - 0.1mm: Metric footprints, QFP (0.5mm / 0.1 = 5)
+    #   - 0.065mm: TSSOP (0.65mm / 0.065 = 10 exact)
+    #   - 0.05mm: Best overall alignment (0.65mm/13, 0.5mm/10, 1.0mm/20)
     if candidates is None:
-        candidates = [0.5, 0.25, 0.127, 0.1, 0.05]
+        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05]
 
     # Sort candidates from coarsest to finest
     candidates = sorted(candidates, reverse=True)
@@ -589,6 +594,73 @@ def auto_select_grid_resolution(
         off_grid_percentage=off_grid_pct,
         candidates_tried=candidates_tried,
     )
+
+
+def recommend_grid_for_board_size(
+    board_width: float,
+    board_height: float,
+    clearance: float = 0.15,
+    small_board_threshold: tuple[float, float] = (100.0, 75.0),
+    medium_board_threshold: tuple[float, float] = (150.0, 100.0),
+) -> float:
+    """Recommend a default grid resolution based on board dimensions.
+
+    This function provides a starting point for grid selection based on
+    board size and memory constraints. The recommendation balances:
+    - Grid alignment with common footprint pitches (0.65mm TSSOP, 0.5mm QFP)
+    - Memory usage (finer grids use more memory)
+    - DRC compliance (grid must be <= clearance)
+
+    Board size categories:
+    - Small (<100x75mm): 0.05mm grid (best pitch alignment, ~3M cells max)
+    - Medium (<150x100mm): 0.1mm grid (good balance, ~1.5M cells max)
+    - Large (>=150x100mm): 0.25mm grid (memory efficient, ~240k cells max)
+
+    Common footprint pitch alignment:
+    | Grid   | TSSOP 0.65mm | QFP 0.5mm | SOIC 1.27mm | 100mil 2.54mm |
+    |--------|--------------|-----------|-------------|---------------|
+    | 0.05mm | 13 exact     | 10 exact  | 25.4 close  | 50.8 close    |
+    | 0.1mm  | 6.5 (off)    | 5 exact   | 12.7 close  | 25.4 close    |
+    | 0.25mm | 2.6 (off)    | 2 exact   | 5.08 close  | 10.16 close   |
+
+    Args:
+        board_width: Board width in mm
+        board_height: Board height in mm
+        clearance: Trace clearance in mm (grid must not exceed this)
+        small_board_threshold: (width, height) below which board is "small"
+        medium_board_threshold: (width, height) below which board is "medium"
+
+    Returns:
+        Recommended grid resolution in mm.
+
+    Example:
+        >>> grid = recommend_grid_for_board_size(65, 56, clearance=0.127)
+        >>> print(f"Use {grid}mm grid")  # Small board: 0.05mm
+        Use 0.05mm grid
+
+        >>> grid = recommend_grid_for_board_size(200, 120, clearance=0.15)
+        >>> print(f"Use {grid}mm grid")  # Large board: 0.15mm (clamped to clearance)
+        Use 0.15mm grid
+    """
+    # Determine board size category
+    is_small = board_width <= small_board_threshold[0] and board_height <= small_board_threshold[1]
+    is_medium = (
+        board_width <= medium_board_threshold[0] and board_height <= medium_board_threshold[1]
+    )
+
+    # Recommend grid based on size
+    if is_small:
+        # Small boards: finest grid for best footprint pitch alignment
+        recommended = 0.05
+    elif is_medium:
+        # Medium boards: balanced grid
+        recommended = 0.1
+    else:
+        # Large boards: coarser grid for memory efficiency
+        recommended = 0.25
+
+    # Grid resolution must not exceed clearance for DRC compliance
+    return min(recommended, clearance)
 
 
 @dataclass
