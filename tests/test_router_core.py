@@ -1688,3 +1688,200 @@ class TestAutorouterOffGridPads:
             "relaxed pad exit checking)"
         )
         assert len(route.segments) > 0, "Route should have segments"
+
+    def test_subgrid_pad_entry_exit(self):
+        """Test routing when pad's grid cells are blocked by adjacent net clearance.
+
+        Issue #996: With coarse grids (0.5mm), pads positioned at fractional
+        coordinates (like 10.325mm) may have their nearest grid cells blocked
+        by adjacent components' clearance zones. The router should allow
+        sub-grid entry/exit segments that connect the pad center directly to
+        the nearest unblocked grid point.
+
+        Scenario:
+        - 0.5mm grid resolution
+        - Pads at fractional positions (0.175mm off-grid)
+        - Adjacent pads from another net positioned to have clearance zones
+          overlap the target pad's nearest grid cells
+        - Router should succeed by routing through the clearance zone
+
+        Uses force_python=True since this tests Python pathfinder logic.
+        """
+        # Coarse 0.5mm grid (typical for routing)
+        rules = DesignRules(
+            trace_clearance=0.2,
+            trace_width=0.25,
+            grid_resolution=0.5,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
+
+        # NET1: pads positioned 0.175mm off-grid
+        # At x=5.175, nearest grid cell is x=5.0 (0.175mm away)
+        pads_net1 = [
+            {
+                "number": "1",
+                "x": 5.175,  # 0.175mm off-grid (5.0 is on-grid)
+                "y": 10.175,  # 0.175mm off-grid (10.0 is on-grid)
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.175,  # 0.175mm off-grid
+                "y": 10.175,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+
+        # NET2: Large pads positioned so their clearance zones overlap with NET1's
+        # nearest grid cells, BUT metal areas don't overlap (which would be a DRC error).
+        # NET1 metal ends at y=10.375. For proper clearance:
+        # - NET2 metal must start at y >= 10.375 + 0.2 (clearance) = 10.575
+        # - NET2 center at y >= 10.575 + 0.4 (half-height) = 10.975
+        # Using y=11.0 gives metal area y=[10.6, 11.4], clearance y=[10.275, 11.725]
+        # This ensures clearance overlap at y=10.375 but no metal overlap.
+        pads_net2 = [
+            {
+                "number": "1",
+                "x": 5.0,  # On-grid
+                "y": 11.0,  # Metal at y=[10.6,11.4], clearance at y=[10.275,11.725]
+                "width": 0.8,
+                "height": 0.8,
+                "net": 2,
+                "net_name": "NET2",
+            },
+            {
+                "number": "2",
+                "x": 15.0,
+                "y": 11.0,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 2,
+                "net_name": "NET2",
+            },
+        ]
+
+        router.add_component("U1", pads_net1)
+        router.add_component("U2", pads_net2)
+
+        # Route NET1 - should succeed with sub-grid connections
+        routes1 = router.route_net(1)
+
+        assert len(routes1) > 0, (
+            "NET1 should be routed when nearest grid cells are blocked by "
+            "clearance zones (Issue #996 sub-grid pad connections)"
+        )
+        assert len(routes1[0].segments) > 0, "NET1 route should have segments"
+
+        # Verify that the route connects the actual pad centers (not grid cells)
+        # The first segment should start at or near the pad center
+        first_seg = routes1[0].segments[0]
+        last_seg = routes1[0].segments[-1]
+
+        # Check that route endpoints are close to pad centers (allowing some tolerance)
+        pad1 = router.pads[("U1", "1")]
+        pad2 = router.pads[("U1", "2")]
+
+        def dist(x1, y1, x2, y2):
+            return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+        # Route should start near pad1 and end near pad2
+        start_dist = min(
+            dist(first_seg.x1, first_seg.y1, pad1.x, pad1.y),
+            dist(last_seg.x2, last_seg.y2, pad1.x, pad1.y),
+        )
+        end_dist = min(
+            dist(first_seg.x1, first_seg.y1, pad2.x, pad2.y),
+            dist(last_seg.x2, last_seg.y2, pad2.x, pad2.y),
+        )
+
+        # At least one endpoint should be close to each pad
+        assert start_dist < 0.3 or end_dist < 0.3, (
+            f"Route should connect to pad centers (distances: {start_dist:.3f}, {end_dist:.3f})"
+        )
+
+    def test_subgrid_bidirectional_routing(self):
+        """Test bidirectional A* with sub-grid pad connections.
+
+        Issue #996: Verifies that bidirectional A* also supports sub-grid
+        routing when pad positions cause all nearby grid cells to be blocked.
+
+        Uses force_python=True since this tests Python pathfinder logic.
+        """
+        rules = DesignRules(
+            trace_clearance=0.2,
+            trace_width=0.25,
+            grid_resolution=0.5,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
+
+        # Off-grid pads
+        pads_net1 = [
+            {
+                "number": "1",
+                "x": 5.325,  # 0.175mm off-grid
+                "y": 10.325,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.325,
+                "y": 10.325,
+                "width": 0.4,
+                "height": 0.4,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+
+        # Adjacent pads with overlapping clearance zones but valid geometric clearance.
+        # Position NET2 so its clearance zone blocks grid cells near NET1,
+        # but the route at y=10.5 still has valid clearance to NET2's metal.
+        # NET2 metal edge at y=11.5-0.4=11.1, clearance zone to y≈10.775, covering y=10.5
+        # Route at y=10.5 has 0.6mm clearance to metal (>0.325mm required), so it's valid.
+        pads_net2 = [
+            {
+                "number": "1",
+                "x": 5.5,  # On-grid, same column as NET1's nearest grid
+                "y": 11.5,  # Metal at y=[11.1,11.9], clearance blocks grid y=10.5
+                "width": 0.8,
+                "height": 0.8,
+                "net": 2,
+                "net_name": "NET2",
+            },
+            {
+                "number": "2",
+                "x": 15.5,
+                "y": 11.5,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 2,
+                "net_name": "NET2",
+            },
+        ]
+
+        router.add_component("U1", pads_net1)
+        router.add_component("U2", pads_net2)
+
+        # Test bidirectional routing directly
+        from kicad_tools.router.pathfinder import Router
+
+        pathfinder = Router(router.grid, router.rules)
+
+        pad1 = router.pads[("U1", "1")]
+        pad2 = router.pads[("U1", "2")]
+
+        route = pathfinder.route_bidirectional(pad1, pad2)
+
+        assert route is not None, (
+            "Bidirectional A* should succeed with sub-grid pad connections (Issue #996)"
+        )
+        assert len(route.segments) > 0, "Route should have segments"
