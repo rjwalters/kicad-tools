@@ -68,6 +68,14 @@ class DesignRules:
     fine_pitch_clearance: float | None = None
     fine_pitch_threshold: float = 0.8  # mm - components with pitch < this use fine_pitch_clearance
 
+    # Trace neck-down configuration (Issue #1018)
+    # When routing to fine-pitch pads, traces can be narrowed near the pad to fit
+    # between adjacent clearance zones. This creates a smooth taper from normal
+    # width to minimum width as the trace approaches the pad.
+    min_trace_width: float | None = None  # Minimum width for neck-down (mm), None = disabled
+    neck_down_distance: float = 1.0  # Distance from pad center where taper begins (mm)
+    neck_down_threshold: float = 0.8  # Only neck-down for pads with pitch < this (mm)
+
     # Layer preferences
     preferred_layer: Layer = Layer.F_CU
     alternate_layer: Layer = Layer.B_CU
@@ -102,9 +110,7 @@ class DesignRules:
     bidirectional_threshold: int = 1000  # Min grid cells to enable bidirectional
     parallel_workers: int = 2  # Number of parallel workers (typically 2 for bidi)
 
-    def get_clearance_for_component(
-        self, ref: str, pin_pitch: float | None = None
-    ) -> float:
+    def get_clearance_for_component(self, ref: str, pin_pitch: float | None = None) -> float:
         """Get the clearance to use for a specific component.
 
         Checks for per-component clearance overrides, then for automatic
@@ -146,6 +152,91 @@ class DesignRules:
 
         # Fall back to default clearance
         return self.trace_clearance
+
+    def should_apply_neck_down(self, ref: str | None, pin_pitch: float | None = None) -> bool:
+        """Determine if neck-down should be applied for a component.
+
+        Neck-down is applied when:
+        1. min_trace_width is configured (feature enabled)
+        2. The component has fine-pitch pins (below neck_down_threshold)
+
+        Args:
+            ref: Component reference (e.g., "U1"), or None for general check
+            pin_pitch: Optional pin pitch in mm (for automatic detection)
+
+        Returns:
+            True if neck-down should be applied, False otherwise.
+
+        Example:
+            >>> rules = DesignRules(
+            ...     trace_width=0.2,
+            ...     min_trace_width=0.1,
+            ...     neck_down_threshold=0.8,
+            ... )
+            >>> rules.should_apply_neck_down("U1", pin_pitch=0.65)  # Fine-pitch
+            True
+            >>> rules.should_apply_neck_down("R1", pin_pitch=1.27)  # Standard pitch
+            False
+            >>> rules.should_apply_neck_down("U2")  # No pitch info, use default
+            False
+        """
+        # Feature must be enabled
+        if self.min_trace_width is None:
+            return False
+
+        # If no pitch info, don't apply neck-down
+        if pin_pitch is None:
+            return False
+
+        # Apply neck-down only for fine-pitch components
+        return pin_pitch < self.neck_down_threshold
+
+    def get_neck_down_width(self, distance_to_pad: float, pin_pitch: float | None = None) -> float:
+        """Calculate trace width based on distance to pad center.
+
+        Creates a smooth linear interpolation from trace_width to min_trace_width
+        as the trace approaches a fine-pitch pad.
+
+        Args:
+            distance_to_pad: Distance from segment point to pad center (mm)
+            pin_pitch: Optional pin pitch in mm (for determining if neck-down applies)
+
+        Returns:
+            Trace width in mm. Returns trace_width if:
+            - Neck-down is disabled (min_trace_width is None)
+            - Distance is beyond neck_down_distance
+            - Pin pitch is above neck_down_threshold
+
+        Example:
+            >>> rules = DesignRules(
+            ...     trace_width=0.2,
+            ...     min_trace_width=0.1,
+            ...     neck_down_distance=1.0,
+            ... )
+            >>> rules.get_neck_down_width(2.0)  # Far from pad
+            0.2
+            >>> rules.get_neck_down_width(0.5)  # In taper zone
+            0.15
+            >>> rules.get_neck_down_width(0.0)  # At pad
+            0.1
+        """
+        # Feature disabled
+        if self.min_trace_width is None:
+            return self.trace_width
+
+        # Check if this is a fine-pitch situation
+        if pin_pitch is not None and pin_pitch >= self.neck_down_threshold:
+            return self.trace_width
+
+        # Beyond taper zone - use normal width
+        if distance_to_pad >= self.neck_down_distance:
+            return self.trace_width
+
+        # Linear interpolation from trace_width to min_trace_width
+        # At distance=0: min_trace_width
+        # At distance=neck_down_distance: trace_width
+        t = distance_to_pad / self.neck_down_distance
+        return self.min_trace_width + t * (self.trace_width - self.min_trace_width)
 
 
 @dataclass
