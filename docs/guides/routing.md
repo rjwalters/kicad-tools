@@ -79,6 +79,70 @@ router = Autorouter.from_pcb("board.kicad_pcb", rules=rules)
 result = router.route_all()
 ```
 
+### Per-Component Clearance
+
+Fine-pitch ICs (like TSSOP, QFP with 0.5mm pitch or finer) often require tighter
+clearances than the rest of the board. Use per-component clearance to handle this:
+
+```python
+from kicad_tools.router import DesignRules
+
+rules = DesignRules(
+    trace_clearance=0.15,              # Default clearance for most components
+    component_clearances={
+        "U1": 0.1,                      # Tighter clearance for fine-pitch IC
+        "U2": 0.08,                     # Even tighter for QFN
+    },
+)
+```
+
+#### Automatic Fine-Pitch Detection
+
+Instead of manually specifying each component, enable automatic fine-pitch
+clearance based on pin pitch:
+
+```python
+rules = DesignRules(
+    trace_clearance=0.15,              # Default
+    fine_pitch_clearance=0.1,          # For fine-pitch components
+    fine_pitch_threshold=0.8,          # Components with pitch < 0.8mm use fine_pitch_clearance
+)
+```
+
+The router automatically detects component pin pitch and applies the appropriate
+clearance. This is useful for boards with many fine-pitch ICs.
+
+#### Combining Both Approaches
+
+Explicit `component_clearances` take precedence over automatic detection:
+
+```python
+rules = DesignRules(
+    trace_clearance=0.15,
+    fine_pitch_clearance=0.1,          # Auto-apply to pitch < 0.8mm
+    fine_pitch_threshold=0.8,
+    component_clearances={
+        "U3": 0.05,                     # Override: U3 needs extra-tight clearance
+    },
+)
+
+# U1 (pitch 0.65mm): uses fine_pitch_clearance (0.1mm)
+# U2 (pitch 2.54mm): uses trace_clearance (0.15mm)
+# U3: uses explicit override (0.05mm)
+```
+
+#### Fine-Pitch Warnings
+
+The CLI automatically warns about fine-pitch components that may cause routing
+issues:
+
+```bash
+kct route board.kicad_pcb
+# Warning: Fine-pitch components detected:
+#   U1 (TSSOP-24): 0.65mm pitch - may need reduced clearance
+#   U4 (QFP-64): 0.5mm pitch - routing may be challenging
+```
+
 ### Layer Configuration
 
 ```python

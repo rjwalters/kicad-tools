@@ -57,6 +57,17 @@ class DesignRules:
     via_clearance: float = 0.2  # mm
     grid_resolution: float = 0.1  # mm (routing grid)
 
+    # Per-component clearance overrides (Issue #1016)
+    # Maps component reference (e.g., "U1") to clearance in mm
+    # Use for fine-pitch ICs where tighter clearance is needed between pins
+    component_clearances: dict[str, float] = field(default_factory=dict)
+
+    # Fine-pitch automatic clearance (Issue #1016)
+    # When set, components with pin pitch below fine_pitch_threshold automatically
+    # use this clearance instead of trace_clearance
+    fine_pitch_clearance: float | None = None
+    fine_pitch_threshold: float = 0.8  # mm - components with pitch < this use fine_pitch_clearance
+
     # Layer preferences
     preferred_layer: Layer = Layer.F_CU
     alternate_layer: Layer = Layer.B_CU
@@ -90,6 +101,51 @@ class DesignRules:
     bidirectional_search: bool = True  # Enable bidirectional A* by default
     bidirectional_threshold: int = 1000  # Min grid cells to enable bidirectional
     parallel_workers: int = 2  # Number of parallel workers (typically 2 for bidi)
+
+    def get_clearance_for_component(
+        self, ref: str, pin_pitch: float | None = None
+    ) -> float:
+        """Get the clearance to use for a specific component.
+
+        Checks for per-component clearance overrides, then for automatic
+        fine-pitch clearance based on pin pitch, then falls back to the
+        default trace_clearance.
+
+        Args:
+            ref: Component reference (e.g., "U1")
+            pin_pitch: Optional pin pitch in mm (for automatic fine-pitch detection)
+
+        Returns:
+            Clearance in mm to use for this component.
+
+        Example:
+            >>> rules = DesignRules(
+            ...     trace_clearance=0.15,
+            ...     component_clearances={"U1": 0.08},
+            ...     fine_pitch_clearance=0.1,
+            ...     fine_pitch_threshold=0.8,
+            ... )
+            >>> rules.get_clearance_for_component("U1")  # Explicit override
+            0.08
+            >>> rules.get_clearance_for_component("U2", pin_pitch=0.65)  # Auto fine-pitch
+            0.1
+            >>> rules.get_clearance_for_component("R1")  # Default
+            0.15
+        """
+        # Check explicit per-component override first
+        if ref in self.component_clearances:
+            return self.component_clearances[ref]
+
+        # Check for automatic fine-pitch clearance
+        if (
+            self.fine_pitch_clearance is not None
+            and pin_pitch is not None
+            and pin_pitch < self.fine_pitch_threshold
+        ):
+            return self.fine_pitch_clearance
+
+        # Fall back to default clearance
+        return self.trace_clearance
 
 
 @dataclass
