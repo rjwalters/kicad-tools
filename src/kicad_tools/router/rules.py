@@ -110,6 +110,13 @@ class DesignRules:
     bidirectional_threshold: int = 1000  # Min grid cells to enable bidirectional
     parallel_workers: int = 2  # Number of parallel workers (typically 2 for bidi)
 
+    # Via placement optimization (Issue #1019)
+    # Controls via placement to avoid blocking adjacent nets near fine-pitch ICs
+    via_exclusion_from_fine_pitch: float = 0.0  # mm exclusion zone from fine-pitch pads
+    via_impact_weight: float = (
+        1.0  # Weight for via impact scoring (0=disabled, higher=stronger avoidance)
+    )
+
     def get_clearance_for_component(self, ref: str, pin_pitch: float | None = None) -> float:
         """Get the clearance to use for a specific component.
 
