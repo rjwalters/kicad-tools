@@ -817,7 +817,9 @@ class Router:
         # within the pad's metal area, not just the grid-snapped center cell.
         # Issue #977: Apply same expansion to START pad - if the grid-snapped center
         # falls on a cell blocked by another net's clearance, we need alternate entry points.
-        start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2 = self._get_pad_metal_bounds(start)
+        start_metal_gx1, start_metal_gy1, start_metal_gx2, start_metal_gy2 = (
+            self._get_pad_metal_bounds(start)
+        )
         end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(end)
 
         # Filter start/end layers by allowed_layers constraint (Issue #715)
@@ -921,6 +923,22 @@ class Router:
                     and nlayer in end_layers
                 )
 
+                # Issue #990: Check if CURRENT node is within a pad's metal area
+                # When the entire metal area is blocked by other nets' clearance zones,
+                # we still need to allow the first step outward from the pad.
+                # This enables routing to start even when all metal area cells would
+                # normally be blocked by adjacent components' clearance zones.
+                is_exiting_start_pad = (
+                    start_metal_gx1 <= current.x <= start_metal_gx2
+                    and start_metal_gy1 <= current.y <= start_metal_gy2
+                    and current.layer in start_layers
+                )
+                is_exiting_end_pad = (
+                    end_metal_gx1 <= current.x <= end_metal_gx2
+                    and end_metal_gy1 <= current.y <= end_metal_gy2
+                    and current.layer in end_layers
+                )
+
                 # Check grid bounds first
                 if not (0 <= nx < self.grid.cols and 0 <= ny < self.grid.rows):
                     continue
@@ -953,7 +971,17 @@ class Router:
                     # Issue #864: Even when center cell is unblocked, check trace clearance
                     # The trace has width and must not violate clearance to other nets
                     # within its radius. Skip this check near pads to allow approach.
-                    if not (is_start_adjacent or is_end_adjacent):
+                    # Issue #990: Also skip when exiting from within a pad's metal area.
+                    # This handles dense layouts where ALL cells in the metal area are
+                    # blocked by adjacent nets' clearance zones - we must allow the
+                    # first step outward to escape the pad.
+                    is_pad_exit_or_approach = (
+                        is_start_adjacent
+                        or is_end_adjacent
+                        or is_exiting_start_pad
+                        or is_exiting_end_pad
+                    )
+                    if not is_pad_exit_or_approach:
                         if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
                             continue
 
@@ -1503,6 +1531,7 @@ class Router:
                         start,
                         start_layers,
                         end_layers,
+                        start_metal_bounds,  # Issue #990: source metal bounds
                         end_metal_bounds,
                         allow_sharing,
                         cost_mult,
@@ -1536,6 +1565,7 @@ class Router:
                         end,  # Backward search uses end pad as "start"
                         end_layers,
                         start_layers,
+                        end_metal_bounds,  # Issue #990: source metal bounds
                         start_metal_bounds,
                         allow_sharing,
                         cost_mult,
@@ -1573,6 +1603,7 @@ class Router:
         source_pad: Pad,
         source_layers: list[int],
         target_layers: list[int],
+        source_metal_bounds: tuple[int, int, int, int],
         target_metal_bounds: tuple[int, int, int, int],
         allow_sharing: bool,
         cost_mult: float,
@@ -1583,7 +1614,8 @@ class Router:
         This is a helper method that expands neighbors for either the forward
         or backward search direction. It handles 2D moves and via transitions.
         """
-        # Extract target bounds
+        # Extract bounds (Issue #990: also need source bounds for pad exit check)
+        src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
         tgt_gx1, tgt_gy1, tgt_gx2, tgt_gy2 = target_metal_bounds
         source_gx, source_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
 
@@ -1616,6 +1648,19 @@ class Router:
                 and nlayer in target_layers
             )
 
+            # Issue #990: Check if CURRENT node is within a pad's metal area
+            # When entire metal area is blocked by clearance zones, allow first step out
+            is_exiting_source_pad = (
+                src_gx1 <= current.x <= src_gx2
+                and src_gy1 <= current.y <= src_gy2
+                and current.layer in source_layers
+            )
+            is_exiting_target_pad = (
+                tgt_gx1 <= current.x <= tgt_gx2
+                and tgt_gy1 <= current.y <= tgt_gy2
+                and current.layer in target_layers
+            )
+
             # Check blocking
             cell = self.grid.grid[nlayer][ny][nx]
             if cell.blocked:
@@ -1627,7 +1672,14 @@ class Router:
                 else:
                     continue  # Different net's pad
             else:
-                if not (is_source_adjacent or is_target_adjacent):
+                # Issue #990: Relax blocking check when exiting from pad metal area
+                is_pad_exit_or_approach = (
+                    is_source_adjacent
+                    or is_target_adjacent
+                    or is_exiting_source_pad
+                    or is_exiting_target_pad
+                )
+                if not is_pad_exit_or_approach:
                     if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing):
                         continue
 

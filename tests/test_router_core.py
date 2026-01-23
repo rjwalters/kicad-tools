@@ -1526,3 +1526,165 @@ class TestAutorouterOffGridPads:
         assert len(routes2) > 0, "NET2 should be routed despite off-grid pad"
         assert len(routes1[0].segments) > 0, "NET1 route should have segments"
         assert len(routes2[0].segments) > 0, "NET2 route should have segments"
+
+    def test_off_grid_pad_with_clearance_overlap(self):
+        """Test routing when pad's grid cells overlap with clearance zones.
+
+        Issue #990: When SMD pads have grid cells that overlap with other nets'
+        clearance zones, the router should still be able to route by allowing
+        the first step outward from the pad with relaxed clearance checking.
+
+        This test creates a scenario where:
+        - Two nets have pads positioned with some overlap in clearance zones
+        - The router must allow exiting from the pad area even when some cells
+          near the pad would normally fail clearance checks
+        - Route should go around the blocked area to maintain proper clearance
+
+        Uses force_python=True since this tests Python pathfinder logic.
+        """
+        # Grid: 0.2mm, Clearance: 0.2mm, Trace: 0.2mm
+        rules = DesignRules(
+            trace_clearance=0.2,
+            trace_width=0.2,
+            grid_resolution=0.2,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
+
+        # Create layout where pads are close but with enough clearance for routing
+        # NET1: pads along y=10.0
+        pads_net1 = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.0,
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+
+        # NET2: pads offset in Y direction with minimal clearance margin
+        # At y=11.0, pad bottom edge is at y=10.5 (for 1.0mm tall pad)
+        # NET1 pad top edge is at y=10.25 (for 0.5mm tall pad)
+        # Gap: 10.5 - 10.25 = 0.25mm, just above required 0.2mm clearance
+        pads_net2 = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 11.0,
+                "width": 0.8,
+                "height": 1.0,
+                "net": 2,
+                "net_name": "NET2",
+            },
+            {
+                "number": "2",
+                "x": 15.0,
+                "y": 11.0,
+                "width": 0.8,
+                "height": 1.0,
+                "net": 2,
+                "net_name": "NET2",
+            },
+        ]
+
+        router.add_component("U1", pads_net1)
+        router.add_component("U2", pads_net2)
+
+        # Route NET1 - should succeed by routing along y=10.0
+        routes1 = router.route_net(1)
+
+        assert len(routes1) > 0, (
+            "NET1 should be routed when clearance zones partially overlap grid cells "
+            "(Issue #990 relaxed pad exit checking)"
+        )
+        assert len(routes1[0].segments) > 0, "NET1 route should have segments"
+
+    def test_off_grid_pad_bidirectional_with_clearance_overlap(self):
+        """Test bidirectional A* with off-grid pads where clearance zones overlap.
+
+        Issue #990: Tests the bidirectional A* algorithm with pads that are
+        off-grid and have partial clearance zone overlap with adjacent nets.
+
+        Uses force_python=True since this tests Python pathfinder logic.
+        """
+        rules = DesignRules(
+            trace_clearance=0.2,
+            trace_width=0.2,
+            grid_resolution=0.2,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
+
+        # Off-grid pads with nearby obstacles
+        pads_net1 = [
+            {
+                "number": "1",
+                "x": 5.05,  # Slightly off-grid
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+            {
+                "number": "2",
+                "x": 15.05,  # Slightly off-grid
+                "y": 10.0,
+                "width": 0.5,
+                "height": 0.5,
+                "net": 1,
+                "net_name": "NET1",
+            },
+        ]
+
+        # NET2 pads with proper clearance (1.0mm gap)
+        pads_net2 = [
+            {
+                "number": "1",
+                "x": 5.05,
+                "y": 11.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 2,
+                "net_name": "NET2",
+            },
+            {
+                "number": "2",
+                "x": 15.05,
+                "y": 11.0,
+                "width": 0.6,
+                "height": 0.6,
+                "net": 2,
+                "net_name": "NET2",
+            },
+        ]
+
+        router.add_component("U1", pads_net1)
+        router.add_component("U2", pads_net2)
+
+        # Access pathfinder directly to test bidirectional routing
+        from kicad_tools.router.pathfinder import Router
+
+        pathfinder = Router(router.grid, router.rules)
+
+        pad1 = router.pads[("U1", "1")]
+        pad2 = router.pads[("U1", "2")]
+
+        # Test bidirectional routing
+        route = pathfinder.route_bidirectional(pad1, pad2)
+
+        assert route is not None, (
+            "Bidirectional A* should succeed with off-grid pads (Issue #990 "
+            "relaxed pad exit checking)"
+        )
+        assert len(route.segments) > 0, "Route should have segments"
