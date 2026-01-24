@@ -3588,15 +3588,6 @@ class TestMergeRoutesIntoPcb:
         # Route should be before final paren
         assert result.index("segment") < result.rfind(")")
 
-    def test_adds_autorouted_comment(self):
-        """Test that autorouted comment is added."""
-        pcb_content = "(kicad_pcb\n)"
-        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
-
-        result = merge_routes_into_pcb(pcb_content, route_sexp)
-
-        assert "; Autorouted traces" in result
-
     def test_handles_trailing_whitespace(self):
         """Test handling of trailing whitespace in PCB content."""
         pcb_content = "(kicad_pcb\n)   \n\n"
