@@ -83,12 +83,7 @@ def calculate_crosstalk_matrix(
     coupling = crosstalk_constant * lengths / (sep_safe * sep_safe)
 
     # Clamp to [0, 1] range
-    # We can't use np.clip directly with all backends, so we do it manually
-    # coupling = max(0, min(coupling, 1))
-    ones = backend.ones(coupling.shape)
-    zeros = backend.zeros(coupling.shape)
-
-    # For GPU-friendly clamping, we'll transfer to numpy, clamp, and transfer back
+    # For GPU-friendly clamping, we transfer to numpy, clamp, and transfer back
     coupling_np = backend.to_numpy(coupling)
     coupling_np = np.clip(coupling_np, 0.0, 1.0)
     coupling = backend.array(coupling_np)
@@ -260,7 +255,6 @@ def calculate_pairwise_distances(
     # This is memory-intensive but parallelizes well on GPU
 
     pos_np = backend.to_numpy(pos)
-    n = pos_np.shape[0]
 
     # Compute squared differences
     # diff[i,j,k] = positions[i,k] - positions[j,k]
@@ -290,10 +284,8 @@ def estimate_parallel_lengths(
     Returns:
         (N, N) matrix of estimated parallel lengths in mm.
     """
-    # Transfer to backend
+    # Work with numpy directly for bounding box calculation
     endpoints_np = trace_endpoints
-
-    n = endpoints_np.shape[0]
 
     # Extract coordinates
     x1 = endpoints_np[:, 0]
