@@ -1766,6 +1766,28 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    # Cache arguments
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable routing cache (force fresh routing)",
+    )
+    parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="Only use cached results (fail if cache miss)",
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear routing cache before routing",
+    )
+    parser.add_argument(
+        "--cache-stats",
+        action="store_true",
+        help="Show routing cache statistics and exit",
+    )
+
     args = parser.parse_args(argv)
 
     # Validate input
@@ -1860,6 +1882,35 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    # Handle cache-related commands early
+    if args.cache_stats:
+        from kicad_tools.router import RoutingCache
+
+        cache = RoutingCache()
+        stats = cache.stats()
+        print("\n--- Routing Cache Statistics ---")
+        print(f"  Cache directory:     {stats['cache_dir']}")
+        print(f"  Routing results:     {stats['routing_results_count']}")
+        print(f"  Partial net routes:  {stats['partial_routes_count']}")
+        print(f"  Total size:          {stats['total_size_mb']:.2f} MB")
+        print(f"  Valid results:       {stats['valid_results']}")
+        print(f"  Expired results:     {stats['expired_results']}")
+        print(f"  TTL:                 {stats['ttl_days']} days")
+        print(f"  Max size:            {stats['max_size_mb']:.0f} MB")
+        if stats["oldest"]:
+            print(f"  Oldest entry:        {stats['oldest']}")
+        if stats["newest"]:
+            print(f"  Newest entry:        {stats['newest']}")
+        return 0
+
+    if args.clear_cache:
+        from kicad_tools.router import RoutingCache
+
+        cache = RoutingCache()
+        count = cache.clear()
+        if not args.quiet:
+            print(f"Cleared {count} entries from routing cache")
 
     # Handle auto-layers mode (separate code path)
     if args.auto_layers and args.adaptive_rules:
@@ -2248,94 +2299,164 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("\n  No differential pairs detected")
 
-    # Route
-    if not quiet:
-        flush_print(f"\n--- Routing ({args.strategy}) ---")
-        if args.timeout:
-            flush_print(f"  Timeout: {args.timeout}s")
-        if args.profile:
-            profile_output = args.profile_output or "route_profile.prof"
-            flush_print(f"  Profiling enabled: {profile_output}")
+    # Check cache for existing routing result (unless --no-cache)
+    cache_key = None
+    cached_result = None
+    use_cache = not args.no_cache
+
+    if use_cache:
+        from kicad_tools.router import CacheKey, RoutingCache
+
+        try:
+            # Compute cache key from PCB content and rules
+            pcb_content = pcb_path.read_bytes()
+            cache_key = CacheKey.compute(pcb_content, rules, args.grid)
+
+            cache = RoutingCache()
+
+            if not quiet:
+                flush_print("\n--- Checking routing cache ---")
+
+            cached_result = cache.get(cache_key)
+            if cached_result is not None:
+                if not quiet:
+                    print(f"  Cache HIT: {cached_result.success_count} nets routed")
+                    print(f"  Segments: {cached_result.total_segments}, Vias: {cached_result.total_vias}")
+                    print(f"  Original compute time: {cached_result.compute_time_ms}ms")
+
+                # Deserialize and apply cached routes
+                cached_routes = cache.deserialize_routes(cached_result.routes_data)
+
+                # Apply cached routes to router
+                router.routes = cached_routes
+
+                if not quiet:
+                    print("  Using cached routing result")
+            else:
+                if not quiet:
+                    print(f"  Cache MISS (key: {cache_key.full_key[:32]}...)")
+                if args.cache_only:
+                    print("Error: --cache-only specified but no cached result found", file=sys.stderr)
+                    return 1
+        except Exception as e:
+            if not quiet:
+                print(f"  Cache error: {e}")
+            cached_result = None
+            if args.cache_only:
+                print("Error: --cache-only specified but cache lookup failed", file=sys.stderr)
+                return 1
 
     # Track nets that needed clearance relaxation (for --progressive-clearance)
     relaxed_nets_report: dict[int, float] = {}
+    routing_start_time = None
 
-    # Define routing function for profiling
-    def do_routing():
-        nonlocal diffpair_warnings, relaxed_nets_report
-        # Progressive clearance relaxation mode
-        if getattr(args, "progressive_clearance", False):
-            routes, relaxed_nets_report = router.route_with_progressive_clearance(
-                min_clearance=getattr(args, "min_clearance", None),
-                num_relaxation_levels=getattr(args, "relaxation_levels", 3),
-                max_iterations=args.iterations,
-                timeout=args.timeout,
-            )
-            return routes
-        elif args.strategy == "negotiated":
-            return router.route_all_negotiated(
-                max_iterations=args.iterations,
-                timeout=args.timeout,
-            )
-        elif args.differential_pairs and args.strategy == "basic":
-            result, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
-            return result
-        elif args.bus_routing and args.strategy == "basic":
-            return router.route_all_with_buses(bus_config)
-        elif args.strategy == "basic":
-            return router.route_all()
-        elif args.strategy == "monte-carlo":
-            return router.route_all_monte_carlo(
-                num_trials=args.mc_trials,
-                verbose=args.verbose and not quiet,
-            )
-        return None
-
-    try:
-        if args.profile:
-            # Profile the routing operation
-            import cProfile
-            import pstats
-
-            profile_output = args.profile_output or "route_profile.prof"
-            profiler = cProfile.Profile()
-            profiler.enable()
-            try:
-                _ = do_routing()
-            finally:
-                profiler.disable()
-                # Save profile data
-                profiler.dump_stats(profile_output)
-                if not quiet:
-                    print(f"\n  Profile saved to: {profile_output}")
-                    # Print top 20 functions by cumulative time
-                    print("\n--- Profile Summary (top 20 by cumulative time) ---")
-                    stats = pstats.Stats(profiler)
-                    stats.strip_dirs().sort_stats("cumulative").print_stats(20)
-        else:
-            # Normal routing without profiling
-            if args.strategy == "negotiated":
-                # Negotiated routing has its own progress output - don't use spinner
-                _ = do_routing()
-            else:
-                with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
-                    _ = do_routing()
-    except KeyboardInterrupt:
-        # Handle any KeyboardInterrupt that wasn't caught by signal handler
-        _interrupt_state["interrupted"] = True
+    # Route (skip if using cached result)
+    if cached_result is not None:
+        # Skip routing - using cached result
         if not quiet:
-            print("\n\n⚠ Routing interrupted!")
-    except Exception as e:
-        print(f"Error during routing: {e}", file=sys.stderr)
-        # Still try to save partial results on error
-        if router.routes:
-            _save_partial_results()
-        return 1
+            flush_print(f"\n--- Using cached result (skipping routing) ---")
+    else:
+        # Route
+        if not quiet:
+            flush_print(f"\n--- Routing ({args.strategy}) ---")
+            if args.timeout:
+                flush_print(f"  Timeout: {args.timeout}s")
+            if args.profile:
+                profile_output = args.profile_output or "route_profile.prof"
+                flush_print(f"  Profiling enabled: {profile_output}")
 
-    # Check if interrupted and save partial results
-    if _interrupt_state["interrupted"]:
-        _save_partial_results()
-        return 2  # Exit code 2 indicates interruption with partial results saved
+        import time
+        routing_start_time = time.time()
+
+        # Define routing function for profiling
+        def do_routing():
+            nonlocal diffpair_warnings, relaxed_nets_report
+            # Progressive clearance relaxation mode
+            if getattr(args, "progressive_clearance", False):
+                routes, relaxed_nets_report = router.route_with_progressive_clearance(
+                    min_clearance=getattr(args, "min_clearance", None),
+                    num_relaxation_levels=getattr(args, "relaxation_levels", 3),
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
+                return routes
+            elif args.strategy == "negotiated":
+                return router.route_all_negotiated(
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
+            elif args.differential_pairs and args.strategy == "basic":
+                result, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)
+                return result
+            elif args.bus_routing and args.strategy == "basic":
+                return router.route_all_with_buses(bus_config)
+            elif args.strategy == "basic":
+                return router.route_all()
+            elif args.strategy == "monte-carlo":
+                return router.route_all_monte_carlo(
+                    num_trials=args.mc_trials,
+                    verbose=args.verbose and not quiet,
+                )
+            return None
+
+        try:
+            if args.profile:
+                # Profile the routing operation
+                import cProfile
+                import pstats
+
+                profile_output = args.profile_output or "route_profile.prof"
+                profiler = cProfile.Profile()
+                profiler.enable()
+                try:
+                    _ = do_routing()
+                finally:
+                    profiler.disable()
+                    # Save profile data
+                    profiler.dump_stats(profile_output)
+                    if not quiet:
+                        print(f"\n  Profile saved to: {profile_output}")
+                        # Print top 20 functions by cumulative time
+                        print("\n--- Profile Summary (top 20 by cumulative time) ---")
+                        stats = pstats.Stats(profiler)
+                        stats.strip_dirs().sort_stats("cumulative").print_stats(20)
+            else:
+                # Normal routing without profiling
+                if args.strategy == "negotiated":
+                    # Negotiated routing has its own progress output - don't use spinner
+                    _ = do_routing()
+                else:
+                    with spinner(f"Routing {nets_to_route} nets...", quiet=quiet):
+                        _ = do_routing()
+        except KeyboardInterrupt:
+            # Handle any KeyboardInterrupt that wasn't caught by signal handler
+            _interrupt_state["interrupted"] = True
+            if not quiet:
+                print("\n\n⚠ Routing interrupted!")
+        except Exception as e:
+            print(f"Error during routing: {e}", file=sys.stderr)
+            # Still try to save partial results on error
+            if router.routes:
+                _save_partial_results()
+            return 1
+
+        # Check if interrupted and save partial results
+        if _interrupt_state["interrupted"]:
+            _save_partial_results()
+            return 2  # Exit code 2 indicates interruption with partial results saved
+
+        # Cache the routing result (if caching enabled and routing succeeded)
+        if use_cache and cache_key is not None and router.routes:
+            import time
+            try:
+                routing_time_ms = int((time.time() - routing_start_time) * 1000) if routing_start_time else 0
+                stats = router.get_statistics()
+                cache.put(cache_key, router.routes, stats, routing_time_ms)
+                if not quiet:
+                    print(f"  Cached routing result ({routing_time_ms}ms compute time)")
+            except Exception as e:
+                if not quiet:
+                    print(f"  Warning: Failed to cache result: {e}")
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if not args.no_optimize and router.routes:

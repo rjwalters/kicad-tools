@@ -23,6 +23,14 @@ Example::
     print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 """
 
+from .cache import (
+    CachedNetRoute,
+    CachedRoutingResult,
+    CacheKey,
+    RoutingCache,
+    compute_pad_positions_hash,
+    get_default_cache_path,
+)
 from .analysis import (
     BlockingObstacle,
     CongestionZone,
@@ -424,4 +432,11 @@ __all__ = [
     "ComponentGridAnalysis",
     "OffGridPad",
     "analyze_fine_pitch_components",
+    # Routing Cache (Issue #1071)
+    "RoutingCache",
+    "CacheKey",
+    "CachedRoutingResult",
+    "CachedNetRoute",
+    "compute_pad_positions_hash",
+    "get_default_cache_path",
 ]
