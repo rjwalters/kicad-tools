@@ -11,7 +11,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -24,6 +24,9 @@ else:
 # User config directory for performance calibration
 PERFORMANCE_CONFIG_DIR = Path.home() / ".config" / "kicad-tools"
 PERFORMANCE_CONFIG_FILE = PERFORMANCE_CONFIG_DIR / "performance.toml"
+
+# Valid GPU backend options
+GpuBackend = Literal["auto", "cuda", "metal", "cpu"]
 
 
 def detect_cpu_count() -> int:
@@ -88,6 +91,43 @@ def detect_available_memory_gb() -> float:
 
 
 @dataclass
+class GpuThresholds:
+    """Minimum problem sizes before GPU acceleration is worthwhile.
+
+    Below these thresholds, CPU is used regardless of backend setting
+    due to GPU kernel launch overhead.
+
+    Attributes:
+        min_grid_cells: Minimum routing grid cells (~316x316 grid).
+        min_components: Minimum components for placement algorithms.
+        min_population: Minimum population for evolutionary optimizer.
+        min_trace_pairs: Minimum trace pairs for signal integrity.
+    """
+
+    min_grid_cells: int = 100_000
+    min_components: int = 50
+    min_population: int = 20
+    min_trace_pairs: int = 100
+
+
+@dataclass
+class GpuConfig:
+    """GPU acceleration configuration.
+
+    Attributes:
+        backend: GPU backend selection (auto, cuda, metal, cpu).
+        device_id: Device selection for multi-GPU systems.
+        memory_limit_mb: GPU memory limit in MB (0 = no limit).
+        thresholds: Minimum problem sizes for GPU use.
+    """
+
+    backend: GpuBackend = "auto"
+    device_id: int = 0
+    memory_limit_mb: int = 0
+    thresholds: GpuThresholds = field(default_factory=GpuThresholds)
+
+
+@dataclass
 class PerformanceConfig:
     """Configuration for routing performance optimization.
 
@@ -104,6 +144,7 @@ class PerformanceConfig:
         negotiated_iterations: Max iterations for negotiated routing.
         partition_rows: Number of partition rows for region-based routing.
         partition_cols: Number of partition columns for region-based routing.
+        gpu: GPU acceleration configuration.
         calibrated: Whether these settings came from calibration.
         calibration_date: ISO date string of last calibration.
     """
@@ -116,6 +157,7 @@ class PerformanceConfig:
     negotiated_iterations: int = 15
     partition_rows: int = 2
     partition_cols: int = 2
+    gpu: GpuConfig = field(default_factory=GpuConfig)
     calibrated: bool = False
     calibration_date: str = ""
 
@@ -172,6 +214,24 @@ class PerformanceConfig:
             cal = data.get("calibration", {})
             routing = data.get("routing", {})
             grid = data.get("grid", {})
+            gpu_data = data.get("gpu", {})
+            gpu_thresholds_data = gpu_data.get("thresholds", {})
+
+            # Build GPU thresholds from config
+            gpu_thresholds = GpuThresholds(
+                min_grid_cells=gpu_thresholds_data.get("min_grid_cells", 100_000),
+                min_components=gpu_thresholds_data.get("min_components", 50),
+                min_population=gpu_thresholds_data.get("min_population", 20),
+                min_trace_pairs=gpu_thresholds_data.get("min_trace_pairs", 100),
+            )
+
+            # Build GPU config from config
+            gpu_config = GpuConfig(
+                backend=gpu_data.get("backend", "auto"),
+                device_id=gpu_data.get("device_id", 0),
+                memory_limit_mb=gpu_data.get("memory_limit_mb", 0),
+                thresholds=gpu_thresholds,
+            )
 
             return cls(
                 cpu_cores=cal.get("cpu_cores", detect_cpu_count()),
@@ -182,6 +242,7 @@ class PerformanceConfig:
                 partition_rows=routing.get("partition_rows", 2),
                 partition_cols=routing.get("partition_cols", 2),
                 grid_memory_limit_mb=grid.get("max_memory_mb", 500),
+                gpu=gpu_config,
                 calibrated=True,
                 calibration_date=cal.get("date", ""),
             )
@@ -260,6 +321,24 @@ partition_cols = {self.partition_cols}
 [grid]
 # Maximum memory for routing grid (MB)
 max_memory_mb = {self.grid_memory_limit_mb}
+
+[gpu]
+# Backend selection: auto | cuda | metal | cpu
+backend = "{self.gpu.backend}"
+
+# Device selection (for multi-GPU systems)
+device_id = {self.gpu.device_id}
+
+# Memory limit in MB (0 = no limit)
+memory_limit_mb = {self.gpu.memory_limit_mb}
+
+[gpu.thresholds]
+# Minimum problem sizes before GPU is worthwhile
+# Below these, CPU is used regardless of backend setting
+min_grid_cells = {self.gpu.thresholds.min_grid_cells}
+min_components = {self.gpu.thresholds.min_components}
+min_population = {self.gpu.thresholds.min_population}
+min_trace_pairs = {self.gpu.thresholds.min_trace_pairs}
 '''
         path.write_text(content)
 
@@ -285,6 +364,17 @@ max_memory_mb = {self.grid_memory_limit_mb}
             },
             "grid": {
                 "max_memory_mb": self.grid_memory_limit_mb,
+            },
+            "gpu": {
+                "backend": self.gpu.backend,
+                "device_id": self.gpu.device_id,
+                "memory_limit_mb": self.gpu.memory_limit_mb,
+                "thresholds": {
+                    "min_grid_cells": self.gpu.thresholds.min_grid_cells,
+                    "min_components": self.gpu.thresholds.min_components,
+                    "min_population": self.gpu.thresholds.min_population,
+                    "min_trace_pairs": self.gpu.thresholds.min_trace_pairs,
+                },
             },
         }
 
