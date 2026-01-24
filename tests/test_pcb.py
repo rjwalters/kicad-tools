@@ -1830,3 +1830,91 @@ class TestPCBCreate:
                 break
         else:
             pytest.fail("Footprint R1 not found")
+
+
+class TestPropertySetterProtection:
+    """Tests for property setters that prevent silent data loss.
+
+    Issue #1047: PCB.segments and PCB.vias property changes don't persist to save().
+    These tests verify that attempting to assign to these properties raises
+    AttributeError with helpful guidance.
+    """
+
+    def test_segments_setter_raises_error(self, minimal_pcb: Path):
+        """Test that assigning to segments raises AttributeError."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        with pytest.raises(AttributeError) as exc_info:
+            pcb.segments = []
+
+        error_msg = str(exc_info.value)
+        assert "Cannot modify segments directly" in error_msg
+        assert "persist to save()" in error_msg
+        assert "add_trace()" in error_msg
+
+    def test_vias_setter_raises_error(self, minimal_pcb: Path):
+        """Test that assigning to vias raises AttributeError."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        with pytest.raises(AttributeError) as exc_info:
+            pcb.vias = []
+
+        error_msg = str(exc_info.value)
+        assert "Cannot modify vias directly" in error_msg
+        assert "persist to save()" in error_msg
+        assert "add_via()" in error_msg
+
+    def test_segments_getter_still_works(self, minimal_pcb: Path):
+        """Test that reading segments still works after adding setters."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # Should be able to read segments
+        segments = pcb.segments
+        assert isinstance(segments, list)
+        # The minimal PCB fixture has 1 segment
+        assert len(segments) == 1
+
+    def test_vias_getter_still_works(self):
+        """Test that reading vias still works after adding setters."""
+        pcb = PCB.create(width=100, height=100)
+
+        # Add a via using the proper method
+        pcb.add_via(x=50.0, y=50.0, net="TestNet")
+
+        # Should be able to read vias
+        vias = pcb.vias
+        assert isinstance(vias, list)
+        assert len(vias) == 1
+
+    def test_add_trace_still_works(self):
+        """Test that add_trace() still works correctly after setter changes."""
+        pcb = PCB.create(width=100, height=100)
+
+        initial_count = len(pcb.segments)
+
+        segments = pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.25,
+            layer="F.Cu",
+            net="TestNet",
+        )
+
+        # Verify add_trace works
+        assert len(segments) == 1
+        assert len(pcb.segments) == initial_count + 1
+
+    def test_add_via_still_works(self):
+        """Test that add_via() still works correctly after setter changes."""
+        pcb = PCB.create(width=100, height=100)
+
+        initial_count = len(pcb.vias)
+
+        via = pcb.add_via(x=50.0, y=50.0, size=0.6, drill=0.3, net="TestNet")
+
+        # Verify add_via works
+        assert via is not None
+        assert len(pcb.vias) == initial_count + 1

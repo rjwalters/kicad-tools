@@ -1403,6 +1403,21 @@ class PCB:
         """All trace segments."""
         return self._segments
 
+    @segments.setter
+    def segments(self, value: list[Segment]) -> None:
+        """Prevent direct assignment to segments.
+
+        Raises:
+            AttributeError: Always raised to prevent silent data loss.
+                Modifying segments directly does not update the S-expression
+                tree used by save(), causing changes to be silently discarded.
+        """
+        raise AttributeError(
+            "Cannot modify segments directly. Changes would not persist to save(). "
+            "Use add_trace() to add segments, or reload the PCB after modifying "
+            "the file with merge_routes_into_pcb()."
+        )
+
     def segments_on_layer(self, layer: str) -> Iterator[Segment]:
         """Get segments on a specific layer."""
         for seg in self._segments:
@@ -1419,6 +1434,21 @@ class PCB:
     def vias(self) -> list[Via]:
         """All vias."""
         return self._vias
+
+    @vias.setter
+    def vias(self, value: list[Via]) -> None:
+        """Prevent direct assignment to vias.
+
+        Raises:
+            AttributeError: Always raised to prevent silent data loss.
+                Modifying vias directly does not update the S-expression
+                tree used by save(), causing changes to be silently discarded.
+        """
+        raise AttributeError(
+            "Cannot modify vias directly. Changes would not persist to save(). "
+            "Use add_via() to add vias, or reload the PCB after modifying "
+            "the file with merge_routes_into_pcb()."
+        )
 
     def vias_in_net(self, net_number: int) -> Iterator[Via]:
         """Get vias in a specific net."""
