@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .primitives import Route, Segment, Via
+    from .primitives import Route
     from .rules import DesignRules
 
 logger = logging.getLogger(__name__)
@@ -309,7 +309,6 @@ class RoutingCache:
         Returns:
             Compressed JSON bytes
         """
-        from .layers import Layer
 
         routes_data = []
         for route in routes:
