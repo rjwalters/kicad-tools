@@ -1,116 +1,172 @@
-# Assume Loom Role
+# Loom
 
-Randomly select and assume an archetypal role from the Loom orchestration system, then perform one iteration of work following that role's guidelines.
+Assume the Loom Daemon role and run the **continuous** Layer 2 system orchestrator.
 
 ## Process
 
-1. **List available roles**: 9 roles available (builder, judge, curator, doctor, champion, architect, hermit, guide, driver)
-2. **Select role using time-based selection**: Use `Date.now() % 13` for weighted random selection
-3. **Role mapping** (core operational roles are double-weighted):
-   ```
-   0: builder    (2x weight)
-   1: builder    (2x weight)
-   2: judge      (2x weight)
-   3: judge      (2x weight)
-   4: curator    (2x weight)
-   5: curator    (2x weight)
-   6: doctor     (2x weight)
-   7: doctor     (2x weight)
-   8: champion   (1x weight)
-   9: architect  (1x weight)
-   10: hermit    (1x weight)
-   11: guide     (1x weight)
-   12: driver    (1x weight)
-   ```
-4. **Read the role definition**: Load `.loom/roles/<role>.md` or `defaults/roles/<role>.md`
-5. **Follow the role's workflow**: Complete ONE iteration only (one task, one PR review, one issue triage, etc.)
-6. **Report results**: Summarize what you accomplished with links to issues/PRs modified
-
-## Available Roles
-
-- **builder.md** - Claim `loom:issue` issue, implement feature/fix, create PR with `loom:review-requested`
-- **judge.md** - Review PR with `loom:review-requested`, approve or request changes, update labels
-- **curator.md** - Find unlabeled issue, enhance with technical details, mark as `loom:curated`
-- **champion.md** - Evaluate `loom:curated` issues, promote to `loom:issue` or provide feedback
-- **architect.md** - Create architectural proposal issue with `loom:architect` label
-- **hermit.md** - Analyze codebase complexity, create bloat removal issue with `loom:hermit`
-- **doctor.md** - Fix bug or address PR feedback, maintain existing PRs
-- **guide.md** - Triage batch of issues, update priorities and labels for workflow
-- **driver.md** - Execute direct task or command (plain shell, no specific workflow)
+1. **Read the role definition**: Load `.loom/roles/loom.md` or `defaults/roles/loom.md`
+2. **Initialize state**: Load or create `.loom/daemon-state.json`
+3. **Run continuous loop**: Spawn shepherd subagents, monitor progress, scale pool
+4. **Run until cancelled**: Continue until Ctrl+C or stop signal
 
 ## Work Scope
 
-Complete **ONE** meaningful task following the selected role's guidelines, then **stop and report**.
+As the **Loom Daemon** (Layer 2), you **continuously** orchestrate the system:
 
-### Task Examples by Role
+- **Spawn shepherds** as background subagents via Task tool
+- **Monitor progress** by checking issue states and task outputs
+- **Scale the pool** based on ready issue count (up to MAX_SHEPHERDS)
+- **Track state** in `.loom/daemon-state.json` for crash recovery
 
-**Builder**: Claim one `loom:issue` issue → implement → test → commit → create PR
-**Judge**: Review one PR with `loom:review-requested` → provide feedback → approve/request changes
-**Curator**: Find one unlabeled issue → add context → tag as `loom:curated`
-**Champion**: Evaluate `loom:curated` issues (max 2) → promote to `loom:issue` or provide feedback
-**Architect**: Identify one architectural need → create detailed proposal issue
-**Hermit**: Analyze codebase section → identify bloat → create removal issue
-**Doctor**: Fix one bug or address one PR comment → update PR → push changes
-**Guide**: Review issue backlog → update priorities → add/remove labels for batch
-**Driver**: Execute one direct command or task per user instruction
+You don't shepherd issues yourself - you spawn subagent shepherds to do the work in parallel.
 
-## Report Format
-
-After completing your iteration, report:
+## Usage
 
 ```
-✓ Role Assumed: [Role Name]
-✓ Task Completed: [Brief description]
-✓ Changes Made:
-  - [Issue/PR #XXX]: [Description with link]
-  - [Label changes]
-  - [Files modified if applicable]
-✓ Next Steps: [Suggestions for follow-up or ready state]
+/loom                     # Start continuous daemon (runs until cancelled)
+/loom status              # Report current system state only
+/loom spawn 123           # Manually spawn shepherd for issue #123
+/loom stop                # Create stop signal for graceful shutdown
 ```
 
-## Label Workflow
+## Commands
 
-Follow the label-based coordination system (ADR-0006):
+| Command | Description |
+|---------|-------------|
+| (none) | Start continuous daemon loop |
+| `status` | Report system state without starting loop (see Status Command below) |
+| `spawn <issue>` | Manually spawn a shepherd subagent for specific issue |
+| `stop` | Create `.loom/stop-daemon` for graceful shutdown |
 
-- Issues: `loom:curated` → `loom:issue` → `loom:building` → closed
-- PRs: `loom:review-requested` → `loom:pr` → merged
-- Proposals: `loom:architect` → reviewed → implemented or closed
-- Suggestions: `loom:hermit` → reviewed → implemented or closed
+## Status Command
 
-## Notes
+The `status` command is a **read-only observation interface** for Layer 3 (human observer). It displays the current system state without taking any action.
 
-- **Time-based selection**: Uses `Date.now() % 13` for deterministic but unpredictable role selection (no bash permissions needed!)
-- **Weighted distribution**: Core operational roles (builder, judge, curator, doctor) are 2x more likely to be selected than supporting roles
-- **Zero permissions**: No bash/python execution required - pure time-based mathematics
-- This command simulates one terminal's work in the Loom multi-terminal orchestration system
-- Multiple Claude Code sessions can run `/loom` in parallel for distributed work
-- Each iteration should be atomic and complete (don't leave partial work)
-- Always update labels appropriately to signal state to other roles
-- Check for existing work to avoid conflicts (e.g., don't claim already `in-progress` issues)
-
-## Example Usage
+**To run status**, execute the helper script:
 
 ```bash
-# In Claude Code terminal
-/loom
+# Display formatted status
+./.loom/scripts/loom-status.sh
 
-# Claude responds:
-"🎭 Selecting role using time-based weighted selection...
-   Time index: Date.now() % 13 = 2
-   Selected: Judge (2x weighted - core operational role)
-
-Looking for PRs with loom:review-requested...
-Found PR #401 - 'Add terminal restart functionality'
-
-[Performs detailed review following judge.md guidelines]
-
-✓ Role Assumed: Judge
-✓ Task Completed: Reviewed PR #401
-✓ Changes Made:
-  - PR #401: Added detailed review comment with 3 suggestions
-  - Label changed: loom:review-requested → loom:pr
-  - Approved PR for merge
-✓ Next Steps: Ready for maintainer to merge
-
-Review complete!"
+# Get status as JSON for scripting
+./.loom/scripts/loom-status.sh --json
 ```
+
+**Status shows**:
+- Daemon status (running/stopped, uptime)
+- System state (issue counts by label)
+- Shepherd pool status (active/idle, assigned issues)
+- Support role status (Architect, Hermit, Guide, Champion)
+- Session statistics (completed issues, PRs merged)
+- Available Layer 3 interventions
+
+**Important**: `/loom status` is for Layer 3 observation - it never modifies state.
+- `/loom` = Run the daemon (Layer 2 executor role)
+- `/loom status` = Observe the system (Layer 3 observer role)
+
+## Continuous Loop
+
+The daemon runs **continuously** until cancelled:
+
+```
+while not cancelled:
+    1. Check for shutdown signal (.loom/stop-daemon)
+    2. Assess system state (ready issues, building, PRs)
+    3. Check shepherd completions (closed issues = done)
+    4. Spawn new shepherds up to MAX_SHEPHERDS
+    5. Print status report
+    6. Sleep 30 seconds, repeat
+```
+
+## Spawning Shepherds
+
+Use the Task tool with `run_in_background: true` to spawn parallel shepherds:
+
+```python
+Task(
+    description="Shepherd issue #123",
+    prompt="/shepherd 123 --force-merge",
+    subagent_type="general-purpose",
+    run_in_background=True
+)
+```
+
+This enables up to 3 shepherds running concurrently.
+
+## Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MAX_SHEPHERDS` | 3 | Maximum concurrent shepherd subagents |
+| `POLL_INTERVAL` | 30s | Time between status checks |
+
+## Status Report
+
+```
+═══════════════════════════════════════════════════
+  LOOM DAEMON STATUS
+═══════════════════════════════════════════════════
+  Status: Running
+  Uptime: 2h 15m
+
+  System State:
+    Ready issues (loom:issue): 5
+    Building (loom:building): 2
+    PRs pending review: 1
+
+  Shepherds: 2/3 active
+    shepherd-1: Issue #123 (running 45m)
+    shepherd-2: Issue #456 (running 12m)
+    shepherd-3: idle
+
+  Session Stats:
+    Issues completed: 3
+    PRs merged: 3
+═══════════════════════════════════════════════════
+```
+
+## State Persistence
+
+State tracked in `.loom/daemon-state.json`:
+
+```json
+{
+  "started_at": "2026-01-23T10:00:00Z",
+  "running": true,
+  "shepherds": {
+    "shepherd-1": {
+      "issue": 123,
+      "task_id": "abc123",
+      "output_file": "/path/to/output"
+    }
+  },
+  "completed_issues": [100, 101, 102]
+}
+```
+
+## Graceful Shutdown
+
+```bash
+# Option 1: Create stop signal
+touch .loom/stop-daemon
+
+# Option 2: Use command
+/loom stop
+
+# Daemon will:
+# 1. Stop spawning new shepherds
+# 2. Wait for active shepherds to complete (max 5 min)
+# 3. Clean up state
+# 4. Exit
+```
+
+## Layer 1 vs Layer 2
+
+| Layer | Role | Purpose |
+|-------|------|---------|
+| Layer 1 | **Shepherd** (`/shepherd 123`) | Orchestrates single issue lifecycle |
+| Layer 2 | **Loom Daemon** (`/loom`) | Spawns shepherds, manages pool continuously |
+
+Use `/shepherd` to shepherd a specific issue. Use `/loom` to run the continuous orchestrator that manages multiple shepherds.
+
+ARGUMENTS: $ARGUMENTS

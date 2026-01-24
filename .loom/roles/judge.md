@@ -403,6 +403,116 @@ gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
 
 **Philosophy**: This empowers Judges to handle complete reviews in one iteration for minor documentation issues, while maintaining strict code quality standards. The Builder's intent is preserved, and the review process is faster.
 
+## Fixing Trivial Code Issues During Review
+
+**For trivial, non-controversial code fixes, fix them directly rather than requesting changes.**
+
+This reduces unnecessary round-trips where a one-line fix creates a full change request cycle.
+
+### What Qualifies as "Trivial"
+
+**✅ Fix directly:**
+- Unused imports
+- Typos in comments or strings
+- Minor whitespace/formatting issues
+- Missing trailing newlines
+- Simple linting fixes that don't change behavior
+- Obvious typos in variable names (within local scope only)
+
+**❌ Request changes instead:**
+- Any logic changes
+- API or interface changes
+- Test behavior changes
+- Anything requiring judgment about correctness
+- Changes to public-facing variable/function names
+- Fixes that might have unintended side effects
+
+### How to Fix Trivial Issues
+
+**Step 1: Check out the PR branch**
+
+```bash
+gh pr checkout <number>
+```
+
+**Step 2: Make the fix**
+
+```bash
+# Example: Remove unused import
+# Edit the file directly
+```
+
+**Step 3: Commit with clear message**
+
+```bash
+git add -A
+git commit -m "Remove unused import (during review)"
+```
+
+**Step 4: Push to the PR branch**
+
+```bash
+git push
+```
+
+**Step 5: Note the fix in your approval comment**
+
+```bash
+gh pr comment <number> --body "$(cat <<'EOF'
+✅ **Approved!**
+
+Fixed during review:
+- Removed unused `tempfile` import in `src/utils.py`
+
+Code quality is excellent, tests pass, implementation is solid.
+EOF
+)"
+gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
+```
+
+### Example Workflow
+
+```bash
+# 1. Check out PR
+gh pr checkout 42
+
+# 2. Find and fix the trivial issue
+# (e.g., remove unused import on line 3 of src/utils.py)
+
+# 3. Commit the fix
+git add -A
+git commit -m "Remove unused import (during review)"
+
+# 4. Push to PR branch
+git push
+
+# 5. Approve with note about the fix
+gh pr comment 42 --body "✅ **Approved!** Removed unused import during review. Code looks great!"
+gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
+```
+
+### Important Guidelines
+
+1. **Keep fixes truly trivial**: If you're unsure, request changes instead
+2. **Document your fixes**: Always mention what you fixed in the approval comment
+3. **Don't change behavior**: Only fix issues that have zero impact on functionality
+4. **One type of fix per commit**: Keep review fixes separate and clear
+5. **Preserve Builder's style**: Match the existing code style in the PR
+
+### Why This Matters
+
+**Without direct fixes:**
+1. Judge requests changes for unused import
+2. Builder/Doctor fixes the one-line issue
+3. PR goes back to review queue
+4. Judge reviews again and approves
+
+**With direct fixes:**
+1. Judge fixes the unused import directly
+2. Judge approves in the same review iteration
+
+This saves significant time and reduces coordination overhead for issues that take seconds to fix.
+
 ### Correctness
 - Does the code do what it claims?
 - Are edge cases handled?

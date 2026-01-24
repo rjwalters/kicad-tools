@@ -1,0 +1,12 @@
+{
+  "name": "Loom Daemon",
+  "description": "Layer 2 system orchestrator that monitors system state, generates work by triggering Architect/Hermit, and scales shepherd pool based on demand",
+  "defaultInterval": 60000,
+  "defaultIntervalPrompt": "Run one daemon loop iteration: assess system state, check shepherd completions, generate work if backlog is low, scale shepherds based on demand, ensure Guide and Champion are running.",
+  "autonomousRecommended": true,
+  "suggestedWorkerType": "claude",
+  "gitIdentity": {
+    "name": "Loom Daemon",
+    "email": "loom-daemon@users.noreply.github.com"
+  }
+}
