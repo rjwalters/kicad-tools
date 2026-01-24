@@ -41,6 +41,10 @@ KNOWN_KEYS = {
         "clearance",
         "via_drill",
         "via_diameter",
+        "cache_enabled",
+        "cache_dir",
+        "cache_max_size_mb",
+        "cache_ttl_days",
     },
     "parts": {"cache_dir", "cache_ttl_days"},
     "footprint_validation": {
@@ -105,6 +109,11 @@ class RouteConfig:
     clearance: float = 0.2
     via_drill: float = 0.3
     via_diameter: float = 0.6
+    # Routing cache configuration
+    cache_enabled: bool = True
+    cache_dir: str = "~/.cache/kicad-tools/routing"
+    cache_max_size_mb: int = 500
+    cache_ttl_days: int = 30
 
 
 @dataclass
