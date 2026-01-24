@@ -2987,6 +2987,141 @@ class PCB:
         """
         return self._path
 
+    def strip_traces(
+        self,
+        *,
+        nets: list[str] | None = None,
+        keep_zones: bool = True,
+    ) -> dict[str, int]:
+        """Remove trace segments and vias from the PCB.
+
+        This method strips routing from the PCB while preserving component
+        placement, zones (optionally), and other board elements. Useful for
+        re-routing a board from scratch with different routing strategies
+        or design rules.
+
+        Args:
+            nets: Optional list of net names to strip. If None, strips all nets.
+                  When specified, only segments/vias belonging to these nets
+                  are removed.
+            keep_zones: If True (default), preserve copper pour zones.
+                        If False, remove zones as well.
+
+        Returns:
+            Dictionary with counts of removed elements:
+            - "segments": Number of trace segments removed
+            - "vias": Number of vias removed
+            - "zones": Number of zones removed (0 if keep_zones=True)
+
+        Example:
+            >>> pcb = PCB.load("board.kicad_pcb")
+            >>> stats = pcb.strip_traces()
+            >>> print(f"Removed {stats['segments']} segments and {stats['vias']} vias")
+            >>> pcb.save("board-stripped.kicad_pcb")
+
+            # Strip only specific nets
+            >>> stats = pcb.strip_traces(nets=["GND", "VCC"])
+
+            # Strip everything including zones
+            >>> stats = pcb.strip_traces(keep_zones=False)
+        """
+        # Build set of net numbers to strip (if filtering by net name)
+        net_numbers_to_strip: set[int] | None = None
+        if nets is not None:
+            net_numbers_to_strip = set()
+            for net_name in nets:
+                for net_num, net in self._nets.items():
+                    if net.name == net_name:
+                        net_numbers_to_strip.add(net_num)
+                        break
+
+        removed_segments = 0
+        removed_vias = 0
+        removed_zones = 0
+
+        # Filter S-expression children to remove segments, vias, and optionally zones
+        new_children = []
+        for child in self._sexp.children:
+            should_remove = False
+
+            if child.name == "segment":
+                if net_numbers_to_strip is None:
+                    # Remove all segments
+                    should_remove = True
+                else:
+                    # Check if segment belongs to a net we're stripping
+                    net_node = child.find("net")
+                    if net_node:
+                        net_num = net_node.get_int(0) or 0
+                        if net_num in net_numbers_to_strip:
+                            should_remove = True
+
+                if should_remove:
+                    removed_segments += 1
+
+            elif child.name == "via":
+                if net_numbers_to_strip is None:
+                    # Remove all vias
+                    should_remove = True
+                else:
+                    # Check if via belongs to a net we're stripping
+                    net_node = child.find("net")
+                    if net_node:
+                        net_num = net_node.get_int(0) or 0
+                        if net_num in net_numbers_to_strip:
+                            should_remove = True
+
+                if should_remove:
+                    removed_vias += 1
+
+            elif child.name == "zone" and not keep_zones:
+                if net_numbers_to_strip is None:
+                    # Remove all zones
+                    should_remove = True
+                else:
+                    # Check if zone belongs to a net we're stripping
+                    net_node = child.find("net")
+                    if net_node:
+                        net_num = net_node.get_int(0) or 0
+                        if net_num in net_numbers_to_strip:
+                            should_remove = True
+
+                if should_remove:
+                    removed_zones += 1
+
+            if not should_remove:
+                new_children.append(child)
+
+        # Update the S-expression tree
+        self._sexp.children = new_children
+
+        # Update internal state to reflect the changes
+        if net_numbers_to_strip is None:
+            self._segments = []
+            self._vias = []
+            if not keep_zones:
+                self._zones = []
+        else:
+            self._segments = [
+                seg for seg in self._segments
+                if seg.net_number not in net_numbers_to_strip
+            ]
+            self._vias = [
+                via for via in self._vias
+                if via.net_number not in net_numbers_to_strip
+            ]
+            if not keep_zones:
+                self._zones = [
+                    zone for zone in self._zones
+                    if zone.net_number not in net_numbers_to_strip
+                ]
+
+        return {
+            "segments": removed_segments,
+            "vias": removed_vias,
+            "zones": removed_zones,
+        }
+
     def save(self, path: str | Path | None = None) -> None:
         """
         Save the PCB to a file.

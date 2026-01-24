@@ -1918,3 +1918,142 @@ class TestPropertySetterProtection:
         # Verify add_via works
         assert via is not None
         assert len(pcb.vias) == initial_count + 1
+
+
+class TestStripTraces:
+    """Tests for PCB.strip_traces() method."""
+
+    def test_strip_all_traces(self, minimal_pcb: Path):
+        """Test stripping all traces and vias from a PCB."""
+        pcb = PCB.load(minimal_pcb)
+
+        # Verify there are traces before stripping
+        assert len(pcb.segments) >= 1
+
+        # Strip all traces
+        stats = pcb.strip_traces()
+
+        # Verify all traces are removed
+        assert len(pcb.segments) == 0
+        assert len(pcb.vias) == 0
+        assert stats["segments"] >= 1
+
+    def test_strip_traces_preserves_footprints(self, minimal_pcb: Path):
+        """Test that stripping traces preserves footprints."""
+        pcb = PCB.load(minimal_pcb)
+
+        initial_footprint_count = len(pcb.footprints)
+        assert initial_footprint_count > 0
+
+        pcb.strip_traces()
+
+        # Footprints should be preserved
+        assert len(pcb.footprints) == initial_footprint_count
+
+    def test_strip_traces_preserves_zones_by_default(self, zone_test_pcb: Path):
+        """Test that zones are preserved by default when stripping traces."""
+        pcb = PCB.load(zone_test_pcb)
+
+        initial_zone_count = len(pcb.zones)
+
+        stats = pcb.strip_traces(keep_zones=True)
+
+        # Zones should be preserved
+        assert len(pcb.zones) == initial_zone_count
+        assert stats["zones"] == 0
+
+    def test_strip_traces_can_remove_zones(self, zone_test_pcb: Path):
+        """Test that zones can be removed with keep_zones=False."""
+        pcb = PCB.load(zone_test_pcb)
+
+        initial_zone_count = len(pcb.zones)
+        assert initial_zone_count > 0
+
+        stats = pcb.strip_traces(keep_zones=False)
+
+        # Zones should be removed
+        assert len(pcb.zones) == 0
+        assert stats["zones"] == initial_zone_count
+
+    def test_strip_specific_nets(self, tmp_path: Path):
+        """Test stripping only specific nets."""
+        pcb = PCB.create(width=100, height=100)
+
+        # Add traces on different nets
+        pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.25,
+            layer="F.Cu",
+            net="GND",
+        )
+        pcb.add_trace(
+            start=(10.0, 20.0),
+            end=(50.0, 20.0),
+            width=0.25,
+            layer="F.Cu",
+            net="VCC",
+        )
+
+        initial_segments = len(pcb.segments)
+        assert initial_segments == 2
+
+        # Strip only GND net
+        stats = pcb.strip_traces(nets=["GND"])
+
+        # Only GND trace should be removed
+        assert stats["segments"] == 1
+        assert len(pcb.segments) == 1
+
+        # The remaining trace should be VCC
+        remaining_net_nums = {seg.net_number for seg in pcb.segments}
+        gnd_net_num = None
+        for net_num, net in pcb.nets.items():
+            if net.name == "GND":
+                gnd_net_num = net_num
+                break
+        assert gnd_net_num not in remaining_net_nums
+
+    def test_strip_traces_updates_sexp(self, minimal_pcb: Path, tmp_path: Path):
+        """Test that stripping traces updates the underlying S-expression."""
+        pcb = PCB.load(minimal_pcb)
+
+        # Strip traces
+        pcb.strip_traces()
+
+        # Save to a new file
+        output_path = tmp_path / "stripped.kicad_pcb"
+        pcb.save(output_path)
+
+        # Reload and verify traces are gone
+        reloaded = PCB.load(output_path)
+        assert len(reloaded.segments) == 0
+        assert len(reloaded.vias) == 0
+
+    def test_strip_traces_returns_stats(self, minimal_pcb: Path):
+        """Test that strip_traces returns correct statistics."""
+        pcb = PCB.load(minimal_pcb)
+
+        initial_segments = len(pcb.segments)
+        initial_vias = len(pcb.vias)
+
+        stats = pcb.strip_traces()
+
+        # Stats should match what was removed
+        assert stats["segments"] == initial_segments
+        assert stats["vias"] == initial_vias
+        assert "zones" in stats
+
+    def test_strip_traces_on_empty_pcb(self):
+        """Test stripping traces on a PCB with no traces."""
+        pcb = PCB.create(width=100, height=100)
+
+        # No traces to begin with
+        assert len(pcb.segments) == 0
+
+        stats = pcb.strip_traces()
+
+        # Should complete without error
+        assert stats["segments"] == 0
+        assert stats["vias"] == 0
+        assert len(pcb.segments) == 0

@@ -475,3 +475,198 @@ class TestPcbModify:
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "not found" in captured.err
+
+
+class TestPcbStrip:
+    """Tests for 'kicad-tools pcb strip' command."""
+
+    def test_strip_dry_run(self, minimal_pcb: Path, capsys):
+        """Test strip command with dry run shows what would be removed."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from argparse import Namespace
+
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "Removed:" in captured.out
+        assert "Segments:" in captured.out
+
+    def test_strip_creates_output_file(self, minimal_pcb: Path, tmp_path, capsys):
+        """Test strip command creates output file."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from argparse import Namespace
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        assert output_file.exists()
+
+        # Verify the output file has no traces
+        from kicad_tools.schema.pcb import PCB
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 0
+
+    def test_strip_json_output(self, minimal_pcb: Path, tmp_path, capsys):
+        """Test strip command with JSON output format."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from argparse import Namespace
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            keep_zones=True,
+            format="json",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "before" in data
+        assert "removed" in data
+        assert "after" in data
+        assert "segments" in data["removed"]
+        assert "vias" in data["removed"]
+
+    def test_strip_specific_nets(self, tmp_path, capsys):
+        """Test stripping only specific nets via CLI."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        # Create a PCB with traces on multiple nets
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_trace(
+            start=(10.0, 10.0),
+            end=(50.0, 10.0),
+            width=0.25,
+            layer="F.Cu",
+            net="GND",
+        )
+        pcb.add_trace(
+            start=(10.0, 20.0),
+            end=(50.0, 20.0),
+            width=0.25,
+            layer="F.Cu",
+            net="VCC",
+        )
+
+        input_file = tmp_path / "multi_net.kicad_pcb"
+        pcb.save(input_file)
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(input_file),
+            pcb_command="strip",
+            output=str(output_file),
+            nets="GND",
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+
+        # Verify only GND trace was removed
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.segments) == 1
+
+    def test_strip_removes_zones_when_requested(self, zone_test_pcb: Path, tmp_path, capsys):
+        """Test stripping zones with --no-keep-zones."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+        from argparse import Namespace
+
+        output_file = tmp_path / "stripped.kicad_pcb"
+        args = Namespace(
+            pcb=str(zone_test_pcb),
+            pcb_command="strip",
+            output=str(output_file),
+            nets=None,
+            keep_zones=False,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+
+        # Verify zones were removed
+        stripped_pcb = PCB.load(output_file)
+        assert len(stripped_pcb.zones) == 0
+
+    def test_strip_file_not_found(self, tmp_path, capsys):
+        """Test strip command with non-existent file."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from argparse import Namespace
+
+        args = Namespace(
+            pcb=str(tmp_path / "nonexistent.kicad_pcb"),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower() or "error" in captured.err.lower()
+
+    def test_strip_default_output_suffix(self, minimal_pcb: Path, capsys):
+        """Test that strip creates output with -stripped suffix when no output specified."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from argparse import Namespace
+
+        # minimal_pcb is already in tmp_path from the fixture
+        args = Namespace(
+            pcb=str(minimal_pcb),
+            pcb_command="strip",
+            output=None,
+            nets=None,
+            keep_zones=True,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+
+        assert result == 0
+
+        # Check that the stripped file was created with the suffix
+        expected_output = minimal_pcb.with_stem(f"{minimal_pcb.stem}-stripped")
+        assert expected_output.exists()
