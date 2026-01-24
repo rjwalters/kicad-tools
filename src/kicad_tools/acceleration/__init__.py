@@ -10,7 +10,7 @@ from kicad_tools.acceleration.backend import (
     get_backend,
     get_best_available_backend,
 )
-from kicad_tools.acceleration.config import should_use_gpu
+from kicad_tools.acceleration.config import get_effective_backend, should_use_gpu
 from kicad_tools.acceleration.detection import (
     GPUBackend,
     GPUInfo,
@@ -25,6 +25,7 @@ __all__ = [
     "BackendType",
     "get_backend",
     "get_best_available_backend",
+    "get_effective_backend",
     "should_use_gpu",
     # Detection utilities
     "GPUBackend",

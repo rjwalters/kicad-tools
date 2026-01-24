@@ -176,6 +176,45 @@ class ArrayBackend:
         """Tile array."""
         return self.xp.tile(x, reps)
 
+    def abs(self, x: Any) -> Any:
+        """Element-wise absolute value."""
+        return self.xp.abs(x)
+
+    def minimum(self, x: Any, y: Any) -> Any:
+        """Element-wise minimum."""
+        return self.xp.minimum(x, y)
+
+    def where(self, condition: Any, x: Any, y: Any) -> Any:
+        """Element-wise selection based on condition."""
+        return self.xp.where(condition, x, y)
+
+    def logical_and(self, x: Any, y: Any) -> Any:
+        """Element-wise logical AND."""
+        return self.xp.logical_and(x, y)
+
+    def logical_or(self, x: Any, y: Any) -> Any:
+        """Element-wise logical OR."""
+        return self.xp.logical_or(x, y)
+
+    def reshape(self, x: Any, shape: tuple[int, ...]) -> Any:
+        """Reshape array."""
+        return self.xp.reshape(x, shape)
+
+    @property
+    def float32(self) -> Any:
+        """Float32 dtype for this backend."""
+        return self.xp.float32
+
+    @property
+    def int32(self) -> Any:
+        """Int32 dtype for this backend."""
+        return self.xp.int32
+
+    @classmethod
+    def auto(cls) -> ArrayBackend:
+        """Create backend with auto-detection (alias for get_best_available_backend)."""
+        return get_best_available_backend()
+
 
 def get_backend(backend_type: BackendType | str = BackendType.CPU) -> ArrayBackend:
     """Get an array backend instance.
