@@ -9,11 +9,18 @@ Performance optimizations:
 - Vectorized operations for bulk cell updates
 - Pre-computed clearance masks for obstacle marking
 - Expanded obstacle mode for coarser grids with pre-computed clearances
+- GPU acceleration for large grids (via CuPy/MLX backends)
 
 Grid Resolution Strategies:
 - Fine grid (clearance/2): Maximum accuracy, highest memory/time cost
 - Standard grid (trace_width): Good balance for most boards
 - Expanded obstacles: Pre-expand obstacles, use coarser grid (~4x faster)
+
+GPU Acceleration:
+- Automatically enabled for grids above threshold (default 100k cells)
+- Bulk operations (obstacle marking, history costs) run on GPU
+- A* pathfinding stays on CPU (sequential algorithm)
+- Lazy sync between GPU and CPU to minimize transfers
 
 Thread Safety:
 - Optional thread-safe mode for parallel routing operations
@@ -21,21 +28,35 @@ Thread Safety:
 - Minimal overhead when disabled (default)
 """
 
+from __future__ import annotations
+
+import logging
 import math
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 
 if TYPE_CHECKING:
+    from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
 
+from kicad_tools.acceleration import (
+    BackendType,
+    check_memory_available,
+    estimate_memory_bytes,
+    get_backend,
+    should_use_gpu,
+    to_numpy,
+)
 from kicad_tools.exceptions import RoutingError
 
 from .layers import Layer, LayerStack
 from .primitives import Obstacle, Pad, Route, Segment, Via
 from .rules import DesignRules
+
+logger = logging.getLogger(__name__)
 
 
 class _CellView:
@@ -207,6 +228,7 @@ class RoutingGrid:
         expanded_obstacles: bool = False,
         resolution_override: float | None = None,
         thread_safe: bool = False,
+        config: PerformanceConfig | None = None,
     ):
         """Initialize routing grid.
 
@@ -220,6 +242,8 @@ class RoutingGrid:
             resolution_override: Override grid resolution (None = auto from rules)
             thread_safe: If True, enable thread-safe mode with locking for
                         concurrent access. Disabled by default for performance.
+            config: Performance configuration for GPU acceleration settings.
+                   If None, GPU is disabled and CPU (NumPy) is always used.
         """
         self.width = width
         self.height = height
@@ -227,6 +251,7 @@ class RoutingGrid:
         self.origin_x = origin_x
         self.origin_y = origin_y
         self.expanded_obstacles = expanded_obstacles
+        self._config = config
 
         # Calculate effective resolution
         if resolution_override is not None:
@@ -256,16 +281,16 @@ class RoutingGrid:
         self.cols = int(width / self.resolution) + 1
         self.rows = int(height / self.resolution) + 1
 
-        # NumPy arrays for cell attributes: [layer, y, x]
+        # Determine backend (GPU or CPU)
+        self._backend_type, self._backend = self._select_backend()
+
+        # Initialize arrays using selected backend
         grid_shape = (self.num_layers, self.rows, self.cols)
-        self._blocked = np.zeros(grid_shape, dtype=np.bool_)
-        self._net = np.zeros(grid_shape, dtype=np.int32)
-        self._usage_count = np.zeros(grid_shape, dtype=np.int16)
-        self._history_cost = np.zeros(grid_shape, dtype=np.float32)
-        self._is_obstacle = np.zeros(grid_shape, dtype=np.bool_)
-        self._is_zone = np.zeros(grid_shape, dtype=np.bool_)
-        self._pad_blocked = np.zeros(grid_shape, dtype=np.bool_)
-        self._original_net = np.zeros(grid_shape, dtype=np.int32)
+        self._init_arrays(grid_shape)
+
+        # Track dirty state for lazy GPU/CPU sync
+        self._gpu_dirty = False  # GPU arrays modified, need sync to CPU
+        self._cpu_dirty = False  # CPU arrays modified, need sync to GPU
 
         # Sparse storage for zone IDs (most cells don't have zones)
         self._zone_ids: dict[tuple[int, int, int], str] = {}
@@ -306,6 +331,152 @@ class RoutingGrid:
         # Issue #750: Grid-based checking is approximate; we need precise geometry
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
+
+    def _select_backend(self) -> tuple[BackendType, Any]:
+        """Select the appropriate backend based on config and grid size.
+
+        Returns:
+            Tuple of (BackendType, backend_module).
+        """
+        # No config = always use CPU
+        if self._config is None:
+            return BackendType.CPU, np
+
+        # Check if GPU should be used based on grid size
+        grid_cells = self.cols * self.rows * self.num_layers
+        if not should_use_gpu(self._config, grid_cells, "grid"):
+            logger.debug(
+                f"Grid size {grid_cells} below threshold, using CPU backend"
+            )
+            return BackendType.CPU, np
+
+        # Check memory availability
+        required_bytes = estimate_memory_bytes(self.cols, self.rows, self.num_layers)
+        if not check_memory_available(required_bytes, self._config):
+            logger.warning(
+                f"Insufficient GPU memory for grid ({required_bytes / 1e6:.1f}MB), "
+                "falling back to CPU"
+            )
+            return BackendType.CPU, np
+
+        # Try to get GPU backend
+        try:
+            backend = get_backend(config=self._config)
+            # Determine backend type from the module
+            if hasattr(backend, "cuda"):
+                backend_type = BackendType.CUDA
+            elif hasattr(backend, "_mx"):  # MLXBackend wrapper
+                backend_type = BackendType.METAL
+            else:
+                backend_type = BackendType.CPU
+
+            logger.info(
+                f"Grid using {backend_type.value} backend for {grid_cells} cells "
+                f"({required_bytes / 1e6:.1f}MB)"
+            )
+            return backend_type, backend
+        except Exception as e:
+            logger.warning(f"Failed to initialize GPU backend: {e}, using CPU")
+            return BackendType.CPU, np
+
+    def _init_arrays(self, grid_shape: tuple[int, int, int]) -> None:
+        """Initialize grid arrays using the selected backend.
+
+        Args:
+            grid_shape: Shape tuple (layers, rows, cols).
+        """
+        xp = self._backend
+
+        # Use backend's array creation functions
+        self._blocked = xp.zeros(grid_shape, dtype=np.bool_)
+        self._net = xp.zeros(grid_shape, dtype=np.int32)
+        self._usage_count = xp.zeros(grid_shape, dtype=np.int16)
+        self._history_cost = xp.zeros(grid_shape, dtype=np.float32)
+        self._is_obstacle = xp.zeros(grid_shape, dtype=np.bool_)
+        self._is_zone = xp.zeros(grid_shape, dtype=np.bool_)
+        self._pad_blocked = xp.zeros(grid_shape, dtype=np.bool_)
+        self._original_net = xp.zeros(grid_shape, dtype=np.int32)
+
+    def sync_to_cpu(self) -> None:
+        """Transfer GPU arrays to CPU for A* operations.
+
+        Call this before performing A* pathfinding or other operations
+        that require random cell access. The transfer is skipped if
+        arrays are already on CPU or if GPU hasn't been modified.
+        """
+        if self._backend_type == BackendType.CPU:
+            return
+
+        if not self._gpu_dirty:
+            return
+
+        logger.debug("Syncing grid arrays from GPU to CPU")
+        self._blocked = to_numpy(self._blocked)
+        self._net = to_numpy(self._net)
+        self._usage_count = to_numpy(self._usage_count)
+        self._history_cost = to_numpy(self._history_cost)
+        self._is_obstacle = to_numpy(self._is_obstacle)
+        self._is_zone = to_numpy(self._is_zone)
+        self._pad_blocked = to_numpy(self._pad_blocked)
+        self._original_net = to_numpy(self._original_net)
+
+        self._gpu_dirty = False
+        self._backend_type = BackendType.CPU
+        self._backend = np
+
+    def sync_to_gpu(self) -> None:
+        """Transfer CPU arrays to GPU for bulk operations.
+
+        Call this before performing bulk operations like obstacle
+        expansion or history cost updates. The transfer is skipped
+        if arrays are already on GPU or if CPU hasn't been modified.
+        """
+        if self._config is None:
+            return  # No GPU config, stay on CPU
+
+        if self._backend_type != BackendType.CPU:
+            return  # Already on GPU
+
+        if not self._cpu_dirty:
+            return
+
+        # Check if we should use GPU
+        grid_cells = self.cols * self.rows * self.num_layers
+        if not should_use_gpu(self._config, grid_cells, "grid"):
+            return
+
+        logger.debug("Syncing grid arrays from CPU to GPU")
+        try:
+            backend = get_backend(config=self._config)
+
+            # Transfer arrays to GPU
+            self._blocked = backend.asarray(self._blocked)
+            self._net = backend.asarray(self._net)
+            self._usage_count = backend.asarray(self._usage_count)
+            self._history_cost = backend.asarray(self._history_cost)
+            self._is_obstacle = backend.asarray(self._is_obstacle)
+            self._is_zone = backend.asarray(self._is_zone)
+            self._pad_blocked = backend.asarray(self._pad_blocked)
+            self._original_net = backend.asarray(self._original_net)
+
+            self._cpu_dirty = False
+            if hasattr(backend, "cuda"):
+                self._backend_type = BackendType.CUDA
+            elif hasattr(backend, "_mx"):
+                self._backend_type = BackendType.METAL
+            self._backend = backend
+        except Exception as e:
+            logger.warning(f"Failed to sync to GPU: {e}")
+
+    @property
+    def backend_type(self) -> BackendType:
+        """Return the current backend type."""
+        return self._backend_type
+
+    @property
+    def uses_gpu(self) -> bool:
+        """Return whether GPU acceleration is active."""
+        return self._backend_type != BackendType.CPU
 
     @property
     def congestion(self) -> np.ndarray:
@@ -1112,15 +1283,22 @@ class RoutingGrid:
         return cells
 
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
-        """Find cells with usage_count > 1 (resource conflicts)."""
+        """Find cells with usage_count > 1 (resource conflicts).
+
+        GPU arrays are synced to CPU for this operation since it returns
+        individual cell coordinates.
+        """
+        # Ensure we're working with CPU arrays for indexing
+        usage_arr = to_numpy(self._usage_count) if self.uses_gpu else self._usage_count
+
         # Find all overused cells using NumPy
-        overused_mask = self._usage_count > 1
+        overused_mask = usage_arr > 1
         layer_indices, y_indices, x_indices = np.where(overused_mask)
 
         # Build result list with usage counts
         overused = []
         for layer_idx, gy, gx in zip(layer_indices, y_indices, x_indices, strict=True):
-            usage = int(self._usage_count[layer_idx, gy, gx])
+            usage = int(usage_arr[layer_idx, gy, gx])
             overused.append((int(gx), int(gy), int(layer_idx), usage))
         return overused
 
@@ -1128,12 +1306,28 @@ class RoutingGrid:
         """Increase history cost for overused cells (PathFinder-style).
 
         Thread-safe when thread_safe=True.
+        GPU-accelerated for large grids.
         """
         with self._acquire_lock():
+            # Use current backend's array operations (works for NumPy, CuPy, MLX)
+            xp = self._backend
+
             # Vectorized update: add increment * (usage_count - 1) where usage_count > 1
             overused_mask = self._usage_count > 1
-            increment = history_increment * (self._usage_count.astype(np.float32) - 1)
-            self._history_cost += np.where(overused_mask, increment, 0)
+
+            # Handle dtype conversion for backend
+            if self._backend_type == BackendType.CPU:
+                usage_float = self._usage_count.astype(np.float32)
+            else:
+                # CuPy/MLX handle dtype conversion
+                usage_float = xp.asarray(self._usage_count, dtype=np.float32)
+
+            increment = history_increment * (usage_float - 1)
+            self._history_cost += xp.where(overused_mask, increment, 0)
+
+            # Mark GPU arrays as dirty if using GPU
+            if self._backend_type != BackendType.CPU:
+                self._gpu_dirty = True
 
     def get_negotiated_cost(
         self, gx: int, gy: int, layer: int, present_cost_factor: float = 1.0
@@ -1153,10 +1347,22 @@ class RoutingGrid:
         return present_cost + history_cost
 
     def get_total_overflow(self) -> int:
-        """Get total overflow (sum of usage_count - 1 for overused cells)."""
+        """Get total overflow (sum of usage_count - 1 for overused cells).
+
+        GPU-accelerated when using GPU backend (reduction operation).
+        """
+        xp = self._backend
+
         # Vectorized calculation: sum of (usage - 1) where usage > 1
         overused = self._usage_count > 1
-        return int(np.sum(np.where(overused, self._usage_count - 1, 0)))
+        result = xp.sum(xp.where(overused, self._usage_count - 1, 0))
+
+        # Convert to Python int (works for all backends)
+        if hasattr(result, "get"):  # CuPy
+            return int(result.get())
+        elif hasattr(result, "item"):  # NumPy/MLX
+            return int(result.item())
+        return int(result)
 
     # =========================================================================
     # ZONE (COPPER POUR) SUPPORT
@@ -1684,8 +1890,34 @@ class RoutingGrid:
             Dict with grid statistics for performance analysis
         """
         total_cells = self.cols * self.rows * self.num_layers
-        blocked_cells = int(np.sum(self._blocked))
-        pad_cells = int(np.sum(self._pad_blocked))
+
+        # Ensure arrays are on CPU for statistics
+        blocked_arr = to_numpy(self._blocked) if self.uses_gpu else self._blocked
+        pad_arr = to_numpy(self._pad_blocked) if self.uses_gpu else self._pad_blocked
+
+        blocked_cells = int(np.sum(blocked_arr))
+        pad_cells = int(np.sum(pad_arr))
+
+        # Get memory usage (works for both NumPy and CuPy)
+        def get_nbytes(arr: Any) -> int:
+            if hasattr(arr, "nbytes"):
+                return arr.nbytes
+            # MLX arrays don't have nbytes, estimate from shape and dtype
+            return arr.size * np.dtype(arr.dtype).itemsize
+
+        memory_bytes = sum(
+            get_nbytes(arr)
+            for arr in [
+                self._blocked,
+                self._net,
+                self._usage_count,
+                self._history_cost,
+                self._is_obstacle,
+                self._is_zone,
+                self._pad_blocked,
+                self._original_net,
+            ]
+        )
 
         return {
             "resolution_mm": self.resolution,
@@ -1698,18 +1930,7 @@ class RoutingGrid:
             "pad_cells": pad_cells,
             "expanded_obstacles": self.expanded_obstacles,
             "thread_safe": self._thread_safe,
-            "memory_mb": round(
-                (
-                    self._blocked.nbytes
-                    + self._net.nbytes
-                    + self._usage_count.nbytes
-                    + self._history_cost.nbytes
-                    + self._is_obstacle.nbytes
-                    + self._is_zone.nbytes
-                    + self._pad_blocked.nbytes
-                    + self._original_net.nbytes
-                )
-                / (1024 * 1024),
-                2,
-            ),
+            "gpu_backend": self._backend_type.value,
+            "uses_gpu": self.uses_gpu,
+            "memory_mb": round(memory_bytes / (1024 * 1024), 2),
         }
