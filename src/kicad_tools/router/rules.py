@@ -117,6 +117,14 @@ class DesignRules:
         1.0  # Weight for via impact scoring (0=disabled, higher=stronger avoidance)
     )
 
+    # Constraint-aware net ordering (Issue #1020)
+    # Routes highly-constrained nets first to give them access to routing resources
+    # before less-constrained nets consume available channels.
+    constraint_ordering_enabled: bool = True  # Enable constraint-aware ordering
+    constraint_fine_pitch_weight: float = 10.0  # Weight for fine-pitch component connections
+    constraint_pad_count_weight: float = 0.5  # Weight for number of pads in net
+    constraint_congestion_weight: float = 5.0  # Weight for nets in congested areas
+
     def get_clearance_for_component(self, ref: str, pin_pitch: float | None = None) -> float:
         """Get the clearance to use for a specific component.
 

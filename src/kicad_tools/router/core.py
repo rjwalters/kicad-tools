@@ -362,6 +362,10 @@ class Autorouter:
 
             self._decision_store = DecisionStore()
 
+        # Constraint-aware net ordering (Issue #1020)
+        # Cache for component pitches, computed lazily on first access
+        self._component_pitches: dict[str, float] | None = None
+
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
         if not self._physics_enabled or self._stackup is None:
@@ -1025,25 +1029,89 @@ class Autorouter:
         # Return diagonal distance
         return math.sqrt((max_x - min_x) ** 2 + (max_y - min_y) ** 2)
 
-    def _get_net_priority(self, net_id: int) -> tuple[int, int, float]:
+    @property
+    def component_pitches(self) -> dict[str, float]:
+        """Get component pin pitches for constraint-aware net ordering.
+
+        Issue #1020: Computed lazily on first access and cached.
+        Used for identifying fine-pitch components that need priority routing.
+
+        Returns:
+            Dict mapping component reference to minimum pin pitch in mm.
+        """
+        if self._component_pitches is None:
+            self._component_pitches = self.grid.compute_component_pitches()
+        return self._component_pitches
+
+    def _calculate_constraint_score(self, net_id: int) -> float:
+        """Calculate a constraint score for a net based on routing difficulty.
+
+        Issue #1020: Nets connecting to fine-pitch components or with many pads
+        are more constrained and should be routed first. Higher score = more constrained.
+
+        The score is computed as:
+        - Fine-pitch component connections: 10.0 / pitch for each pad on a fine-pitch IC
+        - Pad count penalty: 0.5 per pad (more pads = more routing constraints)
+
+        Args:
+            net_id: The net ID to calculate constraint score for.
+
+        Returns:
+            Constraint score (higher = more constrained, should route first).
+        """
+        if not self.rules.constraint_ordering_enabled:
+            return 0.0
+
+        score = 0.0
+        pad_keys = self.nets.get(net_id, [])
+
+        fine_pitch_weight = self.rules.constraint_fine_pitch_weight
+        pad_count_weight = self.rules.constraint_pad_count_weight
+        fine_pitch_threshold = self.rules.fine_pitch_threshold
+
+        # Fine-pitch component connections
+        pitches = self.component_pitches
+        for pad_key in pad_keys:
+            ref = pad_key[0]  # Component reference
+            if ref in pitches:
+                pitch = pitches[ref]
+                if pitch < fine_pitch_threshold:
+                    # Smaller pitch = higher score (more constrained)
+                    score += fine_pitch_weight / pitch
+
+        # More pads = more routing constraints
+        score += len(pad_keys) * pad_count_weight
+
+        return score
+
+    def _get_net_priority(self, net_id: int) -> tuple[int, float, int, float]:
         """Get routing priority for a net (lower = higher priority).
 
-        Returns a 3-tuple used for sorting:
+        Returns a 4-tuple used for sorting:
         1. Net class priority (1-10, where 1 = highest priority like POWER)
-        2. Pad count (fewer pads = higher priority, simpler nets first)
-        3. Bounding box diagonal (shorter nets first, leaves room for longer nets)
+        2. Negative constraint score (higher constraint = route first, so negate)
+        3. Pad count (fewer pads = higher priority, simpler nets first)
+        4. Bounding box diagonal (shorter nets first, leaves room for longer nets)
+
+        Issue #1020: Adds constraint-aware ordering. Nets connecting to fine-pitch
+        ICs are routed before unconstrained nets within the same priority class.
+        This improves routing success by giving highly-constrained nets first access
+        to limited routing resources (escape channels, narrow clearances).
 
         This ordering strategy routes critical signal classes first (power, clock),
-        then within each class routes simpler/shorter nets before complex/longer ones.
-        This improves overall routing success by giving constrained long nets more
-        routing freedom after simple nets have been routed.
+        then within each class routes highly-constrained nets (fine-pitch IC connections)
+        before simpler/shorter nets, giving constrained nets the best routing freedom.
         """
         net_name = self.net_names.get(net_id, "")
         net_class = self.net_class_map.get(net_name)
         priority = net_class.priority if net_class else 10
         pad_count = len(self.nets.get(net_id, []))
         distance = self._get_net_bounding_box_diagonal(net_id)
-        return (priority, pad_count, distance)
+
+        # Issue #1020: Constraint score (negated so higher constraint = lower tuple value)
+        constraint_score = self._calculate_constraint_score(net_id)
+
+        return (priority, -constraint_score, pad_count, distance)
 
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.

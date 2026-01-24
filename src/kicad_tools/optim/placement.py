@@ -37,7 +37,9 @@ from kicad_tools.optim.thermal import (
 )
 
 if TYPE_CHECKING:
+    from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
     from kicad_tools.optim.zones import PlacementZone
+    from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import PCB
 
 __all__ = ["PlacementOptimizer"]
@@ -60,6 +62,7 @@ class PlacementOptimizer:
         board_outline: Polygon,
         config: PlacementConfig | None = None,
         record_decisions: bool = False,
+        perf_config: PerformanceConfig | None = None,
     ):
         """
         Initialize the optimizer.
@@ -68,6 +71,7 @@ class PlacementOptimizer:
             board_outline: Polygon defining the board boundary
             config: Optimization parameters
             record_decisions: If True, record placement decisions for later querying
+            perf_config: Performance configuration for GPU acceleration
         """
         self.board_outline = board_outline
         self.config = config or PlacementConfig()
@@ -84,6 +88,11 @@ class PlacementOptimizer:
         self.board_edges = BoardEdges.from_polygon(board_outline)
         self._edge_constraints: dict[str, EdgeConstraint] = {}
 
+        # GPU acceleration
+        self._perf_config = perf_config
+        self._gpu_accelerator: PlacementGPUAccelerator | None = None
+        self._gpu_enabled = False
+
         # Decision recording
         self.record_decisions = record_decisions
         self._decision_store: DecisionStore | None = None
@@ -92,6 +101,49 @@ class PlacementOptimizer:
             from kicad_tools.explain.decisions import DecisionStore
 
             self._decision_store = DecisionStore()
+
+    @property
+    def gpu_enabled(self) -> bool:
+        """Return True if GPU acceleration is enabled for this optimizer."""
+        return self._gpu_enabled
+
+    @property
+    def gpu_backend(self) -> str | None:
+        """Return the active GPU backend type, or None if not using GPU."""
+        if self._gpu_accelerator is not None:
+            return self._gpu_accelerator.backend_type.value
+        return None
+
+    def enable_gpu(self, force: bool = False) -> bool:
+        """Enable GPU acceleration if available.
+
+        Args:
+            force: If True, enable GPU regardless of component count threshold.
+
+        Returns:
+            True if GPU was enabled, False if not available.
+        """
+        from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
+        from kicad_tools.acceleration import get_best_available_backend, BackendType
+
+        backend = get_best_available_backend()
+        if backend.backend_type == BackendType.CPU and not force:
+            return False
+
+        self._gpu_accelerator = PlacementGPUAccelerator(
+            perf_config=self._perf_config, backend=backend
+        )
+        self._gpu_enabled = True
+
+        if self.components:
+            self._gpu_accelerator.prepare_batch(self.components)
+
+        return True
+
+    def disable_gpu(self) -> None:
+        """Disable GPU acceleration and use CPU for all calculations."""
+        self._gpu_enabled = False
+        self._gpu_accelerator = None
 
     @classmethod
     def from_pcb(
@@ -103,6 +155,7 @@ class PlacementOptimizer:
         edge_detect: bool = False,
         edge_constraints: list[EdgeConstraint] | None = None,
         record_decisions: bool = False,
+        perf_config: PerformanceConfig | None = None,
     ) -> PlacementOptimizer:
         """
         Create optimizer from a loaded PCB.
@@ -117,6 +170,7 @@ class PlacementOptimizer:
             edge_detect: If True, auto-detect edge components (connectors, etc.)
             edge_constraints: Manual list of edge constraints to apply
             record_decisions: If True, record placement decisions for later querying
+            perf_config: Performance configuration for GPU acceleration
         """
         fixed_refs = set(fixed_refs or [])
 
@@ -146,7 +200,7 @@ class PlacementOptimizer:
                     max_y - min_y,
                 )
 
-        optimizer = cls(board, config, record_decisions=record_decisions)
+        optimizer = cls(board, config, record_decisions=record_decisions, perf_config=perf_config)
 
         # Add components
         for fp in pcb.footprints:
@@ -1283,20 +1337,58 @@ class PlacementOptimizer:
 
         return total_force
 
-    def compute_forces_and_torques(self) -> tuple[dict[str, Vector2D], dict[str, float]]:
-        """
-        Compute net forces and torques on all components.
+    def _init_gpu_accelerator(self) -> None:
+        """Initialize GPU accelerator if not already done.
 
-        Uses edge-to-edge charge interactions where each component's edges
-        repel all other components' edges.
+        Creates the GPU accelerator and prepares edge batch for the current components.
+        Called lazily on first force computation.
+        """
+        if self._gpu_accelerator is not None:
+            return
+
+        from kicad_tools.acceleration.config import should_use_gpu
+
+        # Check if GPU should be used based on component count
+        n_components = len(self.components)
+        if self._perf_config is not None:
+            self._gpu_enabled = should_use_gpu(self._perf_config, n_components, "placement")
+        else:
+            # Default: use GPU for 50+ components
+            self._gpu_enabled = n_components >= 50
+
+        if self._gpu_enabled:
+            from kicad_tools.acceleration.kernels.placement import PlacementGPUAccelerator
+
+            self._gpu_accelerator = PlacementGPUAccelerator(perf_config=self._perf_config)
+            self._gpu_accelerator.prepare_batch(self.components)
+
+    def _compute_component_repulsion_gpu(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute component-component repulsion forces using GPU.
 
         Returns:
-            Tuple of (forces dict, torques dict)
+            Tuple of (forces dict, torques dict) for component repulsion only.
+        """
+        if self._gpu_accelerator is None:
+            return {}, {}
+
+        fixed_refs = {comp.ref for comp in self.components if comp.fixed}
+        return self._gpu_accelerator.compute_repulsion_forces(
+            self.components, self.config, fixed_refs
+        )
+
+    def _compute_component_repulsion_cpu(
+        self,
+    ) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """Compute component-component repulsion forces using CPU.
+
+        Returns:
+            Tuple of (forces dict, torques dict) for component repulsion only.
         """
         forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
         torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
 
-        # 1. Component-component repulsion (edge-to-edge charges)
         for i, comp1 in enumerate(self.components):
             outline1 = comp1.outline()
             center1 = comp1.position()
@@ -1340,6 +1432,40 @@ class PlacementOptimizer:
                             edge_center = (e2_start + e2_end) * 0.5
                             r = edge_center - center2
                             torques[comp2.ref] += r.cross(force) + edge_torque
+
+        return forces, torques
+
+    def compute_forces_and_torques(self) -> tuple[dict[str, Vector2D], dict[str, float]]:
+        """
+        Compute net forces and torques on all components.
+
+        Uses edge-to-edge charge interactions where each component's edges
+        repel all other components' edges. GPU acceleration is used when
+        available and the component count exceeds the configured threshold.
+
+        Returns:
+            Tuple of (forces dict, torques dict)
+        """
+        # Initialize GPU accelerator on first call
+        self._init_gpu_accelerator()
+
+        forces: dict[str, Vector2D] = {comp.ref: Vector2D(0.0, 0.0) for comp in self.components}
+        torques: dict[str, float] = {comp.ref: 0.0 for comp in self.components}
+
+        # 1. Component-component repulsion (edge-to-edge charges)
+        # Use GPU when available, otherwise fall back to CPU
+        if self._gpu_enabled and self._gpu_accelerator is not None:
+            # Update edge positions (components may have moved)
+            self._gpu_accelerator.update_edge_positions(self.components)
+            repulsion_forces, repulsion_torques = self._compute_component_repulsion_gpu()
+        else:
+            repulsion_forces, repulsion_torques = self._compute_component_repulsion_cpu()
+
+        # Add repulsion forces/torques to totals
+        for ref, force in repulsion_forces.items():
+            forces[ref] = forces[ref] + force
+        for ref, torque in repulsion_torques.items():
+            torques[ref] += torque
 
         # 2. Board boundary forces (edge-to-edge with board)
         for comp in self.components:
