@@ -81,10 +81,13 @@ ${YELLOW}DESCRIPTION:${NC}
 
     - Daemon status (running/stopped, uptime)
     - System state (issue counts by label)
-    - Shepherd pool status (active/idle, assigned issues)
+    - Shepherd pool status (active/idle, assigned issues, idle time)
     - Support role status (Architect, Hermit, Guide, Champion)
     - Session statistics (completed issues, PRs merged)
     - Available Layer 3 interventions
+
+    For active shepherds, idle time is computed from the output file
+    modification time (time since last output was written).
 
 ${YELLOW}LAYER 3 ROLE:${NC}
     The human observer (Layer 3) uses this command to:
@@ -199,6 +202,73 @@ format_uptime() {
     fi
 }
 
+# Format seconds into human-readable duration (e.g., "2m 30s")
+format_seconds() {
+    local seconds="$1"
+
+    if [[ -z "$seconds" ]] || [[ "$seconds" -lt 0 ]]; then
+        echo "unknown"
+        return
+    fi
+
+    if [[ $seconds -lt 60 ]]; then
+        echo "${seconds}s"
+    elif [[ $seconds -lt 3600 ]]; then
+        local mins=$((seconds / 60))
+        local secs=$((seconds % 60))
+        if [[ $secs -gt 0 ]]; then
+            echo "${mins}m ${secs}s"
+        else
+            echo "${mins}m"
+        fi
+    elif [[ $seconds -lt 86400 ]]; then
+        local hours=$((seconds / 3600))
+        local mins=$(((seconds % 3600) / 60))
+        echo "${hours}h ${mins}m"
+    else
+        local days=$((seconds / 86400))
+        local hours=$(((seconds % 86400) / 3600))
+        echo "${days}d ${hours}h"
+    fi
+}
+
+# Get idle time in seconds from output file modification time
+# Returns idle seconds, or -1 if file doesn't exist or can't be read
+get_file_idle_seconds() {
+    local output_file="$1"
+
+    if [[ -z "$output_file" ]] || [[ "$output_file" == "null" ]]; then
+        echo "-1"
+        return
+    fi
+
+    if [[ ! -f "$output_file" ]]; then
+        echo "-1"
+        return
+    fi
+
+    local now_epoch
+    local file_mtime
+
+    now_epoch=$(date +%s)
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS: stat -f %m returns modification time as epoch seconds
+        file_mtime=$(stat -f %m "$output_file" 2>/dev/null || echo "0")
+    else
+        # Linux: stat -c %Y returns modification time as epoch seconds
+        file_mtime=$(stat -c %Y "$output_file" 2>/dev/null || echo "0")
+    fi
+
+    if [[ "$file_mtime" == "0" ]]; then
+        echo "-1"
+        return
+    fi
+
+    local idle_seconds=$((now_epoch - file_mtime))
+    echo "$idle_seconds"
+}
+
 # Get GitHub issue/PR counts
 get_github_counts() {
     local label="$1"
@@ -235,6 +305,37 @@ output_json() {
     local pending_reviews=$(get_github_counts "loom:review-requested" "pr")
     local ready_to_merge=$(get_github_counts "loom:pr" "pr")
 
+    # Build shepherd status with computed idle times
+    local shepherds_json="{"
+    local first_shepherd=true
+    if [[ -f "$DAEMON_STATE" ]]; then
+        for i in 1 2 3; do
+            local shepherd_id="shepherd-$i"
+            local issue
+            local output_file
+            issue=$(jq -r ".shepherds[\"$shepherd_id\"].issue // null" "$DAEMON_STATE" 2>/dev/null)
+            output_file=$(jq -r ".shepherds[\"$shepherd_id\"].output_file // null" "$DAEMON_STATE" 2>/dev/null)
+
+            local idle_seconds=-1
+            local idle_display="null"
+
+            if [[ "$issue" != "null" ]] && [[ -n "$issue" ]]; then
+                idle_seconds=$(get_file_idle_seconds "$output_file")
+                if [[ "$idle_seconds" -ge 0 ]]; then
+                    idle_display="\"$(format_seconds "$idle_seconds")\""
+                fi
+            fi
+
+            if [[ "$first_shepherd" == "true" ]]; then
+                first_shepherd=false
+            else
+                shepherds_json+=","
+            fi
+            shepherds_json+="\"$shepherd_id\":{\"issue\":$issue,\"idle_seconds\":$idle_seconds,\"idle_display\":$idle_display}"
+        done
+    fi
+    shepherds_json+="}"
+
     # Build JSON output
     cat <<EOF
 {
@@ -252,6 +353,7 @@ output_json() {
     "pending_reviews": $pending_reviews,
     "ready_to_merge": $ready_to_merge
   },
+  "shepherds": $shepherds_json,
   "daemon_state": $daemon_state
 }
 EOF
@@ -342,15 +444,37 @@ output_formatted() {
             local shepherd_id="shepherd-$i"
             local issue
             local started
+            local output_file
+            local idle_since
             issue=$(jq -r ".shepherds[\"$shepherd_id\"].issue // null" "$DAEMON_STATE" 2>/dev/null)
             started=$(jq -r ".shepherds[\"$shepherd_id\"].started // null" "$DAEMON_STATE" 2>/dev/null)
+            output_file=$(jq -r ".shepherds[\"$shepherd_id\"].output_file // null" "$DAEMON_STATE" 2>/dev/null)
+            idle_since=$(jq -r ".shepherds[\"$shepherd_id\"].idle_since // null" "$DAEMON_STATE" 2>/dev/null)
 
             if [[ "$issue" != "null" ]] && [[ -n "$issue" ]]; then
                 local duration
                 duration=$(format_uptime "$started")
-                echo -e "    ${GREEN}$shepherd_id:${NC} Issue #$issue (${duration})"
+
+                # Check output file for idle time
+                local idle_seconds
+                idle_seconds=$(get_file_idle_seconds "$output_file")
+
+                if [[ "$idle_seconds" -ge 0 ]]; then
+                    local idle_display
+                    idle_display=$(format_seconds "$idle_seconds")
+                    echo -e "    ${GREEN}$shepherd_id:${NC} Issue #$issue (${duration}, idle ${idle_display})"
+                else
+                    echo -e "    ${GREEN}$shepherd_id:${NC} Issue #$issue (${duration})"
+                fi
             else
-                echo -e "    ${GRAY}$shepherd_id:${NC} idle"
+                # Show idle duration for idle shepherds
+                if [[ "$idle_since" != "null" ]] && [[ -n "$idle_since" ]]; then
+                    local idle_duration
+                    idle_duration=$(format_uptime "$idle_since")
+                    echo -e "    ${GRAY}$shepherd_id:${NC} idle (${idle_duration})"
+                else
+                    echo -e "    ${GRAY}$shepherd_id:${NC} idle"
+                fi
             fi
         done
     else
