@@ -3016,6 +3016,12 @@ def _add_calibrate_parser(subparsers) -> None:
         help="Show current performance configuration without running calibration",
     )
     calibrate_parser.add_argument(
+        "--show-gpu",
+        action="store_true",
+        dest="calibrate_show_gpu",
+        help="Show GPU acceleration status and suggest install command",
+    )
+    calibrate_parser.add_argument(
         "--benchmark",
         action="store_true",
         dest="calibrate_benchmark",

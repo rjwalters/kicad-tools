@@ -115,6 +115,14 @@ native = [
     "cmake>=3.15",
     "ninja>=1.10",
 ]
+# CUDA GPU acceleration (NVIDIA GPUs on Linux/Windows)
+cuda = [
+    "cupy-cuda12x>=13.0",
+]
+# Metal GPU acceleration (Apple Silicon Macs)
+metal = [
+    "mlx>=0.5",
+]
 # All optional features
 all = [
     "rtree>=1.0",
@@ -126,6 +134,8 @@ all = [
     "pyyaml>=6.0",
     "fastmcp>=2.0,<3",
     "pydantic>=2.0",
+    "cupy-cuda12x>=13.0",
+    "mlx>=0.5",
 ]
 # Development dependencies
 dev = [

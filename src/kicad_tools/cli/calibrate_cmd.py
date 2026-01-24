@@ -32,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Show current performance configuration without running calibration",
     )
     parser.add_argument(
+        "--show-gpu",
+        action="store_true",
+        help="Show GPU acceleration status and suggest install command",
+    )
+    parser.add_argument(
         "--benchmark",
         action="store_true",
         help="Run full benchmarks with detailed output",
@@ -60,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    # Handle --show-gpu: display GPU acceleration status
+    if args.show_gpu:
+        from kicad_tools.acceleration.detection import show_gpu_status
+
+        show_gpu_status(verbose=args.verbose)
+        return 0
 
     # Handle --show: just display current config
     if args.show:

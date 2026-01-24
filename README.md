@@ -22,7 +22,25 @@ Whether you're building an AI assistant that reviews PCB designs, automating DRC
 ## Installation
 
 ```bash
+# Base install (CPU only)
 pip install kicad-tools
+
+# With CUDA GPU acceleration (NVIDIA GPUs on Linux/Windows)
+pip install kicad-tools[cuda]
+
+# With Metal GPU acceleration (Apple Silicon Macs)
+pip install kicad-tools[metal]
+
+# With native C++ router backend
+pip install kicad-tools[native]
+
+# Everything (all optional dependencies)
+pip install kicad-tools[all]
+```
+
+To check GPU acceleration status:
+```bash
+kct calibrate --show-gpu
 ```
 
 ## Quick Start
