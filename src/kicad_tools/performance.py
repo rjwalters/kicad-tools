@@ -3,6 +3,9 @@ Performance configuration for kicad-tools routing operations.
 
 Provides resource-aware defaults and calibrated settings for optimal
 routing performance based on the local machine's capabilities.
+
+Includes GPU acceleration configuration for signal integrity analysis
+and other compute-intensive operations.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -20,6 +23,9 @@ else:
         import tomli as tomllib
     except ImportError:
         tomllib = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from kicad_tools.acceleration.config import GpuConfig
 
 # User config directory for performance calibration
 PERFORMANCE_CONFIG_DIR = Path.home() / ".config" / "kicad-tools"
@@ -87,6 +93,13 @@ def detect_available_memory_gb() -> float:
     return 8.0
 
 
+def _create_default_gpu_config() -> GpuConfig:
+    """Create default GPU configuration with auto-detection."""
+    from kicad_tools.acceleration.config import GpuConfig
+
+    return GpuConfig()
+
+
 @dataclass
 class PerformanceConfig:
     """Configuration for routing performance optimization.
@@ -106,6 +119,7 @@ class PerformanceConfig:
         partition_cols: Number of partition columns for region-based routing.
         calibrated: Whether these settings came from calibration.
         calibration_date: ISO date string of last calibration.
+        gpu: GPU acceleration configuration.
     """
 
     cpu_cores: int = field(default_factory=detect_cpu_count)
@@ -118,6 +132,7 @@ class PerformanceConfig:
     partition_cols: int = 2
     calibrated: bool = False
     calibration_date: str = ""
+    gpu: GpuConfig = field(default_factory=_create_default_gpu_config)
 
     def __post_init__(self):
         """Apply auto-detection for zero values."""
@@ -145,11 +160,14 @@ class PerformanceConfig:
         """Create config with auto-detected system resources.
 
         Returns:
-            PerformanceConfig with detected CPU cores and memory.
+            PerformanceConfig with detected CPU cores, memory, and GPU.
         """
+        from kicad_tools.acceleration.config import GpuConfig
+
         return cls(
             cpu_cores=detect_cpu_count(),
             available_memory_gb=detect_available_memory_gb(),
+            gpu=GpuConfig(),
         )
 
     @classmethod
@@ -159,6 +177,8 @@ class PerformanceConfig:
         Returns:
             PerformanceConfig from calibration file, or auto-detected if not available.
         """
+        from kicad_tools.acceleration.config import GpuConfig, GpuThresholds
+
         if not PERFORMANCE_CONFIG_FILE.exists():
             return cls.detect()
 
@@ -172,6 +192,22 @@ class PerformanceConfig:
             cal = data.get("calibration", {})
             routing = data.get("routing", {})
             grid = data.get("grid", {})
+            gpu_data = data.get("gpu", {})
+
+            # Load GPU config from file or use defaults
+            gpu_thresholds = GpuThresholds(
+                min_grid_cells=gpu_data.get("min_grid_cells", 100_000),
+                min_components=gpu_data.get("min_components", 50),
+                min_population=gpu_data.get("min_population", 20),
+                min_trace_pairs=gpu_data.get("min_trace_pairs", 100),
+            )
+            gpu_config = GpuConfig(
+                backend=gpu_data.get("backend", "auto"),
+                device_id=gpu_data.get("device_id", 0),
+                memory_limit_mb=gpu_data.get("memory_limit_mb", 0),
+                thresholds=gpu_thresholds,
+                enabled=gpu_data.get("enabled", True),
+            )
 
             return cls(
                 cpu_cores=cal.get("cpu_cores", detect_cpu_count()),
@@ -184,6 +220,7 @@ class PerformanceConfig:
                 grid_memory_limit_mb=grid.get("max_memory_mb", 500),
                 calibrated=True,
                 calibration_date=cal.get("date", ""),
+                gpu=gpu_config,
             )
         except Exception:
             return cls.detect()
@@ -192,14 +229,29 @@ class PerformanceConfig:
     def high_performance(cls) -> PerformanceConfig:
         """Create aggressive settings for maximum throughput.
 
-        Uses all available CPU cores and higher trial counts for
-        better routing results at the cost of longer runtime.
+        Uses all available CPU cores, higher trial counts, and GPU
+        acceleration for better routing results at the cost of longer runtime.
 
         Returns:
             PerformanceConfig optimized for maximum performance.
         """
+        from kicad_tools.acceleration.config import GpuConfig, GpuThresholds
+
         cpu_cores = detect_cpu_count()
         memory_gb = detect_available_memory_gb()
+
+        # Lower GPU thresholds for high-performance mode to use GPU more often
+        gpu_thresholds = GpuThresholds(
+            min_grid_cells=50_000,  # Lower threshold
+            min_components=25,
+            min_population=10,
+            min_trace_pairs=50,  # Use GPU for smaller SI problems
+        )
+        gpu_config = GpuConfig(
+            backend="auto",
+            thresholds=gpu_thresholds,
+            enabled=True,
+        )
 
         return cls(
             cpu_cores=cpu_cores,
@@ -217,6 +269,7 @@ class PerformanceConfig:
             partition_cols=max(2, int(cpu_cores**0.5)),
             calibrated=False,
             calibration_date="",
+            gpu=gpu_config,
         )
 
     def save(self, path: Path | None = None) -> None:
@@ -260,6 +313,20 @@ partition_cols = {self.partition_cols}
 [grid]
 # Maximum memory for routing grid (MB)
 max_memory_mb = {self.grid_memory_limit_mb}
+
+[gpu]
+# GPU acceleration settings
+# backend: "auto", "cuda", "metal", or "cpu"
+backend = "{self.gpu.backend}"
+enabled = {str(self.gpu.enabled).lower()}
+device_id = {self.gpu.device_id}
+memory_limit_mb = {self.gpu.memory_limit_mb}
+
+# Minimum problem sizes for GPU usage (below these, CPU is faster)
+min_grid_cells = {self.gpu.thresholds.min_grid_cells}
+min_components = {self.gpu.thresholds.min_components}
+min_population = {self.gpu.thresholds.min_population}
+min_trace_pairs = {self.gpu.thresholds.min_trace_pairs}
 '''
         path.write_text(content)
 
@@ -285,6 +352,16 @@ max_memory_mb = {self.grid_memory_limit_mb}
             },
             "grid": {
                 "max_memory_mb": self.grid_memory_limit_mb,
+            },
+            "gpu": {
+                "backend": self.gpu.backend,
+                "enabled": self.gpu.enabled,
+                "device_id": self.gpu.device_id,
+                "memory_limit_mb": self.gpu.memory_limit_mb,
+                "min_grid_cells": self.gpu.thresholds.min_grid_cells,
+                "min_components": self.gpu.thresholds.min_components,
+                "min_population": self.gpu.thresholds.min_population,
+                "min_trace_pairs": self.gpu.thresholds.min_trace_pairs,
             },
         }
 
