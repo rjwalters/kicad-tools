@@ -304,6 +304,19 @@ def show_current_config(verbose: bool = False) -> PerformanceConfig:
     print("Grid Settings:")
     print(f"  Memory limit: {config.grid_memory_limit_mb} MB")
 
+    print()
+    print("GPU Settings:")
+    print(f"  Backend:      {config.gpu.backend}")
+    print(f"  Device ID:    {config.gpu.device_id}")
+    print(f"  Memory limit: {config.gpu.memory_limit_mb} MB (0 = no limit)")
+
+    print()
+    print("GPU Thresholds (min problem size for GPU usage):")
+    print(f"  Grid cells:     {config.gpu.thresholds.min_grid_cells:,}")
+    print(f"  Components:     {config.gpu.thresholds.min_components}")
+    print(f"  Population:     {config.gpu.thresholds.min_population}")
+    print(f"  Trace pairs:    {config.gpu.thresholds.min_trace_pairs}")
+
     if verbose:
         print()
         print(f"Config file: {PERFORMANCE_CONFIG_FILE}")
