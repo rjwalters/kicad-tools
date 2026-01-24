@@ -21,6 +21,10 @@ from .pinmap import (
     PinMapping,
     compare_schematic_symbols,
     compare_symbols,
+    extract_pins_from_sexp,
+    load_symbol_from_file,
+    load_symbol_from_schematic,
+    match_pins,
 )
 from .symbol_ops import (
     SymbolReplacement,
@@ -54,6 +58,10 @@ __all__ = [
     "PinMapping",
     "compare_schematic_symbols",
     "compare_symbols",
+    "extract_pins_from_sexp",
+    "load_symbol_from_file",
+    "load_symbol_from_schematic",
+    "match_pins",
     # symbol_ops
     "SymbolReplacement",
     "add_symbol_pin",
