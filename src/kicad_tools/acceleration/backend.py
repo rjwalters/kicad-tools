@@ -1,340 +1,256 @@
-"""Backend abstraction for GPU-accelerated array operations.
+"""Backend abstraction for CPU and GPU array operations.
 
-Provides a unified interface for NumPy (CPU), CuPy (CUDA), and MLX (Metal)
-array operations. This allows algorithms to be written once and run on
-any available backend.
-
-Example::
-
-    from kicad_tools.acceleration.backend import ArrayBackend
-
-    backend = ArrayBackend.create("auto")  # Auto-detect best backend
-
-    # Use like NumPy
-    arr = backend.array([[1, 2], [3, 4]], dtype=backend.float32)
-    result = backend.sum(arr, axis=1)
-    numpy_result = backend.to_numpy(result)
+Provides a unified interface for array operations that can run on CPU (NumPy)
+or GPU (CuPy for CUDA, MLX for Metal). The backend automatically falls back
+to CPU if GPU libraries are unavailable.
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
-from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
-class BackendType(str, Enum):
-    """Available compute backends."""
+class BackendType(Enum):
+    """Available backend types for array operations."""
 
     CPU = "cpu"
     CUDA = "cuda"
     METAL = "metal"
 
 
+@runtime_checkable
+class ArrayModule(Protocol):
+    """Protocol for array module (numpy-like interface)."""
+
+    def array(self, data: Any, dtype: Any = None) -> Any: ...
+    def zeros(self, shape: tuple[int, ...], dtype: Any = None) -> Any: ...
+    def ones(self, shape: tuple[int, ...], dtype: Any = None) -> Any: ...
+    def sqrt(self, x: Any) -> Any: ...
+    def sum(self, x: Any, axis: int | None = None) -> Any: ...
+    def maximum(self, x: Any, y: Any) -> Any: ...
+    def clip(self, x: Any, a_min: Any, a_max: Any) -> Any: ...
+
+
 @dataclass
 class ArrayBackend:
-    """Unified interface for array operations across CPU/GPU backends.
+    """Backend abstraction for array operations.
 
-    Wraps NumPy, CuPy, or MLX to provide consistent array operations.
-    The backend is selected at creation time and all operations use
-    that backend's array module.
+    Provides a unified interface for CPU (NumPy) and GPU (CuPy/MLX) operations.
+    Automatically handles data transfer between CPU and GPU.
 
     Attributes:
-        backend_type: The compute backend being used.
+        backend_type: The type of backend (CPU, CUDA, or METAL).
         xp: The array module (numpy, cupy, or mlx.core).
-        float32: Float32 dtype for this backend.
-        float64: Float64 dtype for this backend.
-        int32: Int32 dtype for this backend.
-        int64: Int64 dtype for this backend.
     """
 
     backend_type: BackendType
     xp: Any  # numpy, cupy, or mlx.core module
 
-    def __post_init__(self):
-        """Initialize dtype aliases for the backend."""
-        self.float32 = self.xp.float32
-        self.float64 = getattr(self.xp, "float64", self.xp.float32)
-        self.int32 = self.xp.int32
-        self.int64 = getattr(self.xp, "int64", self.xp.int32)
-
     @classmethod
-    def create(cls, backend: BackendType | str) -> ArrayBackend:
+    def create(cls, backend_type: BackendType | str = BackendType.CPU) -> ArrayBackend:
         """Create a backend instance.
 
         Args:
-            backend: Backend type to use. "auto" will detect best available.
+            backend_type: Desired backend type. Falls back to CPU if unavailable.
 
         Returns:
-            ArrayBackend configured for the requested or detected backend.
-
-        Raises:
-            ImportError: If requested backend library is not available.
+            ArrayBackend configured for the requested (or fallback) backend.
         """
-        if isinstance(backend, str):
-            backend = BackendType(backend.lower())
+        if isinstance(backend_type, str):
+            backend_type = BackendType(backend_type)
 
-        if backend == BackendType.CPU:
-            return cls(backend_type=BackendType.CPU, xp=np)
-
-        if backend == BackendType.CUDA:
+        if backend_type == BackendType.CUDA:
             try:
                 import cupy as cp
 
                 return cls(backend_type=BackendType.CUDA, xp=cp)
-            except ImportError as e:
-                raise ImportError(
-                    "CuPy not installed. Install with: pip install cupy-cuda12x"
-                ) from e
+            except ImportError:
+                warnings.warn(
+                    "CuPy not available, falling back to CPU. "
+                    "Install with: pip install cupy-cuda12x",
+                    stacklevel=2,
+                )
+                return cls(backend_type=BackendType.CPU, xp=np)
 
-        if backend == BackendType.METAL:
+        elif backend_type == BackendType.METAL:
             try:
                 import mlx.core as mx
 
                 return cls(backend_type=BackendType.METAL, xp=mx)
-            except ImportError as e:
-                raise ImportError(
-                    "MLX not installed. Install with: pip install mlx"
-                ) from e
+            except ImportError:
+                warnings.warn(
+                    "MLX not available, falling back to CPU. "
+                    "Install with: pip install mlx",
+                    stacklevel=2,
+                )
+                return cls(backend_type=BackendType.CPU, xp=np)
 
-        raise ValueError(f"Unknown backend: {backend}")
-
-    @classmethod
-    def auto(cls) -> ArrayBackend:
-        """Create backend with auto-detection.
-
-        Tries CUDA first, then Metal, falling back to CPU.
-
-        Returns:
-            ArrayBackend with best available backend.
-        """
-        # Try CUDA first (NVIDIA)
-        try:
-            import cupy as cp
-
-            # Verify GPU is actually available
-            cp.cuda.runtime.getDeviceCount()
-            return cls(backend_type=BackendType.CUDA, xp=cp)
-        except Exception:
-            pass
-
-        # Try Metal (Apple Silicon)
-        try:
-            import mlx.core as mx
-
-            # MLX should work if importable on Apple Silicon
-            import platform
-
-            if platform.machine() == "arm64":
-                return cls(backend_type=BackendType.METAL, xp=mx)
-        except Exception:
-            pass
-
-        # Fallback to CPU (NumPy)
         return cls(backend_type=BackendType.CPU, xp=np)
 
     @property
     def is_gpu(self) -> bool:
-        """Check if this backend uses GPU acceleration."""
+        """Return True if this backend uses GPU acceleration."""
         return self.backend_type in (BackendType.CUDA, BackendType.METAL)
 
     def array(self, data: Any, dtype: Any = None) -> Any:
-        """Create an array on this backend.
-
-        Args:
-            data: Input data (list, tuple, or numpy array).
-            dtype: Optional dtype for the array.
-
-        Returns:
-            Array on this backend.
-        """
+        """Create array on the backend device."""
         if dtype is None:
-            dtype = self.float32
+            dtype = self.xp.float32
         return self.xp.array(data, dtype=dtype)
 
     def zeros(self, shape: tuple[int, ...], dtype: Any = None) -> Any:
-        """Create a zero-filled array.
-
-        Args:
-            shape: Shape of the array.
-            dtype: Optional dtype for the array.
-
-        Returns:
-            Zero-filled array on this backend.
-        """
+        """Create zero-filled array on the backend device."""
         if dtype is None:
-            dtype = self.float32
+            dtype = self.xp.float32
         return self.xp.zeros(shape, dtype=dtype)
 
     def ones(self, shape: tuple[int, ...], dtype: Any = None) -> Any:
-        """Create an array filled with ones.
-
-        Args:
-            shape: Shape of the array.
-            dtype: Optional dtype for the array.
-
-        Returns:
-            Array filled with ones on this backend.
-        """
+        """Create one-filled array on the backend device."""
         if dtype is None:
-            dtype = self.float32
+            dtype = self.xp.float32
         return self.xp.ones(shape, dtype=dtype)
 
-    def to_numpy(self, arr: Any) -> NDArray[Any]:
-        """Convert array to NumPy.
-
-        Args:
-            arr: Array from any backend.
-
-        Returns:
-            NumPy array with same data.
-        """
+    def to_numpy(self, arr: Any) -> NDArray[np.float32]:
+        """Transfer array to CPU as numpy array."""
         if self.backend_type == BackendType.CPU:
             return arr
-        if self.backend_type == BackendType.CUDA:
-            return arr.get()  # CuPy uses .get()
-        if self.backend_type == BackendType.METAL:
+        elif self.backend_type == BackendType.CUDA:
+            return arr.get()  # CuPy's method to transfer to CPU
+        elif self.backend_type == BackendType.METAL:
             return np.array(arr)  # MLX converts via np.array()
-        return np.asarray(arr)
+        return arr
 
     def sqrt(self, x: Any) -> Any:
         """Element-wise square root."""
         return self.xp.sqrt(x)
 
-    def sum(self, x: Any, axis: int | tuple[int, ...] | None = None) -> Any:
-        """Sum of array elements."""
-        return self.xp.sum(x, axis=axis)
+    def sum(self, x: Any, axis: int | None = None, keepdims: bool = False) -> Any:
+        """Sum array elements along axis."""
+        return self.xp.sum(x, axis=axis, keepdims=keepdims)
+
+    def maximum(self, x: Any, y: Any) -> Any:
+        """Element-wise maximum."""
+        return self.xp.maximum(x, y)
+
+    def clip(self, x: Any, a_min: Any, a_max: Any) -> Any:
+        """Clip array values to range."""
+        return self.xp.clip(x, a_min, a_max)
+
+    def fill_diagonal(self, arr: Any, value: float) -> Any:
+        """Fill diagonal of 2D array with value (returns new array)."""
+        if self.backend_type == BackendType.METAL:
+            # MLX doesn't have fill_diagonal, use mask approach
+            n = arr.shape[0]
+            # Create identity mask
+            eye = self.xp.eye(n, dtype=arr.dtype)
+            # Zero out diagonal and add value
+            return arr * (1 - eye) + value * eye
+        else:
+            # NumPy and CuPy have fill_diagonal (modifies in place)
+            result = arr.copy()
+            self.xp.fill_diagonal(result, value)
+            return result
+
+    def norm(self, x: Any, axis: int | None = None, keepdims: bool = False) -> Any:
+        """Compute L2 norm along axis."""
+        if self.backend_type == BackendType.METAL:
+            # MLX uses linalg.norm
+            return self.xp.linalg.norm(x, axis=axis, keepdims=keepdims)
+        else:
+            # NumPy and CuPy
+            return self.xp.linalg.norm(x, axis=axis, keepdims=keepdims)
+
+    def expand_dims(self, x: Any, axis: int) -> Any:
+        """Expand array dimensions."""
+        return self.xp.expand_dims(x, axis=axis)
+
+    def tile(self, x: Any, reps: tuple[int, ...]) -> Any:
+        """Tile array."""
+        return self.xp.tile(x, reps)
 
     def abs(self, x: Any) -> Any:
         """Element-wise absolute value."""
         return self.xp.abs(x)
 
-    def maximum(self, x1: Any, x2: Any) -> Any:
-        """Element-wise maximum."""
-        return self.xp.maximum(x1, x2)
-
-    def minimum(self, x1: Any, x2: Any) -> Any:
+    def minimum(self, x: Any, y: Any) -> Any:
         """Element-wise minimum."""
-        return self.xp.minimum(x1, x2)
-
-    def clip(self, x: Any, a_min: float, a_max: float) -> Any:
-        """Clip values to a range."""
-        return self.xp.clip(x, a_min, a_max)
+        return self.xp.minimum(x, y)
 
     def where(self, condition: Any, x: Any, y: Any) -> Any:
         """Element-wise selection based on condition."""
         return self.xp.where(condition, x, y)
 
-    def broadcast_to(self, arr: Any, shape: tuple[int, ...]) -> Any:
-        """Broadcast array to a new shape."""
-        return self.xp.broadcast_to(arr, shape)
-
-    def expand_dims(self, arr: Any, axis: int) -> Any:
-        """Expand array dimensions."""
-        return self.xp.expand_dims(arr, axis=axis)
-
-    def concatenate(self, arrays: list[Any], axis: int = 0) -> Any:
-        """Concatenate arrays along an axis."""
-        return self.xp.concatenate(arrays, axis=axis)
-
-    def stack(self, arrays: list[Any], axis: int = 0) -> Any:
-        """Stack arrays along a new axis."""
-        return self.xp.stack(arrays, axis=axis)
-
-    def arange(self, start: int, stop: int | None = None, step: int = 1) -> Any:
-        """Create evenly spaced values within an interval."""
-        if stop is None:
-            return self.xp.arange(start)
-        return self.xp.arange(start, stop, step)
-
-    def meshgrid(self, *xi: Any, indexing: str = "xy") -> list[Any]:
-        """Create coordinate matrices from coordinate vectors."""
-        return self.xp.meshgrid(*xi, indexing=indexing)
-
-    def einsum(self, subscripts: str, *operands: Any) -> Any:
-        """Einstein summation convention."""
-        return self.xp.einsum(subscripts, *operands)
-
-    def matmul(self, a: Any, b: Any) -> Any:
-        """Matrix multiplication."""
-        return self.xp.matmul(a, b)
-
-    def logical_and(self, x1: Any, x2: Any) -> Any:
+    def logical_and(self, x: Any, y: Any) -> Any:
         """Element-wise logical AND."""
-        return self.xp.logical_and(x1, x2)
+        return self.xp.logical_and(x, y)
 
-    def logical_or(self, x1: Any, x2: Any) -> Any:
+    def logical_or(self, x: Any, y: Any) -> Any:
         """Element-wise logical OR."""
-        return self.xp.logical_or(x1, x2)
-
-    def logical_not(self, x: Any) -> Any:
-        """Element-wise logical NOT."""
-        return self.xp.logical_not(x)
-
-    def all(self, x: Any, axis: int | None = None) -> Any:
-        """Test whether all elements evaluate to True."""
-        return self.xp.all(x, axis=axis)
-
-    def any(self, x: Any, axis: int | None = None) -> Any:
-        """Test whether any element evaluates to True."""
-        return self.xp.any(x, axis=axis)
-
-    def argmax(self, x: Any, axis: int | None = None) -> Any:
-        """Index of maximum value."""
-        return self.xp.argmax(x, axis=axis)
-
-    def argmin(self, x: Any, axis: int | None = None) -> Any:
-        """Index of minimum value."""
-        return self.xp.argmin(x, axis=axis)
-
-    def mean(self, x: Any, axis: int | tuple[int, ...] | None = None) -> Any:
-        """Mean of array elements."""
-        return self.xp.mean(x, axis=axis)
-
-    def std(self, x: Any, axis: int | tuple[int, ...] | None = None) -> Any:
-        """Standard deviation of array elements."""
-        return self.xp.std(x, axis=axis)
-
-    def astype(self, x: Any, dtype: Any) -> Any:
-        """Cast array to a specified type."""
-        return x.astype(dtype)
+        return self.xp.logical_or(x, y)
 
     def reshape(self, x: Any, shape: tuple[int, ...]) -> Any:
         """Reshape array."""
         return self.xp.reshape(x, shape)
 
-    def transpose(self, x: Any, axes: tuple[int, ...] | None = None) -> Any:
-        """Permute array dimensions."""
-        return self.xp.transpose(x, axes=axes)
-
-    def cos(self, x: Any) -> Any:
-        """Element-wise cosine."""
-        return self.xp.cos(x)
-
-    def sin(self, x: Any) -> Any:
-        """Element-wise sine."""
-        return self.xp.sin(x)
-
-    def radians(self, x: Any) -> Any:
-        """Convert angles from degrees to radians."""
-        if hasattr(self.xp, "radians"):
-            return self.xp.radians(x)
-        # MLX fallback
-        return x * (self.xp.pi / 180.0)
+    @property
+    def float32(self) -> Any:
+        """Float32 dtype for this backend."""
+        return self.xp.float32
 
     @property
-    def pi(self) -> float:
-        """Value of pi."""
-        if hasattr(self.xp, "pi"):
-            return self.xp.pi
-        return 3.141592653589793
+    def int32(self) -> Any:
+        """Int32 dtype for this backend."""
+        return self.xp.int32
 
-    @property
-    def inf(self) -> float:
-        """Positive infinity."""
-        if hasattr(self.xp, "inf"):
-            return self.xp.inf
-        return float("inf")
+    @classmethod
+    def auto(cls) -> ArrayBackend:
+        """Create backend with auto-detection (alias for get_best_available_backend)."""
+        return get_best_available_backend()
+
+
+def get_backend(backend_type: BackendType | str = BackendType.CPU) -> ArrayBackend:
+    """Get an array backend instance.
+
+    Args:
+        backend_type: Desired backend type (cpu, cuda, or metal).
+
+    Returns:
+        ArrayBackend configured for the requested type.
+    """
+    return ArrayBackend.create(backend_type)
+
+
+def get_best_available_backend() -> ArrayBackend:
+    """Get the best available backend for this system.
+
+    Tries CUDA first, then Metal, then falls back to CPU.
+
+    Returns:
+        ArrayBackend configured for the best available backend.
+    """
+    # Try CUDA first (NVIDIA GPUs)
+    try:
+        import cupy as cp  # noqa: F401
+
+        return ArrayBackend.create(BackendType.CUDA)
+    except ImportError:
+        pass
+
+    # Try Metal (Apple Silicon)
+    try:
+        import mlx.core as mx  # noqa: F401
+
+        return ArrayBackend.create(BackendType.METAL)
+    except ImportError:
+        pass
+
+    # Fall back to CPU
+    return ArrayBackend.create(BackendType.CPU)
