@@ -1593,7 +1593,6 @@ def merge_routes_into_pcb(
 
     # Insert routes and close the file
     result = content + "\n\n"
-    result += "  ; Autorouted traces\n"
     result += f"  {route_sexp}\n"
     result += ")\n"
 
