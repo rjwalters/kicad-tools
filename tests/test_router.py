@@ -3635,6 +3635,29 @@ class TestMergeRoutesIntoPcb:
         assert "(net_settings" not in result
         assert "(net_class" not in result
 
+    def test_raises_typeerror_for_autorouter_object(self):
+        """Test that passing an Autorouter object raises TypeError with helpful message.
+
+        Issue #1046: Users may incorrectly pass the Autorouter object directly
+        instead of calling router.to_sexp() first.
+        """
+        pcb_content = "(kicad_pcb\n)"
+
+        # Create a mock object with to_sexp method to simulate Autorouter
+        class MockAutorouter:
+            def to_sexp(self) -> str:
+                return "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        mock_router = MockAutorouter()
+
+        with pytest.raises(TypeError) as exc_info:
+            merge_routes_into_pcb(pcb_content, mock_router)  # type: ignore[arg-type]
+
+        # Check that error message is helpful
+        error_msg = str(exc_info.value)
+        assert "to_sexp()" in error_msg
+        assert "router.to_sexp()" in error_msg or "S-expression string" in error_msg
+
 
 class TestKicad7Compatibility:
     """Integration tests for KiCad 7+ compatibility (Issue #45)."""
