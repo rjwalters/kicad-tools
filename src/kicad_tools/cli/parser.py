@@ -570,6 +570,44 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_stackup.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_stackup.add_argument("--format", choices=["text", "json"], default="text")
 
+    # pcb strip
+    pcb_strip = pcb_subparsers.add_parser(
+        "strip",
+        help="Remove traces while preserving placement",
+        description="Remove trace segments and vias from a PCB while preserving "
+        "component placement, zones, and other board elements. Useful for "
+        "re-routing a board from scratch with different routing strategies.",
+    )
+    pcb_strip.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_strip.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input or add -stripped suffix)",
+    )
+    pcb_strip.add_argument(
+        "--nets",
+        help="Comma-separated list of net names to strip (default: all nets)",
+    )
+    pcb_strip.add_argument(
+        "--no-keep-zones",
+        dest="keep_zones",
+        action="store_false",
+        default=True,
+        help="Also remove copper pour zones (default: keep zones)",
+    )
+    pcb_strip.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_strip.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without modifying files",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
