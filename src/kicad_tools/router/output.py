@@ -66,17 +66,58 @@ def show_routing_summary(
             failures_by_net[failure.net] = []
         failures_by_net[failure.net].append(failure)
 
+    # Calculate success percentage
+    success_rate = len(routed_net_ids) / nets_to_route * 100 if nets_to_route > 0 else 0
+
     print(f"\n{'=' * 60}")
-    print("Routing Diagnostics")
+    print("Routing Complete!")
+    print(f"  Nets routed: {len(routed_net_ids)}/{nets_to_route} ({success_rate:.0f}%)")
     print(f"{'=' * 60}")
 
-    # Show successful routes
-    for net_id in sorted(routed_net_ids):
+    # Show unrouted nets section first if there are failures (more important)
+    if unrouted_ids:
+        print("\nUnrouted nets:")
+
+    # Show failed routes first with detailed diagnostics
+    shown_nets_first: set[int] = set()
+    for net_id in sorted(unrouted_ids):
+        if net_id in shown_nets_first:
+            continue
+        shown_nets_first.add(net_id)
+
         net_name = reverse_net.get(net_id, f"Net_{net_id}")
-        length = route_lengths_by_net.get(net_id, 0)
-        vias = route_vias_by_net.get(net_id, 0)
-        via_info = f", {vias} via{'s' if vias != 1 else ''}" if vias > 0 else ""
-        print(f"\n[✓] {net_name}: Routed successfully ({length:.1f}mm{via_info})")
+        net_failures = failures_by_net.get(net_id, [])
+
+        if net_failures:
+            failure = net_failures[0]
+            analysis = getattr(failure, "analysis", None)
+
+            # Use the new format_summary if analysis is available
+            if analysis and hasattr(analysis, "format_summary"):
+                print(analysis.format_summary(net_name))
+            else:
+                # Fallback to basic format
+                cause_name = (
+                    failure.failure_cause.value
+                    if hasattr(failure, "failure_cause")
+                    else "unknown"
+                )
+                print(f"  {net_name}: {cause_name} - {failure.reason}")
+        else:
+            print(f"  {net_name}: No path found")
+
+    # Show successful routes (brief, only in verbose mode)
+    if verbose and routed_net_ids:
+        print(f"\n{'=' * 60}")
+        print("Successfully Routed Nets")
+        print(f"{'=' * 60}")
+
+        for net_id in sorted(routed_net_ids):
+            net_name = reverse_net.get(net_id, f"Net_{net_id}")
+            length = route_lengths_by_net.get(net_id, 0)
+            vias = route_vias_by_net.get(net_id, 0)
+            via_info = f", {vias} via{'s' if vias != 1 else ''}" if vias > 0 else ""
+            print(f"  {net_name}: {length:.1f}mm{via_info}")
 
     # Group failures by cause for summary
     failures_by_cause: dict[str, list[RoutingFailure]] = defaultdict(list)
@@ -89,64 +130,77 @@ def show_routing_summary(
             failures_by_cause[cause_name].append(failure)
             all_failures.append(failure)
 
-    # Show failed routes with detailed diagnostics
-    shown_nets: set[int] = set()
-    for net_id in sorted(unrouted_ids):
-        if net_id in shown_nets:
-            continue
-        shown_nets.add(net_id)
+    # Show verbose details for each failed net
+    if verbose and unrouted_ids:
+        print(f"\n{'=' * 60}")
+        print("Detailed Failure Analysis")
+        print(f"{'=' * 60}")
 
-        net_name = reverse_net.get(net_id, f"Net_{net_id}")
-        net_failures = failures_by_net.get(net_id, [])
+        for net_id in sorted(unrouted_ids):
+            net_name = reverse_net.get(net_id, f"Net_{net_id}")
+            net_failures = failures_by_net.get(net_id, [])
 
-        if net_failures:
+            if not net_failures:
+                continue
+
             failure = net_failures[0]
-            cause_name = (
-                failure.failure_cause.value.upper()
-                if hasattr(failure, "failure_cause")
-                else "UNKNOWN"
-            )
+            analysis = getattr(failure, "analysis", None)
 
-            print(f"\n[✗] {net_name}: FAILED")
-            print(f"    Reason: {cause_name}")
-            print(f"    Details: {failure.reason}")
+            print(f"\n{net_name}:")
 
-            # Show coordinates if available
+            # Show path coordinates
             if hasattr(failure, "source_coords") and failure.source_coords:
                 src = failure.source_coords
                 tgt = failure.target_coords
-                print(f"    Path: ({src[0]:.1f}, {src[1]:.1f}) → ({tgt[0]:.1f}, {tgt[1]:.1f})")
+                src_ref = f"{failure.source_pad[0]}.{failure.source_pad[1]}" if failure.source_pad else "?"
+                tgt_ref = f"{failure.target_pad[0]}.{failure.target_pad[1]}" if failure.target_pad else "?"
+                print(f"  Path: {src_ref} ({src[0]:.1f}, {src[1]:.1f}) -> {tgt_ref} ({tgt[0]:.1f}, {tgt[1]:.1f})")
 
-            # Show suggestions from analysis
-            if hasattr(failure, "analysis") and failure.analysis and failure.analysis.suggestions:
-                print(f"    Suggestion: {failure.analysis.suggestions[0]}")
+            if analysis:
+                print(f"  Root cause: {analysis.root_cause.value} ({analysis.confidence:.0%} confidence)")
+                print(f"  Congestion score: {analysis.congestion_score:.0%}")
 
-            # Verbose mode: show additional details
-            if verbose and hasattr(failure, "analysis") and failure.analysis:
-                analysis = failure.analysis
-                print("\n    --- Detailed Analysis ---")
-                print(f"    Confidence: {analysis.confidence:.0%}")
-                print(f"    Congestion score: {analysis.congestion_score:.0%}")
+                # Show blocked area info
+                area = analysis.failure_area
+                print(f"  Blocked area: ({area.min_x:.1f}, {area.min_y:.1f}) to ({area.max_x:.1f}, {area.max_y:.1f})")
+                print(f"                Size: {area.width:.1f}mm x {area.height:.1f}mm")
+
                 if analysis.clearance_margin != float("inf"):
-                    print(f"    Clearance margin: {analysis.clearance_margin:.2f}mm")
+                    print(f"  Clearance margin: {analysis.clearance_margin:.2f}mm")
+
+                if analysis.blocking_net_name:
+                    print(f"  Blocking net: {analysis.blocking_net_name}")
+
                 if analysis.blocking_elements:
-                    print(f"    Blocking elements: {len(analysis.blocking_elements)}")
-                    for elem in analysis.blocking_elements[:3]:
+                    print(f"  Blocking elements ({len(analysis.blocking_elements)}):")
+                    for elem in analysis.blocking_elements[:5]:
                         elem_desc = f"{elem.type}"
                         if elem.ref:
                             elem_desc += f" ({elem.ref})"
                         if elem.net:
                             elem_desc += f" net={elem.net}"
-                        print(f"      - {elem_desc}")
-                    if len(analysis.blocking_elements) > 3:
-                        print(f"      ... and {len(analysis.blocking_elements) - 3} more")
+                        print(f"    - {elem_desc}")
+                    if len(analysis.blocking_elements) > 5:
+                        print(f"    ... and {len(analysis.blocking_elements) - 5} more")
+
                 if analysis.suggestions:
-                    print("    All suggestions:")
+                    print("  Suggestions:")
                     for suggestion in analysis.suggestions:
-                        print(f"      - {suggestion}")
-        else:
-            print(f"\n[✗] {net_name}: FAILED")
-            print("    Reason: No path found")
+                        print(f"    - {suggestion}")
+
+                # Show actionable suggestions with details
+                if hasattr(analysis, "actionable_suggestions") and analysis.actionable_suggestions:
+                    print("  Actionable fixes:")
+                    for action in analysis.actionable_suggestions:
+                        details = []
+                        if action.affected_component:
+                            details.append(f"component: {action.affected_component}")
+                        if action.affected_net:
+                            details.append(f"net: {action.affected_net}")
+                        if action.direction and action.distance_mm:
+                            details.append(f"{action.direction} {action.distance_mm}mm")
+                        detail_str = f" ({', '.join(details)})" if details else ""
+                        print(f"    [{action.category}] {action.summary}{detail_str}")
 
     # Show summary grouped by failure reason
     if failures_by_cause:
@@ -197,6 +251,26 @@ def show_routing_summary(
                 print("   Try: --layers 4 or --layers 6 for more routing resources\n")
             else:
                 print("   Try: Increase board area or reduce component density\n")
+
+        # Check for ROUTING_ORDER issues (traces blocking other traces)
+        order_failures = failures_by_cause.get("routing_order", [])
+        if order_failures:
+            count = len({f.net for f in order_failures})
+            blocking_nets: set[str] = set()
+            for f in order_failures:
+                if hasattr(f, "analysis") and f.analysis and f.analysis.blocking_net_name:
+                    blocking_nets.add(f.analysis.blocking_net_name)
+            suggestions_shown += 1
+            print(
+                f"{suggestions_shown}. ROUTING ORDER ({count} net{'s' if count != 1 else ''} affected)"
+            )
+            print("   Earlier routed nets are blocking these paths.")
+            if blocking_nets:
+                net_list = ", ".join(sorted(blocking_nets)[:5])
+                if len(blocking_nets) > 5:
+                    net_list += f" +{len(blocking_nets) - 5} more"
+                print(f"   Blocking nets: {net_list}")
+            print("   Try: kct route --strategy negotiated (allows rip-up and reroute)\n")
 
         # Check for BLOCKED_PATH issues
         blocked_failures = failures_by_cause.get("blocked_path", [])

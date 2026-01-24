@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from kicad_tools.router.failure_analysis import (
+    ActionableSuggestion,
     BlockingElement,
     CongestionMap,
     FailureAnalysis,
@@ -110,10 +111,21 @@ class TestFailureCause:
             "layer_conflict",
             "pin_access",
             "keepout",
+            "via_blocked",
+            "routing_order",
         ]
         cause_values = [c.value for c in FailureCause]
         for expected in expected_causes:
             assert expected in cause_values
+
+    def test_cause_descriptions(self):
+        """Test that all causes have human-readable descriptions."""
+        for cause in FailureCause:
+            assert hasattr(cause, "description")
+            assert isinstance(cause.description, str)
+            assert len(cause.description) > 0
+            # Description should not just be the enum value
+            assert cause.description != cause.value
 
 
 class TestBlockingElement:
@@ -747,3 +759,210 @@ class TestAnalyzePadAccessBlockers:
         assert "pad_access_blockers" in d
         assert len(d["pad_access_blockers"]) == 1
         assert d["pad_access_blockers"][0]["pad_ref"] == "U1.13"
+
+
+class TestActionableSuggestion:
+    """Tests for ActionableSuggestion dataclass."""
+
+    def test_actionable_suggestion_creation(self):
+        """Test creating an ActionableSuggestion."""
+        suggestion = ActionableSuggestion(
+            category="placement",
+            priority=1,
+            summary="Move U3 0.5mm east to create routing channel",
+            details="The +3.3V trace blocks MCLK_DAC near U3 pin 15",
+            affected_component="U3",
+            suggested_action="move",
+            direction="east",
+            distance_mm=0.5,
+        )
+
+        assert suggestion.category == "placement"
+        assert suggestion.priority == 1
+        assert "U3" in suggestion.summary
+        assert suggestion.affected_component == "U3"
+        assert suggestion.direction == "east"
+        assert suggestion.distance_mm == 0.5
+
+    def test_actionable_suggestion_to_dict(self):
+        """Test converting ActionableSuggestion to dictionary."""
+        suggestion = ActionableSuggestion(
+            category="design_rules",
+            priority=2,
+            summary="Reduce clearance to 0.1mm",
+            parameter_name="trace_clearance",
+            current_value=0.15,
+            suggested_value=0.10,
+            suggested_action="reduce",
+        )
+
+        d = suggestion.to_dict()
+        assert d["category"] == "design_rules"
+        assert d["priority"] == 2
+        assert d["parameter_name"] == "trace_clearance"
+        assert d["current_value"] == 0.15
+        assert d["suggested_value"] == 0.10
+
+    def test_actionable_suggestion_str(self):
+        """Test string representation of ActionableSuggestion."""
+        suggestion = ActionableSuggestion(
+            category="routing_order",
+            priority=1,
+            summary="Route MCLK_DAC before +3.3V",
+        )
+
+        s = str(suggestion)
+        assert "Route MCLK_DAC before +3.3V" in s
+
+    def test_actionable_suggestion_optional_fields(self):
+        """Test that optional fields are only included when set."""
+        suggestion = ActionableSuggestion(
+            category="layer_stack",
+            priority=1,
+            summary="Add more layers",
+        )
+
+        d = suggestion.to_dict()
+        assert "affected_component" not in d
+        assert "direction" not in d
+        assert "distance_mm" not in d
+
+
+class TestFailureAnalysisFormatSummary:
+    """Tests for FailureAnalysis.format_summary method."""
+
+    def test_format_summary_routing_order(self):
+        """Test format_summary for routing order failure."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.ROUTING_ORDER,
+            confidence=0.9,
+            failure_location=(32.5, 28.0),
+            failure_area=Rectangle(30, 25, 35, 31),
+            blocking_net_name="+3.3V",
+            nearby_component="U3",
+            nearby_pin="15",
+            suggestions=["Try routing MCLK_DAC before +3.3V, or move U3 0.5mm east"],
+        )
+
+        summary = analysis.format_summary("MCLK_DAC")
+        assert "MCLK_DAC" in summary
+        assert "+3.3V" in summary
+        assert "U3" in summary
+        assert "pin 15" in summary
+        assert "Suggestion:" in summary
+
+    def test_format_summary_pin_access(self):
+        """Test format_summary for pin access failure."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.PIN_ACCESS,
+            confidence=0.85,
+            failure_location=(10, 10),
+            failure_area=Rectangle(8, 8, 12, 12),
+            nearby_component="U1",
+            nearby_pin="4",
+            suggestions=["Use finer grid (0.05mm) or neck-down traces"],
+        )
+
+        summary = analysis.format_summary("NRST")
+        assert "NRST" in summary
+        assert "Pin escape blocked" in summary
+        assert "U1" in summary
+
+    def test_format_summary_congestion(self):
+        """Test format_summary for congestion failure."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.CONGESTION,
+            confidence=0.9,
+            failure_location=(32.5, 28.0),
+            failure_area=Rectangle(10, 18, 55, 38),
+            congestion_score=0.95,
+            suggestions=["Consider 6-layer stackup or placement adjustment"],
+        )
+
+        summary = analysis.format_summary("SPI_MOSI")
+        assert "SPI_MOSI" in summary
+        assert "No path exists" in summary
+        assert "Blocked area" in summary
+        # Should show dimensions
+        assert "45" in summary  # width
+        assert "20" in summary  # height
+
+    def test_format_summary_to_dict_includes_description(self):
+        """Test that to_dict includes root_cause_description."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.CONGESTION,
+            confidence=0.9,
+            failure_location=(0, 0),
+            failure_area=Rectangle(0, 0, 10, 10),
+        )
+
+        d = analysis.to_dict()
+        assert "root_cause_description" in d
+        assert d["root_cause_description"] == FailureCause.CONGESTION.description
+
+
+class TestFailureAnalysisEnhancements:
+    """Tests for enhanced FailureAnalysis features."""
+
+    def test_failure_analysis_with_actionable_suggestions(self):
+        """Test FailureAnalysis with actionable suggestions."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.85,
+            failure_location=(25, 25),
+            failure_area=Rectangle(20, 20, 30, 30),
+            suggestions=["Move U1 east"],
+            actionable_suggestions=[
+                ActionableSuggestion(
+                    category="placement",
+                    priority=1,
+                    summary="Move U1 east",
+                    affected_component="U1",
+                    direction="east",
+                    distance_mm=0.5,
+                )
+            ],
+        )
+
+        assert len(analysis.actionable_suggestions) == 1
+        assert analysis.actionable_suggestions[0].affected_component == "U1"
+
+        d = analysis.to_dict()
+        assert "actionable_suggestions" in d
+        assert len(d["actionable_suggestions"]) == 1
+        assert d["actionable_suggestions"][0]["direction"] == "east"
+
+    def test_failure_analysis_with_blocking_net(self):
+        """Test FailureAnalysis with blocking net information."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.ROUTING_ORDER,
+            confidence=0.9,
+            failure_location=(25, 25),
+            failure_area=Rectangle(20, 20, 30, 30),
+            blocking_net_name="VCC",
+            nearby_component="U2",
+            nearby_pin="3",
+        )
+
+        assert analysis.blocking_net_name == "VCC"
+        assert analysis.nearby_component == "U2"
+        assert analysis.nearby_pin == "3"
+
+        d = analysis.to_dict()
+        assert d["blocking_net_name"] == "VCC"
+        assert d["nearby_component"] == "U2"
+        assert d["nearby_pin"] == "3"
+
+    def test_failure_area_dimensions_in_dict(self):
+        """Test that failure_area includes width and height in to_dict."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.CONGESTION,
+            confidence=0.9,
+            failure_location=(25, 25),
+            failure_area=Rectangle(10, 20, 55, 45),
+        )
+
+        d = analysis.to_dict()
+        assert "failure_area" in d
+        assert d["failure_area"]["width"] == 45  # 55 - 10
+        assert d["failure_area"]["height"] == 25  # 45 - 20

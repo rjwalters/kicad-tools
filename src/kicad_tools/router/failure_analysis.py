@@ -46,11 +46,31 @@ class FailureCause(Enum):
     BLOCKED_PATH = "blocked_path"  # Component in the way
     CLEARANCE = "clearance"  # Can't meet DRC clearance
     LAYER_CONFLICT = "layer_conflict"  # Wrong layer or no layer available
-    PIN_ACCESS = "pin_access"  # Can't reach pin
+    PIN_ACCESS = "pin_access"  # Can't reach pin (pad surrounded)
+    VIA_BLOCKED = "via_blocked"  # Cannot place via for layer transition
     LENGTH_CONSTRAINT = "length_constraint"  # Can't meet length requirements
     DIFFERENTIAL_PAIR = "differential_pair"  # Can't maintain pair constraints
     KEEPOUT = "keepout"  # Path crosses keepout zone
+    ROUTING_ORDER = "routing_order"  # Earlier net blocking this route
     UNKNOWN = "unknown"  # Unable to determine root cause
+
+    @property
+    def description(self) -> str:
+        """Human-readable description of the failure cause."""
+        descriptions = {
+            "congestion": "Area too crowded with traces",
+            "blocked_path": "Path blocked by component or trace",
+            "clearance": "Cannot meet design rule clearance",
+            "layer_conflict": "No available layer for routing",
+            "pin_access": "Pin escape blocked by surrounding traces",
+            "via_blocked": "Cannot place via for layer transition",
+            "length_constraint": "Cannot meet length matching requirements",
+            "differential_pair": "Cannot maintain differential pair constraints",
+            "keepout": "Route path crosses keepout zone",
+            "routing_order": "Blocked by earlier routed net",
+            "unknown": "Unable to determine cause",
+        }
+        return descriptions.get(self.value, self.value)
 
 
 @dataclass
@@ -220,8 +240,84 @@ class PadAccessBlocker:
 
 
 @dataclass
+class ActionableSuggestion:
+    """A specific, actionable suggestion for resolving a routing failure.
+
+    Provides detailed recommendations with specific parameters (direction,
+    distance, component names) rather than generic advice.
+
+    Example::
+
+        suggestion = ActionableSuggestion(
+            category="placement",
+            priority=1,
+            summary="Move U3 0.5mm east to create routing channel",
+            details="The +3.3V trace blocks MCLK_DAC near U3 pin 15",
+            affected_component="U3",
+            suggested_action="move",
+            direction="east",
+            distance_mm=0.5,
+        )
+    """
+
+    category: str  # "routing_order", "placement", "design_rules", "layer_stack"
+    priority: int  # 1 = most actionable, higher = less specific
+    summary: str  # One-line summary
+    details: str = ""  # Additional context
+    affected_component: str | None = None  # Component ref if applicable
+    affected_net: str | None = None  # Net name if applicable
+    suggested_action: str | None = None  # "move", "reroute", "reduce", "add_layer"
+    direction: str | None = None  # "north", "south", "east", "west" for moves
+    distance_mm: float | None = None  # Distance for moves
+    parameter_name: str | None = None  # For design rule changes
+    current_value: float | None = None  # Current parameter value
+    suggested_value: float | None = None  # Suggested parameter value
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        result = {
+            "category": self.category,
+            "priority": self.priority,
+            "summary": self.summary,
+            "details": self.details,
+        }
+        if self.affected_component:
+            result["affected_component"] = self.affected_component
+        if self.affected_net:
+            result["affected_net"] = self.affected_net
+        if self.suggested_action:
+            result["suggested_action"] = self.suggested_action
+        if self.direction:
+            result["direction"] = self.direction
+        if self.distance_mm is not None:
+            result["distance_mm"] = self.distance_mm
+        if self.parameter_name:
+            result["parameter_name"] = self.parameter_name
+        if self.current_value is not None:
+            result["current_value"] = self.current_value
+        if self.suggested_value is not None:
+            result["suggested_value"] = self.suggested_value
+        return result
+
+    def __str__(self) -> str:
+        return self.summary
+
+
+@dataclass
 class FailureAnalysis:
-    """Detailed analysis of why an operation failed."""
+    """Detailed analysis of why an operation failed.
+
+    Provides comprehensive diagnostics for routing failures including:
+    - Root cause classification with confidence score
+    - Blocking element identification (components, traces, vias)
+    - Blocked area location and dimensions
+    - Actionable suggestions with specific remediation steps
+
+    Example output when formatted:
+
+        MCLK_DAC: Blocked by +3.3V trace near U3 pin 15
+                  Suggestion: Try routing MCLK_DAC before +3.3V, or move U3 0.5mm east
+    """
 
     root_cause: FailureCause
     confidence: float  # 0.0-1.0, confidence in the diagnosis
@@ -236,6 +332,13 @@ class FailureAnalysis:
     # Pad access blockers (for PIN_ACCESS failures)
     pad_access_blockers: list[PadAccessBlocker] = field(default_factory=list)
 
+    # Blocking net info (for ROUTING_ORDER failures)
+    blocking_net_name: str | None = None
+
+    # Nearby component info for context
+    nearby_component: str | None = None
+    nearby_pin: str | None = None
+
     # Attempted solutions
     attempted_paths: int = 0
     best_attempt: PathAttempt | None = None
@@ -244,13 +347,17 @@ class FailureAnalysis:
     congestion_score: float = 0.0  # 0-1, how congested the area is
     clearance_margin: float = float("inf")  # How close to DRC limits
 
-    # Suggestions
+    # Suggestions - string summaries for display
     suggestions: list[str] = field(default_factory=list)
+
+    # Actionable suggestions - structured for tooling
+    actionable_suggestions: list[ActionableSuggestion] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             "root_cause": self.root_cause.value,
+            "root_cause_description": self.root_cause.description,
             "confidence": self.confidence,
             "failure_location": list(self.failure_location),
             "failure_area": {
@@ -258,9 +365,14 @@ class FailureAnalysis:
                 "min_y": self.failure_area.min_y,
                 "max_x": self.failure_area.max_x,
                 "max_y": self.failure_area.max_y,
+                "width": self.failure_area.width,
+                "height": self.failure_area.height,
             },
             "blocking_elements": [e.to_dict() for e in self.blocking_elements],
             "pad_access_blockers": [b.to_dict() for b in self.pad_access_blockers],
+            "blocking_net_name": self.blocking_net_name,
+            "nearby_component": self.nearby_component,
+            "nearby_pin": self.nearby_pin,
             "attempted_paths": self.attempted_paths,
             "best_attempt": self.best_attempt.to_dict() if self.best_attempt else None,
             "congestion_score": self.congestion_score,
@@ -268,7 +380,55 @@ class FailureAnalysis:
                 self.clearance_margin if self.clearance_margin != float("inf") else None
             ),
             "suggestions": self.suggestions,
+            "actionable_suggestions": [s.to_dict() for s in self.actionable_suggestions],
         }
+
+    def format_summary(self, net_name: str) -> str:
+        """Format a user-friendly summary of the failure.
+
+        Args:
+            net_name: Name of the net that failed to route
+
+        Returns:
+            Multi-line formatted string suitable for terminal output
+        """
+        lines = []
+
+        # Build the main failure description
+        if self.root_cause == FailureCause.ROUTING_ORDER and self.blocking_net_name:
+            desc = f"Blocked by {self.blocking_net_name} trace"
+            if self.nearby_component and self.nearby_pin:
+                desc += f" near {self.nearby_component} pin {self.nearby_pin}"
+            elif self.nearby_component:
+                desc += f" near {self.nearby_component}"
+        elif self.root_cause == FailureCause.PIN_ACCESS:
+            if self.nearby_component and self.nearby_pin:
+                desc = f"Pin escape blocked - {self.nearby_component} pin {self.nearby_pin} surrounded by routed traces"
+            else:
+                desc = "Pin escape blocked - pad surrounded by routed traces"
+        elif self.root_cause == FailureCause.CONGESTION:
+            area_w = self.failure_area.width
+            area_h = self.failure_area.height
+            center = self.failure_area.center
+            desc = f"No path exists on available layers"
+            if area_w > 0 and area_h > 0:
+                desc += f"\n            Blocked area: {area_w:.0f}x{area_h:.0f}mm around ({center[0]:.1f}, {center[1]:.1f})"
+        elif self.root_cause == FailureCause.VIA_BLOCKED:
+            desc = "Cannot place via for layer transition - area blocked"
+        elif self.root_cause == FailureCause.CLEARANCE:
+            desc = "Cannot meet clearance requirements"
+            if self.clearance_margin != float("inf"):
+                desc += f" (margin: {self.clearance_margin:.2f}mm)"
+        else:
+            desc = self.root_cause.description
+
+        lines.append(f"  {net_name}: {desc}")
+
+        # Add the primary suggestion
+        if self.suggestions:
+            lines.append(f"            Suggestion: {self.suggestions[0]}")
+
+        return "\n".join(lines)
 
     def __str__(self) -> str:
         return (
@@ -527,6 +687,10 @@ class RootCauseAnalyzer:
         net: str,
         attempts: list[PathAttempt] | None = None,
         layer: int = 0,
+        source_pad_ref: str | None = None,
+        source_pin: str | None = None,
+        target_pad_ref: str | None = None,
+        target_pin: str | None = None,
     ) -> FailureAnalysis:
         """Analyze why routing failed between two points.
 
@@ -537,6 +701,10 @@ class RootCauseAnalyzer:
             net: Net name being routed
             attempts: List of PathAttempt records (optional)
             layer: Layer index for routing
+            source_pad_ref: Component reference for source pad (optional)
+            source_pin: Pin number/name for source pad (optional)
+            target_pad_ref: Component reference for target pad (optional)
+            target_pin: Pin number/name for target pad (optional)
 
         Returns:
             FailureAnalysis with root cause and suggestions
@@ -564,7 +732,29 @@ class RootCauseAnalyzer:
         # Compute clearance margin
         clearance_margin = self._compute_clearance_margin(grid, corridor, layer)
 
-        # Determine root cause
+        # Find the primary blocking net (for ROUTING_ORDER cause)
+        blocking_net_name = None
+        nearby_component = None
+        nearby_pin = None
+        trace_blockers = [b for b in blocking if b.type == "trace" and b.net]
+        if trace_blockers:
+            # Get the most significant blocking net
+            blocking_net_name = trace_blockers[0].net
+
+        # Find nearby component for context
+        component_blockers = [b for b in blocking if b.ref]
+        if component_blockers:
+            nearby_component = component_blockers[0].ref
+
+        # Use source/target info for context if blocking is near them
+        if source_pad_ref and self._is_near_point(blocking, start):
+            nearby_component = source_pad_ref
+            nearby_pin = source_pin
+        elif target_pad_ref and self._is_near_point(blocking, end):
+            nearby_component = target_pad_ref
+            nearby_pin = target_pin
+
+        # Determine root cause with enhanced detection
         cause, confidence = self._determine_root_cause(
             grid,
             corridor,
@@ -574,8 +764,21 @@ class RootCauseAnalyzer:
             layer,
         )
 
-        # Generate suggestions
-        suggestions = self._generate_suggestions(cause, blocking, congestion_score, grid.num_layers)
+        # Check if this is a routing order issue
+        if cause == FailureCause.BLOCKED_PATH and trace_blockers:
+            cause = FailureCause.ROUTING_ORDER
+            confidence = min(confidence + 0.05, 0.95)
+
+        # Generate suggestions with context
+        suggestions, actionable = self._generate_suggestions(
+            cause,
+            blocking,
+            congestion_score,
+            grid.num_layers,
+            corridor=corridor,
+            blocking_net=blocking_net_name,
+            net_name=net,
+        )
 
         return FailureAnalysis(
             root_cause=cause,
@@ -583,12 +786,39 @@ class RootCauseAnalyzer:
             failure_location=failure_location,
             failure_area=corridor,
             blocking_elements=blocking,
+            blocking_net_name=blocking_net_name,
+            nearby_component=nearby_component,
+            nearby_pin=nearby_pin,
             attempted_paths=len(attempts),
             best_attempt=best_attempt,
             congestion_score=congestion_score,
             clearance_margin=clearance_margin,
             suggestions=suggestions,
+            actionable_suggestions=actionable,
         )
+
+    def _is_near_point(
+        self,
+        blocking: list[BlockingElement],
+        point: tuple[float, float],
+        threshold: float = 3.0,
+    ) -> bool:
+        """Check if any blocking element is near a point.
+
+        Args:
+            blocking: List of blocking elements
+            point: Point to check (x, y)
+            threshold: Distance threshold in mm
+
+        Returns:
+            True if any blocker is within threshold of the point
+        """
+        for b in blocking:
+            center = b.bounds.center
+            dist = math.sqrt((center[0] - point[0]) ** 2 + (center[1] - point[1]) ** 2)
+            if dist < threshold:
+                return True
+        return False
 
     def analyze_placement_failure(
         self,
@@ -975,7 +1205,10 @@ class RootCauseAnalyzer:
         blocking: list[BlockingElement],
         congestion_score: float,
         num_layers: int,
-    ) -> list[str]:
+        corridor: Rectangle | None = None,
+        blocking_net: str | None = None,
+        net_name: str | None = None,
+    ) -> tuple[list[str], list[ActionableSuggestion]]:
         """Generate actionable suggestions based on root cause.
 
         Args:
@@ -983,51 +1216,194 @@ class RootCauseAnalyzer:
             blocking: List of blocking elements
             congestion_score: Congestion score
             num_layers: Number of available layers
+            corridor: The routing corridor (optional)
+            blocking_net: Name of the net that's blocking (optional)
+            net_name: Name of the net that failed to route (optional)
 
         Returns:
-            List of suggestion strings
+            Tuple of (list of suggestion strings, list of ActionableSuggestion)
         """
         suggestions: list[str] = []
+        actionable: list[ActionableSuggestion] = []
 
         if cause == FailureCause.CONGESTION:
-            suggestions.append("Area is highly congested")
             if num_layers < 4:
-                suggestions.append("Consider adding more routing layers")
-            suggestions.append("Try rerouting earlier nets to spread congestion")
+                suggestions.append(f"Consider 6-layer stackup or placement adjustment")
+                actionable.append(
+                    ActionableSuggestion(
+                        category="layer_stack",
+                        priority=1,
+                        summary="Add routing layers for more capacity",
+                        details=f"Current {num_layers}-layer stackup is saturated",
+                        suggested_action="add_layer",
+                        parameter_name="layer_count",
+                        current_value=float(num_layers),
+                        suggested_value=6.0 if num_layers <= 2 else float(num_layers + 2),
+                    )
+                )
+            else:
+                suggestions.append("Increase board area or reduce component density")
+                actionable.append(
+                    ActionableSuggestion(
+                        category="placement",
+                        priority=2,
+                        summary="Spread components to reduce congestion",
+                        details="Routing channels are saturated",
+                        suggested_action="spread",
+                    )
+                )
+
+        elif cause == FailureCause.ROUTING_ORDER and blocking_net:
+            suggestions.append(
+                f"Try routing {net_name or 'this net'} before {blocking_net}"
+            )
+            actionable.append(
+                ActionableSuggestion(
+                    category="routing_order",
+                    priority=1,
+                    summary=f"Route {net_name or 'this net'} before {blocking_net}",
+                    details=f"{blocking_net} trace is blocking the path",
+                    affected_net=blocking_net,
+                    suggested_action="reorder",
+                )
+            )
 
         elif cause == FailureCause.BLOCKED_PATH:
             movable_refs = {b.ref for b in blocking if b.movable and b.ref}
+            blocking_nets = {b.net for b in blocking if b.net}
+
             if movable_refs:
-                suggestions.append(
-                    f"Consider moving component(s): {', '.join(sorted(movable_refs))}"
-                )
-            if num_layers > 1:
+                ref_list = ", ".join(sorted(movable_refs)[:3])
+                if len(movable_refs) > 3:
+                    ref_list += f" (+{len(movable_refs) - 3} more)"
+
+                # Suggest moving components with direction hint
+                if corridor:
+                    center = corridor.center
+                    direction = self._suggest_move_direction(blocking, center)
+                    if direction:
+                        suggestions.append(
+                            f"Move {ref_list} {direction} to create routing channel"
+                        )
+                        for ref in sorted(movable_refs)[:2]:
+                            actionable.append(
+                                ActionableSuggestion(
+                                    category="placement",
+                                    priority=1,
+                                    summary=f"Move {ref} {direction}",
+                                    affected_component=ref,
+                                    suggested_action="move",
+                                    direction=direction,
+                                    distance_mm=0.5,
+                                )
+                            )
+                    else:
+                        suggestions.append(f"Consider moving component(s): {ref_list}")
+                else:
+                    suggestions.append(f"Consider moving component(s): {ref_list}")
+
+            if blocking_nets and num_layers > 1:
                 suggestions.append("Try routing on a different layer using vias")
 
-        elif cause == FailureCause.CLEARANCE:
-            suggestions.append("Insufficient clearance to meet DRC requirements")
-            suggestions.append("Check design rules and consider wider trace spacing")
-
-        elif cause == FailureCause.KEEPOUT:
-            suggestions.append("Route path crosses a keepout zone")
-            suggestions.append("Modify keepout boundaries or reroute around")
-
-        elif cause == FailureCause.LAYER_CONFLICT:
-            suggestions.append("No available layer for routing")
-            if num_layers == 2:
-                suggestions.append("Consider 4-layer stackup for better routability")
-
-        elif cause == FailureCause.PIN_ACCESS:
-            suggestions.append("Cannot access pin through surrounding obstacles")
-            suggestions.append("Move blocking components or use different approach angle")
-
-        # General suggestions based on congestion
-        if congestion_score > 0.5:
-            suggestions.append(
-                f"Congestion score: {congestion_score:.0%} - consider spreading routes"
+        elif cause == FailureCause.VIA_BLOCKED:
+            suggestions.append("Via placement blocked in transition area")
+            if num_layers > 2:
+                suggestions.append("Try alternative via placement location")
+            else:
+                suggestions.append("Consider 4-layer stackup for more via options")
+            actionable.append(
+                ActionableSuggestion(
+                    category="layer_stack",
+                    priority=2,
+                    summary="Add layers for more via placement options",
+                    suggested_action="add_layer",
+                )
             )
 
-        return suggestions
+        elif cause == FailureCause.CLEARANCE:
+            suggestions.append("Reduce trace clearance if manufacturer allows")
+            actionable.append(
+                ActionableSuggestion(
+                    category="design_rules",
+                    priority=2,
+                    summary="Reduce clearance (check manufacturer limits)",
+                    parameter_name="trace_clearance",
+                    suggested_action="reduce",
+                )
+            )
+
+        elif cause == FailureCause.KEEPOUT:
+            suggestions.append("Route around keepout zone or adjust boundaries")
+            actionable.append(
+                ActionableSuggestion(
+                    category="placement",
+                    priority=3,
+                    summary="Modify keepout zone boundaries",
+                    suggested_action="reroute",
+                )
+            )
+
+        elif cause == FailureCause.LAYER_CONFLICT:
+            if num_layers == 2:
+                suggestions.append("Consider 4-layer stackup for better routability")
+                actionable.append(
+                    ActionableSuggestion(
+                        category="layer_stack",
+                        priority=1,
+                        summary="Upgrade to 4-layer stackup",
+                        parameter_name="layer_count",
+                        current_value=2.0,
+                        suggested_value=4.0,
+                        suggested_action="add_layer",
+                    )
+                )
+            else:
+                suggestions.append("No available layer for routing")
+
+        elif cause == FailureCause.PIN_ACCESS:
+            suggestions.append("Use finer grid (0.05mm) or neck-down traces")
+            actionable.append(
+                ActionableSuggestion(
+                    category="design_rules",
+                    priority=1,
+                    summary="Use finer routing grid for pin escape",
+                    parameter_name="grid_resolution",
+                    suggested_value=0.05,
+                    suggested_action="reduce",
+                )
+            )
+
+        return suggestions, actionable
+
+    def _suggest_move_direction(
+        self,
+        blocking: list[BlockingElement],
+        center: tuple[float, float],
+    ) -> str | None:
+        """Suggest a direction to move blocking components.
+
+        Args:
+            blocking: List of blocking elements
+            center: Center of the routing corridor
+
+        Returns:
+            Direction string ("north", "south", "east", "west") or None
+        """
+        if not blocking:
+            return None
+
+        # Calculate average position of blockers
+        avg_x = sum(b.bounds.center[0] for b in blocking) / len(blocking)
+        avg_y = sum(b.bounds.center[1] for b in blocking) / len(blocking)
+
+        # Determine which direction to suggest moving
+        dx = avg_x - center[0]
+        dy = avg_y - center[1]
+
+        if abs(dx) > abs(dy):
+            return "west" if dx > 0 else "east"
+        else:
+            return "south" if dy > 0 else "north"
 
     def analyze_pad_access_blockers(
         self,
