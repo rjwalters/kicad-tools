@@ -370,3 +370,169 @@ class TestBackendFallback:
         backend = ArrayBackend.create(BackendType.METAL)
         # Should fall back to CPU if Metal/MLX not available
         assert backend.backend_type in (BackendType.METAL, BackendType.CPU)
+
+
+class TestScatterAdd:
+    """Tests for GPU-native scatter-add operations.
+
+    These tests verify the scatter_add functionality that eliminates
+    CPU-GPU memory transfers in inner loops (issue #1052).
+    """
+
+    def test_scatter_add_cpu_basic(self):
+        """Test scatter_add with CPU backend produces correct results."""
+        backend = get_backend(BackendType.CPU)
+
+        # Create target array (3 components, 2D forces)
+        target = backend.zeros((3, 2))
+
+        # Create indices and values
+        # Edge 0 -> component 0
+        # Edge 1 -> component 0
+        # Edge 2 -> component 1
+        # Edge 3 -> component 2
+        # Edge 4 -> component 1
+        indices = backend.array([0, 0, 1, 2, 1], dtype=np.int32)
+        values = backend.array([
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [0.0, 2.0],
+        ], dtype=np.float32)
+
+        # Scatter-add values to target
+        result = backend.scatter_add(target, indices, values)
+
+        # Expected results:
+        # Component 0: [1.0, 0.0] + [2.0, 0.0] = [3.0, 0.0]
+        # Component 1: [0.0, 1.0] + [0.0, 2.0] = [0.0, 3.0]
+        # Component 2: [1.0, 1.0] = [1.0, 1.0]
+        expected = np.array([
+            [3.0, 0.0],
+            [0.0, 3.0],
+            [1.0, 1.0],
+        ])
+
+        assert np.allclose(backend.to_numpy(result), expected)
+
+    def test_scatter_add_cpu_1d(self):
+        """Test scatter_add with 1D arrays (for torques)."""
+        backend = get_backend(BackendType.CPU)
+
+        # Create target array (3 components)
+        target = backend.zeros((3,))
+
+        indices = backend.array([0, 1, 0, 2, 1], dtype=np.int32)
+        values = backend.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+
+        result = backend.scatter_add(target, indices, values)
+
+        # Expected: [1.0 + 3.0, 2.0 + 5.0, 4.0] = [4.0, 7.0, 4.0]
+        expected = np.array([4.0, 7.0, 4.0])
+
+        assert np.allclose(backend.to_numpy(result), expected)
+
+    def test_scatter_add_empty(self):
+        """Test scatter_add with empty indices."""
+        backend = get_backend(BackendType.CPU)
+
+        target = backend.zeros((3, 2))
+        indices = backend.array([], dtype=np.int32)
+        values = backend.array([]).reshape(0, 2)
+
+        result = backend.scatter_add(target, indices, values)
+
+        # Target should be unchanged
+        assert np.allclose(backend.to_numpy(result), 0.0)
+
+    def test_scatter_add_single_component(self):
+        """Test scatter_add when all indices point to same component."""
+        backend = get_backend(BackendType.CPU)
+
+        target = backend.zeros((1, 2))
+        indices = backend.array([0, 0, 0, 0], dtype=np.int32)
+        values = backend.array([
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 0.0],
+        ], dtype=np.float32)
+
+        result = backend.scatter_add(target, indices, values)
+
+        expected = np.array([[10.0, 0.0]])  # 1+2+3+4 = 10
+        assert np.allclose(backend.to_numpy(result), expected)
+
+
+class TestGPUArrayPool:
+    """Tests for GPU array pooling functionality."""
+
+    def test_pool_get_and_return(self):
+        """Test basic pool get and return operations."""
+        from kicad_tools.acceleration.backend import GPUArrayPool, get_backend
+
+        pool = GPUArrayPool()
+        backend = get_backend(BackendType.CPU)
+
+        # Get an array
+        arr1 = pool.get((10, 2), np.float32, backend)
+        assert arr1.shape == (10, 2)
+        assert np.allclose(arr1, 0.0)  # Should be zeroed
+
+        # Modify it
+        arr1[0, 0] = 5.0
+
+        # Return to pool
+        pool.return_array(arr1, backend)
+
+        # Get again - should get the same array back (zeroed)
+        arr2 = pool.get((10, 2), np.float32, backend)
+        assert np.allclose(arr2, 0.0)  # Should be zeroed again
+
+    def test_pool_different_shapes(self):
+        """Test pool handles different shapes independently."""
+        from kicad_tools.acceleration.backend import GPUArrayPool, get_backend
+
+        pool = GPUArrayPool()
+        backend = get_backend(BackendType.CPU)
+
+        arr1 = pool.get((5, 2), np.float32, backend)
+        arr2 = pool.get((10, 2), np.float32, backend)
+
+        assert arr1.shape == (5, 2)
+        assert arr2.shape == (10, 2)
+
+        pool.return_array(arr1, backend)
+        pool.return_array(arr2, backend)
+
+    def test_pool_max_size(self):
+        """Test pool respects max size limit."""
+        from kicad_tools.acceleration.backend import GPUArrayPool, get_backend
+
+        pool = GPUArrayPool(max_pool_size=2)
+        backend = get_backend(BackendType.CPU)
+
+        # Get and return 3 arrays of same shape
+        for _ in range(3):
+            arr = pool.get((5, 2), np.float32, backend)
+            pool.return_array(arr, backend)
+
+        # Pool should only have max_pool_size arrays
+        key = ((5, 2), "float32", BackendType.CPU)
+        assert len(pool._cache.get(key, [])) <= 2
+
+    def test_pool_clear(self):
+        """Test pool can be cleared."""
+        from kicad_tools.acceleration.backend import GPUArrayPool, get_backend
+
+        pool = GPUArrayPool()
+        backend = get_backend(BackendType.CPU)
+
+        arr = pool.get((5, 2), np.float32, backend)
+        pool.return_array(arr, backend)
+
+        assert len(pool._cache) > 0
+
+        pool.clear()
+        assert len(pool._cache) == 0
