@@ -3,10 +3,13 @@ Performance calibration CLI command.
 
 Provides command-line access to calibrate routing performance settings:
 
-    kicad-tools calibrate               # Run calibration and save
+    kicad-tools calibrate               # Run CPU calibration and save
     kicad-tools calibrate --show        # Show current settings
     kicad-tools calibrate --quick       # Quick calibration
     kicad-tools calibrate --benchmark   # Full benchmark with details
+    kicad-tools calibrate --gpu         # Run GPU benchmarks
+    kicad-tools calibrate --all         # Run full calibration including GPU
+    kicad-tools calibrate --show-gpu    # Show GPU capabilities
 """
 
 import argparse
@@ -34,7 +37,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--show-gpu",
         action="store_true",
-        help="Show GPU acceleration status and suggest install command",
+        help="Show GPU capabilities and current configuration",
+    )
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Run GPU-specific benchmarks and determine optimal thresholds",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run full calibration including GPU benchmarks",
     )
     parser.add_argument(
         "--benchmark",
@@ -66,11 +79,33 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Handle --show-gpu: display GPU acceleration status
+    # Handle --show-gpu: display GPU capabilities and config
     if args.show_gpu:
-        from kicad_tools.acceleration.detection import show_gpu_status
+        from kicad_tools.calibration import show_gpu_config
 
-        show_gpu_status(verbose=args.verbose)
+        show_gpu_config(verbose=args.verbose)
+        return 0
+
+    # Handle --gpu: run GPU-specific benchmarks
+    if args.gpu:
+        from pathlib import Path
+
+        from kicad_tools.calibration import run_gpu_calibration
+
+        output_path = Path(args.output) if args.output else None
+        verbose = args.verbose or args.benchmark
+
+        config = run_gpu_calibration(
+            output_path=output_path,
+            verbose=verbose,
+        )
+
+        if args.json:
+            import json
+
+            print()
+            print(json.dumps(config.to_dict(), indent=2))
+
         return 0
 
     # Handle --show: just display current config
@@ -103,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         output_path=output_path,
         verbose=verbose,
         quick=args.quick,
+        include_gpu=args.all,
     )
 
     if args.json:
