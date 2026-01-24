@@ -33,12 +33,16 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
+import numpy as np
+
 from kicad_tools.optim.components import Component, FunctionalCluster, Spring
 from kicad_tools.optim.config import PlacementConfig
 from kicad_tools.optim.geometry import Polygon, Vector2D
 from kicad_tools.optim.placement import PlacementOptimizer
+from kicad_tools.performance import PerformanceConfig
 
 if TYPE_CHECKING:
+    from kicad_tools.acceleration.backend import ArrayBackend
     from kicad_tools.schema.pcb import PCB
 
 __all__ = [
@@ -85,6 +89,10 @@ class EvolutionaryConfig:
     # Parallel processing
     parallel: bool = True
     max_workers: int | None = None  # None = use all available cores
+
+    # GPU acceleration
+    use_gpu: bool = True  # Enable GPU acceleration when available
+    performance_config: PerformanceConfig | None = None  # None = auto-detect
 
 
 @dataclass
@@ -325,6 +333,16 @@ class EvolutionaryPlacementOptimizer:
         self._board_bounds = self._compute_board_bounds()
         self._fitness_history: list[float] = []
         self._cluster_members: set[str] = set()  # Components that are in clusters
+
+        # GPU acceleration state (lazy-initialized)
+        self._backend: ArrayBackend | None = None
+        self._gpu_data_prepared: bool = False
+        self._ref_order: list[str] = []
+        self._ref_to_idx: dict[str, int] = {}
+        self._component_sizes: np.ndarray | None = None
+        self._spring_indices: np.ndarray | None = None
+        self._spring_pin_offsets: np.ndarray | None = None
+        self._board_vertices_arr: np.ndarray | None = None
 
     def _compute_board_bounds(self) -> tuple[float, float, float, float]:
         """Compute bounding box of board outline (min_x, min_y, max_x, max_y)."""
@@ -812,16 +830,174 @@ class EvolutionaryPlacementOptimizer:
             pin_alignment_tolerance=self.config.pin_alignment_tolerance,
         )
 
+    def _should_use_gpu(self, population_size: int) -> bool:
+        """Determine if GPU should be used for fitness evaluation.
+
+        Args:
+            population_size: Number of individuals in the population.
+
+        Returns:
+            True if GPU should be used, False for CPU evaluation.
+        """
+        if not self.config.use_gpu:
+            return False
+
+        perf_config = self.config.performance_config
+        if perf_config is None:
+            perf_config = PerformanceConfig.load_calibrated()
+
+        from kicad_tools.acceleration.config import should_use_gpu
+
+        return should_use_gpu(perf_config, population_size, "evolutionary")
+
+    def _get_or_create_backend(self) -> ArrayBackend:
+        """Get or create the GPU backend for evaluation.
+
+        Returns:
+            ArrayBackend configured for GPU or CPU.
+        """
+        if self._backend is not None:
+            return self._backend
+
+        perf_config = self.config.performance_config
+        if perf_config is None:
+            perf_config = PerformanceConfig.load_calibrated()
+
+        from kicad_tools.acceleration.backend import ArrayBackend
+        from kicad_tools.acceleration.config import get_effective_backend
+
+        backend_name = get_effective_backend(perf_config)
+        self._backend = ArrayBackend.create(backend_name)
+
+        return self._backend
+
+    def _prepare_gpu_data(self) -> None:
+        """Prepare static data arrays for GPU evaluation.
+
+        Called once before the first GPU evaluation to convert component
+        and spring data into the array format needed for GPU computation.
+        """
+        if self._gpu_data_prepared:
+            return
+
+        from kicad_tools.acceleration.kernels.evolutionary import prepare_evaluation_data
+
+        # Create ordered list of component refs
+        self._ref_order = sorted(self._component_map.keys())
+        self._ref_to_idx = {ref: i for i, ref in enumerate(self._ref_order)}
+
+        # Prepare component data dict
+        components_dict: dict[
+            str, tuple[float, float, float, float, float, list[tuple[float, float, str]]]
+        ] = {}
+
+        for comp in self.components:
+            if not comp._pin_offsets and comp.pins:
+                comp._compute_pin_offsets()
+
+            pin_offsets = [
+                (offset[0], offset[1], comp.pins[i].number)
+                for i, offset in enumerate(comp._pin_offsets)
+            ]
+            components_dict[comp.ref] = (
+                comp.x,
+                comp.y,
+                comp.rotation,
+                comp.width,
+                comp.height,
+                pin_offsets,
+            )
+
+        # Prepare spring data list
+        springs_list = [
+            (s.comp1_ref, s.pin1_num, s.comp2_ref, s.pin2_num) for s in self.springs
+        ]
+
+        # Prepare board vertices
+        board_vertices = [(v.x, v.y) for v in self.board_outline.vertices]
+
+        # Convert to arrays
+        (
+            self._component_sizes,
+            self._spring_indices,
+            self._spring_pin_offsets,
+            self._board_vertices_arr,
+        ) = prepare_evaluation_data(
+            components_dict, springs_list, board_vertices, self._ref_to_idx
+        )
+
+        self._gpu_data_prepared = True
+
+    def _get_fitness_weights(self) -> dict[str, float]:
+        """Get fitness weights as a dictionary for GPU evaluation."""
+        return {
+            "baseline": 1000.0,
+            "wire_length_weight": self.config.wire_length_weight,
+            "conflict_weight": self.config.conflict_weight,
+            "boundary_violation_weight": self.config.boundary_violation_weight,
+            "routability_weight": self.config.routability_weight,
+            "pin_alignment_weight": self.config.pin_alignment_weight,
+            "pin_alignment_tolerance": self.config.pin_alignment_tolerance,
+        }
+
+    def _evaluate_population_gpu(self, population: list[Individual]) -> list[float]:
+        """Evaluate population fitness using GPU acceleration.
+
+        Args:
+            population: List of individuals to evaluate.
+
+        Returns:
+            List of fitness values corresponding to each individual.
+        """
+        from kicad_tools.acceleration.kernels.evolutionary import (
+            evaluate_population_gpu,
+            population_to_batch,
+        )
+
+        # Ensure static data is prepared
+        self._prepare_gpu_data()
+
+        # Convert population to batch array
+        positions = population_to_batch(population, self._ref_order)
+
+        # Get backend
+        backend = self._get_or_create_backend()
+
+        # Evaluate on GPU
+        fitness_values = evaluate_population_gpu(
+            positions,
+            self._component_sizes,
+            self._spring_indices,
+            self._spring_pin_offsets,
+            self._board_vertices_arr,
+            self._get_fitness_weights(),
+            backend,
+        )
+
+        return fitness_values.tolist()
+
     def _evaluate_population(self, population: list[Individual]):
         """
         Evaluate fitness for all individuals in population.
 
-        Uses parallel processing with ProcessPoolExecutor if configured.
-        Falls back to sequential evaluation for small populations or when
-        parallel=False.
+        Uses GPU acceleration when available and population is large enough.
+        Falls back to ProcessPoolExecutor or sequential evaluation.
         """
-        # Use parallel evaluation for larger populations
-        if self.config.parallel and len(population) > 4:
+        pop_size = len(population)
+
+        # Try GPU path first
+        if self._should_use_gpu(pop_size):
+            try:
+                fitness_values = self._evaluate_population_gpu(population)
+                for ind, fitness in zip(population, fitness_values, strict=True):
+                    ind.fitness = fitness
+                return
+            except Exception:
+                # Fall through to CPU path on GPU error
+                pass
+
+        # CPU path: parallel evaluation for larger populations
+        if self.config.parallel and pop_size > 4:
             ctx = self._create_evaluation_context()
             max_workers = self.config.max_workers or os.cpu_count()
 
