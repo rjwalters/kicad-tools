@@ -1566,16 +1566,37 @@ def merge_routes_into_pcb(
 
     Args:
         pcb_content: Original PCB file content as string
-        route_sexp: Route S-expressions from Autorouter.to_sexp()
+        route_sexp: Route S-expressions as a string. This must be the output
+            of ``Autorouter.to_sexp()``, NOT the Autorouter object itself.
 
     Returns:
         Modified PCB content with routes inserted.
 
+    Raises:
+        TypeError: If route_sexp is an Autorouter object instead of a string.
+            Call ``router.to_sexp()`` to get the route string.
+
     Example:
+        >>> router, nets = load_pcb_for_routing("board.kicad_pcb")
+        >>> router.route_all_negotiated()
+        >>>
+        >>> # IMPORTANT: Call to_sexp() to get the S-expression string
+        >>> route_sexp = router.to_sexp()
+        >>>
         >>> original = Path("board.kicad_pcb").read_text()
-        >>> routes = router.to_sexp()
-        >>> merged = merge_routes_into_pcb(original, routes)
+        >>> merged = merge_routes_into_pcb(original, route_sexp)
         >>> Path("board_routed.kicad_pcb").write_text(merged)
+
+    Common mistake:
+        The following is INCORRECT and will raise TypeError::
+
+            # Wrong - passing Autorouter object directly
+            merged = merge_routes_into_pcb(original, router)
+
+        Instead, call ``to_sexp()`` first::
+
+            # Correct - passing the S-expression string
+            merged = merge_routes_into_pcb(original, router.to_sexp())
 
     Note:
         Routes contain embedded trace widths and via sizes, so no
@@ -1583,6 +1604,13 @@ def merge_routes_into_pcb(
         blocks with the old KiCad 6 format - this will cause parsing
         errors in KiCad 7+.
     """
+    # Validate that route_sexp is a string, not an Autorouter object
+    if hasattr(route_sexp, "to_sexp"):
+        raise TypeError(
+            "Expected route S-expression string, got object with to_sexp() method "
+            "(likely an Autorouter). Call router.to_sexp() to get the route string."
+        )
+
     if not route_sexp:
         return pcb_content
 
