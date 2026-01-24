@@ -478,6 +478,10 @@ def _run_calibrate_command(args) -> int:
         sub_argv.append("--show")
     if hasattr(args, "calibrate_show_gpu") and args.calibrate_show_gpu:
         sub_argv.append("--show-gpu")
+    if hasattr(args, "calibrate_gpu") and args.calibrate_gpu:
+        sub_argv.append("--gpu")
+    if hasattr(args, "calibrate_all") and args.calibrate_all:
+        sub_argv.append("--all")
     if hasattr(args, "calibrate_benchmark") and args.calibrate_benchmark:
         sub_argv.append("--benchmark")
     if hasattr(args, "calibrate_quick") and args.calibrate_quick:
