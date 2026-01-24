@@ -353,6 +353,19 @@ class FailureAnalysis:
     # Actionable suggestions - structured for tooling
     actionable_suggestions: list[ActionableSuggestion] = field(default_factory=list)
 
+    # Net that failed (for strategy generation)
+    net: str | None = None
+
+    @property
+    def has_movable_blockers(self) -> bool:
+        """Check if any blocking elements can be moved."""
+        return any(el.movable for el in self.blocking_elements)
+
+    @property
+    def has_reroutable_nets(self) -> bool:
+        """Check if blocking elements include traces that could be rerouted."""
+        return any(el.type == "trace" and el.net != self.net for el in self.blocking_elements)
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -381,6 +394,7 @@ class FailureAnalysis:
             ),
             "suggestions": self.suggestions,
             "actionable_suggestions": [s.to_dict() for s in self.actionable_suggestions],
+            "net": self.net,
         }
 
     def format_summary(self, net_name: str) -> str:
@@ -795,6 +809,7 @@ class RootCauseAnalyzer:
             clearance_margin=clearance_margin,
             suggestions=suggestions,
             actionable_suggestions=actionable,
+            net=net,
         )
 
     def _is_near_point(
