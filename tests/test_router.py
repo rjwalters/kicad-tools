@@ -1309,7 +1309,8 @@ class TestAutorouter:
             ],
         )
 
-        priority, pad_count, distance = router._get_net_priority(1)
+        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
+        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert priority == 1  # Power net has highest priority
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -1325,7 +1326,8 @@ class TestAutorouter:
             ],
         )
 
-        priority, pad_count, distance = router._get_net_priority(1)
+        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
+        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert priority == 10  # Default low priority
         assert distance == 0.0  # Single pad has no distance
 

@@ -234,7 +234,8 @@ class TestAutorouterNetPriority:
         pads = [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "RANDOM_NET"}]
         router.add_component("R1", pads)
 
-        priority, pad_count, distance = router._get_net_priority(1)
+        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
+        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert priority == 10  # Default priority
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -247,7 +248,8 @@ class TestAutorouterNetPriority:
         router.add_component("R1", pads1)
         router.add_component("R2", pads2)
 
-        priority, pad_count, distance = router._get_net_priority(1)
+        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
+        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert pad_count == 2
         # Distance should be sqrt(3^2 + 4^2) = 5.0
         assert abs(distance - 5.0) < 0.001
@@ -273,11 +275,224 @@ class TestAutorouterNetPriority:
         p1 = router._get_net_priority(1)
         p2 = router._get_net_priority(2)
 
-        # Both have same class priority and pad count, but net 1 is shorter
+        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
+        # Both have same class priority, constraint score, and pad count, but net 1 is shorter
         assert p1[0] == p2[0]  # Same class priority
-        assert p1[1] == p2[1]  # Same pad count
-        assert p1[2] < p2[2]  # Net 1 has smaller distance
+        assert p1[1] == p2[1]  # Same constraint score (both are standard pitch resistors)
+        assert p1[2] == p2[2]  # Same pad count
+        assert p1[3] < p2[3]  # Net 1 has smaller distance
         assert p1 < p2  # Net 1 should be ordered first
+
+
+class TestConstraintAwareOrdering:
+    """Tests for constraint-aware net ordering (Issue #1020)."""
+
+    @pytest.fixture
+    def router(self):
+        return Autorouter(width=50.0, height=40.0)
+
+    def test_calculate_constraint_score_fine_pitch(self, router):
+        """Test that fine-pitch components get higher constraint scores."""
+        # Add a fine-pitch IC (U1) with 0.65mm pitch (TSSOP-20 style)
+        # Create pads with 0.65mm spacing
+        fine_pitch_pads = []
+        for i in range(4):
+            fine_pitch_pads.append(
+                {
+                    "number": str(i + 1),
+                    "x": 10.0 + i * 0.65,  # 0.65mm pitch
+                    "y": 10.0,
+                    "net": 1 if i == 0 else 0,  # Only first pad on net 1
+                    "net_name": "FINE_NET" if i == 0 else "",
+                }
+            )
+        router.add_component("U1", fine_pitch_pads)
+
+        # Add second pad for net 1 on a standard resistor (1.27mm pitch)
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "FINE_NET"},
+                {"number": "2", "x": 21.27, "y": 10.0, "net": 0},
+            ],
+        )
+
+        # Add a standard pitch net (net 2) with only 1.27mm resistors
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 30.0, "y": 10.0, "net": 2, "net_name": "STD_NET"},
+                {"number": "2", "x": 31.27, "y": 10.0, "net": 0},
+            ],
+        )
+        router.add_component(
+            "R3",
+            [
+                {"number": "1", "x": 35.0, "y": 10.0, "net": 2, "net_name": "STD_NET"},
+                {"number": "2", "x": 36.27, "y": 10.0, "net": 0},
+            ],
+        )
+
+        # Fine-pitch net should have higher constraint score
+        fine_score = router._calculate_constraint_score(1)
+        std_score = router._calculate_constraint_score(2)
+
+        # U1 has 0.65mm pitch which is below fine_pitch_threshold (0.8mm)
+        # So net 1 should have higher constraint score
+        assert fine_score > std_score
+
+    def test_calculate_constraint_score_disabled(self, router):
+        """Test that constraint scoring returns 0 when disabled."""
+        router.rules.constraint_ordering_enabled = False
+
+        # Add any net
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 1.0, "y": 0.0, "net": 0},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 10.0, "y": 0.0, "net": 1, "net_name": "NET1"}],
+        )
+
+        score = router._calculate_constraint_score(1)
+        assert score == 0.0
+
+    def test_constraint_score_pad_count_contribution(self, router):
+        """Test that more pads increase constraint score."""
+        # Net 1: 2 pads
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "SMALL"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 5.0, "y": 0.0, "net": 1, "net_name": "SMALL"}],
+        )
+
+        # Net 2: 4 pads
+        router.add_component(
+            "R3",
+            [{"number": "1", "x": 10.0, "y": 0.0, "net": 2, "net_name": "LARGE"}],
+        )
+        router.add_component(
+            "R4",
+            [{"number": "1", "x": 15.0, "y": 0.0, "net": 2, "net_name": "LARGE"}],
+        )
+        router.add_component(
+            "R5",
+            [{"number": "1", "x": 20.0, "y": 0.0, "net": 2, "net_name": "LARGE"}],
+        )
+        router.add_component(
+            "R6",
+            [{"number": "1", "x": 25.0, "y": 0.0, "net": 2, "net_name": "LARGE"}],
+        )
+
+        score1 = router._calculate_constraint_score(1)
+        score2 = router._calculate_constraint_score(2)
+
+        # Net 2 has more pads, so higher score
+        assert score2 > score1
+
+    def test_net_priority_includes_constraint_score(self, router):
+        """Test that net priority tuple includes constraint score."""
+        # Add a fine-pitch IC
+        fine_pitch_pads = []
+        for i in range(4):
+            fine_pitch_pads.append(
+                {
+                    "number": str(i + 1),
+                    "x": 10.0 + i * 0.5,  # 0.5mm pitch (very fine)
+                    "y": 10.0,
+                    "net": 1 if i == 0 else 0,
+                    "net_name": "FINE" if i == 0 else "",
+                }
+            )
+        router.add_component("U1", fine_pitch_pads)
+
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 30.0, "y": 10.0, "net": 1, "net_name": "FINE"}],
+        )
+
+        # Add a standard pitch net with same distance
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "STD"},
+                {"number": "2", "x": 11.27, "y": 20.0, "net": 0},  # 1.27mm pitch
+            ],
+        )
+        router.add_component(
+            "R3",
+            [
+                {"number": "1", "x": 30.0, "y": 20.0, "net": 2, "net_name": "STD"},
+                {"number": "2", "x": 31.27, "y": 20.0, "net": 0},
+            ],
+        )
+
+        p1 = router._get_net_priority(1)  # Fine-pitch net
+        p2 = router._get_net_priority(2)  # Standard net
+
+        # Same class priority
+        assert p1[0] == p2[0]
+
+        # Fine-pitch net should have higher constraint score (more negative in tuple)
+        assert p1[1] < p2[1]  # More negative = higher constraint
+
+        # Fine-pitch net should be ordered first
+        assert p1 < p2
+
+    def test_net_ordering_fine_pitch_before_standard(self, router):
+        """Test that fine-pitch nets are routed before standard nets."""
+        from kicad_tools.router.rules import DesignRules
+
+        # Enable constraint ordering explicitly
+        rules = DesignRules(constraint_ordering_enabled=True)
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Add a standard pitch net (net 1) - should be routed second
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 0.0, "y": 0.0, "net": 1, "net_name": "STD"},
+                {"number": "2", "x": 1.27, "y": 0.0, "net": 0},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 5.0, "y": 0.0, "net": 1, "net_name": "STD"},
+                {"number": "2", "x": 6.27, "y": 0.0, "net": 0},
+            ],
+        )
+
+        # Add a fine-pitch net (net 2) - should be routed first
+        fine_pitch_pads = []
+        for i in range(4):
+            fine_pitch_pads.append(
+                {
+                    "number": str(i + 1),
+                    "x": 20.0 + i * 0.5,  # 0.5mm pitch
+                    "y": 10.0,
+                    "net": 2 if i == 0 else 0,
+                    "net_name": "FINE" if i == 0 else "",
+                }
+            )
+        router.add_component("U1", fine_pitch_pads)
+        router.add_component(
+            "R3",
+            [{"number": "1", "x": 30.0, "y": 10.0, "net": 2, "net_name": "FINE"}],
+        )
+
+        # Get net order
+        net_order = sorted(router.nets.keys(), key=lambda n: router._get_net_priority(n))
+
+        # Net 2 (fine-pitch) should come before net 1 (standard)
+        assert net_order.index(2) < net_order.index(1)
 
 
 class TestAutorouterInterleavedOrdering:
