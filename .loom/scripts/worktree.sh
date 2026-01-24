@@ -106,6 +106,21 @@ Safety Features:
   ✓ Prevents nested worktrees
   ✓ Non-interactive (safe for AI agents)
   ✓ Reuses existing branches automatically
+  ✓ Runs project-specific hooks after creation
+
+Project-Specific Hooks:
+  Create .loom/hooks/post-worktree.sh to run custom setup after worktree creation.
+  This file is NOT overwritten by Loom upgrades.
+
+  The hook receives three arguments:
+    \$1 - Absolute path to the new worktree
+    \$2 - Branch name (e.g., feature/issue-42)
+    \$3 - Issue number
+
+  Example hook (.loom/hooks/post-worktree.sh):
+    #!/bin/bash
+    cd "\$1"
+    pnpm install  # or: lake exe cache get, pip install -e ., etc.
 
 Resuming Abandoned Work:
   If an agent abandoned work on issue #42, a new agent can resume:
@@ -351,6 +366,29 @@ if git worktree add "${CREATE_ARGS[@]}"; then
 
         # Return to original directory
         cd - > /dev/null
+    fi
+
+    # Run project-specific post-worktree hook if it exists
+    # This allows projects to add custom setup steps (e.g., pnpm install, lake exe cache get)
+    # The hook is stored in .loom/hooks/ which is NOT overwritten by Loom upgrades
+    MAIN_WORKSPACE_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+    POST_WORKTREE_HOOK="$MAIN_WORKSPACE_DIR/.loom/hooks/post-worktree.sh"
+    if [[ -x "$POST_WORKTREE_HOOK" ]]; then
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_info "Running project-specific post-worktree hook..."
+        fi
+
+        # Run the hook from the new worktree directory
+        # Pass: worktree path, branch name, issue number
+        if (cd "$ABS_WORKTREE_PATH" && "$POST_WORKTREE_HOOK" "$ABS_WORKTREE_PATH" "$BRANCH_NAME" "$ISSUE_NUMBER"); then
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_success "Post-worktree hook completed"
+            fi
+        else
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_warning "Post-worktree hook failed (worktree still created)"
+            fi
+        fi
     fi
 
     # Output results

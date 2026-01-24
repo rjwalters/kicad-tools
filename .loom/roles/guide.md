@@ -230,6 +230,136 @@ Run verification **every 15-30 minutes** alongside priority assessment:
 
 By verifying issue closure, you keep the backlog clean and prevent confusion about what's actually done.
 
+## Unblocking: Resolve Dependency Blocks
+
+**Run every 15-30 minutes** to check if blocked issues can be unblocked when their dependencies resolve.
+
+### Problem: Stuck Blocked Issues
+
+When an issue is marked `loom:blocked` due to dependencies, it may stay blocked indefinitely even after the blocking issues are resolved. This creates:
+- ❌ Ready-to-implement issues stuck in blocked state
+- ❌ Manual intervention required to unblock
+- ❌ Delays in the development pipeline
+
+### Check Blocked Issues
+
+For each `loom:blocked` issue, check if all dependencies have resolved:
+
+```bash
+# Get all blocked issues
+gh issue list --label "loom:blocked" --state open --json number,title,body
+
+# For each issue:
+# 1. Parse dependency references from body
+# 2. Check if all referenced issues are closed
+# 3. If all resolved, unblock the issue
+```
+
+### Dependency Parsing
+
+Recognize these patterns in issue bodies:
+
+| Pattern | Example |
+|---------|---------|
+| Explicit blocker | `Blocked by #123` |
+| Depends on | `Depends on #123` |
+| Requires | `Requires #123` |
+| Task list | `- [ ] #123: Description` |
+
+```bash
+parse_dependencies() {
+  local body="$1"
+  # Match dependency patterns and extract issue numbers
+  echo "$body" | grep -oE '(Blocked by|Depends on|Requires|\- \[.\]) #[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+}
+```
+
+### Unblocking Logic
+
+```bash
+check_and_unblock() {
+  gh issue list --label "loom:blocked" --state open --json number,body,title | jq -c '.[]' | while read -r issue; do
+    local number=$(echo "$issue" | jq -r '.number')
+    local body=$(echo "$issue" | jq -r '.body')
+    local title=$(echo "$issue" | jq -r '.title')
+
+    local deps=$(parse_dependencies "$body")
+
+    if [ -z "$deps" ]; then
+      # No parseable dependencies - skip (may need manual review)
+      continue
+    fi
+
+    local all_resolved=true
+    local resolved_deps=""
+
+    for dep in $deps; do
+      local state=$(gh issue view "$dep" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+      if [ "$state" != "CLOSED" ]; then
+        all_resolved=false
+        break
+      fi
+      resolved_deps="$resolved_deps #$dep"
+    done
+
+    if [ "$all_resolved" = true ]; then
+      gh issue edit "$number" --remove-label "loom:blocked" --add-label "loom:issue"
+      gh issue comment "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). Ready for implementation."
+      echo "Unblocked #$number: $title"
+    fi
+  done
+}
+```
+
+### Example Unblocking Flow
+
+```bash
+# 1. Issue #963 has loom:blocked, body contains "Depends on #962"
+gh issue view 963 --json labels,body
+
+# 2. Check if #962 is closed
+gh issue view 962 --json state
+# → state: CLOSED ✓
+
+# 3. Unblock #963
+gh issue edit 963 --remove-label "loom:blocked" --add-label "loom:issue"
+gh issue comment 963 --body "🔓 **Unblocked**: Dependencies resolved (#962). Ready for implementation."
+```
+
+### PR Dependencies
+
+For issues that depend on PRs (not just issues), check the merged state:
+
+```bash
+# Check if a PR is merged
+pr_state=$(gh pr view "$pr_number" --json state,mergedAt --jq '.state')
+# MERGED = resolved, OPEN or CLOSED (without merge) = not resolved
+```
+
+### When NOT to Unblock
+
+- If no parseable dependencies found → Skip (may need manual review)
+- If any dependency is still OPEN → Keep blocked
+- If issue was blocked for non-dependency reasons → Check comments for context
+
+### Comment Format
+
+When unblocking an issue:
+
+```markdown
+🔓 **Unblocked**: Dependencies resolved (#962, #963). Ready for implementation.
+```
+
+When dependencies are partially resolved:
+
+```markdown
+ℹ️ **Dependency check**: 1 of 2 dependencies resolved.
+- ✅ #962 (CLOSED)
+- ⏳ #963 (OPEN)
+
+Still blocked until all dependencies resolve.
+```
+
 ## Maximum Urgent: 3 Issues
 
 **NEVER have more than 3 issues marked `loom:urgent`.**

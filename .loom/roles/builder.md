@@ -309,6 +309,109 @@ The worktree helper script prevents common errors:
 
 This on-demand approach prevents worktree clutter and reduces resource usage.
 
+## Handling Merge Conflicts in Worktrees
+
+When your feature branch has conflicts with main, you have two options depending on the severity of divergence.
+
+### Option 1: Resolve Conflicts in the Worktree (Recommended)
+
+For minor conflicts or small divergence from main:
+
+```bash
+# In the worktree directory (.loom/worktrees/issue-XX)
+git fetch origin main
+git rebase origin/main
+
+# If conflicts occur:
+# 1. Edit conflicting files to resolve
+# 2. Stage resolved files
+git add <resolved-files>
+
+# 3. Continue the rebase
+git rebase --continue
+
+# 4. Force push (rebase rewrites history)
+git push --force-with-lease
+```
+
+**When to use this approach:**
+- Few files have conflicts
+- Conflicts are straightforward to resolve
+- Your changes are relatively small
+
+### Option 2: Create a Fresh Worktree (For Significant Divergence)
+
+If conflicts are too complex or main has changed significantly:
+
+```bash
+# 1. Save your work (note what you changed)
+git diff HEAD > ~/my-changes.patch  # Optional: save as patch
+
+# 2. Return to main repository (not the worktree)
+cd /path/to/main/repo
+
+# 3. Remove the stale worktree
+git worktree remove .loom/worktrees/issue-XX --force
+
+# 4. Delete the old branch
+git branch -D feature/issue-XX
+
+# 5. Fetch latest main
+git fetch origin main
+
+# 6. Create fresh worktree from updated main
+./.loom/scripts/worktree.sh XX
+
+# 7. Re-implement changes in the fresh worktree
+cd .loom/worktrees/issue-XX
+# Cherry-pick, apply patch, or reimplement manually
+```
+
+**When to use this approach:**
+- Many files have conflicts
+- Main has diverged significantly (many commits ahead)
+- Conflicts are in areas you didn't intentionally change
+- Easier to reimplement than untangle
+
+### Never Do This
+
+❌ **Don't switch to the main repository directory to work on features**
+- Always work in worktrees for isolation
+- Main should stay clean and on the default branch
+
+❌ **Don't create branches directly in main**
+- Always use `./.loom/scripts/worktree.sh` to create branches
+- Prevents nested worktree issues
+
+❌ **Don't run `git stash` in main and try to apply in worktrees**
+- Stash is local to the repository, not shared between worktrees
+- Each worktree has its own working directory
+
+❌ **Don't use `git push --force` without `--force-with-lease`**
+- `--force-with-lease` is safer - it fails if someone else pushed
+- Prevents accidentally overwriting others' work
+
+### Preventing Merge Conflicts
+
+To minimize conflicts in the first place:
+
+1. **Pull frequently**: Before starting significant work
+   ```bash
+   git fetch origin main
+   git rebase origin/main
+   ```
+
+2. **Keep PRs small**: Smaller PRs = fewer conflicts = faster merges
+
+3. **Communicate**: If working on shared areas, coordinate with other builders
+
+4. **Rebase before PR**: Always rebase onto latest main before creating PR
+   ```bash
+   git fetch origin main
+   git rebase origin/main
+   git push --force-with-lease
+   ```
+
 ## Working in Tauri App Mode with Terminal Worktrees
 
 When running as an autonomous agent in the Tauri App, you start in a **terminal worktree** (e.g., `.loom/worktrees/terminal-1`), not the main workspace. This provides isolation between multiple autonomous agents.
@@ -430,6 +533,151 @@ done
 
 This workflow ensures clean isolation between agents and issues while maintaining a consistent "home base" for each autonomous agent.
 
+## Claiming Workflow (Parallel Mode)
+
+When working with parallel agents (multiple Builders running simultaneously), use the atomic claiming system to prevent race conditions.
+
+### Why Use Atomic Claims?
+
+**The Problem with Labels Alone:**
+- Two Builders see `loom:issue` at the same time
+- Both try to claim by adding `loom:building`
+- Race condition: both may succeed, causing duplicate work
+
+**The Solution:**
+- Use `claim.sh` for atomic file-based locking
+- Label change is still needed (for visibility), but claim.sh prevents races
+- First Builder to claim wins; others move to next issue
+
+### Claiming Workflow
+
+**1. Check for stop signals before claiming new work:**
+
+```bash
+# Check if stop signal exists (graceful shutdown)
+if ./.loom/scripts/signal.sh check "$AGENT_ID"; then
+  echo "Stop signal received, completing current work and exiting"
+  exit 0
+fi
+```
+
+**2. Attempt atomic claim before label change:**
+
+```bash
+# Try to claim atomically (prevents race conditions)
+if ./.loom/scripts/claim.sh claim "$ISSUE_NUMBER" "$AGENT_ID"; then
+  # Claim succeeded - now update labels for visibility
+  gh issue edit "$ISSUE_NUMBER" --remove-label "loom:issue" --add-label "loom:building"
+  echo "✓ Claimed issue #$ISSUE_NUMBER"
+else
+  # Another agent claimed it first
+  echo "Issue #$ISSUE_NUMBER already claimed, trying next issue"
+  continue  # In a loop, move to next issue
+fi
+```
+
+**3. Extend claim for long-running work:**
+
+```bash
+# If work takes longer than 30 minutes, extend the claim
+./.loom/scripts/claim.sh extend "$ISSUE_NUMBER" "$AGENT_ID" 3600  # Extend by 1 hour
+```
+
+**4. Release claim on completion or abandonment:**
+
+```bash
+# When PR is created or work is blocked, release the claim
+./.loom/scripts/claim.sh release "$ISSUE_NUMBER" "$AGENT_ID"
+```
+
+### Full Parallel Mode Example
+
+```bash
+#!/bin/bash
+AGENT_ID="${AGENT_ID:-builder-$$}"
+
+while true; do
+  # Check for stop signal
+  if ./.loom/scripts/signal.sh check "$AGENT_ID"; then
+    echo "Stop signal received, exiting"
+    exit 0
+  fi
+
+  # Find available issues
+  ISSUES=$(gh issue list --label="loom:issue" --state=open --json number --jq '.[].number')
+
+  for ISSUE_NUMBER in $ISSUES; do
+    # Try atomic claim
+    if ./.loom/scripts/claim.sh claim "$ISSUE_NUMBER" "$AGENT_ID" 1800; then
+      # Claim succeeded
+      gh issue edit "$ISSUE_NUMBER" --remove-label "loom:issue" --add-label "loom:building"
+
+      # Create worktree and do work
+      ./.loom/scripts/worktree.sh "$ISSUE_NUMBER"
+      cd ".loom/worktrees/issue-$ISSUE_NUMBER"
+
+      # ... implement feature ...
+      # ... run tests ...
+      # ... create PR ...
+
+      # Release claim (PR will handle the rest)
+      ./.loom/scripts/claim.sh release "$ISSUE_NUMBER" "$AGENT_ID"
+
+      break  # Move to next iteration
+    fi
+  done
+
+  # No issues available, wait before retrying
+  sleep 60
+done
+```
+
+### Claim Commands Reference
+
+| Command | Purpose |
+|---------|---------|
+| `claim.sh claim <issue> [agent-id] [ttl]` | Atomically claim an issue (default TTL: 30 min) |
+| `claim.sh extend <issue> <agent-id> [seconds]` | Extend claim TTL for long work |
+| `claim.sh release <issue> [agent-id]` | Release claim when done |
+| `claim.sh check <issue>` | Check if issue is claimed |
+| `claim.sh list` | List all active claims |
+| `claim.sh cleanup` | Remove expired claims |
+
+### Signal Commands Reference
+
+| Command | Purpose |
+|---------|---------|
+| `signal.sh stop <agent-id\|all>` | Send stop signal |
+| `signal.sh check <agent-id>` | Check for stop signal (exit 0 if signal exists) |
+| `signal.sh clear <agent-id\|all>` | Clear stop signal |
+
+### When to Use Parallel Mode
+
+**Use atomic claiming when:**
+- Multiple Builder agents run simultaneously (Tauri App Mode)
+- Risk of two agents picking the same issue
+- Need graceful shutdown capability
+
+**Skip atomic claiming when:**
+- Single Builder in Manual Orchestration Mode
+- Human directly assigns issues
+- Testing/debugging workflows
+
+### Graceful Degradation
+
+If `claim.sh` or `signal.sh` don't exist (older installations), fall back to label-only claiming:
+
+```bash
+# Check if claiming system exists
+if [[ -x ./.loom/scripts/claim.sh ]]; then
+  # Use atomic claiming
+  ./.loom/scripts/claim.sh claim "$ISSUE_NUMBER" "$AGENT_ID" || continue
+fi
+
+# Always update labels (works with or without claiming system)
+gh issue edit "$ISSUE_NUMBER" --remove-label "loom:issue" --add-label "loom:building"
+```
+
 ## Reading Issues: ALWAYS Read Comments First
 
 **CRITICAL:** Curator adds implementation guidance in comments (and sometimes amends descriptions). You MUST read both the issue body AND all comments before starting work.
@@ -492,6 +740,92 @@ Before claiming, check for these warning signs:
 - Waste time redoing work (comment had shortcut)
 
 **Reading comments is not optional** - it's where Curators put the detailed spec that makes issues truly ready for implementation.
+
+## Pre-Implementation Review: Check Recent Main Changes
+
+**CRITICAL:** Before implementing, review recent changes to main to avoid conflicts with recent architectural decisions.
+
+### Why This Matters
+
+The codebase evolves while you work. Recent PRs may have:
+- Introduced new utilities or helper functions you should use
+- Changed authentication/authorization patterns
+- Updated API conventions or response formats
+- Added shared components or abstractions
+- Modified configuration or environment handling
+
+**Without this review**: You may implement using outdated patterns, leading to merge conflicts, inconsistent code, or duplicated functionality.
+
+### Required Commands
+
+**Step 1: Review recent commits to main**
+
+```bash
+# Show last 20 commits to main
+git fetch origin main
+git log --oneline -20 origin/main
+
+# Show files changed in recent commits
+git diff HEAD~20..origin/main --stat
+```
+
+**Step 2: Check changes in your feature area**
+
+```bash
+# Check recent changes in directories related to your feature
+git log --oneline -10 origin/main -- "src/relevant/path"
+git log --oneline -10 origin/main -- "*.ts"  # or relevant file types
+```
+
+**Step 3: Look for these architectural changes**
+
+| Change Type | What to Look For | Why It Matters |
+|-------------|------------------|----------------|
+| **Authentication** | New auth middleware, session handling, token patterns | Use the new auth approach, not old patterns |
+| **API Patterns** | Response formats, error handling, validation | Match existing conventions |
+| **Utilities** | New helper functions, shared modules | Reuse instead of reimplementing |
+| **Shared Components** | Common UI elements, base classes | Extend rather than duplicate |
+| **Configuration** | New env vars, config patterns | Follow established patterns |
+
+### Example Workflow
+
+```bash
+# 1. Fetch latest main
+git fetch origin main
+
+# 2. See what changed recently
+git log --oneline -20 origin/main
+# 5b55cb7 Add dependency unblocking to Guide role (#997)
+# cc41f95 Add guidance for handling pre-existing lint/build failures (#982)
+# 6b55a3e Add rebase step before PR creation (#980)
+# ...
+
+# 3. If you see relevant changes, investigate
+git show 5b55cb7 --stat  # See what files changed
+git show 5b55cb7          # See the actual changes
+
+# 4. Check changes in your feature area
+git log --oneline -10 origin/main -- "src/lib/auth"
+# → If you see auth changes, read them before implementing!
+
+# 5. Adapt your implementation plan based on findings
+```
+
+### When to Skip This Step
+
+- **Trivial fixes**: Typos, documentation, obvious bugs
+- **Isolated changes**: Changes that don't interact with other code
+- **Fresh main**: You just pulled main and no time has passed
+
+### Integration with Worktree Workflow
+
+This review happens BEFORE creating your worktree:
+
+1. Read issue (with comments)
+2. **Review recent main changes** ← YOU ARE HERE
+3. Check dependencies
+4. Create worktree
+5. Implement (using patterns learned from review)
 
 ## Checking Dependencies Before Claiming
 
@@ -1151,6 +1485,134 @@ When creating PR:
 After PR creation:
 - [ ] STOP - do not touch any PR labels
 - [ ] Move to next issue
+
+## Handling Pre-existing Lint/Build Failures
+
+**IMPORTANT**: When the target codebase has pre-existing issues, don't let them block your focused work.
+
+### The Problem
+
+Target codebases may have pre-existing failures that are unrelated to your issue:
+- Deprecated linter configurations
+- CSS classes not defined in newer framework versions
+- A11y warnings in unrelated files
+- Type errors in untouched code
+
+**These are NOT your responsibility to fix when implementing a specific feature.**
+
+### Strategy: Focus on Your Changes
+
+**Step 1: Identify what you changed**
+
+```bash
+# Get list of files you modified
+git diff --name-only origin/main
+```
+
+**Step 2: Run scoped checks on your changes only**
+
+```bash
+# Lint only changed files (Biome)
+git diff --name-only origin/main -- '*.ts' '*.tsx' '*.js' '*.jsx' | xargs npx biome check
+
+# Lint only changed files (ESLint)
+git diff --name-only origin/main -- '*.ts' '*.tsx' '*.js' '*.jsx' | xargs npx eslint
+
+# Type-check affected files (TypeScript will check dependencies automatically)
+npx tsc --noEmit
+```
+
+**Step 3: If full checks fail on pre-existing issues**
+
+1. **Document in PR description** what pre-existing issues exist
+2. **Don't fix unrelated issues** - this expands scope
+3. **Optionally create a follow-up issue** for the tech debt
+
+### PR Documentation Template
+
+When pre-existing issues exist, add this to your PR:
+
+```markdown
+## Pre-existing Issues (Not Addressed)
+
+The following issues exist in the codebase but are outside the scope of this PR:
+
+- [ ] `biome.json` uses deprecated v1 schema (needs migration to v2)
+- [ ] `DashboardPage.tsx` has a11y warnings (unrelated to this feature)
+- [ ] Tailwind 4 CSS class `border-border` not defined
+
+These should be addressed in separate PRs to maintain focused scope.
+```
+
+### Decision Tree
+
+```
+Lint/Build fails
+↓
+Is the failure in YOUR changed files?
+├─ YES → Fix it (your responsibility)
+└─ NO → Pre-existing issue
+         ├─ Document in PR description
+         ├─ Continue with your implementation
+         └─ Optionally create follow-up issue
+```
+
+### Creating Follow-up Issues (Optional)
+
+If you want to track pre-existing issues for future cleanup:
+
+```bash
+gh issue create --title "Tech debt: Migrate biome.json to v2 schema" --body "$(cat <<'EOF'
+## Problem
+
+`biome.json` uses deprecated v1 schema which causes warnings on every lint run.
+
+## Discovery
+
+Found while working on #969. Not fixed there to maintain focused scope.
+
+## Solution
+
+Run `npx @biomejs/biome migrate` to update configuration.
+
+## Impact
+
+- Removes deprecation warnings
+- Enables new linter rules
+- Estimated: 30 minutes
+EOF
+)"
+```
+
+### What NOT to Do
+
+❌ **Don't block your PR on unrelated failures**
+```bash
+# WRONG: Spending hours fixing biome config for an unrelated feature
+```
+
+❌ **Don't include unrelated fixes in your PR**
+```bash
+# WRONG: PR titled "Add login button" that also migrates linter config
+```
+
+❌ **Don't ignore failures in YOUR code**
+```bash
+# WRONG: Introducing new lint errors in the code you wrote
+```
+
+### Why This Matters
+
+**Scope creep kills productivity:**
+- Issue #921 spent 2+ hours on biome migration (unrelated to feature)
+- Issue #922 fixed a11y warnings in files not touched by the feature
+- Each detour adds risk and delays the actual goal
+
+**Focused PRs are better:**
+- Easier to review (one concern per PR)
+- Faster to merge (no surprises)
+- Clearer git history (each commit has one purpose)
+- Lower risk (smaller blast radius)
 
 ## Raising Concerns
 
