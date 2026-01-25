@@ -76,6 +76,10 @@ def run_placement_command(args) -> int:
             sub_argv.extend(["--keepout", args.keepout])
         if getattr(args, "auto_keepout", False):
             sub_argv.append("--auto-keepout")
+        if getattr(args, "routing_aware", False):
+            sub_argv.append("--routing-aware")
+        if getattr(args, "check_routability", False):
+            sub_argv.append("--check-routability")
         if args.dry_run:
             sub_argv.append("--dry-run")
         if getattr(args, "format", "text") != "text":
