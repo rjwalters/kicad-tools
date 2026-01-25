@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-01-24
+
+### Added
+
+#### GPU Acceleration (`acceleration/`)
+
+Automatic GPU acceleration for computationally intensive operations with cross-platform support.
+
+- **Backend Abstraction** (#1023) - Unified interface for GPU operations
+  - `BackendType` enum: CUDA, Metal, CPU
+  - Automatic backend detection and selection (CUDA > Metal > CPU)
+  - Graceful fallback when GPU unavailable
+
+- **GPU Configuration** (#1024) - Integration with PerformanceConfig
+  - `[gpu]` section in `~/.config/kicad-tools/performance.toml`
+  - Configurable backend, device ID, memory limits
+  - Problem-size thresholds for GPU vs CPU selection
+
+- **GPU Benchmarking** (#1025) - Calibrate command GPU support
+  - `kicad-tools calibrate --show-gpu` displays GPU capabilities
+  - Automatic GPU performance calibration
+
+- **Optional Dependencies** (#1026) - GPU packages as optional extras
+  - `uv pip install kicad-tools[cuda]` for NVIDIA GPU support
+  - `uv pip install kicad-tools[metal]` for Apple Silicon support
+
+- **GPU-Accelerated Operations**
+  - Force-directed placement (#1027) - O(n²) pairwise force calculations
+  - Evolutionary fitness evaluation (#1028) - Parallel population evaluation
+  - Grid operations (#1029) - Large 3D array operations for routing
+  - Signal integrity calculations (#1030) - Parallel trace pair analysis
+
+### Changed
+
+- **MCP Tool Registry** (#1083) - Unified tool registration between stdio and HTTP transports
+  - New `tools/registry.py` with `ToolSpec` dataclass
+  - Single source of truth for all 28 MCP tools
+  - `server.py` reduced from ~1,700 to ~310 lines (82% reduction)
+
+### Fixed
+
+- **Acceleration**: Consolidate duplicate `GPUBackend`/`BackendType` enums (#1080)
+  - Single `BackendType` enum as source of truth
+  - Removed redundant `GPUBackend` from detection module
+
 ## [0.10.1] - 2026-01-17
 
 ### Fixed
