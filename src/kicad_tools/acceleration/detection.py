@@ -9,26 +9,19 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING
+
+from kicad_tools.acceleration.backend import BackendType
 
 if TYPE_CHECKING:
     pass
-
-
-class GPUBackend(Enum):
-    """Available GPU acceleration backends."""
-
-    NONE = "none"
-    CUDA = "cuda"
-    METAL = "metal"
 
 
 @dataclass
 class GPUInfo:
     """Information about detected GPU capabilities."""
 
-    backend: GPUBackend
+    backend: BackendType
     available: bool
     device_name: str | None = None
     reason: str | None = None
@@ -48,19 +41,19 @@ def _check_cuda() -> GPUInfo:
         props = cp.cuda.runtime.getDeviceProperties(device.id)
         device_name = props["name"].decode() if isinstance(props["name"], bytes) else props["name"]
         return GPUInfo(
-            backend=GPUBackend.CUDA,
+            backend=BackendType.CUDA,
             available=True,
             device_name=device_name,
         )
     except ImportError:
         return GPUInfo(
-            backend=GPUBackend.CUDA,
+            backend=BackendType.CUDA,
             available=False,
             reason="cupy not installed",
         )
     except Exception as e:
         return GPUInfo(
-            backend=GPUBackend.CUDA,
+            backend=BackendType.CUDA,
             available=False,
             reason=str(e),
         )
@@ -75,19 +68,19 @@ def _check_metal() -> GPUInfo:
         # Check if we can create a simple array (validates Metal is working)
         _ = mx.array([1.0, 2.0, 3.0])
         return GPUInfo(
-            backend=GPUBackend.METAL,
+            backend=BackendType.METAL,
             available=True,
             device_name="Apple Silicon GPU",
         )
     except ImportError:
         return GPUInfo(
-            backend=GPUBackend.METAL,
+            backend=BackendType.METAL,
             available=False,
             reason="mlx not installed",
         )
     except Exception as e:
         return GPUInfo(
-            backend=GPUBackend.METAL,
+            backend=BackendType.METAL,
             available=False,
             reason=str(e),
         )
@@ -122,7 +115,7 @@ def detect_gpu() -> GPUInfo:
             return metal_info
 
     return GPUInfo(
-        backend=GPUBackend.NONE,
+        backend=BackendType.CPU,
         available=False,
         reason="no GPU acceleration available",
     )
