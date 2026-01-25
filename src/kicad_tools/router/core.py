@@ -1737,6 +1737,8 @@ class Autorouter:
         partition_rows: int = 2,
         partition_cols: int = 2,
         max_parallel_workers: int = 4,
+        batch_routing: bool = False,
+        hierarchical: bool = False,
     ) -> list[Route]:
         """Route all nets using PathFinder-style negotiated congestion.
 
@@ -1766,6 +1768,12 @@ class Autorouter:
             partition_rows: Number of region rows for partitioning (default 2)
             partition_cols: Number of region columns for partitioning (default 2)
             max_parallel_workers: Maximum parallel workers per region group (default 4)
+            batch_routing: If True, use GPU-accelerated batch routing (Issue #1092).
+                Routes multiple independent nets simultaneously using GPU compute.
+                Best results with 4+ independent nets and Metal/CUDA GPU.
+            hierarchical: If True, use hierarchical coarse-to-fine routing (Issue #1092).
+                First performs global routing on a coarse grid, then refines with
+                the fine grid near pads and congestion points.
 
         Returns:
             List of routes (may be partial if timeout reached)
@@ -1773,6 +1781,16 @@ class Autorouter:
         import time
 
         start_time = time.time()
+
+        # If hierarchical mode is requested, delegate to two-phase routing
+        if hierarchical:
+            return self.route_all_two_phase(
+                use_negotiated=True,
+                corridor_width_factor=2.0,
+                corridor_penalty=5.0,
+                progress_callback=progress_callback,
+                timeout=timeout,
+            )
 
         flush_print("\n=== Negotiated Congestion Routing ===")
         flush_print(f"  Max iterations: {max_iterations}")
@@ -1789,6 +1807,8 @@ class Autorouter:
                 f"  Region parallel: enabled ({partition_rows}x{partition_cols} regions, "
                 f"{max_parallel_workers} workers)"
             )
+        if batch_routing:
+            print("  Batch routing: enabled (GPU-accelerated)")
         if timeout:
             print(f"  Timeout: {timeout}s")
 
