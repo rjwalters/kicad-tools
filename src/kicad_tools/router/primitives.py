@@ -131,6 +131,16 @@ class Segment:
     net: int = 0
     net_name: str = ""
 
+    @property
+    def start(self) -> tuple[float, float]:
+        """Return the start point as a tuple (x1, y1)."""
+        return (self.x1, self.y1)
+
+    @property
+    def end(self) -> tuple[float, float]:
+        """Return the end point as a tuple (x2, y2)."""
+        return (self.x2, self.y2)
+
     def to_sexp(self) -> str:
         """Generate KiCad S-expression."""
         return f"""(segment
