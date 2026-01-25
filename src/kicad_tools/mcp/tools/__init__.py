@@ -1,6 +1,9 @@
 """MCP tools for kicad-tools.
 
 Each tool module provides specific functionality for AI agents.
+
+The registry module provides a unified source of tool definitions
+used by both stdio and HTTP transports.
 """
 
 from kicad_tools.mcp.tools.analysis import (
@@ -43,12 +46,28 @@ from kicad_tools.mcp.tools.patterns import (
     list_available_components,
     validate_pattern,
 )
+from kicad_tools.mcp.tools.registry import (
+    TOOL_REGISTRY,
+    ToolSpec,
+    clear_registry,
+    get_tool,
+    list_tools,
+    register_tool,
+)
 from kicad_tools.mcp.tools.routing import (
     get_unrouted_nets,
     route_net,
 )
 
 __all__ = [
+    # Registry exports
+    "TOOL_REGISTRY",
+    "ToolSpec",
+    "clear_registry",
+    "get_tool",
+    "list_tools",
+    "register_tool",
+    # Tool function exports
     "adapt_pattern",
     "add_subsystem",
     "analyze_board",
