@@ -1,6 +1,13 @@
 {
   "version": "2",
   "offlineMode": false,
+  "reflection": {
+    "enabled": true,
+    "auto_create_issues": false,
+    "min_session_duration": 300,
+    "upstream_repo": "rjwalters/loom",
+    "categories": ["bug", "enhancement", "documentation"]
+  },
   "terminals": [
     {
       "id": "terminal-1",
