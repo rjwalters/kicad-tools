@@ -550,6 +550,8 @@ def route_with_layer_escalation(
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                    batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                    hierarchical=getattr(args, "hierarchical", False),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -863,6 +865,8 @@ def route_with_rule_relaxation(
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                    batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                    hierarchical=getattr(args, "hierarchical", False),
                 )
             elif args.strategy == "basic":
                 router.route_all()
@@ -1194,6 +1198,8 @@ def route_with_combined_escalation(
                     router.route_all_negotiated(
                         max_iterations=args.iterations,
                         timeout=args.timeout,
+                        batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                        hierarchical=getattr(args, "hierarchical", False),
                     )
                 elif args.strategy == "basic":
                     router.route_all()
@@ -1763,6 +1769,27 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Use high-performance mode with aggressive parallelization and more trials. "
             "Uses calibrated settings if available (run 'kicad-tools calibrate' first)."
+        ),
+    )
+    parser.add_argument(
+        "--hierarchical",
+        action="store_true",
+        help=(
+            "Enable hierarchical coarse-to-fine routing mode. "
+            "First performs global routing on a coarse grid (4x resolution) "
+            "to establish corridors, then refines with the fine grid only "
+            "near pads and congestion points. Can significantly speed up "
+            "fine-grid routing (0.05mm-0.1mm) on large boards."
+        ),
+    )
+    parser.add_argument(
+        "--batch-routing",
+        action="store_true",
+        help=(
+            "Enable GPU-accelerated batch routing for parallel net processing. "
+            "Routes multiple independent nets simultaneously using GPU compute. "
+            "Best results with 4+ independent nets and Metal/CUDA GPU. "
+            "Enabled automatically in high-performance mode."
         ),
     )
 
@@ -2384,6 +2411,8 @@ def main(argv: list[str] | None = None) -> int:
                 return router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                    batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                    hierarchical=getattr(args, "hierarchical", False),
                 )
             elif args.differential_pairs and args.strategy == "basic":
                 result, diffpair_warnings = router.route_all_with_diffpairs(diffpair_config)

@@ -17,13 +17,15 @@ if TYPE_CHECKING:
     from .primitives import Pad, Route
     from .rules import DesignRules, NetClassRouting
 
-# Try to import C++ module
+# Try to import C++ module with detailed error tracking
+_CPP_IMPORT_ERROR: str | None = None
 try:
     from . import router_cpp
 
     _CPP_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     _CPP_AVAILABLE = False
+    _CPP_IMPORT_ERROR = str(e)
     router_cpp = None  # type: ignore
 
 
@@ -32,19 +34,74 @@ def is_cpp_available() -> bool:
     return _CPP_AVAILABLE
 
 
+def get_cpp_unavailable_reason() -> str | None:
+    """Get the reason why C++ backend is unavailable.
+
+    Returns:
+        Error message if C++ backend failed to load, None if available.
+    """
+    if _CPP_AVAILABLE:
+        return None
+    return _CPP_IMPORT_ERROR
+
+
 def get_backend_info() -> dict:
-    """Get information about the active backend."""
+    """Get information about the active backend.
+
+    Returns a dictionary with:
+        - backend: "cpp" or "python"
+        - version: version string
+        - available: True if C++ backend is available
+        - unavailable_reason: Error message if C++ unavailable (only if available=False)
+        - platform: Current platform info (for diagnostics)
+    """
+    import platform
+    import sys
+
+    platform_info = {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "python_version": sys.version.split()[0],
+    }
+
     if _CPP_AVAILABLE:
         return {
             "backend": "cpp",
             "version": router_cpp.version(),
             "available": True,
+            "platform": platform_info,
         }
-    return {
+
+    # Build detailed unavailability info
+    reason = _CPP_IMPORT_ERROR or "Unknown error"
+
+    # Provide helpful diagnostics for common issues
+    diagnostic_hint = None
+    if "arm64" in platform.machine().lower() or "aarch64" in platform.machine().lower():
+        if "darwin" in platform.system().lower():
+            diagnostic_hint = (
+                "On Apple Silicon, ensure the C++ extension was built with: "
+                "'kct build-native' or 'python -m build'. "
+                "The native router provides 10-100x speedup for fine-grid routing."
+            )
+    elif "cannot open shared object" in reason.lower() or "dll" in reason.lower():
+        diagnostic_hint = (
+            "The C++ router extension was not found. "
+            "Build with 'kct build-native' or install kicad-tools[native]."
+        )
+
+    result = {
         "backend": "python",
         "version": "pure-python",
         "available": False,
+        "unavailable_reason": reason,
+        "platform": platform_info,
     }
+
+    if diagnostic_hint:
+        result["diagnostic_hint"] = diagnostic_hint
+
+    return result
 
 
 class CppGrid:
