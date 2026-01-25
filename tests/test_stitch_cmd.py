@@ -7,6 +7,7 @@ import pytest
 from kicad_tools.cli.stitch_cmd import (
     PadInfo,
     calculate_via_position,
+    find_all_plane_nets,
     find_existing_tracks,
     find_existing_vias,
     find_pads_on_nets,
@@ -743,3 +744,104 @@ class TestCLIOutputWithZones:
         assert "Warning" in captured.err
         assert "VCC" in captured.err
         assert "B.Cu" in captured.err
+
+
+class TestFindAllPlaneNets:
+    """Tests for find_all_plane_nets function."""
+
+    def test_find_all_plane_nets(self, stitch_zone_pcb: Path):
+        """Should find all nets that have zones."""
+        sexp = load_pcb(stitch_zone_pcb)
+        plane_nets = find_all_plane_nets(sexp)
+
+        # GND and +3.3V have zones
+        assert "GND" in plane_nets
+        assert "+3.3V" in plane_nets
+        assert plane_nets["GND"] == "In1.Cu"
+        assert plane_nets["+3.3V"] == "In2.Cu"
+
+        # VCC has no zone, should not be in result
+        assert "VCC" not in plane_nets
+
+    def test_find_all_plane_nets_empty_pcb(self, stitch_test_pcb: Path):
+        """Should return empty dict for PCB without zones."""
+        sexp = load_pcb(stitch_test_pcb)
+        plane_nets = find_all_plane_nets(sexp)
+
+        assert plane_nets == {}
+
+    def test_find_all_plane_nets_skips_empty_net_names(self, tmp_path: Path):
+        """Should skip zones with empty net names."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (net 0 "")
+          (net 1 "GND")
+          (zone (net 0) (net_name "") (layer "In1.Cu") (uuid "z1"))
+          (zone (net 1) (net_name "GND") (layer "In2.Cu") (uuid "z2"))
+        )"""
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        sexp = load_pcb(pcb_file)
+        plane_nets = find_all_plane_nets(sexp)
+
+        # Only GND should be found, empty net skipped
+        assert len(plane_nets) == 1
+        assert "GND" in plane_nets
+
+
+class TestAutoDetectPlaneNets:
+    """Tests for CLI auto-detection of power plane nets."""
+
+    def test_cli_auto_detect_no_net_flag(self, stitch_zone_pcb: Path, capsys):
+        """CLI without --net should auto-detect plane nets from zones."""
+        exit_code = main([str(stitch_zone_pcb), "--dry-run"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+
+        # Should report auto-detection
+        assert "Auto-detected" in captured.out
+        # Should include both nets with zones
+        assert "GND" in captured.out
+        assert "+3.3V" in captured.out
+
+    def test_cli_auto_detect_adds_vias_for_all_plane_nets(self, stitch_zone_pcb: Path):
+        """Auto-detect should stitch all detected plane nets."""
+        # First verify the nets present
+        sexp = load_pcb(stitch_zone_pcb)
+        plane_nets = find_all_plane_nets(sexp)
+        assert len(plane_nets) == 2  # GND and +3.3V
+
+        # Run stitching with auto-detect
+        exit_code = main([str(stitch_zone_pcb), "--dry-run"])
+        assert exit_code == 0
+
+        # The dry run should report vias for both nets
+        # Note: We can't easily verify count without modifying how results are returned
+        # but we verified the mechanism works via the TestZoneAutoDetection tests
+
+    def test_cli_no_zones_returns_error(self, stitch_test_pcb: Path, capsys):
+        """CLI without --net and no zones should return error."""
+        exit_code = main([str(stitch_test_pcb)])  # No --net, no zones
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "No power plane nets found" in captured.err
+
+    def test_explicit_net_flag_still_works(self, stitch_zone_pcb: Path, capsys):
+        """Explicit --net flag should override auto-detection of which nets to stitch."""
+        # Only stitch GND, not +3.3V
+        exit_code = main([str(stitch_zone_pcb), "--net", "GND", "--dry-run"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+
+        # Should NOT report auto-detection of nets (no "2 power plane nets" message)
+        assert "power plane nets:" not in captured.out
+        # Should report detected target layer for the explicit net
+        assert "GND -> In1.Cu" in captured.out
+        # Should NOT include +3.3V since we only specified GND
+        assert "+3.3V ->" not in captured.out

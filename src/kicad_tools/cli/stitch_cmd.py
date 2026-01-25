@@ -5,6 +5,10 @@ Automatically adds stitching vias to connect surface-mount component pads
 to internal power/ground planes in multi-layer PCBs.
 
 Usage:
+    # Auto-detect all power plane nets from zones and stitch them
+    kicad-pcb-stitch board.kicad_pcb
+
+    # Stitch specific nets
     kicad-pcb-stitch board.kicad_pcb --net GND
     kicad-pcb-stitch board.kicad_pcb --net GND --net +3.3V
     kicad-pcb-stitch board.kicad_pcb --net GND --dry-run
@@ -120,6 +124,45 @@ def find_zones_for_net(sexp: SExp, net_name: str) -> list[str]:
                 layers.append(zone_layer)
 
     return layers
+
+
+def find_all_plane_nets(sexp: SExp) -> dict[str, str]:
+    """Find all nets that have copper zones (power planes).
+
+    Scans the PCB for zones and returns a mapping of net names to their
+    plane layers. This is used for automatic via stitching when no
+    specific nets are provided.
+
+    Args:
+        sexp: PCB S-expression
+
+    Returns:
+        Dict mapping net name to plane layer (e.g., {"GND": "In1.Cu", "+3.3V": "In2.Cu"})
+    """
+    plane_nets: dict[str, str] = {}
+
+    for child in sexp.iter_children():
+        if child.tag == "zone":
+            zone_net_name = None
+            zone_layer = None
+
+            # Get net_name from zone
+            net_name_node = child.find_child("net_name")
+            if net_name_node:
+                zone_net_name = net_name_node.get_string(0)
+
+            # Get layer from zone
+            layer_node = child.find_child("layer")
+            if layer_node:
+                zone_layer = layer_node.get_string(0)
+
+            # Only include zones with valid net names (skip empty nets)
+            if zone_net_name and zone_layer and zone_net_name.strip():
+                # If net already has a plane, keep the first one found
+                if zone_net_name not in plane_nets:
+                    plane_nets[zone_net_name] = zone_layer
+
+    return plane_nets
 
 
 def find_pads_on_nets(sexp: SExp, net_names: set[str]) -> list[PadInfo]:
@@ -574,8 +617,8 @@ def main(argv: list[str] | None = None) -> int:
         "-n",
         action="append",
         dest="nets",
-        required=True,
-        help="Net name to add vias for (can be repeated)",
+        help="Net name to add vias for (can be repeated). If not specified, "
+        "auto-detects all power plane nets from zones.",
     )
     parser.add_argument(
         "--via-size",
@@ -637,10 +680,24 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copy(pcb_path, output_path)
         pcb_path = output_path
 
+    # Auto-detect power plane nets if none specified
+    net_names = args.nets
+    if not net_names:
+        # Load PCB to find zones
+        from kicad_tools.core.sexp_file import load_pcb as _load_pcb
+
+        sexp = _load_pcb(pcb_path)
+        plane_nets = find_all_plane_nets(sexp)
+        if not plane_nets:
+            print("No power plane nets found (no zones with assigned nets)", file=sys.stderr)
+            return 1
+        net_names = list(plane_nets.keys())
+        print(f"Auto-detected {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
+
     try:
         result = run_stitch(
             pcb_path=pcb_path,
-            net_names=args.nets,
+            net_names=net_names,
             via_size=args.via_size,
             drill=args.drill,
             clearance=args.clearance,
