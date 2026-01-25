@@ -670,8 +670,9 @@ class TestSOPStaggeredEscape:
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
-        # Create SOP-16 pads with 0.65mm pitch (TSSOP-like)
-        pads = create_sop_pads(16, pitch=0.65)
+        # Create SOP-16 pads with 1.0mm pitch (standard SOP pitch)
+        # Note: 0.65mm pitch is now classified as SSOP with different routing
+        pads = create_sop_pads(16, pitch=1.0)
         info = router.analyze_package(pads)
 
         assert info.package_type == PackageType.SOP
@@ -686,8 +687,9 @@ class TestSOPStaggeredEscape:
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
-        # Create SOP pads
-        pads = create_sop_pads(16, pitch=0.65)
+        # Create SOP pads with 1.0mm pitch (standard SOP)
+        # Note: 0.65mm pitch is now classified as SSOP with different routing
+        pads = create_sop_pads(16, pitch=1.0)
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
@@ -701,8 +703,9 @@ class TestSOPStaggeredEscape:
         grid, rules = grid_and_rules
         router = EscapeRouter(grid, rules)
 
-        # Create horizontal SOP (rows at different Y positions)
-        pads = create_sop_pads(8, pitch=0.65)
+        # Create horizontal SOP (rows at different Y positions) with 1.0mm pitch
+        # Note: 0.65mm pitch is now classified as SSOP with different routing
+        pads = create_sop_pads(8, pitch=1.0)
         info = router.analyze_package(pads)
         escapes = router.generate_escapes(info)
 
