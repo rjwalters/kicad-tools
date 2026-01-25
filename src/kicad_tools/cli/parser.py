@@ -1420,6 +1420,18 @@ def _add_placement_parser(subparsers) -> None:
         action="store_true",
         help="Enable thermal-aware placement (keeps heat sources away from sensitive components)",
     )
+    placement_optimize.add_argument(
+        "--routing-aware",
+        action="store_true",
+        dest="routing_aware",
+        help="Use integrated place-route optimization (iterates between placement and routing)",
+    )
+    placement_optimize.add_argument(
+        "--check-routability",
+        action="store_true",
+        dest="check_routability",
+        help="Check routability before and after optimization to show impact",
+    )
     placement_optimize.add_argument("--dry-run", action="store_true", help="Preview only")
     placement_optimize.add_argument(
         "--format",
