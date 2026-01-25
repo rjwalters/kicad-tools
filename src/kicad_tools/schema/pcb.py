@@ -1287,24 +1287,35 @@ class PCB:
 
         Sets self._board_origin to the start position of the first gr_rect
         found on Edge.Cuts, or (0, 0) if none found.
+
+        Also converts footprint positions from sheet-absolute to board-relative
+        coordinates so that the optimizer can work with board-relative positions.
         """
+        origin = (0.0, 0.0)
+
         # Look for gr_rect on Edge.Cuts layer - this is how PCB.create() makes outlines
         for graphic in self._graphics:
             if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
-                self._board_origin = graphic.start
-                return
+                origin = graphic.start
+                break
+        else:
+            # Fallback: check for gr_line forming a rectangle on Edge.Cuts
+            # Find the minimum x, y coordinates from all Edge.Cuts lines
+            edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
+            if edge_lines:
+                min_x = min(min(line.start[0], line.end[0]) for line in edge_lines)
+                min_y = min(min(line.start[1], line.end[1]) for line in edge_lines)
+                origin = (min_x, min_y)
 
-        # Fallback: check for gr_line forming a rectangle on Edge.Cuts
-        # Find the minimum x, y coordinates from all Edge.Cuts lines
-        edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
-        if edge_lines:
-            min_x = min(min(line.start[0], line.end[0]) for line in edge_lines)
-            min_y = min(min(line.start[1], line.end[1]) for line in edge_lines)
-            self._board_origin = (min_x, min_y)
-            return
+        self._board_origin = origin
 
-        # No board outline found, use (0, 0)
-        self._board_origin = (0.0, 0.0)
+        # Convert footprint positions from sheet-absolute to board-relative
+        # This ensures the optimizer works with board-relative coordinates,
+        # and update_footprint_position() will correctly add the origin back
+        if origin != (0.0, 0.0):
+            for fp in self._footprints:
+                abs_x, abs_y = fp.position
+                fp.position = (abs_x - origin[0], abs_y - origin[1])
 
     # Public accessors
 

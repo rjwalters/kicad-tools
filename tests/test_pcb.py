@@ -1832,6 +1832,166 @@ class TestPCBCreate:
             pytest.fail("Footprint R1 not found")
 
 
+class TestBoardOriginCoordinateConversion:
+    """Tests for board origin coordinate conversion.
+
+    Issue #1088: Placement optimizer translates components outside board outline.
+    When a PCB is loaded with a non-zero board origin (centered boards), footprint
+    positions should be converted from sheet-absolute to board-relative coordinates.
+    This ensures that the optimizer works with board-relative positions, and
+    update_footprint_position() correctly adds the origin back when saving.
+    """
+
+    def test_loaded_footprint_positions_are_board_relative(self, tmp_path: Path):
+        """Test that footprint positions are converted to board-relative on load.
+
+        This is a regression test for issue #1088: When a centered board is loaded,
+        footprint positions should be board-relative, not sheet-absolute.
+        """
+        # Create a centered board
+        pcb = PCB.create(width=65, height=56)  # Similar to issue example
+
+        # Board origin will be at approximately ((297-65)/2, (210-56)/2) = (116, 77)
+        origin_x, origin_y = pcb.board_origin
+
+        # Add a footprint at board-relative position (12, 43)
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=12.0,
+            y=43.0,
+        )
+
+        # Verify in-memory position is board-relative
+        fp = pcb.get_footprint("R1")
+        assert fp.position[0] == pytest.approx(12.0)
+        assert fp.position[1] == pytest.approx(43.0)
+
+        # Save and reload
+        output_path = tmp_path / "centered_board.kicad_pcb"
+        pcb.save(output_path)
+        reloaded = PCB.load(str(output_path))
+
+        # After loading, position should still be board-relative
+        fp_reloaded = reloaded.get_footprint("R1")
+        assert fp_reloaded.position[0] == pytest.approx(12.0)
+        assert fp_reloaded.position[1] == pytest.approx(43.0)
+
+    def test_update_position_roundtrip_preserves_coordinates(self, tmp_path: Path):
+        """Test that updating position and reloading preserves coordinates.
+
+        This is the core regression test for issue #1088: Without the fix,
+        each save/reload cycle would ADD the board origin to positions,
+        causing positions to grow unboundedly.
+        """
+        # Create a centered board
+        pcb = PCB.create(width=65, height=56)
+
+        # Add a footprint
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=12.0,
+            y=43.0,
+        )
+
+        # Save, reload, update position, save, reload
+        output_path = tmp_path / "roundtrip.kicad_pcb"
+        pcb.save(output_path)
+
+        # First reload
+        pcb2 = PCB.load(str(output_path))
+        fp = pcb2.get_footprint("R1")
+        assert fp.position[0] == pytest.approx(12.0)
+        assert fp.position[1] == pytest.approx(43.0)
+
+        # Update to new position
+        pcb2.update_footprint_position("R1", x=30.0, y=20.0)
+
+        # Save and reload again
+        output_path2 = tmp_path / "roundtrip2.kicad_pcb"
+        pcb2.save(output_path2)
+        pcb3 = PCB.load(str(output_path2))
+
+        # Position should be exactly (30, 20), not doubled
+        fp3 = pcb3.get_footprint("R1")
+        assert fp3.position[0] == pytest.approx(30.0)
+        assert fp3.position[1] == pytest.approx(20.0)
+
+        # Multiple roundtrips should not accumulate offset
+        pcb3.update_footprint_position("R1", x=40.0, y=25.0)
+        output_path3 = tmp_path / "roundtrip3.kicad_pcb"
+        pcb3.save(output_path3)
+        pcb4 = PCB.load(str(output_path3))
+
+        fp4 = pcb4.get_footprint("R1")
+        assert fp4.position[0] == pytest.approx(40.0)
+        assert fp4.position[1] == pytest.approx(25.0)
+
+    def test_optimizer_workflow_preserves_board_bounds(self, tmp_path: Path):
+        """Test that optimizer workflow keeps components within board bounds.
+
+        This simulates the workflow from issue #1088 where optimization
+        caused components to be placed outside the board outline.
+        """
+        from kicad_tools.optim import PlacementConfig, PlacementOptimizer
+
+        # Create a centered board similar to the issue
+        pcb = PCB.create(width=65, height=56)
+        origin_x, origin_y = pcb.board_origin
+
+        # Add components at board-relative positions
+        pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=12.0,
+            y=43.0,
+        )
+        pcb.add_footprint(
+            library_id="Capacitor_SMD:C_0603_1608Metric",
+            reference="C1",
+            x=45.0,
+            y=20.0,
+        )
+
+        # Save and reload to simulate real workflow
+        pcb_path = tmp_path / "optimizer_test.kicad_pcb"
+        pcb.save(pcb_path)
+        loaded_pcb = PCB.load(str(pcb_path))
+
+        # Create optimizer from loaded PCB
+        config = PlacementConfig()
+        optimizer = PlacementOptimizer.from_pcb(loaded_pcb, config=config)
+
+        # Get components - they should be at board-relative positions
+        r1 = optimizer.get_component("R1")
+        c1 = optimizer.get_component("C1")
+
+        assert r1 is not None
+        assert c1 is not None
+
+        # Positions should be board-relative, within board bounds
+        assert 0 <= r1.x <= 65, f"R1.x={r1.x} outside board bounds [0, 65]"
+        assert 0 <= r1.y <= 56, f"R1.y={r1.y} outside board bounds [0, 56]"
+        assert 0 <= c1.x <= 65, f"C1.x={c1.x} outside board bounds [0, 65]"
+        assert 0 <= c1.y <= 56, f"C1.y={c1.y} outside board bounds [0, 56]"
+
+        # Write back and reload
+        optimizer.write_to_pcb(loaded_pcb)
+        loaded_pcb.save(pcb_path)
+
+        final_pcb = PCB.load(str(pcb_path))
+
+        # Positions should still be within board bounds
+        r1_final = final_pcb.get_footprint("R1")
+        c1_final = final_pcb.get_footprint("C1")
+
+        assert 0 <= r1_final.position[0] <= 65, f"R1.x={r1_final.position[0]} outside board bounds"
+        assert 0 <= r1_final.position[1] <= 56, f"R1.y={r1_final.position[1]} outside board bounds"
+        assert 0 <= c1_final.position[0] <= 65, f"C1.x={c1_final.position[0]} outside board bounds"
+        assert 0 <= c1_final.position[1] <= 56, f"C1.y={c1_final.position[1]} outside board bounds"
+
+
 class TestPropertySetterProtection:
     """Tests for property setters that prevent silent data loss.
 
