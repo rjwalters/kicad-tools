@@ -50,6 +50,8 @@ class PackageType(Enum):
     QFN = auto()  # Quad Flat No-lead
     TQFP = auto()  # Thin Quad Flat Package
     SOP = auto()  # Small Outline Package
+    SSOP = auto()  # Shrink Small Outline Package (0.65mm pitch)
+    TSSOP = auto()  # Thin Shrink Small Outline Package (0.65mm pitch)
     SOT = auto()  # Small Outline Transistor
     DIP = auto()  # Dual In-line Package
     THROUGH_HOLE = auto()  # Generic through-hole
@@ -136,6 +138,7 @@ def is_dense_package(
     - Pin pitch is too small for traces to pass between pins, OR
     - Pin pitch < 0.5mm (when no clearance info provided), OR
     - Pin count > 48
+    - Fine-pitch SSOP/TSSOP (0.65mm pitch or less) - always dense
 
     When trace_width and clearance are provided, the threshold is calculated
     dynamically: a package is dense if there's insufficient space between
@@ -169,6 +172,11 @@ def is_dense_package(
     if min_pitch <= 0:
         return False
 
+    # Fine-pitch SSOP/TSSOP check (0.75mm or less is always dense)
+    # These packages need escape routing regardless of design rules
+    if min_pitch <= 0.75 and _is_dual_row(pads):
+        return True
+
     # Dynamic threshold based on design rules
     # A trace needs: trace_width + clearance on each side from adjacent pins
     # So minimum pitch to route between pins is: 2 * (trace_width/2 + clearance) + trace_width
@@ -186,6 +194,33 @@ def is_dense_package(
         return True
 
     return False
+
+
+def is_fine_pitch_ssop(pads: list[Pad], pitch_threshold: float = 0.75) -> bool:
+    """Check if pads represent a fine-pitch SSOP/TSSOP package.
+
+    Fine-pitch SSOP/TSSOP packages (0.65mm pitch) have adjacent pins too close
+    together for standard routing between them. They require special escape
+    routing with alternating layer assignments.
+
+    Args:
+        pads: List of pads from a single component
+        pitch_threshold: Maximum pitch to be considered fine-pitch (mm).
+            Default 0.75mm catches both SSOP (0.65mm) and TSSOP (0.5mm).
+
+    Returns:
+        True if the package is a fine-pitch SSOP/TSSOP needing special routing
+    """
+    if len(pads) < 4:  # Need at least 4 pads for SSOP
+        return False
+
+    # Check for dual-row arrangement (SSOP/TSSOP characteristic)
+    if not _is_dual_row(pads):
+        return False
+
+    # Check pin pitch
+    min_pitch = _calculate_min_pitch(pads)
+    return 0 < min_pitch <= pitch_threshold
 
 
 def detect_package_type(pads: list[Pad]) -> PackageType:
@@ -218,13 +253,23 @@ def detect_package_type(pads: list[Pad]) -> PackageType:
     center_y = (max(ys) + min(ys)) / 2
 
     # IMPORTANT: Check detection order matters!
-    # 1. Dual-row packages (SOP) - only 2 rows of pads
+    # 1. Dual-row packages (SOP/SSOP/TSSOP) - only 2 rows of pads
     # 2. Quad packages (QFP/QFN) - pads on 4 edges, empty interior
     # 3. Grid packages (BGA) - filled grid throughout
 
-    # Check for dual-row first (SOP) - most specific
+    # Check for dual-row first (SOP/SSOP/TSSOP) - most specific
     if _is_dual_row(pads):
-        return PackageType.SOP
+        # Distinguish between SOP, SSOP, TSSOP based on pin pitch
+        min_pitch = _calculate_min_pitch(pads)
+        if min_pitch < 0.55:
+            # TSSOP: 0.5mm pitch (thin shrink)
+            return PackageType.TSSOP
+        elif min_pitch < 0.75:
+            # SSOP: 0.65mm pitch (shrink)
+            return PackageType.SSOP
+        else:
+            # Standard SOP/SOIC: 1.27mm pitch
+            return PackageType.SOP
 
     # Check for quad arrangement (QFP/QFN/TQFP) before BGA
     # QFP/QFN have pads only on edges, not in interior
@@ -535,6 +580,8 @@ class EscapeRouter:
         Routes are generated based on package type:
         - BGA: Ring-based escape with layer alternation
         - QFP/QFN/TQFP: Alternating direction escape
+        - SSOP/TSSOP: Alternating layer escape for fine-pitch
+        - SOP: Staggered via fanout
         - Other: Simple radial escape
 
         Args:
@@ -551,6 +598,9 @@ class EscapeRouter:
             PackageType.TQFP,
         ):
             return self._escape_qfp_alternating(package)
+        elif package.package_type in (PackageType.SSOP, PackageType.TSSOP):
+            # Fine-pitch SSOP/TSSOP needs alternating layer escape for adjacent pins
+            return self._escape_fine_pitch_dual_row(package)
         elif package.package_type == PackageType.SOP:
             return self._escape_sop_staggered(package)
         else:
@@ -878,6 +928,243 @@ class EscapeRouter:
             via=None,
             ring_index=0,
         )
+
+    def _escape_fine_pitch_dual_row(self, package: PackageInfo) -> list[EscapeRoute]:
+        """Generate escape routes with alternating layer escapes for fine-pitch SSOP/TSSOP.
+
+        For fine-pitch dual-row packages (SSOP, TSSOP with 0.65mm or finer pitch),
+        adjacent signal pins cannot route on the same layer due to clearance conflicts.
+        This method implements alternating layer escape routing:
+
+        - Even-indexed pins (0, 2, 4, ...): Escape on F.Cu (top layer)
+        - Odd-indexed pins (1, 3, 5, ...): Via down to inner layer, escape there
+
+        Pattern (for horizontal TSSOP-20):
+        ```
+        Pin row 1:  [1][2][3][4][5][6][7][8][9][10]
+                     |  V  |  V  |  V  |  V  |  V    V = Via to inner layer
+                    F.Cu  In1 F.Cu In1 F.Cu In1     Alternating layers
+
+        Pin row 2:  [20][19][18][17][16][15][14][13][12][11]
+        ```
+
+        This ensures that adjacent pins with signal nets don't conflict with each
+        other's escape routes, as they route on different layers.
+
+        Args:
+            package: SSOP/TSSOP package info
+
+        Returns:
+            List of escape routes with alternating layer assignment
+        """
+        escapes: list[EscapeRoute] = []
+        center_x, center_y = package.center
+
+        # Separate pads into two rows
+        top_row: list[Pad] = []
+        bottom_row: list[Pad] = []
+        left_col: list[Pad] = []
+        right_col: list[Pad] = []
+
+        # Determine orientation by checking Y vs X spread
+        xs = [p.x for p in package.pads]
+        ys = [p.y for p in package.pads]
+        x_spread = max(xs) - min(xs)
+        y_spread = max(ys) - min(ys)
+
+        is_horizontal = x_spread > y_spread  # pins arranged horizontally
+
+        if is_horizontal:
+            # Split by Y position
+            for pad in package.pads:
+                if pad.y > center_y:
+                    top_row.append(pad)
+                else:
+                    bottom_row.append(pad)
+            # Sort rows by X position
+            top_row.sort(key=lambda p: p.x)
+            bottom_row.sort(key=lambda p: p.x)
+
+            # Generate escapes for each row with alternating layers
+            escapes.extend(
+                self._create_fine_pitch_row_escapes(
+                    pads=top_row,
+                    direction=EscapeDirection.NORTH,
+                    package=package,
+                )
+            )
+            escapes.extend(
+                self._create_fine_pitch_row_escapes(
+                    pads=bottom_row,
+                    direction=EscapeDirection.SOUTH,
+                    package=package,
+                )
+            )
+        else:
+            # Vertical orientation - split by X position
+            for pad in package.pads:
+                if pad.x > center_x:
+                    right_col.append(pad)
+                else:
+                    left_col.append(pad)
+            # Sort columns by Y position
+            left_col.sort(key=lambda p: p.y)
+            right_col.sort(key=lambda p: p.y)
+
+            # Generate escapes for each column with alternating layers
+            escapes.extend(
+                self._create_fine_pitch_row_escapes(
+                    pads=left_col,
+                    direction=EscapeDirection.WEST,
+                    package=package,
+                )
+            )
+            escapes.extend(
+                self._create_fine_pitch_row_escapes(
+                    pads=right_col,
+                    direction=EscapeDirection.EAST,
+                    package=package,
+                )
+            )
+
+        return escapes
+
+    def _create_fine_pitch_row_escapes(
+        self,
+        pads: list[Pad],
+        direction: EscapeDirection,
+        package: PackageInfo,
+    ) -> list[EscapeRoute]:
+        """Create escape routes for fine-pitch SSOP/TSSOP with alternating layers.
+
+        Adjacent pins escape on different layers to avoid clearance violations:
+        - Even pins (index 0, 2, 4...): Stay on surface layer (F.Cu)
+        - Odd pins (index 1, 3, 5...): Via to inner layer (In1.Cu or B.Cu)
+
+        This is specifically designed for fine-pitch packages where the pitch
+        (0.65mm or less) doesn't allow traces to pass between adjacent pads.
+
+        Args:
+            pads: Row of pads sorted by position along the row
+            direction: Primary escape direction (perpendicular to row)
+            package: Package info for bounds
+
+        Returns:
+            List of escape routes with alternating layer assignment
+        """
+        escapes: list[EscapeRoute] = []
+        dx, dy = self._direction_to_vector(direction)
+
+        # For fine-pitch, use minimal escape distance
+        # Vias placed just outside pad clearance zone
+        pad_clearance = self.rules.trace_clearance + package.pin_pitch / 4
+        via_offset = pad_clearance + self.rules.via_diameter / 2
+
+        for i, pad in enumerate(pads):
+            # Determine if this pin needs layer transition
+            needs_via = i % 2 == 1  # Odd pins via down
+
+            if needs_via:
+                # Odd pin: Via to inner layer
+                # Calculate via position - place via perpendicular to pin row
+                via_x = pad.x + dx * via_offset
+                via_y = pad.y + dy * via_offset
+
+                # Try to use In1.Cu if available (4-layer board), else B.Cu
+                # For now, use B.Cu for simplicity
+                escape_layer = Layer.B_CU
+
+                # Escape point is beyond the via on the escape layer
+                escape_x = via_x + dx * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+                escape_y = via_y + dy * (self.rules.via_diameter / 2 + self.rules.trace_clearance)
+
+                # Create segments
+                segments: list[Segment] = []
+
+                # Segment from pad to via on surface layer
+                segments.append(
+                    Segment(
+                        x1=pad.x,
+                        y1=pad.y,
+                        x2=via_x,
+                        y2=via_y,
+                        width=self.rules.trace_width,
+                        layer=pad.layer,
+                        net=pad.net,
+                        net_name=pad.net_name,
+                    )
+                )
+
+                # Create via
+                via = Via(
+                    x=via_x,
+                    y=via_y,
+                    drill=self.rules.via_drill,
+                    diameter=self.rules.via_diameter,
+                    layers=(pad.layer, escape_layer),
+                    net=pad.net,
+                    net_name=pad.net_name,
+                )
+
+                # Segment from via to escape point on inner layer
+                segments.append(
+                    Segment(
+                        x1=via_x,
+                        y1=via_y,
+                        x2=escape_x,
+                        y2=escape_y,
+                        width=self.rules.trace_width,
+                        layer=escape_layer,
+                        net=pad.net,
+                        net_name=pad.net_name,
+                    )
+                )
+
+                escapes.append(
+                    EscapeRoute(
+                        pad=pad,
+                        direction=direction,
+                        escape_point=(escape_x, escape_y),
+                        escape_layer=escape_layer,
+                        via_pos=(via_x, via_y),
+                        segments=segments,
+                        via=via,
+                        ring_index=0,
+                    )
+                )
+            else:
+                # Even pin: Stay on surface layer
+                # Simple escape perpendicular to pin row
+                escape_dist = self.escape_clearance + self.rules.trace_width
+                escape_x = pad.x + dx * escape_dist
+                escape_y = pad.y + dy * escape_dist
+
+                # Create segment from pad to escape point
+                segment = Segment(
+                    x1=pad.x,
+                    y1=pad.y,
+                    x2=escape_x,
+                    y2=escape_y,
+                    width=self.rules.trace_width,
+                    layer=pad.layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
+                )
+
+                escapes.append(
+                    EscapeRoute(
+                        pad=pad,
+                        direction=direction,
+                        escape_point=(escape_x, escape_y),
+                        escape_layer=pad.layer,
+                        via_pos=None,
+                        segments=[segment],
+                        via=None,
+                        ring_index=0,
+                    )
+                )
+
+        return escapes
 
     def _escape_sop_staggered(self, package: PackageInfo) -> list[EscapeRoute]:
         """Generate escape routes with staggered vias for SOP/TSSOP/SOIC packages.

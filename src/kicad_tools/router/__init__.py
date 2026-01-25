@@ -81,6 +81,7 @@ from .escape import (
     detect_package_type,
     get_package_info,
     is_dense_package,
+    is_fine_pitch_ssop,
 )
 from .failure_analysis import (
     BlockingElement,
@@ -395,6 +396,7 @@ __all__ = [
     "PackageType",
     "PackageInfo",
     "is_dense_package",
+    "is_fine_pitch_ssop",
     "detect_package_type",
     "get_package_info",
     # Net Class Auto-Detection (Issue #634)
