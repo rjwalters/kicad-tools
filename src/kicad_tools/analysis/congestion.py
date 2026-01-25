@@ -22,20 +22,12 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+from kicad_tools.core.types import RiskLevel as Severity
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
-
-
-class Severity(Enum):
-    """Congestion severity level."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
 
 
 @dataclass

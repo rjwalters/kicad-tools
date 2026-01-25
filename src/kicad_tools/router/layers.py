@@ -2,7 +2,7 @@
 Layer stack and via definitions for PCB routing.
 
 This module provides:
-- Layer: Enum for routing layers (F.Cu, In1.Cu, etc.)
+- Layer: Alias for CopperLayer for routing layers (F.Cu, In1.Cu, etc.)
 - LayerType: Signal, plane, or mixed layer types
 - LayerDefinition: Individual layer configuration
 - LayerStack: Complete PCB stackup with presets
@@ -14,58 +14,8 @@ This module provides:
 from dataclasses import dataclass, field
 from enum import Enum
 
+from kicad_tools.core.types import CopperLayer as Layer
 from kicad_tools.exceptions import RoutingError
-
-
-class Layer(Enum):
-    """Routing layers - supports up to 6 layers."""
-
-    F_CU = 0  # Top copper (outer)
-    IN1_CU = 1  # Inner 1
-    IN2_CU = 2  # Inner 2
-    IN3_CU = 3  # Inner 3
-    IN4_CU = 4  # Inner 4
-    B_CU = 5  # Bottom copper (outer)
-
-    @property
-    def kicad_name(self) -> str:
-        return {
-            Layer.F_CU: "F.Cu",
-            Layer.IN1_CU: "In1.Cu",
-            Layer.IN2_CU: "In2.Cu",
-            Layer.IN3_CU: "In3.Cu",
-            Layer.IN4_CU: "In4.Cu",
-            Layer.B_CU: "B.Cu",
-        }[self]
-
-    @property
-    def is_outer(self) -> bool:
-        """Check if this is an outer (component) layer."""
-        return self in (Layer.F_CU, Layer.B_CU)
-
-    @classmethod
-    def from_kicad_name(cls, name: str) -> "Layer":
-        """Convert a KiCad layer name to a Layer enum.
-
-        Args:
-            name: KiCad layer name like "F.Cu", "B.Cu", "In1.Cu", etc.
-
-        Returns:
-            The corresponding Layer enum member.
-
-        Raises:
-            ValueError: If the name doesn't match any known copper layer.
-
-        Example:
-            >>> Layer.from_kicad_name("B.Cu")
-            <Layer.B_CU: 5>
-            >>> Layer.from_kicad_name("F.Cu")
-            <Layer.F_CU: 0>
-        """
-        for layer in cls:
-            if layer.kicad_name == name:
-                return layer
-        raise ValueError(f"Unknown KiCad copper layer name: {name}")
 
 
 class LayerType(Enum):

@@ -4,12 +4,13 @@ Geometry primitives for PCB block layout.
 This module provides basic geometric types used by the PCB blocks system:
 - Point: 2D point with rotation and arithmetic operations
 - Rectangle: Axis-aligned bounding box
-- Layer: PCB layer enumeration
+- Layer: PCB layer enumeration (imported from core.types)
 """
 
 import math
 from dataclasses import dataclass
-from enum import Enum
+
+from kicad_tools.core.types import Layer
 
 
 @dataclass
@@ -77,20 +78,6 @@ class Rectangle:
         return Rectangle(
             self.min_x - margin, self.min_y - margin, self.max_x + margin, self.max_y + margin
         )
-
-
-class Layer(Enum):
-    """PCB layers."""
-
-    F_CU = "F.Cu"  # Front copper
-    B_CU = "B.Cu"  # Back copper
-    F_SILK = "F.SilkS"  # Front silkscreen
-    B_SILK = "B.SilkS"  # Back silkscreen
-    F_MASK = "F.Mask"  # Front solder mask
-    B_MASK = "B.Mask"  # Back solder mask
-    F_PASTE = "F.Paste"  # Front solder paste
-    B_PASTE = "B.Paste"  # Back solder paste
-    EDGE = "Edge.Cuts"  # Board outline
 
 
 __all__ = ["Point", "Rectangle", "Layer"]

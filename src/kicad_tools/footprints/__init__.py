@@ -7,6 +7,7 @@ including common package types (0402, 0603, SOT-23, QFN, etc.).
 
 from enum import Enum
 
+from kicad_tools.core.types import Layer
 from kicad_tools.sexp import SExp
 from kicad_tools.sexp.builders import fmt
 
@@ -36,22 +37,6 @@ class PadShape(Enum):
     CIRCLE = "circle"
     OVAL = "oval"
     TRAPEZOID = "trapezoid"
-
-
-class Layer(Enum):
-    """PCB layers."""
-
-    F_CU = "F.Cu"
-    B_CU = "B.Cu"
-    F_PASTE = "F.Paste"
-    B_PASTE = "B.Paste"
-    F_MASK = "F.Mask"
-    B_MASK = "B.Mask"
-    F_SILKS = "F.SilkS"
-    B_SILKS = "B.SilkS"
-    F_CRTYD = "F.CrtYd"
-    B_CRTYD = "B.CrtYd"
-    EDGE_CUTS = "Edge.Cuts"
 
 
 class Pad:

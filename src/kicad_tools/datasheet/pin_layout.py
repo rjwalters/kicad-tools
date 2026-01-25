@@ -11,17 +11,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+
+from kicad_tools.core.types import LayoutStyle
 
 from .pins import ExtractedPin
-
-
-class LayoutStyle(str, Enum):
-    """Available pin layout styles."""
-
-    FUNCTIONAL = "functional"
-    PHYSICAL = "physical"
-    SIMPLE = "simple"
 
 
 # Pin grouping categories for functional layout
