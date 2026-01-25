@@ -310,6 +310,128 @@ class TestFailureAnalysis:
         assert "congestion" in s
         assert "85%" in s
 
+    def test_failure_analysis_has_movable_blockers(self):
+        """Test has_movable_blockers property."""
+        # Analysis with movable blocker
+        analysis_with_movable = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.9,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            blocking_elements=[
+                BlockingElement(
+                    type="component",
+                    ref="C3",
+                    net=None,
+                    bounds=Rectangle(8, 18, 12, 22),
+                    movable=True,
+                )
+            ],
+        )
+        assert analysis_with_movable.has_movable_blockers is True
+
+        # Analysis without movable blockers
+        analysis_without_movable = FailureAnalysis(
+            root_cause=FailureCause.KEEPOUT,
+            confidence=0.95,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            blocking_elements=[
+                BlockingElement(
+                    type="keepout",
+                    ref=None,
+                    net=None,
+                    bounds=Rectangle(8, 18, 12, 22),
+                    movable=False,
+                )
+            ],
+        )
+        assert analysis_without_movable.has_movable_blockers is False
+
+        # Analysis with no blockers
+        analysis_empty = FailureAnalysis(
+            root_cause=FailureCause.CONGESTION,
+            confidence=0.8,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            blocking_elements=[],
+        )
+        assert analysis_empty.has_movable_blockers is False
+
+    def test_failure_analysis_has_reroutable_nets(self):
+        """Test has_reroutable_nets property."""
+        # Analysis with reroutable trace from different net
+        analysis_with_reroutable = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.9,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            blocking_elements=[
+                BlockingElement(
+                    type="trace",
+                    ref=None,
+                    net="GND",
+                    bounds=Rectangle(8, 18, 12, 22),
+                    movable=True,
+                )
+            ],
+            net="CLK",
+        )
+        assert analysis_with_reroutable.has_reroutable_nets is True
+
+        # Analysis with trace from same net (not reroutable)
+        analysis_same_net = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.9,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            blocking_elements=[
+                BlockingElement(
+                    type="trace",
+                    ref=None,
+                    net="CLK",
+                    bounds=Rectangle(8, 18, 12, 22),
+                    movable=True,
+                )
+            ],
+            net="CLK",
+        )
+        assert analysis_same_net.has_reroutable_nets is False
+
+        # Analysis with non-trace blocker
+        analysis_no_traces = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.9,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            blocking_elements=[
+                BlockingElement(
+                    type="component",
+                    ref="U1",
+                    net=None,
+                    bounds=Rectangle(8, 18, 12, 22),
+                    movable=True,
+                )
+            ],
+            net="CLK",
+        )
+        assert analysis_no_traces.has_reroutable_nets is False
+
+    def test_failure_analysis_net_field(self):
+        """Test net field in FailureAnalysis."""
+        analysis = FailureAnalysis(
+            root_cause=FailureCause.BLOCKED_PATH,
+            confidence=0.9,
+            failure_location=(10, 20),
+            failure_area=Rectangle(5, 15, 15, 25),
+            net="CLK_NET",
+        )
+        assert analysis.net == "CLK_NET"
+
+        # Test to_dict includes net
+        d = analysis.to_dict()
+        assert d["net"] == "CLK_NET"
+
 
 class TestCongestionMap:
     """Tests for CongestionMap class."""
