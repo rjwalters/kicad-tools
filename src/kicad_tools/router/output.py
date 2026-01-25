@@ -324,8 +324,8 @@ def _calculate_route_length(route: Route) -> float:
     """
     length = 0.0
     for segment in route.segments:
-        dx = segment.end.x - segment.start.x
-        dy = segment.end.y - segment.start.y
+        dx = segment.end[0] - segment.start[0]
+        dy = segment.end[1] - segment.start[1]
         length += (dx**2 + dy**2) ** 0.5
     return length
 

@@ -4,6 +4,84 @@ from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment, Via
 
 
+class TestSegmentStartEndProperties:
+    """Tests for Segment.start and Segment.end properties.
+
+    These properties provide convenient tuple access to segment endpoints,
+    enabling cleaner code when working with segment coordinates.
+    """
+
+    def test_start_property_returns_tuple(self):
+        """Test that start property returns (x1, y1) tuple."""
+        seg = Segment(x1=10.0, y1=20.0, x2=30.0, y2=40.0, width=0.2, layer=Layer.F_CU)
+        assert seg.start == (10.0, 20.0)
+        assert isinstance(seg.start, tuple)
+
+    def test_end_property_returns_tuple(self):
+        """Test that end property returns (x2, y2) tuple."""
+        seg = Segment(x1=10.0, y1=20.0, x2=30.0, y2=40.0, width=0.2, layer=Layer.F_CU)
+        assert seg.end == (30.0, 40.0)
+        assert isinstance(seg.end, tuple)
+
+    def test_start_and_end_different(self):
+        """Test that start and end return different values for non-zero-length segment."""
+        seg = Segment(x1=0.0, y1=0.0, x2=100.0, y2=50.0, width=0.2, layer=Layer.F_CU)
+        assert seg.start != seg.end
+        assert seg.start == (0.0, 0.0)
+        assert seg.end == (100.0, 50.0)
+
+    def test_zero_length_segment(self):
+        """Test start and end for zero-length segment (same point)."""
+        seg = Segment(x1=5.0, y1=5.0, x2=5.0, y2=5.0, width=0.2, layer=Layer.F_CU)
+        assert seg.start == seg.end == (5.0, 5.0)
+
+    def test_negative_coordinates(self):
+        """Test start and end with negative coordinates."""
+        seg = Segment(x1=-10.0, y1=-20.0, x2=-5.0, y2=-15.0, width=0.2, layer=Layer.F_CU)
+        assert seg.start == (-10.0, -20.0)
+        assert seg.end == (-5.0, -15.0)
+
+    def test_tuple_indexing(self):
+        """Test that tuple properties can be indexed."""
+        seg = Segment(x1=1.5, y1=2.5, x2=3.5, y2=4.5, width=0.2, layer=Layer.F_CU)
+        # Index into start
+        assert seg.start[0] == 1.5
+        assert seg.start[1] == 2.5
+        # Index into end
+        assert seg.end[0] == 3.5
+        assert seg.end[1] == 4.5
+
+    def test_tuple_unpacking(self):
+        """Test that tuple properties can be unpacked."""
+        seg = Segment(x1=1.0, y1=2.0, x2=3.0, y2=4.0, width=0.2, layer=Layer.F_CU)
+        # Unpack start
+        x1, y1 = seg.start
+        assert x1 == 1.0
+        assert y1 == 2.0
+        # Unpack end
+        x2, y2 = seg.end
+        assert x2 == 3.0
+        assert y2 == 4.0
+
+    def test_properties_consistent_with_attributes(self):
+        """Test that properties are consistent with x1/y1/x2/y2 attributes."""
+        seg = Segment(x1=100.0, y1=200.0, x2=300.0, y2=400.0, width=0.3, layer=Layer.B_CU)
+        # Properties should match the underlying attributes
+        assert seg.start[0] == seg.x1
+        assert seg.start[1] == seg.y1
+        assert seg.end[0] == seg.x2
+        assert seg.end[1] == seg.y2
+
+    def test_length_calculation_using_properties(self):
+        """Test that segment length can be calculated using start/end properties."""
+        seg = Segment(x1=0.0, y1=0.0, x2=3.0, y2=4.0, width=0.2, layer=Layer.F_CU)
+        # 3-4-5 triangle should have length 5
+        dx = seg.end[0] - seg.start[0]
+        dy = seg.end[1] - seg.start[1]
+        length = (dx**2 + dy**2) ** 0.5
+        assert length == 5.0
+
+
 class TestRouteValidateLayerTransitions:
     """Tests for Route.validate_layer_transitions() method.
 
