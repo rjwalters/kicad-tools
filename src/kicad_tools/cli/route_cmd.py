@@ -1766,6 +1766,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    # Power plane stitching
+    parser.add_argument(
+        "--stitch-power-planes",
+        action="store_true",
+        help=(
+            "Automatically add stitching vias for power planes after routing. "
+            "Connects surface-mount component pads to their power plane layers. "
+            "Equivalent to running 'kicad-pcb-stitch' after routing."
+        ),
+    )
+
     # Cache arguments
     parser.add_argument(
         "--no-cache",
@@ -2604,6 +2615,43 @@ def main(argv: list[str] | None = None) -> int:
 
         if not quiet:
             print(f"  Saved to: {output_path}")
+
+    # Run power plane stitching if requested
+    stitch_result = None
+    if getattr(args, "stitch_power_planes", False) and not args.dry_run:
+        from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
+
+        if not quiet:
+            print("\n--- Stitching Power Planes ---")
+
+        # Load the saved PCB to find plane nets
+        from kicad_tools.core.sexp_file import load_pcb as load_stitch_pcb
+
+        stitch_sexp = load_stitch_pcb(output_path)
+        plane_nets = find_all_plane_nets(stitch_sexp)
+
+        if plane_nets:
+            net_names = list(plane_nets.keys())
+            if not quiet:
+                print(f"  Found {len(net_names)} power plane nets: {', '.join(sorted(net_names))}")
+
+            stitch_result = run_stitch(
+                pcb_path=output_path,
+                net_names=net_names,
+                via_size=args.via_diameter,  # Use same via size as routing
+                drill=args.via_drill,
+                clearance=args.clearance,
+                dry_run=False,
+            )
+
+            if not quiet:
+                if stitch_result.vias_added:
+                    print(f"  Added {len(stitch_result.vias_added)} stitching vias")
+                else:
+                    print("  No stitching vias needed (all pads already connected)")
+        else:
+            if not quiet:
+                print("  No power plane nets found (no zones with assigned nets)")
 
     # Run DRC validation unless skipped or dry-run
     drc_errors = 0
