@@ -57,14 +57,16 @@ class ViaClearanceWarning:
 
 def get_design_rules(
     mfr: str | None, layers: int, copper: float, drill: float | None, diameter: float | None
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     """Get the target drill and diameter from manufacturer or explicit values.
 
     Returns:
-        Tuple of (min_drill_mm, min_diameter_mm)
+        Tuple of (min_drill_mm, min_diameter_mm, min_annular_ring_mm).
+        min_annular_ring_mm is 0.0 when explicit values are used (no
+        manufacturer annular ring cross-check needed).
     """
     if drill is not None and diameter is not None:
-        return drill, diameter
+        return drill, diameter, 0.0
 
     if mfr:
         try:
@@ -83,13 +85,17 @@ def get_design_rules(
                     rules = list(rules_dict.values())[0]
 
             target_drill = drill if drill is not None else rules.min_via_drill_mm
-            target_diameter = diameter if diameter is not None else rules.min_via_diameter_mm
-            return target_drill, target_diameter
+            min_annular_ring = rules.min_annular_ring_mm
+            mfr_min_diameter = rules.min_via_diameter_mm
+            annular_ring_min_diameter = target_drill + 2 * min_annular_ring
+            effective_min_diameter = max(mfr_min_diameter, annular_ring_min_diameter)
+            target_diameter = diameter if diameter is not None else effective_min_diameter
+            return target_drill, target_diameter, min_annular_ring
         except FileNotFoundError:
             print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
 
     # Default values if nothing specified
-    return drill or 0.3, diameter or 0.6
+    return drill or 0.3, diameter or 0.6, 0.0
 
 
 def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int, str]]:
@@ -193,6 +199,7 @@ def fix_vias(
     target_diameter: float,
     min_clearance: float = 0.2,
     dry_run: bool = False,
+    min_annular_ring: float = 0.0,
 ) -> tuple[list[ViaFix], list[ViaClearanceWarning]]:
     """Fix undersized vias in the PCB.
 
@@ -202,6 +209,10 @@ def fix_vias(
         target_diameter: Minimum via diameter in mm
         min_clearance: Minimum clearance for warnings in mm
         dry_run: If True, don't modify the document
+        min_annular_ring: Minimum annular ring width in mm.
+            When set, each via's diameter is also checked against
+            its own drill size to ensure the annular ring is met:
+            required_diameter = drill + 2 * min_annular_ring.
 
     Returns:
         Tuple of (fixes, warnings)
@@ -215,11 +226,18 @@ def fix_vias(
         need_drill_fix = current_drill < target_drill
         need_diameter_fix = current_diameter < target_diameter
 
+        # Check annular ring for the via's actual drill size
+        new_drill = max(current_drill, target_drill)
+        if min_annular_ring > 0:
+            annular_ring_diameter = new_drill + 2 * min_annular_ring
+            need_diameter_fix = need_diameter_fix or current_diameter < annular_ring_diameter
+        else:
+            annular_ring_diameter = 0.0
+
         if not need_drill_fix and not need_diameter_fix:
             continue
 
-        new_drill = max(current_drill, target_drill)
-        new_diameter = max(current_diameter, target_diameter)
+        new_diameter = max(current_diameter, target_diameter, annular_ring_diameter)
 
         # Record the fix
         fixes.append(
@@ -451,7 +469,7 @@ Examples:
         return 1
 
     # Get target dimensions
-    target_drill, target_diameter = get_design_rules(
+    target_drill, target_diameter, min_annular_ring = get_design_rules(
         args.mfr, args.layers, args.copper, args.drill, args.diameter
     )
 
@@ -463,7 +481,13 @@ Examples:
         return 1
 
     # Fix vias
-    fixes, warnings = fix_vias(doc, target_drill, target_diameter, dry_run=args.dry_run)
+    fixes, warnings = fix_vias(
+        doc,
+        target_drill,
+        target_diameter,
+        dry_run=args.dry_run,
+        min_annular_ring=min_annular_ring,
+    )
 
     # Print results
     if not args.quiet:
