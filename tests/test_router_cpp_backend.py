@@ -1,6 +1,8 @@
 """Tests for C++ router backend fallback behavior."""
 
 from kicad_tools.router.cpp_backend import (
+    LARGE_GRID_THRESHOLD,
+    format_backend_status,
     get_backend_info,
     is_cpp_available,
 )
@@ -32,6 +34,76 @@ class TestCppBackendFallback:
             assert info["backend"] == "cpp"
         else:
             assert info["backend"] == "python"
+
+    def test_get_backend_info_has_build_hint_when_unavailable(self):
+        """Test that unavailable backend info includes build hint."""
+        info = get_backend_info()
+        if not info["available"]:
+            assert "build_hint" in info
+            assert "kct build-native" in info["build_hint"]
+
+
+class TestFormatBackendStatus:
+    """Test the format_backend_status helper for CLI output."""
+
+    def test_cpp_backend_shows_native(self):
+        """Test that cpp backend status shows native label."""
+        info = {"backend": "cpp", "version": "1.0.0", "available": True, "active": "cpp"}
+        status = format_backend_status(info)
+        assert "native" in status
+        assert "1.0.0" in status
+
+    def test_python_backend_shows_tip(self):
+        """Test that python backend status includes build tip."""
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info)
+        assert "python" in status.lower()
+        assert "kct build-native" in status
+
+    def test_python_backend_large_grid_warns(self):
+        """Test that large grid with python backend shows WARNING."""
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info, grid_cells=LARGE_GRID_THRESHOLD + 1)
+        assert "WARNING" in status
+        assert "kct build-native" in status
+
+    def test_python_backend_small_grid_no_warning(self):
+        """Test that small grid with python backend shows tip, not WARNING."""
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info, grid_cells=1000)
+        assert "WARNING" not in status
+        assert "Tip" in status
+
+    def test_python_backend_zero_grid_shows_tip(self):
+        """Test that zero grid cells (default) shows tip."""
+        info = {
+            "backend": "python",
+            "version": "pure-python",
+            "available": False,
+            "active": "python",
+        }
+        status = format_backend_status(info, grid_cells=0)
+        assert "Tip" in status
+
+    def test_large_grid_threshold_constant(self):
+        """Test that the large grid threshold is a reasonable value."""
+        assert LARGE_GRID_THRESHOLD > 10_000
+        assert LARGE_GRID_THRESHOLD <= 200_000
 
 
 class TestCppBackendImport:
