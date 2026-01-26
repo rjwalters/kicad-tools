@@ -148,6 +148,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_validate_footprints_parser(subparsers)
     _add_fix_footprints_parser(subparsers)
     _add_fix_vias_parser(subparsers)
+    _add_repair_clearance_parser(subparsers)
     _add_parts_parser(subparsers)
     _add_datasheet_parser(subparsers)
     _add_decisions_parser(subparsers)
@@ -1098,6 +1099,57 @@ def _add_fix_vias_parser(subparsers) -> None:
         help="Preview changes without modifying files",
     )
     fix_vias_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_repair_clearance_parser(subparsers) -> None:
+    """Add repair-clearance subcommand parser."""
+    repair_parser = subparsers.add_parser(
+        "repair-clearance", help="Repair clearance violations by nudging traces"
+    )
+    repair_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    repair_parser.add_argument(
+        "--drc-report",
+        help="Path to existing DRC report (.rpt or .json)",
+    )
+    repair_parser.add_argument(
+        "--mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        help="Target manufacturer (for context)",
+    )
+    repair_parser.add_argument(
+        "--max-displacement",
+        type=float,
+        default=0.1,
+        help="Maximum nudge distance in mm (default: 0.1)",
+    )
+    repair_parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.01,
+        help="Extra clearance margin beyond minimum in mm (default: 0.01)",
+    )
+    repair_parser.add_argument(
+        "--prefer",
+        choices=["move-trace", "move-via"],
+        default="move-trace",
+        help="Which object to move (default: move-trace)",
+    )
+    repair_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    repair_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    repair_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",

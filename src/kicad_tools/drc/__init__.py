@@ -32,6 +32,7 @@ from .incremental import (
 from .incremental import Rectangle as DRCRectangle
 from .incremental import Violation as IncrementalViolation
 from .predictive import PredictiveAnalyzer, PredictiveWarning
+from .repair_clearance import ClearanceRepairer, NudgeResult, RepairResult
 from .report import (
     DRCReport,
     parse_json_report,
@@ -77,4 +78,8 @@ __all__ = [
     # Predictive analysis
     "PredictiveAnalyzer",
     "PredictiveWarning",
+    # Clearance repair
+    "ClearanceRepairer",
+    "NudgeResult",
+    "RepairResult",
 ]

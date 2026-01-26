@@ -324,6 +324,11 @@ def _dispatch_command(args) -> int:
 
         return run_fix_vias_command(args)
 
+    elif args.command == "repair-clearance":
+        from .commands import run_repair_clearance_command
+
+        return run_repair_clearance_command(args)
+
     elif args.command == "config":
         return run_config_command(args)
 
