@@ -27,7 +27,7 @@ from pathlib import Path
 
 from kicad_tools.core.sexp_file import load_pcb, save_pcb
 from kicad_tools.sexp import SExp
-from kicad_tools.sexp.builders import via_node
+from kicad_tools.sexp.builders import segment_node, via_node
 
 
 @dataclass
@@ -58,12 +58,24 @@ class ViaPlacement:
 
 
 @dataclass
+class TraceSegment:
+    """Information about a trace segment connecting a pad to its via."""
+
+    pad: PadInfo
+    via_x: float
+    via_y: float
+    width: float
+    layer: str
+
+
+@dataclass
 class StitchResult:
     """Result of the stitching operation."""
 
     pcb_name: str
     target_nets: list[str]
     vias_added: list[ViaPlacement] = field(default_factory=list)
+    traces_added: list[TraceSegment] = field(default_factory=list)
     pads_skipped: list[tuple[PadInfo, str]] = field(default_factory=list)  # (pad, reason)
     already_connected: int = 0
     # Per-net detected layers: {net_name: layer} for auto-detected layers
@@ -417,6 +429,21 @@ def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
     sexp.append(via)
 
 
+def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
+    """Add a trace segment from pad center to via center."""
+    seg = segment_node(
+        start_x=trace.pad.x,
+        start_y=trace.pad.y,
+        end_x=trace.via_x,
+        end_y=trace.via_y,
+        width=trace.width,
+        layer=trace.layer,
+        net=trace.pad.net_number,
+        uuid_str=str(uuid.uuid4()),
+    )
+    sexp.append(seg)
+
+
 def run_stitch(
     pcb_path: Path,
     net_names: list[str],
@@ -425,6 +452,7 @@ def run_stitch(
     clearance: float = 0.2,
     offset: float = 0.5,
     target_layer: str | None = None,
+    trace_width: float = 0.2,
     dry_run: bool = False,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
@@ -437,6 +465,7 @@ def run_stitch(
         clearance: Minimum clearance from existing copper
         offset: Maximum distance from pad center for via placement
         target_layer: Target plane layer (auto-detect from zones if None)
+        trace_width: Width of pad-to-via trace segments in mm
         dry_run: If True, don't modify the file
 
     Returns:
@@ -516,6 +545,16 @@ def run_stitch(
 
         result.vias_added.append(placement)
 
+        # Create a trace segment from pad center to via center on the surface layer
+        trace = TraceSegment(
+            pad=pad,
+            via_x=via_pos[0],
+            via_y=via_pos[1],
+            width=trace_width,
+            layer=pad.layer,
+        )
+        result.traces_added.append(trace)
+
         # Add to existing vias list to prevent conflicts with subsequent placements
         existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
 
@@ -523,6 +562,8 @@ def run_stitch(
     if not dry_run and result.vias_added:
         for placement in result.vias_added:
             add_via_to_pcb(sexp, placement)
+        for trace in result.traces_added:
+            add_trace_to_pcb(sexp, trace)
         save_pcb(sexp, pcb_path)
 
     return result
@@ -589,6 +630,7 @@ def output_result(result: StitchResult, dry_run: bool = False) -> None:
     print(f"\n{'=' * 60}")
     print("Summary:")
     print(f"  + Added {len(result.vias_added)} stitching vias")
+    print(f"  + Added {len(result.traces_added)} pad-to-via traces")
     if result.already_connected:
         print(f"  = {result.already_connected} pads already connected")
     if result.pads_skipped:
@@ -650,6 +692,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Target plane layer (e.g., In1.Cu). Default: auto-detect",
     )
     parser.add_argument(
+        "--trace-width",
+        type=float,
+        default=0.2,
+        help="Width of pad-to-via trace segments in mm (default: 0.2)",
+    )
+    parser.add_argument(
         "--dry-run",
         "-d",
         action="store_true",
@@ -703,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
             clearance=args.clearance,
             offset=args.offset,
             target_layer=args.target_layer,
+            trace_width=args.trace_width,
             dry_run=args.dry_run,
         )
 
