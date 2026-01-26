@@ -92,7 +92,7 @@ Create `.loom/roles/my-role.json`:
 3. Configure autonomous mode if desired
 4. Save
 
-See [../defaults/roles/README.md](../defaults/roles/README.md) for detailed role creation guide.
+See the [Loom roles documentation](https://github.com/rjwalters/loom/blob/main/defaults/roles/README.md) for detailed role creation guide.
 
 ## Customizing Agent Configuration
 
@@ -128,7 +128,7 @@ To restore default configuration:
 1. **File** → **Factory Reset Workspace...**
 2. Confirm the operation
 3. All `.loom/` contents will be deleted
-4. Default configuration will be restored from `defaults/`
+4. Default configuration will be restored from Loom's bundled defaults
 
 **Warning**: This deletes all custom roles and configurations!
 
@@ -161,7 +161,7 @@ This allows teams to share agent roles and configurations while keeping runtime 
 
 ## More Information
 
-- System roles: [../defaults/roles/](../defaults/roles/)
-- Role creation guide: [../defaults/roles/README.md](../defaults/roles/README.md)
-- Workflow guide: [../WORKFLOWS.md](../WORKFLOWS.md)
-- Development guide: [../CLAUDE.md](../CLAUDE.md)
+- System roles: `.loom/roles/` (local copies) or [Loom defaults](https://github.com/rjwalters/loom/tree/main/defaults/roles)
+- Role creation guide: [Loom roles documentation](https://github.com/rjwalters/loom/blob/main/defaults/roles/README.md)
+- Workflow guide: [CLAUDE.md](../CLAUDE.md) (in your repository root)
+- Loom documentation: [https://github.com/rjwalters/loom](https://github.com/rjwalters/loom)
