@@ -213,6 +213,8 @@ from .rules import (
     ZoneRules,
     create_net_class_map,
 )
+from .global_router import CorridorAssignment, GlobalRouter, GlobalRoutingResult
+from .region_graph import Region, RegionEdge, RegionGraph
 from .sparse import SparseRouter, SparseRoutingGraph, Waypoint
 from .tuning import (
     COST_PROFILES,
@@ -275,6 +277,13 @@ __all__ = [
     "SparseRouter",
     "SparseRoutingGraph",
     "Waypoint",
+    # Hierarchical routing (Issue #1095)
+    "RegionGraph",
+    "Region",
+    "RegionEdge",
+    "GlobalRouter",
+    "GlobalRoutingResult",
+    "CorridorAssignment",
     # Parallel routing
     "ParallelRouter",
     "ParallelRoutingResult",
