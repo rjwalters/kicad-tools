@@ -14,13 +14,7 @@ from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-class Severity(str, Enum):
-    """Severity levels for validation violations."""
-
-    ERROR = "error"
-    WARNING = "warning"
-    INFO = "info"
+from kicad_tools.core.types import Severity
 
 
 class ViolationCategory(str, Enum):

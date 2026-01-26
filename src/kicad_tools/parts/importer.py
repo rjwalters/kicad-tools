@@ -37,6 +37,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from kicad_tools.core.types import LayoutStyle
 from kicad_tools.utils import ensure_parent_dir
 
 if TYPE_CHECKING:
@@ -56,14 +57,6 @@ class ImportStage(Enum):
     MATCH_FOOTPRINT = "match_footprint"
     GENERATE_SYMBOL = "generate_symbol"
     SAVE = "save"
-
-
-class LayoutStyle(Enum):
-    """Pin layout style for generated symbols."""
-
-    FUNCTIONAL = "functional"  # Group by function (power, GPIO, comms)
-    PHYSICAL = "physical"  # Match IC package physical layout
-    SIMPLE = "simple"  # Power top/bottom, signals left/right
 
 
 @dataclass

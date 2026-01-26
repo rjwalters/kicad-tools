@@ -21,19 +21,12 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Any
+
+from kicad_tools.core.types import RiskLevel
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB, Segment
-
-
-class RiskLevel(Enum):
-    """Signal integrity risk level."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
 
 
 # Pattern for identifying high-speed nets

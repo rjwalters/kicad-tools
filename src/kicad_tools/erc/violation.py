@@ -4,18 +4,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from kicad_tools.core import SeverityMixin
+from kicad_tools.core.types import ERCSeverity as Severity
 
 if TYPE_CHECKING:
     from kicad_tools.exceptions import SourcePosition
-
-
-class Severity(SeverityMixin, Enum):
-    """Violation severity level."""
-
-    ERROR = "error"
-    WARNING = "warning"
-    EXCLUSION = "exclusion"
 
 
 class ERCViolationType(Enum):

@@ -11,6 +11,14 @@ from .sexp_file import (
     save_schematic,
     save_symbol_lib,
 )
+from .types import (
+    CopperLayer,
+    ERCSeverity,
+    Layer,
+    LayoutStyle,
+    RiskLevel,
+    Severity,
+)
 
 __all__ = [
     "SExp",
@@ -23,4 +31,11 @@ __all__ = [
     "load_symbol_lib",
     "save_symbol_lib",
     "SeverityMixin",
+    # Canonical types
+    "Severity",
+    "ERCSeverity",
+    "RiskLevel",
+    "Layer",
+    "CopperLayer",
+    "LayoutStyle",
 ]
