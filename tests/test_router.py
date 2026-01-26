@@ -4579,3 +4579,142 @@ class TestLoadPcbLayerStackAutoDetection:
         # Verify pads were loaded successfully
         assert len(router.pads) == 2
         assert "NET1" in net_map
+
+
+# =============================================================================
+# S-expression Output Validation Tests (Issue #1108)
+# =============================================================================
+
+from kicad_tools.cli.route_cmd import _insert_sexp_before_closing, _validate_sexp_parentheses
+
+
+class TestInsertSexpBeforeClosing:
+    """Tests for _insert_sexp_before_closing (Issue #1108).
+
+    The route command previously used rstrip(')') to strip the final closing
+    parenthesis before inserting routes. This stripped ALL trailing ')' characters,
+    not just one, causing unbalanced parentheses in the output PCB file.
+    """
+
+    def test_removes_only_last_closing_paren(self):
+        """Verify only the last ')' is removed, not all trailing ones."""
+        # This PCB has nested structure with ')' at end of inner elements
+        pcb_content = "(kicad_pcb\n  (version 20240108)\n  (net 1 \"VCC\")\n)"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = _insert_sexp_before_closing(pcb_content, route_sexp)
+
+        # Should still contain the inner closing parens
+        assert "(version 20240108)" in result
+        assert "(net 1 \"VCC\")" in result
+        assert "(segment" in result
+        assert result.strip().endswith(")")
+
+    def test_preserves_nested_structure(self):
+        """Ensure deeply nested S-expressions are preserved."""
+        pcb_content = "(kicad_pcb\n  (setup\n    (grid_origin 0 0)\n  )\n)"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = _insert_sexp_before_closing(pcb_content, route_sexp)
+
+        # The setup block should be fully preserved
+        assert "(setup" in result
+        assert "(grid_origin 0 0)" in result
+        assert "(segment" in result
+        # Validate parentheses are balanced
+        assert _validate_sexp_parentheses(result)
+
+    def test_balanced_parentheses_in_result(self):
+        """The critical test: output must have balanced parentheses."""
+        pcb_content = "(kicad_pcb\n  (version 20240108)\n  (generator \"test\")\n)"
+        route_sexp = "(segment (start 1 2) (end 3 4) (width 0.25) (layer \"F.Cu\") (net 1))"
+
+        result = _insert_sexp_before_closing(pcb_content, route_sexp)
+
+        assert _validate_sexp_parentheses(result)
+
+    def test_handles_pcb_ending_with_whitespace(self):
+        """Handle PCB files that end with whitespace after the closing paren."""
+        pcb_content = "(kicad_pcb\n  (version 20240108)\n)  \n\n"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = _insert_sexp_before_closing(pcb_content, route_sexp)
+
+        assert _validate_sexp_parentheses(result)
+        assert "(segment" in result
+
+    def test_regression_rstrip_bug(self):
+        """Regression test for the rstrip(')') bug (Issue #1108).
+
+        The old code used rstrip(')') which strips ALL trailing ')' characters.
+        For PCB files ending with ')\\n)', this would strip both, breaking the
+        S-expression structure.
+        """
+        # PCB content that ends with nested closing parens
+        pcb_content = "(kicad_pcb\n  (footprint \"R0603\"\n    (pad 1 smd rect (at 0 0) (size 0.6 0.5))\n  )\n)"
+        route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = _insert_sexp_before_closing(pcb_content, route_sexp)
+
+        # The footprint block must remain intact
+        assert "(footprint \"R0603\"" in result
+        assert "(pad 1 smd rect" in result
+        # Parentheses must be balanced
+        assert _validate_sexp_parentheses(result)
+
+    def test_multiple_sexp_fragments(self):
+        """Test inserting multiple fragments (routes + zones)."""
+        pcb_content = "(kicad_pcb\n  (version 20240108)\n)"
+        combined = "(zone (net 1))\n  (segment (start 0 0) (end 10 10) (width 0.2))"
+
+        result = _insert_sexp_before_closing(pcb_content, combined)
+
+        assert "(zone" in result
+        assert "(segment" in result
+        assert _validate_sexp_parentheses(result)
+
+
+class TestValidateSexpParentheses:
+    """Tests for _validate_sexp_parentheses (Issue #1108)."""
+
+    def test_balanced_simple(self):
+        assert _validate_sexp_parentheses("(kicad_pcb)")
+
+    def test_balanced_nested(self):
+        assert _validate_sexp_parentheses("(kicad_pcb (version 1) (net 1 \"VCC\"))")
+
+    def test_balanced_with_strings(self):
+        """Parentheses inside quoted strings should be ignored."""
+        assert _validate_sexp_parentheses('(property "Value" "Cap(100nF)")')
+
+    def test_unbalanced_missing_close(self):
+        assert not _validate_sexp_parentheses("(kicad_pcb (version 1)")
+
+    def test_unbalanced_extra_close(self):
+        assert not _validate_sexp_parentheses("(kicad_pcb))")
+
+    def test_unbalanced_extra_open(self):
+        assert not _validate_sexp_parentheses("((kicad_pcb)")
+
+    def test_empty_string(self):
+        assert _validate_sexp_parentheses("")
+
+    def test_real_pcb_structure(self):
+        """Test with a realistic PCB file structure."""
+        pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (net 0 "")
+  (net 1 "VCC")
+  (footprint "R0603"
+    (at 100 100)
+    (pad 1 smd rect
+      (at -0.5 0)
+      (size 0.6 0.5)
+      (layers "F.Cu")
+      (net 1 "VCC")
+    )
+  )
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1))
+)"""
+        assert _validate_sexp_parentheses(pcb)
