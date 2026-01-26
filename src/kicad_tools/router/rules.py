@@ -117,6 +117,13 @@ class DesignRules:
         1.0  # Weight for via impact scoring (0=disabled, higher=stronger avoidance)
     )
 
+    # Sub-grid routing for fine-pitch components (Issue #1109)
+    # When enabled, generates escape segments from off-grid pad centers to the
+    # nearest main-grid points before main routing begins. This allows fine-pitch
+    # ICs (0.5-0.65mm pitch) to be routed without requiring a global fine grid.
+    subgrid_routing: bool = False  # Enable sub-grid escape routing
+    subgrid_escape_radius: int = 3  # Grid cells to search for escape endpoint
+
     # Constraint-aware net ordering (Issue #1020)
     # Routes highly-constrained nets first to give them access to routing resources
     # before less-constrained nets consume available channels.
