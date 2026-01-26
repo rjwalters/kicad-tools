@@ -99,6 +99,14 @@ from .fine_pitch import (
     analyze_fine_pitch_components,
 )
 from .grid import RoutingGrid
+from .subgrid import (
+    SubGridAnalysis,
+    SubGridEscape,
+    SubGridPad,
+    SubGridResult,
+    SubGridRouter,
+    compute_subgrid_resolution,
+)
 from .heuristics import (
     CongestionAwareHeuristic,
     DirectionBiasHeuristic,
@@ -434,6 +442,13 @@ __all__ = [
     "ComponentGridAnalysis",
     "OffGridPad",
     "analyze_fine_pitch_components",
+    # Sub-Grid Routing for Fine-Pitch Components (Issue #1109)
+    "SubGridRouter",
+    "SubGridAnalysis",
+    "SubGridEscape",
+    "SubGridPad",
+    "SubGridResult",
+    "compute_subgrid_resolution",
     # Routing Cache (Issue #1071)
     "RoutingCache",
     "CacheKey",

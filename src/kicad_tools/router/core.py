@@ -36,6 +36,7 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
+from .subgrid import SubGridResult, SubGridRouter
 from .failure_analysis import (
     CongestionMap,
     FailureAnalysis,
@@ -347,6 +348,7 @@ class Autorouter:
         self._bus_router: BusRouter | None = None
         self._diffpair_router: DiffPairRouter | None = None
         self._escape_router: EscapeRouter | None = None
+        self._subgrid_router: SubGridRouter | None = None
 
         # Length constraint tracking (Issue #630)
         self._length_tracker: LengthTracker = LengthTracker()
@@ -3785,6 +3787,158 @@ class Autorouter:
                 print(failure_summary)
 
         return all_routes
+
+    # =========================================================================
+    # SUB-GRID ROUTING FOR FINE-PITCH COMPONENTS (Issue #1109)
+    # =========================================================================
+
+    @property
+    def _subgrid(self) -> SubGridRouter:
+        """Lazy-initialize sub-grid router."""
+        if self._subgrid_router is None:
+            self._subgrid_router = SubGridRouter(self.grid, self.rules)
+        return self._subgrid_router
+
+    def prepare_subgrid_escapes(self) -> SubGridResult:
+        """Prepare sub-grid escape segments for fine-pitch components.
+
+        Analyzes all pads and generates escape segments for those that
+        don't align with the main routing grid. This should be called
+        before main routing to ensure the router can reach off-grid pads.
+
+        Returns:
+            SubGridResult with escape segments and statistics
+
+        Example::
+
+            # Prepare escapes before routing
+            subgrid_result = router.prepare_subgrid_escapes()
+            print(subgrid_result.format_summary())
+
+            # Then route normally
+            routes = router.route_all()
+        """
+        pad_list = list(self.pads.values())
+        return self._subgrid.route_with_subgrid(pad_list)
+
+    def route_with_subgrid(
+        self,
+        use_negotiated: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+    ) -> list[Route]:
+        """Route with automatic sub-grid escape routing for fine-pitch components.
+
+        First generates sub-grid escape segments for any detected off-grid pads
+        (fine-pitch ICs with 0.5-0.65mm pitch), then routes remaining connections
+        using the standard algorithm. This is the recommended approach for boards
+        with TSSOP, SSOP, QFN, or other fine-pitch components.
+
+        Issue #1109: Sub-grid routing enables routing to pads that fall between
+        main grid points without requiring a global fine grid (which would be
+        computationally intractable for large boards).
+
+        Args:
+            use_negotiated: Use negotiated congestion routing (default True)
+            progress_callback: Optional callback for progress updates
+            timeout: Optional timeout in seconds
+
+        Returns:
+            List of all routes (sub-grid escapes + regular routing)
+
+        Example::
+
+            # Route with automatic sub-grid handling
+            routes = router.route_with_subgrid()
+
+            # Check statistics
+            stats = router.get_statistics()
+            print(f"Routed {stats['nets_routed']} nets")
+        """
+        print("\n=== Routing with Sub-Grid Escape (Fine-Pitch Support) ===")
+
+        # Phase 1: Sub-grid escape routing for off-grid pads
+        print("\n--- Phase 1: Sub-Grid Escape Routing ---")
+        subgrid_result = self.prepare_subgrid_escapes()
+
+        if subgrid_result.analysis and subgrid_result.analysis.has_off_grid_pads:
+            print(f"  Off-grid pads: {subgrid_result.analysis.off_grid_count}")
+            print(f"  Escape segments: {subgrid_result.success_count}")
+            print(f"  Grid cells unblocked: {subgrid_result.unblocked_count}")
+
+            if subgrid_result.failed_pads:
+                print(
+                    f"  Failed escapes: {len(subgrid_result.failed_pads)} "
+                    f"(components: {', '.join(sorted({p.ref for p in subgrid_result.failed_pads}))})"
+                )
+
+            # Collect escape routes
+            escape_routes = self._subgrid.get_escape_routes(subgrid_result)
+            for route in escape_routes:
+                self.routes.append(route)
+        else:
+            print("  No off-grid pads detected, sub-grid routing not needed")
+            escape_routes = []
+
+        # Phase 2: Main routing
+        print("\n--- Phase 2: Main Routing ---")
+
+        if use_negotiated:
+            main_routes = self.route_all_negotiated(
+                progress_callback=progress_callback,
+                timeout=timeout,
+            )
+        else:
+            main_routes = self.route_all(
+                progress_callback=progress_callback,
+            )
+
+        # Combine results
+        all_routes = escape_routes + main_routes
+
+        # Summary
+        stats = self.get_statistics()
+        print("\n=== Routing with Sub-Grid Complete ===")
+        if subgrid_result.analysis:
+            print(f"  Fine-pitch pads escaped: {subgrid_result.success_count}")
+        print(f"  Total nets routed: {stats['nets_routed']}")
+        print(f"  Total segments: {stats['segments']}")
+        print(f"  Total vias: {stats['vias']}")
+
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
+
+        return all_routes
+
+    def get_subgrid_statistics(self) -> dict:
+        """Get statistics about sub-grid routing.
+
+        Returns:
+            Dictionary with sub-grid routing stats:
+            - off_grid_pads: Number of off-grid pads detected
+            - escaped_pads: Number of pads with escape segments
+            - failed_pads: Number of pads where escape failed
+            - unblocked_cells: Grid cells unblocked for routing
+        """
+        if self._subgrid_router is None:
+            return {
+                "off_grid_pads": 0,
+                "escaped_pads": 0,
+                "failed_pads": 0,
+                "unblocked_cells": 0,
+            }
+
+        pad_list = list(self.pads.values())
+        analysis = self._subgrid.analyze_pads(pad_list)
+        return {
+            "off_grid_pads": analysis.off_grid_count,
+            "on_grid_pads": len(analysis.on_grid_pads),
+            "total_pads": analysis.total_pads,
+            "off_grid_percentage": analysis.off_grid_percentage,
+        }
 
     # =========================================================================
     # PROGRESSIVE CLEARANCE RELAXATION
