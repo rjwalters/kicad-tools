@@ -1,5 +1,6 @@
 """Tests for the kicad-pcb-stitch CLI command."""
 
+import math
 from pathlib import Path
 
 import pytest
@@ -7,8 +8,11 @@ import pytest
 from kicad_tools.cli.stitch_cmd import (
     PadInfo,
     TraceSegment,
+    TrackSegment,
     calculate_via_position,
+    find_all_board_vias,
     find_all_plane_nets,
+    find_all_track_segments,
     find_existing_tracks,
     find_existing_vias,
     find_pads_on_nets,
@@ -17,6 +21,7 @@ from kicad_tools.cli.stitch_cmd import (
     get_via_layers,
     is_pad_connected,
     main,
+    point_to_segment_distance,
     run_stitch,
 )
 from kicad_tools.core.sexp_file import load_pcb
@@ -651,6 +656,326 @@ class TestEdgeCases:
 
         # The existing via connects the GND pad
         assert result.already_connected >= 1
+
+
+# PCB with other-net tracks near pads to test clearance checking
+# This simulates the bug: GND pad at (110, 110) with a +3.3V trace running nearby
+STITCH_CLEARANCE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (segment (start 109.0 109.0) (end 112.0 109.0) (width 0.2) (layer "F.Cu") (net 2) (uuid "seg-3v3-1"))
+  (segment (start 109.0 111.0) (end 112.0 111.0) (width 0.2) (layer "F.Cu") (net 2) (uuid "seg-3v3-2"))
+  (segment (start 109.0 109.0) (end 109.0 111.0) (width 0.2) (layer "F.Cu") (net 2) (uuid "seg-3v3-3"))
+  (segment (start 112.0 109.0) (end 112.0 111.0) (width 0.2) (layer "F.Cu") (net 2) (uuid "seg-3v3-4"))
+)
+"""
+
+
+@pytest.fixture
+def stitch_clearance_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with other-net tracks near pads for clearance testing."""
+    pcb_file = tmp_path / "stitch_clearance.kicad_pcb"
+    pcb_file.write_text(STITCH_CLEARANCE_PCB)
+    return pcb_file
+
+
+class TestPointToSegmentDistance:
+    """Tests for geometric point-to-segment distance calculation."""
+
+    def test_point_on_segment(self):
+        """Point on the segment should have zero distance."""
+        dist = point_to_segment_distance(1.0, 0.0, 0.0, 0.0, 2.0, 0.0)
+        assert dist == pytest.approx(0.0)
+
+    def test_point_perpendicular_to_segment(self):
+        """Point perpendicular to segment midpoint."""
+        dist = point_to_segment_distance(1.0, 1.0, 0.0, 0.0, 2.0, 0.0)
+        assert dist == pytest.approx(1.0)
+
+    def test_point_nearest_to_start(self):
+        """Point closest to segment start."""
+        dist = point_to_segment_distance(-1.0, 0.0, 0.0, 0.0, 2.0, 0.0)
+        assert dist == pytest.approx(1.0)
+
+    def test_point_nearest_to_end(self):
+        """Point closest to segment end."""
+        dist = point_to_segment_distance(3.0, 0.0, 0.0, 0.0, 2.0, 0.0)
+        assert dist == pytest.approx(1.0)
+
+    def test_degenerate_segment(self):
+        """Zero-length segment should use point-to-point distance."""
+        dist = point_to_segment_distance(3.0, 4.0, 0.0, 0.0, 0.0, 0.0)
+        assert dist == pytest.approx(5.0)
+
+    def test_diagonal_segment(self):
+        """Point distance to diagonal segment."""
+        # Segment from (0,0) to (1,1), point at (0,1) should be sqrt(2)/2
+        dist = point_to_segment_distance(0.0, 1.0, 0.0, 0.0, 1.0, 1.0)
+        assert dist == pytest.approx(math.sqrt(2) / 2)
+
+
+class TestFindAllTrackSegments:
+    """Tests for finding all track segments for clearance checking."""
+
+    def test_finds_other_net_tracks(self, stitch_clearance_pcb: Path):
+        """Should find tracks on other nets for clearance checking."""
+        sexp = load_pcb(stitch_clearance_pcb)
+        # Exclude GND (net 1), should find +3.3V (net 2) tracks
+        segments = find_all_track_segments(sexp, exclude_nets={1})
+
+        assert len(segments) == 4  # Four +3.3V track segments
+        for seg in segments:
+            assert seg.net_number == 2
+
+    def test_excludes_specified_nets(self, stitch_clearance_pcb: Path):
+        """Should exclude tracks on specified nets."""
+        sexp = load_pcb(stitch_clearance_pcb)
+        # Exclude both nets
+        segments = find_all_track_segments(sexp, exclude_nets={1, 2})
+
+        assert len(segments) == 0
+
+    def test_includes_geometry(self, stitch_clearance_pcb: Path):
+        """Should include full segment geometry."""
+        sexp = load_pcb(stitch_clearance_pcb)
+        segments = find_all_track_segments(sexp, exclude_nets={1})
+
+        seg = segments[0]
+        assert seg.start_x == 109.0
+        assert seg.start_y == 109.0
+        assert seg.end_x == 112.0
+        assert seg.end_y == 109.0
+        assert seg.width == 0.2
+        assert seg.layer == "F.Cu"
+
+
+class TestFindAllBoardVias:
+    """Tests for finding all board vias for clearance checking."""
+
+    def test_finds_other_net_vias(self, stitch_connected_pcb: Path):
+        """Should find vias on other nets."""
+        sexp = load_pcb(stitch_connected_pcb)
+        # Exclude +3.3V (net 2), should find GND (net 1) via
+        vias = find_all_board_vias(sexp, exclude_nets={2})
+
+        assert len(vias) == 1
+        assert vias[0][0] == 109.5  # x
+        assert vias[0][1] == 110  # y
+        assert vias[0][2] == 0.45  # size
+        assert vias[0][3] == 1  # net
+
+    def test_excludes_specified_nets(self, stitch_connected_pcb: Path):
+        """Should exclude vias on specified nets."""
+        sexp = load_pcb(stitch_connected_pcb)
+        vias = find_all_board_vias(sexp, exclude_nets={1})
+
+        assert len(vias) == 0
+
+
+class TestClearanceChecking:
+    """Tests for via placement clearance checking against other-net copper."""
+
+    def test_via_avoids_other_net_track(self):
+        """Via placement should avoid tracks on other nets."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Place a +3.3V track right next to where a via would go
+        other_tracks = [
+            TrackSegment(
+                start_x=100.8, start_y=99, end_x=100.8, end_y=101,
+                width=0.2, layer="F.Cu", net_number=2,
+            ),
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+        )
+
+        if pos is not None:
+            # Verify the via doesn't violate clearance to the track
+            dist = point_to_segment_distance(
+                pos[0], pos[1], 100.8, 99, 100.8, 101
+            )
+            min_clearance = 0.45 / 2 + 0.2 / 2 + 0.2  # via_radius + track_half_width + clearance
+            assert dist >= min_clearance - 0.001  # Small tolerance for floating point
+
+    def test_via_avoids_other_net_via(self):
+        """Via placement should avoid vias on other nets."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Place another net's via right next to where we'd place ours
+        other_vias = [
+            (100.8, 100, 0.45, 2),  # x, y, size, net
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_vias=other_vias,
+        )
+
+        if pos is not None:
+            # Verify the via doesn't violate clearance to the other via
+            dist = math.sqrt((pos[0] - 100.8) ** 2 + (pos[1] - 100) ** 2)
+            min_clearance = 0.45 / 2 + 0.45 / 2 + 0.2  # via_radius + other_via_radius + clearance
+            assert dist >= min_clearance - 0.001
+
+    def test_via_surrounded_by_other_net_tracks_is_skipped(self):
+        """Via should be skipped if completely surrounded by other-net tracks."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Surround the pad with very close other-net tracks (box pattern)
+        other_tracks = [
+            TrackSegment(
+                start_x=99.0, start_y=99.5, end_x=101.0, end_y=99.5,
+                width=0.3, layer="F.Cu", net_number=2,
+            ),
+            TrackSegment(
+                start_x=99.0, start_y=100.5, end_x=101.0, end_y=100.5,
+                width=0.3, layer="F.Cu", net_number=2,
+            ),
+            TrackSegment(
+                start_x=99.5, start_y=99.0, end_x=99.5, end_y=101.0,
+                width=0.3, layer="F.Cu", net_number=2,
+            ),
+            TrackSegment(
+                start_x=100.5, start_y=99.0, end_x=100.5, end_y=101.0,
+                width=0.3, layer="F.Cu", net_number=2,
+            ),
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+        )
+
+        # With tight surrounding tracks, should either find a valid position
+        # that clears all tracks, or return None
+        if pos is not None:
+            for seg in other_tracks:
+                dist = point_to_segment_distance(
+                    pos[0], pos[1], seg.start_x, seg.start_y, seg.end_x, seg.end_y
+                )
+                min_clearance = 0.45 / 2 + 0.3 / 2 + 0.2
+                assert dist >= min_clearance - 0.001
+
+    def test_stitch_skips_pad_with_clearance_conflict(self, stitch_clearance_pcb: Path):
+        """Stitching should skip pads where vias would short other nets."""
+        # The clearance PCB has +3.3V tracks surrounding the GND pad area
+        result = run_stitch(
+            pcb_path=stitch_clearance_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # The GND pad at C1.1 should either be skipped (clearance conflict)
+        # or placed at a safe position. Either way, no shorts should occur.
+        for via in result.vias_added:
+            # Verify placed vias don't overlap +3.3V tracks
+            # Tracks: y=109, y=111, x=109, x=112 (all net 2)
+            track_segments = [
+                (109.0, 109.0, 112.0, 109.0),  # top horizontal
+                (109.0, 111.0, 112.0, 111.0),  # bottom horizontal
+                (109.0, 109.0, 109.0, 111.0),  # left vertical
+                (112.0, 109.0, 112.0, 111.0),  # right vertical
+            ]
+            track_width = 0.2
+            via_radius = via.size / 2
+
+            for sx, sy, ex, ey in track_segments:
+                dist = point_to_segment_distance(via.via_x, via.via_y, sx, sy, ex, ey)
+                min_clearance = via_radius + track_width / 2 + 0.2  # default clearance
+                assert dist >= min_clearance - 0.01, (
+                    f"Via at ({via.via_x:.2f}, {via.via_y:.2f}) violates clearance "
+                    f"to track ({sx}, {sy})-({ex}, {ey}): "
+                    f"dist={dist:.3f} < min={min_clearance:.3f}"
+                )
+
+    def test_backwards_compatible_without_other_net_args(self):
+        """calculate_via_position should work without other-net args (backwards compat)."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Call without other_net_tracks and other_net_vias (old API)
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+        )
+
+        assert pos is not None
 
 
 # PCB with zones for auto-detection testing
