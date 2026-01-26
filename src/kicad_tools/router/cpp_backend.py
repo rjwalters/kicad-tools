@@ -75,19 +75,26 @@ def get_backend_info() -> dict:
     # Build detailed unavailability info
     reason = _CPP_IMPORT_ERROR or "Unknown error"
 
-    # Provide helpful diagnostics for common issues
+    # Always provide an actionable build hint
+    build_hint = (
+        "Build the C++ extension for 10-100x faster routing:\n"
+        "  kct build-native\n"
+        "Or install with native support:\n"
+        "  pip install kicad-tools[native]"
+    )
+
+    # Provide platform-specific diagnostics for common issues
     diagnostic_hint = None
     if "arm64" in platform.machine().lower() or "aarch64" in platform.machine().lower():
         if "darwin" in platform.system().lower():
             diagnostic_hint = (
-                "On Apple Silicon, ensure the C++ extension was built with: "
-                "'kct build-native' or 'python -m build'. "
-                "The native router provides 10-100x speedup for fine-grid routing."
+                "On Apple Silicon, the C++ extension must be built locally. "
+                "Run 'kct build-native' to build (requires Xcode Command Line Tools)."
             )
     elif "cannot open shared object" in reason.lower() or "dll" in reason.lower():
         diagnostic_hint = (
-            "The C++ router extension was not found. "
-            "Build with 'kct build-native' or install kicad-tools[native]."
+            "The compiled C++ extension was not found for this platform. "
+            "Run 'kct build-native' to build from source."
         )
 
     result = {
@@ -95,6 +102,7 @@ def get_backend_info() -> dict:
         "version": "pure-python",
         "available": False,
         "unavailable_reason": reason,
+        "build_hint": build_hint,
         "platform": platform_info,
     }
 
@@ -102,6 +110,47 @@ def get_backend_info() -> dict:
         result["diagnostic_hint"] = diagnostic_hint
 
     return result
+
+
+# Threshold for warning about Python backend performance (grid cells)
+LARGE_GRID_THRESHOLD = 50_000
+
+
+def format_backend_status(backend_info: dict, grid_cells: int = 0) -> str:
+    """Format a human-readable backend status string for CLI output.
+
+    Provides actionable guidance when the C++ backend is not available,
+    especially when routing large grids where performance matters.
+
+    Args:
+        backend_info: Dictionary from get_backend_info().
+        grid_cells: Total number of grid cells being routed (0 to skip
+            the large-grid performance warning).
+
+    Returns:
+        Formatted status string suitable for printing to console.
+    """
+    active = backend_info.get("active", backend_info["backend"])
+    available = backend_info.get("available", False)
+
+    if active == "cpp":
+        version = backend_info.get("version", "unknown")
+        return f"cpp v{version} (native, 10-100x faster)"
+
+    # Python backend - provide helpful context
+    parts = ["python (pure Python)"]
+
+    if not available:
+        parts.append("C++ backend not installed")
+        if grid_cells > LARGE_GRID_THRESHOLD:
+            parts.append(
+                f"WARNING: Routing {grid_cells:,} grid cells with Python backend "
+                f"will be slow. Build C++ backend for 10-100x speedup: kct build-native"
+            )
+        else:
+            parts.append("Tip: Run 'kct build-native' for 10-100x faster routing")
+
+    return " | ".join(parts)
 
 
 class CppGrid:

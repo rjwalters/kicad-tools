@@ -2146,9 +2146,11 @@ def main(argv: list[str] | None = None) -> int:
     if not quiet:
         print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
         backend_info = router.backend_info
-        print(
-            f"  Backend:    {backend_info['active']} (C++ available: {backend_info['available']})"
-        )
+        grid_cells = router.grid.cols * router.grid.rows * router.grid.num_layers
+        from kicad_tools.router.cpp_backend import format_backend_status
+        backend_status = format_backend_status(backend_info, grid_cells)
+        print(f"  Backend:    {backend_status}")
+        print(f"  Grid:       {router.grid.cols}x{router.grid.rows}x{router.grid.num_layers} = {grid_cells:,} cells")
         print(f"  Total nets: {len(net_map)}")
         print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
 
