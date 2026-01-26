@@ -352,6 +352,30 @@ class TestRunStitch:
         new_content = stitch_test_pcb.read_text()
         assert new_content.count("(via") >= 4
 
+    def test_run_stitch_via_format_no_rotation(self, stitch_test_pcb: Path):
+        """Vias must use (at X Y) without rotation parameter.
+
+        Regression test for issue #1104: vias written with (at X Y 0) cause
+        KiCad to fail loading the PCB file.
+        """
+        import re
+
+        run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=False,
+        )
+
+        new_content = stitch_test_pcb.read_text()
+        # Find all (at ...) inside (via ...) blocks
+        # Via at nodes should be (at X Y) not (at X Y 0)
+        via_at_pattern = re.compile(r'\(via\s.*?\(at\s+[\d.]+\s+[\d.]+\s+\d+\)', re.DOTALL)
+        matches = via_at_pattern.findall(new_content)
+        assert len(matches) == 0, (
+            f"Found via(s) with rotation in at node: {matches[0][:80]}... "
+            "Vias must use (at X Y) format without rotation parameter."
+        )
+
     def test_run_stitch_skips_connected(self, stitch_connected_pcb: Path):
         """Should skip pads that already have connections."""
         result = run_stitch(

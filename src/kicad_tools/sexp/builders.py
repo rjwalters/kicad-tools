@@ -370,7 +370,7 @@ def via_node(
     layers_node = SExp.list("layers", *layers)
     return SExp.list(
         "via",
-        at(x, y),
+        SExp.list("at", fmt(x), fmt(y)),
         SExp.list("size", fmt(size)),
         SExp.list("drill", fmt(drill)),
         layers_node,

@@ -519,6 +519,21 @@ class TestViaNode:
         layers_node = node.get("layers")
         assert len(layers_node.children) == 2
 
+    def test_via_node_at_has_no_rotation(self):
+        """Via at node must use (at X Y) without rotation parameter.
+
+        KiCad vias do not support a rotation parameter. Including rotation
+        (e.g., (at X Y 0)) causes KiCad to fail loading the PCB file.
+        See: https://github.com/rjwalters/kicad-tools/issues/1104
+        """
+        node = via_node(162.5, 97.25, 0.6, 0.3, ("F.Cu", "B.Cu"), 12, "via-uuid")
+        at_node = node.get("at")
+        assert at_node is not None
+        # Via (at) must have exactly 2 children: x and y, no rotation
+        assert len(at_node.children) == 2
+        assert at_node.children[0].value == 162.5
+        assert at_node.children[1].value == 97.25
+
 
 class TestZoneNode:
     """Tests for the zone_node() PCB builder."""
