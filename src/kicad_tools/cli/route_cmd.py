@@ -50,6 +50,7 @@ Layer Stack Configuration:
 """
 
 import argparse
+import logging
 import math
 import signal
 import sys
@@ -59,6 +60,62 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
+
+logger = logging.getLogger(__name__)
+
+
+def _insert_sexp_before_closing(pcb_content: str, sexp_fragments: str) -> str:
+    """Insert S-expression fragments before the final closing parenthesis of a PCB file.
+
+    This correctly removes only the last closing parenthesis from the PCB content
+    and re-adds it after the inserted fragments. Unlike ``rstrip(")")``, which
+    strips ALL trailing ``)``, this function preserves the S-expression structure.
+
+    Args:
+        pcb_content: Original PCB file content.
+        sexp_fragments: S-expression string(s) to insert (segments, vias, zones).
+
+    Returns:
+        Modified PCB content with fragments inserted before the final ``)``.
+    """
+    content = pcb_content.rstrip()
+    if content.endswith(")"):
+        content = content[:-1].rstrip()
+
+    result = content + "\n\n"
+    result += f"  {sexp_fragments}\n"
+    result += ")\n"
+    return result
+
+
+def _validate_sexp_parentheses(content: str) -> bool:
+    """Validate that S-expression parentheses are balanced.
+
+    Scans the content respecting quoted strings (parentheses inside quotes
+    are not counted). Returns True if parentheses are balanced.
+
+    Args:
+        content: S-expression content to validate.
+
+    Returns:
+        True if parentheses are balanced, False otherwise.
+    """
+    depth = 0
+    in_string = False
+    prev_char = ""
+    for char in content:
+        if char == '"' and prev_char != "\\":
+            in_string = not in_string
+        elif not in_string:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth < 0:
+                    return False
+        prev_char = char
+    return depth == 0
+
 
 # Global state for Ctrl+C handling
 _interrupt_state = {
@@ -112,9 +169,7 @@ def _save_partial_results() -> bool:
             partial_path = output_path.with_stem(output_path.stem + "_partial")
 
             # Insert routes before final closing parenthesis
-            output_content = original_content.rstrip().rstrip(")")
-            output_content += f"\n  {route_sexp}\n"
-            output_content += ")\n"
+            output_content = _insert_sexp_before_closing(original_content, route_sexp)
 
             partial_path.write_text(output_content)
 
@@ -672,13 +727,20 @@ def route_with_layer_escalation(
 
         # Insert routes before final closing parenthesis
         if route_sexp:
-            output_content = original_content.rstrip().rstrip(")")
-            output_content += f"\n  {route_sexp}\n"
-            output_content += ")\n"
+            output_content = _insert_sexp_before_closing(original_content, route_sexp)
         else:
             output_content = original_content
             if not quiet:
                 print("  Warning: No routes generated!")
+
+        # Validate S-expression structure before writing
+        if not _validate_sexp_parentheses(output_content):
+            logger.error("Generated PCB file has unbalanced parentheses")
+            raise ValueError(
+                "Generated PCB file has invalid S-expression syntax "
+                "(unbalanced parentheses). This is a bug in kicad-tools. "
+                "Please report it."
+            )
 
         # Update output filename to include layer count
         if final_result.layer_count > 2:
@@ -1005,13 +1067,20 @@ def route_with_rule_relaxation(
 
         # Insert routes before final closing parenthesis
         if route_sexp:
-            output_content = original_content.rstrip().rstrip(")")
-            output_content += f"\n  {route_sexp}\n"
-            output_content += ")\n"
+            output_content = _insert_sexp_before_closing(original_content, route_sexp)
         else:
             output_content = original_content
             if not quiet:
                 print("  Warning: No routes generated!")
+
+        # Validate S-expression structure before writing
+        if not _validate_sexp_parentheses(output_content):
+            logger.error("Generated PCB file has unbalanced parentheses")
+            raise ValueError(
+                "Generated PCB file has invalid S-expression syntax "
+                "(unbalanced parentheses). This is a bug in kicad-tools. "
+                "Please report it."
+            )
 
         output_path.write_text(output_content)
 
@@ -1364,13 +1433,20 @@ def route_with_combined_escalation(
 
         # Insert routes before final closing parenthesis
         if route_sexp:
-            output_content = original_content.rstrip().rstrip(")")
-            output_content += f"\n  {route_sexp}\n"
-            output_content += ")\n"
+            output_content = _insert_sexp_before_closing(original_content, route_sexp)
         else:
             output_content = original_content
             if not quiet:
                 print("  Warning: No routes generated!")
+
+        # Validate S-expression structure before writing
+        if not _validate_sexp_parentheses(output_content):
+            logger.error("Generated PCB file has unbalanced parentheses")
+            raise ValueError(
+                "Generated PCB file has invalid S-expression syntax "
+                "(unbalanced parentheses). This is a bug in kicad-tools. "
+                "Please report it."
+            )
 
         # Update output filename to include layer count and tier
         if final_result.layer_count > 2 or final_result.tier > 0:
@@ -2629,16 +2705,29 @@ def main(argv: list[str] | None = None) -> int:
             # Insert routes and zones before final closing parenthesis
             # Note: KiCad's S-expression format doesn't support ; comments
             if route_sexp or zone_sexp:
-                output_content = original_content.rstrip().rstrip(")")
+                # Combine zone and route fragments
+                fragments = []
                 if zone_sexp:
-                    output_content += f"\n  {zone_sexp}\n"
+                    fragments.append(zone_sexp)
                 if route_sexp:
-                    output_content += f"\n  {route_sexp}\n"
-                output_content += ")\n"
+                    fragments.append(route_sexp)
+                combined_sexp = "\n  ".join(fragments)
+                output_content = _insert_sexp_before_closing(
+                    original_content, combined_sexp
+                )
             else:
                 output_content = original_content
                 if not quiet:
                     print("  Warning: No routes generated!")
+
+            # Validate S-expression structure before writing
+            if not _validate_sexp_parentheses(output_content):
+                logger.error("Generated PCB file has unbalanced parentheses")
+                raise ValueError(
+                    "Generated PCB file has invalid S-expression syntax "
+                    "(unbalanced parentheses). This is a bug in kicad-tools. "
+                    "Please report it."
+                )
 
             output_path.write_text(output_content)
 
