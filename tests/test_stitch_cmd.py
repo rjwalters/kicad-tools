@@ -6,6 +6,7 @@ import pytest
 
 from kicad_tools.cli.stitch_cmd import (
     PadInfo,
+    TraceSegment,
     calculate_via_position,
     find_all_plane_nets,
     find_existing_tracks,
@@ -401,6 +402,112 @@ class TestRunStitch:
         assert len(result.vias_added) > 0
         for via in result.vias_added:
             assert via.layers == ("F.Cu", "In1.Cu")
+
+
+class TestPadToViaTraces:
+    """Tests for pad-to-via trace segment creation."""
+
+    def test_traces_created_for_each_via(self, stitch_test_pcb: Path):
+        """Should create one trace segment for each via placed."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        assert len(result.traces_added) == len(result.vias_added)
+        assert len(result.traces_added) == 4  # 4 GND pads
+
+    def test_trace_connects_pad_to_via(self, stitch_test_pcb: Path):
+        """Each trace should go from pad center to via center."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        for trace, via in zip(result.traces_added, result.vias_added):
+            # Trace starts at pad center
+            assert trace.pad.x == via.pad.x
+            assert trace.pad.y == via.pad.y
+            # Trace ends at via center
+            assert trace.via_x == via.via_x
+            assert trace.via_y == via.via_y
+
+    def test_trace_on_pad_surface_layer(self, stitch_test_pcb: Path):
+        """Traces should be on the pad's surface layer."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        for trace in result.traces_added:
+            assert trace.layer == trace.pad.layer
+            assert trace.layer == "F.Cu"  # All test pads are on F.Cu
+
+    def test_trace_default_width(self, stitch_test_pcb: Path):
+        """Traces should use default width of 0.2mm."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        for trace in result.traces_added:
+            assert trace.width == 0.2
+
+    def test_trace_custom_width(self, stitch_test_pcb: Path):
+        """Should use custom trace width when specified."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            trace_width=0.3,
+            dry_run=True,
+        )
+
+        for trace in result.traces_added:
+            assert trace.width == 0.3
+
+    def test_traces_written_to_pcb(self, stitch_test_pcb: Path):
+        """Traces should be written as segment nodes in the PCB file."""
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=False,
+        )
+
+        assert len(result.traces_added) == 4
+
+        # File should have both vias and segments
+        new_content = stitch_test_pcb.read_text()
+        assert new_content.count("(via") >= 4
+        assert new_content.count("(segment") >= 4
+
+    def test_no_traces_for_skipped_pads(self, stitch_connected_pcb: Path):
+        """Already-connected pads should not get traces."""
+        result = run_stitch(
+            pcb_path=stitch_connected_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # Already-connected pads have no vias and no traces
+        assert result.already_connected >= 1
+        assert len(result.traces_added) == len(result.vias_added)
+
+    def test_dry_run_does_not_write_traces(self, stitch_test_pcb: Path):
+        """Dry run should not write traces to file."""
+        original_content = stitch_test_pcb.read_text()
+
+        result = run_stitch(
+            pcb_path=stitch_test_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        assert len(result.traces_added) > 0
+        assert stitch_test_pcb.read_text() == original_content
 
 
 class TestCLIMain:
