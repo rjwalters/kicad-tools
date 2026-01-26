@@ -153,7 +153,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_datasheet_parser(subparsers)
     _add_decisions_parser(subparsers)
     _add_placement_parser(subparsers)
-    _add_config_parser(subparsers)
+    # NOTE: config parser has been migrated to new_commands/config.py
+    # and is registered via auto-discovery below.
     _add_interactive_parser(subparsers)
     _add_validate_parser(subparsers)
     _add_analyze_parser(subparsers)
@@ -174,6 +175,14 @@ def create_parser() -> argparse.ArgumentParser:
     _add_explain_parser(subparsers)
     _add_detect_mistakes_parser(subparsers)
     _add_calibrate_parser(subparsers)
+
+    # Auto-register new-style commands that implement the Command protocol.
+    # These coexist with legacy commands; skip_existing=True ensures legacy
+    # commands take precedence if both define the same name.
+    from kicad_tools.cli.registry import discover_commands, register_commands
+
+    new_commands = discover_commands()
+    register_commands(subparsers, new_commands, skip_existing=True)
 
     return parser
 
@@ -1636,45 +1645,9 @@ def _add_placement_parser(subparsers) -> None:
     )
 
 
-def _add_config_parser(subparsers) -> None:
-    """Add config subcommand parser."""
-    config_parser = subparsers.add_parser("config", help="View and manage configuration")
-    config_parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Show effective configuration with sources",
-    )
-    config_parser.add_argument(
-        "--init",
-        action="store_true",
-        help="Create template config file",
-    )
-    config_parser.add_argument(
-        "--paths",
-        action="store_true",
-        help="Show config file paths",
-    )
-    config_parser.add_argument(
-        "--user",
-        action="store_true",
-        help="Use user config for --init",
-    )
-    config_parser.add_argument(
-        "config_action",
-        nargs="?",
-        choices=["get", "set"],
-        help="Config action",
-    )
-    config_parser.add_argument(
-        "config_key",
-        nargs="?",
-        help="Config key (e.g., defaults.format)",
-    )
-    config_parser.add_argument(
-        "config_value",
-        nargs="?",
-        help="Value to set",
-    )
+## NOTE: _add_config_parser has been removed.
+## The config command is now defined in new_commands/config.py
+## and registered via auto-discovery in create_parser().
 
 
 def _add_interactive_parser(subparsers) -> None:
