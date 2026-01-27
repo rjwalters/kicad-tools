@@ -23,6 +23,7 @@ from kicad_tools.cli.stitch_cmd import (
     main,
     point_to_segment_distance,
     run_stitch,
+    segment_to_segment_distance,
 )
 from kicad_tools.core.sexp_file import load_pcb
 
@@ -1301,3 +1302,327 @@ class TestAutoDetectPlaneNets:
         assert "GND -> In1.Cu" in captured.out
         # Should NOT include +3.3V since we only specified GND
         assert "+3.3V ->" not in captured.out
+
+
+class TestSegmentToSegmentDistance:
+    """Tests for segment-to-segment distance calculation."""
+
+    def test_parallel_segments(self):
+        """Parallel segments should have correct perpendicular distance."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 2.0, 0.0,  # Segment A: horizontal at y=0
+            0.0, 1.0, 2.0, 1.0,  # Segment B: horizontal at y=1
+        )
+        assert dist == pytest.approx(1.0)
+
+    def test_crossing_segments(self):
+        """Crossing segments should have distance 0."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 2.0, 2.0,  # Segment A: diagonal
+            0.0, 2.0, 2.0, 0.0,  # Segment B: opposite diagonal (crosses A)
+        )
+        assert dist == pytest.approx(0.0)
+
+    def test_t_shaped_segments(self):
+        """Perpendicular segments that don't cross."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 2.0, 0.0,  # Segment A: horizontal
+            1.0, 1.0, 1.0, 3.0,  # Segment B: vertical, starts 1 unit above A
+        )
+        assert dist == pytest.approx(1.0)
+
+    def test_collinear_separated_segments(self):
+        """Collinear segments with a gap."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 1.0, 0.0,  # Segment A: (0,0)-(1,0)
+            3.0, 0.0, 4.0, 0.0,  # Segment B: (3,0)-(4,0)
+        )
+        assert dist == pytest.approx(2.0)
+
+    def test_endpoint_to_endpoint(self):
+        """Distance between segment endpoints when closest."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 1.0, 0.0,  # Segment A
+            2.0, 1.0, 3.0, 1.0,  # Segment B
+        )
+        expected = math.sqrt(1.0**2 + 1.0**2)  # dist from (1,0) to (2,1)
+        assert dist == pytest.approx(expected)
+
+    def test_zero_length_segment(self):
+        """Degenerate (zero-length) segment acts as point."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 0.0, 0.0,  # Point at origin
+            1.0, 0.0, 2.0, 0.0,  # Segment from (1,0) to (2,0)
+        )
+        assert dist == pytest.approx(1.0)
+
+    def test_identical_segments(self):
+        """Overlapping segments should have distance 0."""
+        dist = segment_to_segment_distance(
+            0.0, 0.0, 2.0, 0.0,
+            0.0, 0.0, 2.0, 0.0,
+        )
+        assert dist == pytest.approx(0.0)
+
+
+class TestTracePathClearance:
+    """Tests for trace path clearance checking against other-net copper."""
+
+    def _make_pad(self, x=100.0, y=100.0):
+        """Helper to create a test pad."""
+        return PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=x,
+            y=y,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+    def test_trace_path_crossing_other_net_track_rejected(self):
+        """Trace crossing an other-net track should be rejected.
+
+        Place an other-net track between the pad and the east (+x) via
+        position. The via position itself may be clear, but the trace
+        from pad to via crosses the other-net track.
+        """
+        pad = self._make_pad()
+
+        # Place a vertical +3.3V track at x=100.5, between pad (100,100)
+        # and the first via candidate in the +x direction (~100.82)
+        other_tracks = [
+            TrackSegment(
+                start_x=100.5, start_y=98.0, end_x=100.5, end_y=102.0,
+                width=0.2, layer="F.Cu", net_number=2,
+            ),
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+            trace_width=0.2,
+        )
+
+        # If a position is found, verify the trace path doesn't cross the track
+        if pos is not None:
+            trace_dist = segment_to_segment_distance(
+                pad.x, pad.y, pos[0], pos[1],
+                100.5, 98.0, 100.5, 102.0,
+            )
+            min_clearance = 0.2 / 2 + 0.2 / 2 + 0.2  # trace_hw + track_hw + clearance
+            assert trace_dist >= min_clearance - 0.001
+
+    def test_trace_path_clearance_violation_rejected(self):
+        """Trace running parallel but too close to other-net track is rejected.
+
+        Place an other-net track running parallel and within clearance
+        distance of the trace path from pad to via.
+        """
+        pad = self._make_pad()
+
+        # Place a horizontal track very close to and parallel with the trace
+        # path in the +x direction (pad at y=100, track at y=100.15)
+        # This is within clearance (0.2/2 + 0.2/2 + 0.2 = 0.4mm needed, only 0.15mm apart)
+        other_tracks = [
+            TrackSegment(
+                start_x=99.5, start_y=100.15, end_x=101.5, end_y=100.15,
+                width=0.2, layer="F.Cu", net_number=2,
+            ),
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+            trace_width=0.2,
+        )
+
+        # If a position is found, the trace path must clear the parallel track
+        if pos is not None:
+            trace_dist = segment_to_segment_distance(
+                pad.x, pad.y, pos[0], pos[1],
+                99.5, 100.15, 101.5, 100.15,
+            )
+            min_clearance = 0.2 / 2 + 0.2 / 2 + 0.2
+            assert trace_dist >= min_clearance - 0.001
+
+    def test_trace_path_with_clear_route_accepted(self):
+        """Trace path that clears all obstacles should be accepted."""
+        pad = self._make_pad()
+
+        # Place a track far away (y=105) that won't interfere with any direction
+        other_tracks = [
+            TrackSegment(
+                start_x=98.0, start_y=105.0, end_x=102.0, end_y=105.0,
+                width=0.2, layer="F.Cu", net_number=2,
+            ),
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+            trace_width=0.2,
+        )
+
+        assert pos is not None
+
+    def test_trace_path_avoids_other_net_via(self):
+        """Trace path should avoid other-net vias along the trace route.
+
+        Place an other-net via along the trace path between pad and via position.
+        """
+        pad = self._make_pad()
+
+        # Place an other-net via at (100.5, 100), right on the trace path
+        # from pad (100,100) toward the east direction
+        other_vias = [
+            (100.5, 100.0, 0.45, 2),  # x, y, size, net
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_vias=other_vias,
+            trace_width=0.2,
+        )
+
+        if pos is not None:
+            # Verify the trace path doesn't violate clearance to the other via
+            trace_dist = point_to_segment_distance(
+                100.5, 100.0, pad.x, pad.y, pos[0], pos[1],
+            )
+            min_clearance = 0.2 / 2 + 0.45 / 2 + 0.2  # trace_hw + via_radius + clearance
+            assert trace_dist >= min_clearance - 0.001
+
+    def test_via_valid_but_trace_blocked_falls_back(self):
+        """When via position is valid but trace path is blocked, should try next direction.
+
+        Place obstacles that block the trace in the +x direction but leave
+        other directions clear.
+        """
+        pad = self._make_pad()
+
+        # Block the trace path to the east with a crossing track
+        # but leave south direction clear
+        other_tracks = [
+            TrackSegment(
+                start_x=100.4, start_y=98.0, end_x=100.4, end_y=102.0,
+                width=0.2, layer="F.Cu", net_number=2,
+            ),
+        ]
+
+        # Without trace_width check, east (+x) direction is tried first and
+        # the via itself at ~100.82 is far enough from the track at 100.4.
+        # But the trace from (100,100) to (100.82,100) crosses x=100.4.
+
+        pos_with_trace_check = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+            trace_width=0.2,
+        )
+
+        pos_without_trace_check = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_tracks=other_tracks,
+            trace_width=0.0,  # No trace check
+        )
+
+        # Both should find a position
+        assert pos_with_trace_check is not None
+        assert pos_without_trace_check is not None
+
+        # But they may differ: trace-checked version should avoid the blocked direction
+        # The without-check version should use the east direction (first tried)
+        # The with-check version should use a different direction (south, etc.)
+        # Verify the with-check version's trace path is actually clear
+        trace_dist = segment_to_segment_distance(
+            pad.x, pad.y, pos_with_trace_check[0], pos_with_trace_check[1],
+            100.4, 98.0, 100.4, 102.0,
+        )
+        min_clearance = 0.2 / 2 + 0.2 / 2 + 0.2
+        assert trace_dist >= min_clearance - 0.001
+
+    def test_backwards_compatible_trace_width_zero(self):
+        """trace_width=0 should behave identically to not checking trace path."""
+        pad = self._make_pad()
+
+        pos_default = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+        )
+
+        pos_zero = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            trace_width=0.0,
+        )
+
+        assert pos_default == pos_zero
+
+    def test_run_stitch_passes_trace_width(self, stitch_clearance_pcb: Path):
+        """run_stitch should pass trace_width to calculate_via_position.
+
+        The clearance PCB has other-net tracks near the pad. With trace path
+        checking enabled (via trace_width parameter), placed vias should have
+        clearance-safe trace paths.
+        """
+        result = run_stitch(
+            pcb_path=stitch_clearance_pcb,
+            net_names=["GND"],
+            trace_width=0.2,
+            dry_run=True,
+        )
+
+        # For every placed via, verify the trace path is clear of other-net tracks
+        track_segments = [
+            (109.0, 109.0, 112.0, 109.0),  # top horizontal
+            (109.0, 111.0, 112.0, 111.0),  # bottom horizontal
+            (109.0, 109.0, 109.0, 111.0),  # left vertical
+            (112.0, 109.0, 112.0, 111.0),  # right vertical
+        ]
+        track_width = 0.2
+
+        for via in result.vias_added:
+            for sx, sy, ex, ey in track_segments:
+                trace_dist = segment_to_segment_distance(
+                    via.pad.x, via.pad.y, via.via_x, via.via_y,
+                    sx, sy, ex, ey,
+                )
+                min_clearance = 0.2 / 2 + track_width / 2 + 0.2
+                assert trace_dist >= min_clearance - 0.01, (
+                    f"Trace from pad ({via.pad.x:.2f}, {via.pad.y:.2f}) to "
+                    f"via ({via.via_x:.2f}, {via.via_y:.2f}) violates clearance "
+                    f"to track ({sx}, {sy})-({ex}, {ey}): "
+                    f"dist={trace_dist:.3f} < min={min_clearance:.3f}"
+                )

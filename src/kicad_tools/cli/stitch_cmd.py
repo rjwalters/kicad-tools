@@ -459,6 +459,57 @@ def point_to_segment_distance(
     return math.sqrt((px - nearest_x) ** 2 + (py - nearest_y) ** 2)
 
 
+def segment_to_segment_distance(
+    a_sx: float,
+    a_sy: float,
+    a_ex: float,
+    a_ey: float,
+    b_sx: float,
+    b_sy: float,
+    b_ex: float,
+    b_ey: float,
+) -> float:
+    """Calculate minimum distance between two line segments.
+
+    Checks endpoints of each segment against the other segment, and also
+    checks for intersection (distance = 0). This covers all cases for
+    minimum distance between two finite line segments.
+
+    Args:
+        a_sx, a_sy: Segment A start
+        a_ex, a_ey: Segment A end
+        b_sx, b_sy: Segment B start
+        b_ex, b_ey: Segment B end
+
+    Returns:
+        Minimum distance between the two segments
+    """
+    # Check all four endpoint-to-segment distances
+    d1 = point_to_segment_distance(a_sx, a_sy, b_sx, b_sy, b_ex, b_ey)
+    d2 = point_to_segment_distance(a_ex, a_ey, b_sx, b_sy, b_ex, b_ey)
+    d3 = point_to_segment_distance(b_sx, b_sy, a_sx, a_sy, a_ex, a_ey)
+    d4 = point_to_segment_distance(b_ex, b_ey, a_sx, a_sy, a_ex, a_ey)
+
+    min_dist = min(d1, d2, d3, d4)
+
+    # Check for intersection: if segments cross, distance is 0
+    if min_dist > 0:
+        # Use cross product method to check intersection
+        d1x = a_ex - a_sx
+        d1y = a_ey - a_sy
+        d2x = b_ex - b_sx
+        d2y = b_ey - b_sy
+
+        denom = d1x * d2y - d1y * d2x
+        if abs(denom) > 1e-12:
+            t = ((b_sx - a_sx) * d2y - (b_sy - a_sy) * d2x) / denom
+            u = ((b_sx - a_sx) * d1y - (b_sy - a_sy) * d1x) / denom
+            if 0 <= t <= 1 and 0 <= u <= 1:
+                return 0.0
+
+    return min_dist
+
+
 def is_pad_connected(
     pad: PadInfo,
     vias: list[tuple[float, float, int]],
@@ -493,11 +544,14 @@ def calculate_via_position(
     clearance: float,
     other_net_tracks: list[TrackSegment] | None = None,
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
+    trace_width: float = 0.0,
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
     Tries to place the via offset from the pad center, checking for conflicts
     with both same-net vias and other-net copper (tracks and vias).
+    When trace_width > 0, also checks the connecting trace path from pad
+    center to via center for clearance violations.
     Returns None if no valid position found.
 
     Args:
@@ -508,6 +562,8 @@ def calculate_via_position(
         clearance: Minimum clearance from existing copper in mm
         other_net_tracks: Track segments on other nets for clearance checking
         other_net_vias: Vias on other nets as (x, y, size, net_num) for clearance
+        trace_width: Width of the connecting trace from pad to via in mm.
+            When > 0, the trace path is checked for clearance violations.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -515,6 +571,7 @@ def calculate_via_position(
         other_net_vias = []
 
     via_radius = via_size / 2
+    trace_half_width = trace_width / 2
 
     # Try different offsets from pad center
     # Start with the direction away from pad center, try 8 directions
@@ -572,8 +629,41 @@ def calculate_via_position(
                     conflict = True
                     break
 
-            if not conflict:
-                return (via_x, via_y)
+            if conflict:
+                continue
+
+            # Check connecting trace path (pad center -> via center) for clearance
+            if trace_width > 0:
+                # Check trace path against other-net track segments
+                for seg in other_net_tracks:
+                    dist = segment_to_segment_distance(
+                        pad.x, pad.y, via_x, via_y,
+                        seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                    )
+                    # Clearance from trace edge to track edge
+                    min_dist = trace_half_width + seg.width / 2 + clearance
+                    if dist < min_dist:
+                        conflict = True
+                        break
+
+                if conflict:
+                    continue
+
+                # Check trace path against other-net vias
+                for ovx, ovy, ov_size, _onet in other_net_vias:
+                    dist = point_to_segment_distance(
+                        ovx, ovy, pad.x, pad.y, via_x, via_y,
+                    )
+                    # Clearance from trace edge to other via edge
+                    min_dist = trace_half_width + ov_size / 2 + clearance
+                    if dist < min_dist:
+                        conflict = True
+                        break
+
+                if conflict:
+                    continue
+
+            return (via_x, via_y)
 
     return None
 
@@ -704,7 +794,8 @@ def run_stitch(
             result.already_connected += 1
             continue
 
-        # Calculate via position with clearance checking against all copper
+        # Calculate via position with clearance checking against all copper,
+        # including the connecting trace path from pad to via
         via_pos = calculate_via_position(
             pad,
             offset=offset,
@@ -713,6 +804,7 @@ def run_stitch(
             clearance=clearance,
             other_net_tracks=other_net_tracks,
             other_net_vias=other_net_vias,
+            trace_width=trace_width,
         )
 
         if via_pos is None:
