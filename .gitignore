@@ -54,3 +54,7 @@ Thumbs.db
 # Board outputs (regenerated artifacts)
 boards/*/design_output.log
 boards/*/output/*.kicad_pro
+.loom/state.json
+.loom/worktrees/
+.loom/*.log
+.loom/*.sock

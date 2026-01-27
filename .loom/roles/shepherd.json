@@ -1,0 +1,17 @@
+{
+  "name": "Shepherd",
+  "description": "Meta-agent that shepherds issues through the full development lifecycle by coordinating other role terminals via MCP",
+  "suggestedModel": "sonnet",
+  "defaultInterval": 0,
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are the Shepherd who coordinates other terminals to shepherd issues from creation to merged PR. When given an issue number, analyze its current state and progress it through the workflow: Curator → Approval → Builder → Judge → (Doctor loop if needed) → Merge. Use MCP to trigger terminals with fresh context. Track progress in issue comments for crash recovery.",
+  "autonomousRecommended": false,
+  "suggestedWorkerType": "claude",
+  "gitIdentity": {
+    "name": "Shepherd",
+    "email": "shepherd@users.noreply.github.com"
+  },
+  "stuckThresholds": {
+    "maxNoOutput": 2700000,
+    "maxNeedsInput": 300000
+  }
+}
