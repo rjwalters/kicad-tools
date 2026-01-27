@@ -917,6 +917,13 @@ def main(argv: list[str] | None = None) -> int:
         import shutil
 
         shutil.copy(pcb_path, output_path)
+
+        # Also copy project file for DRC compatibility
+        pro_path = pcb_path.with_suffix(".kicad_pro")
+        if pro_path.exists():
+            output_pro = output_path.with_suffix(".kicad_pro")
+            shutil.copy(pro_path, output_pro)
+
         pcb_path = output_path
 
     # Auto-detect power plane nets if none specified

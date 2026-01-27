@@ -604,6 +604,60 @@ class TestCLIMain:
         assert output_file.exists()
         assert "(via" in output_file.read_text()
 
+    def test_main_output_copies_project_file(self, stitch_test_pcb: Path, tmp_path):
+        """Main with -o should copy matching .kicad_pro file."""
+        # Create matching project file alongside the test PCB
+        pro_path = stitch_test_pcb.with_suffix(".kicad_pro")
+        pro_content = '{"board": {"design_settings": {}}}'
+        pro_path.write_text(pro_content)
+
+        output_file = tmp_path / "subdir" / "output.kicad_pcb"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", str(output_file)])
+
+        assert exit_code == 0
+        assert output_file.exists()
+        # Project file also copied with matching name
+        output_pro = output_file.with_suffix(".kicad_pro")
+        assert output_pro.exists()
+        assert output_pro.read_text() == pro_content
+
+    def test_main_output_without_project_file(self, stitch_test_pcb: Path, tmp_path):
+        """Main with -o should work even if no .kicad_pro exists."""
+        # Ensure no project file exists
+        pro_path = stitch_test_pcb.with_suffix(".kicad_pro")
+        if pro_path.exists():
+            pro_path.unlink()
+
+        output_file = tmp_path / "output.kicad_pcb"
+
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "-o", str(output_file)])
+
+        assert exit_code == 0
+        assert output_file.exists()
+        # No project file should be created
+        output_pro = output_file.with_suffix(".kicad_pro")
+        assert not output_pro.exists()
+
+    def test_main_dry_run_skips_project_copy(self, stitch_test_pcb: Path, tmp_path):
+        """Dry-run should not copy project file."""
+        # Create matching project file
+        pro_path = stitch_test_pcb.with_suffix(".kicad_pro")
+        pro_path.write_text('{"board": {}}')
+
+        output_file = tmp_path / "output.kicad_pcb"
+
+        exit_code = main(
+            [str(stitch_test_pcb), "--net", "GND", "-o", str(output_file), "--dry-run"]
+        )
+
+        assert exit_code == 0
+        # Neither PCB nor project file should be created in dry-run
+        assert not output_file.exists()
+        output_pro = output_file.with_suffix(".kicad_pro")
+        assert not output_pro.exists()
+
     def test_main_custom_options(self, stitch_test_pcb: Path, capsys):
         """Main should accept custom via options."""
         exit_code = main(
