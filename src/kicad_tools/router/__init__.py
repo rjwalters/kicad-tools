@@ -214,8 +214,18 @@ from .rules import (
     create_net_class_map,
 )
 from .global_router import CorridorAssignment, GlobalRouter, GlobalRoutingResult
+from .orchestrator import RoutingOrchestrator
 from .region_graph import Region, RegionEdge, RegionGraph
 from .sparse import SparseRouter, SparseRoutingGraph, Waypoint
+from .strategies import (
+    AlternativeStrategy,
+    DRCViolation,
+    PerformanceStats,
+    RepairAction,
+    RoutingMetrics,
+    RoutingResult,
+    RoutingStrategy,
+)
 from .tuning import (
     COST_PROFILES,
     BoardCharacteristics,
@@ -284,6 +294,15 @@ __all__ = [
     "GlobalRouter",
     "GlobalRoutingResult",
     "CorridorAssignment",
+    # Routing orchestration (Issue #1138)
+    "RoutingOrchestrator",
+    "RoutingStrategy",
+    "RoutingResult",
+    "RoutingMetrics",
+    "PerformanceStats",
+    "AlternativeStrategy",
+    "RepairAction",
+    "DRCViolation",
     # Parallel routing
     "ParallelRouter",
     "ParallelRoutingResult",
