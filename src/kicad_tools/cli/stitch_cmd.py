@@ -329,9 +329,7 @@ def find_existing_tracks(sexp: SExp, net_numbers: set[int]) -> list[tuple[float,
     return points
 
 
-def find_all_track_segments(
-    sexp: SExp, exclude_nets: set[int] | None = None
-) -> list[TrackSegment]:
+def find_all_track_segments(sexp: SExp, exclude_nets: set[int] | None = None) -> list[TrackSegment]:
     """Find all track segments in the PCB, optionally excluding specific nets.
 
     Unlike find_existing_tracks() which only returns endpoints for same-net
@@ -422,6 +420,78 @@ def find_all_board_vias(
 
             vias.append((x, y, size, net_num))
     return vias
+
+
+def find_all_pads(
+    sexp: SExp, exclude_nets: set[int] | None = None
+) -> list[tuple[float, float, float, int]]:
+    """Find all pads in the PCB, optionally excluding specific nets.
+
+    Returns list of (x, y, radius, net_num) for clearance checking against
+    copper on other nets. Pad positions are transformed to board coordinates
+    using the footprint's position and rotation.
+
+    Args:
+        sexp: PCB S-expression
+        exclude_nets: Net numbers to exclude (e.g., the nets being stitched)
+
+    Returns:
+        List of (x, y, radius, net_num) tuples where:
+        - x, y are board coordinates (mm)
+        - radius is effective copper radius from pad size (mm)
+        - net_num is the pad's net (0 for unconnected)
+    """
+    pads = []
+    if exclude_nets is None:
+        exclude_nets = set()
+
+    for fp in sexp.iter_children():
+        if fp.tag != "footprint":
+            continue
+
+        # Get footprint position and rotation
+        at_node = fp.find_child("at")
+        if not at_node:
+            continue
+        fp_x = at_node.get_float(0) or 0.0
+        fp_y = at_node.get_float(1) or 0.0
+        fp_rot = math.radians(at_node.get_float(2) or 0.0)
+
+        cos_rot = math.cos(fp_rot)
+        sin_rot = math.sin(fp_rot)
+
+        # Extract each pad
+        for pad in fp.find_children("pad"):
+            net_node = pad.find_child("net")
+            if not net_node:
+                continue
+            net_num = net_node.get_int(0)
+            if net_num is None or net_num in exclude_nets:
+                continue
+
+            # Get pad position (relative to footprint)
+            pad_at = pad.find_child("at")
+            if not pad_at:
+                continue
+            rel_x = pad_at.get_float(0) or 0.0
+            rel_y = pad_at.get_float(1) or 0.0
+
+            # Transform to board coordinates
+            board_x = fp_x + rel_x * cos_rot - rel_y * sin_rot
+            board_y = fp_y + rel_x * sin_rot + rel_y * cos_rot
+
+            # Get pad size for radius calculation
+            size_node = pad.find_child("size")
+            if not size_node:
+                continue
+            width = size_node.get_float(0) or 0.0
+            height = size_node.get_float(1) or 0.0
+            # Conservative: use largest dimension as bounding circle
+            radius = max(width, height) / 2
+
+            pads.append((board_x, board_y, radius, net_num))
+
+    return pads
 
 
 def point_to_segment_distance(
@@ -544,12 +614,13 @@ def calculate_via_position(
     clearance: float,
     other_net_tracks: list[TrackSegment] | None = None,
     other_net_vias: list[tuple[float, float, float, int]] | None = None,
+    other_net_pads: list[tuple[float, float, float, int]] | None = None,
     trace_width: float = 0.0,
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
     Tries to place the via offset from the pad center, checking for conflicts
-    with both same-net vias and other-net copper (tracks and vias).
+    with both same-net vias and other-net copper (tracks, vias, and pads).
     When trace_width > 0, also checks the connecting trace path from pad
     center to via center for clearance violations.
     Returns None if no valid position found.
@@ -562,6 +633,7 @@ def calculate_via_position(
         clearance: Minimum clearance from existing copper in mm
         other_net_tracks: Track segments on other nets for clearance checking
         other_net_vias: Vias on other nets as (x, y, size, net_num) for clearance
+        other_net_pads: Pads on other nets as (x, y, radius, net_num) for clearance
         trace_width: Width of the connecting trace from pad to via in mm.
             When > 0, the trace path is checked for clearance violations.
     """
@@ -569,6 +641,8 @@ def calculate_via_position(
         other_net_tracks = []
     if other_net_vias is None:
         other_net_vias = []
+    if other_net_pads is None:
+        other_net_pads = []
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
@@ -625,6 +699,18 @@ def calculate_via_position(
                 dist = math.sqrt((ovx - via_x) ** 2 + (ovy - via_y) ** 2)
                 # Clearance is from via edge to other via edge
                 min_dist = via_radius + ov_size / 2 + clearance
+                if dist < min_dist:
+                    conflict = True
+                    break
+
+            if conflict:
+                continue
+
+            # Check for conflicts with other-net pads
+            for px, py, p_radius, _pnet in other_net_pads:
+                dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
+                # Clearance is from via edge to pad edge
+                min_dist = via_radius + p_radius + clearance
                 if dist < min_dist:
                     conflict = True
                     break
@@ -786,6 +872,7 @@ def run_stitch(
     # Find other-net copper for clearance checking to prevent shorts
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=net_numbers)
+    other_net_pads = find_all_pads(sexp, exclude_nets=net_numbers)
 
     # Process each pad
     for pad in pads:
@@ -804,13 +891,12 @@ def run_stitch(
             clearance=clearance,
             other_net_tracks=other_net_tracks,
             other_net_vias=other_net_vias,
+            other_net_pads=other_net_pads,
             trace_width=trace_width,
         )
 
         if via_pos is None:
-            result.pads_skipped.append(
-                (pad, "no valid via location (clearance conflict)")
-            )
+            result.pads_skipped.append((pad, "no valid via location (clearance conflict)"))
             continue
 
         # Determine via layers using per-net target layer

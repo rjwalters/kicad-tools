@@ -11,6 +11,7 @@ from kicad_tools.cli.stitch_cmd import (
     TrackSegment,
     calculate_via_position,
     find_all_board_vias,
+    find_all_pads,
     find_all_plane_nets,
     find_all_track_segments,
     find_existing_tracks,
@@ -1625,4 +1626,362 @@ class TestTracePathClearance:
                     f"via ({via.via_x:.2f}, {via.via_y:.2f}) violates clearance "
                     f"to track ({sx}, {sy})-({ex}, {ey}): "
                     f"dist={trace_dist:.3f} < min={min_clearance:.3f}"
+                )
+
+
+# PCB with footprint pads on other nets near GND pads (for pad clearance testing)
+# GND pad at C1.1 (~109.49, 110), unconnected pad at U1.4 (~110.3, 110)
+# The unconnected pad should block via placement east of the GND pad.
+STITCH_PAD_CLEARANCE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (net 3 "I2S_BCLK")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 110 110)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c1"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+  (footprint "Package_TO_SOT_SMD:SOT-23-5"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000500")
+    (at 111 110)
+    (property "Reference" "U1" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-u1"))
+    (pad "1" smd roundrect (at -0.95 -0.8) (size 0.6 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "I2S_BCLK"))
+    (pad "2" smd roundrect (at -0.95 0) (size 0.6 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "I2S_BCLK"))
+    (pad "3" smd roundrect (at -0.95 0.8) (size 0.6 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "I2S_BCLK"))
+    (pad "4" smd roundrect (at 0.95 0) (size 0.6 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "5" smd roundrect (at 0.95 -0.8) (size 0.6 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V"))
+  )
+)
+"""
+
+# PCB with a rotated footprint to test coordinate transforms
+STITCH_ROTATED_PAD_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "SIG")
+  (footprint "Package_TO_SOT_SMD:SOT-23-5"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000600")
+    (at 10 20 90)
+    (property "Reference" "U2" (at 0 -2 0) (layer "F.SilkS") (uuid "ref-uuid-u2"))
+    (pad "1" smd roundrect (at 1 0) (size 0.6 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "SIG"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000700")
+    (at 10 21)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref-uuid-c2"))
+    (pad "1" smd roundrect (at 0 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def stitch_pad_clearance_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with other-net pads near GND pads for pad clearance testing."""
+    pcb_file = tmp_path / "stitch_pad_clearance.kicad_pcb"
+    pcb_file.write_text(STITCH_PAD_CLEARANCE_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def stitch_rotated_pad_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with a rotated footprint for coordinate transform testing."""
+    pcb_file = tmp_path / "stitch_rotated_pad.kicad_pcb"
+    pcb_file.write_text(STITCH_ROTATED_PAD_PCB)
+    return pcb_file
+
+
+class TestFindAllPads:
+    """Tests for the find_all_pads function."""
+
+    def test_finds_pads_excluding_target_nets(self, stitch_pad_clearance_pcb: Path):
+        """Should find pads on other nets, excluding the target net."""
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        # Exclude GND (net 1) - should find pads on net 0, 2, 3
+        pads = find_all_pads(sexp, exclude_nets={1})
+
+        # C1.2 (+3.3V), U1.1 (I2S_BCLK), U1.2 (I2S_BCLK), U1.3 (I2S_BCLK),
+        # U1.4 (<no net>), U1.5 (+3.3V)
+        assert len(pads) == 6
+        net_nums = {p[3] for p in pads}
+        assert 1 not in net_nums  # GND excluded
+        assert 0 in net_nums  # Unconnected pad included
+        assert 2 in net_nums  # +3.3V included
+        assert 3 in net_nums  # I2S_BCLK included
+
+    def test_includes_unconnected_pads_as_obstacles(self, stitch_pad_clearance_pcb: Path):
+        """Pads with net 0 (<no net>) must be included as obstacles."""
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        pads = find_all_pads(sexp, exclude_nets={1})
+
+        # Find the unconnected pad (U1.4, net 0)
+        net0_pads = [p for p in pads if p[3] == 0]
+        assert len(net0_pads) == 1
+        # U1 at (111, 110), pad 4 at relative (0.95, 0)
+        # Board coords: (111 + 0.95, 110) = (111.95, 110)
+        px, py, radius, net = net0_pads[0]
+        assert abs(px - 111.95) < 0.01
+        assert abs(py - 110.0) < 0.01
+        assert radius > 0
+        assert net == 0
+
+    def test_excludes_all_specified_nets(self, stitch_pad_clearance_pcb: Path):
+        """Should exclude all pads on specified nets."""
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        # Exclude GND and +3.3V
+        pads = find_all_pads(sexp, exclude_nets={1, 2})
+
+        net_nums = {p[3] for p in pads}
+        assert 1 not in net_nums
+        assert 2 not in net_nums
+
+    def test_handles_rotated_footprints(self, stitch_rotated_pad_pcb: Path):
+        """Pad positions should be correctly transformed for rotated footprints."""
+        sexp = load_pcb(stitch_rotated_pad_pcb)
+        # Find pad from rotated U2 (at 10, 20, rotated 90 degrees)
+        # Pad at relative (1, 0) -> after 90-degree rotation:
+        # board_x = 10 + 1*cos(90) - 0*sin(90) = 10 + 0 = 10
+        # board_y = 20 + 1*sin(90) + 0*cos(90) = 20 + 1 = 21
+        pads = find_all_pads(sexp, exclude_nets={1})  # Exclude GND
+
+        assert len(pads) == 1  # Only U2.1 (SIG, net 2)
+        px, py, radius, net = pads[0]
+        assert abs(px - 10.0) < 0.01
+        assert abs(py - 21.0) < 0.01
+        assert net == 2
+
+    def test_pad_radius_from_size(self, stitch_pad_clearance_pcb: Path):
+        """Pad radius should be max(width, height) / 2."""
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        pads = find_all_pads(sexp, exclude_nets={1})
+
+        # U1 pads have size (0.6, 0.7) -> radius = 0.7/2 = 0.35
+        u1_pads = [p for p in pads if p[3] == 3]  # I2S_BCLK pads
+        for _px, _py, radius, _net in u1_pads:
+            assert abs(radius - 0.35) < 0.01
+
+    def test_no_pads_when_all_excluded(self, stitch_pad_clearance_pcb: Path):
+        """Should return empty list when all nets are excluded."""
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        pads = find_all_pads(sexp, exclude_nets={0, 1, 2, 3})
+        assert len(pads) == 0
+
+    def test_all_pads_when_none_excluded(self, stitch_pad_clearance_pcb: Path):
+        """Should return all pads when no nets are excluded."""
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        pads = find_all_pads(sexp, exclude_nets=set())
+
+        # C1 has 2 pads, U1 has 5 pads = 7 total
+        assert len(pads) == 7
+
+
+class TestPadClearanceChecking:
+    """Tests for via placement clearance checking against other-net pads."""
+
+    def test_via_avoids_other_net_pad(self):
+        """Via placement should avoid pads on other nets."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Place another net's pad right next to where a via would go (east)
+        other_pads = [
+            (100.8, 100, 0.35, 2),  # x, y, radius, net
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_pads=other_pads,
+        )
+
+        if pos is not None:
+            # Verify the via doesn't violate clearance to the other pad
+            dist = math.sqrt((pos[0] - 100.8) ** 2 + (pos[1] - 100) ** 2)
+            min_clearance = 0.45 / 2 + 0.35 + 0.2  # via_radius + pad_radius + clearance
+            assert dist >= min_clearance - 0.001
+
+    def test_via_avoids_unconnected_pad(self):
+        """Via placement should avoid unconnected pads (net 0)."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Unconnected pad (net 0) blocking east direction
+        other_pads = [
+            (100.8, 100, 0.35, 0),  # net 0 = <no net>
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_pads=other_pads,
+        )
+
+        if pos is not None:
+            # Verify the via doesn't violate clearance to the unconnected pad
+            dist = math.sqrt((pos[0] - 100.8) ** 2 + (pos[1] - 100) ** 2)
+            min_clearance = 0.45 / 2 + 0.35 + 0.2
+            assert dist >= min_clearance - 0.001
+
+    def test_via_surrounded_by_other_net_pads_is_skipped(self):
+        """Via should be skipped if completely surrounded by other-net pads."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Surround the pad with other-net pads in all directions (very close)
+        other_pads = [
+            (100.8, 100, 0.35, 2),
+            (99.2, 100, 0.35, 2),
+            (100, 100.8, 0.35, 2),
+            (100, 99.2, 0.35, 2),
+            (100.6, 100.6, 0.35, 2),
+            (99.4, 100.6, 0.35, 2),
+            (100.6, 99.4, 0.35, 2),
+            (99.4, 99.4, 0.35, 2),
+        ]
+
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+            other_net_pads=other_pads,
+        )
+
+        # With tight surrounding pads, should either find a valid position
+        # that clears all pads, or return None
+        if pos is not None:
+            for px, py, p_radius, _ in other_pads:
+                dist = math.sqrt((pos[0] - px) ** 2 + (pos[1] - py) ** 2)
+                min_clearance = 0.45 / 2 + p_radius + 0.2
+                assert dist >= min_clearance - 0.001
+
+    def test_backwards_compatible_without_pad_arg(self):
+        """calculate_via_position should work without other_net_pads arg."""
+        pad = PadInfo(
+            reference="C1",
+            pad_number="1",
+            net_number=1,
+            net_name="GND",
+            x=100,
+            y=100,
+            layer="F.Cu",
+            width=0.54,
+            height=0.64,
+        )
+
+        # Call without other_net_pads (old API)
+        pos = calculate_via_position(
+            pad,
+            offset=0.5,
+            via_size=0.45,
+            existing_vias=[],
+            clearance=0.2,
+        )
+
+        assert pos is not None
+
+    def test_stitch_avoids_other_footprint_pads(self, stitch_pad_clearance_pcb: Path):
+        """Integration test: stitch should avoid pads from other footprints."""
+        result = run_stitch(
+            pcb_path=stitch_pad_clearance_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        # C1.1 is the GND pad. It should either be placed with clearance
+        # or skipped. Any placed via must respect clearance to U1 pads.
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        other_pads = find_all_pads(sexp, exclude_nets={1})
+
+        for via in result.vias_added:
+            for px, py, p_radius, _pnet in other_pads:
+                dist = math.sqrt((via.via_x - px) ** 2 + (via.via_y - py) ** 2)
+                min_clearance = via.size / 2 + p_radius + 0.2
+                assert dist >= min_clearance - 0.01, (
+                    f"Via at ({via.via_x:.2f}, {via.via_y:.2f}) violates clearance "
+                    f"to pad at ({px:.2f}, {py:.2f}): "
+                    f"dist={dist:.3f} < min={min_clearance:.3f}"
+                )
+
+    def test_stitch_avoids_signal_net_pads(self, stitch_pad_clearance_pcb: Path):
+        """Via placement should avoid pads on other signal nets."""
+        result = run_stitch(
+            pcb_path=stitch_pad_clearance_pcb,
+            net_names=["GND"],
+            dry_run=True,
+        )
+
+        sexp = load_pcb(stitch_pad_clearance_pcb)
+        # Get I2S_BCLK pads (net 3) specifically
+        all_other_pads = find_all_pads(sexp, exclude_nets={1})
+        signal_pads = [p for p in all_other_pads if p[3] == 3]
+
+        for via in result.vias_added:
+            for px, py, p_radius, _pnet in signal_pads:
+                dist = math.sqrt((via.via_x - px) ** 2 + (via.via_y - py) ** 2)
+                min_clearance = via.size / 2 + p_radius + 0.2
+                assert dist >= min_clearance - 0.01, (
+                    f"Via at ({via.via_x:.2f}, {via.via_y:.2f}) violates clearance "
+                    f"to signal pad at ({px:.2f}, {py:.2f})"
                 )
