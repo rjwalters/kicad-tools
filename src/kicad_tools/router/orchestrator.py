@@ -46,8 +46,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..design_intent import NetIntent
-    from .grid import RoutingGrid
-    from .primitives import Pad, PCB
+    from .primitives import PCB, Pad
     from .rules import DesignRules
 
 from .adaptive import AdaptiveAutorouter
