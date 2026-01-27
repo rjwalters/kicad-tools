@@ -1,0 +1,23 @@
+# Codex Configuration for Loom Project
+# This configuration provides similar permissions to .claude/settings.json
+
+# Sandbox mode: workspace-write allows modification within the workspace
+# This is safer than danger-full-access but sufficient for our autonomous agents
+sandbox = "workspace-write"
+
+# Approval policy: never - run commands without asking for approval
+# Since we trust the commands in our workflow (git, gh, pnpm, cargo, etc.)
+ask_for_approval = "never"
+
+# Enable web search for agents that need it
+search = true
+
+# Shell environment policy - inherit environment variables
+[shell_environment_policy]
+inherit = "all"
+
+# Sandbox permissions - grant specific access beyond workspace-write
+# These mirror the permissions we've granted in .claude/settings.json
+sandbox_permissions = [
+    "disk-full-read-access",  # Allow reading anywhere (like cat, ls in Claude settings)
+]
