@@ -40,6 +40,7 @@ find_repo_root() {
     echo ""
 }
 
+# shellcheck disable=SC2034  # Used for validation side-effect of find_repo_root
 REPO_ROOT=$(find_repo_root)
 
 # ANSI colors

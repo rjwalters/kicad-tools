@@ -41,10 +41,12 @@ find_repo_root() {
     echo ""
 }
 
+# shellcheck disable=SC2034  # Used for validation side-effect of find_repo_root
 REPO_ROOT=$(find_repo_root)
 TMUX_SOCKET="loom"
 
 # ANSI colors
+# shellcheck disable=SC2034  # Color palette - not all colors used in every script
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'

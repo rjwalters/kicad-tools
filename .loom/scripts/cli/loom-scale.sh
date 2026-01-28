@@ -42,7 +42,6 @@ if [[ -z "$REPO_ROOT" ]]; then
     exit 1
 fi
 
-CONFIG_FILE="$REPO_ROOT/.loom/config.json"
 LOG_DIR="/tmp"
 TMUX_SOCKET="loom"
 

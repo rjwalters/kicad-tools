@@ -94,7 +94,6 @@ check_if_in_worktree() {
 # Function to get current worktree info
 get_worktree_info() {
     if check_if_in_worktree; then
-        local current_dir=$(pwd)
         local worktree_path=$(git rev-parse --show-toplevel)
         local branch=$(git rev-parse --abbrev-ref HEAD)
 
@@ -401,7 +400,6 @@ if git worktree add "${CREATE_ARGS[@]}"; then
             print_info "Initializing $UNINIT_SUBMODULES submodule(s) with shared objects..."
         fi
 
-        SUBMODULE_FAILED=false
         cd "$ABS_WORKTREE_PATH"
 
         # Process each uninitialized submodule

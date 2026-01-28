@@ -15,7 +15,22 @@
     "minTodosForIssue": 3,
     "criticalPatterns": ["FIXME:", "HACK:", "XXX:"],
     "standardPatterns": ["TODO:", "FUTURE:"],
-    "bodySections": ["Follow-on Work", "Follow-on", "Out of Scope", "Future Work", "Deferred", "Phase 2", "Phase II"],
-    "reviewIndicators": ["not blocking", "consider for future", "technical debt", "would be nice", "future enhancement", "could be improved"]
+    "bodySections": [
+      "Follow-on Work",
+      "Follow-on",
+      "Out of Scope",
+      "Future Work",
+      "Deferred",
+      "Phase 2",
+      "Phase II"
+    ],
+    "reviewIndicators": [
+      "not blocking",
+      "consider for future",
+      "technical debt",
+      "would be nice",
+      "future enhancement",
+      "could be improved"
+    ]
   }
 }

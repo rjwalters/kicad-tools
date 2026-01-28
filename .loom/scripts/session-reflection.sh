@@ -29,7 +29,6 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || error "Not in a git 
 # Paths
 DAEMON_STATE="$REPO_ROOT/.loom/daemon-state.json"
 CONFIG_FILE="$REPO_ROOT/.loom/config.json"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default configuration
 DEFAULT_ENABLED=true

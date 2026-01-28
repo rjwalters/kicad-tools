@@ -213,10 +213,8 @@ extend_claim() {
     # Read current values
     local issue
     local claimed_at
-    local ttl_seconds
     issue=$(grep -o '"issue": [0-9]*' "$claim_file" | cut -d' ' -f2)
     claimed_at=$(grep -o '"claimed_at": "[^"]*"' "$claim_file" | cut -d'"' -f4)
-    ttl_seconds=$(grep -o '"ttl_seconds": [0-9]*' "$claim_file" | cut -d' ' -f2)
 
     # Write updated claim
     cat > "$claim_file" << EOF
