@@ -14,6 +14,7 @@
 set -euo pipefail
 
 # Colors for output (disabled if stdout is not a terminal)
+# shellcheck disable=SC2034  # Color palette - not all colors used in every script
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -646,10 +647,9 @@ output_formatted() {
         fi
 
         # Show pipeline summary from state file if available
-        local ready_from_state building_from_state review_from_state
+        local ready_from_state building_from_state
         ready_from_state=$(jq -r '.pipeline_state.ready // [] | length' "$DAEMON_STATE" 2>/dev/null || echo "?")
         building_from_state=$(jq -r '.pipeline_state.building // [] | length' "$DAEMON_STATE" 2>/dev/null || echo "?")
-        review_from_state=$(jq -r '.pipeline_state.review_requested // [] | length' "$DAEMON_STATE" 2>/dev/null || echo "?")
 
         if [[ "$ready_from_state" != "?" ]] && [[ "$ready_from_state" != "0" || "$building_from_state" != "0" ]]; then
             local last_updated

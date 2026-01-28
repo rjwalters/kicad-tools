@@ -76,7 +76,6 @@ PROGRESS_DIR="$REPO_ROOT/.loom/progress"
 
 # Configuration
 HEARTBEAT_STALE_THRESHOLD="${LOOM_HEARTBEAT_STALE_THRESHOLD:-300}"  # 5 minutes default
-TASK_ID_VERIFY_TIMEOUT="${LOOM_TASK_VERIFY_TIMEOUT:-5000}"  # 5 seconds default
 
 # Show help
 show_help() {
@@ -297,6 +296,24 @@ check_daemon_state_tasks() {
         # Only check working shepherds
         if [[ "$status" != "working" ]]; then
             log_verbose "  Skipping (not working status)"
+            continue
+        fi
+
+        # Check task ID format: must be exactly 7 lowercase hex characters
+        if [[ ! "$task_id" =~ ^[a-f0-9]{7}$ ]]; then
+            log_warn "  ORPHANED: $shepherd_id has invalid task_id format '$task_id' (expected 7 hex chars)"
+
+            add_orphaned "invalid_task_id" "$(jq -n \
+                --arg shepherd_id "$shepherd_id" \
+                --arg task_id "$task_id" \
+                --argjson issue "$issue" \
+                --arg reason "invalid_task_id_format" \
+                '{shepherd_id: $shepherd_id, task_id: $task_id, issue: $issue, reason: $reason}')"
+
+            # Recover if requested
+            if [[ "$RECOVER" == "true" ]]; then
+                recover_shepherd "$shepherd_id" "$issue" "$task_id" "invalid_task_id_format"
+            fi
             continue
         fi
 

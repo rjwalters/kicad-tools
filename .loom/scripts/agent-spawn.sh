@@ -63,6 +63,7 @@ log_error() {
 }
 
 # Find the repository root (works from any subdirectory)
+# shellcheck disable=SC2120
 find_repo_root() {
     local dir="${1:-$PWD}"
     while [[ "$dir" != "/" ]]; do

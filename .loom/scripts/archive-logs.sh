@@ -95,7 +95,6 @@ archive_task_outputs() {
   local today=$(date +%Y-%m-%d)
   local archive_subdir="$ARCHIVE_DIR/$today"
   local archived=0
-  local skipped=0
 
   # Find task output directories
   for base_dir in "$TASK_OUTPUT_DIR" "$ALTERNATIVE_TASK_DIR"; do

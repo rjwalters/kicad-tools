@@ -38,6 +38,7 @@ if [[ -n "$REPO_ROOT" ]]; then
 fi
 
 # ANSI colors
+# shellcheck disable=SC2034  # Color palette - not all colors used in every script
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -70,6 +71,7 @@ ${YELLOW}USAGE:${NC}
 ${YELLOW}COMMANDS:${NC}
     ${GREEN}start${NC}     Spawn agent pool from .loom/config.json
     ${GREEN}status${NC}    Display agent pool state and work queues
+    ${GREEN}health${NC}    Diagnostic daemon health check
     ${GREEN}stop${NC}      Graceful shutdown (or --force to kill immediately)
     ${GREEN}attach${NC}    Open live tmux session for an agent
     ${GREEN}send${NC}      Send command to agent session
@@ -83,6 +85,9 @@ ${YELLOW}QUICK START:${NC}
 
     ${GRAY}# Check what's running${NC}
     ./loom status
+
+    ${GRAY}# Run diagnostic health check${NC}
+    ./loom health
 
     ${GRAY}# View an agent's terminal${NC}
     ./loom attach shepherd-1
@@ -101,6 +106,8 @@ ${YELLOW}EXAMPLES:${NC}
     ./loom start --only shepherd  Start only shepherd agents
     ./loom status                 Show current state
     ./loom status --json          Machine-readable status
+    ./loom health                 Run diagnostic health check
+    ./loom health --json          Machine-readable health report
     ./loom attach shepherd-1      Connect to agent terminal
     ./loom send shepherd-1 "/shepherd 123"  Send command to agent
     ./loom stop                   Graceful shutdown
@@ -171,6 +178,14 @@ show_command_help() {
                 exit 1
             fi
             ;;
+        health)
+            if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/scripts/daemon-health.sh" ]]; then
+                exec "$REPO_ROOT/.loom/scripts/daemon-health.sh" --help
+            else
+                echo -e "${RED}Error: health command not installed${NC}"
+                exit 1
+            fi
+            ;;
         stop)
             if [[ -n "$CLI_DIR" && -f "$CLI_DIR/loom-stop.sh" ]]; then
                 exec "$CLI_DIR/loom-stop.sh" --help
@@ -217,7 +232,7 @@ show_command_help() {
         *)
             echo -e "${RED}Error: Unknown command '$command'${NC}"
             echo ""
-            echo "Available commands: start, status, stop, attach, send, scale, logs, help"
+            echo "Available commands: start, status, health, stop, attach, send, scale, logs, help"
             exit 1
             ;;
     esac

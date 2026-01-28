@@ -26,6 +26,7 @@
 set -euo pipefail
 
 # Colors for output (disabled if stdout is not a terminal)
+# shellcheck disable=SC2034  # Color palette - not all colors used in every script
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -81,7 +82,9 @@ DAEMON_METRICS_FILE="$LOOM_DIR/daemon-metrics.json"
 RETENTION_HOURS="${LOOM_HEALTH_RETENTION_HOURS:-24}"
 THROUGHPUT_DECLINE_THRESHOLD="${LOOM_THROUGHPUT_DECLINE_THRESHOLD:-50}"  # % decline
 QUEUE_GROWTH_THRESHOLD="${LOOM_QUEUE_GROWTH_THRESHOLD:-5}"              # absolute growth
+# shellcheck disable=SC2034  # Config variables - available for future use
 STUCK_AGENT_THRESHOLD="${LOOM_STUCK_AGENT_THRESHOLD:-10}"               # minutes without heartbeat
+# shellcheck disable=SC2034  # Config variable - available for future use
 ERROR_RATE_THRESHOLD="${LOOM_ERROR_RATE_THRESHOLD:-20}"                 # % error rate
 
 show_help() {
@@ -246,9 +249,8 @@ collect_current_metrics() {
         consecutive_failures=$(jq -r '.health.consecutive_failures // 0' "$DAEMON_METRICS_FILE" 2>/dev/null || echo "0")
 
         # Calculate success rate
-        local successful failed
+        local successful
         successful=$(jq -r '.successful_iterations // 0' "$DAEMON_METRICS_FILE" 2>/dev/null || echo "0")
-        failed=$(jq -r '.failed_iterations // 0' "$DAEMON_METRICS_FILE" 2>/dev/null || echo "0")
         if [[ $iteration_count -gt 0 ]]; then
             success_rate=$(( (successful * 100) / iteration_count ))
         fi
@@ -849,7 +851,6 @@ show_history() {
 
 # Main command handling
 main() {
-    local command="${1:-}"
     local json_output=false
 
     # Parse global flags

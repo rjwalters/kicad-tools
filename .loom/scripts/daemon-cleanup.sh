@@ -37,7 +37,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_ENABLED="${LOOM_CLEANUP_ENABLED:-true}"
 ARCHIVE_LOGS="${LOOM_ARCHIVE_LOGS:-true}"
 RETENTION_DAYS="${LOOM_RETENTION_DAYS:-7}"
-PERIODIC_INTERVAL_MINUTES="${LOOM_CLEANUP_INTERVAL:-360}"  # 6 hours
 GRACE_PERIOD="${LOOM_GRACE_PERIOD:-600}"  # 10 minutes
 
 # Check for help first
@@ -425,6 +424,49 @@ handle_daemon_shutdown() {
 
   # Note: Don't clean worktrees on shutdown - shepherds might be in progress
   # Let daemon-startup handle that on next run
+
+  # Finalize daemon-state.json: set running=false, stopped_at, reset support roles and shepherds
+  if [[ -f "$DAEMON_STATE" ]]; then
+    info "Finalizing daemon-state.json..."
+    local stopped_at
+    stopped_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    if [[ "$DRY_RUN" == true ]]; then
+      info "[DRY-RUN] Would set running=false, stopped_at=$stopped_at, reset support roles and shepherds to idle"
+    else
+      jq --arg stopped_at "$stopped_at" '
+        .running = false |
+        .stopped_at = $stopped_at |
+        if .support_roles then
+          .support_roles |= with_entries(
+            .value.status = "idle" |
+            .value.task_id = null |
+            .value.last_completed = $stopped_at
+          )
+        else . end |
+        if .shepherds then
+          .shepherds |= with_entries(
+            .value.status = "idle" |
+            .value.issue = null |
+            .value.task_id = null |
+            .value.idle_since = $stopped_at |
+            .value.idle_reason = "shutdown_signal"
+          )
+        else . end
+      ' "$DAEMON_STATE" > "${DAEMON_STATE}.tmp" && mv "${DAEMON_STATE}.tmp" "$DAEMON_STATE"
+      success "daemon-state.json finalized (running=false, stopped_at=$stopped_at)"
+    fi
+  fi
+
+  # Run session reflection if available
+  if [[ -x "$SCRIPT_DIR/session-reflection.sh" ]]; then
+    info "Running session reflection..."
+    if [[ "$DRY_RUN" == true ]]; then
+      "$SCRIPT_DIR/session-reflection.sh" --dry-run 2>/dev/null || warning "session-reflection.sh failed"
+    else
+      "$SCRIPT_DIR/session-reflection.sh" 2>/dev/null || warning "session-reflection.sh failed"
+    fi
+  fi
 
   if [[ "$DRY_RUN" != true ]]; then
     update_cleanup_timestamp "daemon-shutdown"

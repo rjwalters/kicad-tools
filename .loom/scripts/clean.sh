@@ -375,9 +375,6 @@ if [[ "$BRANCHES_ONLY" == false && "$TMUX_ONLY" == false ]]; then
   header "Cleaning Worktrees"
   echo ""
 
-  # Get active worktree paths
-  ACTIVE_PATHS=$(git worktree list | tail -n +2 | awk '{print $1}' || true)
-
   # Check each .loom/worktrees/issue-* directory
   if [[ -d ".loom/worktrees" ]]; then
     for worktree_dir in .loom/worktrees/issue-*; do

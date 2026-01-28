@@ -6,6 +6,7 @@
 # Commands:
 #   start     Spawn agent pool from config
 #   status    Display agent pool state
+#   health    Diagnostic daemon health check
 #   stop      Graceful shutdown
 #   attach    Open live tmux session
 #   send      Send command to agent session
@@ -103,6 +104,15 @@ case "${1:-help}" in
             exit 1
         fi
         ;;
+    health)
+        shift
+        if [[ -f "$REPO_ROOT/.loom/scripts/daemon-health.sh" ]]; then
+            exec "$REPO_ROOT/.loom/scripts/daemon-health.sh" "$@"
+        else
+            echo -e "${RED}Error: daemon-health.sh not found${NC}" >&2
+            exit 1
+        fi
+        ;;
     stop)
         shift
         if [[ -f "$CLI_DIR/loom-stop.sh" ]]; then
@@ -163,6 +173,7 @@ USAGE:
 COMMANDS:
     start     Spawn agent pool from .loom/config.json
     status    Display agent pool state and work queues
+    health    Diagnostic daemon health check
     stop      Graceful shutdown (or --force to kill immediately)
     attach    Open live tmux session for an agent
     send      Send command to agent session

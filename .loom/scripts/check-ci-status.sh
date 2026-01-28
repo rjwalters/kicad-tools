@@ -33,7 +33,6 @@ set -euo pipefail
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TIMEOUT="${LOOM_CI_TIMEOUT:-10}"
 
 # --- Color Output ---
 RED='\033[0;31m'

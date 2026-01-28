@@ -11,7 +11,13 @@ Arguments provided: `{{ARGUMENTS}}`
 ### Mode Selection Decision Tree
 
 ```
-IF arguments contain "iterate":
+IF arguments contain "health":
+    -> Execute HEALTH CHECK (immediate command)
+    -> Run: ./.loom/scripts/daemon-health.sh
+    -> Display formatted health report and EXIT
+    -> DO NOT start daemon loop
+
+ELSE IF arguments contain "iterate":
     -> Execute ITERATION MODE
     -> Read and follow: .claude/commands/loom-iteration.md
     -> Run exactly ONE iteration with fresh context
@@ -50,6 +56,7 @@ ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --force"):
 
 Before proceeding, check the arguments: `{{ARGUMENTS}}`
 
+- Contains "health"? -> Run `./.loom/scripts/daemon-health.sh` and report results, then EXIT
 - Contains "iterate"? -> Read `.claude/commands/loom-iteration.md` and execute iteration mode
 - No "iterate"? -> Read `.claude/commands/loom-parent.md` and execute parent loop mode
 
@@ -120,6 +127,7 @@ You do NOT require human input for any of the above. The only human intervention
 | `/loom iterate` | Execute single iteration (used by parent loop) |
 | `/loom iterate --force` | Single iteration with force mode |
 | `/loom iterate --debug` | Single iteration with verbose debug logging |
+| `/loom health` | Run diagnostic health check (state, pipeline, support roles) |
 | `/loom status` | Report current state without running loop |
 | `/loom stop` | Create stop signal, initiate shutdown |
 

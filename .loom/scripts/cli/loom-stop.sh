@@ -187,7 +187,6 @@ cleanup_logs() {
 main() {
     local force=false
     local timeout="$GRACEFUL_TIMEOUT"
-    local non_interactive=false
     local clean_logs=false
     local target_agent=""
 
@@ -210,7 +209,7 @@ main() {
                 shift 2
                 ;;
             --yes|-y)
-                non_interactive=true
+                # Accepted for compatibility but not currently used
                 shift
                 ;;
             --clean)

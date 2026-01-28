@@ -368,6 +368,12 @@ validate_args() {
         exit 1
     fi
 
+    # Validate task ID format: must be exactly 7 lowercase hex characters
+    if [[ ! "$TASK_ID" =~ ^[a-f0-9]{7}$ ]]; then
+        echo -e "${RED}Error: Invalid task_id '$TASK_ID' - must be exactly 7 lowercase hex characters (e.g., a7dc1e0)${NC}" >&2
+        exit 1
+    fi
+
     case "$EVENT" in
         started)
             if [[ -z "$ISSUE" ]]; then
@@ -425,11 +431,10 @@ handle_event() {
     ensure_progress_dir
 
     local data="{}"
-    local result
 
     case "$EVENT" in
         started)
-            result=$(init_progress_file "$TASK_ID" "$ISSUE" "$MODE")
+            init_progress_file "$TASK_ID" "$ISSUE" "$MODE"
             if [[ "$QUIET" != "true" ]]; then
                 echo -e "${GREEN}Started tracking shepherd $TASK_ID for issue #$ISSUE${NC}"
             fi

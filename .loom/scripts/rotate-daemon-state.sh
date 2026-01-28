@@ -181,9 +181,6 @@ add_session_summary() {
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
   # Calculate session summary
-  local started_at
-  started_at=$(jq -r '.started_at // "unknown"' "$state_file" 2>/dev/null || echo "unknown")
-
   local completed_count
   completed_count=$(jq -r '.completed_issues // [] | length' "$state_file" 2>/dev/null || echo "0")
 

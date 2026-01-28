@@ -270,7 +270,6 @@ spawn_agent() {
 main() {
     local only_role=""
     local dry_run=false
-    local non_interactive=false
     local force=false
 
     while [[ $# -gt 0 ]]; do
@@ -292,7 +291,7 @@ main() {
                 shift
                 ;;
             --yes|-y)
-                non_interactive=true
+                # Accepted for compatibility but not currently used
                 shift
                 ;;
             --force)
@@ -362,7 +361,6 @@ main() {
 
     # Start each terminal
     local started=0
-    local skipped=0
     local failed=0
 
     echo "$terminals" | jq -c '.[]' | while read -r terminal; do

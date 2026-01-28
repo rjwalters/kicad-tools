@@ -24,10 +24,15 @@
 set -euo pipefail
 
 # Colors for output (only used with --pretty)
+# shellcheck disable=SC2034
 RED='\033[0;31m'
+# shellcheck disable=SC2034
 GREEN='\033[0;32m'
+# shellcheck disable=SC2034
 YELLOW='\033[1;33m'
+# shellcheck disable=SC2034
 BLUE='\033[0;34m'
+# shellcheck disable=SC2034
 NC='\033[0m' # No Color
 
 # Default configuration thresholds
@@ -315,8 +320,6 @@ fi
 
 # Read daemon state for active shepherd count and cooldown timestamps
 ACTIVE_SHEPHERDS=0
-LAST_ARCHITECT_TRIGGER=""
-LAST_HERMIT_TRIGGER=""
 
 # Support role state defaults
 GUIDE_LAST_COMPLETED=""
@@ -329,14 +332,17 @@ AUDITOR_LAST_COMPLETED=""
 AUDITOR_STATUS="idle"
 JUDGE_LAST_COMPLETED=""
 JUDGE_STATUS="idle"
+ARCHITECT_LAST_COMPLETED=""
+ARCHITECT_STATUS="idle"
+HERMIT_LAST_COMPLETED=""
+HERMIT_STATUS="idle"
 
 if [[ -f "$DAEMON_STATE_FILE" ]]; then
     # Count active shepherds (those with status="working")
     ACTIVE_SHEPHERDS=$(jq -r '[.shepherds // {} | to_entries[] | select(.value.status == "working")] | length' "$DAEMON_STATE_FILE" 2>/dev/null || echo "0")
-    LAST_ARCHITECT_TRIGGER=$(jq -r '.last_architect_trigger // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
-    LAST_HERMIT_TRIGGER=$(jq -r '.last_hermit_trigger // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
 
     # Read support role last_completed timestamps and statuses
+    # All 7 daemon-spawned roles use support_roles.{role} for state
     GUIDE_LAST_COMPLETED=$(jq -r '.support_roles.guide.last_completed // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
     GUIDE_STATUS=$(jq -r '.support_roles.guide.status // "idle"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "idle")
     CHAMPION_LAST_COMPLETED=$(jq -r '.support_roles.champion.last_completed // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
@@ -347,6 +353,10 @@ if [[ -f "$DAEMON_STATE_FILE" ]]; then
     AUDITOR_STATUS=$(jq -r '.support_roles.auditor.status // "idle"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "idle")
     JUDGE_LAST_COMPLETED=$(jq -r '.support_roles.judge.last_completed // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
     JUDGE_STATUS=$(jq -r '.support_roles.judge.status // "idle"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "idle")
+    ARCHITECT_LAST_COMPLETED=$(jq -r '.support_roles.architect.last_completed // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
+    ARCHITECT_STATUS=$(jq -r '.support_roles.architect.status // "idle"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "idle")
+    HERMIT_LAST_COMPLETED=$(jq -r '.support_roles.hermit.last_completed // ""' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")
+    HERMIT_STATUS=$(jq -r '.support_roles.hermit.status // "idle"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "idle")
 fi
 
 # Calculate counts
@@ -371,16 +381,17 @@ if [[ $READY_COUNT -lt $ISSUE_THRESHOLD ]] && [[ $TOTAL_PROPOSALS -lt $MAX_PROPO
 fi
 
 # Calculate cooldown status
+# Architect and hermit cooldowns now use support_roles.{role}.last_completed
+# (same as other support roles) instead of the legacy top-level fields
 NOW_EPOCH=$(date +%s)
 ARCHITECT_COOLDOWN_OK="false"
 HERMIT_COOLDOWN_OK="false"
 
-if [[ -n "$LAST_ARCHITECT_TRIGGER" ]]; then
-    # Convert ISO timestamp to epoch
+if [[ -n "$ARCHITECT_LAST_COMPLETED" && "$ARCHITECT_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        ARCH_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ARCHITECT_TRIGGER" "+%s" 2>/dev/null || echo "0")
+        ARCH_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ARCHITECT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
-        ARCH_EPOCH=$(date -d "$LAST_ARCHITECT_TRIGGER" "+%s" 2>/dev/null || echo "0")
+        ARCH_EPOCH=$(date -d "$ARCHITECT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
     ARCH_ELAPSED=$((NOW_EPOCH - ARCH_EPOCH))
     if [[ $ARCH_ELAPSED -gt $ARCHITECT_COOLDOWN ]]; then
@@ -390,11 +401,11 @@ else
     ARCHITECT_COOLDOWN_OK="true"
 fi
 
-if [[ -n "$LAST_HERMIT_TRIGGER" ]]; then
+if [[ -n "$HERMIT_LAST_COMPLETED" && "$HERMIT_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        HERMIT_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_HERMIT_TRIGGER" "+%s" 2>/dev/null || echo "0")
+        HERMIT_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$HERMIT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
-        HERMIT_EPOCH=$(date -d "$LAST_HERMIT_TRIGGER" "+%s" 2>/dev/null || echo "0")
+        HERMIT_EPOCH=$(date -d "$HERMIT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
     HERMIT_ELAPSED=$((NOW_EPOCH - HERMIT_EPOCH))
     if [[ $HERMIT_ELAPSED -gt $HERMIT_COOLDOWN ]]; then
@@ -409,7 +420,7 @@ GUIDE_IDLE_SECONDS=0
 GUIDE_NEEDS_TRIGGER="false"
 if [[ -n "$GUIDE_LAST_COMPLETED" && "$GUIDE_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        GUIDE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$GUIDE_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+        GUIDE_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$GUIDE_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
         GUIDE_EPOCH=$(date -d "$GUIDE_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
@@ -429,7 +440,7 @@ CHAMPION_IDLE_SECONDS=0
 CHAMPION_NEEDS_TRIGGER="false"
 if [[ -n "$CHAMPION_LAST_COMPLETED" && "$CHAMPION_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        CHAMPION_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$CHAMPION_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+        CHAMPION_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$CHAMPION_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
         CHAMPION_EPOCH=$(date -d "$CHAMPION_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
@@ -447,7 +458,7 @@ DOCTOR_IDLE_SECONDS=0
 DOCTOR_NEEDS_TRIGGER="false"
 if [[ -n "$DOCTOR_LAST_COMPLETED" && "$DOCTOR_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        DOCTOR_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$DOCTOR_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+        DOCTOR_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$DOCTOR_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
         DOCTOR_EPOCH=$(date -d "$DOCTOR_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
@@ -465,7 +476,7 @@ AUDITOR_IDLE_SECONDS=0
 AUDITOR_NEEDS_TRIGGER="false"
 if [[ -n "$AUDITOR_LAST_COMPLETED" && "$AUDITOR_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        AUDITOR_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$AUDITOR_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+        AUDITOR_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$AUDITOR_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
         AUDITOR_EPOCH=$(date -d "$AUDITOR_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
@@ -483,7 +494,7 @@ JUDGE_IDLE_SECONDS=0
 JUDGE_NEEDS_TRIGGER="false"
 if [[ -n "$JUDGE_LAST_COMPLETED" && "$JUDGE_LAST_COMPLETED" != "null" ]]; then
     if [[ "$(uname)" == "Darwin" ]]; then
-        JUDGE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$JUDGE_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+        JUDGE_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$JUDGE_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     else
         JUDGE_EPOCH=$(date -d "$JUDGE_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
     fi
@@ -495,6 +506,46 @@ if [[ -n "$JUDGE_LAST_COMPLETED" && "$JUDGE_LAST_COMPLETED" != "null" ]]; then
     fi
 elif [[ "$JUDGE_STATUS" != "running" ]]; then
     JUDGE_NEEDS_TRIGGER="true"
+fi
+
+# Architect and hermit use the same idle time logic as other support roles.
+# Their "needs_trigger" is used by the trigger_architect/trigger_hermit actions
+# but spawn-support-role.sh also checks independently. This provides consistency
+# in the snapshot output.
+ARCHITECT_IDLE_SECONDS=0
+ARCHITECT_NEEDS_TRIGGER="false"
+if [[ -n "$ARCHITECT_LAST_COMPLETED" && "$ARCHITECT_LAST_COMPLETED" != "null" ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        ARCHITECT_EPOCH_SR=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ARCHITECT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+    else
+        ARCHITECT_EPOCH_SR=$(date -d "$ARCHITECT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+    fi
+    if [[ "$ARCHITECT_EPOCH_SR" != "0" ]]; then
+        ARCHITECT_IDLE_SECONDS=$((NOW_EPOCH - ARCHITECT_EPOCH_SR))
+        if [[ "$ARCHITECT_STATUS" != "running" ]] && [[ $ARCHITECT_IDLE_SECONDS -gt $ARCHITECT_COOLDOWN ]]; then
+            ARCHITECT_NEEDS_TRIGGER="true"
+        fi
+    fi
+elif [[ "$ARCHITECT_STATUS" != "running" ]]; then
+    ARCHITECT_NEEDS_TRIGGER="true"
+fi
+
+HERMIT_IDLE_SECONDS=0
+HERMIT_NEEDS_TRIGGER="false"
+if [[ -n "$HERMIT_LAST_COMPLETED" && "$HERMIT_LAST_COMPLETED" != "null" ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+        HERMIT_EPOCH_SR=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$HERMIT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+    else
+        HERMIT_EPOCH_SR=$(date -d "$HERMIT_LAST_COMPLETED" "+%s" 2>/dev/null || echo "0")
+    fi
+    if [[ "$HERMIT_EPOCH_SR" != "0" ]]; then
+        HERMIT_IDLE_SECONDS=$((NOW_EPOCH - HERMIT_EPOCH_SR))
+        if [[ "$HERMIT_STATUS" != "running" ]] && [[ $HERMIT_IDLE_SECONDS -gt $HERMIT_COOLDOWN ]]; then
+            HERMIT_NEEDS_TRIGGER="true"
+        fi
+    fi
+elif [[ "$HERMIT_STATUS" != "running" ]]; then
+    HERMIT_NEEDS_TRIGGER="true"
 fi
 
 # Build recommended actions array
@@ -510,13 +561,13 @@ if [[ $READY_COUNT -gt 0 ]] && [[ $AVAILABLE_SHEPHERD_SLOTS -gt 0 ]]; then
     ACTIONS=$(echo "$ACTIONS" | jq '. + ["spawn_shepherds"]')
 fi
 
-# Action: trigger architect
-if [[ "$NEEDS_WORK_GEN" == "true" ]] && [[ "$ARCHITECT_COOLDOWN_OK" == "true" ]] && [[ $ARCHITECT_COUNT -lt 2 ]]; then
+# Action: trigger architect (skip if already running or cooldown not elapsed)
+if [[ "$NEEDS_WORK_GEN" == "true" ]] && [[ "$ARCHITECT_COOLDOWN_OK" == "true" ]] && [[ $ARCHITECT_COUNT -lt 2 ]] && [[ "$ARCHITECT_STATUS" != "running" ]]; then
     ACTIONS=$(echo "$ACTIONS" | jq '. + ["trigger_architect"]')
 fi
 
-# Action: trigger hermit
-if [[ "$NEEDS_WORK_GEN" == "true" ]] && [[ "$HERMIT_COOLDOWN_OK" == "true" ]] && [[ $HERMIT_COUNT -lt 2 ]]; then
+# Action: trigger hermit (skip if already running or cooldown not elapsed)
+if [[ "$NEEDS_WORK_GEN" == "true" ]] && [[ "$HERMIT_COOLDOWN_OK" == "true" ]] && [[ $HERMIT_COUNT -lt 2 ]] && [[ "$HERMIT_STATUS" != "running" ]]; then
     ACTIONS=$(echo "$ACTIONS" | jq '. + ["trigger_hermit"]')
 fi
 
@@ -611,7 +662,7 @@ read_shepherd_progress() {
                     if [[ -n "$last_heartbeat" && "$last_heartbeat" != "null" ]]; then
                         local hb_epoch
                         if [[ "$(uname)" == "Darwin" ]]; then
-                            hb_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_heartbeat" "+%s" 2>/dev/null || echo "0")
+                            hb_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last_heartbeat" "+%s" 2>/dev/null || echo "0")
                         else
                             hb_epoch=$(date -d "$last_heartbeat" "+%s" 2>/dev/null || echo "0")
                         fi
@@ -696,6 +747,31 @@ TMUX_AVAILABLE=$(echo "$TMUX_POOL" | jq -r '.available')
 TMUX_SHEPHERD_COUNT=$(echo "$TMUX_POOL" | jq -r '.shepherd_count')
 TMUX_EXECUTION_MODE=$(echo "$TMUX_POOL" | jq -r '.execution_mode')
 
+# Validate task IDs in daemon-state.json
+INVALID_TASK_IDS="[]"
+if [[ -f "$DAEMON_STATE_FILE" ]]; then
+    # Check shepherd task IDs
+    while IFS=$'\t' read -r key task_id; do
+        [[ -z "$key" ]] && continue
+        if [[ ! "$task_id" =~ ^[a-f0-9]{7}$ ]]; then
+            INVALID_TASK_IDS=$(echo "$INVALID_TASK_IDS" | jq \
+                --arg loc "shepherds" --arg key "$key" --arg tid "$task_id" \
+                '. + [{location: $loc, key: $key, task_id: $tid}]')
+        fi
+    done <<< "$(jq -r '.shepherds // {} | to_entries[] | select(.value.task_id != null and .value.task_id != "") | "\(.key)\t\(.value.task_id)"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")"
+
+    # Check support role task IDs
+    while IFS=$'\t' read -r key task_id; do
+        [[ -z "$key" ]] && continue
+        if [[ ! "$task_id" =~ ^[a-f0-9]{7}$ ]]; then
+            INVALID_TASK_IDS=$(echo "$INVALID_TASK_IDS" | jq \
+                --arg loc "support_roles" --arg key "$key" --arg tid "$task_id" \
+                '. + [{location: $loc, key: $key, task_id: $tid}]')
+        fi
+    done <<< "$(jq -r '.support_roles // {} | to_entries[] | select(.value.task_id != null and .value.task_id != "") | "\(.key)\t\(.value.task_id)"' "$DAEMON_STATE_FILE" 2>/dev/null || echo "")"
+fi
+INVALID_TASK_ID_COUNT=$(echo "$INVALID_TASK_IDS" | jq 'length')
+
 # Count stale heartbeats for warnings
 STALE_HEARTBEAT_COUNT=$(echo "$SHEPHERD_PROGRESS" | jq '[.[] | select(.heartbeat_stale == true and .status == "working")] | length')
 
@@ -709,10 +785,8 @@ detect_orphaned_shepherds() {
 
     # Get tracked issues from daemon-state
     local daemon_tracked_issues="[]"
-    local daemon_shepherd_task_ids="[]"
     if [[ -f "$DAEMON_STATE_FILE" ]]; then
         daemon_tracked_issues=$(jq '[.shepherds // {} | to_entries[] | select(.value.status == "working") | .value.issue] | map(select(. != null))' "$DAEMON_STATE_FILE" 2>/dev/null || echo "[]")
-        daemon_shepherd_task_ids=$(jq '[.shepherds // {} | to_entries[] | select(.value.status == "working") | .value.task_id] | map(select(. != null))' "$DAEMON_STATE_FILE" 2>/dev/null || echo "[]")
     fi
 
     # Check 1: loom:building issues not tracked in daemon-state
@@ -773,6 +847,11 @@ ORPHANED_COUNT=$(echo "$ORPHANED_SHEPHERDS" | jq 'length')
 # Add recover_orphans action if any orphans detected
 if [[ "$ORPHANED_COUNT" -gt 0 ]]; then
     ACTIONS=$(echo "$ACTIONS" | jq '. + ["recover_orphans"]')
+fi
+
+# Add validate_state action if invalid task IDs detected
+if [[ "$INVALID_TASK_ID_COUNT" -gt 0 ]]; then
+    ACTIONS=$(echo "$ACTIONS" | jq '. + ["validate_state"]')
 fi
 
 # Build the final JSON output
@@ -841,6 +920,16 @@ OUTPUT=$(jq -n \
     --argjson tmux_available "$TMUX_AVAILABLE" \
     --argjson tmux_shepherd_count "$TMUX_SHEPHERD_COUNT" \
     --arg tmux_execution_mode "$TMUX_EXECUTION_MODE" \
+    --argjson architect_idle_seconds "$ARCHITECT_IDLE_SECONDS" \
+    --argjson architect_cooldown "$ARCHITECT_COOLDOWN" \
+    --argjson architect_needs_trigger "$ARCHITECT_NEEDS_TRIGGER" \
+    --arg architect_status "$ARCHITECT_STATUS" \
+    --argjson hermit_idle_seconds "$HERMIT_IDLE_SECONDS" \
+    --argjson hermit_cooldown "$HERMIT_COOLDOWN" \
+    --argjson hermit_needs_trigger "$HERMIT_NEEDS_TRIGGER" \
+    --arg hermit_status "$HERMIT_STATUS" \
+    --argjson invalid_task_ids "$INVALID_TASK_IDS" \
+    --argjson invalid_task_id_count "$INVALID_TASK_ID_COUNT" \
     '{
         timestamp: $timestamp,
         pipeline: {
@@ -863,6 +952,10 @@ OUTPUT=$(jq -n \
             stale_heartbeat_count: $stale_heartbeat_count,
             orphaned: $orphaned_shepherds,
             orphaned_count: $orphaned_count
+        },
+        validation: {
+            invalid_task_ids: $invalid_task_ids,
+            invalid_task_id_count: $invalid_task_id_count
         },
         support_roles: {
             guide: {
@@ -897,6 +990,18 @@ OUTPUT=$(jq -n \
                 interval: $judge_interval,
                 needs_trigger: $judge_needs_trigger,
                 demand_trigger: $judge_demand
+            },
+            architect: {
+                status: $architect_status,
+                idle_seconds: $architect_idle_seconds,
+                interval: $architect_cooldown,
+                needs_trigger: $architect_needs_trigger
+            },
+            hermit: {
+                status: $hermit_status,
+                idle_seconds: $hermit_idle_seconds,
+                interval: $hermit_cooldown,
+                needs_trigger: $hermit_needs_trigger
             }
         },
         usage: ($usage + {healthy: $usage_healthy}),

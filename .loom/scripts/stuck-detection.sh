@@ -16,6 +16,7 @@
 set -euo pipefail
 
 # Colors for output (disabled if stdout is not a terminal)
+# shellcheck disable=SC2034  # Color palette - not all colors used in every script
 if [[ -t 1 ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -74,6 +75,7 @@ DEFAULT_IDLE_THRESHOLD=600        # 10 minutes without output
 DEFAULT_WORKING_THRESHOLD=1800    # 30 minutes on same issue with no progress
 DEFAULT_LOOP_THRESHOLD=3          # 3 similar error patterns = looping
 DEFAULT_ERROR_SPIKE_THRESHOLD=5   # 5 errors in 5 minutes = error spike
+# shellcheck disable=SC2034  # Config variable - available for future use
 DEFAULT_COST_THRESHOLD=1000000    # Cost tokens without meaningful output
 DEFAULT_HEARTBEAT_STALE=120       # 2 minutes without heartbeat = stale
 DEFAULT_NO_WORKTREE_THRESHOLD=300 # 5 minutes without worktree creation = warning
