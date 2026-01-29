@@ -73,13 +73,25 @@ class ViaPlacement:
 
 @dataclass
 class TraceSegment:
-    """Information about a trace segment connecting a pad to its via."""
+    """Information about a trace segment connecting a pad to its via.
+
+    For straight traces, only pad position and via position are used.
+    For dog-leg (L-shaped) traces, intermediate_x/y specify the corner point.
+    """
 
     pad: PadInfo
     via_x: float
     via_y: float
     width: float
     layer: str
+    # For dog-leg traces: the intermediate corner point
+    intermediate_x: float | None = None
+    intermediate_y: float | None = None
+
+    @property
+    def is_dogleg(self) -> bool:
+        """Return True if this is an L-shaped (dog-leg) trace."""
+        return self.intermediate_x is not None and self.intermediate_y is not None
 
 
 @dataclass
@@ -754,6 +766,227 @@ def calculate_via_position(
     return None
 
 
+def _check_dogleg_path_clearance(
+    pad_x: float,
+    pad_y: float,
+    intermediate_x: float,
+    intermediate_y: float,
+    via_x: float,
+    via_y: float,
+    trace_half_width: float,
+    other_net_tracks: list[TrackSegment],
+    other_net_vias: list[tuple[float, float, float, int]],
+    other_net_pads: list[tuple[float, float, float, int]],
+    clearance: float,
+) -> bool:
+    """Check if a dog-leg (L-shaped) trace path has adequate clearance.
+
+    The path consists of two segments:
+    1. Pad center -> intermediate point (first leg)
+    2. Intermediate point -> via center (second leg)
+
+    Returns True if path is clear, False if there's a conflict.
+    """
+    # Define the two path segments
+    legs = [
+        (pad_x, pad_y, intermediate_x, intermediate_y),  # First leg
+        (intermediate_x, intermediate_y, via_x, via_y),  # Second leg
+    ]
+
+    for leg_sx, leg_sy, leg_ex, leg_ey in legs:
+        # Check against other-net track segments
+        for seg in other_net_tracks:
+            dist = segment_to_segment_distance(
+                leg_sx, leg_sy, leg_ex, leg_ey,
+                seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+            )
+            min_dist = trace_half_width + seg.width / 2 + clearance
+            if dist < min_dist:
+                return False
+
+        # Check against other-net vias
+        for ovx, ovy, ov_size, _onet in other_net_vias:
+            dist = point_to_segment_distance(ovx, ovy, leg_sx, leg_sy, leg_ex, leg_ey)
+            min_dist = trace_half_width + ov_size / 2 + clearance
+            if dist < min_dist:
+                return False
+
+        # Check against other-net pads
+        for px, py, p_radius, _pnet in other_net_pads:
+            dist = point_to_segment_distance(px, py, leg_sx, leg_sy, leg_ex, leg_ey)
+            min_dist = trace_half_width + p_radius + clearance
+            if dist < min_dist:
+                return False
+
+    return True
+
+
+def calculate_dogleg_via_position(
+    pad: PadInfo,
+    offset: float,
+    via_size: float,
+    existing_vias: list[tuple[float, float, int]],
+    clearance: float,
+    other_net_tracks: list[TrackSegment] | None = None,
+    other_net_vias: list[tuple[float, float, float, int]] | None = None,
+    other_net_pads: list[tuple[float, float, float, int]] | None = None,
+    trace_width: float = 0.0,
+) -> tuple[float, float, float, float] | None:
+    """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
+
+    When straight-line routing fails due to adjacent pads on different nets,
+    this function tries L-shaped routing: first moving along the pad row
+    (axially), then perpendicular to reach clear space.
+
+    This is useful for fine-pitch components (e.g., SSOP with 0.65mm pitch)
+    where adjacent pads on different nets leave insufficient clearance for
+    straight-line via placement.
+
+    Args:
+        pad: The pad to place a via near
+        offset: Base distance offset from pad edge
+        via_size: Via pad diameter in mm
+        existing_vias: Same-net vias as (x, y, net_num) for via-to-via spacing
+        clearance: Minimum clearance from existing copper in mm
+        other_net_tracks: Track segments on other nets for clearance checking
+        other_net_vias: Vias on other nets as (x, y, size, net_num) for clearance
+        other_net_pads: Pads on other nets as (x, y, radius, net_num) for clearance
+        trace_width: Width of the connecting trace in mm
+
+    Returns:
+        Tuple of (via_x, via_y, intermediate_x, intermediate_y) for an L-shaped
+        path, or None if no valid position found.
+    """
+    if other_net_tracks is None:
+        other_net_tracks = []
+    if other_net_vias is None:
+        other_net_vias = []
+    if other_net_pads is None:
+        other_net_pads = []
+
+    via_radius = via_size / 2
+    trace_half_width = trace_width / 2
+
+    pad_radius = max(pad.width, pad.height) / 2
+
+    # Determine the dominant alignment direction based on nearby other-net pads
+    # This helps us route along the pad row first, then escape perpendicular
+    nearby_pads = [
+        (px, py) for px, py, _r, pnet in other_net_pads
+        if pnet != pad.net_number and abs(px - pad.x) < 1.5 and abs(py - pad.y) < 1.5
+    ]
+
+    # Determine primary and secondary axes based on pad row orientation
+    if len(nearby_pads) >= 1:
+        # Calculate spread in X and Y among nearby pads
+        xs = [px for px, _ in nearby_pads]
+        ys = [py for _, py in nearby_pads]
+        x_spread = max(xs) - min(xs) if len(xs) > 1 else 0
+        y_spread = max(ys) - min(ys) if len(ys) > 1 else 0
+
+        # If pads are spread more horizontally, the row is horizontal
+        # -> axial movement should be horizontal, escape should be vertical
+        if x_spread >= y_spread:
+            axial_dirs = [(1, 0), (-1, 0)]  # Move along horizontal row
+            escape_dirs = [(0, 1), (0, -1), (0.707, 0.707), (-0.707, 0.707),
+                           (0.707, -0.707), (-0.707, -0.707)]  # Escape vertically
+        else:
+            axial_dirs = [(0, 1), (0, -1)]  # Move along vertical row
+            escape_dirs = [(1, 0), (-1, 0), (0.707, 0.707), (0.707, -0.707),
+                           (-0.707, 0.707), (-0.707, -0.707)]  # Escape horizontally
+    else:
+        # No clear row orientation, try all combinations
+        axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        escape_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1),
+                       (0.707, 0.707), (-0.707, 0.707),
+                       (-0.707, -0.707), (0.707, -0.707)]
+
+    # Axial distances: how far to move along the row before turning
+    axial_distances = [0.3, 0.5, 0.7, 1.0, 1.3]
+
+    # Escape offsets: how far to move perpendicular after the axial step
+    escape_offsets = [pad_radius + offset * 0.75, pad_radius + offset,
+                      pad_radius + offset * 1.5, pad_radius + offset * 2]
+
+    for axial_dx, axial_dy in axial_dirs:
+        for axial_dist in axial_distances:
+            # Calculate the intermediate (corner) point
+            intermediate_x = pad.x + axial_dx * axial_dist
+            intermediate_y = pad.y + axial_dy * axial_dist
+
+            for escape_dx, escape_dy in escape_dirs:
+                # Skip if escape direction is the same as axial direction
+                # (that would be a straight line, not a dog-leg)
+                if abs(axial_dx * escape_dx + axial_dy * escape_dy) > 0.9:
+                    continue
+
+                for escape_offset in escape_offsets:
+                    via_x = intermediate_x + escape_dx * escape_offset
+                    via_y = intermediate_y + escape_dy * escape_offset
+
+                    # Check via position clearance (same as straight-line)
+                    conflict = False
+
+                    # Check same-net via spacing
+                    for vx, vy, _vnet in existing_vias:
+                        dist = math.sqrt((vx - via_x) ** 2 + (vy - via_y) ** 2)
+                        if dist < via_size + clearance:
+                            conflict = True
+                            break
+                    if conflict:
+                        continue
+
+                    # Check other-net track clearance at via position
+                    for seg in other_net_tracks:
+                        dist = point_to_segment_distance(
+                            via_x, via_y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
+                        )
+                        min_dist = via_radius + seg.width / 2 + clearance
+                        if dist < min_dist:
+                            conflict = True
+                            break
+                    if conflict:
+                        continue
+
+                    # Check other-net via clearance at via position
+                    for ovx, ovy, ov_size, _onet in other_net_vias:
+                        dist = math.sqrt((ovx - via_x) ** 2 + (ovy - via_y) ** 2)
+                        min_dist = via_radius + ov_size / 2 + clearance
+                        if dist < min_dist:
+                            conflict = True
+                            break
+                    if conflict:
+                        continue
+
+                    # Check other-net pad clearance at via position
+                    for px, py, p_radius, _pnet in other_net_pads:
+                        dist = math.sqrt((px - via_x) ** 2 + (py - via_y) ** 2)
+                        min_dist = via_radius + p_radius + clearance
+                        if dist < min_dist:
+                            conflict = True
+                            break
+                    if conflict:
+                        continue
+
+                    # Check the entire L-shaped path for clearance
+                    if trace_width > 0:
+                        if not _check_dogleg_path_clearance(
+                            pad.x, pad.y,
+                            intermediate_x, intermediate_y,
+                            via_x, via_y,
+                            trace_half_width,
+                            other_net_tracks,
+                            other_net_vias,
+                            other_net_pads,
+                            clearance,
+                        ):
+                            continue
+
+                    return (via_x, via_y, intermediate_x, intermediate_y)
+
+    return None
+
+
 def get_via_layers(pad_layer: str, target_layer: str | None) -> tuple[str, str]:
     """Determine the layers for the via.
 
@@ -789,18 +1022,51 @@ def add_via_to_pcb(sexp: SExp, placement: ViaPlacement) -> None:
 
 
 def add_trace_to_pcb(sexp: SExp, trace: TraceSegment) -> None:
-    """Add a trace segment from pad center to via center."""
-    seg = segment_node(
-        start_x=trace.pad.x,
-        start_y=trace.pad.y,
-        end_x=trace.via_x,
-        end_y=trace.via_y,
-        width=trace.width,
-        layer=trace.layer,
-        net=trace.pad.net_number,
-        uuid_str=str(uuid.uuid4()),
-    )
-    sexp.append(seg)
+    """Add trace segment(s) from pad center to via center.
+
+    For straight traces, adds a single segment.
+    For dog-leg (L-shaped) traces, adds two segments: pad -> corner -> via.
+    """
+    if trace.is_dogleg:
+        # Dog-leg trace: two segments forming an L-shape
+        # First segment: pad center to intermediate corner point
+        seg1 = segment_node(
+            start_x=trace.pad.x,
+            start_y=trace.pad.y,
+            end_x=trace.intermediate_x,
+            end_y=trace.intermediate_y,
+            width=trace.width,
+            layer=trace.layer,
+            net=trace.pad.net_number,
+            uuid_str=str(uuid.uuid4()),
+        )
+        sexp.append(seg1)
+
+        # Second segment: intermediate corner point to via center
+        seg2 = segment_node(
+            start_x=trace.intermediate_x,
+            start_y=trace.intermediate_y,
+            end_x=trace.via_x,
+            end_y=trace.via_y,
+            width=trace.width,
+            layer=trace.layer,
+            net=trace.pad.net_number,
+            uuid_str=str(uuid.uuid4()),
+        )
+        sexp.append(seg2)
+    else:
+        # Straight trace: single segment
+        seg = segment_node(
+            start_x=trace.pad.x,
+            start_y=trace.pad.y,
+            end_x=trace.via_x,
+            end_y=trace.via_y,
+            width=trace.width,
+            layer=trace.layer,
+            net=trace.pad.net_number,
+            uuid_str=str(uuid.uuid4()),
+        )
+        sexp.append(seg)
 
 
 def run_stitch(
@@ -895,37 +1161,89 @@ def run_stitch(
             trace_width=trace_width,
         )
 
+        # Track if we're using dog-leg routing
+        dogleg_pos: tuple[float, float, float, float] | None = None
+
         if via_pos is None:
-            result.pads_skipped.append((pad, "no valid via location (clearance conflict)"))
-            continue
+            # Straight-line failed - try dog-leg (L-shaped) routing
+            # This is especially useful for fine-pitch components like SSOP
+            # where adjacent pads on different nets block straight-line escape
+            dogleg_pos = calculate_dogleg_via_position(
+                pad,
+                offset=offset,
+                via_size=via_size,
+                existing_vias=existing_vias,
+                clearance=clearance,
+                other_net_tracks=other_net_tracks,
+                other_net_vias=other_net_vias,
+                other_net_pads=other_net_pads,
+                trace_width=trace_width,
+            )
+
+            if dogleg_pos is None:
+                result.pads_skipped.append(
+                    (pad, "no valid via location (clearance conflict, dog-leg also failed)")
+                )
+                continue
 
         # Determine via layers using per-net target layer
         pad_target_layer = net_target_layers.get(pad.net_name)
         layers = get_via_layers(pad.layer, pad_target_layer)
 
-        placement = ViaPlacement(
-            pad=pad,
-            via_x=via_pos[0],
-            via_y=via_pos[1],
-            size=via_size,
-            drill=drill,
-            layers=layers,
-        )
+        if dogleg_pos is not None:
+            # Dog-leg placement: (via_x, via_y, intermediate_x, intermediate_y)
+            via_x, via_y, intermediate_x, intermediate_y = dogleg_pos
 
-        result.vias_added.append(placement)
+            placement = ViaPlacement(
+                pad=pad,
+                via_x=via_x,
+                via_y=via_y,
+                size=via_size,
+                drill=drill,
+                layers=layers,
+            )
 
-        # Create a trace segment from pad center to via center on the surface layer
-        trace = TraceSegment(
-            pad=pad,
-            via_x=via_pos[0],
-            via_y=via_pos[1],
-            width=trace_width,
-            layer=pad.layer,
-        )
-        result.traces_added.append(trace)
+            result.vias_added.append(placement)
 
-        # Add to existing vias list to prevent conflicts with subsequent placements
-        existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
+            # Create an L-shaped trace segment
+            trace = TraceSegment(
+                pad=pad,
+                via_x=via_x,
+                via_y=via_y,
+                width=trace_width,
+                layer=pad.layer,
+                intermediate_x=intermediate_x,
+                intermediate_y=intermediate_y,
+            )
+            result.traces_added.append(trace)
+
+            # Add to existing vias list
+            existing_vias.append((via_x, via_y, pad.net_number))
+        else:
+            # Straight-line placement
+            placement = ViaPlacement(
+                pad=pad,
+                via_x=via_pos[0],
+                via_y=via_pos[1],
+                size=via_size,
+                drill=drill,
+                layers=layers,
+            )
+
+            result.vias_added.append(placement)
+
+            # Create a straight trace segment from pad center to via center
+            trace = TraceSegment(
+                pad=pad,
+                via_x=via_pos[0],
+                via_y=via_pos[1],
+                width=trace_width,
+                layer=pad.layer,
+            )
+            result.traces_added.append(trace)
+
+            # Add to existing vias list
+            existing_vias.append((via_pos[0], via_pos[1], pad.net_number))
 
     # Apply changes if not dry run
     if not dry_run and result.vias_added:
@@ -995,11 +1313,18 @@ def output_result(result: StitchResult, dry_run: bool = False) -> None:
         if len(result.pads_skipped) > 5:
             print(f"  ... ({len(result.pads_skipped) - 5} more)")
 
+    # Count dog-leg traces
+    dogleg_traces = [t for t in result.traces_added if t.is_dogleg]
+    straight_traces = len(result.traces_added) - len(dogleg_traces)
+
     # Summary
     print(f"\n{'=' * 60}")
     print("Summary:")
     print(f"  + Added {len(result.vias_added)} stitching vias")
     print(f"  + Added {len(result.traces_added)} pad-to-via traces")
+    if dogleg_traces:
+        print(f"    - {straight_traces} straight traces")
+        print(f"    - {len(dogleg_traces)} dog-leg (L-shaped) traces for fine-pitch pads")
     if result.already_connected:
         print(f"  = {result.already_connected} pads already connected")
     if result.pads_skipped:
