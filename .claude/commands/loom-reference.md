@@ -21,6 +21,7 @@ The daemon maintains state in `.loom/daemon-state.json`. This file provides comp
   "iteration": 42,
   "force_mode": false,
   "debug_mode": false,
+  "daemon_session_id": "1706400000-12345",
 
   "shepherds": {
     "shepherd-1": {
@@ -449,13 +450,13 @@ The daemon integrates with cleanup scripts to manage task artifacts and worktree
 
 ```bash
 # Archive task outputs to .loom/logs/{date}/
-./scripts/archive-logs.sh [--dry-run] [--retention-days N]
+./.loom/scripts/archive-logs.sh [--dry-run] [--retention-days N]
 
 # Safe worktree cleanup (only MERGED PRs)
-./scripts/safe-worktree-cleanup.sh [--dry-run] [--grace-period N]
+./.loom/scripts/safe-worktree-cleanup.sh [--dry-run] [--grace-period N]
 
 # Event-driven daemon cleanup
-./scripts/daemon-cleanup.sh <event> [options]
+./.loom/scripts/daemon-cleanup.sh <event> [options]
 ```
 
 ### Cleanup Configuration

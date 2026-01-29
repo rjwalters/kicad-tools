@@ -23,40 +23,32 @@ In parent mode, you do MINIMAL work:
 
 The iteration subagent handles ALL orchestration logic. You just spawn it.
 
-## Execution Modes
+## Script Infrastructure
 
-The daemon automatically detects and uses the best available execution backend:
+The daemon relies on deterministic bash scripts for critical operations. These scripts ensure consistent behavior and proper error handling:
 
-| Mode | Priority | Detection | Description |
-|------|----------|-----------|-------------|
-| `mcp` | 1 (highest) | MCP tools available | Delegate to Tauri-managed terminals |
-| `tmux` | 2 | `tmux -L loom has-session` | Delegate to tmux-backed agent sessions |
-| `direct` | 3 (default) | Fallback | Spawn Task subagents directly |
+| Script | Purpose |
+|--------|---------|
+| `daemon-snapshot.sh` | Pipeline state assessment (replaces 10+ gh commands) |
+| `validate-daemon-state.sh` | Validates state file |
+| `agent-spawn.sh` | Spawn tmux agent sessions |
+| `agent-wait.sh` | Detect when tmux agents complete |
+| `agent-destroy.sh` | Clean up tmux agent sessions |
+| `spawn-support-role.sh` | Support role spawning with interval checking |
+| `stale-building-check.sh` | Recovers orphaned loom:building issues |
+| `recover-orphaned-shepherds.sh` | Recovers from daemon crashes |
 
-**Mode Selection Flow:**
-```
-IF Tauri app running (MCP heartbeat responds):
-    MODE = "mcp"      <- Best: Full UI integration
-ELIF tmux pool running (loom start has been run):
-    MODE = "tmux"     <- Good: Persistent, inspectable terminals
-ELSE:
-    MODE = "direct"   <- Fallback: Task subagents (opaque but functional)
-```
+See `loom-iteration.md` for how these scripts are used in each iteration.
 
-**tmux Mode Benefits:**
-- Persistent terminals that survive daemon restarts
-- Inspectable via `loom attach shepherd-1`
-- Lower overhead than spawning new Task subagents
-- Output visible via `loom logs shepherd-1`
+## Execution Model
 
-**To enable tmux mode:**
-```bash
-# Start the tmux agent pool
-./loom start
+The daemon uses **tmux-based agent execution** exclusively. All workers (shepherds, support roles) run in attachable tmux sessions via `agent-spawn.sh`:
 
-# Then run the daemon (will auto-detect tmux mode)
-/loom
-```
+- **Shepherds**: Spawned as on-demand ephemeral tmux sessions (e.g., `loom-shepherd-issue-42`)
+- **Support roles**: Spawned as on-demand ephemeral tmux sessions (e.g., `loom-guide`, `loom-champion`)
+- **Observability**: Attach to any session with `tmux -L loom attach -t <session-name>`
+- **Completion detection**: `agent-wait.sh` polls process trees to detect when Claude finishes
+- **Cleanup**: `agent-destroy.sh` removes sessions after completion
 
 ## Core Principles
 
@@ -103,111 +95,45 @@ else
 fi
 ```
 
-### Parallelism via Subagents
+### Subagent Delegation Pattern
 
-Use the **Task tool with `run_in_background: true`** to spawn parallel shepherd subagents:
+The parent loop uses the **Skill tool** to spawn iteration subagents:
 
+```python
+# Parent spawns iteration subagent (uses Skill so iteration gets its role prompt)
+Skill(skill="loom-iteration", args="--force --debug")
 ```
-Task(
-  subagent_type: "general-purpose",
-  prompt: """You must invoke the Skill tool to execute the shepherd workflow.
 
-IMPORTANT: Do NOT use CLI commands like 'claude --skill=shepherd'. Use the Skill tool:
+**Why Skill for parent→iteration**: The parent wants the iteration subagent to receive
+its full role prompt (`loom-iteration.md`) so it can execute the complete iteration logic.
 
-Skill(skill="shepherd", args="123 --force-merge")
+**Iteration→role spawning** (shepherds, support roles) happens in `loom-iteration.md` and
+uses **tmux agent-spawn.sh** to create ephemeral tmux sessions:
 
-Follow all shepherd workflow steps until the issue is complete or blocked.""",
-  run_in_background: true
-) -> Returns task_id and output_file
+```bash
+# Iteration spawns shepherd as tmux worker
+./.loom/scripts/agent-spawn.sh --role shepherd --name "shepherd-issue-123" --args "123" --on-demand
+
+# Wait for completion
+./.loom/scripts/agent-wait.sh "shepherd-issue-123" --timeout 1800
+
+# Clean up
+./.loom/scripts/agent-destroy.sh "shepherd-issue-123"
 ```
 
 **Shepherd Force Mode Flags**:
-- `--force-merge`: Full automation - auto-merge after Judge approval (use when daemon is in force mode)
-- `--force-pr`: Stops at `loom:pr` (ready-to-merge), requires Champion for merge (default)
+- `--force` or `-f`: Full automation - auto-merge after Judge approval (use when daemon is in force mode)
+- (default): Stops at `loom:pr` (ready-to-merge), requires Champion for merge
+- `--wait`: Explicit wait for human approval at each gate
 
-**CRITICAL - Correct Tool Invocation**: Daemon-spawned subagents must use the **Skill tool**, NOT CLI commands.
+**Delegation Summary**:
 
-> **Scope**: This Skill-in-Task pattern applies to **daemon→shepherd** and **daemon→support role**
-> invocations only. Shepherds themselves use plain `Task` subagents with slash-command prompts
-> for phase delegation (e.g., `Task(prompt="/builder 123")`). See `shepherd.md` for details.
-
-```
-CORRECT - Use the Skill tool (daemon spawning shepherds/support roles):
-   Skill(skill="guide")
-   Skill(skill="shepherd", args="123 --force-merge")
-
-WRONG - These will fail with CLI errors:
-   claude --skill=guide
-   claude --role guide
-   /guide
-   bash("claude --skill=guide")
-```
-
-### Task Spawn Verification
-
-After spawning a Task subagent, you MUST verify the task actually started before recording its task_id in daemon-state.json.
-
-```python
-def validate_task_id(task_id):
-    """Validate that a task_id matches the expected format from the Task tool.
-
-    Real Task tool task IDs are 7-character lowercase hexadecimal strings (e.g., 'a7dc1e0', 'abeb2e8').
-    Fabricated task IDs typically look like 'auditor-1769471216' or 'champion-12345'.
-
-    Returns True if valid, False if fabricated or malformed.
-    """
-    if not task_id or not isinstance(task_id, str):
-        return False
-
-    # Real task IDs are 7-char hex strings
-    import re
-    return bool(re.match(r'^[a-f0-9]{7}$', task_id))
-
-
-def verify_task_spawn(result, description="task"):
-    """Verify a Task spawn succeeded by checking TaskOutput immediately.
-
-    Validates both that the task started AND that the task_id is a real
-    Task tool ID (not a fabricated string like 'auditor-1769471216').
-    """
-    if not result or not result.task_id:
-        print(f"  SPAWN FAILED: {description} - no task_id returned")
-        return False
-
-    # Validate task_id format BEFORE attempting TaskOutput check
-    # This catches fabricated IDs like "auditor-1769471216" that the LLM
-    # may generate instead of actually invoking the Task tool
-    if not validate_task_id(result.task_id):
-        print(f"  SPAWN FAILED: {description} - invalid task_id format: '{result.task_id}'")
-        print(f"    Expected 7-char hex UUID (e.g., 'a7dc1e0'), got fabricated string")
-        print(f"    This usually means the Task tool was not actually invoked")
-        return False
-
-    try:
-        check = TaskOutput(task_id=result.task_id, block=False, timeout=1000)
-        if check.status in ["running", "completed"]:
-            # Check output for CLI error patterns
-            if check.output:
-                cli_error_patterns = [
-                    "error: unknown option",
-                    "Did you mean",
-                    "unrecognized command",
-                    "command not found"
-                ]
-                for pattern in cli_error_patterns:
-                    if pattern in check.output:
-                        print(f"  SPAWN FAILED: {description} - CLI error detected")
-                        return False
-            return True
-        elif check.status == "failed":
-            print(f"  SPAWN FAILED: {description} - task immediately failed")
-            return False
-    except Exception as e:
-        print(f"  SPAWN FAILED: {description} - verification error: {e}")
-        return False
-
-    return True
-```
+| Delegation | Pattern | Reason |
+|------------|---------|--------|
+| parent → iteration | `Skill(skill="loom-iteration")` | Need iteration's full role prompt |
+| iteration → shepherd | `agent-spawn.sh --role shepherd` | Ephemeral tmux session, attachable |
+| iteration → support role | `agent-spawn.sh --role guide` | Ephemeral tmux session, attachable |
+| shepherd → builder | `agent-spawn.sh --role builder` | Ephemeral tmux session, attachable |
 
 ## Configuration Parameters
 
@@ -268,6 +194,102 @@ GUIDE/CHAMPION/DOCTOR/AUDITOR:
 - Proposals are auto-promoted to `loom:issue` by the daemon
 - Only `loom:blocked` issues require human intervention
 
+## CRITICAL: Dual Daemon Prevention
+
+**Before starting the parent loop, you MUST check for an existing daemon instance.**
+
+This prevents the critical bug where two daemon instances compete for `daemon-state.json`, causing state corruption, duplicate shepherd spawns, and unpredictable behavior.
+
+### Checking for Existing Daemon
+
+```python
+def check_for_existing_daemon():
+    """Check if another daemon instance is already running.
+
+    Uses PID file (.loom/daemon-loop.pid) as the primary check,
+    and daemon_session_id in state file as a secondary check.
+
+    Returns True if safe to start, False if another daemon is running.
+    """
+    pid_file = ".loom/daemon-loop.pid"
+
+    # Check PID file (shell wrapper daemon)
+    if exists(pid_file):
+        pid = read_file(pid_file).strip()
+        # Check if process is still alive
+        result = run(f"kill -0 {pid} 2>/dev/null && echo alive || echo dead")
+        if result.strip() == "alive":
+            print(f"ERROR: Daemon loop already running (PID: {pid})")
+            print(f"  The shell wrapper daemon-loop.sh is active.")
+            print(f"  Stop it first: touch .loom/stop-daemon")
+            print(f"  Or check status: ./.loom/scripts/daemon-loop.sh --status")
+            return False
+        else:
+            print(f"Warning: Removing stale PID file (PID {pid} is not running)")
+            rm(pid_file)
+
+    # Check state file for active LLM-interpreted daemon
+    state_file = ".loom/daemon-state.json"
+    if exists(state_file):
+        state = json.load(open(state_file))
+        if state.get("running") == True and state.get("daemon_session_id"):
+            session_id = state["daemon_session_id"]
+            last_poll = state.get("last_poll")
+            if last_poll:
+                # Check if last poll was recent (within 5 minutes)
+                # If so, another daemon is likely still active
+                poll_age_seconds = seconds_since(last_poll)
+                if poll_age_seconds < 300:
+                    print(f"WARNING: Another daemon session may be active")
+                    print(f"  Session ID: {session_id}")
+                    print(f"  Last poll: {last_poll} ({poll_age_seconds}s ago)")
+                    print(f"  If you are sure no other daemon is running, delete .loom/daemon-state.json")
+                    print(f"  Proceeding with caution - will use session ID to detect conflicts")
+
+    return True
+```
+
+### Continuation Detection
+
+**CRITICAL**: When Claude Code runs out of context and auto-continues, the continuation MUST NOT re-invoke the parent loop. If you detect that you are in a continuation (e.g., conversation history shows a previous `/loom` invocation that was running), do NOT start a new parent loop. Instead:
+
+1. Check if `.loom/daemon-state.json` shows `running: true` with a recent `last_poll`
+2. If yes, you are likely a continuation of a previous daemon session
+3. Do NOT start a new parent loop - this would create a dual-daemon conflict
+4. Instead, print a warning and exit:
+
+```python
+def detect_continuation():
+    """Detect if this is a continuation of a previous daemon session.
+
+    When Claude Code runs out of context and auto-continues, the new
+    session may try to re-invoke /loom. This detects that scenario.
+    """
+    if exists(".loom/daemon-state.json"):
+        state = json.load(open(".loom/daemon-state.json"))
+        if state.get("running") == True:
+            last_poll = state.get("last_poll")
+            if last_poll:
+                poll_age = seconds_since(last_poll)
+                # If last poll was very recent, another daemon is likely running
+                if poll_age < 300:  # 5 minutes
+                    print("=" * 60)
+                    print("  CONTINUATION DETECTED - NOT STARTING NEW DAEMON")
+                    print("=" * 60)
+                    print(f"  daemon-state.json shows running=true")
+                    print(f"  Last poll: {poll_age}s ago")
+                    print(f"  Session ID: {state.get('daemon_session_id', 'unknown')}")
+                    print()
+                    print("  This appears to be a continuation of a previous session.")
+                    print("  Starting a second daemon would cause state corruption.")
+                    print()
+                    print("  To force restart: rm .loom/daemon-state.json && /loom")
+                    print("  To stop daemon:   touch .loom/stop-daemon")
+                    print("=" * 60)
+                    return True
+    return False
+```
+
 ## Startup Validation
 
 Before entering the main loop, validate role configuration:
@@ -295,6 +317,12 @@ def validate_at_startup():
 
 ```python
 def start_daemon(force_mode=False, debug_mode=False):
+    # 0. CRITICAL: Check for existing daemon instance (dual-daemon prevention)
+    if detect_continuation():
+        return  # Don't start - continuation of previous session detected
+    if not check_for_existing_daemon():
+        return  # Don't start - another daemon is running
+
     # 1. Rotate existing state file to preserve session history
     run("./.loom/scripts/rotate-daemon-state.sh")
 
@@ -302,6 +330,12 @@ def start_daemon(force_mode=False, debug_mode=False):
     state = load_or_create_state(".loom/daemon-state.json")
     state["started_at"] = now()
     state["running"] = True
+
+    # 2b. Generate and store session ID for conflict detection
+    import time, os
+    session_id = f"{int(time.time())}-{os.getpid()}"
+    state["daemon_session_id"] = session_id
+    print(f"  Session ID: {session_id}")
 
     # 3. Set force mode if enabled
     if force_mode:
@@ -325,7 +359,7 @@ def start_daemon(force_mode=False, debug_mode=False):
     save_daemon_state(state)
 
     # 7. Enter thin parent loop
-    parent_loop(force_mode, debug_mode)
+    parent_loop(force_mode, debug_mode, session_id)
 ```
 
 ### Parent Loop (Thin - Context Efficient)
@@ -333,7 +367,7 @@ def start_daemon(force_mode=False, debug_mode=False):
 **CRITICAL**: The parent loop does MINIMAL work. All orchestration happens in iteration subagents.
 
 ```python
-def parent_loop(force_mode=False, debug_mode=False):
+def parent_loop(force_mode=False, debug_mode=False, session_id=None):
     """Thin parent loop - spawns iteration subagents to do actual work."""
 
     iteration = 0
@@ -341,21 +375,12 @@ def parent_loop(force_mode=False, debug_mode=False):
     debug_flag = "--debug" if debug_mode else ""
     flags = f"{force_flag} {debug_flag}".strip()
 
-    # Detect execution mode for banner
-    execution_mode = detect_execution_mode(debug_mode)
-
     print("=" * 60)
     print("  LOOM DAEMON - SUBAGENT-PER-ITERATION MODE")
     print("=" * 60)
     print(f"  Force mode: {'ENABLED' if force_mode else 'disabled'}")
     print(f"  Debug: {'ENABLED' if debug_mode else 'disabled'}")
-    print(f"  Execution backend: {execution_mode.upper()}")
-    if execution_mode == "tmux":
-        print("    -> Using tmux agent pool (loom attach to inspect)")
-    elif execution_mode == "mcp":
-        print("    -> Using Tauri-managed terminals")
-    else:
-        print("    -> Using Task subagents (start 'loom start' for tmux mode)")
+    print(f"  Execution: tmux workers (attach via tmux -L loom attach)")
     print(f"  Poll interval: {POLL_INTERVAL}s")
     print("  Parent loop accumulates only iteration summaries")
     print("=" * 60)
@@ -372,12 +397,27 @@ def parent_loop(force_mode=False, debug_mode=False):
             break
 
         # ====================================
+        # STEP 1b: SESSION OWNERSHIP CHECK (dual-daemon prevention)
+        # ====================================
+        # Verify our session ID still matches the state file.
+        # If another daemon has taken over, yield gracefully.
+        if session_id and exists(".loom/daemon-state.json"):
+            state = json.load(open(".loom/daemon-state.json"))
+            file_session_id = state.get("daemon_session_id")
+            if file_session_id and file_session_id != session_id:
+                print(f"\nIteration {iteration}: SESSION CONFLICT DETECTED")
+                print(f"  Our session:  {session_id}")
+                print(f"  File session: {file_session_id}")
+                print(f"  Another daemon has taken over. Yielding.")
+                break
+
+        # ====================================
         # STEP 2: SPAWN ITERATION SUBAGENT (does ALL work)
         # ====================================
         # The iteration subagent gets fresh context and handles:
         # - Assess system state (gh commands)
-        # - Check completions (TaskOutput)
-        # - Spawn shepherds (background Tasks)
+        # - Check tmux worker completions (agent-wait.sh)
+        # - Spawn shepherds (agent-spawn.sh)
         # - Trigger work generation
         # - Ensure support roles
         # - Stuck detection
@@ -418,7 +458,7 @@ Do not include any other text or explanation.""",
 
 **Key benefits of thin parent loop:**
 - Parent context grows by ~100 bytes per iteration (just summaries)
-- All gh commands, TaskOutput, and subagent spawning in iteration subagent
+- All gh commands and tmux worker spawning in iteration subagent
 - Iteration subagent context discarded after each iteration
 - Can run indefinitely without context compaction issues
 
@@ -484,7 +524,7 @@ The `.loom/stop-shepherds` file acts as a coordination signal:
 When `/loom --force` is invoked, the daemon enables **force mode**:
 
 1. **Auto-Promote Proposals**: Champion automatically promotes `loom:architect`, `loom:hermit`, and `loom:curated` proposals to `loom:issue`
-2. **Shepherd Auto-Merge**: Shepherds use `--force-merge` flag
+2. **Shepherd Auto-Merge**: Shepherds use `--force` flag
 3. **Audit Trail**: All auto-promoted items include `[force-mode]` marker
 
 **Use cases**: New project bootstrap, solo developer, weekend hack mode
@@ -509,20 +549,33 @@ The daemon maintains state in `.loom/daemon-state.json`:
   "iteration": 42,
   "force_mode": false,
   "debug_mode": false,
+  "daemon_session_id": "1706400000-12345",
   "shepherds": { ... },
   "support_roles": { ... },
   "pipeline_state": { ... },
-  "warnings": [ ... ]
+  "warnings": [ ... ],
+  "spawn_retry_queue": {
+    "123": {
+      "failures": 2,
+      "last_attempt": "2026-01-23T11:25:00Z",
+      "last_error": "verification_failed"
+    }
+  }
 }
 ```
+
+**daemon_session_id**: Unique identifier (format: `timestamp-PID`) for the current daemon session.
+Used for dual-daemon conflict detection - before writing state, the daemon verifies its session
+ID still matches the file to prevent state corruption from competing daemon instances.
+
+**spawn_retry_queue**: Tracks spawn failures per issue to prevent infinite retry loops.
+After `MAX_SPAWN_FAILURES` (3) consecutive failures, the issue is marked as `loom:blocked`.
 
 For detailed state file format, see `loom-reference.md`.
 
 ## Example Session
 
-**With tmux pool (recommended):**
 ```
-$ ./loom start         # First, start the tmux agent pool
 $ claude
 > /loom
 
@@ -531,13 +584,12 @@ $ claude
 ====================================================================
   Force mode: disabled
   Debug: disabled
-  Execution backend: TMUX
-    -> Using tmux agent pool (loom attach to inspect)
+  Execution: tmux workers (attach via tmux -L loom attach)
   Poll interval: 120s
   Parent loop accumulates only iteration summaries
 ====================================================================
 
-Iteration 1: mode=tmux ready=5 building=0 shepherds=3/3 +shepherd=#1010 +shepherd=#1011 +shepherd=#1012
+Iteration 1: ready=5 building=0 shepherds=3/3 +shepherd=#1010 +shepherd=#1011 +shepherd=#1012
 Iteration 2: ready=2 building=3 shepherds=3/3
 Iteration 3: ready=2 building=3 shepherds=3/3
 Iteration 4: ready=2 building=3 shepherds=3/3 pr=#1015
@@ -549,27 +601,13 @@ Graceful shutdown initiated...
   Cleanup complete
 ```
 
-**Without tmux pool (direct mode fallback):**
-```
-$ claude
-> /loom
-
-====================================================================
-  LOOM DAEMON - SUBAGENT-PER-ITERATION MODE
-====================================================================
-  Force mode: disabled
-  Debug: disabled
-  Execution backend: DIRECT
-    -> Using Task subagents (start 'loom start' for tmux mode)
-  Poll interval: 120s
-  Parent loop accumulates only iteration summaries
-====================================================================
-
-Iteration 1: mode=direct ready=5 building=0 shepherds=3/3 +shepherd=#1010 +shepherd=#1011 +shepherd=#1012
-...
+**Observability**: While running, attach to any worker session:
+```bash
+tmux -L loom attach -t loom-shepherd-issue-42
+tmux -L loom attach -t loom-guide
 ```
 
-**Notice**: Parent loop only shows compact summaries (~50-100 chars each). The execution mode is shown on the first iteration only.
+**Notice**: Parent loop only shows compact summaries (~50-100 chars each).
 
 ## Context Clearing
 

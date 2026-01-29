@@ -44,6 +44,7 @@ if [[ -z "$REPO_ROOT" ]]; then
 fi
 
 CONFIG_FILE="$REPO_ROOT/.loom/config.json"
+# shellcheck disable=SC2034  # LOG_DIR reserved for future logging enhancements
 LOG_DIR="/tmp"
 TMUX_SOCKET="loom"
 
@@ -181,7 +182,7 @@ is_session_running() {
     tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null
 }
 
-# Spawn a single agent
+# Spawn a single agent using agent-spawn.sh
 spawn_agent() {
     local terminal_id="$1"
     local terminal_name="$2"
@@ -193,14 +194,13 @@ spawn_agent() {
 
     local session_name
     session_name=$(get_session_name "$terminal_id")
-    local log_file="$LOG_DIR/loom-$terminal_id.out"
 
     # Check if already running
     if is_session_running "$session_name"; then
         if [[ "$force" == "true" ]]; then
             echo -e "  ${YELLOW}$terminal_name ($terminal_id):${NC} Stopping existing session..."
             if [[ "$dry_run" != "true" ]]; then
-                tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+                "$REPO_ROOT/.loom/scripts/agent-destroy.sh" "$terminal_id" --force 2>/dev/null || true
                 sleep 1
             fi
         else
@@ -216,52 +216,20 @@ spawn_agent() {
 
     echo -e "  ${GREEN}$terminal_name ($terminal_id):${NC} Starting..."
 
-    # Create tmux session detached
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -n "$terminal_name"
-
-    # Set up output capture
-    # Note: tmux pipe-pane captures all output to the log file
-    tmux -L "$TMUX_SOCKET" pipe-pane -t "$session_name" -o "cat >> '$log_file'"
-
-    # Change to workspace directory
-    tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "cd '$REPO_ROOT'" C-m
-
-    # Build claude command
-    # Use claude-wrapper.sh if it exists for resilience, otherwise use claude directly
-    local claude_cmd
-    local wrapper_script="$REPO_ROOT/.loom/scripts/claude-wrapper.sh"
-
-    if [[ -x "$wrapper_script" ]]; then
-        # Use resilient wrapper with environment variables for stop signal detection
-        claude_cmd="LOOM_TERMINAL_ID='$terminal_id' LOOM_WORKSPACE='$REPO_ROOT' '$wrapper_script'"
-    else
-        # Fallback to bare claude if wrapper not found
-        claude_cmd="claude"
-        echo -e "    ${YELLOW}Warning: claude-wrapper.sh not found, using claude directly (no retry logic)${NC}"
-    fi
-
-    # Add role if specified
+    # Derive role name from role file (e.g., "builder.md" -> "builder")
+    local role_name=""
     if [[ -n "$role_file" && "$role_file" != "null" ]]; then
-        # Check if role file exists
-        local role_path="$REPO_ROOT/.loom/roles/$role_file"
-        if [[ -f "$role_path" ]]; then
-            # Use the skill system with /<role> command
-            local role_name="${role_file%.md}"
-            claude_cmd="$claude_cmd -p '/$role_name'"
-        else
-            echo -e "    ${YELLOW}Warning: Role file not found: $role_file${NC}"
-        fi
+        role_name="${role_file%.md}"
     fi
 
-    # Add dangerously-skip-permissions for autonomous agents
-    claude_cmd="$claude_cmd --dangerously-skip-permissions"
-
-    # Send the command
-    tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "$claude_cmd" C-m
-
-    # If interval is set, we need to handle autonomous mode
-    # For now, just start the agent - the interval prompt handling
-    # would need to be implemented in the agent itself
+    # Use agent-spawn.sh for consistent session creation
+    local spawn_script="$REPO_ROOT/.loom/scripts/agent-spawn.sh"
+    if [[ -x "$spawn_script" ]]; then
+        "$spawn_script" --role "$role_name" --name "$terminal_id"
+    else
+        echo -e "    ${RED}Error: agent-spawn.sh not found${NC}"
+        return 1
+    fi
 
     return 0
 }

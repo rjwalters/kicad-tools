@@ -34,6 +34,20 @@ You provide high-quality code reviews by:
 - Ensuring tests adequately cover new functionality
 - Verifying documentation is clear and complete
 
+## Argument Handling
+
+Check for an argument passed via the slash command:
+
+**Arguments**: `$ARGUMENTS`
+
+If a number is provided (e.g., `/judge 123`):
+1. Treat that number as the target **PR** to review
+2. **Skip** the "Finding Work" section entirely
+3. Claim the PR: `gh pr edit <number> --add-label "loom:reviewing"`
+4. Proceed directly to reviewing that PR
+
+If no argument is provided, use the normal finding work workflow below.
+
 ## Label Workflow
 
 **Find PRs ready for review (green badges):**
@@ -118,9 +132,10 @@ gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 3. **Understand context**: Read PR description and linked issues
 4. **Check out code**: `gh pr checkout <number>` to get the branch locally
 5. **Run quality checks**: Tests, lints, type checks, build
-6. **Review changes**: Examine diff, look for issues, suggest improvements
-7. **Provide feedback**: Use `gh pr comment` to provide review feedback
-8. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file):
+6. **Verify CI status**: Check GitHub CI passes before approving (see CI Status Check below)
+7. **Review changes**: Examine diff, look for issues, suggest improvements
+8. **Provide feedback**: Use `gh pr comment` to provide review feedback
+9. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file):
    - If approved: Comment with approval, remove `loom:review-requested` and `loom:reviewing`, add `loom:pr` (blue badge - ready for user to merge)
    - If changes needed: Comment with issues, remove `loom:review-requested` and `loom:reviewing`, add `loom:changes-requested` (amber badge - Fixer will address)
 
@@ -128,6 +143,8 @@ gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 - [ ] I am using `gh pr comment`, NOT `gh pr review`
 - [ ] I am using `gh pr edit` for label changes
 - [ ] I understand `gh pr review --approve` WILL fail with "cannot approve your own PR"
+- [ ] All CI checks pass (verified via `gh pr checks`)
+- [ ] Merge state is CLEAN (verified via `gh pr view --json mergeStateStatus`)
 
 ### Fallback Queue (When No Labeled Work)
 
@@ -207,6 +224,115 @@ fi
 - Provides proactive code review on external contributor PRs
 - Catches issues before they accumulate
 - Respects external PRs by not adding workflow labels
+
+## CI Status Check (REQUIRED Before Approval)
+
+**CRITICAL: Never approve a PR until all CI checks pass.**
+
+Local tests passing is not sufficient - you MUST verify that GitHub Actions CI workflows have completed successfully. This prevents situations where a PR is approved while CI is still running or failing.
+
+### How to Check CI Status
+
+**Step 1: Check all PR checks**
+
+```bash
+gh pr checks <PR_NUMBER>
+```
+
+This shows the status of all CI checks. Look for:
+- ✅ All checks show `pass` - Safe to approve
+- ❌ Any check shows `fail` - Request changes
+- ⏳ Any check shows `pending` - Wait for completion
+
+**Step 2: Verify merge state**
+
+```bash
+gh pr view <PR_NUMBER> --json mergeStateStatus --jq '.mergeStateStatus'
+```
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| `CLEAN` | All checks pass, no conflicts | Safe to approve |
+| `BLOCKED` | Required checks failing | Request changes |
+| `UNSTABLE` | Non-required checks failing | Review if acceptable |
+| `BEHIND` | Branch needs rebase | May need update |
+| `DIRTY` | Merge conflicts | Request changes |
+| `UNKNOWN` | Status not computed yet | Wait and retry |
+
+### When CI Fails
+
+If CI checks are failing, **do NOT approve**. Instead:
+
+```bash
+gh pr comment <number> --body "$(cat <<'EOF'
+❌ **Changes Requested - CI Failing**
+
+The following CI checks are failing:
+
+[LIST THE FAILING CHECKS FROM `gh pr checks` OUTPUT]
+
+Please fix these issues before the PR can be approved. Common causes:
+- Shellcheck warnings in shell scripts
+- TypeScript type errors
+- Failing unit/integration tests
+- Linting violations
+
+I'll review again once CI passes.
+EOF
+)"
+gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
+```
+
+### When CI is Pending
+
+If checks are still running:
+
+1. **Wait for completion** - Don't approve with pending checks
+2. **Check back later** - Note pending status and return
+3. **Document waiting** - Optionally comment that you're waiting for CI
+
+```bash
+# Check if any checks are still pending
+gh pr checks <PR_NUMBER> | grep -E "(pending|queued|in_progress)"
+
+# If pending, wait or check back later
+gh pr comment <number> --body "Code review looks good, waiting for CI checks to complete before approving."
+```
+
+### Example CI Verification Workflow
+
+```bash
+# 1. Check CI status
+gh pr checks 42
+# Example output:
+# ✓ build-and-test   pass   2m35s   https://...
+# ✓ lint             pass   45s     https://...
+# ✓ typecheck        pass   1m12s   https://...
+
+# 2. Verify merge state
+gh pr view 42 --json mergeStateStatus --jq '.mergeStateStatus'
+# Should output: CLEAN
+
+# 3. Only then proceed with approval
+gh pr comment 42 --body "✅ **Approved!** All CI checks pass, code looks great."
+gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
+```
+
+### Why CI Verification Matters
+
+**Scenario that caused this requirement (Issue #1441):**
+1. Doctor fixed a Rust test, pushed changes
+2. Judge reviewed, saw local tests pass, approved with `loom:pr`
+3. CI was still failing (shellcheck, frontend tests)
+4. Had to run multiple doctor passes to fix remaining failures
+
+**The lesson:** Local tests may pass while CI fails due to:
+- Different test environments (CI has more checks)
+- Shellcheck or lint rules not run locally
+- Integration tests that only run in CI
+- Platform-specific issues (CI runs on different OS)
+
+**Always verify `gh pr checks` before approving.**
 
 ## Review Focus Areas
 
@@ -714,3 +840,9 @@ After completing your iteration (reviewing a PR and updating labels), execute:
 - ✅ **After completing a review** (PR approved or changes requested)
 - ✅ **When no work is available** (no PRs to review)
 - ❌ **NOT during active work** (only after iteration is complete)
+
+## Completion
+
+**Work completion is detected automatically.**
+
+When you complete your task (PR reviewed and labeled with `loom:pr` or `loom:changes-requested`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.

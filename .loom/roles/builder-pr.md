@@ -173,7 +173,138 @@ Summary: 47 passed, 3 failed, 50 total
 
 This gives you all the information needed to fix issues without wasting tokens on verbose output.
 
+## Acceptance Criteria Verification: REQUIRED Before PR Creation
+
+**CRITICAL:** Before creating a PR, you MUST explicitly verify that ALL acceptance criteria from the issue are met. This prevents incomplete PRs that require manual intervention during review.
+
+### Why This Matters
+
+During orchestration, incomplete PRs cause:
+- CI failures when criteria are missed
+- Manual intervention mid-workflow
+- Wasted review cycles
+- Shepherd/Judge time spent on fixable issues
+
+**Example failure**: Issue #1441 listed 4 shellcheck warnings to fix. Builder fixed 3/4, missed `cli/loom-start.sh:47`, requiring manual fixes after CI failed.
+
+### Step 1: Extract Acceptance Criteria
+
+Before starting implementation, extract ALL acceptance criteria from the issue:
+
+**Look for these patterns in issue body and comments:**
+
+| Pattern | Example |
+|---------|---------|
+| Checkbox items | `- [ ] Fix shellcheck warning in file.sh` |
+| Numbered requirements | `1. Add validation to input` |
+| "must"/"should"/"required" statements | `Must handle edge case X` |
+| Explicit test conditions | `Verify that Y works when Z` |
+| File-specific changes | `Update config.json to include...` |
+
+**Create a working checklist:**
+
+```markdown
+## My Acceptance Criteria Checklist
+
+From issue #123:
+- [ ] Fix shellcheck warning in `scripts/build.sh:42`
+- [ ] Fix shellcheck warning in `scripts/test.sh:15`
+- [ ] Fix shellcheck warning in `scripts/deploy.sh:88`
+- [ ] All `find ... -exec shellcheck` returns 0 warnings
+```
+
+### Step 2: Verify Each Criterion During Implementation
+
+As you complete each item, explicitly verify it works:
+
+```bash
+# Example: Issue says "Fix all shellcheck warnings in scripts/"
+# DON'T just fix what you find - verify the COMPLETE list from the issue
+
+# If issue lists specific files:
+shellcheck scripts/build.sh    # Check file 1
+shellcheck scripts/test.sh     # Check file 2
+shellcheck scripts/deploy.sh   # Check file 3
+# etc. - check EVERY file mentioned
+
+# If issue says "all shellcheck warnings":
+find scripts -name "*.sh" -exec shellcheck {} \; 2>&1 | grep -c "error\|warning"
+# Must return 0
+```
+
+### Step 3: Pre-PR Verification Checklist
+
+**BEFORE running `gh pr create`, complete this checklist:**
+
+```markdown
+## Pre-PR Verification
+
+Issue #123 acceptance criteria:
+
+1. [ ] Criterion A - Verified by: [describe how you checked]
+2. [ ] Criterion B - Verified by: [describe how you checked]
+3. [ ] Criterion C - Verified by: [describe how you checked]
+
+Local verification:
+- [ ] `pnpm check:ci` passes (or equivalent)
+- [ ] Relevant tests pass
+- [ ] Each criterion has explicit verification (not "I think it works")
+```
+
+### Step 4: Document Verification in PR Description
+
+Include criterion verification in your PR description:
+
+```markdown
+## Summary
+Fix shellcheck warnings in deployment scripts.
+
+## Acceptance Criteria Verification
+
+| Criterion | Status | Verification |
+|-----------|--------|--------------|
+| Fix `scripts/build.sh:42` | ✅ | `shellcheck scripts/build.sh` returns no warnings |
+| Fix `scripts/test.sh:15` | ✅ | `shellcheck scripts/test.sh` returns no warnings |
+| Fix `scripts/deploy.sh:88` | ✅ | `shellcheck scripts/deploy.sh` returns no warnings |
+| All warnings resolved | ✅ | `find scripts -name "*.sh" -exec shellcheck {} \;` returns 0 |
+
+Closes #123
+```
+
+### Common Verification Commands
+
+| Criterion Type | Verification Command |
+|----------------|---------------------|
+| Shellcheck fixes | `shellcheck <file>` or `find ... -exec shellcheck {} \;` |
+| TypeScript errors | `pnpm tsc --noEmit` |
+| Lint issues | `pnpm lint` or scoped `biome check <file>` |
+| Test passes | `pnpm test -- <pattern>` |
+| File exists/content | `cat <file>` or `grep <pattern> <file>` |
+| Config changes | Read file and verify expected content |
+
+### Red Flags: Don't Create PR Yet
+
+**STOP and verify if:**
+- You haven't explicitly checked each criterion from the issue
+- You're unsure if a criterion is met ("it should work")
+- The issue mentions files you haven't touched
+- CI might fail on something you didn't test locally
+
+**Instead:**
+1. Go back to Step 1 and re-extract criteria
+2. Verify each one explicitly
+3. Only then create the PR
+
+---
+
 ## Creating Pull Requests: Label and Auto-Close Requirements
+
+> **CRITICAL**: PRs MUST include `Closes #N` (or `Fixes #N` / `Resolves #N`) in the body.
+> This is required for:
+> 1. GitHub to auto-close the issue when the PR merges
+> 2. **Shepherd orchestration to detect your PR during phase validation**
+>
+> Without this keyword, shepherd phase validation cannot find your PR and will report false failures.
 
 ### PR Label Rules
 
@@ -259,12 +390,13 @@ GitHub's auto-close feature only works with specific keywords at the start of a 
 
 When creating a PR, verify:
 
-1. PR description uses "Closes #X" syntax (not "Issue #X" or "Addresses #X")
-2. Issue number is correct
-3. PR has `loom:review-requested` label
-4. All CI checks pass (`pnpm check:ci` locally)
-5. Changes match issue requirements
-6. Tests added/updated as needed
+1. **Acceptance criteria verified** - Each criterion from issue explicitly checked (see "Acceptance Criteria Verification" above)
+2. PR description uses "Closes #X" syntax (not "Issue #X" or "Addresses #X")
+3. Issue number is correct
+4. PR has `loom:review-requested` label
+5. All CI checks pass (`pnpm check:ci` locally)
+6. PR description includes verification table for each criterion
+7. Tests added/updated as needed
 
 ### Creating the PR
 
@@ -279,6 +411,13 @@ Brief description of what this PR does and why.
 - Change 2
 - Change 3
 
+## Acceptance Criteria Verification
+
+| Criterion | Status | Verification |
+|-----------|--------|--------------|
+| Criterion 1 from issue | ✅ | How you verified it |
+| Criterion 2 from issue | ✅ | How you verified it |
+
 ## Test Plan
 How you verified the changes work.
 
@@ -287,7 +426,9 @@ EOF
 )"
 ```
 
-**Remember**: Put "Closes #123" on its own line in the PR description. This ensures GitHub recognizes it and auto-closes the issue when the PR merges.
+**Remember**:
+- Put "Closes #123" on its own line in the PR description
+- Include the acceptance criteria verification table showing each criterion was checked
 
 ## Handling Pre-existing Lint/Build Failures
 

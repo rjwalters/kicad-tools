@@ -13,6 +13,8 @@ Follow the complete role definition in `.loom/roles/judge.md` for:
 - Finding PRs with `gh pr list --label="loom:review-requested"`
 - Checkout and review process
 - Running `pnpm check:ci` for CI validation
+- **Verifying CI passes** with `gh pr checks` before approval (REQUIRED)
+- **Checking merge state** with `gh pr view --json mergeStateStatus` (must be CLEAN)
 - Code quality and security assessment
 - Approval workflow: `gh pr review --approve`, update labels (remove `loom:review-requested`, add `loom:pr`)
 - Change request workflow: `gh pr review --request-changes`, update labels (remove `loom:review-requested`, add `loom:changes-requested`)

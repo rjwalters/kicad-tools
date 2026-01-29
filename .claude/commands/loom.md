@@ -11,7 +11,13 @@ Arguments provided: `{{ARGUMENTS}}`
 ### Mode Selection Decision Tree
 
 ```
-IF arguments contain "iterate":
+IF arguments contain "health":
+    -> Execute HEALTH CHECK (immediate command)
+    -> Run: ./.loom/scripts/daemon-health.sh
+    -> Display formatted health report and EXIT
+    -> DO NOT start daemon loop
+
+ELSE IF arguments contain "iterate":
     -> Execute ITERATION MODE
     -> Read and follow: .claude/commands/loom-iteration.md
     -> Run exactly ONE iteration with fresh context
@@ -33,7 +39,7 @@ ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --force"):
 
 - **Parent mode** (`/loom` or `/loom --force`): You run a thin loop that spawns subagents
   - Parent accumulates only ~100 bytes per iteration (summaries)
-  - All heavy work (gh commands, TaskOutput, spawning) happens in subagents
+  - All heavy work (gh commands, spawning) happens in subagents
   - Can run for hours/days without hitting context limits
 
 - **Iteration mode** (`/loom iterate` or `/loom iterate --force`): You execute ONE iteration
@@ -46,10 +52,17 @@ ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --force"):
 - Eventually hits context limits after a few hours
 - System becomes unresponsive and requires restart
 
+**FAILURE MODE TO AVOID**: Starting a second daemon instance (dual-daemon conflict):
+- When a Claude Code session runs out of context and auto-continues, the continuation may re-invoke `/loom`
+- Two daemon instances competing for `daemon-state.json` causes state corruption
+- **Always check for existing daemon before starting** (see `loom-parent.md` for details)
+- The parent loop uses a `daemon_session_id` field to detect and prevent conflicts
+
 ### Check Your Mode Now
 
 Before proceeding, check the arguments: `{{ARGUMENTS}}`
 
+- Contains "health"? -> Run `./.loom/scripts/daemon-health.sh` and report results, then EXIT
 - Contains "iterate"? -> Read `.claude/commands/loom-iteration.md` and execute iteration mode
 - No "iterate"? -> Read `.claude/commands/loom-parent.md` and execute parent loop mode
 
@@ -70,9 +83,9 @@ Before proceeding, check the arguments: `{{ARGUMENTS}}`
 |  Tier 2: Iteration Subagent (fresh ctx) |
 |  1. Read .loom/daemon-state.json        |
 |  2. Assess system (gh commands)         |
-|  3. Check completions (TaskOutput)      |
+|  3. Check tmux worker completions       |
 |  4. Auto-promote proposals (force mode) |
-|  5. Spawn shepherds (Task, background)  |
+|  5. Spawn shepherds (tmux workers)      |
 |  6. Spawn work generation               |
 |  7. Demand-based support role spawning  |
 |  8. Interval-based support role spawn   |
@@ -83,9 +96,10 @@ Before proceeding, check the arguments: `{{ARGUMENTS}}`
 
 **Why this architecture?**
 - Parent accumulates only ~100 bytes per iteration (summaries)
-- Each iteration gets fresh context (all gh/TaskOutput calls)
+- Each iteration gets fresh context (all gh calls)
 - Can run for hours/days without context compaction
 - State continuity maintained via JSON file
+- All workers run in attachable tmux sessions (observable via `tmux -L loom attach`)
 
 ## Your Role
 
@@ -120,6 +134,7 @@ You do NOT require human input for any of the above. The only human intervention
 | `/loom iterate` | Execute single iteration (used by parent loop) |
 | `/loom iterate --force` | Single iteration with force mode |
 | `/loom iterate --debug` | Single iteration with verbose debug logging |
+| `/loom health` | Run diagnostic health check (state, pipeline, support roles) |
 | `/loom status` | Report current state without running loop |
 | `/loom stop` | Create stop signal, initiate shutdown |
 

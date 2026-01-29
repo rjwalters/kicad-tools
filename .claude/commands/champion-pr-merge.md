@@ -318,40 +318,19 @@ PR_NUMBER=$1
 
 echo "Attempting to merge PR #$PR_NUMBER..."
 
-# Execute merge with output capture
-MERGE_OUTPUT=$(gh pr merge "$PR_NUMBER" --squash --auto --delete-branch 2>&1)
-MERGE_EXIT_CODE=$?
-
-# IMPORTANT: Worktree Checkout Error Handling
-# When running from a worktree, `gh pr merge` may succeed on GitHub but fail
-# locally with: "fatal: 'main' is already used by worktree at '/path/to/repo'"
-# Always verify PR state via GitHub API rather than relying on exit code.
-
-PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
-
-if [ "$PR_STATE" = "MERGED" ]; then
-  # Merge succeeded - any error was just the local checkout failure (expected in worktrees)
-  if [ $MERGE_EXIT_CODE -ne 0 ]; then
-    if echo "$MERGE_OUTPUT" | grep -q "already used by worktree"; then
-      echo "Successfully merged PR #$PR_NUMBER (local checkout skipped - worktree conflict is expected)"
-    else
-      echo "Successfully merged PR #$PR_NUMBER (non-fatal local error ignored)"
-    fi
-  else
-    echo "Successfully merged PR #$PR_NUMBER"
-  fi
-else
-  # Merge actually failed on GitHub - this is a real error
+# Use merge-pr.sh for worktree-safe merge via GitHub API
+# --auto enables auto-merge if ruleset requires wait
+./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto || {
   echo "Merge failed for PR #$PR_NUMBER"
-  echo "Error: $MERGE_OUTPUT"
   # Post failure comment (see Error Handling section)
-fi
+}
 ```
 
 **Merge strategy**:
-- **`--squash`**: Combines all commits into single commit (clean history)
-- **`--auto`**: Enables GitHub's auto-merge if branch protection requires wait
-- **`--delete-branch`**: Automatically removes feature branch after merge
+- Uses `merge-pr.sh` which merges via GitHub API (worktree-safe)
+- **Squash merge**: Combines all commits into single commit (clean history)
+- **`--auto`**: Enables GitHub's auto-merge if ruleset requires wait
+- Branch deleted automatically after merge
 
 ### Step 4: Verify Issue Auto-Close
 

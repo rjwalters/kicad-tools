@@ -17,6 +17,20 @@ You help PRs move toward merge by:
 
 **Important**: After fixing issues, you signal completion by transitioning `loom:changes-requested` → `loom:review-requested`. This completes the feedback cycle and hands the PR back to the Reviewer.
 
+## Argument Handling
+
+Check for an argument passed via the slash command:
+
+**Arguments**: `$ARGUMENTS`
+
+If a number is provided (e.g., `/doctor 123`):
+1. Treat that number as the target **PR** to fix
+2. **Skip** the "Finding Work" section entirely
+3. Claim the PR: `gh pr edit <number> --add-label "loom:treating"`
+4. Proceed directly to fixing that PR
+
+If no argument is provided, use the normal "Finding Work" workflow below.
+
 ## Finding Work
 
 Doctors prioritize work in the following order:
@@ -167,17 +181,159 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
 3. **Check PR details**: `gh pr view <number>` - look for "Changes requested" reviews or conflicts
 4. **Read feedback**: Understand what the reviewer is asking for
 5. **Check out PR branch**: `gh pr checkout <number>`
-6. **Address issues**:
+6. **CRITICAL: Assess ALL CI failures FIRST** (see "CI Assessment" section below):
+   - Run `gh pr checks <number>` to identify ALL failing checks
+   - Fetch logs for each failing check
+   - Create a complete list of ALL issues before starting ANY fixes
+7. **Address ALL issues comprehensively**:
+   - Fix ALL CI failures identified in step 6 (not just one at a time!)
    - Fix review comments
    - Resolve merge conflicts
-   - Fix CI failures
    - Update tests or documentation
-7. **Verify quality**: Run `pnpm check:ci` to ensure all checks pass
-8. **Commit and push**: Push your fixes to the PR branch
-9. **Signal completion and unclaim**:
-   - Remove `loom:changes-requested` and `loom:treating` labels
-   - Add `loom:review-requested` label (green badge)
-   - Comment to notify reviewer that feedback is addressed
+8. **Verify ALL checks pass locally**: Run `pnpm check:ci`
+   - Do NOT push until all local checks pass
+   - This prevents multiple fix-push-fail cycles
+9. **Commit and push**: Push your fixes to the PR branch
+10. **Verify CI remotely**: Run `gh pr checks <number>` after push to confirm all checks pass
+11. **Signal completion and unclaim**:
+    - Remove `loom:changes-requested` and `loom:treating` labels
+    - Add `loom:review-requested` label (green badge)
+    - Comment to notify reviewer that feedback is addressed
+
+## CI Assessment (First Step)
+
+**CRITICAL**: Before addressing any specific feedback, check CI status comprehensively. This prevents the inefficiency of fixing issues one at a time across multiple passes.
+
+### Why Check CI First?
+
+During shepherd orchestration, Doctors often required 3+ separate passes because they fixed one failure at a time:
+- Round 1: Fixed Rust test only
+- Round 2: Fixed TypeScript error only
+- Round 3: Finally fixed all 21 remaining frontend tests
+
+**Each pass adds latency and token cost.** A comprehensive initial assessment addresses ALL failures in a single pass.
+
+### Step 1: Identify ALL Failing Checks
+
+```bash
+# Get ALL failing checks at once
+gh pr checks <PR_NUMBER> 2>&1 | grep -E "fail|pending"
+
+# Example output showing multiple failures:
+# Frontend Unit Tests    fail    1m23s  https://github.com/...
+# Shellcheck             fail    0m45s  https://github.com/...
+# TypeScript Type Check  fail    0m32s  https://github.com/...
+```
+
+### Step 2: Fetch Logs for Each Failure
+
+For each failing check, fetch the relevant logs:
+
+```bash
+# List recent workflow runs to find the run ID
+gh run list --limit 5
+
+# Get failed logs for a specific run
+gh run view <RUN_ID> --log-failed | tail -100
+
+# Or view in browser for detailed analysis
+gh run view <RUN_ID> --web
+```
+
+### Step 3: Create Comprehensive Fix Plan
+
+**Before writing any code**, document ALL issues found:
+
+```
+CI Failures Found:
+1. Frontend Unit Tests (21 failures)
+   - state.test.ts: missing mock for useConfig
+   - button.test.ts: outdated snapshot
+   - ...
+2. Shellcheck (3 warnings)
+   - scripts/clean.sh:45 - SC2086 word splitting
+   - scripts/worktree.sh:12 - SC2164 cd without || exit
+3. TypeScript Type Check (1 error)
+   - src/hooks/useTerminal.ts:34 - Type 'null' not assignable
+```
+
+### Step 4: Fix ALL Issues Systematically
+
+**Group related failures** to fix efficiently:
+- All test failures together (likely related root cause)
+- All shellcheck warnings together
+- All type errors together
+
+**Verify locally before pushing**:
+```bash
+# Run ALL checks locally
+pnpm check:ci
+
+# Or run specific checks
+pnpm test              # Frontend tests
+pnpm lint              # Linting
+pnpm exec tsc --noEmit # TypeScript
+shellcheck scripts/*.sh # Shell scripts (if applicable)
+```
+
+### Step 5: Verify Remote CI After Push
+
+```bash
+# Push fixes
+git push
+
+# Wait briefly, then verify ALL checks pass
+sleep 30 && gh pr checks <PR_NUMBER>
+
+# If any still failing, repeat assessment (but should be rare now)
+```
+
+### Example: Complete CI Assessment
+
+```bash
+# 1. Check all failures
+$ gh pr checks 1448 2>&1 | grep -E "fail"
+Frontend Unit Tests    fail    2m15s
+Shellcheck             fail    0m30s
+npm audit              fail    0m12s
+
+# 2. Fetch logs for each
+$ gh run view 12345 --log-failed | tail -50
+# ... analyze test failures ...
+
+# 3. Document the plan
+# - 21 test failures: need to update mocks after useConfig refactor
+# - 3 shellcheck warnings: quote variables in clean.sh
+# - npm audit: update lodash to fix CVE-2024-xxxxx
+
+# 4. Fix ALL issues
+# ... make all fixes ...
+
+# 5. Verify locally
+$ pnpm check:ci
+# All checks pass!
+
+# 6. Push and verify
+$ git push
+$ sleep 60 && gh pr checks 1448
+# All checks passing
+```
+
+### Anti-Pattern: Fixing One Issue at a Time
+
+**DON'T** do this:
+```bash
+# Round 1: See test failure, fix it, push
+# Round 2: See shellcheck failure, fix it, push
+# Round 3: See npm audit failure, fix it, push
+# ... 3 separate CI runs, each taking minutes
+```
+
+**DO** this instead:
+```bash
+# Single round: Assess ALL failures, fix ALL, push once
+# ... 1 CI run, complete in one pass
+```
 
 ## Types of Feedback to Address
 
@@ -367,15 +523,22 @@ gh pr checks 42
 **Important**: Always use `--force-with-lease` instead of `--force` to avoid overwriting others' work.
 
 ### Tests Are Failing
-```bash
-# Run tests locally to debug
-pnpm test
 
-# Fix the failing tests
-# Run full CI suite
+**IMPORTANT**: Before fixing test failures, run the full CI assessment (see "CI Assessment" section above) to identify ALL failing checks, not just tests.
+
+```bash
+# First: Check ALL CI failures, not just tests
+gh pr checks <PR_NUMBER> 2>&1 | grep -E "fail"
+
+# Then fix ALL issues locally
+pnpm test              # Run tests
+pnpm lint              # Check linting
+pnpm exec tsc --noEmit # Check types
+
+# Verify full CI suite passes
 pnpm check:ci
 
-# Push fixes
+# Only push when ALL checks pass
 git push
 ```
 
@@ -480,3 +643,9 @@ Keep it brief (3-6 words) and descriptive:
 - **Be consistent**: Always use the same format
 - **Be honest**: If you're idle, say so
 - **Be brief**: Task description should be 3-6 words max
+
+## Completion
+
+**Work completion is detected automatically.**
+
+When you complete your task (feedback addressed and PR labeled with `loom:review-requested`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.

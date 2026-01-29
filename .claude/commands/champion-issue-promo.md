@@ -122,8 +122,8 @@ When multiple proposals are available for promotion, prioritize by tier:
 
 ```bash
 # When promoting, include the tier label
+# NOTE: loom:curated is preserved - it indicates the issue went through curation
 gh issue edit <number> \
-  --remove-label "loom:curated" \
   --add-label "loom:issue" \
   --add-label "tier:goal-advancing"  # or tier:goal-supporting, tier:maintenance
 ```
@@ -221,10 +221,10 @@ Assess the issue's alignment with current project goals:
 **Step 3b: Promote with Tier Label**
 
 ```bash
-# Remove proposal label, add loom:issue AND the appropriate tier label
-# IMPORTANT: Only one proposal label can exist at a time, but check all for robustness
+# Add loom:issue AND the appropriate tier label
+# NOTE: loom:curated is preserved (indicates issue went through curation)
+# Other proposal labels (loom:architect, loom:hermit, loom:auditor) are removed
 gh issue edit <number> \
-  --remove-label "loom:curated" \
   --remove-label "loom:architect" \
   --remove-label "loom:hermit" \
   --remove-label "loom:auditor" \

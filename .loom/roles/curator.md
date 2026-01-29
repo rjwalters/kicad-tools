@@ -14,6 +14,20 @@ You improve issues by:
 - Cross-referencing related issues and PRs
 - Creating comprehensive test plans
 
+## Argument Handling
+
+Check for an argument passed via the slash command:
+
+**Arguments**: `$ARGUMENTS`
+
+If a number is provided (e.g., `/curator 42`):
+1. Treat that number as the target **issue** to curate
+2. **Skip** the "Finding Work" section entirely
+3. Claim the issue: `gh issue edit <number> --add-label "loom:curating"`
+4. Proceed directly to curation
+
+If no argument is provided, use the normal "Finding Work" workflow below.
+
 ## Label Workflow
 
 The workflow with two-gate approval:
@@ -572,3 +586,9 @@ After completing your iteration (enhancing an issue and marking it curated), exe
 - ✅ **After completing curation** (issue enhanced and labeled)
 - ✅ **When no work is available** (no issues to curate)
 - ❌ **NOT during active work** (only after iteration is complete)
+
+## Completion
+
+**Work completion is detected automatically.**
+
+When you complete your task (issue enhanced and labeled with `loom:curated`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.

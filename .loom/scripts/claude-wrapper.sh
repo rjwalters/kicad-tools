@@ -10,6 +10,7 @@
 # - Error pattern detection for known transient failures
 # - Exponential backoff with configurable parameters
 # - Graceful shutdown via stop signal file
+# - Working directory recovery (handles deleted worktrees)
 # - Detailed logging for debugging
 #
 # Usage:
@@ -34,7 +35,8 @@ MULTIPLIER="${LOOM_BACKOFF_MULTIPLIER:-2}"
 
 # Terminal identification for stop signals
 TERMINAL_ID="${LOOM_TERMINAL_ID:-}"
-WORKSPACE="${LOOM_WORKSPACE:-$(pwd)}"
+# Note: WORKSPACE may fail if CWD is invalid at startup - recover_cwd handles this
+WORKSPACE="${LOOM_WORKSPACE:-$(pwd 2>/dev/null || echo "$HOME")}"
 
 # Logging helpers
 log_info() {
@@ -47,6 +49,50 @@ log_warn() {
 
 log_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" >&2
+}
+
+# Recover from deleted working directory
+# This handles the case where the agent's worktree is deleted while it's running
+# (e.g., by clean.sh, merge-pr.sh, or agent-destroy.sh)
+recover_cwd() {
+    # Check if current directory is still valid
+    if pwd &>/dev/null 2>&1; then
+        return 0  # CWD is fine, nothing to do
+    fi
+
+    log_warn "Working directory deleted, attempting recovery..."
+
+    # Try WORKSPACE first (set by agent-spawn.sh, may point to repo root)
+    if [[ -n "${WORKSPACE:-}" ]] && [[ -d "$WORKSPACE" ]]; then
+        if cd "$WORKSPACE" 2>/dev/null; then
+            log_info "Recovered to workspace: $WORKSPACE"
+            return 0
+        fi
+    fi
+
+    # Try to find git root (may fail if CWD context is completely gone)
+    local git_root
+    if git_root=$(git rev-parse --show-toplevel 2>/dev/null) && [[ -d "$git_root" ]]; then
+        if cd "$git_root" 2>/dev/null; then
+            log_info "Recovered to git root: $git_root"
+            return 0
+        fi
+    fi
+
+    # Last resort: home directory
+    if cd "$HOME" 2>/dev/null; then
+        log_warn "Recovered to HOME (worktree likely removed): $HOME"
+        return 0
+    fi
+
+    # Absolute last resort: /tmp
+    if cd /tmp 2>/dev/null; then
+        log_warn "Recovered to /tmp (all other recovery paths failed)"
+        return 0
+    fi
+
+    log_error "Failed to recover working directory - all recovery paths failed"
+    return 1
 }
 
 # Check if stop signal exists (graceful shutdown support)
@@ -175,10 +221,22 @@ run_with_retry() {
     local exit_code=0
     local output=""
 
+    # Recover CWD if it was deleted before we started
+    if ! recover_cwd; then
+        log_error "Cannot proceed - working directory recovery failed"
+        return 1
+    fi
+
     log_info "Starting Claude CLI with resilient wrapper"
     log_info "Configuration: max_retries=${MAX_RETRIES}, initial_wait=${INITIAL_WAIT}s, max_wait=${MAX_WAIT}s, multiplier=${MULTIPLIER}x"
 
     while [[ "${attempt}" -le "${MAX_RETRIES}" ]]; do
+        # Recover CWD if it was deleted during previous attempt or backoff
+        if ! recover_cwd; then
+            log_error "Cannot proceed - working directory recovery failed"
+            return 1
+        fi
+
         # Check for stop signal before each attempt
         if check_stop_signal; then
             log_info "Stop signal detected - exiting gracefully"
@@ -194,10 +252,12 @@ run_with_retry() {
         temp_output=$(mktemp)
 
         # Run claude with all arguments passed to wrapper
-        # Use script or unbuffer to preserve interactivity if available
+        # Use macOS `script` to preserve TTY (so Claude CLI sees isatty(stdout) = true)
+        # while still capturing output to a file. A plain pipe (`| tee`) would replace
+        # stdout with a pipe fd, causing Claude to switch to non-interactive --print mode.
         set +e  # Temporarily disable errexit to capture exit code
-        claude "$@" 2>&1 | tee "${temp_output}"
-        exit_code="${PIPESTATUS[0]}"
+        script -q "${temp_output}" claude "$@"
+        exit_code=$?
         set -e
 
         output=$(cat "${temp_output}")

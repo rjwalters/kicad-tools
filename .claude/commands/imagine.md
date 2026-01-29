@@ -227,15 +227,10 @@ PR_NUMBER=$(gh pr list --label "loom:review-requested" --json number --jq '.[0].
 
 if [ -n "$PR_NUMBER" ]; then
   echo "Merging Loom installation PR #$PR_NUMBER..."
-  gh pr merge "$PR_NUMBER" --squash --admin --delete-branch
-
-  # Verify merge
-  PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
-  if [ "$PR_STATE" = "MERGED" ]; then
-    echo "Loom installed successfully"
-  else
+  ./.loom/scripts/merge-pr.sh "$PR_NUMBER" || {
     echo "WARNING: PR merge may have failed, please check manually"
-  fi
+  }
+  echo "Loom installed successfully"
 else
   echo "WARNING: Could not find Loom installation PR"
 fi

@@ -337,10 +337,57 @@ if [[ -d "$WORKTREE_PATH" ]]; then
 
     # Check if it's registered with git
     if git worktree list | grep -q "$WORKTREE_PATH"; then
-        print_info "Worktree is registered with git"
-        echo ""
-        print_info "To use this worktree: cd $WORKTREE_PATH"
-        exit 0
+        # Check if worktree is stale: no commits ahead of main and behind main
+        local_commits_ahead=$(git -C "$WORKTREE_PATH" rev-list --count "origin/main..HEAD" 2>/dev/null) || local_commits_ahead="0"
+        local_commits_behind=$(git -C "$WORKTREE_PATH" rev-list --count "HEAD..origin/main" 2>/dev/null) || local_commits_behind="0"
+        local_uncommitted=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null) || local_uncommitted=""
+
+        if [[ "$local_commits_ahead" == "0" && "$local_commits_behind" -gt 0 && -z "$local_uncommitted" ]]; then
+            # Stale worktree: no work done, behind main, no uncommitted changes
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_warning "Stale worktree detected (0 commits ahead, $local_commits_behind behind main, no uncommitted changes)"
+                print_info "Removing stale worktree and recreating from current main..."
+            fi
+
+            # Remove the stale worktree
+            local_branch=$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null) || local_branch=""
+            git worktree remove "$WORKTREE_PATH" --force 2>/dev/null || {
+                print_error "Failed to remove stale worktree"
+                exit 1
+            }
+
+            # Delete the empty branch if it exists and has no commits ahead
+            if [[ -n "$local_branch" && "$local_branch" != "main" ]]; then
+                if git branch -d "$local_branch" 2>/dev/null; then
+                    if [[ "$JSON_OUTPUT" != "true" ]]; then
+                        print_info "Removed empty branch: $local_branch"
+                    fi
+                else
+                    # Branch may have diverged or have other references; force-delete only if truly empty
+                    if [[ "$JSON_OUTPUT" != "true" ]]; then
+                        print_warning "Could not delete branch $local_branch (may have upstream references)"
+                    fi
+                fi
+            fi
+
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_success "Stale worktree cleaned up"
+                echo ""
+            fi
+            # Fall through to create fresh worktree below
+        else
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_info "Worktree is registered with git"
+                if [[ "$local_commits_ahead" -gt 0 ]]; then
+                    print_info "Worktree has $local_commits_ahead commit(s) ahead of main - preserving existing work"
+                elif [[ -n "$local_uncommitted" ]]; then
+                    print_info "Worktree has uncommitted changes - preserving existing work"
+                fi
+                echo ""
+                print_info "To use this worktree: cd $WORKTREE_PATH"
+            fi
+            exit 0
+        fi
     else
         print_error "Directory exists but is not a registered worktree"
         echo ""

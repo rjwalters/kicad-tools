@@ -7,7 +7,7 @@
 #
 # Features:
 # - Creates tmux sessions with predictable names (loom-<name>)
-# - Uses dedicated tmux socket (-L loom-agents) for isolation
+# - Uses shared tmux socket (-L loom) for unified session visibility
 # - Captures all output to .loom/logs/<session-name>.log
 # - Integrates with signal.sh for graceful shutdown
 # - Wraps Claude CLI with claude-wrapper.sh for resilience
@@ -15,6 +15,7 @@
 #
 # Usage:
 #   agent-spawn.sh --role <role> --name <name> [--args "<args>"] [--worktree <path>]
+#   agent-spawn.sh --role <role> --name <name> --on-demand [--wait [--timeout <s>]]
 #   agent-spawn.sh --check <name>
 #   agent-spawn.sh --help
 #
@@ -25,18 +26,22 @@
 #   # Spawn a builder agent in a worktree
 #   agent-spawn.sh --role builder --args "42" --name builder-1 --worktree .loom/worktrees/issue-42
 #
+#   # Spawn an ephemeral on-demand worker and wait for completion
+#   agent-spawn.sh --role builder --name builder-issue-42 --args "42" --on-demand --wait --timeout 1800
+#
 #   # Check if a session exists
 #   agent-spawn.sh --check shepherd-1
 #
 #   # Attach to a running session
-#   tmux -L loom-agents attach -t loom-shepherd-1
+#   tmux -L loom attach -t loom-shepherd-1
 
 set -euo pipefail
 
 # Configuration
-TMUX_SOCKET="loom-agents"
+TMUX_SOCKET="loom"
 SESSION_PREFIX="loom-"
-STARTUP_WAIT_SECONDS=3
+READINESS_TIMEOUT_SECONDS=30
+STUCK_SESSION_THRESHOLD_SECONDS=${LOOM_STUCK_SESSION_THRESHOLD:-300}  # 5 minutes
 
 # Colors for output
 RED='\033[0;31m'
@@ -93,6 +98,11 @@ ${YELLOW}OPTIONS:${NC}
     --name <name>       Session identifier (used in tmux session name: loom-<name>)
     --args "<args>"     Arguments to pass to the role slash command
     --worktree <path>   Path to git worktree (agent runs in isolated worktree)
+    --on-demand         Mark session as ephemeral (for agent-destroy.sh cleanup)
+    --fresh             Force new session even if one already exists (kills stuck sessions)
+    --wait              Block until agent completes (requires agent-wait.sh)
+    --timeout <seconds> Timeout for --wait (default: 3600)
+    --json              Output spawn result as JSON
     --check <name>      Check if session exists (exit 0 if yes, 1 if no)
     --list              List all active loom-agent sessions
     --help              Show this help message
@@ -108,6 +118,10 @@ ${YELLOW}EXAMPLES:${NC}
     # Spawn a support role (judge, champion, etc.) from main repo
     agent-spawn.sh --role judge --name judge-1
 
+    # Spawn ephemeral worker, wait for completion, get JSON result
+    agent-spawn.sh --role builder --name builder-issue-42 --args "42" \\
+        --worktree .loom/worktrees/issue-42 --on-demand --wait --timeout 1800 --json
+
     # Check if a session exists
     agent-spawn.sh --check shepherd-1
 
@@ -115,7 +129,7 @@ ${YELLOW}EXAMPLES:${NC}
     agent-spawn.sh --list
 
     # Attach to a running session
-    tmux -L loom-agents attach -t loom-shepherd-1
+    tmux -L loom attach -t loom-shepherd-1
 
     # Stop a session gracefully
     ./.loom/scripts/signal.sh stop shepherd-1
@@ -125,9 +139,10 @@ ${YELLOW}ENVIRONMENT:${NC}
     LOOM_INITIAL_WAIT      - Initial wait time in seconds (default: 60)
     LOOM_MAX_WAIT          - Maximum wait time in seconds (default: 1800)
     LOOM_BACKOFF_MULTIPLIER - Backoff multiplier (default: 2)
+    LOOM_STUCK_SESSION_THRESHOLD - Seconds before idle session is considered stuck (default: 300)
 
 ${YELLOW}TMUX ARCHITECTURE:${NC}
-    Socket: -L loom-agents (separate from user's default and daemon's socket)
+    Socket: -L loom (shared with CLI tools for unified visibility)
     Session naming: loom-<name> where <name> is the --name parameter
     Output capture: .loom/logs/<session-name>.log via pipe-pane
 
@@ -254,6 +269,109 @@ cleanup_dead_session() {
 
     log_info "Cleaning up dead session: $session_name"
     tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+}
+
+# Check if an existing session is stuck (idle with no claude activity)
+# Returns 0 if stuck, 1 if healthy
+session_is_stuck() {
+    local name="$1"
+    local repo_root="$2"
+    local session_name="${SESSION_PREFIX}${name}"
+    local log_file="${repo_root}/.loom/logs/${session_name}.log"
+
+    # Check 1: Is claude actually running in this session?
+    local shell_pid
+    shell_pid=$(tmux -L "$TMUX_SOCKET" list-panes -t "$session_name" -F '#{pane_pid}' 2>/dev/null | head -1)
+    if [[ -z "$shell_pid" ]]; then
+        log_warn "Session has no shell PID - considered stuck"
+        return 0
+    fi
+
+    local claude_running=false
+    if pgrep -P "$shell_pid" -f "claude" >/dev/null 2>&1; then
+        claude_running=true
+    else
+        # Check grandchildren (claude-wrapper.sh -> claude)
+        local children
+        children=$(pgrep -P "$shell_pid" 2>/dev/null || true)
+        for child in $children; do
+            if pgrep -P "$child" -f "claude" >/dev/null 2>&1; then
+                claude_running=true
+                break
+            fi
+        done
+    fi
+
+    if [[ "$claude_running" != "true" ]]; then
+        log_warn "No claude process found in session - considered stuck"
+        return 0
+    fi
+
+    # Check 2: Has the log file been written to recently?
+    if [[ -f "$log_file" ]]; then
+        local now
+        now=$(date +%s)
+        local log_mtime
+        # macOS stat syntax
+        if stat -f '%m' "$log_file" >/dev/null 2>&1; then
+            log_mtime=$(stat -f '%m' "$log_file")
+        else
+            # Linux stat syntax
+            log_mtime=$(stat -c '%Y' "$log_file")
+        fi
+        local idle_seconds=$((now - log_mtime))
+
+        if [[ "$idle_seconds" -ge "$STUCK_SESSION_THRESHOLD_SECONDS" ]]; then
+            log_warn "Session log idle for ${idle_seconds}s (threshold: ${STUCK_SESSION_THRESHOLD_SECONDS}s)"
+
+            # Check 3: Look for progress milestones as a secondary signal
+            local progress_dir="${repo_root}/.loom/progress"
+            local has_recent_milestone=false
+            if [[ -d "$progress_dir" ]]; then
+                for pfile in "$progress_dir"/shepherd-*.json; do
+                    [[ -f "$pfile" ]] || continue
+                    local pfile_mtime
+                    if stat -f '%m' "$pfile" >/dev/null 2>&1; then
+                        pfile_mtime=$(stat -f '%m' "$pfile")
+                    else
+                        pfile_mtime=$(stat -c '%Y' "$pfile")
+                    fi
+                    local pfile_age=$((now - pfile_mtime))
+                    if [[ "$pfile_age" -lt "$STUCK_SESSION_THRESHOLD_SECONDS" ]]; then
+                        has_recent_milestone=true
+                        break
+                    fi
+                done
+            fi
+
+            if [[ "$has_recent_milestone" == "true" ]]; then
+                log_info "Recent progress milestone found - session may still be active"
+                return 1  # Not stuck
+            fi
+
+            return 0  # Stuck
+        fi
+    fi
+
+    # Session appears healthy
+    return 1
+}
+
+# Kill a stuck session and clean up
+kill_stuck_session() {
+    local name="$1"
+    local session_name="${SESSION_PREFIX}${name}"
+
+    log_warn "Killing stuck session: $session_name"
+
+    # Attempt graceful shutdown first
+    tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" C-c 2>/dev/null || true
+    sleep 1
+
+    # Force kill
+    tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+
+    log_success "Stuck session killed: $session_name"
 }
 
 # List all loom-agent sessions
@@ -386,9 +504,23 @@ EOF
     log_info "Starting Claude CLI..."
     tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "$claude_cmd" C-m
 
-    # Wait for Claude to initialize
-    log_info "Waiting ${STARTUP_WAIT_SECONDS}s for Claude to initialize..."
-    sleep "$STARTUP_WAIT_SECONDS"
+    # Wait for Claude to be ready by polling for the input prompt indicator
+    local max_wait=$READINESS_TIMEOUT_SECONDS
+    local elapsed=0
+    log_info "Waiting for Claude CLI to become ready (up to ${max_wait}s)..."
+    while [[ $elapsed -lt $max_wait ]]; do
+        # Look for the ❯ prompt character that indicates Claude Code is ready for input
+        if tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null | grep -q '❯'; then
+            log_info "Claude CLI prompt detected after ${elapsed}s"
+            break
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    if [[ $elapsed -ge $max_wait ]]; then
+        log_warn "Claude CLI did not show ready prompt within ${max_wait}s, sending command anyway"
+    fi
 
     # Send the role slash command
     local role_cmd="/${role}"
@@ -398,6 +530,44 @@ EOF
 
     log_info "Sending role command: $role_cmd"
     tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "$role_cmd" C-m
+
+    # Verify the command was actually processed.
+    # Claude Code renders the ❯ prompt character as part of its TUI layout BEFORE
+    # the input handler is ready, so we may have sent the command too early.
+    # Poll for processing indicators to confirm the command is being handled.
+    #
+    # IMPORTANT: We do NOT re-send Enter if the command text is still visible.
+    # The command text often remains visible in terminal scrollback even after
+    # Claude has started processing (it appears in conversation history). Re-sending
+    # Enter mid-processing can cause issues. If the command wasn't consumed, the
+    # session will show no processing indicators and we log a warning.
+    local verify_elapsed=0
+    local verify_max=5
+    local command_processed=false
+
+    sleep 3  # Grace period: Claude needs time to parse skill and load context
+
+    while [[ $verify_elapsed -lt $verify_max ]]; do
+        local pane_content
+        pane_content=$(tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null || true)
+
+        # Check for indicators that the command is being processed:
+        # - Spinner characters (Claude thinking)
+        # - Progress/status text
+        # - Tool use indicators
+        if echo "$pane_content" | grep -qE '⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|Beaming|Loading|● |✓ |◐|◓|◑|◒|thinking|streaming'; then
+            command_processed=true
+            break
+        fi
+
+        sleep 1
+        verify_elapsed=$((verify_elapsed + 1))
+    done
+
+    # Only warn if we truly couldn't confirm processing after all attempts
+    if [[ "$command_processed" != "true" ]]; then
+        log_warn "Could not confirm command processing within $((verify_max + 3))s (agent may still be starting)"
+    fi
 
     log_success "Agent spawned successfully"
     log_info ""
@@ -417,6 +587,11 @@ main() {
     local worktree=""
     local check_name=""
     local do_list=false
+    local on_demand=false
+    local fresh=false
+    local do_wait=false
+    local wait_timeout=3600
+    local json_output=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -436,6 +611,26 @@ main() {
             --worktree)
                 worktree="$2"
                 shift 2
+                ;;
+            --on-demand)
+                on_demand=true
+                shift
+                ;;
+            --fresh)
+                fresh=true
+                shift
+                ;;
+            --wait)
+                do_wait=true
+                shift
+                ;;
+            --timeout)
+                wait_timeout="$2"
+                shift 2
+                ;;
+            --json)
+                json_output=true
+                shift
                 ;;
             --check)
                 check_name="$2"
@@ -528,10 +723,21 @@ main() {
 
     # Handle idempotency - check if session already exists
     if session_exists "$name"; then
-        if session_is_alive "$name"; then
-            log_success "Session already exists and is running: ${SESSION_PREFIX}${name}"
-            log_info "Attach:  tmux -L $TMUX_SOCKET attach -t ${SESSION_PREFIX}${name}"
-            exit 0
+        if [[ "$fresh" == "true" ]]; then
+            log_info "Fresh session requested - killing existing session: ${SESSION_PREFIX}${name}"
+            kill_stuck_session "$name"
+        elif session_is_alive "$name"; then
+            # Session exists and has windows - check if it's actually making progress
+            log_info "Checking health of existing session: ${SESSION_PREFIX}${name}"
+            if session_is_stuck "$name" "$repo_root"; then
+                log_warn "Session is stuck (idle > ${STUCK_SESSION_THRESHOLD_SECONDS}s with no progress)"
+                log_info "Recovering: killing stuck session and restarting fresh"
+                kill_stuck_session "$name"
+            else
+                log_success "Session already exists and is healthy: ${SESSION_PREFIX}${name}"
+                log_info "Attach:  tmux -L $TMUX_SOCKET attach -t ${SESSION_PREFIX}${name}"
+                exit 0
+            fi
         else
             # Session exists but is dead - clean it up
             cleanup_dead_session "$name"
@@ -540,7 +746,40 @@ main() {
 
     # Spawn the agent
     if ! spawn_agent "$role" "$name" "$args" "$worktree" "$repo_root"; then
+        if [[ "$json_output" == "true" ]]; then
+            echo "{\"status\":\"error\",\"name\":\"$name\",\"error\":\"spawn_failed\"}"
+        fi
         exit 1
+    fi
+
+    # Mark as on-demand (ephemeral) for agent-destroy.sh
+    if [[ "$on_demand" == "true" ]]; then
+        tmux -L "$TMUX_SOCKET" set-environment -t "${SESSION_PREFIX}${name}" LOOM_ON_DEMAND "true"
+    fi
+
+    local session_name="${SESSION_PREFIX}${name}"
+    local log_file="${repo_root}/.loom/logs/${session_name}.log"
+
+    if [[ "$json_output" == "true" ]] && [[ "$do_wait" != "true" ]]; then
+        echo "{\"status\":\"spawned\",\"name\":\"$name\",\"session\":\"$session_name\",\"on_demand\":$on_demand,\"log\":\"$log_file\"}"
+    fi
+
+    # Wait for completion if requested
+    if [[ "$do_wait" == "true" ]]; then
+        local wait_script="${repo_root}/.loom/scripts/agent-wait.sh"
+        if [[ ! -x "$wait_script" ]]; then
+            log_error "agent-wait.sh not found at $wait_script"
+            exit 1
+        fi
+
+        local wait_args=("$name" "--timeout" "$wait_timeout")
+        if [[ "$json_output" == "true" ]]; then
+            wait_args+=("--json")
+        fi
+
+        # agent-wait.sh exits 0=completed, 1=timeout, 2=not found
+        "$wait_script" "${wait_args[@]}"
+        exit $?
     fi
 
     exit 0

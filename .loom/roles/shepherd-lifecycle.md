@@ -2,325 +2,355 @@
 
 This document contains detailed workflow implementation for the Shepherd role. For core role definition, principles, and phase flow overview, see `shepherd.md`.
 
-## Graceful Shutdown - Detailed Implementation
+## Graceful Shutdown - Integrated into Waits
 
-### Checkpoint Logic
+Shutdown signal checking is integrated into `agent-wait-bg.sh`, which polls for signals during phase waits. This replaces the previous approach of checking only at phase boundaries.
 
-Before starting each phase, check for the shutdown signal:
+### How It Works
+
+`agent-wait-bg.sh` runs `agent-wait.sh` in the background and polls for shutdown signals every poll interval. When a signal is detected, it kills the background wait, and returns exit code 3.
+
+### Signals Checked
+
+| Signal | Scope | Detection |
+|--------|-------|-----------|
+| `.loom/stop-shepherds` file | All shepherds | File existence check |
+| `loom:abort` label | Single issue | GitHub label check (requires `--issue`) |
+
+### Handling Exit Code 3
+
+When `agent-wait-bg.sh` returns exit code 3 (detected via polling), the shepherd should clean up and exit:
 
 ```bash
-# Check for graceful shutdown signal
-check_shutdown_signal() {
-    if [ -f .loom/stop-shepherds ]; then
-        echo "Shutdown signal detected - exiting gracefully at phase boundary"
+# Run wait in background
+Bash(command="./.loom/scripts/agent-wait-bg.sh '${ROLE}-issue-${ISSUE_NUMBER}' --timeout 900 --issue '$ISSUE_NUMBER'", run_in_background=true)
+# Returns WAIT_TASK_ID
 
-        # Revert issue label so it can be picked up again
-        if [ -n "$ISSUE_NUMBER" ]; then
-            LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '.labels[].name')
-            if echo "$LABELS" | grep -q "loom:building"; then
-                gh issue edit $ISSUE_NUMBER --remove-label "loom:building" --add-label "loom:issue"
-                gh issue comment $ISSUE_NUMBER --body "$(cat <<'EOF'
-**Shepherd graceful shutdown**
+# Poll loop with heartbeat reporting
+while not completed:
+    result = TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+    if result.status == "completed":
+        WAIT_EXIT = result.exit_code
+        break
+    ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for ${ROLE}"
+    sleep 15
 
-Orchestration paused at phase boundary due to daemon shutdown signal.
-Issue returned to `loom:issue` state for pickup when daemon restarts.
+if [ "$WAIT_EXIT" -eq 3 ]; then
+    echo "Shutdown signal detected during ${ROLE} phase"
+    ./.loom/scripts/agent-destroy.sh "${ROLE}-issue-${ISSUE_NUMBER}"
 
-Progress preserved - next shepherd will resume from current state.
-EOF
-)"
-            fi
-        fi
-
-        echo "Graceful exit complete"
-        exit 0
+    # Revert issue label so it can be picked up again
+    LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '.labels[].name')
+    if echo "$LABELS" | grep -q "loom:building"; then
+        gh issue edit $ISSUE_NUMBER --remove-label "loom:building" --add-label "loom:issue"
     fi
-}
-```
-
-### Phase Boundary Checks
-
-Insert shutdown checks at these points in the orchestration flow:
-
-```bash
-# Example: After Builder phase completes
-echo "Builder phase complete - PR #$PR_NUMBER created"
-check_shutdown_signal  # Insert check here
-echo "Proceeding to Judge phase..."
-```
-
-### Behavior Summary
-
-| Signal Detected | Current State | Action |
-|-----------------|---------------|--------|
-| `.loom/stop-shepherds` exists | `loom:building` | Revert to `loom:issue`, exit |
-| `.loom/stop-shepherds` exists | Mid-phase (building code) | Complete current phase, then check |
-| No signal | Any | Continue normally |
-
-### Why Phase Boundaries?
-
-Checking only at phase boundaries ensures:
-- **Work integrity**: Current phase completes fully (no half-built features)
-- **Clean state**: Issue labels accurately reflect progress
-- **Resumability**: Next shepherd can pick up from a known state
-- **Responsiveness**: Shutdown happens within one phase duration (not 5+ minutes)
-
-### Per-Issue Abort
-
-For aborting a specific shepherd without stopping all shepherds, add `loom:abort` label to the issue:
-
-```bash
-# Also check for per-issue abort
-if echo "$LABELS" | grep -q "loom:abort"; then
-    echo "Abort signal detected for issue #$ISSUE_NUMBER"
-    gh issue edit $ISSUE_NUMBER --remove-label "loom:abort" --remove-label "loom:building" --add-label "loom:issue"
-    gh issue comment $ISSUE_NUMBER --body "**Shepherd aborted** per \`loom:abort\` label. Issue returned to \`loom:issue\` state."
+    if echo "$LABELS" | grep -q "loom:abort"; then
+        gh issue edit $ISSUE_NUMBER --remove-label "loom:abort"
+        gh issue comment $ISSUE_NUMBER --body "**Shepherd aborted** per \`loom:abort\` label. Issue returned to \`loom:issue\` state."
+    else
+        gh issue comment $ISSUE_NUMBER --body "**Shepherd graceful shutdown** - orchestration paused during ${ROLE} phase. Issue returned to \`loom:issue\` state."
+    fi
     exit 0
 fi
 ```
 
-## Direct Mode - Detailed Examples
+### Behavior Summary
 
-### Phase-Specific Task Subagent Execution
+| Signal Detected | When | Action |
+|-----------------|------|--------|
+| `.loom/stop-shepherds` | During wait | Kill worker wait, clean up, revert labels, exit |
+| `loom:abort` label | During wait | Kill worker wait, clean up, revert labels, exit |
+| No signal | Wait completes | Continue to label verification |
 
-**Curator Phase (Task Subagent):**
-```python
-# Spawn curator subagent with fresh context
-# Use sonnet - curation is structured enhancement work
-result = Task(
-    description=f"Curate issue #{issue_number} - add implementation details and acceptance criteria",
-    prompt=f"/curator {issue_number}",
-    subagent_type="general-purpose",
-    model="sonnet",
-    run_in_background=False
-)
+## tmux Worker Execution - Detailed Examples
 
-# Verify completion by checking labels
-labels = gh_issue_view(issue_number, "--json labels --jq '.labels[].name'")
-assert "loom:curated" in labels or "loom:issue" in labels
+### Phase-Specific Worker Execution
+
+**Curator Phase:**
+```bash
+# Spawn curator worker in ephemeral tmux session
+./.loom/scripts/agent-spawn.sh --role curator --name "curator-issue-${ISSUE}" --args "$ISSUE" --on-demand
+
+# Non-blocking wait with heartbeat polling
+Bash(command="./.loom/scripts/agent-wait-bg.sh 'curator-issue-${ISSUE}' --timeout 600 --issue '$ISSUE'", run_in_background=true)
+# Poll loop: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+# Each iteration: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for curator"
+# When completed: WAIT_EXIT = result.exit_code
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "curator-issue-${ISSUE}"; handle_shutdown; }
+
+# Clean up
+./.loom/scripts/agent-destroy.sh "curator-issue-${ISSUE}"
+
+# Validate phase contract (recovers by applying loom:curated if missing)
+./.loom/scripts/validate-phase.sh curator "$ISSUE" --task-id "$TASK_ID"
+[ $? -ne 0 ] && exit 1
 ```
 
-**Builder Phase (Task Subagent):**
-```python
-# Spawn builder subagent with fresh context
-# Use opus - implementation requires deep reasoning
-result = Task(
-    description=f"Build issue #{issue_number} - implement feature and create PR",
-    prompt=f"/builder {issue_number}",
-    subagent_type="general-purpose",
-    model="opus",
-    run_in_background=False
-)
+**Builder Phase:**
+```bash
+# Spawn builder worker with worktree isolation
+./.loom/scripts/agent-spawn.sh --role builder --name "builder-issue-${ISSUE}" --args "$ISSUE" \
+    --worktree ".loom/worktrees/issue-${ISSUE}" --on-demand
 
-# Verify completion by checking for PR
-pr_number = gh_pr_list(f"--search 'Closes #{issue_number}' --json number --jq '.[0].number'")
-assert pr_number is not None
+# Non-blocking wait with heartbeat polling
+Bash(command="./.loom/scripts/agent-wait-bg.sh 'builder-issue-${ISSUE}' --timeout 1800 --issue '$ISSUE'", run_in_background=true)
+# Poll loop: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+# Each iteration: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for builder"
+# When completed: WAIT_EXIT = result.exit_code
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "builder-issue-${ISSUE}"; handle_shutdown; }
+
+# Clean up (worktree stays for judge/doctor phases)
+./.loom/scripts/agent-destroy.sh "builder-issue-${ISSUE}"
+
+# Validate phase contract (recovers by committing/pushing worktree and creating PR)
+./.loom/scripts/validate-phase.sh builder "$ISSUE" --worktree ".loom/worktrees/issue-${ISSUE}" --task-id "$TASK_ID"
+[ $? -ne 0 ] && exit 1
+
+# Get PR number for subsequent phases
+PR_NUMBER=$(gh pr list --search "Closes #${ISSUE}" --state open --json number --jq '.[0].number')
 ```
 
-**Judge Phase (Task Subagent):**
-```python
-# Spawn judge subagent with fresh context
-# Use opus - thorough code review needs deep understanding
-result = Task(
-    description=f"Review PR #{pr_number} for issue #{issue_number}",
-    prompt=f"/judge {pr_number}",
-    subagent_type="general-purpose",
-    model="opus",
-    run_in_background=False
-)
+**Judge Phase:**
+```bash
+# Spawn judge worker
+./.loom/scripts/agent-spawn.sh --role judge --name "judge-issue-${ISSUE}" --args "$PR_NUMBER" --on-demand
 
-# Verify completion by checking PR labels
-labels = gh_pr_view(pr_number, "--json labels --jq '.labels[].name'")
-if "loom:pr" in labels:
-    phase = "gate2"  # Approved
-elif "loom:changes-requested" in labels:
-    phase = "doctor"  # Needs fixes
+# Non-blocking wait with heartbeat polling
+Bash(command="./.loom/scripts/agent-wait-bg.sh 'judge-issue-${ISSUE}' --timeout 900 --issue '$ISSUE'", run_in_background=true)
+# Poll loop: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+# Each iteration: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for judge"
+# When completed: WAIT_EXIT = result.exit_code
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE}"; handle_shutdown; }
+
+# Clean up
+./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE}"
+
+# Validate phase contract (no recovery — marks loom:blocked if neither label present)
+./.loom/scripts/validate-phase.sh judge "$ISSUE" --pr "$PR_NUMBER" --task-id "$TASK_ID"
+[ $? -ne 0 ] && exit 1
+
+# Determine next phase from PR labels
+LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
+if echo "$LABELS" | grep -q "loom:pr"; then
+    PHASE="gate2"  # Approved
+elif echo "$LABELS" | grep -q "loom:changes-requested"; then
+    PHASE="doctor"  # Needs fixes
+fi
 ```
 
-**Doctor Phase (Task Subagent):**
-```python
-# Spawn doctor subagent with fresh context
-# Use sonnet - PR fixes are usually targeted and scoped
-result = Task(
-    description=f"Address review feedback on PR #{pr_number} for issue #{issue_number}",
-    prompt=f"/doctor {pr_number}",
-    subagent_type="general-purpose",
-    model="sonnet",
-    run_in_background=False
-)
+**Doctor Phase:**
+```bash
+# Spawn doctor worker
+./.loom/scripts/agent-spawn.sh --role doctor --name "doctor-issue-${ISSUE}" --args "$PR_NUMBER" --on-demand
 
-# Verify completion by checking for review-requested label
-labels = gh_pr_view(pr_number, "--json labels --jq '.labels[].name'")
-assert "loom:review-requested" in labels
+# Non-blocking wait with heartbeat polling
+Bash(command="./.loom/scripts/agent-wait-bg.sh 'doctor-issue-${ISSUE}' --timeout 900 --issue '$ISSUE'", run_in_background=true)
+# Poll loop: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+# Each iteration: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for doctor"
+# When completed: WAIT_EXIT = result.exit_code
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "doctor-issue-${ISSUE}"; handle_shutdown; }
+
+# Clean up
+./.loom/scripts/agent-destroy.sh "doctor-issue-${ISSUE}"
+
+# Validate phase contract (no recovery — marks loom:blocked if label missing)
+./.loom/scripts/validate-phase.sh doctor "$ISSUE" --pr "$PR_NUMBER" --task-id "$TASK_ID"
+[ $? -ne 0 ] && exit 1
 ```
 
-### Complete Direct Mode Example
+### Complete Orchestration Example
 
-Here's the full orchestration flow using Task subagents with phase-specific models:
+```bash
+# Shepherd orchestrating issue #123
+ISSUE=123
 
-```python
-# Shepherd orchestrating issue #123 in Direct Mode
-issue_number = 123
+# Helper for shutdown signal handling
+handle_shutdown() {
+    LABELS=$(gh issue view $ISSUE --json labels --jq '.labels[].name')
+    if echo "$LABELS" | grep -q "loom:building"; then
+        gh issue edit $ISSUE --remove-label "loom:building" --add-label "loom:issue"
+    fi
+    echo "Shutdown signal detected - exiting gracefully"
+    exit 0
+}
 
-# Phase 1: Curator (sonnet - structured enhancement)
-print(f"Starting Curator phase for issue #{issue_number}...")
-Task(
-    description=f"Curator phase for #{issue_number}",
-    prompt=f"/curator {issue_number}",
-    subagent_type="general-purpose",
-    model="sonnet",
-    run_in_background=False
-)
-print("Curator phase complete")
+# Helper: non-blocking wait with heartbeat polling
+# Usage: wait_with_heartbeat <session-name> <timeout> <role-label>
+# Sets WAIT_EXIT when complete
+wait_with_heartbeat() {
+    local SESSION_NAME="$1" TIMEOUT="$2" ROLE_LABEL="$3"
+    # Run wait in background
+    Bash(command="./.loom/scripts/agent-wait-bg.sh '${SESSION_NAME}' --timeout ${TIMEOUT} --issue '$ISSUE'", run_in_background=true)
+    # Returns WAIT_TASK_ID
+    # Poll loop with heartbeat
+    while not completed:
+        result = TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+        if result.status == "completed":
+            WAIT_EXIT = result.exit_code
+            break
+        ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for ${ROLE_LABEL}"
+        sleep 15
+}
+
+# Phase 1: Curator
+echo "Starting Curator phase for issue #${ISSUE}..."
+./.loom/scripts/agent-spawn.sh --role curator --name "curator-issue-${ISSUE}" --args "$ISSUE" --on-demand
+wait_with_heartbeat "curator-issue-${ISSUE}" 600 "curator"
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "curator-issue-${ISSUE}"; handle_shutdown; }
+./.loom/scripts/agent-destroy.sh "curator-issue-${ISSUE}"
+./.loom/scripts/validate-phase.sh curator "$ISSUE"
+[ $? -ne 0 ] && { echo "Curator phase contract failed"; exit 1; }
+echo "Curator phase complete"
 
 # Gate 1: Wait for approval (or auto-approve in force mode)
-if force_mode:
-    gh_issue_edit(issue_number, "--add-label 'loom:issue'")
+if [ "$FORCE_MODE" = "true" ]; then
+    gh issue edit $ISSUE --add-label "loom:issue"
+fi
 
-# Phase 2: Builder (opus - complex implementation)
-print(f"Starting Builder phase for issue #{issue_number}...")
-Task(
-    description=f"Builder phase for #{issue_number}",
-    prompt=f"/builder {issue_number}",
-    subagent_type="general-purpose",
-    model="opus",
-    run_in_background=False
-)
-pr_number = get_pr_for_issue(issue_number)
-print(f"Builder phase complete - PR #{pr_number} created")
+# Phase 2: Builder
+echo "Starting Builder phase for issue #${ISSUE}..."
+./.loom/scripts/agent-spawn.sh --role builder --name "builder-issue-${ISSUE}" --args "$ISSUE" --on-demand
+wait_with_heartbeat "builder-issue-${ISSUE}" 1800 "builder"
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "builder-issue-${ISSUE}"; handle_shutdown; }
+./.loom/scripts/agent-destroy.sh "builder-issue-${ISSUE}"
+./.loom/scripts/validate-phase.sh builder "$ISSUE" --worktree ".loom/worktrees/issue-${ISSUE}"
+[ $? -ne 0 ] && { echo "Builder phase contract failed"; exit 1; }
+PR_NUMBER=$(gh pr list --search "Closes #${ISSUE}" --json number --jq '.[0].number')
+echo "Builder phase complete - PR #${PR_NUMBER} created"
 
-# Phase 3: Judge (opus - thorough code review)
-print(f"Starting Judge phase for PR #{pr_number}...")
-Task(
-    description=f"Judge phase for PR #{pr_number}",
-    prompt=f"/judge {pr_number}",
-    subagent_type="general-purpose",
-    model="opus",
-    run_in_background=False
-)
-print("Judge phase complete")
+# Phase 3: Judge
+echo "Starting Judge phase for PR #${PR_NUMBER}..."
+./.loom/scripts/agent-spawn.sh --role judge --name "judge-issue-${ISSUE}" --args "$PR_NUMBER" --on-demand
+wait_with_heartbeat "judge-issue-${ISSUE}" 900 "judge"
+[ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE}"; handle_shutdown; }
+./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE}"
+./.loom/scripts/validate-phase.sh judge "$ISSUE" --pr "$PR_NUMBER"
+[ $? -ne 0 ] && { echo "Judge phase contract failed"; exit 1; }
+echo "Judge phase complete"
 
-# Continue with Doctor loop (sonnet) and merge as needed...
+# Continue with Doctor loop and merge as needed...
 ```
 
-## Triggering Terminals (MCP Mode)
+### Observability
 
-### Finding Terminal IDs
-
-Before triggering, identify which terminal runs which role:
-
+All worker sessions are attachable for live observation:
 ```bash
-# List all terminals
-mcp__loom__list_terminals
+# Watch builder working on issue 42
+tmux -L loom attach -t loom-builder-issue-42
 
-# Returns terminal IDs and their configurations
-# Example output:
-# terminal-1: Judge (judge.md)
-# terminal-2: Curator (curator.md)
-# terminal-3: Builder (builder.md)
-```
-
-### Restart for Fresh Context
-
-Before triggering a role, restart the terminal to clear context:
-
-```bash
-# Restart terminal to clear context
-mcp__loom__restart_terminal --terminal_id terminal-2
-```
-
-### Configure Phase-Specific Prompt
-
-Set the interval prompt to focus on the specific issue:
-
-```bash
-# Configure with issue-specific prompt
-mcp__loom__configure_terminal \
-  --terminal_id terminal-2 \
-  --interval_prompt "Curate issue #123. Follow .loom/roles/curator.md"
-```
-
-### Trigger Immediate Run
-
-Execute the role immediately:
-
-```bash
-# Trigger immediate run
-mcp__loom__trigger_run_now --terminalId terminal-2
-```
-
-### Full Trigger Sequence (MCP Mode)
-
-For each phase, execute this sequence:
-
-```bash
-# 1. Restart for fresh context
-mcp__loom__restart_terminal --terminal_id <terminal-id>
-
-# 2. Configure with phase-specific prompt
-mcp__loom__configure_terminal \
-  --terminal_id <terminal-id> \
-  --interval_prompt "<Role> for issue #<N>. <specific instructions>"
-
-# 3. Trigger immediate execution
-mcp__loom__trigger_run_now --terminalId <terminal-id>
+# List all active worker sessions
+tmux -L loom list-sessions
 ```
 
 ## Waiting for Completion
 
-**Note**: In Direct Mode, the Task subagent runs synchronously (run_in_background=False), so you know when the phase completes. However, you should still verify success by polling labels - the subagent may have encountered issues or been unable to complete its task.
+After spawning a worker with `agent-spawn.sh`, run `agent-wait-bg.sh` in the background using `Bash(run_in_background=true)`, then poll with `TaskOutput(block=false)` in a loop. This non-blocking pattern allows the shepherd to report heartbeat milestones during the wait, keeping the daemon informed of progress.
 
-### Label Polling (MCP Mode Only)
+```
+# Launch wait in background
+Bash(command="./.loom/scripts/agent-wait-bg.sh '<name>' --timeout <T> --issue '$ISSUE'", run_in_background=true)
+# Returns WAIT_TASK_ID
 
-Poll labels every 30 seconds to detect phase completion:
-
-```bash
-# Poll for label changes
-while true; do
-  labels=$(gh issue view <number> --json labels --jq '.labels[].name')
-
-  # Check for expected completion label
-  if echo "$labels" | grep -q "loom:curated"; then
-    echo "Curator phase complete"
-    break
-  fi
-
-  # Check for blocked state
-  if echo "$labels" | grep -q "loom:blocked"; then
-    echo "Issue is blocked"
-    exit 1
-  fi
-
-  sleep 30
-done
+# Poll with heartbeat reporting every 15 seconds
+while not completed:
+    result = TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+    if result.status == "completed":
+        WAIT_EXIT = result.exit_code
+        break
+    ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for <role>"
+    sleep 15
 ```
 
-### PR Label Polling
+Exit codes from `agent-wait-bg.sh`:
+- **0**: Agent completed normally
+- **1**: Timeout reached
+- **2**: Session not found
+- **3**: Shutdown signal detected (clean up and exit)
 
-For PR-related phases, poll the PR instead:
+After `agent-wait-bg.sh` returns with exit code 0, always verify success by checking labels — the worker may have encountered issues:
+
+### Post-Phase Contract Validation
+
+After each phase completes, use `validate-phase.sh` to verify the expected outcome occurred and attempt recovery if it didn't. This replaces manual label checking with a standardized validation + recovery pipeline.
 
 ```bash
-# Find PR for issue
-PR_NUMBER=$(gh pr list --search "Closes #<issue-number>" --json number --jq '.[0].number')
-
-# Poll PR labels
-labels=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
-
-if echo "$labels" | grep -q "loom:pr"; then
-  echo "PR approved, ready for merge"
-elif echo "$labels" | grep -q "loom:changes-requested"; then
-  echo "Changes requested, triggering Doctor"
+# After each phase: spawn -> wait -> destroy -> validate
+./.loom/scripts/validate-phase.sh <phase> $ISSUE [--worktree <path>] [--pr <number>] [--task-id <id>]
+VALIDATE_EXIT=$?
+if [ "$VALIDATE_EXIT" -ne 0 ]; then
+    echo "Phase contract failed for <phase>, issue blocked"
+    # validate-phase.sh already applied loom:blocked and commented
+    exit 1
 fi
 ```
 
-### Terminal Output Monitoring
+**Phase contracts and recovery**:
 
-Optionally check terminal output for completion signals:
+| Phase | Expected Outcome | Recovery |
+|-------|-----------------|----------|
+| `curator` | `loom:curated` label on issue | Apply label (curator may have enhanced but not labeled) |
+| `builder` | PR exists with `loom:review-requested` | Commit/push worktree changes, create PR |
+| `judge` | `loom:pr` or `loom:changes-requested` on PR | No recovery — mark `loom:blocked` |
+| `doctor` | `loom:review-requested` on PR | No recovery — mark `loom:blocked` |
+
+Use `--json` for machine-readable output. Exit code 0 means contract satisfied (initially or after recovery), 1 means failed.
+
+### Common Mistakes to Avoid
+
+> **⚠️ WARNING**: These mistakes can leave issues in inconsistent states, breaking the orchestration pipeline.
+
+| Mistake | Consequence | Prevention |
+|---------|-------------|------------|
+| Skipping `validate-phase.sh` | Issue may be missing labels or PR; next phase fails or gets stuck | Always validate after every phase |
+| Only checking labels manually | Misses recovery opportunities; inconsistent error handling | Use `validate-phase.sh` instead of manual checks |
+| Ignoring validation exit code | Issue proceeds despite failed contracts; downstream chaos | Always check `$?` and exit on failure |
+| Validating before `agent-destroy.sh` | Worker session may still be writing; race conditions | Destroy session first, then validate |
+
+**Correct order for every phase:**
+```bash
+# 1. Spawn worker
+agent-spawn.sh ...
+
+# 2. Wait for completion
+agent-wait-bg.sh ... (in background, poll with heartbeat)
+
+# 3. Destroy session FIRST
+agent-destroy.sh ...
+
+# 4. THEN validate (REQUIRED)
+validate-phase.sh ...
+[ $? -ne 0 ] && exit 1
+```
+
+### Label Verification (Legacy)
+
+The `validate-phase.sh` script supersedes manual label checking. For reference, the previous approach:
 
 ```bash
-output=$(mcp__loom__get_terminal_output --terminal_id terminal-2 --lines 100)
+# After curator phase
+LABELS=$(gh issue view $ISSUE --json labels --jq '.labels[].name')
+if echo "$LABELS" | grep -q "loom:curated"; then
+  echo "Curator phase complete"
+elif echo "$LABELS" | grep -q "loom:blocked"; then
+  echo "Issue is blocked"
+  exit 1
+fi
+```
 
-if echo "$output" | grep -q "Role Assumed: Curator"; then
-  echo "Curator completed its iteration"
+### PR Label Verification (Legacy)
+
+For PR-related phases:
+
+```bash
+# Find PR for issue
+PR_NUMBER=$(gh pr list --search "Closes #$ISSUE" --json number --jq '.[0].number')
+
+# Check PR labels
+LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
+if echo "$LABELS" | grep -q "loom:pr"; then
+  echo "PR approved, ready for merge"
+elif echo "$LABELS" | grep -q "loom:changes-requested"; then
+  echo "Changes requested, triggering Doctor"
 fi
 ```
 
@@ -397,26 +427,23 @@ fi
 
 ```bash
 if [ "$PHASE" = "curator" ]; then
-  # Find curator terminal
-  CURATOR_TERMINAL="terminal-2"  # or lookup from config
+  # Spawn ephemeral curator worker
+  ./.loom/scripts/agent-spawn.sh --role curator --name "curator-issue-${ISSUE_NUMBER}" --args "$ISSUE_NUMBER" --on-demand
 
-  # Restart and configure
-  mcp__loom__restart_terminal --terminal_id $CURATOR_TERMINAL
-  mcp__loom__configure_terminal \
-    --terminal_id $CURATOR_TERMINAL \
-    --interval_prompt "Curate issue #$ISSUE_NUMBER. Add implementation details and acceptance criteria."
+  # Non-blocking wait with heartbeat polling
+  Bash(command="./.loom/scripts/agent-wait-bg.sh 'curator-issue-${ISSUE_NUMBER}' --timeout 600 --issue '$ISSUE_NUMBER'", run_in_background=true)
+  # Poll: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+  # Heartbeat: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for curator"
+  # When completed: WAIT_EXIT = result.exit_code
+  [ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "curator-issue-${ISSUE_NUMBER}"; handle_shutdown; }
+  ./.loom/scripts/agent-destroy.sh "curator-issue-${ISSUE_NUMBER}"
 
-  # Trigger
-  mcp__loom__trigger_run_now --terminalId $CURATOR_TERMINAL
-
-  # Wait for completion
-  while true; do
-    LABELS=$(gh issue view $ISSUE_NUMBER --json labels --jq '.labels[].name')
-    if echo "$LABELS" | grep -q "loom:curated\|loom:issue"; then
-      break
-    fi
-    sleep 30
-  done
+  # Validate phase contract
+  ./.loom/scripts/validate-phase.sh curator "$ISSUE_NUMBER" --task-id "$TASK_ID"
+  if [ $? -ne 0 ]; then
+    echo "Curator phase contract failed"
+    exit 1
+  fi
 
   # Update progress
   update_progress "curator" "complete"
@@ -427,11 +454,11 @@ fi
 
 ```bash
 if [ "$PHASE" = "gate1" ]; then
-  # Check if --force-pr or --force-merge mode - auto-approve
-  if [ "$FORCE_PR" = "true" ] || [ "$FORCE_MERGE" = "true" ]; then
-    echo "Force mode: auto-approving issue"
+  # Check if --force or default mode - auto-approve
+  if [ "$FORCE_MODE" = "true" ] || [ "$DEFAULT_MODE" = "true" ]; then
+    echo "Auto-approving issue (force/default mode)"
     gh issue edit $ISSUE_NUMBER --add-label "loom:issue"
-    gh issue comment $ISSUE_NUMBER --body "**Auto-approved** via \`/shepherd --force-pr\` or \`--force-merge\`"
+    gh issue comment $ISSUE_NUMBER --body "**Auto-approved** via shepherd orchestration"
   else
     # Wait for human or Champion to promote to loom:issue
     TIMEOUT=1800  # 30 minutes
@@ -461,25 +488,27 @@ fi
 
 ```bash
 if [ "$PHASE" = "builder" ]; then
-  BUILDER_TERMINAL="terminal-3"
+  # Spawn ephemeral builder worker
+  ./.loom/scripts/agent-spawn.sh --role builder --name "builder-issue-${ISSUE_NUMBER}" --args "$ISSUE_NUMBER" --on-demand
 
-  mcp__loom__restart_terminal --terminal_id $BUILDER_TERMINAL
-  mcp__loom__configure_terminal \
-    --terminal_id $BUILDER_TERMINAL \
-    --interval_prompt "Build issue #$ISSUE_NUMBER. Create worktree, implement, test, create PR."
+  # Non-blocking wait with heartbeat polling
+  Bash(command="./.loom/scripts/agent-wait-bg.sh 'builder-issue-${ISSUE_NUMBER}' --timeout 1800 --issue '$ISSUE_NUMBER'", run_in_background=true)
+  # Poll: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+  # Heartbeat: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for builder"
+  # When completed: WAIT_EXIT = result.exit_code
+  [ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "builder-issue-${ISSUE_NUMBER}"; handle_shutdown; }
+  ./.loom/scripts/agent-destroy.sh "builder-issue-${ISSUE_NUMBER}"
 
-  mcp__loom__trigger_run_now --terminalId $BUILDER_TERMINAL
+  # Validate phase contract (attempts recovery from worktree if no PR)
+  ./.loom/scripts/validate-phase.sh builder "$ISSUE_NUMBER" --worktree ".loom/worktrees/issue-${ISSUE_NUMBER}" --task-id "$TASK_ID"
+  if [ $? -ne 0 ]; then
+    echo "Builder phase contract failed"
+    exit 1
+  fi
 
-  # Wait for PR creation
-  while true; do
-    # Check if a PR exists for this issue
-    PR_NUMBER=$(gh pr list --search "Closes #$ISSUE_NUMBER" --state open --json number --jq '.[0].number')
-    if [ -n "$PR_NUMBER" ]; then
-      echo "PR #$PR_NUMBER created"
-      break
-    fi
-    sleep 30
-  done
+  # Find the PR
+  PR_NUMBER=$(gh pr list --search "Closes #$ISSUE_NUMBER" --state open --json number --jq '.[0].number')
+  echo "PR #$PR_NUMBER created"
 
   update_progress "builder" "complete" "$PR_NUMBER"
 fi
@@ -489,31 +518,35 @@ fi
 
 ```bash
 if [ "$PHASE" = "judge" ]; then
-  JUDGE_TERMINAL="terminal-1"
+  # Spawn ephemeral judge worker
+  ./.loom/scripts/agent-spawn.sh --role judge --name "judge-issue-${ISSUE_NUMBER}" --args "$PR_NUMBER" --on-demand
 
-  mcp__loom__restart_terminal --terminal_id $JUDGE_TERMINAL
-  mcp__loom__configure_terminal \
-    --terminal_id $JUDGE_TERMINAL \
-    --interval_prompt "Review PR #$PR_NUMBER for issue #$ISSUE_NUMBER."
+  # Non-blocking wait with heartbeat polling
+  Bash(command="./.loom/scripts/agent-wait-bg.sh 'judge-issue-${ISSUE_NUMBER}' --timeout 900 --issue '$ISSUE_NUMBER'", run_in_background=true)
+  # Poll: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+  # Heartbeat: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for judge"
+  # When completed: WAIT_EXIT = result.exit_code
+  [ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE_NUMBER}"; handle_shutdown; }
+  ./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE_NUMBER}"
 
-  mcp__loom__trigger_run_now --terminalId $JUDGE_TERMINAL
+  # Validate phase contract
+  ./.loom/scripts/validate-phase.sh judge "$ISSUE_NUMBER" --pr "$PR_NUMBER" --task-id "$TASK_ID"
+  if [ $? -ne 0 ]; then
+    echo "Judge phase contract failed"
+    exit 1
+  fi
 
-  # Wait for review completion
+  # Check review result
   # Note: Judge uses label-based reviews (comment + label change), not GitHub's
   # review API, so self-approval is not a problem. See judge.md for details.
-  while true; do
-    LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
-    if echo "$LABELS" | grep -q "loom:pr"; then
-      echo "PR approved"
-      PHASE="gate2"
-      break
-    elif echo "$LABELS" | grep -q "loom:changes-requested"; then
-      echo "Changes requested"
-      PHASE="doctor"
-      break
-    fi
-    sleep 30
-  done
+  LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
+  if echo "$LABELS" | grep -q "loom:pr"; then
+    echo "PR approved"
+    PHASE="gate2"
+  elif echo "$LABELS" | grep -q "loom:changes-requested"; then
+    echo "Changes requested"
+    PHASE="doctor"
+  fi
 fi
 ```
 
@@ -524,31 +557,41 @@ MAX_DOCTOR_ITERATIONS=3
 DOCTOR_ITERATION=0
 
 while [ "$PHASE" = "doctor" ] && [ $DOCTOR_ITERATION -lt $MAX_DOCTOR_ITERATIONS ]; do
-  DOCTOR_TERMINAL="terminal-4"  # or lookup
+  # Spawn ephemeral doctor worker
+  ./.loom/scripts/agent-spawn.sh --role doctor --name "doctor-issue-${ISSUE_NUMBER}" --args "$PR_NUMBER" --on-demand
 
-  mcp__loom__restart_terminal --terminal_id $DOCTOR_TERMINAL
-  mcp__loom__configure_terminal \
-    --terminal_id $DOCTOR_TERMINAL \
-    --interval_prompt "Address review feedback on PR #$PR_NUMBER for issue #$ISSUE_NUMBER."
+  # Non-blocking wait with heartbeat polling
+  Bash(command="./.loom/scripts/agent-wait-bg.sh 'doctor-issue-${ISSUE_NUMBER}' --timeout 900 --issue '$ISSUE_NUMBER'", run_in_background=true)
+  # Poll: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+  # Heartbeat: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for doctor"
+  # When completed: WAIT_EXIT = result.exit_code
+  [ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "doctor-issue-${ISSUE_NUMBER}"; handle_shutdown; }
+  ./.loom/scripts/agent-destroy.sh "doctor-issue-${ISSUE_NUMBER}"
 
-  mcp__loom__trigger_run_now --terminalId $DOCTOR_TERMINAL
-
-  # Wait for Doctor to complete and re-trigger Judge
-  while true; do
-    LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
-    if echo "$LABELS" | grep -q "loom:review-requested"; then
-      echo "Doctor completed, returning to Judge"
-      PHASE="judge"
-      break
-    fi
-    sleep 30
-  done
+  # Validate doctor phase contract
+  ./.loom/scripts/validate-phase.sh doctor "$ISSUE_NUMBER" --pr "$PR_NUMBER" --task-id "$TASK_ID"
+  if [ $? -eq 0 ]; then
+    echo "Doctor completed, returning to Judge"
+    PHASE="judge"
+  fi
 
   DOCTOR_ITERATION=$((DOCTOR_ITERATION + 1))
 
   # If we've returned to judge phase, run the judge again
   if [ "$PHASE" = "judge" ]; then
-    # ... trigger judge again (same as Step 5) ...
+    ./.loom/scripts/agent-spawn.sh --role judge --name "judge-issue-${ISSUE_NUMBER}" --args "$PR_NUMBER" --on-demand
+
+    # Non-blocking wait with heartbeat polling
+    Bash(command="./.loom/scripts/agent-wait-bg.sh 'judge-issue-${ISSUE_NUMBER}' --timeout 900 --issue '$ISSUE_NUMBER'", run_in_background=true)
+    # Poll: TaskOutput(task_id=WAIT_TASK_ID, block=false, timeout=5000)
+    # Heartbeat: ./.loom/scripts/report-milestone.sh heartbeat --task-id "$TASK_ID" --action "waiting for judge (doctor loop)"
+    # When completed: WAIT_EXIT = result.exit_code
+    [ "$WAIT_EXIT" -eq 3 ] && { ./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE_NUMBER}"; handle_shutdown; }
+    ./.loom/scripts/agent-destroy.sh "judge-issue-${ISSUE_NUMBER}"
+
+    # Validate judge phase contract
+    ./.loom/scripts/validate-phase.sh judge "$ISSUE_NUMBER" --pr "$PR_NUMBER" --task-id "$TASK_ID"
+    [ $? -ne 0 ] && { echo "Judge phase contract failed in doctor loop"; exit 1; }
 
     # Check result
     LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
@@ -573,79 +616,25 @@ fi
 
 ```bash
 if [ "$PHASE" = "gate2" ]; then
-  # Check if --force-pr mode - stop here, don't merge
-  if [ "$FORCE_PR" = "true" ]; then
-    echo "Force-pr mode: stopping at loom:pr state"
-    gh issue comment $ISSUE_NUMBER --body "**PR approved** - stopping at \`loom:pr\` per \`--force-pr\`. Ready for human merge."
+  # Check if default mode - stop here, don't merge
+  if [ "$DEFAULT_MODE" = "true" ]; then
+    echo "Default mode: stopping at loom:pr state"
+    gh issue comment $ISSUE_NUMBER --body "**PR approved** - stopping at \`loom:pr\`. Ready for human merge or Champion auto-merge."
     exit 0
   fi
 
-  # Check if --force-merge mode - auto-merge with conflict resolution
-  if [ "$FORCE_MERGE" = "true" ]; then
-    echo "Force-merge mode: auto-merging PR"
+  # Check if --force mode - auto-merge with conflict resolution
+  if [ "$FORCE_MODE" = "true" ]; then
+    echo "Force mode: auto-merging PR"
 
-    # IMPORTANT: Worktree Checkout Error Handling
-    # ============================================
-    # When running from a worktree, `gh pr merge` may succeed on GitHub but fail
-    # locally with: "fatal: 'main' is already used by worktree at '/path/to/repo'"
-    #
-    # This is EXPECTED behavior - the merge completes remotely but git can't switch
-    # to main locally because another worktree already has it checked out.
-    #
-    # Solution: Always verify PR state via GitHub API rather than relying on exit code.
-    # The exit code of `gh pr merge` is unreliable when running from worktrees.
+    # Use merge-pr.sh for worktree-safe merge via GitHub API
+    ./.loom/scripts/merge-pr.sh $PR_NUMBER --cleanup-worktree || {
+      echo "Merge failed for PR #$PR_NUMBER"
+      exit 1
+    }
+    echo "PR merged successfully"
 
-    MERGE_OUTPUT=$(gh pr merge $PR_NUMBER --squash --delete-branch 2>&1)
-    MERGE_EXIT=$?
-
-    # Always verify actual merge state via GitHub API (exit code is unreliable in worktrees)
-    PR_STATE=$(gh pr view $PR_NUMBER --json state --jq '.state')
-
-    if [ "$PR_STATE" = "MERGED" ]; then
-      # Merge succeeded - any error was just the local checkout failure (expected in worktrees)
-      if [ $MERGE_EXIT -ne 0 ]; then
-        if echo "$MERGE_OUTPUT" | grep -q "already used by worktree"; then
-          echo "PR merged successfully (local checkout skipped - worktree conflict is expected)"
-        else
-          echo "PR merged successfully (non-fatal local error ignored)"
-        fi
-      else
-        echo "PR merged successfully"
-      fi
-    else
-      # Merge actually failed on GitHub - this is a real error that needs handling
-      echo "Merge failed (PR state: $PR_STATE)"
-
-      # Check for merge conflicts
-      MERGEABLE=$(gh pr view $PR_NUMBER --json mergeable --jq '.mergeable')
-      if [ "$MERGEABLE" = "CONFLICTING" ]; then
-        echo "Attempting conflict resolution..."
-        git fetch origin main
-        git checkout $BRANCH_NAME 2>/dev/null || git checkout -b $BRANCH_NAME origin/$BRANCH_NAME
-        git merge origin/main --no-edit || {
-          # Auto-resolve conflicts if possible
-          git checkout --theirs .
-          git add -A
-          git commit -m "Resolve merge conflicts (auto-resolved)"
-        }
-        git push origin $BRANCH_NAME
-
-        # Retry merge and verify via API (not exit code)
-        gh pr merge $PR_NUMBER --squash --delete-branch 2>&1
-        PR_STATE=$(gh pr view $PR_NUMBER --json state --jq '.state')
-        if [ "$PR_STATE" = "MERGED" ]; then
-          echo "PR merged successfully after conflict resolution"
-        else
-          echo "Merge failed after conflict resolution"
-          exit 1
-        fi
-      else
-        echo "Merge failed: $MERGE_OUTPUT"
-        exit 1
-      fi
-    fi
-
-    gh issue comment $ISSUE_NUMBER --body "**Auto-merged** PR #$PR_NUMBER via \`/shepherd --force-merge\`"
+    gh issue comment $ISSUE_NUMBER --body "**Auto-merged** PR #$PR_NUMBER via \`/shepherd --force\`"
   else
     # Trigger Champion or wait for human merge
     CHAMPION_TERMINAL="terminal-5"  # if exists
@@ -705,232 +694,49 @@ EOF
 )"
 ```
 
-## Terminal Configuration Requirements (MCP Mode Only)
+## Prerequisites
 
-For MCP Mode orchestration, you need these terminals configured:
+The shepherd requires these scripts in `.loom/scripts/`:
+- `agent-spawn.sh` — spawn ephemeral tmux worker sessions
+- `agent-wait-bg.sh` — wait for worker completion with shutdown signal checking
+- `agent-wait.sh` — wait for worker completion (used by `agent-wait-bg.sh` internally)
+- `agent-destroy.sh` — clean up worker sessions
+- `validate-phase.sh` — validate phase contracts and attempt recovery
 
-| Terminal | Role | Suggested Name |
-|----------|------|----------------|
-| terminal-1 | judge.md | Judge |
-| terminal-2 | curator.md | Curator |
-| terminal-3 | builder.md | Builder |
-| terminal-4 | doctor.md | Doctor |
-| terminal-5 | champion.md | Champion (optional) |
-
-You can discover terminal configurations with:
-
-```bash
-mcp__loom__get_ui_state
-```
-
-**Note**: In Direct Mode, terminal configuration is not required. The orchestrator spawns Task subagents for each role phase.
-
-## Auto-Configuring Missing Terminals (Force Mode)
-
-In MCP Mode, when `--force`, `--force-pr`, or `--force-merge` is specified, the orchestrator automatically configures any missing required terminals instead of prompting the user.
-
-### Why Auto-Configure?
-
-Force mode implies minimal user interaction. Stopping to ask "Add Builder terminal?" defeats the purpose. The orchestrator should:
-1. Detect missing terminals
-2. Auto-configure with sensible defaults
-3. Log what was configured
-4. Continue orchestration
-
-### Detection Logic
-
-Before each phase, check if the required terminal exists:
-
-```bash
-# Check for a terminal with specific role
-TERMINALS=$(mcp__loom__list_terminals)
-BUILDER_TERMINAL=$(echo "$TERMINALS" | jq -r '.[] | select(.roleConfig.roleFile == "builder.md") | .id' | head -1)
-
-if [ -z "$BUILDER_TERMINAL" ]; then
-  if [ "$FORCE_MODE" = "true" ]; then
-    # Auto-configure the missing terminal
-    auto_configure_terminal "builder"
-  else
-    # Prompt user (normal mode behavior)
-    echo "Missing Builder terminal. Add one?"
-  fi
-fi
-```
-
-### Auto-Configuration Process
-
-When a required terminal is missing and force mode is active:
-
-**Step 1: Read Role Defaults**
-
-```bash
-# Load defaults from role JSON file
-ROLE_JSON=$(cat .loom/roles/builder.json)
-ROLE_NAME=$(echo "$ROLE_JSON" | jq -r '.name')                    # "Development Worker"
-WORKER_TYPE=$(echo "$ROLE_JSON" | jq -r '.suggestedWorkerType')   # "claude"
-INTERVAL=$(echo "$ROLE_JSON" | jq -r '.defaultInterval')          # 0
-```
-
-**Step 2: Create Terminal via MCP**
-
-```bash
-# Create the terminal with role defaults
-mcp__loom__create_terminal \
-  --name "$ROLE_NAME" \
-  --role "builder"
-```
-
-**Step 3: Configure Role Settings**
-
-```bash
-# Get the new terminal ID (will be terminal-N based on nextAgentNumber)
-NEW_TERMINAL_ID=$(mcp__loom__list_terminals | jq -r '.[-1].id')
-
-# Configure with role-specific settings
-mcp__loom__configure_terminal \
-  --terminal_id "$NEW_TERMINAL_ID" \
-  --target_interval "$INTERVAL" \
-  --role_file "builder.md"
-```
-
-**Step 4: Log What Was Configured**
-
-```bash
-echo "Auto-configured $ROLE_NAME terminal ($NEW_TERMINAL_ID)"
-```
-
-### Role Defaults Reference
-
-Each role has defaults in its JSON metadata file:
-
-| Role | Name | Worker Type | Interval | Autonomous |
-|------|------|-------------|----------|------------|
-| builder | Development Worker | claude | 0 | No |
-| curator | Issue Curator | codex | 300000 | Yes |
-| judge | Code Review Specialist | codex | 300000 | Yes |
-| doctor | PR Fixer | claude | 300000 | Yes |
-| champion | PR Champion | codex | 600000 | Yes |
-
-### Terminal Configuration Structure
-
-Auto-configured terminals follow this structure:
-
-```json
-{
-  "id": "terminal-N",
-  "name": "<role.name from JSON>",
-  "role": "<role-key>",
-  "roleConfig": {
-    "workerType": "<role.suggestedWorkerType>",
-    "roleFile": "<role>.md",
-    "targetInterval": "<role.defaultInterval>",
-    "intervalPrompt": ""
-  }
-}
-```
-
-### Complete Auto-Configuration Function
-
-```bash
-auto_configure_terminal() {
-  local ROLE_KEY=$1  # e.g., "builder", "curator", "judge"
-
-  # Read role metadata
-  local ROLE_JSON_FILE=".loom/roles/${ROLE_KEY}.json"
-  if [ ! -f "$ROLE_JSON_FILE" ]; then
-    echo "ERROR: Role file not found: $ROLE_JSON_FILE"
-    return 1
-  fi
-
-  local ROLE_JSON=$(cat "$ROLE_JSON_FILE")
-  local ROLE_NAME=$(echo "$ROLE_JSON" | jq -r '.name // "Unknown Role"')
-  local WORKER_TYPE=$(echo "$ROLE_JSON" | jq -r '.suggestedWorkerType // "claude"')
-  local INTERVAL=$(echo "$ROLE_JSON" | jq -r '.defaultInterval // 0')
-
-  # Create terminal
-  mcp__loom__create_terminal \
-    --name "$ROLE_NAME" \
-    --role "$ROLE_KEY"
-
-  # Get newly created terminal ID
-  local NEW_TERMINAL_ID=$(mcp__loom__list_terminals | jq -r '.[-1].id')
-
-  # Configure role settings
-  mcp__loom__configure_terminal \
-    --terminal_id "$NEW_TERMINAL_ID" \
-    --target_interval "$INTERVAL" \
-    --role_file "${ROLE_KEY}.md"
-
-  echo "Auto-configured $ROLE_NAME terminal ($NEW_TERMINAL_ID)"
-
-  # Return the terminal ID for use
-  echo "$NEW_TERMINAL_ID"
-}
-```
-
-### Usage in Phase Execution
-
-Before triggering each phase, check and auto-configure:
-
-```bash
-# Example: Builder phase with auto-configuration
-if [ "$PHASE" = "builder" ]; then
-  # Find existing Builder terminal
-  BUILDER_TERMINAL=$(mcp__loom__list_terminals | \
-    jq -r '.[] | select(.roleConfig.roleFile == "builder.md") | .id' | head -1)
-
-  # Auto-configure if missing and in force mode
-  if [ -z "$BUILDER_TERMINAL" ]; then
-    if [ "$FORCE_MODE" = "true" ]; then
-      BUILDER_TERMINAL=$(auto_configure_terminal "builder")
-    else
-      echo "ERROR: No Builder terminal configured"
-      exit 1
-    fi
-  fi
-
-  # Now proceed with the phase using $BUILDER_TERMINAL
-  mcp__loom__restart_terminal --terminal_id "$BUILDER_TERMINAL"
-  mcp__loom__configure_terminal \
-    --terminal_id "$BUILDER_TERMINAL" \
-    --interval_prompt "Build issue #$ISSUE_NUMBER"
-  mcp__loom__trigger_run_now --terminalId "$BUILDER_TERMINAL"
-fi
-```
-
-### Behavior Summary
-
-| Mode | Missing Terminal | Behavior |
-|------|------------------|----------|
-| Normal (`/shepherd N`) | Builder missing | Prompt user: "Add Builder terminal?" |
-| Force (`--force`) | Builder missing | Auto-configure Builder, log, continue |
-| Force PR (`--force-pr`) | Builder missing | Auto-configure Builder, log, continue |
-| Force Merge (`--force-merge`) | Builder missing | Auto-configure Builder, log, continue |
-| Direct Mode | Any missing | N/A - executes roles directly |
-
-### Persistence
-
-Auto-configured terminals are persisted to `.loom/config.json` by the MCP server. They will be available for future orchestrations.
+No terminal pre-configuration is needed — workers are created on-demand per phase.
 
 ## Error Handling Details
 
-### Terminal Not Found
+### Worker Spawn Failure
 
-If a required terminal isn't configured:
+If `agent-spawn.sh` fails:
 
-**In Force Mode** (`--force`, `--force-pr`, `--force-merge`):
-- Auto-configure the terminal using defaults from `.loom/roles/<role>.json`
-- See "Auto-Configuring Missing Terminals" section above
-
-**In Normal Mode**:
 ```bash
-# Prompt user for action
-echo "Missing $ROLE terminal. Options:"
-echo "1. Add $ROLE terminal with default configuration"
-echo "2. Skip this phase (may cause issues)"
-echo "3. Abort orchestration"
+# Retry once for transient failures
+if ! ./.loom/scripts/agent-spawn.sh --role "$ROLE" --name "${ROLE}-issue-${ISSUE}" --args "$ARGS" --on-demand; then
+    sleep 5
+    if ! ./.loom/scripts/agent-spawn.sh --role "$ROLE" --name "${ROLE}-issue-${ISSUE}" --args "$ARGS" --on-demand; then
+        echo "ERROR: Failed to spawn $ROLE worker after retry"
+        gh issue edit $ISSUE --add-label "loom:blocked"
+        gh issue comment $ISSUE --body "**Orchestration blocked**: Failed to spawn $ROLE worker."
+        exit 1
+    fi
+fi
+```
 
-# If user chooses to abort:
-echo "ERROR: No terminal found for role '$ROLE'. Configure a terminal with roleFile: $ROLE.md"
-gh issue comment $ISSUE_NUMBER --body "**Orchestration paused**: Missing terminal for $ROLE role. Run with --force to auto-configure."
+### Worker Timeout
+
+After the polling loop completes, check exit code:
+
+```bash
+# WAIT_EXIT is obtained from the TaskOutput polling loop
+if [ "$WAIT_EXIT" -eq 3 ]; then
+    echo "Shutdown signal detected - cleaning up"
+    ./.loom/scripts/agent-destroy.sh "${ROLE}-issue-${ISSUE}"
+    handle_shutdown
+elif [ "$WAIT_EXIT" -eq 1 ]; then
+    echo "Worker timed out - destroying session"
+    ./.loom/scripts/agent-destroy.sh "${ROLE}-issue-${ISSUE}" --force
+    # Check if the worker made partial progress via labels
+fi
 ```

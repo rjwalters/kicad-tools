@@ -89,7 +89,33 @@ You are a specialist in {{workspace}} repository...
 ## Guidelines
 - Best practices
 - Working style
+
+## Completion
+
+**Work completion is detected automatically.**
+
+When you complete your task (apply appropriate end-state labels), the orchestration
+layer detects this and terminates the session automatically. No explicit exit command is needed.
 ```
+
+### Completion Detection
+
+Worker completion is detected automatically through **phase contracts** - the orchestration layer validates that the expected end-state has been achieved (e.g., correct labels applied) and terminates the session.
+
+**How it works:**
+1. Shepherds spawn worker agents (builder, judge, doctor, curator) for each phase
+2. `validate-phase.sh` checks for phase-specific completion criteria:
+   - **Curator**: `loom:curated` label on issue
+   - **Builder**: PR with `loom:review-requested` label linked to issue
+   - **Judge**: `loom:pr` or `loom:changes-requested` label on PR
+   - **Doctor**: `loom:review-requested` label after fixes
+3. When the phase contract is satisfied, the session terminates automatically
+4. Idle detection provides a fallback if the agent becomes unresponsive
+
+**Benefits of automatic detection:**
+- No ambiguity about what "completion" means (it's defined by labels)
+- Agents don't need to execute shell commands to signal completion
+- Consistent behavior across all worker roles
 
 ### Template Variables
 

@@ -22,7 +22,21 @@ This role definition is split across multiple files for maintainability:
 | **builder.md** (this file) | Core workflow, labels, finding work, guidelines |
 | **builder-worktree.md** | Git worktree workflows, Tauri App mode, parallel claiming |
 | **builder-complexity.md** | Complexity assessment, issue decomposition, scope management |
-| **builder-pr.md** | PR creation, test output, quality requirements |
+| **builder-pr.md** | PR creation, **acceptance criteria verification**, test output, quality requirements |
+
+## Argument Handling
+
+Check for an argument passed via the slash command:
+
+**Arguments**: `$ARGUMENTS`
+
+If a number is provided (e.g., `/builder 42`):
+1. Treat that number as the target **issue** to work on
+2. **Skip** the "Finding Work" section entirely
+3. Claim the issue: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`
+4. Proceed directly to implementation
+
+If no argument is provided, use the normal "Finding Work" workflow below.
 
 ## CRITICAL: Label Discipline
 
@@ -33,8 +47,17 @@ This role definition is split across multiple files for maintainability:
 | Action | Remove | Add |
 |--------|--------|-----|
 | Claim issue | `loom:issue` | `loom:building` |
-| Block issue | - | `loom:blocked` |
+| Block issue | `loom:building` | `loom:blocked` |
 | Create PR | - | `loom:review-requested` (on new PR only) |
+
+**IMPORTANT**: `loom:building` and `loom:blocked` are **mutually exclusive** - an issue cannot be in both states. Always use atomic transitions:
+```bash
+# CORRECT: Atomic transition to blocked state
+gh issue edit <number> --remove-label "loom:building" --add-label "loom:blocked"
+
+# WRONG: Leaves issue in invalid state with both labels
+gh issue edit <number> --add-label "loom:blocked"
+```
 
 ### Labels You NEVER Touch
 
@@ -172,6 +195,51 @@ For detailed worktree workflows, see **builder-worktree.md**.
 - Work in `.loom/worktrees/issue-N` directories
 - Return with `pnpm worktree:return` in Tauri App mode
 
+## CRITICAL: Never Work on Main Branch
+
+**You MUST work in a worktree, never directly on main.**
+
+### Pre-Work Validation
+
+After claiming an issue, **before writing any code**, verify you are in the correct worktree:
+
+```bash
+# 1. Create the worktree (if not already created)
+./.loom/scripts/worktree.sh <issue-number>
+
+# 2. Change to the worktree directory
+cd .loom/worktrees/issue-<issue-number>
+
+# 3. Verify your location
+pwd  # MUST show: .loom/worktrees/issue-<number>
+git branch  # MUST show: feature/issue-<number>
+```
+
+**If your working directory does NOT contain `.loom/worktrees/issue-`:**
+1. **STOP** - do not write any code
+2. Create the worktree: `./.loom/scripts/worktree.sh <issue-number>`
+3. Change to the worktree: `cd .loom/worktrees/issue-<issue-number>`
+4. THEN start implementation
+
+### Why This Matters
+
+Working directly on main causes:
+- **Workflow violations**: PRs cannot be created from uncommitted changes on main
+- **Lost work**: Changes on main may be overwritten by `git pull`
+- **Pipeline failures**: Shepherd validation fails when no worktree exists
+- **Coordination issues**: Other agents cannot see or review your work
+- **State corruption**: Issue stuck in `loom:building` with no path forward
+
+### Validation Checklist
+
+Before writing any code, confirm ALL of these:
+- [ ] Worktree exists at `.loom/worktrees/issue-<N>`
+- [ ] Current directory is inside the worktree (not repo root)
+- [ ] Branch is `feature/issue-<N>` (not `main`)
+- [ ] Issue is claimed with `loom:building` label
+
+**If any of these fail, STOP and fix the setup before proceeding.**
+
 ## Reading Issues: ALWAYS Read Comments First
 
 **CRITICAL:** Curator adds implementation guidance in comments (and sometimes amends descriptions). You MUST read both the issue body AND all comments before starting work.
@@ -267,9 +335,9 @@ Open the issue and look for:
 If you discover a dependency while working:
 
 1. **Add Dependencies section** to the issue
-2. **Mark as blocked**:
+2. **Mark as blocked** (atomic transition from building to blocked):
    ```bash
-   gh issue edit <number> --add-label "loom:blocked"
+   gh issue edit <number> --remove-label "loom:building" --add-label "loom:blocked"
    ```
 3. **Create comment** explaining the dependency
 4. **Wait** for dependency to be resolved, or switch to another issue
@@ -360,6 +428,10 @@ gh issue list --label="loom:issue" --state=open --json number,title,labels \
 For detailed PR creation and quality requirements, see **builder-pr.md**.
 
 **Quick reference:**
+- **Verify ALL acceptance criteria** before creating PR (see builder-pr.md for details)
+- Extract criteria from issue body/comments (checkboxes, numbered items, "must"/"should" statements)
+- Verify each criterion explicitly with concrete checks (not "I think it works")
+- Include criterion verification table in PR description
 - Add `loom:review-requested` label when creating PR
 - Use "Closes #N" syntax for auto-close
 - Never touch PR labels after creation
@@ -446,3 +518,9 @@ Keep it brief (3-6 words) and descriptive:
 - **Be consistent**: Always use the same format
 - **Be honest**: If you're idle, say so
 - **Be brief**: Task description should be 3-6 words max
+
+## Completion
+
+**Work completion is detected automatically.**
+
+When you complete your task (PR created with `loom:review-requested` label, or issue marked as `loom:blocked`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.

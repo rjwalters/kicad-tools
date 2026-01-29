@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Loom Cleanup Script - WRAPPER (backwards compatibility)
 #
-# This script is a thin wrapper around defaults/scripts/clean.sh for backwards compatibility.
+# This script is a thin wrapper around clean.sh for backwards compatibility.
 # The unified clean.sh now handles all cleanup functionality.
 #
 # AGENT USAGE INSTRUCTIONS:
@@ -12,8 +12,8 @@
 #   Interactive mode (prompts for confirmation):
 #     ./scripts/cleanup.sh
 #
-# DEPRECATED: Use defaults/scripts/clean.sh instead:
-#   ./defaults/scripts/clean.sh --deep --force   # Equivalent to cleanup.sh --yes
+# DEPRECATED: Use clean.sh instead:
+#   ./scripts/clean.sh --deep --force   # Equivalent to cleanup.sh --yes
 #
 # What this wrapper does:
 #   Maps cleanup.sh arguments to clean.sh equivalents
@@ -23,7 +23,6 @@ set -euo pipefail
 
 # Find script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Map arguments
 ARGS=("--deep")  # cleanup.sh always cleans build artifacts
@@ -38,7 +37,7 @@ for arg in "$@"; do
 Loom Cleanup Script - DEPRECATED WRAPPER
 
 This script is a thin wrapper around clean.sh for backwards compatibility.
-Please use defaults/scripts/clean.sh directly for more options.
+Please use clean.sh directly for more options.
 
 Usage: ./scripts/cleanup.sh [options]
 
@@ -53,8 +52,8 @@ What it does:
   4. Prunes orphaned git worktrees
 
 Equivalent clean.sh commands:
-  ./scripts/cleanup.sh           ->  ./defaults/scripts/clean.sh --deep
-  ./scripts/cleanup.sh --yes     ->  ./defaults/scripts/clean.sh --deep --force
+  ./scripts/cleanup.sh           ->  ./scripts/clean.sh --deep
+  ./scripts/cleanup.sh --yes     ->  ./scripts/clean.sh --deep --force
 
 After running, restore dependencies with: pnpm install
 EOF
@@ -66,5 +65,5 @@ EOF
   esac
 done
 
-# Call the unified clean.sh from defaults/scripts/
-exec "$PROJECT_ROOT/defaults/scripts/clean.sh" "${ARGS[@]}"
+# Call the unified clean.sh
+exec "$SCRIPT_DIR/clean.sh" "${ARGS[@]}"

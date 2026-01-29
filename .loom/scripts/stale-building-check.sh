@@ -104,6 +104,7 @@ log_warn() {
   fi
 }
 
+# shellcheck disable=SC2329  # log_error kept for API consistency and future use
 log_error() {
   if [[ "$JSON_OUTPUT" != "true" ]]; then
     echo -e "${RED}✗ $*${NC}" >&2

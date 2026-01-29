@@ -64,6 +64,7 @@ STATE_FILE=".loom/daemon-state.json"
 METRICS_FILE=".loom/daemon-metrics.json"
 STOP_SIGNAL=".loom/stop-daemon"
 PID_FILE=".loom/daemon-loop.pid"
+SESSION_ID="$(date +%s)-$$"  # Unique session ID: timestamp-PID
 
 # ANSI colors (disabled if not a terminal)
 if [[ -t 1 ]]; then
@@ -101,6 +102,11 @@ while [[ $# -gt 0 ]]; do
                 pid=$(cat "$PID_FILE")
                 if kill -0 "$pid" 2>/dev/null; then
                     echo -e "${GREEN}Daemon loop running (PID: $pid)${NC}"
+                    # Show session ID from state file if available
+                    if [[ -f "$STATE_FILE" ]]; then
+                        session_id=$(jq -r '.daemon_session_id // "unknown"' "$STATE_FILE" 2>/dev/null)
+                        echo -e "  Session ID: $session_id"
+                    fi
                     exit 0
                 else
                     echo -e "${YELLOW}Daemon loop not running (stale PID file)${NC}"
@@ -287,6 +293,7 @@ log_header() {
     echo "═══════════════════════════════════════════════════════════════════" | tee -a "$LOG_FILE"
     echo "  Started: $(date -Iseconds)" | tee -a "$LOG_FILE"
     echo "  PID: $$" | tee -a "$LOG_FILE"
+    echo "  Session ID: $SESSION_ID" | tee -a "$LOG_FILE"
     echo "  Mode: $mode_display" | tee -a "$LOG_FILE"
     echo "  Poll interval: ${POLL_INTERVAL}s" | tee -a "$LOG_FILE"
     echo "  Iteration timeout: ${ITERATION_TIMEOUT}s" | tee -a "$LOG_FILE"
@@ -424,7 +431,8 @@ init_daemon_state() {
         temp_file=$(mktemp)
         if jq --arg force_mode "$force_mode_value" \
               --arg started_at "$timestamp" \
-              '.force_mode = ($force_mode == "true") | .started_at = $started_at | .running = true | .iteration = 0' \
+              --arg session_id "$SESSION_ID" \
+              '.force_mode = ($force_mode == "true") | .started_at = $started_at | .running = true | .iteration = 0 | .daemon_session_id = $session_id' \
               "$STATE_FILE" > "$temp_file" 2>/dev/null; then
             mv "$temp_file" "$STATE_FILE"
         else
@@ -448,6 +456,7 @@ create_fresh_state() {
   "running": true,
   "iteration": 0,
   "force_mode": $force_mode_value,
+  "daemon_session_id": "$SESSION_ID",
   "shepherds": {},
   "completed_issues": [],
   "total_prs_merged": 0
@@ -459,6 +468,24 @@ init_daemon_state
 if [[ -n "$FORCE_FLAG" ]]; then
     log "${YELLOW}Force mode enabled - stored in daemon-state.json${NC}"
 fi
+log "Session ID: $SESSION_ID"
+
+# Validate session ownership of state file
+# Returns 0 if we own the session, 1 if another daemon took over
+validate_session_ownership() {
+    if [[ ! -f "$STATE_FILE" ]]; then
+        return 0  # No state file = we're the only daemon
+    fi
+
+    local file_session_id
+    file_session_id=$(jq -r '.daemon_session_id // empty' "$STATE_FILE" 2>/dev/null)
+
+    if [[ -n "$file_session_id" ]] && [[ "$file_session_id" != "$SESSION_ID" ]]; then
+        return 1  # Another daemon has taken over
+    fi
+
+    return 0
+}
 
 iteration=0
 consecutive_failures=0
@@ -471,6 +498,17 @@ while true; do
     # Check for stop signal
     if [[ -f "$STOP_SIGNAL" ]]; then
         log "${YELLOW}Iteration $iteration: SHUTDOWN_SIGNAL detected${NC}"
+        break
+    fi
+
+    # Validate session ownership before each iteration
+    # Detects if another daemon has taken over the state file
+    if ! validate_session_ownership; then
+        file_session_id=$(jq -r '.daemon_session_id // "unknown"' "$STATE_FILE" 2>/dev/null)
+        log "${RED}SESSION CONFLICT: Another daemon has taken over the state file${NC}"
+        log "${RED}  Our session:    $SESSION_ID${NC}"
+        log "${RED}  File session:   $file_session_id${NC}"
+        log "${RED}  Yielding to the other daemon instance. Exiting.${NC}"
         break
     fi
 

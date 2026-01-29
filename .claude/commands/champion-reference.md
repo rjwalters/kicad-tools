@@ -23,7 +23,7 @@ fi
 
 **Decision**: **Allow merge** - absence of CI is not a blocker.
 
-**Rationale**: Many repositories don't use CI, or use branch protection without status checks.
+**Rationale**: Many repositories don't use CI, or use rulesets without status checks.
 
 ---
 
@@ -475,20 +475,13 @@ echo ""
 echo "STEP 3/5: Executing squash merge..."
 echo ""
 
-MERGE_OUTPUT=$(gh pr merge "$PR_NUMBER" --squash --auto --delete-branch 2>&1)
-MERGE_EXIT_CODE=$?
-
-# Verify actual merge state via GitHub API
-PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
-
-if [ "$PR_STATE" = "MERGED" ]; then
-  echo "Successfully merged PR #$PR_NUMBER"
-  echo ""
-else
+# Use merge-pr.sh for worktree-safe merge via GitHub API
+./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto || {
   echo "Merge failed!"
-  echo "Error output: $MERGE_OUTPUT"
   exit 1
-fi
+}
+echo "Successfully merged PR #$PR_NUMBER"
+echo ""
 
 # ============================================
 # STEP 4: Verify Issue Closure
@@ -596,7 +589,7 @@ done
 ### Common Issues
 
 **PR not merging despite passing all checks**
-- Check if branch protection requires additional approvals
+- Check if rulesets require additional approvals
 - Verify GitHub API rate limits haven't been hit
 - Check for webhook delays in GitHub's processing
 

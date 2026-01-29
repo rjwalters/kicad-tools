@@ -763,7 +763,8 @@ output_formatted() {
     if [[ "$curated_issues" -gt 0 ]]; then
         echo -e "    ${YELLOW}Curated Issues Awaiting Approval:${NC}"
         echo -e "      - View curated: ${CYAN}gh issue list --label loom:curated${NC}"
-        echo -e "      - Approve: ${CYAN}gh issue edit <N> --remove-label loom:curated --add-label loom:issue${NC}"
+        echo -e "      - Approve: ${CYAN}gh issue edit <N> --add-label loom:issue${NC}"
+        echo -e "      ${GRAY}(loom:curated is preserved to indicate curation status)${NC}"
         echo ""
     fi
 

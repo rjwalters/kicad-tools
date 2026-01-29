@@ -93,7 +93,7 @@ ${YELLOW}QUICK START:${NC}
     ./loom attach shepherd-1
 
     ${GRAY}# Send a command to an agent${NC}
-    ./loom send shepherd-1 "/shepherd 123 --force-pr"
+    ./loom send shepherd-1 "/shepherd 123"
 
     ${GRAY}# View logs${NC}
     ./loom logs shepherd-1

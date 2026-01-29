@@ -131,9 +131,9 @@ In addition to systematic analysis, perform **opportunistic simplification** by 
 **1. Pick a Random File**
 
 ```bash
-mcp__loom__get_random_file
+./.loom/scripts/random-file.sh
 # Or with filters:
-mcp__loom__get_random_file --includePatterns '["src/**/*.ts"]' --excludePatterns '["**/*.test.ts"]'
+./.loom/scripts/random-file.sh --include "src/**/*.ts" --exclude "**/*.test.ts"
 ```
 
 **2. Quick Scan (2-3 minutes max)**

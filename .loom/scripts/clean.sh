@@ -359,6 +359,7 @@ echo ""
 # Counters for summary
 cleaned_worktrees=0
 skipped_open=0
+skipped_in_use=0
 skipped_not_merged=0
 skipped_grace=0
 skipped_uncommitted=0
@@ -390,6 +391,17 @@ if [[ "$BRANCHES_ONLY" == false && "$TMUX_ONLY" == false ]]; then
       fi
 
       echo "Checking worktree: issue-$issue_num"
+
+      # Check for in-use marker (shepherd orchestration in progress)
+      # See issue #1485: prevents premature cleanup during orchestration
+      marker_file="${worktree_path}/.loom-in-use"
+      if [[ -f "$marker_file" ]]; then
+        marker_task_id=$(jq -r '.shepherd_task_id // "unknown"' "$marker_file" 2>/dev/null || echo "unknown")
+        marker_pid=$(jq -r '.pid // "unknown"' "$marker_file" 2>/dev/null || echo "unknown")
+        info "  Worktree in use by shepherd (task: $marker_task_id, pid: $marker_pid) - preserving"
+        ((skipped_in_use++)) || true
+        continue
+      fi
 
       # Check issue state
       if ! command -v gh &> /dev/null; then
@@ -667,6 +679,10 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "  Would clean: $cleaned_worktrees worktree(s)"
 else
   echo "  Cleaned: $cleaned_worktrees worktree(s)"
+fi
+
+if [[ "$skipped_in_use" -gt 0 ]]; then
+  echo "  Skipped (in use by shepherd): $skipped_in_use"
 fi
 
 if [[ "$SAFE_MODE" == true ]]; then

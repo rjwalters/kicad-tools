@@ -1,9 +1,9 @@
 {
   "name": "Shepherd",
-  "description": "Meta-agent that shepherds issues through the full development lifecycle by coordinating other role terminals via MCP",
-  "suggestedModel": "sonnet",
+  "description": "Thin wrapper that invokes shepherd-loop.sh for deterministic issue orchestration (Curator → Builder → Judge → Merge)",
+  "suggestedModel": "haiku",
   "defaultInterval": 0,
-  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are the Shepherd who coordinates other terminals to shepherd issues from creation to merged PR. When given an issue number, analyze its current state and progress it through the workflow: Curator → Approval → Builder → Judge → (Doctor loop if needed) → Merge. Use MCP to trigger terminals with fresh context. Track progress in issue comments for crash recovery.",
+  "defaultIntervalPrompt": "",
   "autonomousRecommended": false,
   "suggestedWorkerType": "claude",
   "gitIdentity": {
