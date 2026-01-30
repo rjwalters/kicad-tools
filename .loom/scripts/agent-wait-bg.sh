@@ -22,10 +22,10 @@
 #   LOOM_PROMPT_STUCK_THRESHOLD - Seconds before checking for 'stuck at prompt' (default: 30)
 #
 # Usage:
-#   agent-wait-bg.sh <name> [--timeout <s>] [--poll-interval <s>] [--issue <N>] [--json]
+#   agent-wait-bg.sh <name> [--timeout <s>] [--poll-interval <s>] [--issue <N>] [--task-id <id>] [--json]
 #
 # Examples:
-#   agent-wait-bg.sh builder-issue-42 --timeout 1800 --issue 42
+#   agent-wait-bg.sh builder-issue-42 --timeout 1800 --issue 42 --task-id abc123
 #   agent-wait-bg.sh shepherd-1 --poll-interval 10 --json
 #   LOOM_STUCK_WARNING=180 LOOM_STUCK_ACTION=pause agent-wait-bg.sh builder-1
 
@@ -33,6 +33,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
+if [[ -x "$GH_CACHED" ]]; then
+    GH="$GH_CACHED"
+else
+    GH="gh"
+fi
 
 # tmux configuration (must match agent-spawn.sh)
 TMUX_SOCKET="loom"
@@ -53,6 +61,11 @@ log_warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] ⚠${NC} $*" >&2; }
 # Default poll interval for signal checking
 DEFAULT_SIGNAL_POLL=5
 
+# Default interval (seconds) for emitting shepherd heartbeats during long waits.
+# Keeps progress files fresh so daemon-snapshot.sh and stuck-detection.sh don't
+# falsely flag actively building shepherds as stale (see issue #1586).
+DEFAULT_HEARTBEAT_INTERVAL=60
+
 # Default idle timeout (seconds) before checking phase contract via GitHub state
 DEFAULT_IDLE_TIMEOUT=60
 
@@ -61,7 +74,10 @@ DEFAULT_IDLE_TIMEOUT=60
 # waiting for idle timeout. This detects completion much faster for phases
 # like builder where the signal is on GitHub (PR exists) rather than in logs.
 # Set to 0 to disable proactive checking (fall back to idle timeout only).
-DEFAULT_CONTRACT_INTERVAL=30
+# Note: The idle timeout (DEFAULT_IDLE_TIMEOUT=60) still provides faster
+# detection when the agent is actually idle, so this interval can be longer
+# without significantly impacting completion detection latency.
+DEFAULT_CONTRACT_INTERVAL=90
 
 # Stuck detection thresholds (configurable via environment variables)
 STUCK_WARNING_THRESHOLD=${LOOM_STUCK_WARNING:-300}   # 5 min default
@@ -89,6 +105,7 @@ ${YELLOW}OPTIONS:${NC}
     --timeout <seconds>        Maximum time to wait (default: 3600)
     --poll-interval <seconds>  Time between signal checks (default: $DEFAULT_SIGNAL_POLL)
     --issue <N>                Issue number for per-issue abort checking
+    --task-id <id>             Shepherd task ID for heartbeat emission during long waits
     --phase <phase>            Phase name (curator, builder, judge, doctor) for contract checking
     --worktree <path>          Worktree path for builder phase recovery
     --pr <N>                   PR number for judge/doctor phase validation
@@ -146,8 +163,8 @@ ${YELLOW}PROMPT STUCK DETECTION:${NC}
     2. Full command retry (if recoverable from session name)
 
 ${YELLOW}EXAMPLES:${NC}
-    # Phase-aware completion detection (recommended)
-    agent-wait-bg.sh builder-issue-42 --timeout 1800 --issue 42 --phase builder --worktree .loom/worktrees/issue-42
+    # Phase-aware completion detection with heartbeat (recommended)
+    agent-wait-bg.sh builder-issue-42 --timeout 1800 --issue 42 --task-id abc123 --phase builder --worktree .loom/worktrees/issue-42
 
     # Legacy log-based detection
     agent-wait-bg.sh curator-issue-10 --poll-interval 10 --json
@@ -171,7 +188,7 @@ check_signals() {
     # Check per-issue abort label
     if [ -n "$issue" ]; then
         local labels
-        labels=$(gh issue view "$issue" --repo "$(gh repo view --json nameWithOwner --jq '.nameWithOwner')" --json labels --jq '.labels[].name' 2>/dev/null || true)
+        labels=$($GH issue view "$issue" --repo "$($GH repo view --json nameWithOwner --jq '.nameWithOwner')" --json labels --jq '.labels[].name' 2>/dev/null || true)
         if echo "$labels" | grep -q "loom:abort"; then
             log_warn "Abort signal detected for issue #${issue}"
             return 0
@@ -536,10 +553,12 @@ check_completion_patterns() {
     # Only check the pattern relevant to the current phase to avoid false matches
     case "$phase" in
         builder)
-            # Builder completion: PR created with loom:review-requested
-            # Look for patterns like "gh pr create" followed by "loom:review-requested"
-            # or explicit PR creation success messages
-            if echo "$recent_log" | grep -qE 'loom:review-requested|PR #[0-9]+ created|pull request.*created'; then
+            # Builder completion: PR created successfully
+            # Match the actual gh pr create OUTPUT (the PR URL), not the command text.
+            # The command text (including "loom:review-requested") appears in Claude Code's
+            # UI rendering while the command is still running, causing false positives.
+            # gh pr create prints the PR URL on success: https://github.com/.../pull/NNN
+            if echo "$recent_log" | grep -qE 'https://github\.com/.*/pull/[0-9]+'; then
                 COMPLETION_REASON="builder_pr_created"
                 return 0
             fi
@@ -569,7 +588,7 @@ check_completion_patterns() {
         *)
             # Unknown phase or shepherd - check all patterns as fallback
             # This handles generic or shepherd sessions that may spawn worker roles
-            if echo "$recent_log" | grep -qE 'loom:review-requested|PR #[0-9]+ created|pull request.*created'; then
+            if echo "$recent_log" | grep -qE 'https://github\.com/.*/pull/[0-9]+'; then
                 COMPLETION_REASON="builder_pr_created"
                 return 0
             fi
@@ -693,6 +712,7 @@ main() {
     local timeout="3600"
     local poll_interval="$DEFAULT_SIGNAL_POLL"
     local issue=""
+    local task_id=""
     local idle_timeout="$DEFAULT_IDLE_TIMEOUT"
     local contract_interval="$DEFAULT_CONTRACT_INTERVAL"
     local phase=""
@@ -720,6 +740,10 @@ main() {
                 ;;
             --issue)
                 issue="$2"
+                shift 2
+                ;;
+            --task-id)
+                task_id="$2"
                 shift 2
                 ;;
             --grace-period)
@@ -762,6 +786,9 @@ main() {
     done
 
     log_info "Waiting for agent '$name' with signal checking (poll: ${poll_interval}s, timeout: ${timeout}s)"
+    if [[ -n "$task_id" ]]; then
+        log_info "Heartbeat emission: every ${DEFAULT_HEARTBEAT_INTERVAL}s (task-id: $task_id)"
+    fi
     if [[ -n "$phase" ]] && [[ "$contract_interval" -gt 0 ]]; then
         log_info "Proactive contract checking: every ${contract_interval}s for phase '$phase'"
     fi
@@ -785,6 +812,7 @@ main() {
     local stuck_critical_reported=false
     local prompt_stuck_checked=false
     local prompt_stuck_recovery_attempted=false
+    local last_heartbeat_time=$start_time
     COMPLETION_REASON=""
     CONTRACT_STATUS=""
 
@@ -832,7 +860,7 @@ main() {
                 local signal_type="shutdown"
                 if [ -n "$issue" ]; then
                     local labels
-                    labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null || true)
+                    labels=$($GH issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null || true)
                     if echo "$labels" | grep -q "loom:abort"; then
                         signal_type="abort"
                     fi
@@ -904,11 +932,10 @@ main() {
 
                 if check_phase_contract "$phase" "$issue" "$worktree" "$pr_number" "check_only"; then
                     completion_detected=true
-                    completion_time=$now
                     COMPLETION_REASON="phase_contract_satisfied"
 
                     log_info "Phase contract satisfied ($CONTRACT_STATUS) via proactive check"
-                    log_warn "Agent completed work but didn't exit - waiting ${grace_period}s grace period"
+                    log_info "Agent completed work but didn't exit - terminating session"
                 fi
             fi
         fi
@@ -950,8 +977,27 @@ main() {
         # Check for completion patterns in log (backup detection)
         if [[ "$completion_detected" != "true" ]]; then
             if check_completion_patterns "$session_name"; then
-                completion_detected=true
-                if [[ "$COMPLETION_REASON" != "explicit_exit" ]]; then
+                if [[ "$COMPLETION_REASON" == "explicit_exit" ]]; then
+                    completion_detected=true
+                elif [[ -n "$phase" ]] && [[ -n "$issue" ]]; then
+                    # Non-exit completion pattern detected (e.g., label command in log).
+                    # The pattern matches the *intent* to run a gh command, not its
+                    # confirmed execution. Sleep briefly to let the gh command finish,
+                    # then verify the phase contract is actually satisfied before
+                    # terminating. This prevents killing the session while gh is still
+                    # executing (see issue #1596).
+                    log_info "Completion pattern detected ($COMPLETION_REASON) - verifying phase contract"
+                    sleep 3
+                    if check_phase_contract "$phase" "$issue" "$worktree" "$pr_number" "check_only"; then
+                        completion_detected=true
+                        log_info "Phase contract verified ($CONTRACT_STATUS) - terminating session"
+                    else
+                        log_warn "Completion pattern detected but phase contract not yet satisfied - continuing to wait"
+                        COMPLETION_REASON=""
+                    fi
+                else
+                    # No phase info available, trust the pattern
+                    completion_detected=true
                     log_info "Completion pattern detected ($COMPLETION_REASON) - terminating session"
                 fi
             fi
@@ -1024,6 +1070,27 @@ main() {
 
                     exit 4
                 fi
+            fi
+        fi
+
+        # Emit periodic heartbeat to keep shepherd progress file fresh (issue #1586).
+        # Without this, long-running phases (builder, doctor) cause the progress file's
+        # last_heartbeat to go stale, triggering false positives in daemon-snapshot.sh
+        # and stuck-detection.sh which use a 120s stale threshold.
+        if [[ -n "$task_id" ]] && [[ -x "$SCRIPT_DIR/report-milestone.sh" ]]; then
+            local now
+            now=$(date +%s)
+            local since_last_heartbeat=$((now - last_heartbeat_time))
+
+            if [[ "$since_last_heartbeat" -ge "$DEFAULT_HEARTBEAT_INTERVAL" ]]; then
+                last_heartbeat_time=$now
+                local elapsed=$((now - start_time))
+                local elapsed_min=$((elapsed / 60))
+                local phase_desc="${phase:-agent}"
+                "$SCRIPT_DIR/report-milestone.sh" heartbeat \
+                    --task-id "$task_id" \
+                    --action "${phase_desc} running (${elapsed_min}m elapsed)" \
+                    --quiet 2>/dev/null || true
             fi
         fi
 

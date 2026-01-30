@@ -12,7 +12,7 @@ In iteration mode, you:
 1. Load state from JSON
 2. Check shutdown signal
 3. Assess system state via `daemon-snapshot.sh`
-4. Check tmux worker completions
+4. Check shepherd completions (process-tree + progress files)
 5. Auto-promote proposals (if force mode)
 6. Spawn shepherds for ready issues (via agent-spawn.sh)
 7. Trigger work generation
@@ -29,7 +29,7 @@ The daemon uses **tmux-based agent execution** exclusively. All workers run in e
 
 - **Shepherds**: Spawned as on-demand tmux sessions (e.g., `loom-shepherd-issue-42`)
 - **Support roles**: Spawned as on-demand tmux sessions (e.g., `loom-guide`, `loom-champion`)
-- **Completion detection**: `agent-wait.sh` polls process trees
+- **Completion detection**: `agent-wait.sh` polls process trees + progress file cross-reference
 - **Cleanup**: `agent-destroy.sh` removes sessions after completion
 - **Observability**: `tmux -L loom attach -t <session-name>`
 
@@ -81,11 +81,11 @@ def loom_iterate(force_mode=False, debug_mode=False):
     debug(f"Pipeline state: ready={ready_count} building={snapshot_data['computed']['total_building']}")
     debug(f"Recommended actions: {recommended_actions}")
 
-    # 4. Check tmux worker completions (shepherd and support role sessions)
-    completions = check_all_completions(state, debug_mode)
+    # 4. Check shepherd completions (process-tree AND progress file signals)
+    completions = check_shepherd_completions(state, snapshot_data, debug_mode)
     if debug_mode and completions:
         for c in completions:
-            debug(f"Completion detected: {c['name']} issue=#{c.get('issue', 'N/A')}")
+            debug(f"Completion detected: {c['name']} issue=#{c.get('issue', 'N/A')} reason={c.get('reason', 'unknown')}")
 
     # 4b. Check support role completions (all 7 roles)
     completed_support_roles = check_support_role_completions(state, debug_mode)
@@ -786,6 +786,111 @@ def check_support_role_completions(state, debug_mode=False):
             debug(f"{role_name.capitalize()} session not found (already cleaned up)")
 
     return completed_roles
+```
+
+## Check Shepherd Completions
+
+Uses `agent-wait.sh` with `--timeout 0` (non-blocking) to check if shepherd tmux sessions
+have completed. Additionally cross-references shepherd progress files from
+`snapshot_data["shepherds"]["progress"]` to detect completions where the shepherd's work
+is done (progress file shows `status: completed`) but the tmux session is still alive
+(Claude CLI sitting at idle prompt).
+
+```python
+def check_shepherd_completions(state, snapshot_data, debug_mode=False):
+    """Check if any shepherds have completed and update their in-memory state.
+
+    Uses two completion signals:
+    1. agent-wait.sh: Detects when Claude CLI exits or tmux session is destroyed
+    2. Progress files: Detects when shepherd reports status=completed via
+       report-milestone.sh, even if the tmux session remains alive
+
+    Both signals trigger the same completion handling: mark shepherd idle,
+    destroy tmux session, clean up progress file.
+    """
+
+    def debug(msg):
+        if debug_mode:
+            print(f"[DEBUG] {msg}")
+
+    completed = []
+
+    if "shepherds" not in state:
+        return completed
+
+    now_iso = now()
+
+    # Build lookup of completed progress files by issue number
+    completed_progress = {}
+    for progress in snapshot_data.get("shepherds", {}).get("progress", []):
+        if progress.get("status") == "completed":
+            issue = progress.get("issue")
+            if issue is not None:
+                completed_progress[issue] = progress
+
+    for shepherd_name, shepherd_info in state["shepherds"].items():
+        # Skip shepherds that aren't working
+        if shepherd_info.get("status") != "working":
+            continue
+
+        tmux_session = shepherd_info.get("tmux_session")
+        issue = shepherd_info.get("issue")
+
+        if not tmux_session:
+            continue
+
+        session_name = tmux_session.replace("loom-", "")
+
+        # Signal 1: Non-blocking process-tree check via agent-wait.sh
+        result = run(f'./.loom/scripts/agent-wait.sh "{session_name}" --timeout 0 --json 2>/dev/null || true')
+
+        try:
+            wait_result = json.loads(result) if result.strip() else {}
+        except Exception:
+            wait_result = {}
+
+        status = wait_result.get("status")
+        reason = None
+
+        if status == "completed":
+            reason = "process_exited"
+        elif status == "not_found":
+            reason = "session_destroyed"
+        elif status == "timeout" and issue in completed_progress:
+            # Signal 2: Progress file shows completed but tmux session still alive
+            reason = "progress_completed"
+            debug(f"Shepherd {shepherd_name}: progress file shows completed for #{issue}, tmux still alive")
+
+        if reason:
+            # Mark shepherd as idle in state
+            shepherd_info["status"] = "idle"
+            shepherd_info["last_completed"] = now_iso
+            shepherd_info["idle_since"] = now_iso
+            shepherd_info["idle_reason"] = "completed_issue"
+            shepherd_info["last_issue"] = issue
+            shepherd_info["issue"] = None
+            shepherd_info["tmux_session"] = None
+
+            completed.append({
+                "name": shepherd_name,
+                "issue": issue,
+                "reason": reason
+            })
+
+            debug(f"Shepherd {shepherd_name} completed: issue=#{issue} reason={reason}")
+
+            # Clean up the tmux session
+            run(f'./.loom/scripts/agent-destroy.sh "{session_name}" --force 2>/dev/null || true')
+
+            # Clean up progress file for this shepherd
+            if issue in completed_progress:
+                task_id = completed_progress[issue].get("task_id", "")
+                if task_id:
+                    progress_file = f".loom/progress/shepherd-{task_id}.json"
+                    run(f'rm -f "{progress_file}" 2>/dev/null || true')
+                    debug(f"Cleaned up progress file: {progress_file}")
+
+    return completed
 ```
 
 ## Error Handling

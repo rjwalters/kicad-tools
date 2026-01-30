@@ -16,13 +16,13 @@
 #
 # Options:
 #   --force, -f     Auto-approve, auto-merge after approval (does NOT skip Judge review)
-#   --wait          Wait for human approval at each gate (explicit non-default)
 #   --to <phase>    Stop after specified phase (curated, pr, approved)
 #   --task-id <id>  Use specific task ID (generated if not provided)
 #
 # Deprecated:
 #   --force-pr      (deprecated) Now the default behavior
 #   --force-merge   (deprecated) Use --force or -f instead
+#   --wait          (deprecated) No longer blocks; shepherd always exits after PR approval
 #
 # Environment Variables:
 #   LOOM_CURATOR_TIMEOUT     Seconds for curator phase (default: 300)
@@ -111,6 +111,14 @@ find_repo_root() {
 REPO_ROOT=$(find_repo_root)
 cd "$REPO_ROOT"
 
+# Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
+if [[ -x "$GH_CACHED" ]]; then
+    GH="$GH_CACHED"
+else
+    GH="gh"
+fi
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 log() {
@@ -182,7 +190,6 @@ ${YELLOW}USAGE:${NC}
 
 ${YELLOW}OPTIONS:${NC}
     --force, -f     Auto-approve, resolve conflicts, auto-merge after approval
-    --wait          Wait for human approval at each gate (explicit non-default)
     --from <phase>  Start from specified phase (skip earlier phases)
                     Valid phases: curator, builder, judge, merge
     --to <phase>    Stop after specified phase (curated, pr, approved)
@@ -192,6 +199,7 @@ ${YELLOW}OPTIONS:${NC}
 ${YELLOW}DEPRECATED:${NC}
     --force-pr      (deprecated) Now the default behavior
     --force-merge   (deprecated) Use --force or -f instead
+    --wait          (deprecated) No longer blocks; shepherd always exits after PR approval
 
 ${YELLOW}PHASES:${NC}
     1. Curator    - Enhance issue with implementation guidance
@@ -199,12 +207,16 @@ ${YELLOW}PHASES:${NC}
     3. Builder    - Create worktree, implement, create PR
     4. Judge      - Review PR, approve or request changes (always runs, even in force mode)
     5. Doctor     - Address requested changes (if any)
-    6. Merge      - Auto-merge (--force) or wait for human
+    6. Merge      - Auto-merge (--force) or exit at loom:pr (default)
 
 ${YELLOW}NOTE:${NC}
     Force mode does NOT skip the Judge phase. Code review always runs because
     GitHub's API prevents self-approval of PRs. Force mode enables auto-approval
     at phase 2 and auto-merge at phase 6.
+
+    Without --force, the shepherd exits after the PR is approved (loom:pr).
+    The Champion role handles merging approved PRs. This frees the shepherd
+    slot for new issues instead of blocking indefinitely.
 
 ${YELLOW}ENVIRONMENT:${NC}
     LOOM_CURATOR_TIMEOUT     Seconds for curator phase (default: 300)
@@ -215,15 +227,12 @@ ${YELLOW}ENVIRONMENT:${NC}
     LOOM_POLL_INTERVAL       Seconds between completion checks (default: 5)
 
 ${YELLOW}EXAMPLES:${NC}
-    # Create PR without waiting (default behavior)
+    # Create PR, exit after approval (default behavior)
     shepherd-loop.sh 42
 
     # Full automation with auto-merge
     shepherd-loop.sh 42 --force
     shepherd-loop.sh 42 -f
-
-    # Wait for human approval at each gate
-    shepherd-loop.sh 42 --wait
 
     # Stop after curation (for review before building)
     shepherd-loop.sh 42 --to curated
@@ -241,6 +250,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --wait)
+            # Deprecated: --wait used to block indefinitely at the merge gate.
+            # Now all non-force modes exit after PR approval (Champion handles merge).
+            log_warn "Flag --wait is deprecated (shepherd always exits after PR approval)"
             MODE="normal"
             shift
             ;;
@@ -321,19 +333,42 @@ fi
 
 # ─── Label helpers ────────────────────────────────────────────────────────────
 
+# Cached issue labels to avoid redundant API calls.
+# Call refresh_issue_labels() to fetch fresh data, then use has_label() to check.
+_CACHED_ISSUE_LABELS=""
+_CACHED_ISSUE_NUMBER=""
+
+refresh_issue_labels() {
+    local issue="$1"
+    _CACHED_ISSUE_LABELS=$($GH issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null) || _CACHED_ISSUE_LABELS=""
+    _CACHED_ISSUE_NUMBER="$issue"
+}
+
 has_label() {
     local issue="$1"
     local label="$2"
-    local labels
-    labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
-    echo "$labels" | grep -q "^${label}$"
+    # Use cache if available and for the same issue
+    if [[ "$issue" == "$_CACHED_ISSUE_NUMBER" && -n "$_CACHED_ISSUE_LABELS" ]]; then
+        echo "$_CACHED_ISSUE_LABELS" | grep -q "^${label}$"
+        return $?
+    fi
+    # Cache miss - fetch and cache
+    refresh_issue_labels "$issue"
+    echo "$_CACHED_ISSUE_LABELS" | grep -q "^${label}$"
+}
+
+# Invalidate cached labels after mutations (add/remove label).
+# This forces the next has_label() call to re-fetch from GitHub.
+invalidate_issue_label_cache() {
+    _CACHED_ISSUE_LABELS=""
+    _CACHED_ISSUE_NUMBER=""
 }
 
 has_label_pr() {
     local pr="$1"
     local label="$2"
     local labels
-    labels=$(gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
+    labels=$($GH pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null) || return 1
     echo "$labels" | grep -q "^${label}$"
 }
 
@@ -341,12 +376,14 @@ add_label() {
     local issue="$1"
     local label="$2"
     gh issue edit "$issue" --add-label "$label" >/dev/null 2>&1
+    invalidate_issue_label_cache
 }
 
 remove_label() {
     local issue="$1"
     local label="$2"
     gh issue edit "$issue" --remove-label "$label" >/dev/null 2>&1 || true
+    invalidate_issue_label_cache
 }
 
 add_label_pr() {
@@ -471,7 +508,7 @@ fail_with_reason() {
 # ─── Phase execution ──────────────────────────────────────────────────────────
 
 # Run a phase worker and wait for completion
-# Usage: run_phase <role> <name> <timeout> [--worktree <path>] [--args <args>] [--phase <phase>] [--pr <N>]
+# Usage: run_phase <role> <name> <timeout> [--worktree <path>] [--args <args>] [--phase <phase>] [--pr <N>] [--task-id <id>]
 run_phase() {
     local role="$1"
     local name="$2"
@@ -482,6 +519,7 @@ run_phase() {
     local args=""
     local phase=""
     local pr_number=""
+    local run_task_id=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -499,6 +537,10 @@ run_phase() {
                 ;;
             --pr)
                 pr_number="$2"
+                shift 2
+                ;;
+            --task-id)
+                run_task_id="$2"
                 shift 2
                 ;;
             *)
@@ -549,6 +591,9 @@ run_phase() {
     fi
     if [[ -n "$pr_number" ]]; then
         wait_args+=(--pr "$pr_number")
+    fi
+    if [[ -n "$run_task_id" ]]; then
+        wait_args+=(--task-id "$run_task_id")
     fi
 
     "$REPO_ROOT/.loom/scripts/agent-wait-bg.sh" "${wait_args[@]}" || wait_exit=$?
@@ -605,6 +650,11 @@ run_phase_with_retry() {
 
 # ─── Get PR for issue ─────────────────────────────────────────────────────────
 
+# Cached PR number to avoid redundant 4-pattern searches.
+# Once a PR is found for an issue, subsequent calls return the cached value.
+_CACHED_PR_NUMBER=""
+_CACHED_PR_ISSUE=""
+
 # Find a PR for an issue, trying multiple linking patterns
 # Usage: get_pr_for_issue <issue> [state]
 # state: open (default), closed, or all
@@ -613,18 +663,33 @@ get_pr_for_issue() {
     local state="${2:-open}"
     local pr
 
-    # Try multiple linking patterns (search body for these phrases)
+    # Return cached PR number if available for same issue and state is "open"
+    if [[ "$issue" == "$_CACHED_PR_ISSUE" && -n "$_CACHED_PR_NUMBER" && "$state" == "open" ]]; then
+        echo "$_CACHED_PR_NUMBER"
+        return 0
+    fi
+
+    # Method 1: Branch-based lookup (deterministic, no indexing lag)
+    pr=$($GH pr list --head "feature/issue-${issue}" --state "$state" --json number --jq '.[0].number' 2>/dev/null) || true
+    if [[ -n "$pr" && "$pr" != "null" ]]; then
+        _CACHED_PR_NUMBER="$pr"
+        _CACHED_PR_ISSUE="$issue"
+        echo "$pr"
+        return 0
+    fi
+
+    # Method 2-4: Search body for linking keywords (has indexing lag)
     for pattern in "Closes #${issue}" "Fixes #${issue}" "Resolves #${issue}"; do
-        pr=$(gh pr list --search "$pattern" --state "$state" --json number --jq '.[0].number' 2>/dev/null) || true
+        pr=$($GH pr list --search "$pattern" --state "$state" --json number --jq '.[0].number' 2>/dev/null) || true
         if [[ -n "$pr" && "$pr" != "null" ]]; then
+            _CACHED_PR_NUMBER="$pr"
+            _CACHED_PR_ISSUE="$issue"
             echo "$pr"
             return 0
         fi
     done
 
-    # Fallback: search by branch name
-    pr=$(gh pr list --head "feature/issue-${issue}" --state "$state" --json number --jq '.[0].number' 2>/dev/null) || true
-    echo "$pr"
+    echo ""
 }
 
 # ─── Phase skip helper ────────────────────────────────────────────────────────
@@ -676,15 +741,16 @@ main() {
     log_info "Repository: $REPO_ROOT"
     echo ""
 
-    # Verify issue exists
-    if ! gh issue view "$ISSUE" --json number >/dev/null 2>&1; then
+    # Fetch issue metadata in a single API call (url, state, title, labels)
+    local issue_meta
+    issue_meta=$($GH issue view "$ISSUE" --json url,state,title,labels 2>/dev/null) || {
         log_error "Issue #$ISSUE does not exist"
         exit 1
-    fi
+    }
 
     # Verify it's an issue, not a pull request
     local item_url
-    item_url=$(gh issue view "$ISSUE" --json url --jq '.url' 2>/dev/null)
+    item_url=$(echo "$issue_meta" | jq -r '.url' 2>/dev/null)
     if [[ "$item_url" == */pull/* ]]; then
         log_error "#$ISSUE is a pull request, not an issue"
         log_info "Hint: Use 'gh pr view $ISSUE' to see PR details"
@@ -693,13 +759,17 @@ main() {
 
     # Check if issue is already closed or merged
     local issue_state
-    issue_state=$(gh issue view "$ISSUE" --json state --jq '.state' 2>/dev/null)
+    issue_state=$(echo "$issue_meta" | jq -r '.state' 2>/dev/null)
     if [[ "$issue_state" != "OPEN" ]]; then
         log_info "Issue #$ISSUE is already $issue_state - no orchestration needed"
         exit 0
     fi
 
-    # Check if issue is blocked
+    # Pre-populate label cache from the metadata we already fetched
+    _CACHED_ISSUE_LABELS=$(echo "$issue_meta" | jq -r '.labels[].name' 2>/dev/null) || _CACHED_ISSUE_LABELS=""
+    _CACHED_ISSUE_NUMBER="$ISSUE"
+
+    # Check if issue is blocked (uses cached labels from above)
     if has_label "$ISSUE" "loom:blocked"; then
         if [[ "$MODE" == "force-merge" ]]; then
             log_warn "Issue #$ISSUE has loom:blocked label - proceeding anyway (--force mode)"
@@ -711,7 +781,7 @@ main() {
     fi
 
     local issue_title
-    issue_title=$(gh issue view "$ISSUE" --json title --jq '.title' 2>/dev/null)
+    issue_title=$(echo "$issue_meta" | jq -r '.title' 2>/dev/null)
     log_info "Title: $issue_title"
     echo ""
 
@@ -751,6 +821,7 @@ main() {
         local curator_exit=0
         run_phase_with_retry "curator" "curator-issue-${ISSUE}" "$CURATOR_TIMEOUT" \
             --phase "curator" \
+            --task-id "$TASK_ID" \
             --args "$ISSUE" || curator_exit=$?
 
         if [[ $curator_exit -eq 3 ]]; then
@@ -803,7 +874,11 @@ main() {
         log_info "To approve: gh issue edit $ISSUE --add-label loom:issue"
 
         # Poll until approved or shutdown
-        while ! has_label "$ISSUE" "loom:issue"; do
+        while true; do
+            invalidate_issue_label_cache  # Force fresh fetch each poll
+            if has_label "$ISSUE" "loom:issue"; then
+                break
+            fi
             if check_shutdown; then
                 handle_shutdown "approval"
             fi
@@ -921,6 +996,7 @@ main() {
         run_phase_with_retry "builder" "builder-issue-${ISSUE}" "$BUILDER_TIMEOUT" \
             --phase "builder" \
             --worktree "$worktree_path" \
+            --task-id "$TASK_ID" \
             --args "$ISSUE" || builder_exit=$?
 
         if [[ $builder_exit -eq 3 ]]; then
@@ -1001,6 +1077,7 @@ main() {
         run_phase_with_retry "judge" "judge-issue-${ISSUE}" "$JUDGE_TIMEOUT" \
             --phase "judge" \
             --pr "$pr_number" \
+            --task-id "$TASK_ID" \
             --args "$pr_number" || judge_exit=$?
 
         if [[ $judge_exit -eq 3 ]]; then
@@ -1060,6 +1137,7 @@ main() {
                 --phase "doctor" \
                 --pr "$pr_number" \
                 --worktree "$worktree_path" \
+                --task-id "$TASK_ID" \
                 --args "$pr_number" || doctor_exit=$?
 
             if [[ $doctor_exit -eq 3 ]]; then
@@ -1114,35 +1192,15 @@ main() {
             gh issue comment "$ISSUE" --body "**Shepherd blocked**: Failed to merge PR #$pr_number. Branch may be out of date or have merge conflicts." >/dev/null 2>&1 || true
             fail_with_reason "merge" "failed to merge PR #$pr_number"
         fi
-    elif [[ "$MODE" == "force-pr" ]]; then
-        log_info "Stopping at loom:pr state (force-pr mode)"
-        log_info "PR #$pr_number is approved and ready for human merge"
-        completed_phases+=("Merge (awaiting human)")
     else
-        log_info "Waiting for human to merge PR #$pr_number..."
-        log_info "To merge: gh pr merge $pr_number --squash --delete-branch"
-
-        # Poll until merged or shutdown
-        while true; do
-            if check_shutdown; then
-                handle_shutdown "merge"
-            fi
-
-            local pr_state
-            pr_state=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null) || true
-
-            if [[ "$pr_state" == "MERGED" ]]; then
-                completed_phases+=("Merge (human merged)")
-                log_success "PR #$pr_number merged by human"
-                break
-            elif [[ "$pr_state" == "CLOSED" ]]; then
-                log_warn "PR #$pr_number was closed without merging"
-                completed_phases+=("Merge (closed)")
-                break
-            fi
-
-            sleep "$POLL_INTERVAL"
-        done
+        # Both force-pr (default) and normal (--wait) modes exit here.
+        # The Champion role is responsible for merging loom:pr PRs, so the
+        # shepherd doesn't need to wait. This frees the shepherd slot for
+        # new issues instead of blocking indefinitely.
+        log_info "Stopping at loom:pr state (PR approved, ready for merge)"
+        log_info "PR #$pr_number is approved and ready for Champion to merge"
+        log_info "To merge manually: gh pr merge $pr_number --squash --delete-branch"
+        completed_phases+=("Merge (awaiting merge)")
     fi
 
     # ─── Complete ─────────────────────────────────────────────────────────────
@@ -1153,10 +1211,12 @@ main() {
 
     # Report completion
     if [[ -x "$REPO_ROOT/.loom/scripts/report-milestone.sh" ]]; then
-        "$REPO_ROOT/.loom/scripts/report-milestone.sh" completed \
-            --task-id "$TASK_ID" \
-            --pr-merged \
-            --quiet || true
+        local milestone_args=(completed --task-id "$TASK_ID" --quiet)
+        # Only report --pr-merged if the PR was actually merged (force-merge mode)
+        if [[ "$MODE" == "force-merge" ]]; then
+            milestone_args+=(--pr-merged)
+        fi
+        "$REPO_ROOT/.loom/scripts/report-milestone.sh" "${milestone_args[@]}" || true
     fi
 
     log_phase "SHEPHERD ORCHESTRATION COMPLETE"

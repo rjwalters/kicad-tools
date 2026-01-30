@@ -56,8 +56,16 @@ find_main_repo_root() {
 REPO_ROOT="$(find_main_repo_root)" || \
   error "Not in a git repository"
 
+# Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
+if [[ -x "$GH_CACHED" ]]; then
+    GH="$GH_CACHED"
+else
+    GH="gh"
+fi
+
 # Auto-detect owner/repo from git remote
-REPO_NWO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" || \
+REPO_NWO="$($GH repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" || \
   error "Could not determine repository. Is 'gh' authenticated?"
 
 # Parse arguments
@@ -87,7 +95,7 @@ done
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || error "PR number must be numeric: $PR_NUMBER"
 
 # Fetch PR state
-PR_JSON=$(gh api "repos/$REPO_NWO/pulls/$PR_NUMBER" 2>/dev/null) || \
+PR_JSON=$($GH api "repos/$REPO_NWO/pulls/$PR_NUMBER" 2>/dev/null) || \
   error "Could not fetch PR #$PR_NUMBER"
 
 PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
@@ -147,7 +155,7 @@ for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
     2>&1) && break  # Success, exit loop
 
   # Check if it merged despite error (race condition)
-  RECHECK=$(gh api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+  RECHECK=$($GH --no-cache api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
   if [[ "$RECHECK" == "true" ]]; then
     warning "Merge reported error but PR is merged (race condition)"
     break
@@ -183,7 +191,7 @@ for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
 done
 
 # Verify merge
-VERIFY_MERGED=$(gh api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+VERIFY_MERGED=$($GH --no-cache api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
 if [[ "$VERIFY_MERGED" != "true" ]]; then
   error "Merge API call returned but PR #$PR_NUMBER is not merged"
 fi

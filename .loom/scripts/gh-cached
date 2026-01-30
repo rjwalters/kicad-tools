@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""gh-cached: TTL-based LRU cache wrapper for the GitHub CLI.
+
+Drop-in replacement for `gh` that caches read-only command responses
+to reduce API calls. Mutations bypass the cache and invalidate
+related entries.
+
+Cache is file-backed in /tmp/gh-cache/ for cross-process sharing.
+
+Usage:
+    gh-cached issue view 42 --json labels
+    gh-cached pr list --label "loom:review-requested" --state open
+    gh-cached --no-cache issue view 42 --json labels  # bypass cache
+    gh-cached --clear-cache                            # clear all cached entries
+    gh-cached --cache-stats                            # show hit/miss statistics
+
+Environment:
+    GH_CACHE_DIR       Cache directory (default: /tmp/gh-cache)
+    GH_CACHE_TTL       Default TTL in seconds (default: 30)
+    GH_CACHE_MAX_SIZE  Max cached entries (default: 256)
+    GH_CACHE_DISABLE   Set to "1" to disable caching entirely
+    GH_CACHE_DEBUG     Set to "1" for debug logging to stderr
+"""
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+
+# ─── Configuration ──────────────────────────────────────────────────────────
+
+CACHE_DIR = os.environ.get("GH_CACHE_DIR", "/tmp/gh-cache")
+DEFAULT_TTL = int(os.environ.get("GH_CACHE_TTL", "30"))
+MAX_CACHE_SIZE = int(os.environ.get("GH_CACHE_MAX_SIZE", "256"))
+CACHE_DISABLED = os.environ.get("GH_CACHE_DISABLE", "") == "1"
+DEBUG = os.environ.get("GH_CACHE_DEBUG", "") == "1"
+
+# TTL overrides by command type (seconds)
+TTL_BY_COMMAND = {
+    ("issue", "view"):   30,
+    ("issue", "list"):   30,
+    ("pr", "view"):      30,
+    ("pr", "list"):      30,
+    ("api",):            30,
+}
+
+# Commands that are read-only and safe to cache
+CACHEABLE_SUBCOMMANDS = frozenset({"view", "list", "search", "status"})
+
+# Commands that mutate state — bypass cache and invalidate
+MUTATION_SUBCOMMANDS = frozenset({
+    "edit", "create", "delete", "close", "reopen",
+    "merge", "review", "comment", "label",
+})
+
+# Top-level gh commands that are never cached
+PASSTHROUGH_COMMANDS = frozenset({
+    "auth", "config", "ssh-key", "gpg-key", "secret",
+    "repo", "gist", "extension", "alias", "completion",
+    "help", "--help", "-h", "--version",
+})
+
+# ─── Cache Implementation ───────────────────────────────────────────────────
+
+def debug(msg: str) -> None:
+    if DEBUG:
+        print(f"[gh-cached] {msg}", file=sys.stderr)
+
+
+def ensure_cache_dir() -> None:
+    os.makedirs(CACHE_DIR, mode=0o700, exist_ok=True)
+
+
+def cache_key(args: list[str]) -> str:
+    """Generate a cache key from the gh command arguments."""
+    raw = " ".join(args)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def cache_path(key: str) -> str:
+    return os.path.join(CACHE_DIR, f"{key}.json")
+
+
+def stats_path() -> str:
+    return os.path.join(CACHE_DIR, "_stats.json")
+
+
+def read_stats() -> dict:
+    path = stats_path()
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"hits": 0, "misses": 0, "bypasses": 0, "invalidations": 0}
+
+
+def write_stats(stats: dict) -> None:
+    ensure_cache_dir()
+    path = stats_path()
+    try:
+        with open(path, "w") as f:
+            json.dump(stats, f)
+    except OSError:
+        pass
+
+
+def increment_stat(stat_name: str) -> None:
+    stats = read_stats()
+    stats[stat_name] = stats.get(stat_name, 0) + 1
+    write_stats(stats)
+
+
+def cache_get(key: str) -> tuple[str | None, int | None]:
+    """Read a cached entry. Returns (stdout, returncode) or (None, None) if miss."""
+    path = cache_path(key)
+    try:
+        with open(path) as f:
+            entry = json.load(f)
+        if time.time() - entry["time"] > entry["ttl"]:
+            debug(f"EXPIRED key={key}")
+            os.unlink(path)
+            return None, None
+        # Update access time for LRU
+        entry["accessed"] = time.time()
+        with open(path, "w") as f:
+            json.dump(entry, f)
+        return entry["stdout"], entry["returncode"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return None, None
+
+
+def cache_put(key: str, stdout: str, returncode: int, ttl: int) -> None:
+    """Write a cache entry."""
+    ensure_cache_dir()
+    enforce_max_size()
+    entry = {
+        "time": time.time(),
+        "accessed": time.time(),
+        "ttl": ttl,
+        "stdout": stdout,
+        "returncode": returncode,
+    }
+    path = cache_path(key)
+    try:
+        with open(path, "w") as f:
+            json.dump(entry, f)
+    except OSError:
+        pass
+
+
+def enforce_max_size() -> None:
+    """Evict least-recently-accessed entries if cache exceeds max size."""
+    try:
+        entries = []
+        for name in os.listdir(CACHE_DIR):
+            if name.startswith("_") or not name.endswith(".json"):
+                continue
+            path = os.path.join(CACHE_DIR, name)
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                entries.append((data.get("accessed", 0), path))
+            except (json.JSONDecodeError, OSError):
+                # Corrupted entry — remove it
+                os.unlink(path)
+
+        if len(entries) <= MAX_CACHE_SIZE:
+            return
+
+        # Sort by access time, evict oldest
+        entries.sort(key=lambda x: x[0])
+        evict_count = len(entries) - MAX_CACHE_SIZE
+        for _, path in entries[:evict_count]:
+            debug(f"EVICT {os.path.basename(path)}")
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def invalidate_for_resource(resource_type: str, resource_id: str | None) -> None:
+    """Invalidate cached entries related to a resource.
+
+    After a mutation like `gh issue edit 42 ...`, we invalidate any cached
+    entries whose command args contain the resource type and id.
+    """
+    if not resource_id:
+        return
+
+    debug(f"INVALIDATE {resource_type} {resource_id}")
+    count = 0
+    try:
+        for name in os.listdir(CACHE_DIR):
+            if name.startswith("_") or not name.endswith(".json"):
+                continue
+            path = os.path.join(CACHE_DIR, name)
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                stdout = data.get("stdout", "")
+                # Heuristic: if the cached output mentions this resource,
+                # or if the cache key was derived from a command referencing it,
+                # invalidate it. Since we can't reconstruct the original args
+                # from the hash, we take the conservative approach of invalidating
+                # entries that contain the resource id in their output.
+                if resource_id in stdout:
+                    os.unlink(path)
+                    count += 1
+            except (json.JSONDecodeError, OSError):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    if count:
+        debug(f"INVALIDATED {count} entries for {resource_type} {resource_id}")
+        stats = read_stats()
+        stats["invalidations"] = stats.get("invalidations", 0) + count
+        write_stats(stats)
+
+
+def invalidate_all_for_type(resource_type: str) -> None:
+    """Broad invalidation: clear all entries when we can't determine the resource id."""
+    debug(f"INVALIDATE ALL (mutation on {resource_type})")
+    clear_cache()
+
+
+def clear_cache() -> None:
+    """Remove all cached entries."""
+    try:
+        for name in os.listdir(CACHE_DIR):
+            if name.startswith("_"):
+                continue
+            path = os.path.join(CACHE_DIR, name)
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+# ─── Command Analysis ────────────────────────────────────────────────────────
+
+def parse_gh_args(args: list[str]) -> dict:
+    """Parse gh command arguments to determine cacheability.
+
+    Returns dict with:
+        resource_type: "issue", "pr", "api", etc.
+        subcommand: "view", "list", "edit", etc.
+        resource_id: The issue/PR number if present
+        cacheable: Whether this command can be cached
+        ttl: TTL to use for this command
+    """
+    result = {
+        "resource_type": None,
+        "subcommand": None,
+        "resource_id": None,
+        "cacheable": False,
+        "ttl": DEFAULT_TTL,
+    }
+
+    if not args:
+        return result
+
+    # First non-flag arg is the resource type
+    resource_type = args[0]
+    result["resource_type"] = resource_type
+
+    if resource_type in PASSTHROUGH_COMMANDS:
+        return result
+
+    # Special case: `gh api` — cache GET requests
+    if resource_type == "api":
+        result["subcommand"] = "api"
+        # Check for method flags that indicate mutation
+        is_mutation = False
+        for i, arg in enumerate(args):
+            if arg in ("-X", "--method") and i + 1 < len(args):
+                method = args[i + 1].upper()
+                if method != "GET":
+                    is_mutation = True
+                    break
+            if arg == "-f" or arg == "--field":
+                # POST with fields
+                is_mutation = True
+                break
+        if not is_mutation:
+            result["cacheable"] = True
+            result["ttl"] = TTL_BY_COMMAND.get(("api",), DEFAULT_TTL)
+        return result
+
+    # Second arg is the subcommand
+    if len(args) < 2:
+        return result
+
+    subcommand = args[1]
+    result["subcommand"] = subcommand
+
+    # Extract resource ID (first non-flag arg after subcommand)
+    for arg in args[2:]:
+        if not arg.startswith("-"):
+            result["resource_id"] = arg
+            break
+
+    # Determine TTL
+    ttl_key = (resource_type, subcommand)
+    result["ttl"] = TTL_BY_COMMAND.get(ttl_key, DEFAULT_TTL)
+
+    # Determine cacheability
+    if subcommand in CACHEABLE_SUBCOMMANDS:
+        result["cacheable"] = True
+    elif subcommand in MUTATION_SUBCOMMANDS:
+        result["cacheable"] = False
+
+    return result
+
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+def run_gh(args: list[str]) -> tuple[str, str, int]:
+    """Execute the real gh command and return (stdout, stderr, returncode)."""
+    proc = subprocess.run(
+        ["gh"] + args,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout, proc.stderr, proc.returncode
+
+
+def main() -> int:
+    args = sys.argv[1:]
+
+    # Handle meta-commands
+    if "--clear-cache" in args:
+        clear_cache()
+        print("Cache cleared.", file=sys.stderr)
+        return 0
+
+    if "--cache-stats" in args:
+        stats = read_stats()
+        total = stats["hits"] + stats["misses"]
+        rate = (stats["hits"] / total * 100) if total > 0 else 0
+        print(f"Hits: {stats['hits']}", file=sys.stderr)
+        print(f"Misses: {stats['misses']}", file=sys.stderr)
+        print(f"Bypasses: {stats['bypasses']}", file=sys.stderr)
+        print(f"Invalidations: {stats['invalidations']}", file=sys.stderr)
+        print(f"Hit rate: {rate:.1f}%", file=sys.stderr)
+        return 0
+
+    # Handle --no-cache flag
+    no_cache = False
+    if "--no-cache" in args:
+        args.remove("--no-cache")
+        no_cache = True
+
+    # Disabled or passthrough
+    if CACHE_DISABLED or no_cache or not args:
+        stdout, stderr, rc = run_gh(args)
+        sys.stdout.write(stdout)
+        sys.stderr.write(stderr)
+        if no_cache:
+            increment_stat("bypasses")
+        return rc
+
+    parsed = parse_gh_args(args)
+    debug(f"CMD: gh {' '.join(args)}")
+    debug(f"PARSED: cacheable={parsed['cacheable']} type={parsed['resource_type']} "
+          f"sub={parsed['subcommand']} id={parsed['resource_id']} ttl={parsed['ttl']}")
+
+    # Mutation: bypass cache, invalidate related entries
+    if not parsed["cacheable"]:
+        stdout, stderr, rc = run_gh(args)
+        sys.stdout.write(stdout)
+        sys.stderr.write(stderr)
+
+        # Invalidate on successful mutations
+        if rc == 0 and parsed["subcommand"] in MUTATION_SUBCOMMANDS:
+            if parsed["resource_id"]:
+                invalidate_for_resource(parsed["resource_type"], parsed["resource_id"])
+            else:
+                invalidate_all_for_type(parsed["resource_type"] or "unknown")
+
+        increment_stat("bypasses")
+        return rc
+
+    # Read-only: check cache
+    key = cache_key(args)
+    cached_stdout, cached_rc = cache_get(key)
+
+    if cached_stdout is not None:
+        debug(f"HIT key={key}")
+        sys.stdout.write(cached_stdout)
+        increment_stat("hits")
+        return cached_rc
+
+    # Cache miss: run real command
+    debug(f"MISS key={key}")
+    stdout, stderr, rc = run_gh(args)
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+
+    # Only cache successful responses
+    if rc == 0:
+        cache_put(key, stdout, rc, parsed["ttl"])
+
+    increment_stat("misses")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

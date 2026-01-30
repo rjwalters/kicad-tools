@@ -522,16 +522,18 @@ fi
 
 The `--force` flag affects Gate 1 (approval) and Gate 2 (merge), but **does not skip the Judge phase**. Code review always runs because GitHub's API prevents self-approval of PRs.
 
-| Phase | Default (`--force-pr`) | `--wait` | `--force` |
-|-------|----------------------|----------|-----------|
-| Curator | Runs | Runs | Runs |
-| Gate 1 (Approval) | Auto-approve | Wait for human | Auto-approve |
-| Builder | Runs | Runs | Runs |
-| **Judge** | **Runs** | **Runs** | **Runs** |
-| Doctor (if needed) | Runs | Runs | Runs |
-| Gate 2 (Merge) | Stop at `loom:pr` | Wait for human | Auto-merge |
+| Phase | Default | `--force` |
+|-------|---------|-----------|
+| Curator | Runs | Runs |
+| Gate 1 (Approval) | Auto-approve | Auto-approve |
+| Builder | Runs | Runs |
+| **Judge** | **Runs** | **Runs** |
+| Doctor (if needed) | Runs | Runs |
+| Gate 2 (Merge) | Exit at `loom:pr` (Champion merges) | Auto-merge |
 
-**Why Judge always runs**: GitHub's API returns "cannot approve your own PR" when the same user who created a PR tries to approve it. Loom works around this via label-based reviews (Judge sets `loom:pr` label instead of calling `gh pr review --approve`), which works in all modes. Force mode's value is auto-promotion at Gate 1 and auto-merge at Gate 2, not review bypass.
+**Why Judge always runs**: GitHub's API returns "cannot approve your own PR" when the same user who created a PR tries to approve it. Loom works around this via label-based reviews (Judge sets `loom:pr` label instead of calling `gh pr review --approve`), which works in all modes. Force mode's value is auto-merge at Gate 2, not review bypass.
+
+**Why shepherds exit at `loom:pr`**: Without `--force`, shepherds exit after the PR is approved to free their slot for new issues. The Champion role is responsible for merging `loom:pr` PRs. The deprecated `--wait` flag previously caused shepherds to block indefinitely at this stage.
 
 ## Full Orchestration Workflow
 
@@ -754,13 +756,6 @@ fi
 
 ```bash
 if [ "$PHASE" = "gate2" ]; then
-  # Check if default mode - stop here, don't merge
-  if [ "$DEFAULT_MODE" = "true" ]; then
-    echo "Default mode: stopping at loom:pr state"
-    gh issue comment $ISSUE_NUMBER --body "**PR approved** - stopping at \`loom:pr\`. Ready for human merge or Champion auto-merge."
-    exit 0
-  fi
-
   # Check if --force mode - auto-merge with conflict resolution
   if [ "$FORCE_MODE" = "true" ]; then
     echo "Force mode: auto-merging PR"
@@ -774,34 +769,12 @@ if [ "$PHASE" = "gate2" ]; then
 
     gh issue comment $ISSUE_NUMBER --body "**Auto-merged** PR #$PR_NUMBER via \`/shepherd --force\`"
   else
-    # Trigger Champion or wait for human merge
-    CHAMPION_TERMINAL="terminal-5"  # if exists
-
-    mcp__loom__trigger_run_now --terminalId $CHAMPION_TERMINAL
-
-    # Wait for merge
-    TIMEOUT=1800  # 30 minutes
-    START=$(date +%s)
-
-    while true; do
-      PR_STATE=$(gh pr view $PR_NUMBER --json state --jq '.state')
-      if [ "$PR_STATE" = "MERGED" ]; then
-        echo "PR merged successfully"
-        break
-      elif [ "$PR_STATE" = "CLOSED" ]; then
-        echo "PR was closed without merging"
-        exit 1
-      fi
-
-      NOW=$(date +%s)
-      if [ $((NOW - START)) -gt $TIMEOUT ]; then
-        echo "Timeout waiting for merge"
-        gh issue comment $ISSUE_NUMBER --body "Orchestration complete: PR #$PR_NUMBER is approved and ready for merge."
-        exit 0
-      fi
-
-      sleep 30
-    done
+    # Default mode: exit immediately at loom:pr state.
+    # The Champion role handles merging approved PRs.
+    # This frees the shepherd slot for new issues.
+    echo "PR approved - exiting (Champion will merge)"
+    gh issue comment $ISSUE_NUMBER --body "**PR approved** - stopping at \`loom:pr\`. Ready for Champion auto-merge."
+    exit 0
   fi
 fi
 ```

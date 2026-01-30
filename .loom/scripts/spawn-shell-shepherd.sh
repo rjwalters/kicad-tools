@@ -10,7 +10,6 @@
 #
 # Options:
 #   --force, -f     Auto-approve, resolve conflicts, auto-merge after approval
-#   --wait          Wait for human approval at each gate (explicit non-default)
 #   --name <name>   Session name (default: shepherd-issue-<N>)
 #   --json          Output spawn result as JSON
 #   --help          Show this help message
@@ -18,14 +17,14 @@
 # Deprecated:
 #   --force-pr      (deprecated) Now the default behavior
 #   --force-merge   (deprecated) Use --force or -f instead
+#   --wait          (deprecated) No longer blocks; shepherd always exits after PR approval
 #
 # The daemon can configure LOOM_SHELL_SHEPHERDS=true to use this script
 # instead of agent-spawn.sh for shepherd spawning.
 #
 # Example:
-#   spawn-shell-shepherd.sh 42 --json            # Default: create PR without waiting
+#   spawn-shell-shepherd.sh 42 --json            # Default: exit after PR approval
 #   spawn-shell-shepherd.sh 42 --force --json    # Full automation with auto-merge
-#   spawn-shell-shepherd.sh 42 --name shepherd-issue-42 --wait  # Wait for human approval
 
 set -euo pipefail
 
@@ -92,7 +91,6 @@ ${YELLOW}USAGE:${NC}
 
 ${YELLOW}OPTIONS:${NC}
     --force, -f     Auto-approve, resolve conflicts, auto-merge after approval
-    --wait          Wait for human approval at each gate (explicit non-default)
     --name <name>   Session name (default: shepherd-issue-<N>)
     --json          Output spawn result as JSON
     --help          Show this help message
@@ -100,9 +98,10 @@ ${YELLOW}OPTIONS:${NC}
 ${YELLOW}DEPRECATED:${NC}
     --force-pr      (deprecated) Now the default behavior
     --force-merge   (deprecated) Use --force or -f instead
+    --wait          (deprecated) No longer blocks; shepherd always exits after PR approval
 
 ${YELLOW}EXAMPLES:${NC}
-    # Spawn with default behavior (create PR without waiting)
+    # Spawn with default behavior (exit after PR approval)
     spawn-shell-shepherd.sh 42
 
     # Spawn with full automation (auto-merge)
@@ -139,6 +138,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --wait)
+            # Deprecated: --wait used to block indefinitely at the merge gate.
+            log_warn "Flag --wait is deprecated (shepherd always exits after PR approval)"
             MODE="--wait"
             shift
             ;;

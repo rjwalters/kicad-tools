@@ -71,6 +71,15 @@ find_repo_root() {
 }
 
 REPO_ROOT=$(find_repo_root)
+
+# Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
+if [[ -x "$GH_CACHED" ]]; then
+    GH="$GH_CACHED"
+else
+    GH="gh"
+fi
+
 DAEMON_STATE_FILE="$REPO_ROOT/.loom/daemon-state.json"
 PROGRESS_DIR="$REPO_ROOT/.loom/progress"
 
@@ -188,40 +197,40 @@ trap 'rm -rf "$TMPDIR"' EXIT
 # Each query writes to a temp file
 
 # Issues
-gh issue list --label "loom:issue" --state open --json number,title,labels,createdAt \
+$GH issue list --label "loom:issue" --state open --json number,title,labels,createdAt \
     > "$TMPDIR/ready_issues" 2>/dev/null &
 PID_READY=$!
 
-gh issue list --label "loom:building" --state open --json number,title,labels \
+$GH issue list --label "loom:building" --state open --json number,title,labels \
     > "$TMPDIR/building_issues" 2>/dev/null &
 PID_BUILDING=$!
 
-gh issue list --label "loom:architect" --state open --json number,title,labels \
+$GH issue list --label "loom:architect" --state open --json number,title,labels \
     > "$TMPDIR/architect_proposals" 2>/dev/null &
 PID_ARCHITECT=$!
 
-gh issue list --label "loom:hermit" --state open --json number,title,labels \
+$GH issue list --label "loom:hermit" --state open --json number,title,labels \
     > "$TMPDIR/hermit_proposals" 2>/dev/null &
 PID_HERMIT=$!
 
-gh issue list --label "loom:curated" --state open --json number,title,labels \
+$GH issue list --label "loom:curated" --state open --json number,title,labels \
     > "$TMPDIR/curated_issues" 2>/dev/null &
 PID_CURATED=$!
 
-gh issue list --label "loom:blocked" --state open --json number,title,labels \
+$GH issue list --label "loom:blocked" --state open --json number,title,labels \
     > "$TMPDIR/blocked_issues" 2>/dev/null &
 PID_BLOCKED=$!
 
 # PRs
-gh pr list --label "loom:review-requested" --state open --json number,title,labels,headRefName \
+$GH pr list --label "loom:review-requested" --state open --json number,title,labels,headRefName \
     > "$TMPDIR/review_requested_prs" 2>/dev/null &
 PID_REVIEW=$!
 
-gh pr list --label "loom:changes-requested" --state open --json number,title,labels,headRefName \
+$GH pr list --label "loom:changes-requested" --state open --json number,title,labels,headRefName \
     > "$TMPDIR/changes_requested_prs" 2>/dev/null &
 PID_CHANGES=$!
 
-gh pr list --label "loom:pr" --state open --json number,title,labels,headRefName \
+$GH pr list --label "loom:pr" --state open --json number,title,labels,headRefName \
     > "$TMPDIR/ready_to_merge_prs" 2>/dev/null &
 PID_MERGE=$!
 
@@ -301,7 +310,7 @@ READY_ISSUES=$(sort_issues "$READY_ISSUES_RAW" "$ISSUE_STRATEGY")
 BUILDING_ISSUES=$(read_json_file "$TMPDIR/building_issues")
 ARCHITECT_PROPOSALS=$(read_json_file "$TMPDIR/architect_proposals")
 HERMIT_PROPOSALS=$(read_json_file "$TMPDIR/hermit_proposals")
-CURATED_ISSUES=$(read_json_file "$TMPDIR/curated_issues")
+CURATED_ISSUES=$(read_json_file "$TMPDIR/curated_issues" | jq '[.[] | select([.labels[].name] | (contains(["loom:building"]) or contains(["loom:issue"])) | not)]')
 BLOCKED_ISSUES=$(read_json_file "$TMPDIR/blocked_issues")
 REVIEW_REQUESTED=$(read_json_file "$TMPDIR/review_requested_prs")
 CHANGES_REQUESTED=$(read_json_file "$TMPDIR/changes_requested_prs")
