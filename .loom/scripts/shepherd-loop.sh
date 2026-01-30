@@ -1015,6 +1015,27 @@ main() {
         if ! "$REPO_ROOT/.loom/scripts/validate-phase.sh" builder "$ISSUE" \
             --worktree "$worktree_path" \
             --task-id "$TASK_ID"; then
+            # Cleanup: remove stale worktree so the next retry starts fresh
+            # validate-phase.sh is read-only; cleanup is the caller's responsibility
+            if [[ -d "$worktree_path" ]]; then
+                local stale_branch
+                stale_branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || stale_branch=""
+                local has_commits
+                has_commits=$(git -C "$worktree_path" log --oneline '@{upstream}..HEAD' 2>/dev/null) || has_commits=""
+                local has_changes
+                has_changes=$(git -C "$worktree_path" status --porcelain 2>/dev/null) || has_changes=""
+                if [[ -z "$has_commits" && -z "$has_changes" ]]; then
+                    log_info "Cleaning up stale worktree (no commits, no changes): $worktree_path"
+                    if git worktree remove "$worktree_path" --force 2>/dev/null; then
+                        log_info "Removed stale worktree: $worktree_path"
+                        if [[ -n "$stale_branch" && "$stale_branch" != "main" ]]; then
+                            if git -C "$REPO_ROOT" branch -d "$stale_branch" 2>/dev/null; then
+                                log_info "Removed empty branch: $stale_branch"
+                            fi
+                        fi
+                    fi
+                fi
+            fi
             log_error "Builder phase validation failed"
             fail_with_reason "builder" "validation failed"
         fi
