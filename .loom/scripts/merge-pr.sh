@@ -28,8 +28,32 @@ info() { echo -e "${BLUE}$*${NC}"; }
 success() { echo -e "${GREEN}$*${NC}"; }
 warning() { echo -e "${YELLOW}$*${NC}"; }
 
-# Find git repository root
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || \
+# Find the main repository root (works from worktrees too)
+# When run from a worktree, git rev-parse --show-toplevel returns the worktree path,
+# not the main repository. This function navigates via the gitdir to find the actual root.
+find_main_repo_root() {
+  local dir
+  dir="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+
+  # Check if this is a worktree (has .git file, not directory)
+  if [[ -f "$dir/.git" ]]; then
+    local gitdir
+    gitdir=$(cat "$dir/.git" | sed 's/^gitdir: //')
+    # gitdir is like /path/to/repo/.git/worktrees/issue-123
+    # main repo is 3 levels up from there
+    local main_repo
+    main_repo=$(dirname "$(dirname "$(dirname "$gitdir")")")
+    if [[ -d "$main_repo/.loom" ]]; then
+      echo "$main_repo"
+      return 0
+    fi
+  fi
+
+  # Not a worktree or fallback - return the git root
+  echo "$dir"
+}
+
+REPO_ROOT="$(find_main_repo_root)" || \
   error "Not in a git repository"
 
 # Auto-detect owner/repo from git remote
@@ -196,10 +220,26 @@ if [[ "$CLEANUP_WORKTREE" == "true" ]]; then
   if [[ -n "$ISSUE_NUM" ]]; then
     WORKTREE_PATH="$REPO_ROOT/.loom/worktrees/issue-$ISSUE_NUM"
     if [[ -d "$WORKTREE_PATH" ]]; then
+      # Check if we're currently inside the worktree being removed
+      CURRENT_DIR="$(pwd -P 2>/dev/null || pwd)"
+      WORKTREE_REAL="$(cd "$WORKTREE_PATH" 2>/dev/null && pwd -P || echo "$WORKTREE_PATH")"
+      IN_WORKTREE=false
+      if [[ "$CURRENT_DIR" == "$WORKTREE_REAL"* ]]; then
+        IN_WORKTREE=true
+        cd "$REPO_ROOT"
+      fi
       info "Removing worktree: $WORKTREE_PATH"
-      git -C "$REPO_ROOT" worktree remove "$WORKTREE_PATH" --force 2>/dev/null && \
-        success "Worktree removed" || \
+      if git -C "$REPO_ROOT" worktree remove "$WORKTREE_PATH" --force 2>/dev/null; then
+        success "Worktree removed"
+        if [[ "$IN_WORKTREE" == "true" ]]; then
+          echo ""
+          warning "Your shell's working directory was inside the removed worktree."
+          warning "Run this command to fix:"
+          echo "  cd $REPO_ROOT"
+        fi
+      else
         warning "Could not remove worktree at $WORKTREE_PATH"
+      fi
     else
       info "No worktree found at $WORKTREE_PATH"
     fi

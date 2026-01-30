@@ -396,6 +396,7 @@ if [[ "$BRANCHES_ONLY" == false && "$TMUX_ONLY" == false ]]; then
       # See issue #1485: prevents premature cleanup during orchestration
       marker_file="${worktree_path}/.loom-in-use"
       if [[ -f "$marker_file" ]]; then
+        marker_task_id="" marker_pid=""
         marker_task_id=$(jq -r '.shepherd_task_id // "unknown"' "$marker_file" 2>/dev/null || echo "unknown")
         marker_pid=$(jq -r '.pid // "unknown"' "$marker_file" 2>/dev/null || echo "unknown")
         info "  Worktree in use by shepherd (task: $marker_task_id, pid: $marker_pid) - preserving"

@@ -2,6 +2,127 @@
 
 This document contains detailed workflow implementation for the Shepherd role. For core role definition, principles, and phase flow overview, see `shepherd.md`.
 
+## Label State Machine
+
+This section documents the expected GitHub label states at each shepherd phase boundary. This is essential for:
+- Manual shepherd continuation after failures
+- Debugging label state issues
+- Understanding the state machine for recovery
+
+### Phase Entry States
+
+| Phase | Required Labels | Removed Before Entry |
+|-------|-----------------|----------------------|
+| Curator | (none or `loom:curating`) | - |
+| Approval Gate | `loom:curated` | `loom:curating` |
+| Builder | `loom:issue` + `loom:building` | `loom:curated` (optional) |
+| Judge | Issue: `loom:building`, PR: `loom:review-requested` | `loom:issue` |
+| Doctor | Issue: `loom:building`, PR: `loom:changes-requested` | PR: `loom:review-requested` |
+| Merge Gate | Issue: `loom:building`, PR: `loom:pr` | PR: `loom:changes-requested` |
+
+### Phase Exit States (Success)
+
+| Phase | Issue Labels | PR Labels | Notes |
+|-------|--------------|-----------|-------|
+| Curator | `loom:curated` | - | Ready for approval |
+| Approval | `loom:issue` | - | Human/Champion promoted |
+| Builder | `loom:building` | `loom:review-requested` | PR created and ready for review |
+| Judge (approve) | `loom:building` | `loom:pr` | PR approved |
+| Judge (request changes) | `loom:building` | `loom:changes-requested` | Needs doctor |
+| Doctor | `loom:building` | `loom:review-requested` | Ready for re-review |
+| Merge | (closed) | (merged) | Issue auto-closed by GitHub |
+
+### Phase Exit States (Failure)
+
+| Phase | Issue Labels | PR Labels | Recovery |
+|-------|--------------|-----------|----------|
+| Curator | (unchanged) | - | Retry curator |
+| Builder | `loom:blocked` | - | See diagnostics comment |
+| Judge | `loom:blocked` | (unchanged) | Manual review required |
+| Doctor | `loom:blocked` | (unchanged) | Manual fix required |
+
+### Label State Diagram
+
+```
+Issue Lifecycle:
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  (created)  │ ──▶ │loom:curating│ ──▶ │loom:curated │ ──▶ │ loom:issue  │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                          ↑ Curator           ↑ Curator          ↑ Approval
+                                                                    │
+                                                                    ▼
+                    ┌─────────────┐                         ┌─────────────┐
+                    │loom:blocked │ ◀─── (failure) ─────── │loom:building│
+                    └─────────────┘                         └─────────────┘
+                                                                    │
+                                                              (PR merged)
+                                                                    ▼
+                                                            ┌─────────────┐
+                                                            │  (closed)   │
+                                                            └─────────────┘
+
+PR Lifecycle:
+┌─────────────────────┐     ┌───────────────────────┐     ┌─────────────┐
+│loom:review-requested│ ──▶ │loom:changes-requested │ ──▶ │  loom:pr    │
+└─────────────────────┘     └───────────────────────┘     └─────────────┘
+        ↑ Builder                   ↑ Judge                    ↑ Judge
+        ↑ Doctor ◀──────────────────┘ (after fix)              │
+                                                               ▼
+                                                         ┌─────────────┐
+                                                         │  (merged)   │
+                                                         └─────────────┘
+```
+
+### Manual Recovery: Setting Label State
+
+When manually continuing after a shepherd failure, ensure labels match the expected state for the phase you're entering:
+
+**Resume at Builder phase:**
+```bash
+# Issue must have loom:issue AND loom:building
+gh issue edit <N> --remove-label "loom:blocked,loom:curated" --add-label "loom:issue,loom:building"
+```
+
+**Resume at Judge phase:**
+```bash
+# Issue has loom:building, PR has loom:review-requested
+gh issue edit <N> --remove-label "loom:blocked"
+gh pr edit <PR> --add-label "loom:review-requested"
+```
+
+**Resume at Doctor phase:**
+```bash
+# PR has loom:changes-requested
+gh pr edit <PR> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
+```
+
+**Reset to retry from beginning:**
+```bash
+# Clear all loom labels and start fresh
+gh issue edit <N> --remove-label "loom:blocked,loom:building,loom:issue,loom:curated,loom:curating"
+# Then run: /shepherd <N>
+```
+
+### Validation Script
+
+Use `validate-phase.sh` to check if current label state matches expected state:
+
+```bash
+# Check curator phase contract
+./.loom/scripts/validate-phase.sh curator <issue-number> --check-only
+
+# Check builder phase contract
+./.loom/scripts/validate-phase.sh builder <issue-number> --worktree .loom/worktrees/issue-<N> --check-only
+
+# Check judge phase contract
+./.loom/scripts/validate-phase.sh judge <issue-number> --pr <PR-number> --check-only
+
+# Check doctor phase contract
+./.loom/scripts/validate-phase.sh doctor <issue-number> --pr <PR-number> --check-only
+```
+
+Use `--check-only` to inspect state without triggering recovery actions.
+
 ## Graceful Shutdown - Integrated into Waits
 
 Shutdown signal checking is integrated into `agent-wait-bg.sh`, which polls for signals during phase waits. This replaces the previous approach of checking only at phase boundaries.
@@ -397,6 +518,21 @@ else
 fi
 ```
 
+## Mode Behavior at Each Phase
+
+The `--force` flag affects Gate 1 (approval) and Gate 2 (merge), but **does not skip the Judge phase**. Code review always runs because GitHub's API prevents self-approval of PRs.
+
+| Phase | Default (`--force-pr`) | `--wait` | `--force` |
+|-------|----------------------|----------|-----------|
+| Curator | Runs | Runs | Runs |
+| Gate 1 (Approval) | Auto-approve | Wait for human | Auto-approve |
+| Builder | Runs | Runs | Runs |
+| **Judge** | **Runs** | **Runs** | **Runs** |
+| Doctor (if needed) | Runs | Runs | Runs |
+| Gate 2 (Merge) | Stop at `loom:pr` | Wait for human | Auto-merge |
+
+**Why Judge always runs**: GitHub's API returns "cannot approve your own PR" when the same user who created a PR tries to approve it. Loom works around this via label-based reviews (Judge sets `loom:pr` label instead of calling `gh pr review --approve`), which works in all modes. Force mode's value is auto-promotion at Gate 1 and auto-merge at Gate 2, not review bypass.
+
 ## Full Orchestration Workflow
 
 ### Step 1: Check State
@@ -516,9 +652,11 @@ fi
 
 ### Step 5: Judge Phase
 
+**Note**: The Judge phase runs in ALL modes, including `--force`. Force mode does not skip code review. GitHub's API prevents self-approval of PRs, but Loom's label-based review system (Judge adds `loom:pr` label instead of using `gh pr review --approve`) works around this restriction. See `judge.md` for details.
+
 ```bash
 if [ "$PHASE" = "judge" ]; then
-  # Spawn ephemeral judge worker
+  # Spawn ephemeral judge worker (always runs, even in force mode)
   ./.loom/scripts/agent-spawn.sh --role judge --name "judge-issue-${ISSUE_NUMBER}" --args "$PR_NUMBER" --on-demand
 
   # Non-blocking wait with heartbeat polling
