@@ -99,6 +99,11 @@ from .fine_pitch import (
     analyze_fine_pitch_components,
 )
 from .grid import RoutingGrid
+from .adaptive_grid import (
+    AdaptiveGridResult,
+    AdaptiveGridRouter,
+    identify_fine_pitch_components,
+)
 from .subgrid import (
     SubGridAnalysis,
     SubGridEscape,
@@ -477,6 +482,10 @@ __all__ = [
     "SubGridPad",
     "SubGridResult",
     "compute_subgrid_resolution",
+    # Adaptive Grid Routing (Issue #1135)
+    "AdaptiveGridRouter",
+    "AdaptiveGridResult",
+    "identify_fine_pitch_components",
     # Routing Cache (Issue #1071)
     "RoutingCache",
     "CacheKey",
