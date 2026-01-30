@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import os
 import random
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -22,9 +21,11 @@ from kicad_tools.cli.progress import flush_print
 
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .algorithms import (
+    HierarchicalRouter,
     MonteCarloRouter,
     MSTRouter,
     NegotiatedRouter,
+    TwoPhaseRouter,
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
@@ -62,8 +63,6 @@ from .rules import (
     NetClassRouting,
     assign_layer_preferences,
 )
-from .global_router import CorridorAssignment, GlobalRouter, GlobalRoutingResult
-from .region_graph import RegionGraph
 from .sparse import Corridor, SparseRouter, Waypoint
 from .tuning import (
     COST_PROFILES,
@@ -2320,6 +2319,24 @@ class Autorouter:
     # TWO-PHASE ROUTING (GLOBAL + DETAILED)
     # =========================================================================
 
+    def _create_two_phase_router(self) -> TwoPhaseRouter:
+        """Create a TwoPhaseRouter with access to Autorouter state."""
+        return TwoPhaseRouter(
+            grid=self.grid,
+            router=self.router,
+            rules=self.rules,
+            net_class_map=self.net_class_map,
+            nets=self.nets,
+            net_names=self.net_names,
+            pads=self.pads,
+            routes=self.routes,
+            routing_failures=self.routing_failures,
+            get_net_priority=self._get_net_priority,
+            route_net=self.route_net,
+            route_net_with_corridor=self._route_net_with_corridor,
+            mark_route=self._mark_route,
+        )
+
     def route_all_two_phase(
         self,
         use_negotiated: bool = True,
@@ -2331,17 +2348,9 @@ class Autorouter:
         """Route all nets using two-phase global+detailed routing.
 
         Phase 1 (Global): Use SparseRouter to find coarse paths and reserve
-        corridors for each net. This establishes routing channels that prevent
-        nets from blocking each other.
+        corridors for each net.
 
         Phase 2 (Detailed): Use grid-based routing with corridor guidance.
-        Routes prefer to stay within their assigned corridors but can exit
-        with a cost penalty.
-
-        This approach provides:
-        - Early detection of unroutable nets (global routing fails fast)
-        - Better resource allocation (corridors prevent contention)
-        - Faster convergence (detailed router has guidance)
 
         Args:
             use_negotiated: Use negotiated congestion routing in detailed phase
@@ -2353,279 +2362,14 @@ class Autorouter:
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
         """
-        import time
-
-        start_time = time.time()
-
-        print("\n=== Two-Phase Routing (Global + Detailed) ===")
-
-        # Get nets to route in priority order
-        net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
-        net_order = [n for n in net_order if n != 0]
-        total_nets = len(net_order)
-
-        if total_nets == 0:
-            print("  No nets to route")
-            return []
-
-        def check_timeout() -> bool:
-            if timeout is None:
-                return False
-            return time.time() - start_time >= timeout
-
-        def elapsed_str() -> str:
-            return f"{time.time() - start_time:.1f}s"
-
-        # =====================================================================
-        # Phase 1: Global Routing with SparseRouter
-        # =====================================================================
-        print("\n--- Phase 1: Global Routing ---")
-        if progress_callback is not None:
-            if not progress_callback(0.0, "Phase 1: Global routing", True):
-                return list(self.routes)
-
-        # Create sparse router for global routing
-        sparse_router = SparseRouter(
-            width=self.grid.width,
-            height=self.grid.height,
-            rules=self.rules,
-            origin_x=self.grid.origin_x,
-            origin_y=self.grid.origin_y,
-            num_layers=self.grid.num_layers,
+        tp_router = self._create_two_phase_router()
+        return tp_router.route_all(
+            use_negotiated=use_negotiated,
+            corridor_width_factor=corridor_width_factor,
+            corridor_penalty=corridor_penalty,
+            progress_callback=progress_callback,
+            timeout=timeout,
         )
-
-        # Add all pads to sparse router
-        for pad in self.pads.values():
-            sparse_router.add_pad(pad)
-
-        # Build the sparse graph
-        sparse_router.build_graph()
-        stats = sparse_router.get_statistics()
-        print(f"  Sparse graph: {stats['total_waypoints']} waypoints, {stats['total_edges']} edges")
-
-        # Find global paths and reserve corridors
-        corridors: dict[int, Corridor] = {}
-        global_failures: list[int] = []
-        corridor_width = corridor_width_factor * self.rules.trace_clearance
-
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                print(
-                    f"  ⚠ Timeout during global routing at net {i}/{total_nets} ({elapsed_str()})"
-                )
-                break
-
-            pads = self.nets[net]
-            if len(pads) < 2:
-                continue
-
-            # For multi-pad nets, find path between first two pads
-            # (MST routing will handle the rest in detailed phase)
-            pad1 = self.pads[pads[0]]
-            pad2 = self.pads[pads[1]]
-
-            waypoints = sparse_router.find_global_path(pad1, pad2)
-
-            if waypoints:
-                corridor = sparse_router.reserve_corridor(net, waypoints, corridor_width)
-                corridors[net] = corridor
-            else:
-                global_failures.append(net)
-                net_name = self.net_names.get(net, f"Net {net}")
-                print(f"  ⚠ Global routing failed for {net_name}")
-
-        print(
-            f"  Global routing: {len(corridors)}/{total_nets} nets have corridors ({elapsed_str()})"
-        )
-        if global_failures:
-            print(f"  ⚠ {len(global_failures)} nets failed global routing (will attempt anyway)")
-
-        # =====================================================================
-        # Phase 2: Detailed Routing with Corridor Guidance
-        # =====================================================================
-        print("\n--- Phase 2: Detailed Routing ---")
-        if progress_callback is not None:
-            if not progress_callback(0.3, "Phase 2: Detailed routing", True):
-                return list(self.routes)
-
-        # Set corridor preferences on the grid
-        for net, corridor in corridors.items():
-            self.grid.set_corridor_preference(corridor, net, corridor_penalty)
-
-        # Route using negotiated or standard routing
-        if use_negotiated:
-            detailed_routes = self._route_two_phase_detailed_negotiated(
-                net_order=net_order,
-                progress_callback=progress_callback,
-                timeout=timeout,
-                start_time=start_time,
-            )
-        else:
-            detailed_routes = self._route_two_phase_detailed_standard(
-                net_order=net_order,
-                progress_callback=progress_callback,
-                timeout=timeout,
-                start_time=start_time,
-            )
-
-        # Clear corridor preferences (not needed after routing)
-        self.grid.clear_all_corridor_preferences()
-
-        # Summary
-        successful_nets = len({r.net for r in detailed_routes})
-        total_elapsed = time.time() - start_time
-        print("\n=== Two-Phase Routing Complete ===")
-        print(f"  Total nets: {total_nets}")
-        print(f"  Global routing: {len(corridors)} corridors assigned")
-        print(f"  Detailed routing: {successful_nets} nets routed")
-        print(f"  Total time: {total_elapsed:.1f}s")
-
-        # Print failed nets summary if any routes failed
-        if self.routing_failures:
-            failure_summary = format_failed_nets_summary(self.routing_failures)
-            if failure_summary:
-                print(failure_summary)
-
-        if progress_callback is not None:
-            progress_callback(
-                1.0,
-                f"Complete: {successful_nets}/{total_nets} nets routed in {total_elapsed:.1f}s",
-                False,
-            )
-
-        return detailed_routes
-
-    def _route_two_phase_detailed_negotiated(
-        self,
-        net_order: list[int],
-        progress_callback: ProgressCallback | None,
-        timeout: float | None,
-        start_time: float,
-    ) -> list[Route]:
-        """Detailed routing phase using negotiated congestion routing."""
-        import time
-
-        def check_timeout() -> bool:
-            if timeout is None:
-                return False
-            return time.time() - start_time >= timeout
-
-        def elapsed_str() -> str:
-            return f"{time.time() - start_time:.1f}s"
-
-        total_nets = len(net_order)
-
-        # Use negotiated routing with corridor guidance
-        neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
-        net_routes: dict[int, list[Route]] = {}
-        present_factor = 0.5
-
-        # Initial routing pass
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                print(
-                    f"  ⚠ Timeout during detailed routing at net {i}/{total_nets} ({elapsed_str()})"
-                )
-                break
-
-            net_name = self.net_names.get(net, f"Net {net}")
-            pct = (i / total_nets * 100) if total_nets > 0 else 0
-            print(f"  [{pct:5.1f}%] Routing {net_name}... ({elapsed_str()})")
-
-            routes = self._route_net_with_corridor(net, present_factor)
-            if routes:
-                net_routes[net] = routes
-                for route in routes:
-                    self.grid.mark_route_usage(route)
-                    self.routes.append(route)
-
-        overflow = self.grid.get_total_overflow()
-        print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
-
-        # Rip-up and reroute iterations if needed
-        if overflow > 0:
-            max_iterations = 10
-            history_increment = 1.0
-            present_factor_increment = 0.5
-
-            for iteration in range(1, max_iterations + 1):
-                if check_timeout():
-                    print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
-                    break
-
-                if progress_callback is not None:
-                    progress = 0.3 + 0.6 * (iteration / max_iterations)
-                    if not progress_callback(
-                        progress, f"Iteration {iteration}/{max_iterations}", True
-                    ):
-                        break
-
-                present_factor += present_factor_increment
-                self.grid.update_history_costs(history_increment)
-
-                overused = self.grid.find_overused_cells()
-                nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
-                print(
-                    f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets ({elapsed_str()})"
-                )
-
-                neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
-
-                for net in nets_to_reroute:
-                    if check_timeout():
-                        break
-                    routes = self._route_net_with_corridor(net, present_factor)
-                    if routes:
-                        net_routes[net] = routes
-                        for route in routes:
-                            self.grid.mark_route_usage(route)
-                            self.routes.append(route)
-
-                overflow = self.grid.get_total_overflow()
-                print(f"  Iteration {iteration} complete: overflow={overflow}")
-
-                if overflow == 0:
-                    print(f"  Converged at iteration {iteration}!")
-                    break
-
-        return list(self.routes)
-
-    def _route_two_phase_detailed_standard(
-        self,
-        net_order: list[int],
-        progress_callback: ProgressCallback | None,
-        timeout: float | None,
-        start_time: float,
-    ) -> list[Route]:
-        """Detailed routing phase using standard routing (no negotiation)."""
-        import time
-
-        def check_timeout() -> bool:
-            if timeout is None:
-                return False
-            return time.time() - start_time >= timeout
-
-        def elapsed_str() -> str:
-            return f"{time.time() - start_time:.1f}s"
-
-        total_nets = len(net_order)
-        all_routes: list[Route] = []
-
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                print(f"  ⚠ Timeout at net {i}/{total_nets} ({elapsed_str()})")
-                break
-
-            if progress_callback is not None:
-                progress = 0.3 + 0.7 * (i / total_nets)
-                net_name = self.net_names.get(net, f"Net {net}")
-                if not progress_callback(progress, f"Routing {net_name}", True):
-                    break
-
-            routes = self.route_net(net)
-            all_routes.extend(routes)
-
-        return all_routes
 
     def _route_net_with_corridor(self, net: int, present_cost_factor: float) -> list[Route]:
         """Route a single net with corridor-aware costs.
@@ -2665,6 +2409,24 @@ class Autorouter:
     # HIERARCHICAL ROUTING (Issue #1095 - Phase A)
     # =========================================================================
 
+    def _create_hierarchical_router(self) -> HierarchicalRouter:
+        """Create a HierarchicalRouter with access to Autorouter state."""
+        return HierarchicalRouter(
+            grid=self.grid,
+            router=self.router,
+            rules=self.rules,
+            net_class_map=self.net_class_map,
+            nets=self.nets,
+            net_names=self.net_names,
+            pads=self.pads,
+            routes=self.routes,
+            routing_failures=self.routing_failures,
+            get_net_priority=self._get_net_priority,
+            route_net=self.route_net,
+            route_net_with_corridor=self._route_net_with_corridor,
+            mark_route=self._mark_route,
+        )
+
     def route_all_hierarchical(
         self,
         num_cols: int = 10,
@@ -2677,317 +2439,28 @@ class Autorouter:
         """Route all nets using hierarchical global-to-detailed flow.
 
         This strategy uses a RegionGraph to plan coarse routing corridors
-        for each net before performing detailed routing. The flow is:
-
-        1. Build a RegionGraph partitioning the board into regions
-        2. Use GlobalRouter to assign each net a corridor (sequence of regions)
-        3. Convert corridors to grid-level preferences
-        4. Run detailed routing (standard or negotiated) with corridor guidance
-        5. Fallback: nets that fail global routing are routed without corridors
-
-        This approach provides better resource allocation than direct routing
-        because nets are guided into non-overlapping channels, reducing
-        contention during detailed routing.
+        for each net before performing detailed routing.
 
         Args:
             num_cols: Number of region columns for the RegionGraph (default: 10)
             num_rows: Number of region rows for the RegionGraph (default: 10)
-            corridor_width_factor: Corridor width as multiple of clearance
-                (default: 2.0). The actual corridor half-width is
-                corridor_width_factor * trace_clearance.
-            use_negotiated: Use negotiated congestion routing in detailed
-                phase (default: True)
-            progress_callback: Optional callback for progress updates.
-                Signature: callback(progress: float, message: str, active: bool) -> bool
-            timeout: Optional timeout in seconds for the entire operation
+            corridor_width_factor: Corridor width as multiple of clearance (default: 2.0)
+            use_negotiated: Use negotiated congestion routing in detailed phase
+            progress_callback: Optional callback for progress updates
+            timeout: Optional timeout in seconds
 
         Returns:
             List of Route objects (may be partial if timeout reached)
         """
-        import time
-
-        start_time = time.time()
-
-        flush_print("\n=== Hierarchical Routing (Global + Detailed) ===")
-
-        # Get nets to route in priority order
-        net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
-        net_order = [n for n in net_order if n != 0]
-        total_nets = len(net_order)
-
-        if total_nets == 0:
-            flush_print("  No nets to route")
-            return []
-
-        def check_timeout() -> bool:
-            if timeout is None:
-                return False
-            return time.time() - start_time >= timeout
-
-        def elapsed_str() -> str:
-            return f"{time.time() - start_time:.1f}s"
-
-        # =================================================================
-        # Phase 1: Build RegionGraph and run GlobalRouter
-        # =================================================================
-        flush_print("\n--- Phase 1: Global Routing via RegionGraph ---")
-        if progress_callback is not None:
-            if not progress_callback(0.0, "Phase 1: Building region graph", True):
-                return list(self.routes)
-
-        corridor_width = corridor_width_factor * self.rules.trace_clearance
-
-        # Build region graph
-        region_graph = RegionGraph(
-            board_width=self.grid.width,
-            board_height=self.grid.height,
-            origin_x=self.grid.origin_x,
-            origin_y=self.grid.origin_y,
+        h_router = self._create_hierarchical_router()
+        return h_router.route_all(
             num_cols=num_cols,
             num_rows=num_rows,
+            corridor_width_factor=corridor_width_factor,
+            use_negotiated=use_negotiated,
+            progress_callback=progress_callback,
+            timeout=timeout,
         )
-
-        # Register obstacles (pads reduce region capacity)
-        all_pads = list(self.pads.values())
-        region_graph.register_obstacles(all_pads)
-
-        rg_stats = region_graph.get_statistics()
-        flush_print(
-            f"  Region graph: {rg_stats['num_regions']} regions "
-            f"({rg_stats['num_rows']}x{rg_stats['num_cols']}), "
-            f"{rg_stats['num_edges']} edges, "
-            f"{rg_stats['regions_with_obstacles']} regions with obstacles"
-        )
-
-        # Run global router
-        global_router = GlobalRouter(
-            region_graph=region_graph,
-            corridor_width=corridor_width,
-            default_layer=0,
-        )
-
-        if progress_callback is not None:
-            if not progress_callback(0.05, "Phase 1: Assigning corridors", True):
-                return list(self.routes)
-
-        global_result = global_router.route_all(
-            nets=self.nets,
-            pad_dict=self.pads,
-            net_order=net_order,
-        )
-
-        flush_print(
-            f"  Global routing: {len(global_result.assignments)}/{total_nets} "
-            f"nets assigned corridors ({elapsed_str()})"
-        )
-        if global_result.failed_nets:
-            flush_print(
-                f"  Warning: {len(global_result.failed_nets)} nets failed "
-                f"global routing (will attempt without corridors)"
-            )
-
-        # =================================================================
-        # Phase 2: Detailed Routing with Corridor Guidance
-        # =================================================================
-        flush_print("\n--- Phase 2: Detailed Routing with Corridors ---")
-        if progress_callback is not None:
-            if not progress_callback(0.2, "Phase 2: Detailed routing", True):
-                return list(self.routes)
-
-        # Set corridor preferences on the grid for nets with assignments
-        corridor_penalty = 5.0
-        for net, assignment in global_result.assignments.items():
-            self.grid.set_corridor_preference(
-                assignment.corridor, net, corridor_penalty
-            )
-
-        # Route all nets (corridor-assigned nets get guidance, others route freely)
-        if use_negotiated:
-            detailed_routes = self._route_hierarchical_detailed_negotiated(
-                net_order=net_order,
-                progress_callback=progress_callback,
-                timeout=timeout,
-                start_time=start_time,
-            )
-        else:
-            detailed_routes = self._route_hierarchical_detailed_standard(
-                net_order=net_order,
-                progress_callback=progress_callback,
-                timeout=timeout,
-                start_time=start_time,
-            )
-
-        # Clear corridor preferences
-        self.grid.clear_all_corridor_preferences()
-
-        # Summary
-        successful_nets = len({r.net for r in detailed_routes})
-        total_elapsed = time.time() - start_time
-        flush_print("\n=== Hierarchical Routing Complete ===")
-        flush_print(f"  Total nets: {total_nets}")
-        flush_print(
-            f"  Global routing: {len(global_result.assignments)} corridors assigned"
-        )
-        flush_print(f"  Detailed routing: {successful_nets} nets routed")
-        flush_print(f"  Total time: {total_elapsed:.1f}s")
-
-        if self.routing_failures:
-            failure_summary = format_failed_nets_summary(self.routing_failures)
-            if failure_summary:
-                print(failure_summary)
-
-        if progress_callback is not None:
-            progress_callback(
-                1.0,
-                f"Complete: {successful_nets}/{total_nets} nets in {total_elapsed:.1f}s",
-                False,
-            )
-
-        return detailed_routes
-
-    def _route_hierarchical_detailed_negotiated(
-        self,
-        net_order: list[int],
-        progress_callback: ProgressCallback | None,
-        timeout: float | None,
-        start_time: float,
-    ) -> list[Route]:
-        """Detailed phase of hierarchical routing using negotiated congestion.
-
-        Uses the same negotiated routing infrastructure as two-phase routing
-        but with corridor preferences set by the hierarchical global router.
-        """
-        import time
-
-        def check_timeout() -> bool:
-            if timeout is None:
-                return False
-            return time.time() - start_time >= timeout
-
-        total_nets = len(net_order)
-
-        neg_router = NegotiatedRouter(self.grid, self.router, self.rules, self.net_class_map)
-        net_routes: dict[int, list[Route]] = {}
-        present_factor = 0.5
-
-        # Initial routing pass
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                flush_print(
-                    f"  Timeout during detailed routing at net {i}/{total_nets}"
-                )
-                break
-
-            if progress_callback is not None:
-                progress = 0.2 + 0.6 * (i / total_nets)
-                net_name = self.net_names.get(net, f"Net {net}")
-                if not progress_callback(progress, f"Routing {net_name}", True):
-                    break
-
-            routes = self._route_net_with_corridor(net, present_factor)
-            if routes:
-                net_routes[net] = routes
-                for route in routes:
-                    self.grid.mark_route_usage(route)
-                    self.routes.append(route)
-
-        overflow = self.grid.get_total_overflow()
-        flush_print(
-            f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}"
-        )
-
-        # Rip-up and reroute if overflow remains
-        if overflow > 0:
-            max_iterations = 10
-            history_increment = 1.0
-            present_factor_increment = 0.5
-
-            for iteration in range(1, max_iterations + 1):
-                if check_timeout():
-                    flush_print(f"  Timeout at iteration {iteration}")
-                    break
-
-                if progress_callback is not None:
-                    progress = 0.8 + 0.15 * (iteration / max_iterations)
-                    if not progress_callback(
-                        progress, f"Iteration {iteration}/{max_iterations}", True
-                    ):
-                        break
-
-                present_factor += present_factor_increment
-                self.grid.update_history_costs(history_increment)
-
-                overused = self.grid.find_overused_cells()
-                nets_to_reroute = neg_router.find_nets_through_overused_cells(
-                    net_routes, overused
-                )
-                flush_print(
-                    f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets"
-                )
-
-                neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
-
-                for net in nets_to_reroute:
-                    if check_timeout():
-                        break
-                    routes = self._route_net_with_corridor(net, present_factor)
-                    if routes:
-                        net_routes[net] = routes
-                        for route in routes:
-                            self.grid.mark_route_usage(route)
-                            self.routes.append(route)
-
-                new_overflow = self.grid.get_total_overflow()
-                if new_overflow == 0:
-                    flush_print(f"  Overflow resolved at iteration {iteration}")
-                    break
-                overflow = new_overflow
-
-        # Collect all routes
-        all_routes: list[Route] = []
-        for routes in net_routes.values():
-            all_routes.extend(routes)
-
-        return all_routes
-
-    def _route_hierarchical_detailed_standard(
-        self,
-        net_order: list[int],
-        progress_callback: ProgressCallback | None,
-        timeout: float | None,
-        start_time: float,
-    ) -> list[Route]:
-        """Detailed phase of hierarchical routing using standard sequential routing.
-
-        Routes each net sequentially with corridor guidance. This is simpler
-        than negotiated routing and works well when the global routing provides
-        good corridor assignments.
-        """
-        import time
-
-        def check_timeout() -> bool:
-            if timeout is None:
-                return False
-            return time.time() - start_time >= timeout
-
-        total_nets = len(net_order)
-        all_routes: list[Route] = []
-
-        for i, net in enumerate(net_order):
-            if check_timeout():
-                flush_print(f"  Timeout at net {i}/{total_nets}")
-                break
-
-            if progress_callback is not None:
-                progress = 0.2 + 0.7 * (i / total_nets)
-                net_name = self.net_names.get(net, f"Net {net}")
-                if not progress_callback(progress, f"Routing {net_name}", True):
-                    break
-
-            routes = self.route_net(net)
-            all_routes.extend(routes)
-
-        return all_routes
 
     def _reset_for_new_trial(self):
         """Reset the router to initial state for a new trial."""
@@ -3087,178 +2560,17 @@ class Autorouter:
         Returns:
             List of routes from the best trial
         """
-        base_seed = seed if seed is not None else random.randint(0, 2**31 - 1)
-        random.seed(base_seed)
+        from .algorithms.monte_carlo import run_monte_carlo
 
-        # Determine number of workers
-        if num_workers is None or num_workers <= 0:
-            num_workers = min(num_trials, os.cpu_count() or 4)
-        num_workers = min(num_workers, num_trials)
-
-        if verbose:
-            print("\n=== Monte Carlo Multi-Start Routing ===")
-            print(f"  Trials: {num_trials}, Negotiated: {use_negotiated}")
-            if num_workers > 1:
-                print(f"  Parallel workers: {num_workers}")
-
-        base_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
-        base_order = [n for n in base_order if n != 0]
-
-        best_routes: list[Route] | None = None
-        best_score, best_trial = float("-inf"), -1
-
-        # Use parallel execution if num_workers > 1
-        if num_workers > 1:
-            try:
-                best_routes, best_score, best_trial = self._run_parallel_monte_carlo(
-                    num_trials=num_trials,
-                    use_negotiated=use_negotiated,
-                    base_seed=base_seed,
-                    base_order=base_order,
-                    num_workers=num_workers,
-                    verbose=verbose,
-                    progress_callback=progress_callback,
-                )
-            except Exception as e:
-                if verbose:
-                    print(f"  ⚠ Parallel execution failed: {e}")
-                    print("  Falling back to sequential execution...")
-                # Fall back to sequential execution
-                num_workers = 1
-
-        # Sequential execution (num_workers == 1 or fallback)
-        if num_workers == 1:
-            for trial in range(num_trials):
-                if progress_callback is not None:
-                    if not progress_callback(
-                        trial / num_trials, f"Trial {trial + 1}/{num_trials}", True
-                    ):
-                        break
-
-                random.seed(base_seed + trial)
-                self._reset_for_new_trial()
-                net_order = (
-                    base_order.copy() if trial == 0 else self._shuffle_within_tiers(base_order)
-                )
-                routes = (
-                    self.route_all_negotiated() if use_negotiated else self.route_all(net_order)
-                )
-                score = self._evaluate_solution(routes)
-
-                if verbose:
-                    status = "NEW BEST" if score > best_score else ""
-                    print(
-                        f"  Trial {trial + 1}: {len({r.net for r in routes})}/{len(base_order)} nets, "
-                        f"{sum(len(r.vias) for r in routes)} vias, score={score:.2f} {status}"
-                    )
-
-                if score > best_score:
-                    best_score, best_routes, best_trial = score, routes.copy(), trial
-
-        if verbose:
-            print(f"\n  Best: Trial {best_trial + 1} (score={best_score:.2f})")
-
-        self.routes = best_routes if best_routes else []
-        if progress_callback is not None:
-            routed = len({r.net for r in self.routes}) if self.routes else 0
-            progress_callback(
-                1.0, f"Best: trial {best_trial + 1}, {routed}/{len(base_order)} nets", False
-            )
-
-        return self.routes
-
-    def _run_parallel_monte_carlo(
-        self,
-        num_trials: int,
-        use_negotiated: bool,
-        base_seed: int,
-        base_order: list[int],
-        num_workers: int,
-        verbose: bool,
-        progress_callback: ProgressCallback | None,
-    ) -> tuple[list[Route] | None, float, int]:
-        """Run Monte Carlo trials in parallel using ProcessPoolExecutor.
-
-        Args:
-            num_trials: Total number of trials to run
-            use_negotiated: Whether to use negotiated routing
-            base_seed: Base random seed
-            base_order: Base net ordering
-            num_workers: Number of parallel workers
-            verbose: Whether to print progress
-            progress_callback: Optional progress callback
-
-        Returns:
-            Tuple of (best_routes, best_score, best_trial)
-        """
-        # Serialize current state for workers
-        base_config = self._serialize_for_parallel()
-
-        # Create configs for each trial
-        trial_configs = []
-        for trial in range(num_trials):
-            config = base_config.copy()
-            config.update(
-                {
-                    "trial_num": trial,
-                    "seed": base_seed + trial,
-                    "base_order": base_order,
-                    "use_negotiated": use_negotiated,
-                }
-            )
-            trial_configs.append(config)
-
-        best_routes: list[Route] | None = None
-        best_score = float("-inf")
-        best_trial = -1
-        completed = 0
-
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # Submit all tasks
-            futures = {
-                executor.submit(_run_monte_carlo_trial, config): config["trial_num"]
-                for config in trial_configs
-            }
-
-            # Process results as they complete
-            for future in as_completed(futures):
-                trial_num = futures[future]
-                try:
-                    routes, score, _ = future.result()
-                    completed += 1
-
-                    if progress_callback is not None:
-                        if not progress_callback(
-                            completed / num_trials,
-                            f"Completed {completed}/{num_trials} trials",
-                            True,
-                        ):
-                            # Cancel remaining futures
-                            for f in futures:
-                                f.cancel()
-                            break
-
-                    is_new_best = score > best_score
-                    if is_new_best:
-                        best_score = score
-                        best_routes = routes
-                        best_trial = trial_num
-
-                    if verbose:
-                        status = "NEW BEST" if is_new_best else ""
-                        net_count = len({r.net for r in routes}) if routes else 0
-                        via_count = sum(len(r.vias) for r in routes) if routes else 0
-                        print(
-                            f"  Trial {trial_num + 1}: {net_count}/{len(base_order)} nets, "
-                            f"{via_count} vias, score={score:.2f} {status}"
-                        )
-
-                except Exception as e:
-                    if verbose:
-                        print(f"  Trial {trial_num + 1}: FAILED - {e}")
-                    completed += 1
-
-        return best_routes, best_score, best_trial
+        return run_monte_carlo(
+            autorouter=self,
+            num_trials=num_trials,
+            use_negotiated=use_negotiated,
+            seed=seed,
+            verbose=verbose,
+            progress_callback=progress_callback,
+            num_workers=num_workers,
+        )
 
     def route_all_advanced(
         self,
@@ -3307,25 +2619,13 @@ class Autorouter:
 
     def get_statistics(self) -> dict:
         """Get routing statistics including congestion metrics."""
-        total_length = sum(
-            math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2)
-            for r in self.routes
-            for s in r.segments
-        )
-        congestion_stats = self.grid.get_congestion_map()
-        layer_stats = self.get_layer_usage_statistics()
+        from .observability import compute_routing_statistics
 
-        return {
-            "routes": len(self.routes),
-            "segments": sum(len(r.segments) for r in self.routes),
-            "vias": sum(len(r.vias) for r in self.routes),
-            "total_length_mm": total_length,
-            "nets_routed": len({r.net for r in self.routes}),
-            "max_congestion": congestion_stats["max_congestion"],
-            "avg_congestion": congestion_stats["avg_congestion"],
-            "congested_regions": congestion_stats["congested_regions"],
-            "layer_usage": layer_stats,
-        }
+        return compute_routing_statistics(
+            routes=self.routes,
+            grid=self.grid,
+            layer_stats=self.get_layer_usage_statistics(),
+        )
 
     def get_layer_usage_statistics(self) -> dict:
         """Get layer utilization statistics from routed segments (Issue #625).
@@ -3338,58 +2638,13 @@ class Autorouter:
             - least_used_layer: Layer index with lowest usage (among used layers)
             - balance_ratio: Ratio of min/max usage (1.0 = perfectly balanced)
         """
-        # Count segments and length per layer
-        layer_stats: dict[int, dict] = {}
+        from .observability import compute_layer_usage_statistics
 
-        for route in self.routes:
-            for seg in route.segments:
-                # Get layer index from segment
-                layer_idx = (
-                    self.grid.layer_to_index(seg.layer.value)
-                    if self.layer_stack
-                    else seg.layer.value
-                )
-
-                if layer_idx not in layer_stats:
-                    layer_stats[layer_idx] = {
-                        "segments": 0,
-                        "length_mm": 0.0,
-                        "nets": set(),
-                    }
-
-                seg_length = math.sqrt((seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2)
-                layer_stats[layer_idx]["segments"] += 1
-                layer_stats[layer_idx]["length_mm"] += seg_length
-                layer_stats[layer_idx]["nets"].add(route.net)
-
-        # Convert sets to counts for JSON serialization
-        for layer_idx, stats in layer_stats.items():
-            stats["net_count"] = len(stats["nets"])
-            del stats["nets"]
-
-        # Calculate summary statistics
-        total_length = sum(s["length_mm"] for s in layer_stats.values())
-        lengths = [s["length_mm"] for s in layer_stats.values()] if layer_stats else [0]
-
-        most_used = (
-            max(layer_stats.keys(), key=lambda k: layer_stats[k]["length_mm"]) if layer_stats else 0
+        return compute_layer_usage_statistics(
+            routes=self.routes,
+            grid=self.grid,
+            layer_stack=self.layer_stack,
         )
-        least_used = (
-            min(layer_stats.keys(), key=lambda k: layer_stats[k]["length_mm"]) if layer_stats else 0
-        )
-
-        # Balance ratio: min/max (1.0 = perfectly balanced)
-        max_length = max(lengths) if lengths else 0
-        min_length = min(lengths) if lengths else 0
-        balance_ratio = min_length / max_length if max_length > 0 else 1.0
-
-        return {
-            "per_layer": layer_stats,
-            "total_length": total_length,
-            "most_used_layer": most_used,
-            "least_used_layer": least_used,
-            "balance_ratio": balance_ratio,
-        }
 
     def enable_auto_layer_preferences(self) -> None:
         """Enable automatic layer preference assignment (Issue #625).
@@ -3562,98 +2817,16 @@ class Autorouter:
                 if result.success:
                     print(f"Net {net_id}: added {result.length_added:.3f}mm")
         """
-        from .optimizer.serpentine import SerpentineGenerator, tune_match_group
+        from .length_tuning import apply_length_tuning as _apply
 
         self._update_length_tracker()
-        results: dict[int, tuple[Route, any]] = {}
-
-        # Get violations to determine which nets need tuning
-        violations = self._length_tracker.get_violations()
-
-        if not violations and verbose:
-            print("No length violations - no tuning needed")
-            return results
-
-        if verbose:
-            print(f"\n=== Length Tuning ({len(violations)} violations) ===")
-
-        # Build routes by net ID
-        routes_by_net: dict[int, Route] = {}
-        for route in self.routes:
-            routes_by_net[route.net] = route
-
-        # Process match groups
-        processed_groups: set[str] = set()
-        for group_name, net_ids in self._length_tracker.match_groups.items():
-            if group_name in processed_groups:
-                continue
-            processed_groups.add(group_name)
-
-            # Get tolerance from first constraint
-            tolerance = 0.5
-            if net_ids and net_ids[0] in self._length_tracker._constraint_map:
-                tolerance = self._length_tracker._constraint_map[net_ids[0]].match_tolerance
-
-            if verbose:
-                print(f"  Tuning match group '{group_name}' ({len(net_ids)} nets)")
-
-            group_results = tune_match_group(
-                routes=routes_by_net,
-                group_net_ids=net_ids,
-                tolerance=tolerance,
-                grid=self.grid,
-            )
-
-            # Update routes and collect results
-            for net_id, (new_route, result) in group_results.items():
-                if result.success and result.length_added > 0:
-                    # Replace route in routes list
-                    for i, r in enumerate(self.routes):
-                        if r.net == net_id:
-                            self.routes[i] = new_route
-                            break
-                    routes_by_net[net_id] = new_route
-
-                    if verbose:
-                        print(f"    Net {net_id}: {result.message}")
-
-                results[net_id] = (new_route, result)
-
-        # Process individual min length violations (not in match groups)
-        generator = SerpentineGenerator()
-        for violation in violations:
-            if violation.violation_type.value == "too_short":
-                net_id = violation.net_id
-                if isinstance(net_id, str):
-                    continue  # Match group, already processed
-
-                constraint = self._length_tracker.get_constraint(net_id)
-                if constraint and constraint.match_group:
-                    continue  # Part of a match group, already processed
-
-                route = routes_by_net.get(net_id)
-                if not route:
-                    continue
-
-                target = violation.target_length or 0
-                new_route, result = generator.add_serpentine(route, target, self.grid)
-
-                if result.success and result.length_added > 0:
-                    for i, r in enumerate(self.routes):
-                        if r.net == net_id:
-                            self.routes[i] = new_route
-                            break
-
-                    if verbose:
-                        net_name = self.net_names.get(net_id, f"Net {net_id}")
-                        print(f"  {net_name}: {result.message}")
-
-                results[net_id] = (new_route, result)
-
-        if verbose:
-            print("=== Length Tuning Complete ===\n")
-
-        return results
+        return _apply(
+            routes=self.routes,
+            length_tracker=self._length_tracker,
+            grid=self.grid,
+            net_names=self.net_names,
+            verbose=verbose,
+        )
 
     @property
     def length_tracker(self) -> LengthTracker:
