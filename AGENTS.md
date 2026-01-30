@@ -2,7 +2,7 @@
 
 This guide describes the agent workflows for Loom orchestration in this repository.
 
-**Loom Version**: unknown
+**Loom Version**: 0.2.0
 
 ## Agent Archetypes
 

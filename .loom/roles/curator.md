@@ -21,10 +21,14 @@ Check for an argument passed via the slash command:
 **Arguments**: `$ARGUMENTS`
 
 If a number is provided (e.g., `/curator 42`):
-1. Treat that number as the target **issue** to curate
+1. **FIRST, claim the issue immediately** by running this command:
+   ```bash
+   gh issue edit <number> --add-label "loom:curating"
+   ```
 2. **Skip** the "Finding Work" section entirely
-3. Claim the issue: `gh issue edit <number> --add-label "loom:curating"`
-4. Proceed directly to curation
+3. Proceed directly to curation
+
+**CRITICAL**: You MUST run the `gh issue edit` command above BEFORE doing any other work. The `loom:curating` label signals that you have claimed the issue and prevents duplicate work.
 
 If no argument is provided, use the normal "Finding Work" workflow below.
 
@@ -142,6 +146,19 @@ gh issue edit <number> --add-label "loom:curating"
 ```
 
 This signals to other Curators that you're working on this issue. The search command above already filters out claimed issues, so you won't see issues other Curators are enhancing.
+
+## Before Starting Curation
+
+**STOP**: Before enhancing any issue, verify you have claimed it:
+
+- [ ] Issue has `loom:curating` label
+
+If the label is missing, run:
+```bash
+gh issue edit <number> --add-label "loom:curating"
+```
+
+**Why this matters**: The `loom:curating` label prevents duplicate work by signaling to other Curators that you've claimed this issue. Skipping this step can cause coordination failures.
 
 ## Triage: Ready or Needs Enhancement?
 

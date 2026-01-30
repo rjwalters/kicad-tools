@@ -19,6 +19,7 @@
 #   LOOM_STUCK_WARNING   - Seconds without progress before warning (default: 300)
 #   LOOM_STUCK_CRITICAL  - Seconds without progress before critical (default: 600)
 #   LOOM_STUCK_ACTION    - Action on stuck: warn, pause, restart, retry (default: warn)
+#   LOOM_PROMPT_STUCK_THRESHOLD - Seconds before checking for 'stuck at prompt' (default: 30)
 #
 # Usage:
 #   agent-wait-bg.sh <name> [--timeout <s>] [--poll-interval <s>] [--issue <N>] [--json]
@@ -52,18 +53,27 @@ log_warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] ⚠${NC} $*" >&2; }
 # Default poll interval for signal checking
 DEFAULT_SIGNAL_POLL=5
 
-# Grace period (seconds) to wait after detecting completion before force-terminating
-DEFAULT_GRACE_PERIOD=30
-
 # Default idle timeout (seconds) before checking phase contract via GitHub state
-# This is separate from grace period - idle timeout triggers contract check,
-# grace period is how long to wait after detecting completion pattern
 DEFAULT_IDLE_TIMEOUT=60
+
+# Default interval (seconds) for proactive phase contract checking
+# Checks the phase contract periodically during the poll loop rather than
+# waiting for idle timeout. This detects completion much faster for phases
+# like builder where the signal is on GitHub (PR exists) rather than in logs.
+# Set to 0 to disable proactive checking (fall back to idle timeout only).
+DEFAULT_CONTRACT_INTERVAL=30
 
 # Stuck detection thresholds (configurable via environment variables)
 STUCK_WARNING_THRESHOLD=${LOOM_STUCK_WARNING:-300}   # 5 min default
 STUCK_CRITICAL_THRESHOLD=${LOOM_STUCK_CRITICAL:-600} # 10 min default
 STUCK_ACTION=${LOOM_STUCK_ACTION:-warn}              # warn, pause, restart, retry
+
+# "Stuck at prompt" detection - command visible but not processing
+# This is a distinct, faster-detectable failure mode from general stuck detection
+PROMPT_STUCK_THRESHOLD=${LOOM_PROMPT_STUCK_THRESHOLD:-30}  # 30 seconds default
+
+# Pattern for detecting Claude is processing a command (shared with agent-spawn.sh)
+PROCESSING_INDICATORS='⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|Beaming|Loading|● |✓ |◐|◓|◑|◒|thinking|streaming|Wandering'
 
 # Progress tracking file prefix
 PROGRESS_DIR="/tmp/loom-agent-progress"
@@ -82,8 +92,9 @@ ${YELLOW}OPTIONS:${NC}
     --phase <phase>            Phase name (curator, builder, judge, doctor) for contract checking
     --worktree <path>          Worktree path for builder phase recovery
     --pr <N>                   PR number for judge/doctor phase validation
-    --grace-period <seconds>   Time to wait after completion detection (default: $DEFAULT_GRACE_PERIOD)
+    --grace-period <seconds>   Deprecated (no-op). Agent is terminated immediately on completion detection.
     --idle-timeout <seconds>   Time without output before checking phase contract (default: $DEFAULT_IDLE_TIMEOUT)
+    --contract-interval <s>    Seconds between proactive phase contract checks (default: $DEFAULT_CONTRACT_INTERVAL, 0=disable)
     --json                     Output result as JSON
     --help                     Show this help message
 
@@ -99,10 +110,15 @@ ${YELLOW}SIGNALS CHECKED:${NC}
     - loom:abort label on issue (per-issue abort, requires --issue)
 
 ${YELLOW}COMPLETION DETECTION:${NC}
-    Primary: Phase contract validation via GitHub state (when --phase provided)
+    Primary: Proactive phase contract checking (when --phase provided)
     - Checks actual GitHub labels/PRs rather than parsing log output
+    - Proactively checked every --contract-interval seconds (default: ${DEFAULT_CONTRACT_INTERVAL}s)
+    - Uses validate-phase.sh --check-only for safe, side-effect-free verification
+    - Detects completion within one interval of actual work finishing
+
+    Secondary: Idle-triggered phase contract check (when --phase provided)
     - Triggers when agent is idle (no output for --idle-timeout seconds)
-    - Uses validate-phase.sh for contract verification
+    - Acts as fallback if proactive checks are disabled (--contract-interval 0)
 
     Fallback: Log pattern matching (when --phase not provided)
     - Builder: PR created with loom:review-requested
@@ -117,6 +133,17 @@ ${YELLOW}STUCK DETECTION:${NC}
     LOOM_STUCK_WARNING   Seconds without progress before warning (default: 300)
     LOOM_STUCK_CRITICAL  Seconds without progress before critical (default: 600)
     LOOM_STUCK_ACTION    Action on stuck: warn, pause, restart (default: warn)
+
+${YELLOW}PROMPT STUCK DETECTION:${NC}
+    Fast detection of 'stuck at prompt' state - command visible but not processing.
+    This distinct failure mode is detected much faster than general stuck detection.
+    Configure via environment variables:
+
+    LOOM_PROMPT_STUCK_THRESHOLD  Seconds before checking for stuck-at-prompt (default: 30)
+
+    Recovery is attempted automatically:
+    1. Enter key nudge (command may just need Enter to submit)
+    2. Full command retry (if recoverable from session name)
 
 ${YELLOW}EXAMPLES:${NC}
     # Phase-aware completion detection (recommended)
@@ -241,6 +268,84 @@ check_stuck_status() {
     else
         echo "OK"
     fi
+}
+
+# Check if agent is stuck at prompt - command visible but not processing.
+# This is a distinct failure mode from general stuck detection and can be
+# identified much faster (30s vs 5min).
+#
+# Returns 0 if stuck at prompt, 1 if processing normally or cannot determine.
+# This function checks for role slash commands visible at the prompt without
+# any processing indicators, suggesting the command was not dispatched.
+check_stuck_at_prompt() {
+    local session_name="$1"
+
+    # Capture current pane content
+    local pane_content
+    pane_content=$(tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null || true)
+
+    if [[ -z "$pane_content" ]]; then
+        return 1  # Can't determine, session may be gone
+    fi
+
+    # Check for role slash command visible at the prompt line
+    # Pattern: ❯ followed by a role command like /builder, /judge, /curator, /doctor, /shepherd
+    local command_at_prompt=false
+    if echo "$pane_content" | grep -qE '❯[[:space:]]*/?(builder|judge|curator|doctor|shepherd)'; then
+        command_at_prompt=true
+    fi
+
+    # Check for processing indicators that show Claude is working
+    local processing=false
+    if echo "$pane_content" | grep -qE "$PROCESSING_INDICATORS"; then
+        processing=true
+    fi
+
+    # Stuck at prompt = command visible but not processing
+    if [[ "$command_at_prompt" == "true" ]] && [[ "$processing" == "false" ]]; then
+        return 0  # Stuck at prompt
+    fi
+
+    return 1  # Not stuck at prompt (either processing or no command visible)
+}
+
+# Attempt to recover an agent stuck at the prompt.
+# Tries Enter key nudge first, then full command retry if that fails.
+# Returns 0 if recovered, 1 if recovery failed.
+attempt_prompt_stuck_recovery() {
+    local session_name="$1"
+    local role_cmd="$2"
+
+    # Strategy 1: Try an Enter key nudge first
+    # The command is typically already visible at the prompt and just needs Enter to trigger processing
+    log_info "Trying Enter key nudge to recover stuck prompt..."
+    tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" C-m 2>/dev/null || return 1
+    sleep 3
+
+    # Check if now processing
+    local pane_content
+    pane_content=$(tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null || true)
+    if echo "$pane_content" | grep -qE "$PROCESSING_INDICATORS"; then
+        log_success "Agent recovered with Enter key nudge"
+        return 0
+    fi
+
+    # Strategy 2: If nudge failed and we have the role command, re-send it
+    if [[ -n "$role_cmd" ]]; then
+        log_info "Enter nudge failed, re-sending role command: $role_cmd"
+        sleep 2  # Additional wait for TUI
+        tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "$role_cmd" C-m 2>/dev/null || return 1
+        sleep 3
+
+        pane_content=$(tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null || true)
+        if echo "$pane_content" | grep -qE "$PROCESSING_INDICATORS"; then
+            log_success "Agent recovered with full command retry"
+            return 0
+        fi
+    fi
+
+    log_warn "Prompt stuck recovery failed - intervention may be needed"
+    return 1
 }
 
 # Capture diagnostic information from a stuck agent before killing it
@@ -489,11 +594,13 @@ check_completion_patterns() {
 # Check phase contract satisfaction via validate-phase.sh
 # Returns 0 if contract is satisfied (work complete), 1 otherwise
 # Sets CONTRACT_STATUS global variable with the validation result
+# Optional 5th parameter: "check_only" to skip side effects (for idle timeout checks)
 check_phase_contract() {
     local phase="$1"
     local issue="$2"
     local worktree="$3"
     local pr_number="$4"
+    local check_only="${5:-}"
 
     if [[ -z "$phase" ]] || [[ -z "$issue" ]]; then
         return 1
@@ -505,6 +612,11 @@ check_phase_contract() {
     fi
     if [[ -n "$pr_number" ]]; then
         validate_args+=("--pr" "$pr_number")
+    fi
+    # Use --check-only to avoid side effects (worktree removal, label changes)
+    # when checking during idle timeout (see issue #1536)
+    if [[ "$check_only" == "check_only" ]]; then
+        validate_args+=("--check-only")
     fi
     validate_args+=("--json")
 
@@ -581,8 +693,8 @@ main() {
     local timeout="3600"
     local poll_interval="$DEFAULT_SIGNAL_POLL"
     local issue=""
-    local grace_period="$DEFAULT_GRACE_PERIOD"
     local idle_timeout="$DEFAULT_IDLE_TIMEOUT"
+    local contract_interval="$DEFAULT_CONTRACT_INTERVAL"
     local phase=""
     local worktree=""
     local pr_number=""
@@ -611,11 +723,15 @@ main() {
                 shift 2
                 ;;
             --grace-period)
-                grace_period="$2"
+                # Deprecated: grace period is no longer used (agents are terminated immediately)
                 shift 2
                 ;;
             --idle-timeout)
                 idle_timeout="$2"
+                shift 2
+                ;;
+            --contract-interval)
+                contract_interval="$2"
                 shift 2
                 ;;
             --phase)
@@ -646,7 +762,11 @@ main() {
     done
 
     log_info "Waiting for agent '$name' with signal checking (poll: ${poll_interval}s, timeout: ${timeout}s)"
+    if [[ -n "$phase" ]] && [[ "$contract_interval" -gt 0 ]]; then
+        log_info "Proactive contract checking: every ${contract_interval}s for phase '$phase'"
+    fi
     log_info "Stuck detection: warning=${STUCK_WARNING_THRESHOLD}s, critical=${STUCK_CRITICAL_THRESHOLD}s, action=${STUCK_ACTION}"
+    log_info "Prompt stuck detection: threshold=${PROMPT_STUCK_THRESHOLD}s"
 
     # Launch agent-wait.sh in the background
     "${SCRIPT_DIR}/agent-wait.sh" "$name" --timeout "$timeout" --poll-interval "$poll_interval" --json &
@@ -659,10 +779,12 @@ main() {
     local log_file="${REPO_ROOT}/.loom/logs/${session_name}.log"
     local prompt_resolved=false
     local completion_detected=false
-    local completion_time=0
     local idle_contract_checked=false
+    local last_contract_check=0
     local stuck_warned=false
     local stuck_critical_reported=false
+    local prompt_stuck_checked=false
+    local prompt_stuck_recovery_attempted=false
     COMPLETION_REASON=""
     CONTRACT_STATUS=""
 
@@ -722,8 +844,78 @@ main() {
             exit 3
         fi
 
+        # Fast "stuck at prompt" detection - command visible but not processing
+        # This failure mode can be detected in ~30s vs the 5min general stuck threshold.
+        # Only check once after the threshold and only if not already processing.
+        local elapsed=$(( $(date +%s) - start_time ))
+        if [[ "$prompt_stuck_checked" != "true" ]] && [[ "$prompt_stuck_recovery_attempted" != "true" ]] && [[ "$elapsed" -ge "$PROMPT_STUCK_THRESHOLD" ]]; then
+            if check_stuck_at_prompt "$session_name"; then
+                prompt_stuck_checked=true
+                log_warn "Agent appears stuck at prompt (command visible but not processing after ${elapsed}s)"
+
+                # Attempt recovery
+                prompt_stuck_recovery_attempted=true
+                # Extract the likely role command from the session name for retry
+                local role_cmd=""
+                if [[ "$name" == builder-issue-* ]]; then
+                    local issue_num="${name#builder-issue-}"
+                    role_cmd="/builder ${issue_num}"
+                elif [[ "$name" == judge-* ]] || [[ "$name" == curator-* ]] || [[ "$name" == doctor-* ]]; then
+                    # For other roles, we can't easily reconstruct the command
+                    # Enter nudge is still attempted
+                    role_cmd=""
+                fi
+
+                if attempt_prompt_stuck_recovery "$session_name" "$role_cmd"; then
+                    log_success "Agent recovered from stuck-at-prompt state"
+                    # Reset tracking so we continue normal monitoring
+                    prompt_stuck_checked=false
+                else
+                    # Recovery failed - let the general stuck detection handle escalation
+                    log_warn "Stuck-at-prompt recovery failed - waiting for general stuck detection"
+                fi
+            else
+                # Not stuck at prompt - mark as checked so we don't keep rechecking
+                prompt_stuck_checked=true
+            fi
+        fi
+
+        # Reset prompt stuck tracking if we see progress (pane content changed)
+        if [[ "$prompt_stuck_checked" == "true" ]] || [[ "$prompt_stuck_recovery_attempted" == "true" ]]; then
+            local pane_content
+            pane_content=$(tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null || true)
+            if echo "$pane_content" | grep -qE "$PROCESSING_INDICATORS"; then
+                # Agent is now processing - reset tracking
+                prompt_stuck_checked=false
+                prompt_stuck_recovery_attempted=false
+            fi
+        fi
+
+        # Proactive phase contract checking: check periodically regardless of idle state
+        # This detects completion within one contract_interval of actual work finishing,
+        # rather than waiting for the idle timeout to trigger (see issue #1581)
+        if [[ "$completion_detected" != "true" ]] && [[ -n "$phase" ]] && [[ "$contract_interval" -gt 0 ]]; then
+            local now
+            now=$(date +%s)
+            local since_last_check=$((now - last_contract_check))
+
+            if [[ "$since_last_check" -ge "$contract_interval" ]]; then
+                last_contract_check=$now
+
+                if check_phase_contract "$phase" "$issue" "$worktree" "$pr_number" "check_only"; then
+                    completion_detected=true
+                    completion_time=$now
+                    COMPLETION_REASON="phase_contract_satisfied"
+
+                    log_info "Phase contract satisfied ($CONTRACT_STATUS) via proactive check"
+                    log_warn "Agent completed work but didn't exit - waiting ${grace_period}s grace period"
+                fi
+            fi
+        fi
+
         # Activity-based completion detection: check phase contract when agent is idle
         # This is a backup mechanism when /exit doesn't work (see issue #1461)
+        # Skipped if proactive checking already detected completion above
         if [[ "$completion_detected" != "true" ]] && [[ -n "$phase" ]] && [[ "$idle_contract_checked" != "true" ]]; then
             local idle_time
             idle_time=$(get_log_idle_time "$log_file")
@@ -731,13 +923,13 @@ main() {
             if [[ "$idle_time" -ge "$idle_timeout" ]]; then
                 log_info "Agent idle for ${idle_time}s (threshold: ${idle_timeout}s) - checking phase contract"
 
-                if check_phase_contract "$phase" "$issue" "$worktree" "$pr_number"; then
+                # Use check_only mode to avoid side effects during idle check
+                # This prevents premature worktree removal that breaks retry (issue #1536)
+                if check_phase_contract "$phase" "$issue" "$worktree" "$pr_number" "check_only"; then
                     completion_detected=true
-                    completion_time=$(date +%s)
                     COMPLETION_REASON="phase_contract_satisfied"
 
-                    log_info "Phase contract satisfied ($CONTRACT_STATUS) - treating as complete"
-                    log_warn "Agent completed work but didn't exit - waiting ${grace_period}s grace period"
+                    log_info "Phase contract satisfied ($CONTRACT_STATUS) - terminating session"
                 else
                     # Contract not satisfied, don't check again until next idle timeout
                     idle_contract_checked=true
@@ -759,20 +951,17 @@ main() {
         if [[ "$completion_detected" != "true" ]]; then
             if check_completion_patterns "$session_name"; then
                 completion_detected=true
-                completion_time=$(date +%s)
-                # Only warn about grace period for role-specific patterns, not explicit /exit
                 if [[ "$COMPLETION_REASON" != "explicit_exit" ]]; then
-                    log_warn "Completion pattern detected ($COMPLETION_REASON) but session still running - waiting ${grace_period}s grace period"
-                    log_warn "Agent should have executed /exit after completing task"
+                    log_info "Completion pattern detected ($COMPLETION_REASON) - terminating session"
                 fi
             fi
         fi
 
-        # If completion was detected, check if grace period has elapsed
+        # If completion was detected, terminate immediately
         if [[ "$completion_detected" == "true" ]]; then
-            # /exit is an explicit completion signal - no grace period needed
+            local elapsed=$(( $(date +%s) - start_time ))
+
             if [[ "$COMPLETION_REASON" == "explicit_exit" ]]; then
-                local elapsed=$(( $(date +%s) - start_time ))
                 log_info "/exit detected in output - sending /exit to prompt and terminating '$session_name'"
 
                 # Send /exit to the actual tmux prompt as backup
@@ -781,47 +970,24 @@ main() {
 
                 # Brief pause to let /exit process
                 sleep 1
-
-                # Kill the background wait process
-                kill "$wait_pid" 2>/dev/null || true
-                wait "$wait_pid" 2>/dev/null || true
-
-                # Clean up progress files
-                cleanup_progress_files "$name"
-
-                # Destroy the tmux session to clean up
-                tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
-
-                if [[ "$json_output" == "true" ]]; then
-                    echo "{\"status\":\"completed\",\"name\":\"$name\",\"reason\":\"explicit_exit\",\"elapsed\":$elapsed}"
-                else
-                    log_success "Agent '$name' completed (explicit /exit after ${elapsed}s)"
-                fi
-                exit 0
             fi
 
-            local grace_elapsed=$(( $(date +%s) - completion_time ))
-            if [[ "$grace_elapsed" -ge "$grace_period" ]]; then
-                local elapsed=$(( $(date +%s) - start_time ))
-                log_warn "Grace period expired - force-terminating session '$session_name'"
+            # Kill the background wait process
+            kill "$wait_pid" 2>/dev/null || true
+            wait "$wait_pid" 2>/dev/null || true
 
-                # Kill the background wait process
-                kill "$wait_pid" 2>/dev/null || true
-                wait "$wait_pid" 2>/dev/null || true
+            # Clean up progress files
+            cleanup_progress_files "$name"
 
-                # Clean up progress files
-                cleanup_progress_files "$name"
+            # Destroy the tmux session to clean up
+            tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
 
-                # Destroy the tmux session to clean up
-                tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
-
-                if [[ "$json_output" == "true" ]]; then
-                    echo "{\"status\":\"completed\",\"name\":\"$name\",\"reason\":\"completion_pattern_detected\",\"pattern\":\"$COMPLETION_REASON\",\"elapsed\":$elapsed,\"grace_period_used\":true}"
-                else
-                    log_success "Agent '$name' completed (pattern: $COMPLETION_REASON, forced after ${grace_period}s grace period)"
-                fi
-                exit 0
+            if [[ "$json_output" == "true" ]]; then
+                echo "{\"status\":\"completed\",\"name\":\"$name\",\"reason\":\"$COMPLETION_REASON\",\"elapsed\":$elapsed}"
+            else
+                log_success "Agent '$name' completed ($COMPLETION_REASON after ${elapsed}s)"
             fi
+            exit 0
         fi
 
         # Check for progress and update stuck tracking
