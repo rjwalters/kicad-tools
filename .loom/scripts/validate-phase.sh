@@ -70,6 +70,14 @@ find_repo_root() {
 
 REPO_ROOT="$(find_repo_root)"
 
+# Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
+if [[ -x "$GH_CACHED" ]]; then
+    GH="$GH_CACHED"
+else
+    GH="gh"
+fi
+
 # Parse arguments
 PHASE=""
 ISSUE=""
@@ -258,7 +266,7 @@ $log_tail
 
     # 3. Check issue state for clues
     local issue_labels
-    issue_labels=$(gh issue view "$issue_number" --json labels --jq '.labels[].name' 2>/dev/null | tr '\n' ', ') || issue_labels=""
+    issue_labels=$($GH issue view "$issue_number" --json labels --jq '.labels[].name' 2>/dev/null | tr '\n' ', ') || issue_labels=""
     if [[ -n "$issue_labels" ]]; then
         diagnostics+="
 **Current issue labels**: $issue_labels
@@ -331,7 +339,7 @@ gh issue edit $issue_number --remove-label loom:blocked --add-label loom:issue
 
 validate_curator() {
     local labels
-    labels=$(gh issue view "$ISSUE" --json labels --jq '.labels[].name' 2>/dev/null) || {
+    labels=$($GH issue view "$ISSUE" --json labels --jq '.labels[].name' 2>/dev/null) || {
         output_result "failed" "Could not fetch issue labels"
         return 1
     }
@@ -380,28 +388,41 @@ validate_builder() {
     # First: Check if issue is already closed (builder may have resolved without PR)
     # This is valid for verification tasks, documentation issues, research tasks, etc.
     local issue_state
-    issue_state=$(gh issue view "$ISSUE" --json state --jq '.state' 2>/dev/null) || true
+    issue_state=$($GH issue view "$ISSUE" --json state --jq '.state' 2>/dev/null) || true
     if [[ "$issue_state" == "CLOSED" ]]; then
         output_result "satisfied" "Issue #$ISSUE is closed (resolved without PR)"
         return 0
     fi
 
     # Check if a PR already exists for this issue
-    # Strategy: Try multiple search methods to find the PR
-    # Method 1 (branch-based) is deterministic and preferred over search API (has indexing lag)
+    # If --pr was passed (from shepherd cache), use it directly to skip the search
     local pr=""
     local pr_found_by=""
 
-    # Method 1: Branch-based lookup (deterministic, no indexing lag)
-    # Branch name follows convention from worktree.sh: feature/issue-<number>
-    pr=$(gh pr list --head "feature/issue-${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
-    if [[ -n "$pr" && "$pr" != "null" ]]; then
-        pr_found_by="branch_name"
+    if [[ -n "$PR_NUMBER" ]]; then
+        # PR number provided by caller (cached from shepherd pipeline)
+        # Verify it still exists and is open
+        local pr_state
+        pr_state=$($GH pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null) || pr_state=""
+        if [[ "$pr_state" == "OPEN" ]]; then
+            pr="$PR_NUMBER"
+            pr_found_by="caller_cached"
+        fi
+    fi
+
+    # Fall back to search if no cached PR or it's no longer open
+    if [[ -z "$pr" || "$pr" == "null" ]]; then
+        # Method 1: Branch-based lookup (deterministic, no indexing lag)
+        # Branch name follows convention from worktree.sh: feature/issue-<number>
+        pr=$($GH pr list --head "feature/issue-${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
+        if [[ -n "$pr" && "$pr" != "null" ]]; then
+            pr_found_by="branch_name"
+        fi
     fi
 
     # Method 2: Search by "Closes #N" in PR body (fallback if branch name differs)
     if [[ -z "$pr" || "$pr" == "null" ]]; then
-        pr=$(gh pr list --search "Closes #${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
+        pr=$($GH pr list --search "Closes #${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
         if [[ -n "$pr" && "$pr" != "null" ]]; then
             pr_found_by="closes_keyword"
         fi
@@ -409,7 +430,7 @@ validate_builder() {
 
     # Method 3: Search by "Fixes #N" in PR body
     if [[ -z "$pr" || "$pr" == "null" ]]; then
-        pr=$(gh pr list --search "Fixes #${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
+        pr=$($GH pr list --search "Fixes #${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
         if [[ -n "$pr" && "$pr" != "null" ]]; then
             pr_found_by="fixes_keyword"
         fi
@@ -417,7 +438,7 @@ validate_builder() {
 
     # Method 4: Search by "Resolves #N" in PR body
     if [[ -z "$pr" || "$pr" == "null" ]]; then
-        pr=$(gh pr list --search "Resolves #${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
+        pr=$($GH pr list --search "Resolves #${ISSUE}" --state open --json number --jq '.[0].number' 2>/dev/null) || true
         if [[ -n "$pr" && "$pr" != "null" ]]; then
             pr_found_by="resolves_keyword"
         fi
@@ -429,7 +450,7 @@ validate_builder() {
             # PR found by branch name - check if it needs "Closes #N" added
             # Skip this recovery in check-only mode
             local pr_body
-            pr_body=$(gh pr view "$pr" --json body --jq '.body' 2>/dev/null) || pr_body=""
+            pr_body=$($GH pr view "$pr" --json body --jq '.body' 2>/dev/null) || pr_body=""
 
             if ! echo "$pr_body" | grep -qE "(Closes|Fixes|Resolves)[[:space:]]+#${ISSUE}"; then
                 echo -e "${YELLOW}PR #$pr found but missing issue reference - adding 'Closes #${ISSUE}'${NC}"
@@ -453,7 +474,7 @@ Closes #${ISSUE}"
 
         # Check for loom:review-requested label
         local pr_labels
-        pr_labels=$(gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null) || true
+        pr_labels=$($GH pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null) || true
         if echo "$pr_labels" | grep -q "loom:review-requested"; then
             output_result "satisfied" "PR #$pr exists with loom:review-requested"
             return 0
@@ -633,7 +654,7 @@ validate_judge() {
     fi
 
     local labels
-    labels=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null) || {
+    labels=$($GH pr view "$PR_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null) || {
         output_result "failed" "Could not fetch PR labels"
         return 1
     }
@@ -664,7 +685,7 @@ validate_doctor() {
     fi
 
     local labels
-    labels=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null) || {
+    labels=$($GH pr view "$PR_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null) || {
         output_result "failed" "Could not fetch PR labels"
         return 1
     }

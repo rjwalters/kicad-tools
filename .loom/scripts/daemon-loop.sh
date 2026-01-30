@@ -19,6 +19,7 @@
 #   LOOM_MAX_BACKOFF - Maximum backoff interval in seconds (default: 1800)
 #   LOOM_BACKOFF_MULTIPLIER - Backoff multiplier on failure (default: 2)
 #   LOOM_BACKOFF_THRESHOLD - Failures before backoff kicks in (default: 3)
+#   LOOM_SLOW_ITERATION_THRESHOLD_MULTIPLIER - Multiplier of rolling average to trigger slow warning (default: 2)
 #
 # Features:
 #   - Deterministic loop behavior (no LLM interpretation variability)
@@ -59,6 +60,7 @@ ITERATION_TIMEOUT="${LOOM_ITERATION_TIMEOUT:-300}"
 MAX_BACKOFF="${LOOM_MAX_BACKOFF:-1800}"
 BACKOFF_MULTIPLIER="${LOOM_BACKOFF_MULTIPLIER:-2}"
 BACKOFF_THRESHOLD="${LOOM_BACKOFF_THRESHOLD:-3}"
+SLOW_ITERATION_THRESHOLD_MULTIPLIER="${LOOM_SLOW_ITERATION_THRESHOLD_MULTIPLIER:-2}"
 LOG_FILE=".loom/daemon.log"
 STATE_FILE=".loom/daemon-state.json"
 METRICS_FILE=".loom/daemon-metrics.json"
@@ -382,6 +384,68 @@ update_metrics() {
     fi
 }
 
+# Update iteration timing summary in daemon-state.json
+# Reads rolling data from daemon-metrics.json (source of truth) and writes
+# a summary view to daemon-state.json for observability/debugging.
+# Usage: update_state_timing
+update_state_timing() {
+    if [[ ! -f "$STATE_FILE" ]] || [[ ! -f "$METRICS_FILE" ]]; then
+        return
+    fi
+
+    local temp_file
+    temp_file=$(mktemp)
+
+    # Read timing data from metrics file and write summary to state file
+    local last_duration avg_duration max_duration
+    last_duration=$(jq -r '.last_iteration.duration_seconds // 0' "$METRICS_FILE" 2>/dev/null || echo "0")
+    avg_duration=$(jq -r '.average_iteration_seconds // 0' "$METRICS_FILE" 2>/dev/null || echo "0")
+    max_duration=$(jq -r '[.iteration_durations[] // 0] | max // 0' "$METRICS_FILE" 2>/dev/null || echo "0")
+
+    if jq --argjson last "$last_duration" \
+       --argjson avg "$avg_duration" \
+       --argjson max "$max_duration" '
+       .iteration_timing = {
+           last_duration_seconds: $last,
+           avg_duration_seconds: $avg,
+           max_duration_seconds: $max
+       }
+    ' "$STATE_FILE" > "$temp_file" 2>/dev/null; then
+        mv "$temp_file" "$STATE_FILE"
+    else
+        rm -f "$temp_file"
+    fi
+}
+
+# Check for slow iteration and log warning if duration exceeds threshold
+# Usage: check_slow_iteration <duration>
+check_slow_iteration() {
+    local duration="$1"
+
+    if [[ ! -f "$METRICS_FILE" ]]; then
+        return
+    fi
+
+    local avg_duration total_iterations
+    avg_duration=$(jq -r '.average_iteration_seconds // 0' "$METRICS_FILE" 2>/dev/null || echo "0")
+    total_iterations=$(jq -r '.total_iterations // 0' "$METRICS_FILE" 2>/dev/null || echo "0")
+
+    # Need at least 3 iterations for a meaningful average
+    if [[ "$total_iterations" -lt 3 ]]; then
+        return
+    fi
+
+    # Skip if average is zero (avoid division issues)
+    if [[ "$avg_duration" -eq 0 ]]; then
+        return
+    fi
+
+    local threshold=$((avg_duration * SLOW_ITERATION_THRESHOLD_MULTIPLIER))
+    if [[ "$duration" -gt "$threshold" ]]; then
+        log "${YELLOW}WARNING: Slow iteration detected - ${duration}s exceeds ${SLOW_ITERATION_THRESHOLD_MULTIPLIER}x average (${avg_duration}s, threshold: ${threshold}s)${NC}"
+    fi
+}
+
 # Cleanup function called on exit
 cleanup() {
     local exit_code=$?
@@ -570,6 +634,8 @@ while true; do
 
     # Update metrics with iteration results
     update_metrics "$iteration_status" "$iteration_duration" "$summary"
+    update_state_timing
+    check_slow_iteration "$iteration_duration"
 
     # Collect health metrics (proactive monitoring)
     if [[ -x "./.loom/scripts/health-check.sh" ]]; then

@@ -123,8 +123,8 @@ uses **tmux agent-spawn.sh** to create ephemeral tmux sessions:
 
 **Shepherd Force Mode Flags**:
 - `--force` or `-f`: Full automation - auto-merge after Judge approval (use when daemon is in force mode)
-- (default): Stops at `loom:pr` (ready-to-merge), requires Champion for merge
-- `--wait`: Explicit wait for human approval at each gate
+- (default): Exits at `loom:pr` (ready-to-merge), Champion handles merge
+- `--wait`: (deprecated) No longer blocks; same behavior as default
 
 **Delegation Summary**:
 
