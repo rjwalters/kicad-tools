@@ -108,7 +108,7 @@ ${YELLOW}OPTIONS:${NC}
 
 ${YELLOW}EXAMPLES:${NC}
     # Spawn a shepherd agent for issue 42
-    agent-spawn.sh --role shepherd --args "42 --force" --name shepherd-1
+    agent-spawn.sh --role shepherd --args "42 --merge" --name shepherd-1
 
     # Spawn a builder agent in a worktree
     agent-spawn.sh --role builder --args "42" --name builder-1 \\

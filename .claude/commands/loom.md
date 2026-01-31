@@ -13,7 +13,7 @@ Arguments provided: `{{ARGUMENTS}}`
 ```
 IF arguments contain "health":
     -> Execute HEALTH CHECK (immediate command)
-    -> Run: ./.loom/scripts/daemon-health.sh
+    -> Run: loom-daemon-diagnostic
     -> Display formatted health report and EXIT
     -> DO NOT start daemon loop
 
@@ -24,7 +24,7 @@ ELSE IF arguments contain "iterate":
     -> Return a compact 1-line summary and EXIT
     -> DO NOT loop, DO NOT spawn iteration subagents
 
-ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --force"):
+ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --merge"):
     -> Execute PARENT LOOP MODE
     -> Read and follow: .claude/commands/loom-parent.md
     -> Run the THIN parent loop
@@ -37,12 +37,12 @@ ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --force"):
 
 **The daemon uses a subagent-per-iteration architecture to prevent context accumulation:**
 
-- **Parent mode** (`/loom` or `/loom --force`): You run a thin loop that spawns subagents
+- **Parent mode** (`/loom` or `/loom --merge`): You run a thin loop that spawns subagents
   - Parent accumulates only ~100 bytes per iteration (summaries)
   - All heavy work (gh commands, spawning) happens in subagents
   - Can run for hours/days without hitting context limits
 
-- **Iteration mode** (`/loom iterate` or `/loom iterate --force`): You execute ONE iteration
+- **Iteration mode** (`/loom iterate` or `/loom iterate --merge`): You execute ONE iteration
   - You ARE the subagent spawned by the parent
   - Fresh context for all gh commands and state assessment
   - Return a compact summary and EXIT immediately
@@ -62,7 +62,7 @@ ELSE (no "iterate" in arguments, e.g., "/loom" or "/loom --force"):
 
 Before proceeding, check the arguments: `{{ARGUMENTS}}`
 
-- Contains "health"? -> Run `./.loom/scripts/daemon-health.sh` and report results, then EXIT
+- Contains "health"? -> Run `loom-daemon-diagnostic` and report results, then EXIT
 - Contains "iterate"? -> Read `.claude/commands/loom-iteration.md` and execute iteration mode
 - No "iterate"? -> Read `.claude/commands/loom-parent.md` and execute parent loop mode
 
@@ -129,10 +129,10 @@ You do NOT require human input for any of the above. The only human intervention
 | Command | Description |
 |---------|-------------|
 | `/loom` | Start thin parent loop (spawns iteration subagents) |
-| `/loom --force` | Start with force mode (auto-promote proposals) |
+| `/loom --merge` | Start with merge mode (auto-promote proposals) |
 | `/loom --debug` | Start with debug mode (verbose logging) |
 | `/loom iterate` | Execute single iteration (used by parent loop) |
-| `/loom iterate --force` | Single iteration with force mode |
+| `/loom iterate --merge` | Single iteration with merge mode |
 | `/loom iterate --debug` | Single iteration with verbose debug logging |
 | `/loom health` | Run diagnostic health check (state, pipeline, support roles) |
 | `/loom status` | Report current state without running loop |

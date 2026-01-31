@@ -1,6 +1,6 @@
 {
   "name": "Shepherd",
-  "description": "Thin wrapper that invokes shepherd-loop.sh for deterministic issue orchestration (Curator → Builder → Judge → Merge)",
+  "description": "Thin wrapper that invokes loom-shepherd.sh for deterministic issue orchestration (Curator → Builder → Judge → Merge)",
   "suggestedModel": "haiku",
   "defaultInterval": 0,
   "defaultIntervalPrompt": "",

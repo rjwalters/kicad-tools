@@ -11,7 +11,7 @@ You are the Layer 2 Loom Daemon running in ITERATION MODE in the {{workspace}} r
 In iteration mode, you:
 1. Load state from JSON
 2. Check shutdown signal
-3. Assess system state via `daemon-snapshot.sh`
+3. Assess system state via `loom-tools snapshot`
 4. Check shepherd completions (process-tree + progress files)
 5. Auto-promote proposals (if force mode)
 6. Spawn shepherds for ready issues (via agent-spawn.sh)
@@ -35,7 +35,7 @@ The daemon uses **tmux-based agent execution** exclusively. All workers run in e
 
 ## Iteration Execution
 
-**CRITICAL**: The iteration MUST use `daemon-snapshot.sh` for state assessment and act on its `recommended_actions`. This ensures deterministic behavior and proper work generation triggering.
+**CRITICAL**: The iteration MUST use `python3 -m loom_tools.snapshot` (or `loom-tools snapshot`) for state assessment and act on its `recommended_actions`. This ensures deterministic behavior and proper work generation triggering.
 
 ```python
 def loom_iterate(force_mode=False, debug_mode=False):
@@ -66,9 +66,9 @@ def loom_iterate(force_mode=False, debug_mode=False):
         debug("Shutdown signal detected")
         return "SHUTDOWN_SIGNAL"
 
-    # 3. CRITICAL: Get system state via daemon-snapshot.sh
+    # 3. CRITICAL: Get system state via loom-tools snapshot
     # This is the CANONICAL source for all state and recommended actions
-    snapshot = run("./.loom/scripts/daemon-snapshot.sh")
+    snapshot = run("python3 -m loom_tools.snapshot")
     snapshot_data = json.loads(snapshot)
 
     # Extract computed decisions (these are authoritative)
@@ -126,6 +126,28 @@ def loom_iterate(force_mode=False, debug_mode=False):
     # 9. Stuck detection
     stuck_count = check_stuck_agents(state, debug_mode)
 
+    # 9b. Health warnings: emit WARN: codes from snapshot health data
+    health_warnings = snapshot_data["computed"].get("health_warnings", [])
+    health_status = snapshot_data["computed"].get("health_status", "healthy")
+    debug(f"Health status: {health_status}, warnings: {len(health_warnings)}")
+
+    # 9c. LLM-side systematic failure detection
+    # When pipeline is stalled (blocked>0 and ready=0), inspect blocked issue
+    # details for shared error patterns. This complex pattern matching is
+    # natural for the LLM but hard to express in shell.
+    if snapshot_data["computed"]["total_blocked"] > 0 and snapshot_data["computed"]["total_ready"] == 0:
+        systematic_failure = detect_systematic_failure(snapshot_data, state, debug_mode)
+        if systematic_failure:
+            health_warnings.append({
+                "code": "systematic_failure",
+                "level": "warning",
+                "message": systematic_failure["message"]
+            })
+            debug(f"Systematic failure detected: {systematic_failure['message']}")
+
+    # 9d. Populate daemon-state.json warnings array (fulfills existing schema)
+    state["warnings"] = format_state_warnings(health_warnings)
+
     # 10. Orphan recovery (every 5 iterations) - catches crashed shepherds mid-session
     recovered_count = 0
     if state.get("iteration", 0) % 5 == 0:
@@ -157,7 +179,8 @@ def loom_iterate(force_mode=False, debug_mode=False):
     save_daemon_state(state)
 
     # 12. Return compact summary (ONE LINE)
-    summary = format_iteration_summary(snapshot_data, spawned_shepherds, triggered_generation, ensured_roles, demand_spawned, promoted_count, stuck_count, recovered_count)
+    # Include WARN: codes from health_warnings at the end of the summary line
+    summary = format_iteration_summary(snapshot_data, spawned_shepherds, triggered_generation, ensured_roles, demand_spawned, promoted_count, stuck_count, recovered_count, health_warnings)
     debug(f"Iteration {iteration} completed - {summary}")
     return summary
 ```
@@ -190,6 +213,16 @@ ready=5 building=2 shepherds=2/3 +shepherd=#123 +architect
 - `completed=#N` - Issue completed this iteration (if any)
 - `recovered=N` - Stale building issues recovered (if any)
 - `spawn-fail=N` - Task spawns that failed verification (if any)
+- `WARN:code` - Health warnings from snapshot (if any, appended at end)
+
+**Health warning codes** (from `computed.health_warnings` in snapshot):
+- `WARN:pipeline_stalled` - 0 ready, 0 building, >0 blocked
+- `WARN:proposal_backlog` - Proposals exist but pipeline empty
+- `WARN:no_work_available` - Pipeline completely empty
+- `WARN:stale_heartbeats` - Shepherd(s) with stale heartbeats
+- `WARN:orphaned_issues` - Orphaned shepherds detected
+- `WARN:session_budget_low` - Session usage nearing limit
+- `WARN:systematic_failure` - Multiple shepherds failed with same cause (LLM-detected)
 
 **Example summaries:**
 ```
@@ -199,16 +232,19 @@ ready=0 building=1 shepherds=1/3 +architect +hermit
 ready=2 building=2 shepherds=2/3 stuck=1
 ready=2 building=2 shepherds=2/3 spawn-fail=1
 ready=3 building=0 shepherds=0/3 promoted=3
+ready=0 building=0 shepherds=0/3 WARN:pipeline_stalled
+ready=0 building=0 shepherds=0/3 WARN:pipeline_stalled WARN:proposal_backlog
+ready=0 building=0 shepherds=0/3 WARN:no_work_available
 SHUTDOWN_SIGNAL
 ```
 
-## Using daemon-snapshot.sh for State Assessment
+## Using loom-tools snapshot for State Assessment
 
-The `daemon-snapshot.sh` script consolidates all state queries into a single tool call, replacing 10+ individual `gh` commands:
+The `loom-tools snapshot` command consolidates all state queries into a single tool call, replacing 10+ individual `gh` commands:
 
 ```bash
 # Get complete system state in one call
-snapshot=$(./.loom/scripts/daemon-snapshot.sh)
+snapshot=$(python3 -m loom_tools.snapshot)
 
 # Parse the JSON output
 ready_count=$(echo "$snapshot" | jq '.computed.total_ready')
@@ -226,7 +262,7 @@ if echo "$actions" | grep -q "spawn_shepherds"; then
 fi
 ```
 
-**Benefits of daemon-snapshot.sh:**
+**Benefits of loom-tools snapshot:**
 - **Single tool call**: Replaces 10+ individual `gh` commands
 - **Parallel queries**: Runs all `gh` queries concurrently for efficiency
 - **Pre-computed decisions**: Includes `computed.recommended_actions` for immediate use
@@ -245,7 +281,9 @@ fi
     "total_ready": 3,
     "needs_work_generation": false,
     "available_shepherd_slots": 2,
-    "recommended_actions": ["spawn_shepherds", "check_stuck"]
+    "recommended_actions": ["spawn_shepherds", "check_stuck"],
+    "health_status": "healthy",
+    "health_warnings": []
   },
   "config": { "issue_threshold": 3, "max_shepherds": 3 }
 }
@@ -270,7 +308,7 @@ def auto_spawn_shepherds(state, snapshot_data, debug_mode=False):
         if debug_mode:
             print(f"[DEBUG] {msg}")
 
-    # daemon-snapshot.sh returns issues pre-sorted by LOOM_ISSUE_STRATEGY:
+    # loom-tools snapshot returns issues pre-sorted by LOOM_ISSUE_STRATEGY:
     # - loom:urgent issues always first (regardless of strategy)
     # - Then sorted by: fifo (oldest first), lifo (newest first), or priority
     ready_issues = snapshot_data["pipeline"]["ready_issues"]
@@ -283,7 +321,7 @@ def auto_spawn_shepherds(state, snapshot_data, debug_mode=False):
 
     # Determine shepherd mode based on daemon's force_mode
     force_mode = state.get("force_mode", False)
-    shepherd_flag = "--force" if force_mode else ""  # default is force-pr behavior
+    shepherd_flag = "--merge" if force_mode else ""  # default is force-pr behavior
 
     debug(f"Issue selection: {len(ready_issues)} ready issues, {active_count}/{max_shepherds} shepherds active")
     debug(f"Shepherd mode: {shepherd_flag} (force_mode={force_mode})")
@@ -499,7 +537,7 @@ This {proposal_type} proposal has been automatically promoted to `loom:issue` by
 
 ## Trigger Work Generation
 
-**CRITICAL**: Work generation keeps the pipeline fed. When `daemon-snapshot.sh` includes `trigger_architect` or `trigger_hermit` in `recommended_actions`, the iteration MUST spawn these roles.
+**CRITICAL**: Work generation keeps the pipeline fed. When `loom-tools snapshot` includes `trigger_architect` or `trigger_hermit` in `recommended_actions`, the iteration MUST spawn these roles.
 
 **Note**: `trigger_architect_role()` and `trigger_hermit_role()` have been removed. Architect and
 hermit now use the unified `trigger_support_role()` function (same as guide, champion, doctor,
@@ -639,7 +677,7 @@ def auto_ensure_support_roles(state, snapshot_data, recommended_actions, debug_m
     debug(f"Demand-spawned: {demand_spawned}")
 
     # Define which roles to check and their trigger actions
-    # Architect and hermit use trigger_architect/trigger_hermit actions from daemon-snapshot.sh
+    # Architect and hermit use trigger_architect/trigger_hermit actions from loom-tools snapshot
     role_checks = [
         ("guide", "trigger_guide", "Guide backlog triage", False),
         ("champion", "trigger_champion", "Champion PR merge", demand_spawned.get("champion", False)),
@@ -905,7 +943,7 @@ def check_stuck_agents(state, debug_mode=False):
         if debug_mode:
             print(f"[DEBUG] {msg}")
 
-    result = run("./.loom/scripts/stuck-detection.sh check --json")
+    result = run("loom-stuck-detection check --json")
 
     if result.exit_code == 2:  # Stuck agents found
         stuck_data = json.loads(result.stdout)
@@ -949,6 +987,90 @@ def check_stale_building(state, debug_mode=False):
         return len(recovered)
 
     return 0
+```
+
+### Systematic Failure Detection (LLM-Side)
+
+When the pipeline is stalled with blocked issues but no ready work, the iteration subagent
+inspects recent shepherd errors and blocked issue details for shared patterns. This is complex
+pattern matching that is natural for the LLM but hard to express in shell.
+
+```python
+def detect_systematic_failure(snapshot_data, state, debug_mode=False):
+    """Detect systematic failure patterns across recent shepherds.
+
+    Analyzes blocked issues and recent shepherd errors for shared root causes.
+    Returns a warning dict if a systematic pattern is detected, None otherwise.
+    """
+
+    def debug(msg):
+        if debug_mode:
+            print(f"[DEBUG] {msg}")
+
+    blocked_issues = snapshot_data.get("pipeline", {}).get("blocked_issues", [])
+    if len(blocked_issues) < 2:
+        return None  # Need at least 2 blocked issues for a pattern
+
+    # Check recent shepherd completions in state for shared error patterns
+    shepherds = state.get("shepherds", {})
+    recent_errors = []
+    for name, info in shepherds.items():
+        if info.get("last_error"):
+            recent_errors.append(info["last_error"])
+
+    # Also check spawn_retry_queue for repeated failures
+    retry_queue = state.get("spawn_retry_queue", {})
+    for issue_key, retry_info in retry_queue.items():
+        if retry_info.get("last_error"):
+            recent_errors.append(retry_info["last_error"])
+
+    if len(recent_errors) < 2:
+        return None
+
+    # Look for common error substring patterns (basic deduplication)
+    # The LLM should analyze whether the errors share a root cause
+    # such as: same test failure, same build error, same dependency issue
+    debug(f"Analyzing {len(recent_errors)} recent errors for systematic pattern")
+    debug(f"Blocked issues: {[i.get('number') for i in blocked_issues]}")
+    debug(f"Recent errors: {recent_errors[:3]}")
+
+    # Count distinct error patterns by taking first 50 chars as signature
+    error_signatures = {}
+    for err in recent_errors:
+        sig = err[:50] if len(err) > 50 else err
+        error_signatures[sig] = error_signatures.get(sig, 0) + 1
+
+    # If any single error pattern appears in majority of errors, it's systematic
+    for sig, count in error_signatures.items():
+        if count >= 2 and count >= len(recent_errors) * 0.5:
+            return {
+                "code": "systematic_failure",
+                "message": f"{count} shepherds failed with similar cause: {sig}"
+            }
+
+    return None
+
+
+def format_state_warnings(health_warnings):
+    """Convert health_warnings list to daemon-state.json warnings format.
+
+    The daemon-state.json warnings array uses a different schema than the
+    snapshot health_warnings. This function maps between the two formats.
+    """
+    state_warnings = []
+    now_iso = now()
+
+    for w in health_warnings:
+        state_warnings.append({
+            "time": now_iso,
+            "type": w["code"],
+            "severity": w["level"],
+            "message": w["message"],
+            "context": {},
+            "acknowledged": False
+        })
+
+    return state_warnings
 ```
 
 ### Orphan Recovery (In-Session)
@@ -1030,7 +1152,7 @@ def handle_empty_backlog(state, debug_mode):
         print("  Backlog empty - checking work generation triggers...")
 
         # Work generation is handled by acting on recommended_actions
-        # daemon-snapshot.sh includes trigger_architect/trigger_hermit when appropriate
+        # loom-tools snapshot includes trigger_architect/trigger_hermit when appropriate
 
         # Report what human can do (informational only)
         if curated_count > 0:
@@ -1044,7 +1166,7 @@ def handle_empty_backlog(state, debug_mode):
 | Command | Description |
 |---------|-------------|
 | `/loom iterate` | Execute single iteration (used by parent loop) |
-| `/loom iterate --force` | Single iteration with force mode |
+| `/loom iterate --merge` | Single iteration with merge mode |
 | `/loom iterate --debug` | Single iteration with verbose debug logging |
 
 ### Command Detection
@@ -1053,7 +1175,7 @@ def handle_empty_backlog(state, debug_mode):
 args = "$ARGUMENTS".strip().split()
 
 if "iterate" in args:
-    force_mode = "--force" in args
+    force_mode = "--merge" in args or "--force" in args  # --force is deprecated alias
     debug_mode = "--debug" in args
     summary = loom_iterate(force_mode, debug_mode)
     print(summary)  # This is what parent receives
@@ -1071,7 +1193,7 @@ When running with `--debug`, iteration produces verbose logging:
 [DEBUG] Spawning tmux shepherd: shepherd-issue-456 for issue #456
 [DEBUG] Spawning decision: shepherd assigned to #456 (verified)
 [DEBUG]   tmux session: loom-shepherd-issue-456
-[DEBUG] Shepherd mode: --force (force_mode=true)
+[DEBUG] Shepherd mode: --merge (force_mode=true)
 [DEBUG] Checking support roles via spawn-support-role.sh (interval-based)
 [DEBUG] guide: spawn needed (interval_elapsed)
 [DEBUG] State update: guide marked running in-memory (tmux session: loom-guide)

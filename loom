@@ -106,10 +106,13 @@ case "${1:-help}" in
         ;;
     health)
         shift
-        if [[ -f "$REPO_ROOT/.loom/scripts/daemon-health.sh" ]]; then
-            exec "$REPO_ROOT/.loom/scripts/daemon-health.sh" "$@"
+        loom_venv="$REPO_ROOT/loom-tools/.venv/bin/loom-daemon-diagnostic"
+        if [[ -n "$REPO_ROOT" && -x "$loom_venv" ]]; then
+            exec "$loom_venv" "$@"
+        elif command -v loom-daemon-diagnostic &>/dev/null; then
+            exec loom-daemon-diagnostic "$@"
         else
-            echo -e "${RED}Error: daemon-health.sh not found${NC}" >&2
+            echo -e "${RED}Error: health command not installed (install loom-tools)${NC}" >&2
             exit 1
         fi
         ;;

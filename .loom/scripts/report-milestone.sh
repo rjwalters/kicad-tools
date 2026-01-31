@@ -254,7 +254,7 @@ add_milestone() {
         --arg event "$event" \
         '.milestones += [$milestone] | .last_heartbeat = $timestamp |
          if $event == "phase_entered" then .current_phase = $milestone.data.phase
-         elif $event == "completed" then .status = "completed"
+         elif $event == "completed" then .status = "completed" | .current_phase = null
          elif $event == "blocked" then .status = "blocked"
          elif $event == "error" then .status = (if $milestone.data.will_retry then "retrying" else "errored" end)
          else . end')

@@ -161,6 +161,21 @@ for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
     break
   fi
 
+  # Check for "Merge already in progress" (HTTP 405)
+  # This happens when auto-merge triggers at the same time as our merge attempt
+  if echo "$MERGE_RESPONSE" | grep -q "Merge already in progress"; then
+    info "Merge already in progress (HTTP 405), waiting for completion..."
+    sleep 5
+    RECHECK=$($GH --no-cache api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+    if [[ "$RECHECK" == "true" ]]; then
+      success "PR #$PR_NUMBER merged (concurrent merge completed)"
+      break
+    fi
+    # Still not merged after wait - continue retry loop
+    warning "Concurrent merge not yet complete, retrying..."
+    continue
+  fi
+
   # Check for stale branch error (base branch was modified)
   if echo "$MERGE_RESPONSE" | grep -q "Base branch was modified"; then
     if [[ $MERGE_ATTEMPT -lt $MAX_MERGE_RETRIES ]]; then
@@ -206,6 +221,8 @@ LINKED_ISSUE=$(echo "$PR_BODY" | grep -oE '(Closes|closes|Fixes|fixes|Resolves|r
 if [[ -n "$LINKED_ISSUE" ]]; then
   info "Found linked issue: #$LINKED_ISSUE"
   # Remove workflow labels that shouldn't persist on closed issues
+  # NOTE: Origin labels (loom:architect, loom:hermit, loom:auditor) are intentionally
+  # preserved for audit trail - they indicate where the issue originated from
   for label in loom:building loom:issue loom:curated loom:curating loom:treating loom:blocked; do
     gh issue edit "$LINKED_ISSUE" --remove-label "$label" 2>/dev/null && \
       info "  Removed label: $label" || true
@@ -215,11 +232,16 @@ else
   info "No linked issue found in PR body (no 'Closes #N' pattern)"
 fi
 
-# Delete remote branch
-info "Deleting remote branch: $PR_BRANCH"
-gh api "repos/$REPO_NWO/git/refs/heads/$PR_BRANCH" -X DELETE 2>/dev/null && \
-  success "Branch '$PR_BRANCH' deleted" || \
-  warning "Could not delete branch '$PR_BRANCH' (may already be deleted)"
+# Delete remote branch (skip if GitHub auto-deletes on merge)
+DELETE_BRANCH_ON_MERGE=$($GH api "repos/$REPO_NWO" --jq '.delete_branch_on_merge' 2>/dev/null || echo "false")
+if [[ "$DELETE_BRANCH_ON_MERGE" == "true" ]]; then
+  info "Skipping branch deletion (GitHub auto-delete is enabled)"
+else
+  info "Deleting remote branch: $PR_BRANCH"
+  gh api "repos/$REPO_NWO/git/refs/heads/$PR_BRANCH" -X DELETE 2>/dev/null && \
+    success "Branch '$PR_BRANCH' deleted" || \
+    warning "Could not delete branch '$PR_BRANCH' (may already be deleted)"
+fi
 
 # Cleanup worktree if requested
 if [[ "$CLEANUP_WORKTREE" == "true" ]]; then

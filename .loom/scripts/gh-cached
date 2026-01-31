@@ -131,7 +131,7 @@ def cache_get(key: str) -> tuple[str | None, int | None]:
         return None, None
 
 
-def cache_put(key: str, stdout: str, returncode: int, ttl: int) -> None:
+def cache_put(key: str, stdout: str, returncode: int, ttl: int, args: list[str] | None = None) -> None:
     """Write a cache entry."""
     ensure_cache_dir()
     enforce_max_size()
@@ -141,6 +141,7 @@ def cache_put(key: str, stdout: str, returncode: int, ttl: int) -> None:
         "ttl": ttl,
         "stdout": stdout,
         "returncode": returncode,
+        "args": args or [],
     }
     path = cache_path(key)
     try:
@@ -183,7 +184,9 @@ def invalidate_for_resource(resource_type: str, resource_id: str | None) -> None
     """Invalidate cached entries related to a resource.
 
     After a mutation like `gh issue edit 42 ...`, we invalidate any cached
-    entries whose command args contain the resource type and id.
+    entries whose original command args reference the same resource type and id.
+    Falls back to checking stdout for backward compatibility with cache entries
+    that predate the args field.
     """
     if not resource_id:
         return
@@ -198,13 +201,18 @@ def invalidate_for_resource(resource_type: str, resource_id: str | None) -> None
             try:
                 with open(path) as f:
                     data = json.load(f)
+                args = data.get("args", [])
+                # Primary: check if the cached command's args reference this resource
+                if args and resource_type in args and resource_id in args:
+                    debug(f"INVALIDATE (args match) {name}")
+                    os.unlink(path)
+                    count += 1
+                    continue
+                # Fallback: check stdout for backward compatibility with
+                # cache entries that don't have stored args
                 stdout = data.get("stdout", "")
-                # Heuristic: if the cached output mentions this resource,
-                # or if the cache key was derived from a command referencing it,
-                # invalidate it. Since we can't reconstruct the original args
-                # from the hash, we take the conservative approach of invalidating
-                # entries that contain the resource id in their output.
                 if resource_id in stdout:
+                    debug(f"INVALIDATE (stdout match) {name}")
                     os.unlink(path)
                     count += 1
             except (json.JSONDecodeError, OSError):
@@ -402,7 +410,7 @@ def main() -> int:
 
     # Only cache successful responses
     if rc == 0:
-        cache_put(key, stdout, rc, parsed["ttl"])
+        cache_put(key, stdout, rc, parsed["ttl"], args=args)
 
     increment_stat("misses")
     return rc

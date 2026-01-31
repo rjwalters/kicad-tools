@@ -29,7 +29,7 @@ The daemon relies on deterministic bash scripts for critical operations. These s
 
 | Script | Purpose |
 |--------|---------|
-| `daemon-snapshot.sh` | Pipeline state assessment (replaces 10+ gh commands) |
+| `loom-tools snapshot` | Pipeline state assessment (replaces 10+ gh commands) |
 | `validate-daemon-state.sh` | Validates state file |
 | `agent-spawn.sh` | Spawn tmux agent sessions |
 | `agent-wait.sh` | Detect when tmux agents complete |
@@ -101,7 +101,7 @@ The parent loop uses the **Skill tool** to spawn iteration subagents:
 
 ```python
 # Parent spawns iteration subagent (uses Skill so iteration gets its role prompt)
-Skill(skill="loom-iteration", args="--force --debug")
+Skill(skill="loom-iteration", args="--merge --debug")
 ```
 
 **Why Skill for parent→iteration**: The parent wants the iteration subagent to receive
@@ -121,9 +121,10 @@ uses **tmux agent-spawn.sh** to create ephemeral tmux sessions:
 ./.loom/scripts/agent-destroy.sh "shepherd-issue-123"
 ```
 
-**Shepherd Force Mode Flags**:
-- `--force` or `-f`: Full automation - auto-merge after Judge approval (use when daemon is in force mode)
+**Shepherd Merge Mode Flags**:
+- `--merge` or `-m`: Full automation - auto-merge after Judge approval (use when daemon is in merge mode)
 - (default): Exits at `loom:pr` (ready-to-merge), Champion handles merge
+- `--force` or `-f`: (deprecated) Use `--merge` or `-m` instead
 - `--wait`: (deprecated) No longer blocks; same behavior as default
 
 **Delegation Summary**:
@@ -190,7 +191,7 @@ GUIDE/CHAMPION/DOCTOR/AUDITOR:
 - Approving proposals: `loom:hermit` -> `loom:issue`
 - Handling blocked: `loom:blocked` issues
 
-**In force mode** (`/loom --force`):
+**In merge mode** (`/loom --merge`):
 - Proposals are auto-promoted to `loom:issue` by the daemon
 - Only `loom:blocked` issues require human intervention
 
@@ -220,9 +221,9 @@ def check_for_existing_daemon():
         result = run(f"kill -0 {pid} 2>/dev/null && echo alive || echo dead")
         if result.strip() == "alive":
             print(f"ERROR: Daemon loop already running (PID: {pid})")
-            print(f"  The shell wrapper daemon-loop.sh is active.")
+            print(f"  Another daemon loop is active.")
             print(f"  Stop it first: touch .loom/stop-daemon")
-            print(f"  Or check status: ./.loom/scripts/daemon-loop.sh --status")
+            print(f"  Or check status: loom-daemon-diagnostic")
             return False
         else:
             print(f"Warning: Removing stale PID file (PID {pid} is not running)")
@@ -371,7 +372,7 @@ def parent_loop(force_mode=False, debug_mode=False, session_id=None):
     """Thin parent loop - spawns iteration subagents to do actual work."""
 
     iteration = 0
-    force_flag = "--force" if force_mode else ""
+    force_flag = "--merge" if force_mode else ""
     debug_flag = "--debug" if debug_mode else ""
     flags = f"{force_flag} {debug_flag}".strip()
 
@@ -514,17 +515,17 @@ The `.loom/stop-shepherds` file acts as a coordination signal:
 | Command | Description |
 |---------|-------------|
 | `/loom` | Start thin parent loop (spawns iteration subagents) |
-| `/loom --force` | Start with force mode (auto-promote proposals) |
+| `/loom --merge` | Start with merge mode (auto-promote proposals) |
 | `/loom --debug` | Start with debug mode (verbose logging) |
 | `/loom status` | Report current state without running loop |
 | `/loom stop` | Create stop signal, initiate shutdown |
 
-### --force Mode
+### --merge Mode
 
-When `/loom --force` is invoked, the daemon enables **force mode**:
+When `/loom --merge` is invoked, the daemon enables **merge mode**:
 
 1. **Auto-Promote Proposals**: Champion automatically promotes `loom:architect`, `loom:hermit`, and `loom:curated` proposals to `loom:issue`
-2. **Shepherd Auto-Merge**: Shepherds use `--force` flag
+2. **Shepherd Auto-Merge**: Shepherds use `--merge` flag
 3. **Audit Trail**: All auto-promoted items include `[force-mode]` marker
 
 **Use cases**: New project bootstrap, solo developer, weekend hack mode

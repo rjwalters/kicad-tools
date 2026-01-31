@@ -780,10 +780,10 @@ output_formatted() {
     # Show stuck detection actions if interventions exist
     if [[ "$intervention_count" -gt 0 ]]; then
         echo -e "    ${YELLOW}Stuck Agent Actions:${NC}"
-        echo -e "      - View stuck status: ${CYAN}./.loom/scripts/stuck-detection.sh status${NC}"
-        echo -e "      - Clear intervention: ${CYAN}./.loom/scripts/stuck-detection.sh clear <agent-id>${NC}"
+        echo -e "      - View stuck status: ${CYAN}loom-stuck-detection status${NC}"
+        echo -e "      - Clear intervention: ${CYAN}loom-stuck-detection clear <agent-id>${NC}"
         echo -e "      - Resume agent: ${CYAN}./.loom/scripts/signal.sh clear <agent-id>${NC}"
-        echo -e "      - View history: ${CYAN}./.loom/scripts/stuck-detection.sh history${NC}"
+        echo -e "      - View history: ${CYAN}loom-stuck-detection history${NC}"
         echo ""
     fi
 

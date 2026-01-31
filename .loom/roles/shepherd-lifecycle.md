@@ -520,9 +520,9 @@ fi
 
 ## Mode Behavior at Each Phase
 
-The `--force` flag affects Gate 1 (approval) and Gate 2 (merge), but **does not skip the Judge phase**. Code review always runs because GitHub's API prevents self-approval of PRs.
+The `--merge` flag affects Gate 1 (approval) and Gate 2 (merge), but **does not skip the Judge phase**. Code review always runs because GitHub's API prevents self-approval of PRs.
 
-| Phase | Default | `--force` |
+| Phase | Default | `--merge` |
 |-------|---------|-----------|
 | Curator | Runs | Runs |
 | Gate 1 (Approval) | Auto-approve | Auto-approve |
@@ -531,9 +531,9 @@ The `--force` flag affects Gate 1 (approval) and Gate 2 (merge), but **does not 
 | Doctor (if needed) | Runs | Runs |
 | Gate 2 (Merge) | Exit at `loom:pr` (Champion merges) | Auto-merge |
 
-**Why Judge always runs**: GitHub's API returns "cannot approve your own PR" when the same user who created a PR tries to approve it. Loom works around this via label-based reviews (Judge sets `loom:pr` label instead of calling `gh pr review --approve`), which works in all modes. Force mode's value is auto-merge at Gate 2, not review bypass.
+**Why Judge always runs**: GitHub's API returns "cannot approve your own PR" when the same user who created a PR tries to approve it. Loom works around this via label-based reviews (Judge sets `loom:pr` label instead of calling `gh pr review --approve`), which works in all modes. Merge mode's value is auto-merge at Gate 2, not review bypass.
 
-**Why shepherds exit at `loom:pr`**: Without `--force`, shepherds exit after the PR is approved to free their slot for new issues. The Champion role is responsible for merging `loom:pr` PRs. The deprecated `--wait` flag previously caused shepherds to block indefinitely at this stage.
+**Why shepherds exit at `loom:pr`**: Without `--merge`, shepherds exit after the PR is approved to free their slot for new issues. The Champion role is responsible for merging `loom:pr` PRs. The deprecated `--wait` flag previously caused shepherds to block indefinitely at this stage.
 
 ## Full Orchestration Workflow
 
@@ -592,7 +592,7 @@ fi
 
 ```bash
 if [ "$PHASE" = "gate1" ]; then
-  # Check if --force or default mode - auto-approve
+  # Check if --merge or default mode - auto-approve
   if [ "$FORCE_MODE" = "true" ] || [ "$DEFAULT_MODE" = "true" ]; then
     echo "Auto-approving issue (force/default mode)"
     gh issue edit $ISSUE_NUMBER --add-label "loom:issue"
@@ -654,11 +654,11 @@ fi
 
 ### Step 5: Judge Phase
 
-**Note**: The Judge phase runs in ALL modes, including `--force`. Force mode does not skip code review. GitHub's API prevents self-approval of PRs, but Loom's label-based review system (Judge adds `loom:pr` label instead of using `gh pr review --approve`) works around this restriction. See `judge.md` for details.
+**Note**: The Judge phase runs in ALL modes, including `--merge`. Merge mode does not skip code review. GitHub's API prevents self-approval of PRs, but Loom's label-based review system (Judge adds `loom:pr` label instead of using `gh pr review --approve`) works around this restriction. See `judge.md` for details.
 
 ```bash
 if [ "$PHASE" = "judge" ]; then
-  # Spawn ephemeral judge worker (always runs, even in force mode)
+  # Spawn ephemeral judge worker (always runs, even in merge mode)
   ./.loom/scripts/agent-spawn.sh --role judge --name "judge-issue-${ISSUE_NUMBER}" --args "$PR_NUMBER" --on-demand
 
   # Non-blocking wait with heartbeat polling
@@ -756,7 +756,7 @@ fi
 
 ```bash
 if [ "$PHASE" = "gate2" ]; then
-  # Check if --force mode - auto-merge with conflict resolution
+  # Check if --merge mode - auto-merge with conflict resolution
   if [ "$FORCE_MODE" = "true" ]; then
     echo "Force mode: auto-merging PR"
 
@@ -767,7 +767,7 @@ if [ "$PHASE" = "gate2" ]; then
     }
     echo "PR merged successfully"
 
-    gh issue comment $ISSUE_NUMBER --body "**Auto-merged** PR #$PR_NUMBER via \`/shepherd --force\`"
+    gh issue comment $ISSUE_NUMBER --body "**Auto-merged** PR #$PR_NUMBER via \`/shepherd --merge\`"
   else
     # Default mode: exit immediately at loom:pr state.
     # The Champion role handles merging approved PRs.

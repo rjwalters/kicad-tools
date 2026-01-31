@@ -179,10 +179,13 @@ show_command_help() {
             fi
             ;;
         health)
-            if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/.loom/scripts/daemon-health.sh" ]]; then
-                exec "$REPO_ROOT/.loom/scripts/daemon-health.sh" --help
+            local loom_venv="$REPO_ROOT/loom-tools/.venv/bin/loom-daemon-diagnostic"
+            if [[ -n "$REPO_ROOT" && -x "$loom_venv" ]]; then
+                exec "$loom_venv" --help
+            elif command -v loom-daemon-diagnostic &>/dev/null; then
+                exec loom-daemon-diagnostic --help
             else
-                echo -e "${RED}Error: health command not installed${NC}"
+                echo -e "${RED}Error: health command not installed (install loom-tools)${NC}"
                 exit 1
             fi
             ;;

@@ -60,6 +60,7 @@ ${YELLOW}USAGE:${NC}
 ${YELLOW}OPTIONS:${NC}
     --timeout <seconds>        Maximum time to wait (default: $DEFAULT_TIMEOUT)
     --poll-interval <seconds>  Time between checks (default: $DEFAULT_POLL_INTERVAL)
+    --min-idle-elapsed <secs>  Minimum seconds before idle prompt detection (default: $MIN_IDLE_ELAPSED)
     --json                     Output result as JSON
     --help                     Show this help message
 
@@ -149,7 +150,9 @@ check_exit_command() {
 }
 
 # Pattern for detecting Claude is actively processing (shared with agent-wait-bg.sh)
-PROCESSING_INDICATORS='⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|Beaming|Loading|● |✓ |◐|◓|◑|◒|thinking|streaming|Wandering'
+# Claude Code shows "esc to interrupt" in the status bar whenever it is working
+# (thinking, running tools, streaming). This text is absent when idle at prompt.
+PROCESSING_INDICATORS='esc to interrupt'
 
 # Check if Claude is sitting at an idle prompt (task completed, waiting for input).
 # This detects the case where a support role has finished its work but the Claude
@@ -245,6 +248,10 @@ main() {
                 ;;
             --poll-interval)
                 poll_interval="$2"
+                shift 2
+                ;;
+            --min-idle-elapsed)
+                MIN_IDLE_ELAPSED="$2"
                 shift 2
                 ;;
             --json)
@@ -345,8 +352,23 @@ main() {
         #   Claude has begun working (e.g., --timeout 0 called immediately after spawn)
         # - IDLE_PROMPT_CONFIRM_COUNT: require consecutive idle observations to avoid
         #   triggering on a brief prompt flash between tool calls
+        #
+        # Special case: --timeout 0 (non-blocking mode)
+        #   The daemon calls with --timeout 0 long after the agent started, so the
+        #   per-invocation elapsed guard and confirmation count are unnecessary.
+        #   A single idle prompt observation is sufficient.
         elapsed=$(( $(date +%s) - start_time ))
-        if [[ "$elapsed" -ge "$MIN_IDLE_ELAPSED" ]]; then
+        if [[ "$timeout" -eq 0 ]]; then
+            # Non-blocking: single check, no guards (daemon already ensured agent ran)
+            if check_idle_prompt "$session_name"; then
+                if [[ "$json_output" == "true" ]]; then
+                    echo "{\"status\":\"completed\",\"name\":\"$name\",\"reason\":\"idle_prompt\",\"elapsed\":$elapsed}"
+                else
+                    log_success "Agent '$name' completed (idle at prompt after ${elapsed}s)"
+                fi
+                exit 0
+            fi
+        elif [[ "$elapsed" -ge "$MIN_IDLE_ELAPSED" ]]; then
             if check_idle_prompt "$session_name"; then
                 idle_prompt_count=$(( idle_prompt_count + 1 ))
                 if [[ "$idle_prompt_count" -ge "$IDLE_PROMPT_CONFIRM_COUNT" ]]; then
