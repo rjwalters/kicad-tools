@@ -53,7 +53,7 @@ log_error() {
 
 # Recover from deleted working directory
 # This handles the case where the agent's worktree is deleted while it's running
-# (e.g., by clean.sh, merge-pr.sh, or agent-destroy.sh)
+# (e.g., by loom-clean, merge-pr.sh, or agent-destroy.sh)
 recover_cwd() {
     # Check if current directory is still valid
     if pwd &>/dev/null 2>&1; then

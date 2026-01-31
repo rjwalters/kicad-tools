@@ -215,10 +215,21 @@ handle_shepherd_complete() {
 
   if [[ -d "$worktree_path" ]]; then
     info "Cleaning worktree for issue #$ISSUE_NUMBER..."
-    if [[ "$DRY_RUN" == true ]]; then
-      "$SCRIPT_DIR/safe-worktree-cleanup.sh" --dry-run --grace-period "$GRACE_PERIOD" 2>/dev/null || true
+    local loom_clean_cmd=""
+    local loom_clean_venv="$REPO_ROOT/loom-tools/.venv/bin/loom-clean"
+    if [[ -x "$loom_clean_venv" ]]; then
+      loom_clean_cmd="$loom_clean_venv"
+    elif command -v loom-clean &>/dev/null; then
+      loom_clean_cmd="loom-clean"
+    fi
+    if [[ -n "$loom_clean_cmd" ]]; then
+      if [[ "$DRY_RUN" == true ]]; then
+        "$loom_clean_cmd" --safe --worktrees-only --dry-run --grace-period "$GRACE_PERIOD" 2>/dev/null || true
+      else
+        "$loom_clean_cmd" --safe --worktrees-only --grace-period "$GRACE_PERIOD" 2>/dev/null || true
+      fi
     else
-      "$SCRIPT_DIR/safe-worktree-cleanup.sh" --grace-period "$GRACE_PERIOD" 2>/dev/null || true
+      warning "loom-clean not found (install loom-tools)"
     fi
   fi
 
@@ -309,6 +320,22 @@ cleanup_stale_progress_files() {
           rm -f "$progress_file"
           info "Deleted stale progress file: $(basename "$progress_file") (status: $status)"
         fi
+      else
+        # Stale working file - check if associated issue is closed
+        local file_issue
+        file_issue=$(jq -r '.issue // 0' "$progress_file" 2>/dev/null || echo "0")
+        if [[ "$file_issue" != "0" ]]; then
+          local issue_state
+          issue_state=$(gh issue view "$file_issue" --json state --jq '.state' 2>/dev/null || echo "unknown")
+          if [[ "$issue_state" == "CLOSED" ]]; then
+            if [[ "$DRY_RUN" == true ]]; then
+              info "[DRY-RUN] Would delete orphaned progress file: $(basename "$progress_file") (issue #$file_issue closed, status: working)"
+            else
+              rm -f "$progress_file"
+              info "Deleted orphaned progress file: $(basename "$progress_file") (issue #$file_issue closed, status: working)"
+            fi
+          fi
+        fi
       fi
     fi
   done
@@ -376,10 +403,21 @@ handle_daemon_startup() {
   # ===================================================================
   # Run safe worktree cleanup
   info "Cleaning stale worktrees..."
-  if [[ "$DRY_RUN" == true ]]; then
-    "$SCRIPT_DIR/safe-worktree-cleanup.sh" --dry-run 2>/dev/null || warning "safe-worktree-cleanup.sh not found"
+  local loom_clean_cmd=""
+  local loom_clean_venv="$REPO_ROOT/loom-tools/.venv/bin/loom-clean"
+  if [[ -x "$loom_clean_venv" ]]; then
+    loom_clean_cmd="$loom_clean_venv"
+  elif command -v loom-clean &>/dev/null; then
+    loom_clean_cmd="loom-clean"
+  fi
+  if [[ -n "$loom_clean_cmd" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      "$loom_clean_cmd" --safe --worktrees-only --dry-run 2>/dev/null || warning "loom-clean failed"
+    else
+      "$loom_clean_cmd" --safe --worktrees-only 2>/dev/null || warning "loom-clean failed"
+    fi
   else
-    "$SCRIPT_DIR/safe-worktree-cleanup.sh" 2>/dev/null || warning "safe-worktree-cleanup.sh not found"
+    warning "loom-clean not found (install loom-tools)"
   fi
 
   # ===================================================================
@@ -558,10 +596,21 @@ handle_periodic() {
   # Only clean worktrees if no active shepherds or in force mode
   if [[ "$(has_active_shepherds)" == "false" ]]; then
     info "No active shepherds - running full worktree cleanup..."
-    if [[ "$DRY_RUN" == true ]]; then
-      "$SCRIPT_DIR/safe-worktree-cleanup.sh" --dry-run 2>/dev/null || warning "safe-worktree-cleanup.sh not found"
+    local loom_clean_cmd=""
+    local loom_clean_venv="$REPO_ROOT/loom-tools/.venv/bin/loom-clean"
+    if [[ -x "$loom_clean_venv" ]]; then
+      loom_clean_cmd="$loom_clean_venv"
+    elif command -v loom-clean &>/dev/null; then
+      loom_clean_cmd="loom-clean"
+    fi
+    if [[ -n "$loom_clean_cmd" ]]; then
+      if [[ "$DRY_RUN" == true ]]; then
+        "$loom_clean_cmd" --safe --worktrees-only --dry-run 2>/dev/null || warning "loom-clean failed"
+      else
+        "$loom_clean_cmd" --safe --worktrees-only 2>/dev/null || warning "loom-clean failed"
+      fi
     else
-      "$SCRIPT_DIR/safe-worktree-cleanup.sh" 2>/dev/null || warning "safe-worktree-cleanup.sh not found"
+      warning "loom-clean not found (install loom-tools)"
     fi
   else
     info "Skipping worktree cleanup (active shepherds)"

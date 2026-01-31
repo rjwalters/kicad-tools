@@ -8,7 +8,7 @@
 #
 # Examples:
 #   loom send shepherd-1 "/shepherd 123"
-#   loom send shepherd-1 "/shepherd 123 --force"
+#   loom send shepherd-1 "/shepherd 123 --merge"
 #   loom send terminal-2 "/builder 456"
 #   loom send champion "/champion"
 #
@@ -84,7 +84,7 @@ ${YELLOW}OPTIONS:${NC}
 
 ${YELLOW}EXAMPLES:${NC}
     loom send shepherd-1 "/shepherd 123"
-    loom send shepherd-1 "/shepherd 123 --force"
+    loom send shepherd-1 "/shepherd 123 --merge"
     loom send terminal-2 "/builder 456"
     loom send champion "/champion"
 

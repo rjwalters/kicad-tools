@@ -318,8 +318,8 @@ When working with parallel agents (multiple Builders running simultaneously), us
 - Race condition: both may succeed, causing duplicate work
 
 **The Solution:**
-- Use `claim.sh` for atomic file-based locking
-- Label change is still needed (for visibility), but claim.sh prevents races
+- Use `loom-claim` for atomic file-based locking
+- Label change is still needed (for visibility), but loom-claim prevents races
 - First Builder to claim wins; others move to next issue
 
 ### Claiming Workflow
@@ -338,7 +338,7 @@ fi
 
 ```bash
 # Try to claim atomically (prevents race conditions)
-if ./.loom/scripts/claim.sh claim "$ISSUE_NUMBER" "$AGENT_ID"; then
+if loom-claim claim "$ISSUE_NUMBER" "$AGENT_ID"; then
   # Claim succeeded - now update labels for visibility
   gh issue edit "$ISSUE_NUMBER" --remove-label "loom:issue" --add-label "loom:building"
   echo "Claimed issue #$ISSUE_NUMBER"
@@ -353,14 +353,14 @@ fi
 
 ```bash
 # If work takes longer than 30 minutes, extend the claim
-./.loom/scripts/claim.sh extend "$ISSUE_NUMBER" "$AGENT_ID" 3600  # Extend by 1 hour
+loom-claim extend "$ISSUE_NUMBER" "$AGENT_ID" 3600  # Extend by 1 hour
 ```
 
 **4. Release claim on completion or abandonment:**
 
 ```bash
 # When PR is created or work is blocked, release the claim
-./.loom/scripts/claim.sh release "$ISSUE_NUMBER" "$AGENT_ID"
+loom-claim release "$ISSUE_NUMBER" "$AGENT_ID"
 ```
 
 ### Full Parallel Mode Example
@@ -381,7 +381,7 @@ while true; do
 
   for ISSUE_NUMBER in $ISSUES; do
     # Try atomic claim
-    if ./.loom/scripts/claim.sh claim "$ISSUE_NUMBER" "$AGENT_ID" 1800; then
+    if loom-claim claim "$ISSUE_NUMBER" "$AGENT_ID" 1800; then
       # Claim succeeded
       gh issue edit "$ISSUE_NUMBER" --remove-label "loom:issue" --add-label "loom:building"
 
@@ -394,7 +394,7 @@ while true; do
       # ... create PR ...
 
       # Release claim (PR will handle the rest)
-      ./.loom/scripts/claim.sh release "$ISSUE_NUMBER" "$AGENT_ID"
+      loom-claim release "$ISSUE_NUMBER" "$AGENT_ID"
 
       break  # Move to next iteration
     fi
@@ -409,12 +409,12 @@ done
 
 | Command | Purpose |
 |---------|---------|
-| `claim.sh claim <issue> [agent-id] [ttl]` | Atomically claim an issue (default TTL: 30 min) |
-| `claim.sh extend <issue> <agent-id> [seconds]` | Extend claim TTL for long work |
-| `claim.sh release <issue> [agent-id]` | Release claim when done |
-| `claim.sh check <issue>` | Check if issue is claimed |
-| `claim.sh list` | List all active claims |
-| `claim.sh cleanup` | Remove expired claims |
+| `loom-claim claim <issue> [agent-id] [ttl]` | Atomically claim an issue (default TTL: 30 min) |
+| `loom-claim extend <issue> <agent-id> [seconds]` | Extend claim TTL for long work |
+| `loom-claim release <issue> [agent-id]` | Release claim when done |
+| `loom-claim check <issue>` | Check if issue is claimed |
+| `loom-claim list` | List all active claims |
+| `loom-claim cleanup` | Remove expired claims |
 
 ### Signal Commands Reference
 
@@ -438,13 +438,13 @@ done
 
 ### Graceful Degradation
 
-If `claim.sh` or `signal.sh` don't exist (older installations), fall back to label-only claiming:
+If `loom-claim` or `signal.sh` don't exist (older installations), fall back to label-only claiming:
 
 ```bash
 # Check if claiming system exists
-if [[ -x ./.loom/scripts/claim.sh ]]; then
+if command -v loom-claim &>/dev/null; then
   # Use atomic claiming
-  ./.loom/scripts/claim.sh claim "$ISSUE_NUMBER" "$AGENT_ID" || continue
+  loom-claim claim "$ISSUE_NUMBER" "$AGENT_ID" || continue
 fi
 
 # Always update labels (works with or without claiming system)

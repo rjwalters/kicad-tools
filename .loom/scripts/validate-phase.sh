@@ -311,7 +311,7 @@ This is a workflow violation - builders MUST work in worktrees.
 **Option A: Retry with shepherd** (recommended)
 \`\`\`bash
 gh issue edit $issue_number --remove-label loom:blocked --add-label loom:issue
-./.loom/scripts/shepherd-loop.sh $issue_number --force
+./.loom/scripts/loom-shepherd.sh $issue_number --merge
 \`\`\`
 
 **Option B: Complete manually**

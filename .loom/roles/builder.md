@@ -521,6 +521,12 @@ Keep it brief (3-6 words) and descriptive:
 
 ## Completion
 
-**Work completion is detected automatically.**
+After successfully creating the PR:
 
-When you complete your task (PR created with `loom:review-requested` label, or issue marked as `loom:blocked`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.
+1. **Verify the PR was created** with `loom:review-requested` label:
+   ```bash
+   gh pr view <number> --json labels,number,url
+   ```
+2. **Exit the session** - the shepherd will continue the workflow
+
+**Work completion is detected automatically.** When you complete your task (PR created with `loom:review-requested` label, or issue marked as `loom:blocked`), the orchestration layer terminates the session. However, you should explicitly exit after verifying PR creation to avoid unnecessary delays in the pipeline.
