@@ -39,6 +39,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -235,7 +236,7 @@ class AdaptiveGridRouter:
         self,
         nets: dict[int, list[tuple[str, str]]],
         pads: dict[tuple[str, str], Pad],
-        route_fn: callable | None = None,
+        route_fn: Callable[[], list[Route]] | None = None,
     ) -> AdaptiveGridResult:
         """Execute two-phase adaptive grid routing.
 
@@ -338,7 +339,7 @@ class AdaptiveGridRouter:
         self,
         nets: dict[int, list[tuple[str, str]]],
         pads: dict[tuple[str, str], Pad],
-        route_fn: callable | None = None,
+        route_fn: Callable[[], list[Route]] | None = None,
     ) -> tuple[list[Route], int, int]:
         """Phase 2: Route all nets on the coarse grid.
 
