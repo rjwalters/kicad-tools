@@ -37,6 +37,7 @@ from .cpp_backend import CppGrid, CppPathfinder, create_hybrid_router, get_backe
 from .diffpair import DifferentialPair, DifferentialPairConfig, LengthMismatchWarning
 from .diffpair_routing import DiffPairRouter
 from .escape import EscapeRouter, PackageInfo, is_dense_package
+from .adaptive_grid import AdaptiveGridResult, AdaptiveGridRouter
 from .subgrid import SubGridResult, SubGridRouter
 from .failure_analysis import (
     CongestionMap,
@@ -3423,6 +3424,85 @@ class Autorouter:
                 print(failure_summary)
 
         return all_routes
+
+    def route_with_adaptive_grid(
+        self,
+        use_negotiated: bool = True,
+        fine_pitch_threshold: float = 0.8,
+        progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+    ) -> list[Route]:
+        """Route with adaptive grid: fine grid near pads, coarse grid in channels.
+
+        Two-phase routing strategy (Issue #1135):
+        - Phase 1: Detect fine-pitch components and generate escape segments
+          from off-grid pads to the nearest coarse-grid points
+        - Phase 2: Route all nets on the coarse grid where every endpoint
+          is guaranteed on-grid
+
+        This achieves 100% pad reachability at coarse-grid routing speed.
+
+        Args:
+            use_negotiated: Use negotiated congestion routing for Phase 2
+            fine_pitch_threshold: Pin pitch below this triggers fine-grid escape
+            progress_callback: Optional progress callback
+            timeout: Optional timeout in seconds
+
+        Returns:
+            List of all routes (escape segments + channel routes)
+
+        Example::
+
+            routes = router.route_with_adaptive_grid()
+            stats = router.get_statistics()
+        """
+        from kicad_tools.cli.progress import flush_print
+
+        flush_print("\n=== Adaptive Grid Routing (Fine Grid + Coarse Grid) ===")
+
+        adaptive = AdaptiveGridRouter(
+            grid=self.grid,
+            rules=self.rules,
+            router=self.router,
+            fine_pitch_threshold=fine_pitch_threshold,
+        )
+
+        def _route_phase2() -> list[Route]:
+            if use_negotiated:
+                return self.route_all_negotiated(
+                    progress_callback=progress_callback,
+                    timeout=timeout,
+                )
+            else:
+                return self.route_all(
+                    progress_callback=progress_callback,
+                )
+
+        result = adaptive.route_adaptive(
+            nets=self.nets,
+            pads=self.pads,
+            route_fn=_route_phase2,
+        )
+
+        # Add escape routes to our route list
+        for route in result.escape_routes:
+            self.routes.append(route)
+
+        # Summary
+        flush_print(f"\n{result.format_summary()}")
+
+        stats = self.get_statistics()
+        flush_print(f"\n=== Adaptive Grid Routing Complete ===")
+        flush_print(f"  Total nets routed: {stats['nets_routed']}")
+        flush_print(f"  Total segments: {stats['segments']}")
+        flush_print(f"  Total vias: {stats['vias']}")
+
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                flush_print(failure_summary)
+
+        return result.all_routes
 
     def get_subgrid_statistics(self) -> dict:
         """Get statistics about sub-grid routing.
