@@ -163,6 +163,17 @@ validate_task_id() {
     return 1
 }
 
+# Check if a tmux session exists and is running
+# Returns 0 if session exists, 1 otherwise
+check_tmux_session_exists() {
+    local session_name="$1"
+    if [[ -z "$session_name" ]]; then
+        return 1
+    fi
+    # Check if tmux session exists using loom socket
+    tmux -L loom has-session -t "$session_name" 2>/dev/null
+}
+
 # Convert ISO timestamp (UTC) to epoch seconds (cross-platform)
 iso_to_epoch() {
     local timestamp="$1"
@@ -199,10 +210,23 @@ check_role() {
 
     # Check if already running - never spawn duplicates
     if [[ "$status" == "running" ]]; then
-        local task_id
+        local task_id tmux_session
         task_id=$(jq -r ".support_roles.${role}.task_id // \"\"" "$STATE_FILE" 2>/dev/null || echo "")
+        tmux_session=$(jq -r ".support_roles.${role}.tmux_session // \"\"" "$STATE_FILE" 2>/dev/null || echo "")
 
-        # Validate the task_id - if fabricated, treat as idle
+        # First check tmux_session (preferred for agent-spawn.sh execution model)
+        if [[ -n "$tmux_session" && "$tmux_session" != "null" ]]; then
+            if check_tmux_session_exists "$tmux_session"; then
+                echo '{"should_spawn":false,"reason":"already_running","role":"'"$role"'","tmux_session":"'"$tmux_session"'"}'
+                return 1
+            else
+                # tmux_session recorded but session doesn't exist - stale state
+                echo '{"should_spawn":true,"reason":"stale_tmux_session","role":"'"$role"'","stale_session":"'"$tmux_session"'"}'
+                return 0
+            fi
+        fi
+
+        # Fall back to task_id check (for backward compatibility with Task() execution)
         if [[ -n "$task_id" && "$task_id" != "null" ]]; then
             if validate_task_id "$task_id"; then
                 echo '{"should_spawn":false,"reason":"already_running","role":"'"$role"'","task_id":"'"$task_id"'"}'
@@ -213,8 +237,9 @@ check_role() {
                 return 0
             fi
         fi
-        # Running but no task_id - something is wrong, allow spawn
-        echo '{"should_spawn":true,"reason":"running_no_task_id","role":"'"$role"'"}'
+
+        # Running but no task_id or tmux_session - something is wrong, allow spawn
+        echo '{"should_spawn":true,"reason":"running_no_identifier","role":"'"$role"'"}'
         return 0
     fi
 

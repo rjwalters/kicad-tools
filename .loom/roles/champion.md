@@ -201,7 +201,7 @@ Force mode still respects these boundaries:
 
 | Criterion | Normal Mode | Force Mode |
 |-----------|-------------|------------|
-| Size limit | <= 200 lines | **No limit** (trust Judge review) |
+| Size limit | <= configured limit (default 200, see `champion.auto_merge_max_lines` in `.loom/config.json`; waived by `loom:auto-merge-ok` label) | **No limit** (trust Judge review) |
 | Critical files | Block `Cargo.toml`, `package.json`, etc. | **Allow all** (trust Judge review) |
 | Recency | Updated within 24h | Updated within **72h** |
 | CI status | All checks must pass | All checks must pass (unchanged) |

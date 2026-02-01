@@ -781,6 +781,270 @@ Keep it brief (3-6 words) and descriptive:
 - **Be honest**: If you're idle, say so
 - **Be brief**: Task description should be 3-6 words max
 
+## Document Maintenance
+
+**Run at the end of each triage cycle** to keep the repository's living documents current.
+
+The Guide maintains three documents at the repository root:
+
+| Document | Purpose |
+|----------|---------|
+| **WORK_LOG.md** | Chronological record of merged PRs and closed issues |
+| **WORK_PLAN.md** | Prioritized roadmap from current GitHub label state |
+| **README.md** | Project overview (updated only when architecture changes) |
+
+This phase supplements the existing `discover_project_goals()` function, which continues to read README.md for prioritization context.
+
+### State Tracking
+
+Track high-water marks in `.loom/guide-docs-state.json` (gitignored) to avoid duplicate entries:
+
+```json
+{
+  "last_processed_pr": 1803,
+  "last_processed_issue": 1780,
+  "last_plan_hash": "abc123",
+  "last_run": "2026-01-31T12:00:00Z"
+}
+```
+
+Initialize the state file on first run if it doesn't exist:
+
+```bash
+if [ ! -f .loom/guide-docs-state.json ]; then
+  echo '{"last_processed_pr":0,"last_processed_issue":0,"last_plan_hash":"","last_run":""}' > .loom/guide-docs-state.json
+fi
+```
+
+### Step 1: Check for Existing Docs PR
+
+Before creating any changes, check if a previous docs PR is still open:
+
+```bash
+OPEN_DOCS_PR=$(gh pr list --state open --head "docs/guide-update" --json number --jq '.[0].number // empty')
+
+if [ -n "$OPEN_DOCS_PR" ]; then
+  echo "Docs PR #$OPEN_DOCS_PR is still open. Skipping document maintenance."
+  # Optionally: check if it's stale and comment
+  return
+fi
+```
+
+If a docs PR is already open, **skip the entire document maintenance phase** to prevent PR accumulation.
+
+### Step 2: Update WORK_LOG.md
+
+Append entries for newly merged PRs and closed issues since the last high-water mark.
+
+```bash
+update_work_log() {
+  local state_file=".loom/guide-docs-state.json"
+  local last_pr=$(jq -r '.last_processed_pr // 0' "$state_file")
+  local last_issue=$(jq -r '.last_processed_issue // 0' "$state_file")
+
+  # Get newly merged PRs (after high-water mark)
+  local new_prs=$(gh pr list --state merged --limit 50 --json number,title,mergedAt \
+    --jq "[.[] | select(.number > $last_pr)] | sort_by(.mergedAt) | reverse")
+
+  # Get newly closed issues (after high-water mark)
+  local new_issues=$(gh issue list --state closed --limit 50 --json number,title,closedAt \
+    --jq "[.[] | select(.number > $last_issue)] | sort_by(.closedAt) | reverse")
+
+  # If nothing new, skip
+  if [ "$(echo "$new_prs" | jq 'length')" -eq 0 ] && [ "$(echo "$new_issues" | jq 'length')" -eq 0 ]; then
+    echo "No new merged PRs or closed issues. WORK_LOG.md is current."
+    return 1
+  fi
+
+  # Group entries by date and prepend to WORK_LOG.md
+  # Format: ### YYYY-MM-DD
+  #         - **PR #N**: Title
+  #         - **Issue #N** (closed): Title
+
+  # Update high-water marks
+  local max_pr=$(echo "$new_prs" | jq '[.[].number] | max // 0')
+  local max_issue=$(echo "$new_issues" | jq '[.[].number] | max // 0')
+
+  if [ "$max_pr" -gt "$last_pr" ]; then
+    jq ".last_processed_pr = $max_pr" "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+  fi
+  if [ "$max_issue" -gt "$last_issue" ]; then
+    jq ".last_processed_issue = $max_issue" "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+  fi
+
+  return 0
+}
+```
+
+**Entry format** (grouped by date, newest first):
+
+```markdown
+### 2026-01-31
+
+- **PR #1803**: Fix Rust clippy errors across loom-daemon and src-tauri
+- **PR #1780**: Fix biome lint errors across quickstarts and src/lib
+- **Issue #1770** (closed): Stale heartbeat messages from previous phase
+```
+
+### Step 3: Update WORK_PLAN.md
+
+Regenerate the roadmap from current GitHub label state. Only rewrite if labels have changed.
+
+```bash
+update_work_plan() {
+  # Fetch current label state
+  local urgent=$(gh issue list --label "loom:urgent" --state open --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+
+  local ready=$(gh issue list --label "loom:issue" --state open --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+
+  local proposed_architect=$(gh issue list --label "loom:architect" --state open --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title) *(architect)*"')
+  local proposed_hermit=$(gh issue list --label "loom:hermit" --state open --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title) *(hermit)*"')
+  local proposed_curated=$(gh issue list --label "loom:curated" --state open --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title) *(curated)*"')
+  local proposed="${proposed_architect}${proposed_hermit:+$'\n'}${proposed_hermit}${proposed_curated:+$'\n'}${proposed_curated}"
+
+  local epics=$(gh issue list --label "loom:epic" --state open --json number,title \
+    --jq '.[] | "- **#\(.number)**: \(.title)"')
+
+  # Compute a hash of the content to detect changes
+  local content_hash=$(echo "${urgent}${ready}${proposed}${epics}" | md5)
+
+  local state_file=".loom/guide-docs-state.json"
+  local last_hash=$(jq -r '.last_plan_hash // ""' "$state_file")
+
+  if [ "$content_hash" = "$last_hash" ]; then
+    echo "WORK_PLAN.md is current (no label changes detected)."
+    return 1
+  fi
+
+  # Regenerate WORK_PLAN.md with current state
+  # Use the template structure: Urgent, Ready, Proposed, Epics
+
+  # Update hash in state file
+  jq ".last_plan_hash = \"$content_hash\"" "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+
+  return 0
+}
+```
+
+### Step 4: Check README.md Staleness
+
+Only update README.md when merged PRs touch architectural files.
+
+```bash
+check_readme_staleness() {
+  # Check recently merged PRs for architectural file changes
+  local arch_patterns="Cargo.toml|package.json|src/lib/|src-tauri/|install.sh|scripts/install"
+
+  # Get last 10 merged PRs and check their changed files
+  local recent_prs=$(gh pr list --state merged --limit 10 --json number,files \
+    --jq "[.[] | select(.files != null) | select([.files[].path] | any(test(\"$arch_patterns\")))] | .[].number")
+
+  if [ -z "$recent_prs" ]; then
+    echo "No recent architectural changes. README.md is current."
+    return 1
+  fi
+
+  echo "Architectural changes detected in PRs: $recent_prs"
+  echo "Review README.md for staleness."
+  # The Guide should read the affected sections and update if needed
+  return 0
+}
+```
+
+README updates should be **conservative**: only update sections that are clearly stale. Do not rewrite the entire README.
+
+### Step 5: Create Bundled Docs PR
+
+If any documents were updated, bundle all changes into a single PR.
+
+```bash
+create_docs_pr() {
+  local timestamp=$(date +%Y%m%d-%H%M%S)
+  local branch="docs/guide-update-${timestamp}"
+
+  # Create branch from main
+  git checkout -b "$branch" main
+
+  # Stage all document changes
+  git add WORK_LOG.md WORK_PLAN.md README.md
+
+  # Check if there are actual changes to commit
+  if git diff --cached --quiet; then
+    echo "No document changes to commit."
+    git checkout -
+    git branch -D "$branch"
+    return
+  fi
+
+  # Commit and push
+  git commit -m "docs: update WORK_LOG, WORK_PLAN, and README
+
+Automated document maintenance by Guide triage agent."
+
+  git push -u origin "$branch"
+
+  # Create PR
+  gh pr create \
+    --title "docs: Guide document maintenance update" \
+    --label "loom:review-requested" \
+    --body "$(cat <<'PRBODY'
+## Summary
+
+Automated document maintenance by the Guide triage agent.
+
+### Changes
+- **WORK_LOG.md**: Appended entries for recently merged PRs and closed issues
+- **WORK_PLAN.md**: Regenerated roadmap from current GitHub label state
+- **README.md**: Updated if architectural changes were detected
+
+### Context
+This PR is generated automatically by the Guide role as part of its triage cycle.
+See issue #1784 for the feature specification.
+
+---
+*Automated by Guide role - document maintenance phase*
+PRBODY
+)"
+
+  # Update last_run timestamp
+  local state_file=".loom/guide-docs-state.json"
+  jq ".last_run = \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+
+  # Return to previous branch
+  git checkout -
+}
+```
+
+### Document Maintenance Summary
+
+The full document maintenance flow runs at the end of each triage cycle:
+
+```
+Document Maintenance Phase
+  ├─ Check for open docs PR → skip if one exists
+  ├─ Update WORK_LOG.md (append new entries)
+  ├─ Update WORK_PLAN.md (regenerate if labels changed)
+  ├─ Check README.md staleness (only if architecture changed)
+  ├─ If any changes:
+  │    ├─ Create branch: docs/guide-update-<timestamp>
+  │    ├─ Commit all document changes
+  │    ├─ Push and create PR with loom:review-requested
+  │    └─ Update .loom/guide-docs-state.json
+  └─ If no changes: skip (no PR created)
+```
+
+**Important constraints:**
+- Only one docs PR open at a time (prevents accumulation)
+- High-water marks prevent duplicate WORK_LOG entries
+- WORK_PLAN is only regenerated when label state actually changes
+- README updates are conservative (stale sections only)
+- All changes go through the standard PR review pipeline
+
 ## Context Clearing (Cost Optimization)
 
 **When running autonomously, clear your context at the end of each iteration to save API costs.**

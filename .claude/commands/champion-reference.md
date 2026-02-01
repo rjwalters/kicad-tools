@@ -113,7 +113,7 @@ fi
 
 **Decision**: **Allow merge if criteria pass** - test-only changes are safe.
 
-**Rationale**: Size limit (200 lines) and CI checks provide sufficient protection.
+**Rationale**: Size limit (configurable, default 200 lines) and CI checks provide sufficient protection.
 
 ---
 
@@ -187,20 +187,21 @@ fi
 
 ---
 
-### Edge Case 11: PR Size Exactly at Limit (200 Lines)
+### Edge Case 11: PR Size Exactly at Limit
 
-**Scenario**: PR has exactly 200 lines changed (e.g., 100 additions + 100 deletions).
+**Scenario**: PR has exactly the configured limit of lines changed (e.g., if limit is 200: 100 additions + 100 deletions).
 
 **Handling**:
 ```bash
-if [ "$TOTAL" -gt 200 ]; then  # Strictly greater than
+SIZE_LIMIT=$(jq -r '.champion.auto_merge_max_lines // 200' .loom/config.json 2>/dev/null || echo 200)
+if [ "$TOTAL" -gt "$SIZE_LIMIT" ]; then  # Strictly greater than
   echo "FAIL: Too large"
 fi
 ```
 
-**Decision**: **Allow merge** - limit is inclusive (<= 200 allowed).
+**Decision**: **Allow merge** - limit is inclusive (<= configured limit allowed).
 
-**Rationale**: 200-line PRs are still considered "small" for auto-merge purposes.
+**Rationale**: PRs exactly at the limit are still considered acceptable for auto-merge purposes. The limit is configurable via `champion.auto_merge_max_lines` in `.loom/config.json` (default: 200). PRs can also bypass the size limit entirely with the `loom:auto-merge-ok` label.
 
 ---
 
@@ -298,7 +299,7 @@ gh issue create --title "Follow-on: Work identified in PR #$PR_NUMBER" --label "
 | Multiple linked issues | Allow | Verify all closed |
 | Mixed-state CI | Fail | Require all SUCCESS |
 | Unknown critical file | Miss | Needs pattern update |
-| Exactly 200 lines | Allow | Limit is inclusive |
+| Exactly at size limit | Allow | Limit is inclusive |
 | API rate limit | Error | Comment and continue |
 | Multiple approvals | Allow | Label is source of truth |
 | Follow-on indicators found | Create | If thresholds met |
@@ -351,9 +352,15 @@ PR_DATA=$(gh pr view "$PR_NUMBER" --json additions,deletions)
 ADDITIONS=$(echo "$PR_DATA" | jq -r '.additions')
 DELETIONS=$(echo "$PR_DATA" | jq -r '.deletions')
 TOTAL=$((ADDITIONS + DELETIONS))
-if [ "$FORCE_MODE" != "true" ] && [ "$TOTAL" -gt 200 ]; then
-  echo "FAIL: Too large ($TOTAL lines, limit is 200)"
-  exit 1
+if [ "$FORCE_MODE" != "true" ]; then
+  HAS_AUTO_MERGE_OK=$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | any(. == "loom:auto-merge-ok")')
+  if [ "$HAS_AUTO_MERGE_OK" != "true" ]; then
+    SIZE_LIMIT=$(jq -r '.champion.auto_merge_max_lines // 200' .loom/config.json 2>/dev/null || echo 200)
+    if [ "$TOTAL" -gt "$SIZE_LIMIT" ]; then
+      echo "FAIL: Too large ($TOTAL lines, limit is $SIZE_LIMIT)"
+      exit 1
+    fi
+  fi
 fi
 echo "PASS: Size check ($TOTAL lines)"
 
@@ -450,7 +457,7 @@ gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
 This PR meets all safety criteria for automatic merging:
 
 - Judge approved (\`loom:pr\` label)
-- Small change ($TOTAL lines: +$ADDITIONS/-$DELETIONS)
+- Size check passed ($TOTAL lines: +$ADDITIONS/-$DELETIONS)
 - No critical files modified
 - No merge conflicts
 - Updated recently ($HOURS_AGO hours ago)

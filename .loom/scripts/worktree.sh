@@ -107,6 +107,114 @@ get_worktree_info() {
     fi
 }
 
+# Function to check for .loom-in-use marker
+check_in_use_marker() {
+    local worktree_path="$1"
+    local marker_file="$worktree_path/.loom-in-use"
+
+    if [[ -f "$marker_file" ]]; then
+        return 0  # Marker exists - worktree is in use
+    else
+        return 1  # No marker - not in use
+    fi
+}
+
+# Function to check for active processes using worktree as CWD
+check_active_processes() {
+    local worktree_path="$1"
+    local abs_worktree_path
+    abs_worktree_path=$(cd "$worktree_path" 2>/dev/null && pwd) || return 1
+
+    # Try to find processes with CWD in the worktree
+    if command -v lsof &>/dev/null; then
+        # macOS/BSD: use lsof
+        local pids
+        pids=$(lsof +d "$abs_worktree_path" -F pt 2>/dev/null | grep -A1 '^p' | grep '^tcwd' -B1 | grep '^p' | cut -c2- | grep -v "^$$" || true)
+        if [[ -n "$pids" ]]; then
+            return 0  # Active processes found
+        fi
+    elif [[ -d "/proc" ]]; then
+        # Linux: check /proc
+        for pid_dir in /proc/[0-9]*; do
+            local pid="${pid_dir##*/}"
+            [[ "$pid" == "$$" ]] && continue  # Skip current process
+            local cwd
+            cwd=$(readlink -f "$pid_dir/cwd" 2>/dev/null) || continue
+            if [[ "$cwd" == "$abs_worktree_path" || "$cwd" == "$abs_worktree_path/"* ]]; then
+                return 0  # Active process found
+            fi
+        done
+    fi
+
+    return 1  # No active processes
+}
+
+# Function to check worktree creation grace period (5 minutes default)
+check_grace_period() {
+    local worktree_path="$1"
+    local grace_seconds="${2:-300}"  # Default 5 minutes
+    local git_file="$worktree_path/.git"
+
+    local creation_time
+    if [[ -e "$git_file" ]]; then
+        # Get creation/modification time
+        if stat --version &>/dev/null 2>&1; then
+            # GNU stat
+            creation_time=$(stat -c %Y "$git_file" 2>/dev/null) || return 1
+        else
+            # BSD stat (macOS)
+            creation_time=$(stat -f %m "$git_file" 2>/dev/null) || return 1
+        fi
+    else
+        return 1  # No .git file
+    fi
+
+    local current_time
+    current_time=$(date +%s)
+    local age=$((current_time - creation_time))
+
+    if [[ "$age" -lt "$grace_seconds" ]]; then
+        return 0  # Within grace period
+    else
+        return 1  # Past grace period
+    fi
+}
+
+# Function to check if worktree is safe to remove
+is_worktree_safe_to_remove() {
+    local worktree_path="$1"
+    local reason=""
+
+    # Check 1: In-use marker
+    if check_in_use_marker "$worktree_path"; then
+        reason="worktree has .loom-in-use marker"
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_info "  $reason - preserving"
+        fi
+        return 1
+    fi
+
+    # Check 2: Active processes
+    if check_active_processes "$worktree_path"; then
+        reason="active process(es) using worktree"
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_info "  $reason - preserving"
+        fi
+        return 1
+    fi
+
+    # Check 3: Grace period
+    if check_grace_period "$worktree_path"; then
+        reason="worktree within grace period"
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_info "  $reason - preserving"
+        fi
+        return 1
+    fi
+
+    return 0  # Safe to remove
+}
+
 # Function to show help
 show_help() {
     cat << EOF
@@ -343,13 +451,24 @@ if [[ -d "$WORKTREE_PATH" ]]; then
         local_uncommitted=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null) || local_uncommitted=""
 
         if [[ "$local_commits_ahead" == "0" && "$local_commits_behind" -gt 0 && -z "$local_uncommitted" ]]; then
-            # Stale worktree: no work done, behind main, no uncommitted changes
+            # Potentially stale worktree: no work done, behind main, no uncommitted changes
+            # But first, check safety constraints before removal
+            if ! is_worktree_safe_to_remove "$WORKTREE_PATH"; then
+                # Safety check failed - reuse the worktree instead of removing
+                if [[ "$JSON_OUTPUT" != "true" ]]; then
+                    print_info "Worktree appears stale but cannot be safely removed - reusing"
+                    echo ""
+                    print_info "To use this worktree: cd $WORKTREE_PATH"
+                fi
+                exit 0
+            fi
+
             if [[ "$JSON_OUTPUT" != "true" ]]; then
                 print_warning "Stale worktree detected (0 commits ahead, $local_commits_behind behind main, no uncommitted changes)"
                 print_info "Removing stale worktree and recreating from current main..."
             fi
 
-            # Remove the stale worktree
+            # Remove the stale worktree (safety checks passed)
             local_branch=$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null) || local_branch=""
             git worktree remove "$WORKTREE_PATH" --force 2>/dev/null || {
                 print_error "Failed to remove stale worktree"

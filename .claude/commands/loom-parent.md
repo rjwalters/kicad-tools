@@ -97,15 +97,22 @@ fi
 
 ### Subagent Delegation Pattern
 
-The parent loop uses the **Skill tool** to spawn iteration subagents:
+The parent loop uses the **Task tool** to spawn iteration subagents with isolated context:
 
 ```python
-# Parent spawns iteration subagent (uses Skill so iteration gets its role prompt)
-Skill(skill="loom-iteration", args="--merge --debug")
+# Parent spawns iteration subagent via Task (context isolation)
+result = Task(
+    description=f"Daemon iteration {iteration}",
+    prompt=f'Execute the Loom daemon iteration by invoking: Skill(skill="loom", args="iterate {flags}")',
+    subagent_type="general-purpose",
+    model="sonnet"
+)
 ```
 
-**Why Skill for parent→iteration**: The parent wants the iteration subagent to receive
-its full role prompt (`loom-iteration.md`) so it can execute the complete iteration logic.
+**Why Task for parent→iteration**: The Task tool creates a fresh subagent with its own context.
+The subagent then invokes the `loom-iteration` Skill internally to get the full role prompt.
+This two-level pattern keeps iteration context (gh outputs, snapshot data, spawn results)
+isolated from the parent, which accumulates only the ~100-byte summary returned by each Task.
 
 **Iteration→role spawning** (shepherds, support roles) happens in `loom-iteration.md` and
 uses **tmux agent-spawn.sh** to create ephemeral tmux sessions:
@@ -131,7 +138,8 @@ uses **tmux agent-spawn.sh** to create ephemeral tmux sessions:
 
 | Delegation | Pattern | Reason |
 |------------|---------|--------|
-| parent → iteration | `Skill(skill="loom-iteration")` | Need iteration's full role prompt |
+| parent → iteration | `Task(subagent_type="general-purpose")` | Context isolation from parent |
+| iteration (internal) | `Skill(skill="loom", args="iterate")` | Load iteration role prompt |
 | iteration → shepherd | `agent-spawn.sh --role shepherd` | Ephemeral tmux session, attachable |
 | iteration → support role | `agent-spawn.sh --role guide` | Ephemeral tmux session, attachable |
 | shepherd → builder | `agent-spawn.sh --role builder` | Ephemeral tmux session, attachable |
@@ -293,7 +301,67 @@ def detect_continuation():
 
 ## Startup Validation
 
-Before entering the main loop, validate role configuration:
+### Toolchain Validation
+
+Before entering the main loop, validate that essential loom-tools commands are available:
+
+```python
+def validate_toolchain():
+    """Validate loom-tools commands are installed.
+
+    Critical commands must exist for daemon to start.
+    Optional commands allow degraded functionality.
+
+    Returns True if all critical commands available, False otherwise.
+    """
+    result = run("./scripts/validate-toolchain.sh --json")
+    validation = json.loads(result)
+
+    if validation["status"] == "critical":
+        print("=" * 60)
+        print("  TOOLCHAIN VALIDATION FAILED")
+        print("=" * 60)
+        print()
+        print("  Critical commands missing:")
+        for cmd in validation["critical"]["missing"]:
+            print(f"    - {cmd}")
+        print()
+        print("  The daemon cannot start without these commands.")
+        print()
+        print("  To install loom-tools:")
+        print("    pip install -e ./loom-tools")
+        print()
+        print("  Or with uv:")
+        print("    uv pip install -e ./loom-tools")
+        print("=" * 60)
+        return False
+
+    if validation["status"] == "degraded":
+        print("TOOLCHAIN WARNING: Optional commands missing")
+        for cmd in validation["optional"]["missing"]:
+            print(f"  - {cmd} (degraded functionality)")
+        print()
+        print("  Daemon will continue with reduced capabilities.")
+
+    print(f"  Toolchain validated in {validation['duration_ms']}ms")
+    return True
+```
+
+**Critical Commands** (daemon cannot start without):
+- `loom-daemon-cleanup` - Cleanup stale artifacts at daemon startup
+- `loom-recover-orphans` - Recover orphaned shepherds after crash
+- `loom-snapshot` - Generate pipeline snapshot for iteration decisions
+
+**Optional Commands** (degraded functionality without):
+- `loom-stuck-detection` - Detect stuck agents
+- `loom-status` - Show daemon status
+- `loom-health-monitor` - Health monitoring
+- `loom-agent-wait` - Wait for agent completion
+- `loom-agent-spawn` - Spawn agent sessions
+
+### Role Validation
+
+Validate role configuration:
 
 ```python
 def validate_at_startup():
@@ -323,6 +391,10 @@ def start_daemon(force_mode=False, debug_mode=False):
         return  # Don't start - continuation of previous session detected
     if not check_for_existing_daemon():
         return  # Don't start - another daemon is running
+
+    # 0b. CRITICAL: Validate toolchain before any operations
+    if not validate_toolchain():
+        return  # Don't start - essential tools missing
 
     # 1. Rotate existing state file to preserve session history
     run("./.loom/scripts/rotate-daemon-state.sh")
