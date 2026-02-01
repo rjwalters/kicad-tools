@@ -15,7 +15,7 @@ Follow the complete role definition in `.loom/roles/champion.md` for:
 - Find PRs with `gh pr list --label="loom:pr" --state=open`
 - Verify 7 safety criteria before merging:
   1. Has `loom:pr` label
-  2. Size <= 200 lines changed
+  2. Size within configured limit (default 200, configurable via `.loom/config.json`; waived by `loom:auto-merge-ok` label)
   3. No critical file modifications
   4. Mergeable (no conflicts)
   5. Updated within 24 hours

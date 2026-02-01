@@ -20,7 +20,30 @@ success() { echo -e "${GREEN}$*${NC}"; }
 warning() { echo -e "${YELLOW}$*${NC}"; }
 
 # Detect repository root
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || error "Not in a git repository"
+# In worktrees, git rev-parse --show-toplevel returns the worktree path,
+# not the main repo root. Use --show-superproject-working-tree first,
+# falling back to --show-toplevel for the main repo case.
+REPO_ROOT="$(git rev-parse --show-superproject-working-tree 2>/dev/null)"
+if [[ -z "$REPO_ROOT" ]]; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || error "Not in a git repository"
+fi
+
+# If .loom doesn't exist at REPO_ROOT, try resolving via .git file (worktree case)
+if [[ ! -d "$REPO_ROOT/.loom" ]]; then
+  # Worktree .git is a file like "gitdir: ../../.git/worktrees/issue-42"
+  git_file="$REPO_ROOT/.git"
+  if [[ -f "$git_file" ]]; then
+    gitdir=$(sed 's/^gitdir: //' "$git_file")
+    resolved=$(cd "$REPO_ROOT" && cd "$gitdir" 2>/dev/null && pwd)
+    # Walk up from .git/worktrees/X to .git to repo root
+    while [[ "$(basename "$resolved")" != ".git" && "$resolved" != "/" ]]; do
+      resolved=$(dirname "$resolved")
+    done
+    if [[ "$(basename "$resolved")" == ".git" ]]; then
+      REPO_ROOT=$(dirname "$resolved")
+    fi
+  fi
+fi
 
 # Configuration
 LOOM_DIR="$REPO_ROOT/.loom"

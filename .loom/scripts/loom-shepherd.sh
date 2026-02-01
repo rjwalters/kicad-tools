@@ -25,7 +25,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LOOM_TOOLS="$REPO_ROOT/loom-tools"
+
+# Find loom-tools directory
+# Priority:
+#   1. Local loom-tools in repo (for Loom source repository development)
+#   2. Loom source path recorded during installation (for target repositories)
+if [[ -d "$REPO_ROOT/loom-tools" ]]; then
+    # Running in Loom source repository
+    LOOM_TOOLS="$REPO_ROOT/loom-tools"
+elif [[ -f "$REPO_ROOT/.loom/loom-source-path" ]]; then
+    # Running in target repository with Loom installed
+    LOOM_SOURCE="$(cat "$REPO_ROOT/.loom/loom-source-path")"
+    if [[ -d "$LOOM_SOURCE/loom-tools" ]]; then
+        LOOM_TOOLS="$LOOM_SOURCE/loom-tools"
+    else
+        echo "[ERROR] Loom source directory not found: $LOOM_SOURCE" >&2
+        echo "  The recorded Loom source path may be invalid." >&2
+        echo "  Re-run Loom installation or fix .loom/loom-source-path" >&2
+        exit 1
+    fi
+else
+    # Neither found - will fall back to system-installed or error
+    LOOM_TOOLS=""
+fi
 
 # Map --merge/-m to --force/-f for CLI parity
 # The Python CLI uses --force internally, but users expect --merge per documentation
@@ -53,18 +75,30 @@ fi
 
 # Try Python implementation first
 # Priority order:
-#   1. Virtual environment in loom-tools (development setup)
+#   1. Virtual environment in loom-tools (from source or recorded path)
 #   2. System-installed loom-shepherd (pip install)
-#   3. Fallback to shell script (transition period)
+#   3. Error with helpful message
 
-if [[ -x "$LOOM_TOOLS/.venv/bin/loom-shepherd" ]]; then
-    # Development setup: use venv directly
+if [[ -n "$LOOM_TOOLS" ]] && [[ -x "$LOOM_TOOLS/.venv/bin/loom-shepherd" ]]; then
+    # Use venv from loom-tools directory
     exec "$LOOM_TOOLS/.venv/bin/loom-shepherd" "${args[@]}"
 elif command -v loom-shepherd &>/dev/null; then
     # System-installed
     exec loom-shepherd "${args[@]}"
 else
-    echo "[ERROR] Python shepherd not available. Install loom-tools:" >&2
-    echo "  cd loom-tools && pip install -e ." >&2
+    echo "[ERROR] Python shepherd not available." >&2
+    echo "" >&2
+    if [[ -z "$LOOM_TOOLS" ]]; then
+        echo "  loom-tools directory not found and no loom-source-path recorded." >&2
+        echo "  If this is a target repository, re-run Loom installation." >&2
+    elif [[ ! -d "$LOOM_TOOLS/.venv" ]]; then
+        echo "  Virtual environment not found in: $LOOM_TOOLS/.venv" >&2
+        echo "  Run: $LOOM_TOOLS/../scripts/install/setup-python-tools.sh --loom-root $(dirname "$LOOM_TOOLS")" >&2
+    else
+        echo "  loom-shepherd not found in: $LOOM_TOOLS/.venv/bin/" >&2
+        echo "  Run: $LOOM_TOOLS/.venv/bin/pip install -e $LOOM_TOOLS" >&2
+    fi
+    echo "" >&2
+    echo "  Or install system-wide: pip install loom-tools" >&2
     exit 1
 fi

@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "generated_at": "2026-01-31T04:58:22Z",
-  "loom_version": "0.2.0",
-  "loom_commit": "00d61d5",
-  "file_count": 135,
+  "generated_at": "2026-02-01T03:38:42Z",
+  "loom_version": "{{LOOM_VERSION}}",
+  "loom_commit": "{{LOOM_COMMIT}}",
+  "file_count": 128,
   "files": {
     ".claude/agents/loom-architect.md": {
       "sha256": "85c5b4fff6b3853762f3a27a0bd8e8f333e208bab7524045e9327dd8371e7d99",
@@ -18,8 +18,8 @@
       "size": 1078
     },
     ".claude/agents/loom-champion.md": {
-      "sha256": "fcb51d774174c60e510c7135a1a7bb39c63e5f524eb27b7fcd29fd574e6f9ce5",
-      "size": 1159
+      "sha256": "2b47af55f7b9378ddfa99152520d346cd9646c760d5167d5e3df9a2227101bb6",
+      "size": 1252
     },
     ".claude/agents/loom-curator.md": {
       "sha256": "4ded8fe22dced22875f40217ad16f8dca715e12cdb6dbcc528d1328d47231bf5",
@@ -94,16 +94,16 @@
       "size": 11288
     },
     ".claude/commands/champion-pr-merge.md": {
-      "sha256": "a239d28ffbb96f79904fd8148dfc9ca9f9316d846d81a421a8ca64cab31ae81a",
-      "size": 23296
+      "sha256": "2b0df23f19e3ce1be1bccfb61ea1f35a99d9150d565ce2bc26d294e4a0fbf91f",
+      "size": 24335
     },
     ".claude/commands/champion-reference.md": {
-      "sha256": "4f80ed64745aab6be0917951f84e53bf569be0474b442d30ee654e419c6a46c6",
-      "size": 19561
+      "sha256": "6070236c1b209b6932e873693dddd461723f7c5664c2ef6e8449005eb94cda6b",
+      "size": 20257
     },
     ".claude/commands/champion.md": {
-      "sha256": "a02452fc0d9e1a21b910cbc29d1d40de9720fef599b94866b13a674f50542bbc",
-      "size": 12047
+      "sha256": "b9a641d88828af579d5ce645d6ecae5255bcd06a2bbd262225ae3db660ecdfbb",
+      "size": 12166
     },
     ".claude/commands/curator.md": {
       "sha256": "b75304e46751e207b86c9a60845e8a85083e69735b33a728f5ef7612806c6c74",
@@ -118,8 +118,8 @@
       "size": 1787
     },
     ".claude/commands/guide.md": {
-      "sha256": "6eecaf0f68b9b3ca74e804d668628656cc76accf778bfec95d7d41514677c916",
-      "size": 25685
+      "sha256": "db1cfd011c7b630408d7df48266e8ba0ff31d7934841a3bf63e8a60c796ce26d",
+      "size": 34707
     },
     ".claude/commands/hermit-patterns.md": {
       "sha256": "e777329d17a63ca4b2698e33fd1e15f7cd4039e410a3880a649fabf32bbfd9c3",
@@ -138,12 +138,12 @@
       "size": 44402
     },
     ".claude/commands/loom-iteration.md": {
-      "sha256": "b9672aec726a5deb2781b8ffa4cc57d58c7dc1ee8f1b8ec70a8419c7a5287095",
-      "size": 49186
+      "sha256": "a2ab15f67421cf0ef23abf5bc34121a117ecdc69961e9153878b751dcf3dc693",
+      "size": 52480
     },
     ".claude/commands/loom-parent.md": {
-      "sha256": "91eaa9cb5997995b38fdf0e05a847864cf4e7e2692fb2acf0369f7b7adc56a69",
-      "size": 23642
+      "sha256": "727f0f4f0c9c46356ccd9b11f9701866aaa7a16fd23291e00d8b2450e2e640e0",
+      "size": 26288
     },
     ".claude/commands/loom-reference.md": {
       "sha256": "157e4629288fdc4b0e7d3b1c9d784c541367ff7fc34cf04bcde41db208259ed8",
@@ -154,8 +154,8 @@
       "size": 7307
     },
     ".claude/commands/shepherd-lifecycle.md": {
-      "sha256": "6930110a87159c10a0280b7edaf1d6f55368500f884417d2895000e9b4ca4921",
-      "size": 35313
+      "sha256": "46564f3a5238d8ac41da21868bfc4faa0c8e3c4a276c4431523b5c564faa0026",
+      "size": 35797
     },
     ".claude/commands/shepherd.md": {
       "sha256": "a6b41bf8ae7aba027810e91fbd1cbe63427c73387d2eb32cff1ed57b378aa39c",
@@ -226,12 +226,12 @@
       "size": 20857
     },
     ".loom/roles/champion.json": {
-      "sha256": "2fcb9112133c1a743acaca580f74a58053f2e37d574766d61426596168d8d61c",
-      "size": 1757
+      "sha256": "0a99dba0ab9f30197c1d91ccdb6204012576b97d9e86a2c213aa84e8c5798946",
+      "size": 1887
     },
     ".loom/roles/champion.md": {
-      "sha256": "a02452fc0d9e1a21b910cbc29d1d40de9720fef599b94866b13a674f50542bbc",
-      "size": 12047
+      "sha256": "b9a641d88828af579d5ce645d6ecae5255bcd06a2bbd262225ae3db660ecdfbb",
+      "size": 12166
     },
     ".loom/roles/curator.json": {
       "sha256": "7ce73c7c0deef22ca054ebf46078b4e7d421fb82a9cdb768a6ad56bc9dd84110",
@@ -262,8 +262,8 @@
       "size": 369
     },
     ".loom/roles/guide.md": {
-      "sha256": "6eecaf0f68b9b3ca74e804d668628656cc76accf778bfec95d7d41514677c916",
-      "size": 25685
+      "sha256": "db1cfd011c7b630408d7df48266e8ba0ff31d7934841a3bf63e8a60c796ce26d",
+      "size": 34707
     },
     ".loom/roles/hermit-patterns.md": {
       "sha256": "e777329d17a63ca4b2698e33fd1e15f7cd4039e410a3880a649fabf32bbfd9c3",
@@ -298,8 +298,8 @@
       "size": 4511
     },
     ".loom/roles/shepherd-lifecycle.md": {
-      "sha256": "6930110a87159c10a0280b7edaf1d6f55368500f884417d2895000e9b4ca4921",
-      "size": 35313
+      "sha256": "46564f3a5238d8ac41da21868bfc4faa0c8e3c4a276c4431523b5c564faa0026",
+      "size": 35797
     },
     ".loom/roles/shepherd.json": {
       "sha256": "2abec01d1ecee13545af490aa3f058cf107bdc666ddb253b723868499d4f911e",
@@ -314,20 +314,20 @@
       "size": 4520
     },
     ".loom/scripts/agent-metrics.sh": {
-      "sha256": "e3818c86f18fa014e17868cddbd68a953d124c750be3a0a823c378956fd9cb6a",
-      "size": 18660
+      "sha256": "f2bd4b06e150beb978513644965a3599bd56a729d26059a4746eed4e2157729a",
+      "size": 763
     },
     ".loom/scripts/agent-spawn.sh": {
-      "sha256": "88a40211f3666d09da5a2d6c5bed7730d4c6ebdf8a4d09dfa232c605ccdcc225",
-      "size": 25735
+      "sha256": "5f8e52a6304b8e7b140eeec3631812e5f85f32772674de4a35066e24c9cac178",
+      "size": 737
     },
     ".loom/scripts/agent-wait-bg.sh": {
-      "sha256": "13351d2012a46f0530434f9a036fc26a21878f31009443a12af6a4580d8f0360",
-      "size": 52747
+      "sha256": "29dea62bf57becfd3f34366126811e212c6b33d5eb74546fc54799815a2ef80a",
+      "size": 53351
     },
     ".loom/scripts/agent-wait.sh": {
-      "sha256": "0fc0297ef8f72ed0e47b2e6ed99dfc14d82907442f4329cf0523c6e9cfdfa10c",
-      "size": 14329
+      "sha256": "fd3a0dcda9b7552ef4e203eeb969786f1989a6bf99fbd0681eb3402e0e3005f6",
+      "size": 728
     },
     ".loom/scripts/archive-logs.sh": {
       "sha256": "285d244f39c4b5ae3e62178e474b671c105bb05e9ca3639d42c18febfbeb86b6",
@@ -337,10 +337,6 @@
       "sha256": "72659ea91df612fbbdb5bffa8f2c04623f04943d7f55287974435dba032bbaef",
       "size": 8958
     },
-    ".loom/scripts/check-completions.sh": {
-      "sha256": "a2fcc752c94affd4ffe5c1def5f7bdfd111b3989bf64d6e20f285bb4034c58b9",
-      "size": 17277
-    },
     ".loom/scripts/check-shutdown.sh": {
       "sha256": "fd6c01708c17d4ccac01a792b6e94ff2686ee98d7112b3975b05f70057e482a3",
       "size": 1490
@@ -348,10 +344,6 @@
     ".loom/scripts/check-usage.sh": {
       "sha256": "b367e97d12217775eee61f6a801705aceb63dfe0ed68d77a9396e726d986b039",
       "size": 3278
-    },
-    ".loom/scripts/claim.sh": {
-      "sha256": "cbe03f359dc59b79d8a7089f3f5ba7a5e946c968a9f5b381d38caae0c2b6f83b",
-      "size": 13634
     },
     ".loom/scripts/claude-wrapper.sh": {
       "sha256": "83904ed6776d2ae21b4fbc720339f6145f4af6399e2231b04e24683acc7d0ca7",
@@ -362,8 +354,8 @@
       "size": 4045
     },
     ".loom/scripts/clean.sh": {
-      "sha256": "e5dbc7034422ed1eae4ea763a779724b29e8c9c632993112b5b6d2f6b64ee616",
-      "size": 21271
+      "sha256": "8100f138b8f9c85775b7c82ba0376ae8404e934848e78f489ea7f023d59d39fb",
+      "size": 700
     },
     ".loom/scripts/cleanup-branches.sh": {
       "sha256": "6ec3399b2815e913abb05ed043b67b4ae1009433d8a23175e4fce803d932319d",
@@ -372,10 +364,6 @@
     ".loom/scripts/cleanup-progress.sh": {
       "sha256": "6f059ae59db4c718f94766359e0c503107b2d2d6b80dbd667792f6172876d874",
       "size": 7010
-    },
-    ".loom/scripts/cleanup.sh": {
-      "sha256": "77139b7fe4f87c405e3a789b23eabff4ba3c1b1eda48a5bf566cf5ac5c62a773",
-      "size": 1874
     },
     ".loom/scripts/cli/loom-attach.sh": {
       "sha256": "939615f3ff5bb3dde523f5cc570f2fb4cf9681880a660f17241fb7e805c8b48b",
@@ -406,20 +394,8 @@
       "size": 9827
     },
     ".loom/scripts/daemon-cleanup.sh": {
-      "sha256": "1a54e63c98987b292ec01a99df8dd1b79ccee2c0e84cc2f9b62e2a9051aa1d9d",
-      "size": 21569
-    },
-    ".loom/scripts/daemon-health.sh": {
-      "sha256": "acb88c86ba4a9de2421607f1351c5261388ab967050b95910438702aca4d6f88",
-      "size": 31196
-    },
-    ".loom/scripts/daemon-loop.sh": {
-      "sha256": "d285ec6ba35b0c363ce6602e294dca670bcd43ca02d5199ed765b29c19326962",
-      "size": 25497
-    },
-    ".loom/scripts/daemon-snapshot.sh": {
-      "sha256": "af17f0b8719dc3254d946e62885930d1892fa3f65674e551eeccde454bc10583",
-      "size": 43248
+      "sha256": "29ba8dbc9006c2abf32dcd2646befd1f949f15c755a21b8a656c22fc8a2c719d",
+      "size": 1007
     },
     ".loom/scripts/detect-systematic-failure.sh": {
       "sha256": "a7d874025e96c7c7410caa6dc5d3f6e28b93eae1de0a3bdeacbd11ead3c95931",
@@ -430,20 +406,24 @@
       "size": 13737
     },
     ".loom/scripts/health-check.sh": {
-      "sha256": "8cf2f6a35faba976287e89e6d2e86f498b5004dc72f23260c5e51adbc06d98b2",
-      "size": 35245
+      "sha256": "db0383c898e8f264e9098b24300e7af950021662eabacaf692810a7c8811d383",
+      "size": 955
     },
     ".loom/scripts/is-force-mode.sh": {
       "sha256": "d43e9082d16d5579113cdfd8042bf38d2af14be28bc3b3ea543d8b18b77b9c13",
       "size": 2816
     },
+    ".loom/scripts/lib/loom-tools.sh": {
+      "sha256": "b7cad12914b6dd597ac23fb43f6dcbfc846d2f6971f67f5e0ecc449b60302f9e",
+      "size": 4312
+    },
     ".loom/scripts/loom-shepherd.sh": {
-      "sha256": "8e507bf2f46b0f187d142a8431133e76794a65efee56a92e4c48f7cec260d242",
-      "size": 2504
+      "sha256": "25de83647755b7954e5f82fc05c42822bfbcf8fd4f37bf2a533c7f6e44dfa4b8",
+      "size": 4028
     },
     ".loom/scripts/loom-status.sh": {
-      "sha256": "d94e73e5add05dafe8446e59268bd7e5cdea4860a2f2fa95f11a78a91351cd9e",
-      "size": 30280
+      "sha256": "99dbc0d7c9fd309b90aefaf0be561e1946143216dba0e77c2b0191e6eba0ab07",
+      "size": 632
     },
     ".loom/scripts/merge-pr.sh": {
       "sha256": "e306d7dedaaf7a35237ea8688f9538750d0b88996cfcdc15bf3ff1d1f65679e0",
@@ -458,32 +438,24 @@
       "size": 4541
     },
     ".loom/scripts/recover-orphaned-shepherds.sh": {
-      "sha256": "440aaf8bb8bfde48b33c13a524b7cdc6b8d1b338a9dd61378079bb4862ec1f79",
-      "size": 22488
+      "sha256": "855779fe3288569176437e7107b3f9f41e0741a10b0f1b15474ab30a2bbf097d",
+      "size": 812
     },
     ".loom/scripts/report-milestone.sh": {
-      "sha256": "c82b170608bb47d7fa74686bfd1cc04fd828c010b748da5a21647a1aa6594b46",
-      "size": 15521
+      "sha256": "1c1fe4cdc5804a2cbe9335d30a44a9c674d435663b1797e51af0e5078a72c1f3",
+      "size": 644
     },
     ".loom/scripts/retry-blocked-issues.sh": {
       "sha256": "7dcb33230944552bfb25b909e4ec8706ce9db5713281eeca932844d84b05673c",
       "size": 10624
     },
     ".loom/scripts/rotate-daemon-state.sh": {
-      "sha256": "e548fb7f0d49d745dde92e67473dc7e6d092b0141a61e311bee4d9d6eecab0a0",
-      "size": 7410
-    },
-    ".loom/scripts/safe-worktree-cleanup.sh": {
-      "sha256": "22f9d73516418b880ab90e3edec1f4c5867cba1e5a9e611ab3a591a11952c333",
-      "size": 2522
+      "sha256": "9eb1ea4c03857d996c6a40021b3f4bde355573369cb2e0029015c507afb23993",
+      "size": 8382
     },
     ".loom/scripts/session-reflection.sh": {
-      "sha256": "610b0acd0615956f63c1c7417add0c2e842431ab631d2f98f498266b8c81bb04",
-      "size": 14828
-    },
-    ".loom/scripts/shepherd-loop.sh": {
-      "sha256": "33095a5064426f954ac57c3877e2111551b9e1e0ce2d89d1d436fbdc87dde0cd",
-      "size": 47963
+      "sha256": "f2ca1cc37afe08e43447a150a7e18c11197f8861ccb0b7ef9e4575796aa5c06b",
+      "size": 14955
     },
     ".loom/scripts/signal.sh": {
       "sha256": "e7aa84c1307dc46ca5d6b2e6eb85eb5b4732667e8a020974c7c6ffbebaa0b301",
@@ -494,8 +466,8 @@
       "size": 10117
     },
     ".loom/scripts/spawn-support-role.sh": {
-      "sha256": "c73f0a60afb2dbcf102efae5a8d227ba7750e1885427985fb511def35548b92c",
-      "size": 13101
+      "sha256": "1a165173986f3dc1c03b92c4b09ace3cf50108c11f7903361ef090aa9973427c",
+      "size": 14247
     },
     ".loom/scripts/stale-building-check.sh": {
       "sha256": "31710ad2d7c8f2d7afaa4fa6dfce90b65932ac22cc7b9ba49026d6f715cad2d1",
@@ -505,25 +477,25 @@
       "sha256": "de16bf4fa562fbc8f4da1bca308e3d37d40edea4bbe01fe0f3ed5ffbb717990e",
       "size": 12427
     },
-    ".loom/scripts/stuck-detection.sh": {
-      "sha256": "04c23488ea31b78c9890488fb3c5bb661890dea92f1ad10637e10479c301e2bb",
-      "size": 34060
-    },
     ".loom/scripts/test-plan-metrics.sh": {
       "sha256": "817757d1f60d92442bbd458e2c9dc2ae564b4a204280018cb21b553e13e758c4",
       "size": 19523
     },
     ".loom/scripts/validate-daemon-state.sh": {
-      "sha256": "ca19e8f6e2fa68a8b8090a68090a30d14d7c9eaa201a5e8e23406e9db285ca8e",
-      "size": 12813
+      "sha256": "fa01427dae75a3bbfa44d9cc08f85545b3c289f149436ccddf201cfb12e444ba",
+      "size": 428
     },
     ".loom/scripts/validate-phase.sh": {
-      "sha256": "654852b14ba27bfa424e7e58bb4c6d8644485c92d720ae345c01758e365a117f",
-      "size": 25238
+      "sha256": "d1704a53304fc89424c2aee1441aa75f60f61c48b09c119376ddeeb8dd4f7ae5",
+      "size": 752
     },
     ".loom/scripts/validate-roles.sh": {
       "sha256": "69e596632f516ff731fcbadd304a17a1b1bb306d5914311b4d2203d4a2697f67",
       "size": 6941
+    },
+    ".loom/scripts/validate-toolchain.sh": {
+      "sha256": "80e56a917df89796d083240eec856bf4a32c1c2d608b6c640ac5f4ad601915b0",
+      "size": 9731
     },
     ".loom/scripts/verify-install.sh": {
       "sha256": "0f0c63d93f28a993f4b64aee0a074c3cfd0492981acc0850383876662450a192",
@@ -534,12 +506,12 @@
       "size": 6407
     },
     ".loom/scripts/worktree.sh": {
-      "sha256": "4bc06631542c4bd9e243240220a710c53727a539eb87fd4a5ab747d5a3ad5f4a",
-      "size": 19170
+      "sha256": "53549f742c2de78569caa01e7fc870a51c1bcf0381225084cd1b5be430383fb3",
+      "size": 22997
     },
     "CLAUDE.md": {
-      "sha256": "dbde634547c41c0bfccf36deb668e62c5404f999a2bcda6e74d8362d2a617513",
-      "size": 15525
+      "sha256": "559b52d8ad60dfb83095b0f8c88419719d2ca59b1106700781c6a8510b0c5a43",
+      "size": 15556
     },
     "loom": {
       "sha256": "30193930e2715dbb0b18a9072c77829fb658069585c7ea8b29c0b6e27a0e8402",

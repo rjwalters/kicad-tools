@@ -878,12 +878,16 @@ main() {
     log_info "Stuck detection: warning=${STUCK_WARNING_THRESHOLD}s, critical=${STUCK_CRITICAL_THRESHOLD}s, action=${STUCK_ACTION}"
     log_info "Prompt stuck detection: check_interval=${PROMPT_STUCK_CHECK_INTERVAL}s, age_threshold=${PROMPT_STUCK_AGE_THRESHOLD}s, recovery_cooldown=${PROMPT_STUCK_RECOVERY_COOLDOWN}s"
 
-    # Launch agent-wait.sh in the background
+    # Launch agent-wait.sh in the background with stdout redirected to a temp file.
+    # This prevents the child from writing JSON to the parent's stdout, which would
+    # produce two JSON objects when both scripts detect completion (issue #1792).
+    local wait_output
+    wait_output=$(mktemp "${TMPDIR:-/tmp}/agent-wait-output.XXXXXX")
     local wait_cmd=("${SCRIPT_DIR}/agent-wait.sh" "$name" --timeout "$timeout" --poll-interval "$poll_interval" --json)
     if [[ -n "$min_idle_elapsed" ]]; then
         wait_cmd+=(--min-idle-elapsed "$min_idle_elapsed")
     fi
-    "${wait_cmd[@]}" &
+    "${wait_cmd[@]}" > "$wait_output" &
     local wait_pid=$!
 
     local start_time
@@ -928,9 +932,10 @@ main() {
             cleanup_progress_files "$name"
 
             if [[ "$json_output" == "true" ]]; then
-                # agent-wait.sh already output JSON, just pass through exit code
-                :
+                # Pass through agent-wait.sh's JSON from the temp file (not shared stdout)
+                cat "$wait_output"
             fi
+            rm -f "$wait_output"
             exit "$exit_code"
         fi
 
@@ -942,8 +947,9 @@ main() {
             kill "$wait_pid" 2>/dev/null || true
             wait "$wait_pid" 2>/dev/null || true
 
-            # Clean up progress files
+            # Clean up progress files and temp output
             cleanup_progress_files "$name"
+            rm -f "$wait_output"
 
             if [[ "$json_output" == "true" ]]; then
                 local signal_type="shutdown"
@@ -978,8 +984,9 @@ main() {
                     kill "$wait_pid" 2>/dev/null || true
                     wait "$wait_pid" 2>/dev/null || true
 
-                    # Clean up progress files
+                    # Clean up progress files and temp output
                     cleanup_progress_files "$name"
+                    rm -f "$wait_output"
 
                     # Destroy the tmux session
                     tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
@@ -1202,8 +1209,9 @@ main() {
             kill "$wait_pid" 2>/dev/null || true
             wait "$wait_pid" 2>/dev/null || true
 
-            # Clean up progress files
+            # Clean up progress files and discard child's partial output
             cleanup_progress_files "$name"
+            rm -f "$wait_output"
 
             # Destroy the tmux session to clean up
             tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
@@ -1245,8 +1253,9 @@ main() {
                     kill "$wait_pid" 2>/dev/null || true
                     wait "$wait_pid" 2>/dev/null || true
 
-                    # Clean up progress files
+                    # Clean up progress files and temp output
                     cleanup_progress_files "$name"
+                    rm -f "$wait_output"
 
                     exit 4
                 fi

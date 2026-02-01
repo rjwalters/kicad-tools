@@ -43,7 +43,9 @@ echo "PASS: Label check"
 **Rationale**: Only merge PRs explicitly approved by Judge, respect human override
 
 ### 2. Size Check
-- [ ] Total lines changed <= 200 (additions + deletions)
+- [ ] Total lines changed <= configured limit (additions + deletions)
+- [ ] **Default limit**: 200 lines (configurable via `.loom/config.json` `champion.auto_merge_max_lines`)
+- [ ] **`loom:auto-merge-ok` label**: Size limit is waived (applied by Judge or human to signal large PR is safe)
 - [ ] **Force mode**: Size limit is waived
 
 **Verification command**:
@@ -60,16 +62,25 @@ FORCE_MODE=$(cat .loom/daemon-state.json 2>/dev/null | jq -r '.force_mode // fal
 if [ "$FORCE_MODE" = "true" ]; then
   echo "PASS: Size check waived in force mode ($TOTAL lines)"
 else
-  # Check size limit (normal mode)
-  if [ "$TOTAL" -gt 200 ]; then
-    echo "FAIL: Too large ($TOTAL lines, limit is 200)"
-    exit 1
+  # Check for loom:auto-merge-ok label override
+  HAS_AUTO_MERGE_OK=$(gh pr view <number> --json labels --jq '[.labels[].name] | any(. == "loom:auto-merge-ok")')
+
+  if [ "$HAS_AUTO_MERGE_OK" = "true" ]; then
+    echo "PASS: Size check waived by loom:auto-merge-ok label ($TOTAL lines)"
+  else
+    # Read configurable size limit from .loom/config.json (default: 200)
+    SIZE_LIMIT=$(jq -r '.champion.auto_merge_max_lines // 200' .loom/config.json 2>/dev/null || echo 200)
+
+    if [ "$TOTAL" -gt "$SIZE_LIMIT" ]; then
+      echo "FAIL: Too large ($TOTAL lines, limit is $SIZE_LIMIT)"
+      exit 1
+    fi
+    echo "PASS: Size check ($TOTAL lines, limit is $SIZE_LIMIT)"
   fi
-  echo "PASS: Size check ($TOTAL lines)"
 fi
 ```
 
-**Rationale**: Small PRs are easier to revert if problems arise. In force mode, trust Judge review for larger changes.
+**Rationale**: Small PRs are easier to revert if problems arise. The size limit is configurable via `.loom/config.json` to allow teams to tune the risk/autonomy tradeoff. The `loom:auto-merge-ok` label provides a per-PR escape hatch for large but safe PRs. In force mode, trust Judge review for all changes.
 
 ### 3. Critical File Exclusion Check
 - [ ] No changes to critical configuration or infrastructure files
@@ -293,7 +304,7 @@ gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
 This PR meets all safety criteria for automatic merging:
 
 - Judge approved (\`loom:pr\` label)
-- Small change ($TOTAL_LINES lines: +$ADDITIONS/-$DELETIONS)
+- Size check passed ($TOTAL_LINES lines: +$ADDITIONS/-$DELETIONS)
 - No critical files modified
 - No merge conflicts
 - Updated recently ($HOURS_AGO hours ago)
@@ -744,7 +755,7 @@ This PR met all safety criteria but the merge operation failed. A human will nee
 
 | Criterion | Normal Mode | Force Mode |
 |-----------|-------------|------------|
-| Size limit | <= 200 lines | **No limit** (trust Judge review) |
+| Size limit | <= configured limit (default 200, see `champion.auto_merge_max_lines` in `.loom/config.json`; waived by `loom:auto-merge-ok` label) | **No limit** (trust Judge review) |
 | Critical files | Block `Cargo.toml`, `package.json`, etc. | **Allow all** (trust Judge review) |
 | Recency | Updated within 24h | Updated within **72h** |
 | CI status | All checks must pass | All checks must pass (unchanged) |

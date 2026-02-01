@@ -37,7 +37,8 @@ This section documents the expected GitHub label states at each shepherd phase b
 | Phase | Issue Labels | PR Labels | Recovery |
 |-------|--------------|-----------|----------|
 | Curator | (unchanged) | - | Retry curator |
-| Builder | `loom:blocked` | - | See diagnostics comment |
+| Builder (test failure) | `loom:needs-fix` | - | Worktree preserved, Doctor/Builder fixes tests |
+| Builder (other failure) | `loom:blocked` | - | See diagnostics comment |
 | Judge | `loom:blocked` | (unchanged) | Manual review required |
 | Doctor | `loom:blocked` | (unchanged) | Manual fix required |
 
@@ -54,12 +55,16 @@ Issue Lifecycle:
                     ┌─────────────┐                         ┌─────────────┐
                     │loom:blocked │ ◀─── (failure) ─────── │loom:building│
                     └─────────────┘                         └─────────────┘
-                                                                    │
-                                                              (PR merged)
-                                                                    ▼
-                                                            ┌─────────────┐
-                                                            │  (closed)   │
-                                                            └─────────────┘
+                                                             │     │
+                                                   (test fail) (PR merged)
+                                                             ▼        ▼
+                                                  ┌───────────────┐ ┌─────────────┐
+                                                  │loom:needs-fix │ │  (closed)   │
+                                                  └───────────────┘ └─────────────┘
+                                                          │
+                                                  (Doctor fixes tests)
+                                                          ▼
+                                                  back to loom:building
 
 PR Lifecycle:
 ┌─────────────────────┐     ┌───────────────────────┐     ┌─────────────┐
