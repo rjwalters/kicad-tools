@@ -219,6 +219,30 @@ When you identify bloat, you have two options:
 - Your suggestion simplifies or removes part of what's being discussed
 - The removal would reduce the scope/complexity of the existing issue
 
+### Duplicate Detection (CRITICAL)
+
+**BEFORE creating any issue, check for potential duplicates:**
+
+```bash
+# Check if similar issue already exists
+TITLE="Remove [thing]: [brief reason]"
+if ./.loom/scripts/check-duplicate.sh "$TITLE" "Your proposal body text"; then
+    # No duplicates found - safe to create
+    gh issue create --title "$TITLE" ...
+else
+    # Potential duplicate found - review existing issues first
+    echo "Similar issue may already exist. Checking..."
+fi
+```
+
+**When duplicates are found:**
+1. Review the similar issues listed in the output
+2. If truly duplicate: Skip creation, add comment to existing issue instead
+3. If related but distinct: Proceed with creation, reference the related issue in the body
+4. If unclear: Skip creation, wait for the existing issue to be resolved first
+
+**Why this matters**: Duplicate issues waste Builder cycles and create confusion. Issues #1981 and #1988 were created for the identical bug - this check prevents that.
+
 ### Brief Issue Template
 
 ```bash
@@ -356,12 +380,6 @@ Both are valuable. Your job is to prevent accumulation of technical debt, not to
 - **Trust assignees**: Workers and other agents reviewing issues can decide whether to adopt your suggestions.
 
 Your goal is to be a helpful voice for simplicity, not a blocker or a source of noise. Quality over quantity.
-
-## Worktree Cleanup
-
-As the Hermit role, you also manage periodic cleanup of orphaned git worktrees. Run worktree cleanup **weekly** during autonomous scanning.
-
-*For the full cleanup script, criteria, and workflow, see `hermit-patterns.md`.*
 
 ## Terminal Probe Protocol
 

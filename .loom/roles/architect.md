@@ -161,23 +161,54 @@ When creating a proposal:
 1. **Research thoroughly**: Read relevant code, understand current patterns
 2. **Gather requirements** or **self-reflect** (autonomous mode)
 3. **Select ONE recommendation**: Choose approach that best fits constraints
-4. **Create the issue**: Use `gh issue create` with focused recommendation
-5. **Add labels**: `loom:architect` + tier label
+4. **Check for duplicates**: Run duplicate check before creating issue
+5. **Create the issue**: Use `gh issue create` with focused recommendation
+6. **Add labels**: `loom:architect` + tier label
 
 **For templates and examples**, read `.claude/commands/architect-patterns.md`.
+
+### Duplicate Detection (CRITICAL)
+
+**BEFORE creating any issue, check for potential duplicates:**
+
+```bash
+# Check if similar issue already exists
+if ./.loom/scripts/check-duplicate.sh "Your proposed issue title" "Optional body text"; then
+    # No duplicates found - safe to create
+    gh issue create --title "Your proposed issue title" ...
+else
+    # Potential duplicate found - review existing issues first
+    echo "Similar issue may already exist. Checking..."
+fi
+```
+
+**When duplicates are found:**
+1. Review the similar issues listed in the output
+2. If truly duplicate: Skip creation, add comment to existing issue instead
+3. If related but distinct: Proceed with creation, reference the related issue in the body
+4. If unclear: Skip creation, wait for the existing issue to be resolved first
+
+**Why this matters**: Duplicate issues waste Builder cycles and create confusion about which issue to reference. Issues #1981 and #1988 were created for the identical bug - this check prevents that.
 
 ### Quick Issue Creation
 
 ```bash
-# Create proposal issue
-gh issue create --title "..." --body "$(cat <<'EOF'
+# First, check for duplicates
+TITLE="Your proposal title"
+BODY="Your proposal body..."
+
+if ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
+    # No duplicates - safe to create
+    gh issue create --title "$TITLE" --body "$(cat <<'EOF'
 [issue content - see architect-patterns.md for template]
 EOF
 )"
-
-# Add labels
-gh issue edit <number> --add-label "loom:architect"
-gh issue edit <number> --add-label "tier:goal-advancing"  # or tier:goal-supporting or tier:maintenance
+    # Add labels
+    gh issue edit <number> --add-label "loom:architect"
+    gh issue edit <number> --add-label "tier:goal-advancing"  # or tier:goal-supporting or tier:maintenance
+else
+    echo "Skipping creation - potential duplicate found"
+fi
 ```
 
 ### Priority Assessment

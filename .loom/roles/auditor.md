@@ -245,10 +245,18 @@ Create a capability request when you:
 Before creating a new capability request:
 
 ```bash
-# Check for existing capability requests
-gh issue list --state open --label "loom:auditor-capability-request" --json number,title --jq '.[] | "#\(.number): \(.title)"'
+# Use the duplicate detection script (recommended)
+TITLE="Auditor Capability Request: [specific capability needed]"
+if ./.loom/scripts/check-duplicate.sh "$TITLE" "Description of capability gap"; then
+    # No duplicates found - safe to create
+    gh issue create --title "$TITLE" ...
+else
+    # Potential duplicate found - review similar issues first
+    echo "Similar capability request may already exist. Checking..."
+fi
 
-# Search for similar requests
+# Alternative: manual search
+gh issue list --state open --label "loom:auditor-capability-request" --json number,title --jq '.[] | "#\(.number): \(.title)"'
 gh issue list --state open --label "loom:auditor-capability-request" --search "screenshot" --json number,title
 ```
 
@@ -379,17 +387,31 @@ When reporting validation results, include any identified capability gaps:
 
 ### Avoiding Duplicate Issues
 
-Before creating a bug issue:
+**Before creating a bug issue, check for potential duplicates:**
 
 ```bash
-# Check for existing similar issues
-gh issue list --state open --json number,title --jq '.[] | "#\(.number): \(.title)"' | head -20
+# Use the duplicate detection script (recommended)
+TITLE="Build/runtime failure on main: [specific problem]"
+if ./.loom/scripts/check-duplicate.sh "$TITLE" "Description of the bug"; then
+    # No duplicates found - safe to create
+    gh issue create --title "$TITLE" ...
+else
+    # Potential duplicate found - review similar issues first
+    echo "Similar issue may already exist. Checking..."
+fi
 
-# Search for keywords from the error
+# Alternative: manual search
+gh issue list --state open --json number,title --jq '.[] | "#\(.number): \(.title)"' | head -20
 gh issue list --state open --search "build failure" --json number,title
 ```
 
-If a similar issue exists, add a comment instead of creating a duplicate.
+**When duplicates are found:**
+1. Review the similar issues listed in the output
+2. If truly duplicate: Add comment to existing issue instead of creating new one
+3. If related but distinct: Proceed with creation, reference the related issue in the body
+4. If unclear: Skip creation, let human review the existing issue
+
+**Why this matters**: Duplicate issues waste Builder cycles and create confusion. Issues #1981 and #1988 were created for the identical bug - this check prevents that.
 
 ## Best Practices
 

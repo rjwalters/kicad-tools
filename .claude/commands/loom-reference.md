@@ -2,10 +2,10 @@
 
 This file contains detailed reference documentation for the Loom daemon. It is NOT loaded by agents during normal operation - it is for human reference only.
 
-For daemon execution instructions, see:
-- `loom.md` - Mode detection and routing
-- `loom-parent.md` - Parent loop mode instructions
-- `loom-iteration.md` - Iteration mode instructions
+For daemon execution:
+- `loom.md` - Skill that invokes the Python daemon
+- `.loom/scripts/loom-daemon.sh` - Shell wrapper for the daemon
+- `loom-tools/src/loom_tools/daemon/` - Python daemon implementation
 
 ## State File Format
 

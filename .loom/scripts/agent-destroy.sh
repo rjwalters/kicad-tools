@@ -119,10 +119,21 @@ main() {
         if repo_root=$(find_repo_root); then
             # Only clean if it's actually a worktree (not the main repo)
             if [[ "$worktree_path" != "$repo_root" ]] && [[ "$worktree_path" == *".loom/worktrees/"* ]]; then
-                log_info "Removing worktree: $worktree_path"
-                git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || true
-                worktree_cleaned=true
-                log_success "Removed worktree: $worktree_path"
+                # Safety check: Don't remove worktree if current shell's CWD is inside it
+                local current_cwd
+                local worktree_real
+                current_cwd=$(pwd -P 2>/dev/null || pwd)
+                worktree_real=$(cd "$worktree_path" 2>/dev/null && pwd -P || echo "$worktree_path")
+                if [[ "$current_cwd" == "$worktree_real" || "$current_cwd" == "$worktree_real/"* ]]; then
+                    log_warn "Cannot remove worktree: current shell CWD is inside it"
+                    log_info "CWD: $current_cwd"
+                    log_info "Worktree: $worktree_real"
+                else
+                    log_info "Removing worktree: $worktree_path"
+                    git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || true
+                    worktree_cleaned=true
+                    log_success "Removed worktree: $worktree_path"
+                fi
             fi
         fi
     fi

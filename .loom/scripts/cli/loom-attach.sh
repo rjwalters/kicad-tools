@@ -98,7 +98,7 @@ list_sessions() {
     if ! tmux -L loom list-sessions 2>/dev/null; then
         echo -e "${YELLOW}No Loom sessions found${NC}"
         echo ""
-        echo "Start agents with: ./loom start"
+        echo "Start agents with: ./.loom/bin/loom start"
         return 0
     fi
 
@@ -161,7 +161,7 @@ main() {
         echo "Available sessions:"
         tmux -L loom list-sessions 2>/dev/null || echo "  (none running)"
         echo ""
-        echo "Use './loom status' to see all agents" >&2
+        echo "Use './.loom/bin/loom status' to see all agents" >&2
         exit 1
     fi
 

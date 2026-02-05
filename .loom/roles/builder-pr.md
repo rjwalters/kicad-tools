@@ -278,9 +278,38 @@ Closes #123
 | Shellcheck fixes | `shellcheck <file>` or `find ... -exec shellcheck {} \;` |
 | TypeScript errors | `pnpm tsc --noEmit` |
 | Lint issues | `pnpm lint` or scoped `biome check <file>` |
+| Rust formatting | `cargo fmt --all -- --check` (see Language-Specific section below) |
 | Test passes | `pnpm test -- <pattern>` |
 | File exists/content | `cat <file>` or `grep <pattern> <file>` |
 | Config changes | Read file and verify expected content |
+
+### Language-Specific Verification
+
+**Rust Code Changes**
+
+If you modified any `.rs` files, run these checks **before committing**:
+
+```bash
+# Format all Rust files (applies formatting)
+cargo fmt
+
+# Verify formatting (check only, no changes - returns non-zero if unformatted)
+cargo fmt --all -- --check
+```
+
+**Why format before commit (not just rely on CI)?**
+
+1. **Defense in depth** - Pre-commit hooks can fail silently in worktrees or with PATH issues
+2. **Early feedback** - Catch formatting issues immediately instead of after CI failure
+3. **Save a Doctor cycle** - `pnpm check:ci` includes format verification; catching it early avoids a fix cycle
+
+**Add to your pre-PR checklist when modifying Rust:**
+
+```markdown
+Local verification:
+- [ ] `pnpm check:ci` passes
+- [ ] `cargo fmt --all -- --check` returns 0 (Rust files only)
+```
 
 ### Red Flags: Don't Create PR Yet
 

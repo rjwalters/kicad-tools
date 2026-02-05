@@ -127,7 +127,7 @@ list_logs() {
     if [[ "$found" == "false" ]]; then
         echo -e "${YELLOW}No log files found${NC}"
         echo ""
-        echo "Start agents with: ./loom start"
+        echo "Start agents with: ./.loom/bin/loom start"
     else
         echo ""
         echo -e "${CYAN}To view:${NC} loom logs <name>"
@@ -251,7 +251,7 @@ main() {
 
         if [[ ${#log_files[@]} -eq 0 ]]; then
             echo -e "${YELLOW}No log files found${NC}" >&2
-            echo "Start agents with: ./loom start" >&2
+            echo "Start agents with: ./.loom/bin/loom start" >&2
             exit 1
         fi
 

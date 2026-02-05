@@ -54,8 +54,8 @@ gh pr create --label "loom:review-requested"
 # 6. Return to main workspace
 cd ../..  # Back to workspace root
 
-# 7. Clean up worktree (optional - done automatically on terminal destroy)
-git worktree remove .loom/worktrees/issue-84
+# 7. Worktree cleanup is automatic - DO NOT manually delete worktrees
+# Worktrees are cleaned up automatically when PRs merge or by loom-clean
 ```
 
 ### Collision Detection
@@ -147,6 +147,12 @@ cd .loom/worktrees/issue-XX
 - Easier to reimplement than untangle
 
 ### Never Do This
+
+**Don't delete worktrees manually with `git worktree remove`**
+- Running `git worktree remove` while your shell is in the worktree corrupts shell state
+- Even `pwd` will fail with "No such file or directory" errors
+- Use `loom-clean` for safe cleanup (handles edge cases)
+- Worktrees auto-cleanup when PRs merge
 
 **Don't switch to the main repository directory to work on features**
 - Always work in worktrees for isolation

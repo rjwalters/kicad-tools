@@ -103,7 +103,7 @@ ${BOLD}TRACKED FILE LOCATIONS:${NC}
     .github/labels.yml             Label definitions
     .github/ISSUE_TEMPLATE/*       Issue templates
     .github/workflows/*.yml        GitHub workflows
-    CLAUDE.md, .loom/AGENTS.md     Top-level docs
+    CLAUDE.md                       Top-level docs
     .loom/CLAUDE.md, .loom/README.md
     .codex/config.toml             Codex configuration
     loom                           CLI wrapper
@@ -189,9 +189,6 @@ collect_tracked_files() {
     # Top-level docs
     if [[ -f "$root/CLAUDE.md" ]]; then
         files+=("CLAUDE.md")
-    fi
-    if [[ -f "$root/.loom/AGENTS.md" ]]; then
-        files+=(".loom/AGENTS.md")
     fi
     if [[ -f "$root/.loom/CLAUDE.md" ]]; then
         files+=(".loom/CLAUDE.md")

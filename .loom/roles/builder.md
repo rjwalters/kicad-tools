@@ -240,6 +240,81 @@ Before writing any code, confirm ALL of these:
 
 **If any of these fail, STOP and fix the setup before proceeding.**
 
+## Progress Checkpoints
+
+**IMPORTANT**: Write checkpoints as you progress through implementation stages. Checkpoints allow the shepherd to detect partial progress if you fail, enabling smarter recovery instead of always retrying from scratch.
+
+### Checkpoint Stages
+
+| Stage | When to Write | What It Signals |
+|-------|---------------|-----------------|
+| `planning` | After reading issue, before coding | Issue understood, planning approach |
+| `implementing` | After first meaningful code changes | Code exists, may be useful |
+| `tested` | After running tests | Tests ran (pass or fail noted) |
+| `committed` | After git commit | Changes are safely committed |
+| `pushed` | After git push | Branch is on remote |
+| `pr_created` | After PR creation | PR exists with labels |
+
+### How to Write Checkpoints
+
+Use the checkpoint script from your worktree:
+
+```bash
+# After reading issue and planning approach
+./.loom/scripts/checkpoint.sh write --stage planning --issue <number>
+
+# After making code changes
+./.loom/scripts/checkpoint.sh write --stage implementing --issue <number> --files-changed 5
+
+# After running tests
+./.loom/scripts/checkpoint.sh write --stage tested --issue <number> \
+  --test-result pass --test-command "pnpm check:ci"
+
+# After committing
+./.loom/scripts/checkpoint.sh write --stage committed --issue <number> \
+  --commit-sha "$(git rev-parse HEAD)"
+
+# After pushing
+./.loom/scripts/checkpoint.sh write --stage pushed --issue <number>
+
+# After PR creation
+./.loom/scripts/checkpoint.sh write --stage pr_created --issue <number> \
+  --pr-number <pr-number>
+```
+
+### When to Write Checkpoints
+
+Write a checkpoint **immediately after completing each stage**:
+
+1. **After claiming issue and reading it** → `planning`
+2. **After first meaningful code changes** → `implementing`
+3. **After running tests (pass or fail)** → `tested` with `--test-result`
+4. **After committing** → `committed` with `--commit-sha`
+5. **After pushing** → `pushed`
+6. **After PR creation** → `pr_created` with `--pr-number`
+
+### Why Checkpoints Matter
+
+Without checkpoints, if you fail at any point:
+- Shepherd doesn't know how far you got
+- Recovery always starts from scratch
+- Useful work may be lost or duplicated
+
+With checkpoints:
+- Shepherd knows exactly where you stopped
+- Recovery can skip completed stages
+- Targeted instructions for remaining work
+
+### Checkpoint File Location
+
+Checkpoints are stored in: `.loom-checkpoint` (in your worktree root)
+
+You can read the current checkpoint:
+```bash
+./.loom/scripts/checkpoint.sh read
+./.loom/scripts/checkpoint.sh read --json  # For programmatic use
+```
+
 ## Reading Issues: ALWAYS Read Comments First
 
 **CRITICAL:** Curator adds implementation guidance in comments (and sometimes amends descriptions). You MUST read both the issue body AND all comments before starting work.

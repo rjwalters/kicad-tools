@@ -90,8 +90,9 @@ CONTRACT_INTERVAL_OVERRIDE=${LOOM_CONTRACT_INTERVAL_OVERRIDE:-0}
 CONTRACT_INITIAL_DELAY=180
 
 # Stuck detection thresholds (configurable via environment variables)
-STUCK_WARNING_THRESHOLD=${LOOM_STUCK_WARNING:-300}   # 5 min default
-STUCK_CRITICAL_THRESHOLD=${LOOM_STUCK_CRITICAL:-600} # 10 min default
+# Note: Set high to avoid killing agents mid-work (see issue #2001)
+STUCK_WARNING_THRESHOLD=${LOOM_STUCK_WARNING:-3600}   # 1 hour default
+STUCK_CRITICAL_THRESHOLD=${LOOM_STUCK_CRITICAL:-7200} # 2 hour default
 STUCK_ACTION=${LOOM_STUCK_ACTION:-warn}              # warn, pause, restart, retry
 
 # "Stuck at prompt" detection - command visible but not processing
