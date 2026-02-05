@@ -215,6 +215,9 @@ REPO_ROOT=$(find_repo_root) || {
     exit 1
 }
 
+# Source shared pipe-pane helper
+source "$REPO_ROOT/.loom/scripts/lib/pipe-pane-cmd.sh"
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 FULL_SESSION_NAME="${SESSION_PREFIX}${SESSION_NAME}"
@@ -277,8 +280,8 @@ if ! tmux -L "$TMUX_SOCKET" new-session -d -s "$FULL_SESSION_NAME" -c "$REPO_ROO
     exit 1
 fi
 
-# Set up output capture via pipe-pane
-tmux -L "$TMUX_SOCKET" pipe-pane -t "$FULL_SESSION_NAME" "cat >> '$LOG_FILE'" 2>/dev/null || true
+# Set up output capture via pipe-pane with ANSI stripping
+tmux -L "$TMUX_SOCKET" pipe-pane -t "$FULL_SESSION_NAME" "$(pipe_pane_cmd "$LOG_FILE")" 2>/dev/null || true
 
 # Set environment variables for the session
 tmux -L "$TMUX_SOCKET" set-environment -t "$FULL_SESSION_NAME" LOOM_TERMINAL_ID "$SESSION_NAME"

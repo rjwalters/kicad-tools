@@ -23,7 +23,36 @@ Check for an argument passed via the slash command:
 
 **Arguments**: `$ARGUMENTS`
 
-If a number is provided (e.g., `/doctor 123`):
+### Test Fix Mode (from Shepherd)
+
+If arguments contain `--test-fix <issue>` (e.g., `--test-fix 123` or `--test-fix 123 --context /path/to/context.json`):
+1. This is a **test failure recovery** invoked by the Shepherd
+2. You are working in the issue worktree (already checked out)
+3. Your ONLY job is to fix the failing tests described in the context
+4. **Read the context file first** if `--context <path>` is provided:
+   ```bash
+   cat <path>
+   ```
+   The context file (`.loom-test-failure-context.json`) contains:
+   - `test_command`: The test command that was run
+   - `test_output_tail`: Last 10 lines of test output showing what failed
+   - `test_summary`: Parsed test summary (e.g., "3 failed, 12 passed")
+   - `changed_files`: Files the builder modified (your scope)
+   - `failure_message`: Human-readable failure description
+
+5. **CRITICAL RULES for test fix mode:**
+   - Fix ONLY the specific test failures described in the context
+   - Do NOT make changes to files outside the `changed_files` list unless a test failure directly requires it
+   - Do NOT make opportunistic improvements, refactoring, or unrelated fixes
+   - If test failures are in code you didn't change, check if your changes broke them
+   - If failures are pre-existing and unrelated to the builder's changes, document this and exit
+   - Run the test command from the context to verify your fix works
+
+6. After fixing, commit and proceed normally
+
+### Standard PR Fix Mode
+
+If a number is provided without `--test-fix` (e.g., `/doctor 123`):
 1. Treat that number as the target **PR** to fix
 2. **Skip** the "Finding Work" section entirely
 3. Claim the PR: `gh pr edit <number> --add-label "loom:treating"`
@@ -685,6 +714,40 @@ Keep it brief (3-6 words) and descriptive:
 - **Be consistent**: Always use the same format
 - **Be honest**: If you're idle, say so
 - **Be brief**: Task description should be 3-6 words max
+
+## Pre-existing Failures
+
+When working on test failures during shepherd orchestration, you may discover that the failures are **pre-existing** — they existed before the builder's changes and are unrelated to the current issue. In this case, you should signal this explicitly rather than making no changes.
+
+### When to Signal Pre-existing Failures
+
+Signal pre-existing failures when ALL of these conditions are true:
+1. You've been asked to fix test failures (not PR review feedback)
+2. After analysis, you determine the failures are NOT caused by the builder's changes
+3. The failures would exist even if the builder's changes were reverted
+4. Fixing the failures is outside the scope of the current issue
+
+### How to Signal
+
+Use the special exit code **5** to explicitly communicate that failures are pre-existing:
+
+```bash
+# After determining failures are pre-existing, exit with code 5
+exit 5
+```
+
+### Benefits of Explicit Signaling
+
+- **Faster pipeline**: Shepherd immediately continues to PR creation
+- **Clear audit trail**: Logs show "Doctor determined failures are pre-existing (exit code 5)"
+- **Better observability**: Explicit signal vs. inferred from no commits
+- **Reduced ambiguity**: No guessing whether Doctor attempted a fix or decided not to
+
+### What NOT to Do
+
+- **Don't exit 5 if you made any commits** — the shepherd will verify and may fail
+- **Don't exit 5 for failures you could reasonably fix** — only for truly unrelated issues
+- **Don't exit 5 for PR review feedback** — this is only for test failure recovery
 
 ## Completion
 

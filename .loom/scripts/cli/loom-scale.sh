@@ -42,6 +42,9 @@ if [[ -z "$REPO_ROOT" ]]; then
     exit 1
 fi
 
+# Source shared pipe-pane helper
+source "$REPO_ROOT/.loom/scripts/lib/pipe-pane-cmd.sh"
+
 LOG_DIR="/tmp"
 TMUX_SOCKET="loom"
 
@@ -214,8 +217,8 @@ spawn_role_agent() {
     # Create tmux session
     tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -n "$role"
 
-    # Set up output capture
-    tmux -L "$TMUX_SOCKET" pipe-pane -t "$session_name" -o "cat >> '$log_file'"
+    # Set up output capture with ANSI stripping
+    tmux -L "$TMUX_SOCKET" pipe-pane -t "$session_name" -o "$(pipe_pane_cmd "$log_file")"
 
     # Change to workspace
     tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "cd '$REPO_ROOT'" C-m

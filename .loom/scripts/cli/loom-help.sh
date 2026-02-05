@@ -66,7 +66,7 @@ Loom is a multi-terminal orchestration system for AI-powered development.
 This CLI provides management of tmux-backed agent pools.
 
 ${YELLOW}USAGE:${NC}
-    ./loom <command> [options]
+    ./.loom/bin/loom <command> [options]
 
 ${YELLOW}COMMANDS:${NC}
     ${GREEN}start${NC}     Spawn agent pool from .loom/config.json
@@ -81,41 +81,41 @@ ${YELLOW}COMMANDS:${NC}
 
 ${YELLOW}QUICK START:${NC}
     ${GRAY}# Start all configured agents${NC}
-    ./loom start
+    ./.loom/bin/loom start
 
     ${GRAY}# Check what's running${NC}
-    ./loom status
+    ./.loom/bin/loom status
 
     ${GRAY}# Run diagnostic health check${NC}
-    ./loom health
+    ./.loom/bin/loom health
 
     ${GRAY}# View an agent's terminal${NC}
-    ./loom attach shepherd-1
+    ./.loom/bin/loom attach shepherd-1
 
     ${GRAY}# Send a command to an agent${NC}
-    ./loom send shepherd-1 "/shepherd 123"
+    ./.loom/bin/loom send shepherd-1 "/shepherd 123"
 
     ${GRAY}# View logs${NC}
-    ./loom logs shepherd-1
+    ./.loom/bin/loom logs shepherd-1
 
     ${GRAY}# Stop everything${NC}
-    ./loom stop
+    ./.loom/bin/loom stop
 
 ${YELLOW}EXAMPLES:${NC}
-    ./loom start                  Start all configured agents
-    ./loom start --only shepherd  Start only shepherd agents
-    ./loom status                 Show current state
-    ./loom status --json          Machine-readable status
-    ./loom health                 Run diagnostic health check
-    ./loom health --json          Machine-readable health report
-    ./loom attach shepherd-1      Connect to agent terminal
-    ./loom send shepherd-1 "/shepherd 123"  Send command to agent
-    ./loom stop                   Graceful shutdown
-    ./loom stop --force           Force kill all sessions
-    ./loom stop shepherd-1        Stop single agent
-    ./loom scale shepherd 3       Scale shepherd pool to 3
-    ./loom logs terminal-1        Tail agent output
-    ./loom logs --all             Tail all agent logs
+    ./.loom/bin/loom start                  Start all configured agents
+    ./.loom/bin/loom start --only shepherd  Start only shepherd agents
+    ./.loom/bin/loom status                 Show current state
+    ./.loom/bin/loom status --json          Machine-readable status
+    ./.loom/bin/loom health                 Run diagnostic health check
+    ./.loom/bin/loom health --json          Machine-readable health report
+    ./.loom/bin/loom attach shepherd-1      Connect to agent terminal
+    ./.loom/bin/loom send shepherd-1 "/shepherd 123"  Send command to agent
+    ./.loom/bin/loom stop                   Graceful shutdown
+    ./.loom/bin/loom stop --force           Force kill all sessions
+    ./.loom/bin/loom stop shepherd-1        Stop single agent
+    ./.loom/bin/loom scale shepherd 3       Scale shepherd pool to 3
+    ./.loom/bin/loom logs terminal-1        Tail agent output
+    ./.loom/bin/loom logs --all             Tail all agent logs
 
 ${YELLOW}SSH AND REMOTE:${NC}
     All commands work over SSH without \$DISPLAY.
@@ -145,8 +145,8 @@ ${YELLOW}TMUX SOCKET:${NC}
     ${GRAY}tmux -L loom attach -t loom-shepherd-1${NC}
 
 ${YELLOW}FOR MORE HELP:${NC}
-    ./loom <command> --help    Command-specific help
-    ./loom help <command>      Same as above
+    ./.loom/bin/loom <command> --help    Command-specific help
+    ./.loom/bin/loom help <command>      Same as above
 
 ${YELLOW}RELATED COMMANDS:${NC}
     /loom                     Run the daemon (Layer 2 orchestration)

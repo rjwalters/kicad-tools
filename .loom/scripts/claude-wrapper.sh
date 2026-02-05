@@ -33,6 +33,10 @@ INITIAL_WAIT="${LOOM_INITIAL_WAIT:-60}"
 MAX_WAIT="${LOOM_MAX_WAIT:-1800}"  # 30 minutes
 MULTIPLIER="${LOOM_BACKOFF_MULTIPLIER:-2}"
 
+# Output monitor configuration
+# How long to wait after detecting an API error pattern before killing claude
+API_ERROR_IDLE_TIMEOUT="${LOOM_API_ERROR_IDLE_TIMEOUT:-60}"
+
 # Terminal identification for stop signals
 TERMINAL_ID="${LOOM_TERMINAL_ID:-}"
 # Note: WORKSPACE may fail if CWD is invalid at startup - recover_cwd handles this
@@ -189,6 +193,87 @@ is_transient_error() {
     return 1
 }
 
+# Monitor output file for API errors during execution.
+# If an API error pattern is detected and no new output arrives within
+# API_ERROR_IDLE_TIMEOUT seconds, sends SIGINT to the claude process.
+# This handles the "agent waits for 'try again' input" scenario.
+#
+# Arguments: $1 = output file path, $2 = PID file path to write monitor PID
+start_output_monitor() {
+    local output_file="$1"
+    local monitor_pid_file="$2"
+
+    (
+        local last_size=0
+        local error_detected_at=0
+
+        while true; do
+            sleep 5
+
+            # Exit if output file is gone (session ended)
+            if [[ ! -f "${output_file}" ]]; then
+                break
+            fi
+
+            local current_size
+            current_size=$(wc -c < "${output_file}" 2>/dev/null || echo "0")
+
+            if [[ "${current_size}" -ne "${last_size}" ]]; then
+                # New output arrived - check for API error patterns
+                local tail_content
+                tail_content=$(tail -c 2000 "${output_file}" 2>/dev/null || echo "")
+
+                local found_error=false
+                for pattern in "500 Internal Server Error" "Rate limit exceeded" \
+                    "overloaded" "temporarily unavailable" "503 Service" \
+                    "502 Bad Gateway" "No messages returned"; do
+                    if echo "${tail_content}" | grep -qi "${pattern}" 2>/dev/null; then
+                        found_error=true
+                        break
+                    fi
+                done
+
+                if [[ "${found_error}" == "true" ]]; then
+                    if [[ "${error_detected_at}" -eq 0 ]]; then
+                        error_detected_at=$(date +%s)
+                        log_warn "Output monitor: API error pattern detected, watching for idle..."
+                    fi
+                else
+                    # New non-error output - reset detection
+                    error_detected_at=0
+                fi
+                last_size="${current_size}"
+            elif [[ "${error_detected_at}" -gt 0 ]]; then
+                # No new output since error was detected
+                local now
+                now=$(date +%s)
+                local idle_time=$((now - error_detected_at))
+                if [[ "${idle_time}" -ge "${API_ERROR_IDLE_TIMEOUT}" ]]; then
+                    log_warn "Output monitor: No new output for ${idle_time}s after API error - sending SIGINT to claude"
+                    # Find and signal the claude process (child of this wrapper's shell)
+                    pkill -INT -P $$ -f "claude" 2>/dev/null || true
+                    break
+                fi
+            fi
+        done
+    ) &
+    echo $! > "${monitor_pid_file}"
+}
+
+# Stop the background output monitor
+stop_output_monitor() {
+    local monitor_pid_file="$1"
+    if [[ -f "${monitor_pid_file}" ]]; then
+        local pid
+        pid=$(cat "${monitor_pid_file}" 2>/dev/null || echo "")
+        if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+            kill "${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
+        fi
+        rm -f "${monitor_pid_file}"
+    fi
+}
+
 # Calculate wait time with exponential backoff
 calculate_wait_time() {
     local attempt="$1"
@@ -251,14 +336,20 @@ run_with_retry() {
         local temp_output
         temp_output=$(mktemp)
 
+        # Start background output monitor to detect API errors during execution
+        local monitor_pid_file
+        monitor_pid_file=$(mktemp)
+
         # Run claude with all arguments passed to wrapper
         # Use macOS `script` to preserve TTY (so Claude CLI sees isatty(stdout) = true)
         # while still capturing output to a file. A plain pipe (`| tee`) would replace
         # stdout with a pipe fd, causing Claude to switch to non-interactive --print mode.
+        start_output_monitor "${temp_output}" "${monitor_pid_file}"
         set +e  # Temporarily disable errexit to capture exit code
         script -q "${temp_output}" claude "$@"
         exit_code=$?
         set -e
+        stop_output_monitor "${monitor_pid_file}"
 
         output=$(cat "${temp_output}")
         rm -f "${temp_output}"

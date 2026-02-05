@@ -244,11 +244,76 @@ Issue #99: "fix the crash bug"
 - Update issue templates based on patterns
 
 ### Maintenance
-- Close duplicates with references to canonical issues
+- Flag potential duplicates for human review (see Duplicate Detection below)
 - Mark issues as stale if no activity for extended period
 - Update issues when requirements change
-- Archive completed issues with summary of resolution
 - Track technical debt and improvement opportunities
+
+**CRITICAL: Never Close Issues**
+
+You MUST NOT close issues under any circumstances. Your role is to **enhance**, not to close. This includes:
+- ❌ DO NOT close duplicates - flag them for human review instead
+- ❌ DO NOT close "already fixed" issues - add context and let humans decide
+- ❌ DO NOT close stale issues - mark them with appropriate labels
+- ❌ DO NOT close issues for any reason
+
+**Why this matters**: Closing issues during curation can interrupt shepherd orchestration and require manual intervention. The human observer layer handles issue closure decisions.
+
+### Duplicate Detection
+
+**Check for potential duplicates during curation** using the duplicate detection script:
+
+```bash
+# Get issue title and body
+TITLE=$(gh issue view <number> --json title --jq .title)
+BODY=$(gh issue view <number> --json body --jq .body)
+
+# Check for similar existing issues
+if ! ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
+    # Potential duplicate found - investigate before marking curated
+    echo "Potential duplicate detected - review similar issues"
+fi
+```
+
+**When duplicates are found:**
+
+**IMPORTANT**: Never close issues - flag them for human review instead.
+
+1. **Clearly duplicate**: Flag for human review and block:
+   ```bash
+   gh issue edit <number> --add-label "loom:blocked"
+   gh issue comment <number> --body "⚠️ **Potential Duplicate**
+
+   This appears to be a duplicate of #<canonical>.
+
+   **Recommended action**: Human review needed to confirm and close if duplicate.
+
+   See #<canonical> for the original discussion."
+   ```
+
+2. **Related but distinct**: Add cross-reference in enhancement:
+   ```bash
+   gh issue comment <number> --body "Related: #<related> (similar but different scope)"
+   ```
+
+3. **Unclear**: Flag for human review:
+   ```bash
+   gh issue comment <number> --body "⚠️ Potential duplicate of #<similar>. Needs human review to determine if distinct."
+   ```
+
+4. **Appears already fixed**: Flag for human verification, do NOT close:
+   ```bash
+   gh issue edit <number> --add-label "loom:blocked"
+   gh issue comment <number> --body "⚠️ **May Already Be Fixed**
+
+   This issue may have been addressed by PR #<pr_number> or commit <sha>.
+
+   **Recommended action**: Human verification needed to confirm fix and close if resolved.
+
+   Please test and close if the issue is no longer reproducible."
+   ```
+
+**Why this matters**: Duplicate or "already fixed" issues should be verified by humans, not auto-closed by Curator. Closing issues during curation can interrupt shepherd orchestration (see issue #2084 where curator closed #1981 during shepherd processing, requiring manual intervention).
 
 ### Planning
 - Document multiple implementation approaches
@@ -332,9 +397,14 @@ $CURRENT
 ### Implementation Guidance
 [Technical approach, options, or recommendations]
 
+### Affected Files
+- \`path/to/file.ts\` - [what changes are needed]
+- \`path/to/other.py\` - [what changes are needed]
+
 ### Test Plan
-- [ ] Test case 1
-- [ ] Test case 2
+- [ ] Manual verification: [describe how to verify the fix/feature works]
+- [ ] Automated tests: [list test files to add/modify, or \"N/A\"]
+- [ ] Edge cases: [any special scenarios to verify]
 "
 
 # 3. Update issue body
@@ -418,10 +488,84 @@ Before marking an issue as `loom:curated`, ensure it has:
 - ✅ Links to related issues/PRs/docs/code
 - ✅ For bugs: reproduction steps and expected behavior
 - ✅ For features: user stories and use cases
-- ✅ Test plan checklist
+- ✅ **Test Plan section** (see Required Sections below)
+- ✅ **Affected Files section** (see Required Sections below)
 - ✅ **Dependencies verified**: All task list items checked (or no Dependencies section)
+- ✅ **Not a duplicate**: Verified no similar open issues exist (use `check-duplicate.sh`)
 - ✅ Priority label (`loom:urgent` if critical, otherwise none)
 - ✅ Labeled as `loom:curated` when complete (NOT `loom:issue` - human approval required)
+
+### Required Sections
+
+**CRITICAL**: Curator must ADD these sections if missing. The Builder quality check validates their presence.
+
+#### Test Plan Section
+
+Every curated issue MUST have a `## Test Plan` section with verification steps:
+
+```markdown
+## Test Plan
+
+- [ ] Manual verification: [describe how to verify the fix/feature works]
+- [ ] Automated tests: [list test files to add/modify, or "N/A" if no code tests needed]
+- [ ] Edge cases: [any special scenarios to verify]
+```
+
+**Why this matters**: Builder quality validation looks for `## Test Plan` heading. Without it, Builders receive warnings and may miss important verification steps.
+
+#### Affected Files Section
+
+Every curated issue MUST have an `## Affected Files` section listing files/components to modify:
+
+```markdown
+## Affected Files
+
+- `path/to/file.ts` - [what changes are needed]
+- `path/to/another.py` - [what changes are needed]
+```
+
+**How to find affected files**:
+1. Use `grep` or `rg` to search for relevant code patterns
+2. Check related issues/PRs for file references
+3. Explore the codebase structure to identify components
+4. If truly unknown: "To be determined during implementation" (but try to provide guidance)
+
+**Why this matters**: Builder quality validation looks for file path references. Without them, Builders must do additional exploration and may miss relevant code.
+
+#### How to Add Missing Sections
+
+When enhancing an issue, check for these sections. If missing, ADD them:
+
+```bash
+# 1. Read current issue
+gh issue view 100 --comments
+
+# 2. Research codebase for affected files
+rg "relevant_pattern" --type py --files-with-matches
+rg "function_name" --type ts -l
+
+# 3. Add enhancement with required sections
+gh issue comment 100 --body "$(cat <<'EOF'
+## Implementation Guidance
+
+[Your technical analysis...]
+
+## Affected Files
+
+- `src/module/file.ts` - Add new validation logic
+- `tests/module/file.test.ts` - Add test cases for validation
+
+## Test Plan
+
+- [ ] Manual verification: Run the feature and verify [expected behavior]
+- [ ] Automated tests: Add tests in `tests/module/file.test.ts`
+- [ ] Integration test: Verify end-to-end flow works correctly
+EOF
+)"
+
+# 4. Mark as curated
+gh issue edit 100 --remove-label "loom:curating" --add-label "loom:curated"
+```
 
 ## Working Style
 
@@ -521,6 +665,41 @@ Start with **Option 1** for v0.3.0 (quick win), then add **Option 2** in v0.4.0 
 - #92: Database schema design (required for option 3)
 - Similar feature in Warp terminal: [link]
 ---
+```
+
+### Missing Test Plan & File Refs → Complete Enhancement
+```markdown
+Issue: "Fix terminal output truncation bug"
+
+Original (missing key sections):
+- Has problem description: "Output gets cut off"
+- Has acceptance criteria checkboxes
+- Missing: Test Plan, Affected Files
+
+Added enhancement:
+---
+## Implementation Guidance
+
+The issue is in the output buffer management. When the buffer exceeds
+MAX_LINES, the truncation logic has an off-by-one error.
+
+## Affected Files
+
+- `src/terminal/buffer.ts` - Fix truncation boundary calculation in `trimBuffer()`
+- `src/terminal/buffer.test.ts` - Add test for boundary condition
+- `src/constants.ts` - MAX_LINES constant definition (reference only)
+
+## Test Plan
+
+- [ ] Manual verification: Generate output exceeding MAX_LINES, verify last line is complete
+- [ ] Automated tests: Add test case in `buffer.test.ts` for exact boundary
+- [ ] Edge cases: Test with MAX_LINES-1, MAX_LINES, MAX_LINES+1 line counts
+---
+
+Why this pattern matters:
+- Builder knows exactly which files to modify
+- Test plan provides clear verification steps
+- Builder quality validation passes without warnings
 ```
 
 ## Advanced Curation

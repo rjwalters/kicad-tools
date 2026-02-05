@@ -180,10 +180,39 @@ check_grace_period() {
     fi
 }
 
+# Function to check if current shell's CWD is inside a worktree
+check_cwd_inside_worktree() {
+    local worktree_path="$1"
+    local current_cwd
+    local abs_worktree_path
+
+    # Get current working directory (resolved, follows symlinks)
+    current_cwd=$(pwd -P 2>/dev/null || pwd)
+
+    # Get absolute path of worktree (resolved)
+    abs_worktree_path=$(cd "$worktree_path" 2>/dev/null && pwd -P || echo "$worktree_path")
+
+    # Check if current CWD is exactly the worktree or inside it
+    if [[ "$current_cwd" == "$abs_worktree_path" || "$current_cwd" == "$abs_worktree_path/"* ]]; then
+        return 0  # CWD is inside worktree
+    else
+        return 1  # CWD is not inside worktree
+    fi
+}
+
 # Function to check if worktree is safe to remove
 is_worktree_safe_to_remove() {
     local worktree_path="$1"
     local reason=""
+
+    # Check 0: Current shell's CWD inside worktree (simplest and most direct check)
+    if check_cwd_inside_worktree "$worktree_path"; then
+        reason="current shell CWD is inside worktree"
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_info "  $reason - preserving"
+        fi
+        return 1
+    fi
 
     # Check 1: In-use marker
     if check_in_use_marker "$worktree_path"; then
@@ -256,6 +285,7 @@ Safety Features:
   ✓ Prevents nested worktrees
   ✓ Non-interactive (safe for AI agents)
   ✓ Reuses existing branches automatically
+  ✓ Symlinks node_modules from main (avoids pnpm install)
   ✓ Runs project-specific hooks after creation
   ✓ Stashes/restores local changes during pull
 
@@ -403,6 +433,26 @@ if check_if_in_worktree; then
     fi
 fi
 
+# Prune orphaned worktree references before any worktree operations
+# This cleans up stale references when worktree directories were deleted externally (e.g., rm -rf)
+# Without this, subsequent worktree operations or `gh pr checkout` can fail
+PRUNE_OUTPUT=$(git worktree prune --dry-run --verbose 2>/dev/null || true)
+if [[ -n "$PRUNE_OUTPUT" ]]; then
+    # There are orphaned references to prune
+    if [[ "$JSON_OUTPUT" != "true" ]]; then
+        print_info "Pruning orphaned worktree references..."
+    fi
+    if git worktree prune 2>/dev/null; then
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_success "Pruned orphaned worktree references"
+        fi
+    else
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_warning "Failed to prune worktrees (continuing anyway)"
+        fi
+    fi
+fi
+
 # Ensure we're on main branch and pull latest changes
 # This happens whether we came from a worktree (already switched above) or started in main workspace
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
@@ -469,8 +519,11 @@ if [[ -d "$WORKTREE_PATH" ]]; then
             fi
 
             # Remove the stale worktree (safety checks passed)
-            local_branch=$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null) || local_branch=""
-            git worktree remove "$WORKTREE_PATH" --force 2>/dev/null || {
+            # Use absolute path and git -C to avoid CWD-inside-worktree issues
+            ABS_WORKTREE="$(cd "$WORKTREE_PATH" 2>/dev/null && pwd -P || echo "$WORKTREE_PATH")"
+            REPO_DIR="$(pwd -P)"
+            local_branch=$(git -C "$ABS_WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null) || local_branch=""
+            git -C "$REPO_DIR" worktree remove "$ABS_WORKTREE" --force 2>/dev/null || {
                 print_error "Failed to remove stale worktree"
                 exit 1
             }
@@ -494,6 +547,63 @@ if [[ -d "$WORKTREE_PATH" ]]; then
                 echo ""
             fi
             # Fall through to create fresh worktree below
+        elif [[ "$local_commits_ahead" == "0" && "$local_commits_behind" == "0" && -z "$local_uncommitted" ]]; then
+            # Worktree at same commit as main, no commits, no uncommitted changes
+            # Check if remote branch exists - if not, this is an abandoned worktree
+            if ! git ls-remote --heads origin "$BRANCH_NAME" 2>/dev/null | grep -q .; then
+                # No commits + no remote = abandoned worktree, safe to clean
+                if ! is_worktree_safe_to_remove "$WORKTREE_PATH"; then
+                    # Safety check failed - reuse the worktree instead of removing
+                    if [[ "$JSON_OUTPUT" != "true" ]]; then
+                        print_info "Worktree appears abandoned but cannot be safely removed - reusing"
+                        echo ""
+                        print_info "To use this worktree: cd $WORKTREE_PATH"
+                    fi
+                    exit 0
+                fi
+
+                if [[ "$JSON_OUTPUT" != "true" ]]; then
+                    print_warning "Abandoned worktree detected (0 commits, at same commit as main, no remote branch)"
+                    print_info "Removing abandoned worktree and recreating from current main..."
+                fi
+
+                # Remove the abandoned worktree (safety checks passed)
+                ABS_WORKTREE="$(cd "$WORKTREE_PATH" 2>/dev/null && pwd -P || echo "$WORKTREE_PATH")"
+                REPO_DIR="$(pwd -P)"
+                local_branch=$(git -C "$ABS_WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null) || local_branch=""
+                git -C "$REPO_DIR" worktree remove "$ABS_WORKTREE" --force 2>/dev/null || {
+                    print_error "Failed to remove abandoned worktree"
+                    exit 1
+                }
+
+                # Delete the empty branch if it exists
+                if [[ -n "$local_branch" && "$local_branch" != "main" ]]; then
+                    if git branch -d "$local_branch" 2>/dev/null; then
+                        if [[ "$JSON_OUTPUT" != "true" ]]; then
+                            print_info "Removed empty branch: $local_branch"
+                        fi
+                    else
+                        if [[ "$JSON_OUTPUT" != "true" ]]; then
+                            print_warning "Could not delete branch $local_branch (may have upstream references)"
+                        fi
+                    fi
+                fi
+
+                if [[ "$JSON_OUTPUT" != "true" ]]; then
+                    print_success "Abandoned worktree cleaned up"
+                    echo ""
+                fi
+                # Fall through to create fresh worktree below
+            else
+                # Remote branch exists - preserve worktree
+                if [[ "$JSON_OUTPUT" != "true" ]]; then
+                    print_info "Worktree is registered with git"
+                    print_info "Remote branch exists - preserving worktree"
+                    echo ""
+                    print_info "To use this worktree: cd $WORKTREE_PATH"
+                fi
+                exit 0
+            fi
         else
             if [[ "$JSON_OUTPUT" != "true" ]]; then
                 print_info "Worktree is registered with git"
@@ -602,10 +712,33 @@ if git worktree add "${CREATE_ARGS[@]}"; then
         cd - > /dev/null
     fi
 
+    # Symlink node_modules from main workspace if available
+    # This avoids expensive pnpm install on every worktree (30-60s savings)
+    MAIN_WORKSPACE_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+    MAIN_NODE_MODULES="$MAIN_WORKSPACE_DIR/node_modules"
+    WORKTREE_NODE_MODULES="$ABS_WORKTREE_PATH/node_modules"
+    WORKTREE_PACKAGE_JSON="$ABS_WORKTREE_PATH/package.json"
+
+    if [[ -d "$MAIN_NODE_MODULES" && -f "$WORKTREE_PACKAGE_JSON" && ! -e "$WORKTREE_NODE_MODULES" ]]; then
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            print_info "Symlinking node_modules from main workspace..."
+        fi
+
+        if ln -s "$MAIN_NODE_MODULES" "$WORKTREE_NODE_MODULES" 2>/dev/null; then
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_success "node_modules symlinked (skipping pnpm install)"
+            fi
+        else
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                print_warning "Could not symlink node_modules (will install on first build)"
+            fi
+        fi
+    fi
+
     # Run project-specific post-worktree hook if it exists
     # This allows projects to add custom setup steps (e.g., pnpm install, lake exe cache get)
     # The hook is stored in .loom/hooks/ which is NOT overwritten by Loom upgrades
-    MAIN_WORKSPACE_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+    # Note: MAIN_WORKSPACE_DIR is already set by node_modules symlink section above
     POST_WORKTREE_HOOK="$MAIN_WORKSPACE_DIR/.loom/hooks/post-worktree.sh"
     if [[ -x "$POST_WORKTREE_HOOK" ]]; then
         if [[ "$JSON_OUTPUT" != "true" ]]; then
