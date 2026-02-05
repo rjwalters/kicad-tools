@@ -523,6 +523,8 @@ class SExp:
             "top",
             "bottom",
             "mirror",
+            "front",
+            "back",
             # Pin types
             "input",
             "output",
@@ -602,6 +604,9 @@ class SExp:
             "uvia_drill",
             "diff_pair_width",
             "diff_pair_gap",
+            # Other
+            "allow_missing_courtyard",
+            "allow_soldermask_bridges",
         }
 
         if s in unquoted_keywords:
