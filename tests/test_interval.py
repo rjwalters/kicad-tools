@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from kicad_tools.types.interval import Interval, UnitError
-
 
 # ------------------------------------------------------------------
 # Construction and validation

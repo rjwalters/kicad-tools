@@ -86,9 +86,7 @@ class Interval:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_center_rel(
-        cls, center: float, tolerance: float, unit: str = ""
-    ) -> Interval:
+    def from_center_rel(cls, center: float, tolerance: float, unit: str = "") -> Interval:
         """Create from a center value and relative tolerance.
 
         Args:
@@ -109,9 +107,7 @@ class Interval:
         return cls(center - delta, center + delta, unit)
 
     @classmethod
-    def from_center_abs(
-        cls, center: float, delta: float, unit: str = ""
-    ) -> Interval:
+    def from_center_abs(cls, center: float, delta: float, unit: str = "") -> Interval:
         """Create from a center value and absolute delta.
 
         Args:
@@ -228,9 +224,7 @@ class Interval:
                 self.max * other.min,
                 self.max * other.max,
             )
-            return Interval(
-                min(products), max(products), _unit_product(self.unit, other.unit)
-            )
+            return Interval(min(products), max(products), _unit_product(self.unit, other.unit))
         if isinstance(other, (int, float)):
             a, b = self.min * other, self.max * other
             return Interval(min(a, b), max(a, b), self.unit)
@@ -253,9 +247,7 @@ class Interval:
                 self.max / other.min,
                 self.max / other.max,
             )
-            return Interval(
-                min(quotients), max(quotients), _unit_quotient(self.unit, other.unit)
-            )
+            return Interval(min(quotients), max(quotients), _unit_quotient(self.unit, other.unit))
         if isinstance(other, (int, float)):
             if other == 0:
                 msg = "Cannot divide by zero"
