@@ -1,0 +1,32 @@
+[
+  {
+    "board": "voltage-divider",
+    "total_nets": 2,
+    "routed_nets": 0,
+    "completion_rate": 0.0,
+    "routing_time": 1.0967254638671875e-05,
+    "failures": 0,
+    "segments": 0,
+    "vias": 0
+  },
+  {
+    "board": "charlieplex-led",
+    "total_nets": 8,
+    "routed_nets": 0,
+    "completion_rate": 0.0,
+    "routing_time": 1.71661376953125e-05,
+    "failures": 0,
+    "segments": 0,
+    "vias": 0
+  },
+  {
+    "board": "usb-joystick",
+    "total_nets": 14,
+    "routed_nets": 0,
+    "completion_rate": 0.0,
+    "routing_time": 1.7881393432617188e-05,
+    "failures": 0,
+    "segments": 0,
+    "vias": 0
+  }
+]

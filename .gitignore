@@ -57,10 +57,6 @@ boards/*/output/*.kicad_pro
 .loom/daemon-state.json
 .loom/00-daemon-state.json
 .loom/stop-daemon
-.loom/state.json
-.loom/worktrees/
-.loom/*.log
-.loom/*.sock
 .loom-in-use
 .loom/.daemon.pid
 .loom/.daemon.log
@@ -86,3 +82,7 @@ boards/*/output/*.kicad_pro
 .loom/stuck-config.json
 .loom/metrics/
 .loom/logs/
+.loom/worktrees/
+.loom/state.json
+.loom/*.log
+.loom/*.sock
