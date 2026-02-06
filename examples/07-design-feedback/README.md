@@ -11,18 +11,6 @@ around U1 pins 4-7, consider moving bypass caps".
 
 ## Examples
 
-### Rich Error Demo (`rich_error_demo.py`)
-
-Demonstrates compiler-style error reporting with:
-- Source position tracking (file:line:column)
-- S-expression snippet extraction
-- Color-coded severity levels
-- Fix suggestions
-
-```bash
-python rich_error_demo.py
-```
-
 ### Congestion Analysis Demo (`congestion_demo.py`)
 
 Analyzes routing density to identify hotspots:
