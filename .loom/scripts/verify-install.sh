@@ -240,12 +240,14 @@ cmd_generate() {
     local generated_at
     generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    # Detect loom version from CLAUDE.md if possible
+    # Detect loom version from CLAUDE.md and commit from install-metadata.json
     local loom_version=""
     local loom_commit=""
     if [[ -f "$root/CLAUDE.md" ]]; then
         loom_version=$(grep -o 'Loom Version.*: .*' "$root/CLAUDE.md" | head -1 | sed 's/.*: //' | sed 's/\*//g' | tr -d '[:space:]' || true)
-        loom_commit=$(grep -o 'Loom Commit.*: .*' "$root/CLAUDE.md" | head -1 | sed 's/.*: //' | sed 's/\*//g' | tr -d '[:space:]' || true)
+    fi
+    if [[ -f "$root/.loom/install-metadata.json" ]]; then
+        loom_commit=$(grep -o '"loom_commit": "[^"]*"' "$root/.loom/install-metadata.json" | head -1 | sed 's/.*: "//; s/"//' || true)
     fi
 
     # Build JSON using printf (no jq dependency for generate)

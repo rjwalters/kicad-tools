@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "generated_at": "2026-02-06T19:35:51Z",
+  "generated_at": "2026-02-06T22:12:53Z",
   "loom_version": "{{LOOM_VERSION}}",
-  "loom_commit": "{{LOOM_COMMIT}}",
+  "loom_commit": "cdd12bc",
   "file_count": 134,
   "files": {
     ".claude/agents/loom-architect.md": {
@@ -522,8 +522,8 @@
       "size": 9731
     },
     ".loom/scripts/verify-install.sh": {
-      "sha256": "f2d7e9b1c26dcb641be47e88d275d87f6c9a3b070c2530f1c3392a42c885c6f8",
-      "size": 17504
+      "sha256": "85b13e134f9006aa9010e3038168dd3f3b78e9f6896e282599b23c3b90f1d8ee",
+      "size": 17590
     },
     ".loom/scripts/worktree-return.sh": {
       "sha256": "e14ac3daf0d5875e375a380951703b8c2f2bc6b8ad97cac293ab16444af3a580",
@@ -534,8 +534,8 @@
       "size": 29265
     },
     "CLAUDE.md": {
-      "sha256": "73e0e6e5c95ddf85d5a310a97d0e544e1dadbb6c17c25191efab981dc03348a7",
-      "size": 31088
+      "sha256": "449e70dbe718059310b9e4624aac8bd522607eddd2cf9dae326564fb19ad6e86",
+      "size": 31063
     },
     "loom": {
       "sha256": "30193930e2715dbb0b18a9072c77829fb658069585c7ea8b29c0b6e27a0e8402",
