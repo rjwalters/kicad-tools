@@ -542,7 +542,6 @@ Last updated: {{INSTALL_DATE}}<!-- BEGIN LOOM ORCHESTRATION -->
 This repository uses **Loom** for AI-powered development orchestration.
 
 **Loom Version**: 0.2.0
-**Loom Commit**: c0154d2
 **Installation Date**: 2026-02-06
 
 ## What is Loom?
