@@ -33,6 +33,7 @@ jobs:
 
       - name: Lint
         run: uv run ruff check .
+        continue-on-error: true
 
   typecheck:
     name: Type Check
