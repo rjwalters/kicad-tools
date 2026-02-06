@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from ..base import CircuitBlock
+from ..interfaces import PowerPort
 
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic
@@ -118,6 +119,30 @@ class LDOBlock(CircuitBlock):
             "VOUT": vout_pos,
             "GND": gnd_pos,
             "EN": en_pos,
+        }
+
+        # Register typed ports with power interface metadata
+        self.typed_ports = {
+            "VIN": PowerPort(
+                name="VIN",
+                x=vin_pos[0],
+                y=vin_pos[1],
+                direction="input",
+            ),
+            "VOUT": PowerPort(
+                name="VOUT",
+                x=vout_pos[0],
+                y=vout_pos[1],
+                direction="output",
+            ),
+            "GND": PowerPort(
+                name="GND",
+                x=gnd_pos[0],
+                y=gnd_pos[1],
+                direction="passive",
+                voltage_min=0.0,
+                voltage_max=0.0,
+            ),
         }
 
         # Tie EN to VIN if requested

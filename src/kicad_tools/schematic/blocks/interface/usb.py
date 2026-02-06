@@ -4,6 +4,7 @@ import contextlib
 from typing import TYPE_CHECKING
 
 from ..base import CircuitBlock
+from ..interfaces import DataPort, PowerPort
 
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic, SymbolInstance
@@ -270,6 +271,42 @@ class USBConnector(CircuitBlock):
         # Add SHIELD if available
         if "SHIELD" in conn_pins:
             self.ports["SHIELD"] = conn_pins["SHIELD"]
+
+        # Register typed ports with interface metadata
+        self._register_typed_ports()
+
+    def _register_typed_ports(self) -> None:
+        """Register typed ports with USB interface metadata."""
+        for name, pos in self.ports.items():
+            if name in ("D+", "D-"):
+                self.typed_ports[name] = DataPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="bidirectional",
+                    protocol="usb2",
+                    signal_role=name.lower(),
+                    group="usb_data",
+                )
+            elif name == "VBUS":
+                self.typed_ports[name] = PowerPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="output",
+                    voltage_min=4.75,
+                    voltage_max=5.25,
+                    max_current=0.5,
+                )
+            elif name == "GND":
+                self.typed_ports[name] = PowerPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="passive",
+                    voltage_min=0.0,
+                    voltage_max=0.0,
+                )
 
     def connect_to_rails(
         self,

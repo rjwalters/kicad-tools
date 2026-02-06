@@ -27,6 +27,18 @@ Usage:
 """
 
 # Base classes
+# Analog blocks
+from .analog import (
+    ADCInputFilterBlock,
+    OpAmpBlock,
+    ThermistorSense,
+    VoltageDividerSense,
+    create_adc_filter,
+    create_opamp_buffer,
+    create_opamp_gain,
+    create_temperature_sense,
+    create_voltage_sense,
+)
 from .base import CircuitBlock, Port
 
 # Indicator blocks
@@ -48,6 +60,9 @@ from .interface import (
     create_usb_micro_b,
     create_usb_type_c,
 )
+
+# Typed port interfaces
+from .interfaces import DataPort, PowerPort
 
 # MCU blocks
 from .mcu import (
@@ -90,26 +105,6 @@ from .power import (
     create_voltage_divider,
 )
 
-# Timing blocks
-from .timing import (
-    CrystalOscillator,
-    OscillatorBlock,
-    create_mclk_oscillator,
-)
-
-# Analog blocks
-from .analog import (
-    ADCInputFilterBlock,
-    OpAmpBlock,
-    ThermistorSense,
-    VoltageDividerSense,
-    create_adc_filter,
-    create_opamp_buffer,
-    create_opamp_gain,
-    create_temperature_sense,
-    create_voltage_sense,
-)
-
 # Protection blocks
 from .protection import (
     ESDProtectionBlock,
@@ -127,10 +122,26 @@ from .protection import (
     create_thermal_cutoff,
 )
 
+# Timing blocks
+from .timing import (
+    CrystalOscillator,
+    OscillatorBlock,
+    create_mclk_oscillator,
+)
+
+# Connection validation
+from .validator import ConnectionValidator, ConnectionWarning, WarningSeverity
+
 __all__ = [
     # Base classes
     "Port",
     "CircuitBlock",
+    # Typed ports and validation
+    "PowerPort",
+    "DataPort",
+    "ConnectionValidator",
+    "ConnectionWarning",
+    "WarningSeverity",
     # Indicators
     "LEDIndicator",
     "create_power_led",
