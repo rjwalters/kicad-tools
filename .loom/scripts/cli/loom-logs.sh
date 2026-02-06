@@ -174,9 +174,11 @@ get_log_path() {
     return 1
 }
 
-# Strip ANSI escape codes (optional, for cleaner output)
+# Strip ANSI escape codes and terminal control characters for cleaner output.
+# Removes CSI sequences, OSC sequences, carriage returns, backspaces,
+# and bare escape sequences.
 strip_ansi() {
-    sed 's/\x1b\[[0-9;]*m//g'
+    sed -E 's/\x1b\[[?0-9;]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g; s/\r//g; s/\x08//g; s/\x1b[^][]//g'
 }
 
 # Main logic

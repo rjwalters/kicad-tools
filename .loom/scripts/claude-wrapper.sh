@@ -226,7 +226,8 @@ start_output_monitor() {
                 local found_error=false
                 for pattern in "500 Internal Server Error" "Rate limit exceeded" \
                     "overloaded" "temporarily unavailable" "503 Service" \
-                    "502 Bad Gateway" "No messages returned"; do
+                    "502 Bad Gateway" "No messages returned" \
+                    "PreToolUse.*hook error"; do
                     if echo "${tail_content}" | grep -qi "${pattern}" 2>/dev/null; then
                         found_error=true
                         break
