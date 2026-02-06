@@ -1,0 +1,6 @@
+{
+  "issue": 1173,
+  "failure_message": "Builder interrupted: builder exited with code 1",
+  "interrupted": true,
+  "wip_commit": true
+}
