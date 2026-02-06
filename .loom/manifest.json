@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-02-06T05:18:20Z",
+  "generated_at": "2026-02-06T06:56:33Z",
   "loom_version": "{{LOOM_VERSION}}",
   "loom_commit": "{{LOOM_COMMIT}}",
   "file_count": 134,
@@ -358,8 +358,8 @@
       "size": 1499
     },
     ".loom/scripts/claude-wrapper.sh": {
-      "sha256": "d1cc80e6967240b4739ecaca160578ac6a9e777b2238f716c27699164f1d509d",
-      "size": 14495
+      "sha256": "820ebfd57ca795c6720e3e9ccd8b9f41dbf18903e4833232ee7b6c687db16b12",
+      "size": 14542
     },
     ".loom/scripts/clean-labels.sh": {
       "sha256": "f47a7979fa43553295a71b2aa374e0bb6ff9a453e1788059dd7ea0bb12de4a80",
@@ -386,8 +386,8 @@
       "size": 7910
     },
     ".loom/scripts/cli/loom-logs.sh": {
-      "sha256": "b354860bd4fc209769b8e038baadf01e5434b219dadba11c1206afe1f1cc1df1",
-      "size": 9013
+      "sha256": "426b79e90e7c035447a530e086c3303252e4278d5f5eed9e131f7d61c6904f6b",
+      "size": 9205
     },
     ".loom/scripts/cli/loom-scale.sh": {
       "sha256": "02da51ca95a01a01646ab7ce20648672d2588231994ab60472c4a59252c49937",
@@ -434,8 +434,8 @@
       "size": 4594
     },
     ".loom/scripts/lib/pipe-pane-cmd.sh": {
-      "sha256": "b49ada9d16bc839fb51128103e5cb8c0a68adfb2beba2a1c80e752dcd6749406",
-      "size": 1059
+      "sha256": "f1316261a73352413eb1ab4a268acb7748f0dfb645ab8fc1ddcca205082db6c4",
+      "size": 1280
     },
     ".loom/scripts/loom-daemon.sh": {
       "sha256": "7912599243af5b8a8182c460c4de9f2ee8d76129724f07fd8e5fa2fb14261b73",
@@ -534,7 +534,7 @@
       "size": 29265
     },
     "CLAUDE.md": {
-      "sha256": "5e3ae61b04f1d03e02345efbf4751702cbb105a36367ee1ef4b48e82aa55013f",
+      "sha256": "8551fd59ae3ded26186f044f4b9a7799983204afd04196c8884e81b4da31ae5f",
       "size": 31088
     },
     "loom": {
