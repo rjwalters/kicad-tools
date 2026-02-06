@@ -102,9 +102,11 @@ class NetNode:
         pin_function = ""
         pin_type = ""
 
-        # Reference is in (ref "...") child node in KiCad netlist format
+        # Reference is in (ref "...") child node or as first positional atom
         if ref_node := sexp.find("ref"):
             ref = ref_node.get_string(0) or ""
+        else:
+            ref = sexp.get_string(0) or ""
 
         if pin_node := sexp.find("pin"):
             pin = pin_node.get_string(0) or ""

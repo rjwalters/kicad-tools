@@ -130,7 +130,7 @@ class TestLayer:
         """Test layer values."""
         assert Layer.F_CU.value == "F.Cu"
         assert Layer.B_CU.value == "B.Cu"
-        assert Layer.EDGE.value == "Edge.Cuts"
+        assert Layer.EDGE_CUTS.value == "Edge.Cuts"
 
 
 class TestPad:

@@ -199,8 +199,8 @@ class TestSnapshotCapture:
         # Verify component positions
         r1 = snapshot.get_component("R1")
         if r1:
-            assert r1.x == 100.0
-            assert r1.y == 50.0
+            assert r1.x == 5.0  # Board-relative (origin at 95,35)
+            assert r1.y == 15.0
 
     def test_capture_convenience_function(self, test_project_pcb: Path, test_project_sch: Path):
         """Test capture_layout convenience function."""
