@@ -534,7 +534,8 @@ class TestNetNode:
 
     def test_from_sexp(self):
         """Test parsing net node from S-expression."""
-        sexp = parse_sexp("""(node "R1"
+        sexp = parse_sexp("""(node
+            (ref "R1")
             (pin "1")
             (pinfunction "~")
             (pintype "passive")
@@ -553,8 +554,8 @@ class TestNetlistNet:
         sexp = parse_sexp("""(net
             (code "1")
             (name "GND")
-            (node "R1" (pin "1"))
-            (node "C1" (pin "2"))
+            (node (ref "R1") (pin "1"))
+            (node (ref "C1") (pin "2"))
         )""")
         net = NetlistNet.from_sexp(sexp)
         assert net.code == 1

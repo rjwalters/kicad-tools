@@ -313,8 +313,8 @@ class TestSessionIsolation:
         session2 = session_manager.get(info2.id)
         comp_pos = session2.get_component_position("C1")
 
-        assert comp_pos["x"] == 120.0  # Original position
-        assert comp_pos["y"] == 120.0
+        assert comp_pos["x"] == 20.0  # Board-relative position (origin at 100, 100)
+        assert comp_pos["y"] == 20.0
 
 
 class TestSessionExpiration:

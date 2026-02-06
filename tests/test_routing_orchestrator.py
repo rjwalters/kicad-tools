@@ -130,8 +130,8 @@ class TestRoutingOrchestrator:
         """Verify default strategy selection for standard nets."""
         # Create simple pads (wide spacing, not fine-pitch)
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            Pad(x=0, y=0, width=1.0, height=1.0, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=10.0, width=1.0, height=1.0, net=1, net_name="NET1", pin="2"),
         ]
 
         strategy = orchestrator._select_strategy("NET1", intent=None, pads=pads)
@@ -143,9 +143,9 @@ class TestRoutingOrchestrator:
         """Verify escape routing strategy for fine-pitch pads."""
         # Create fine-pitch pads (0.5mm spacing, below 0.8mm threshold)
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=0.4, height=0.4),
-            Pad(0, 0.5, 0, "2", 1, layer=0, width=0.4, height=0.4),
-            Pad(0, 1.0, 0, "3", 1, layer=0, width=0.4, height=0.4),
+            Pad(x=0, y=0, width=0.4, height=0.4, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=0.5, width=0.4, height=0.4, net=1, net_name="NET1", pin="2"),
+            Pad(x=0, y=1.0, width=0.4, height=0.4, net=1, net_name="NET1", pin="3"),
         ]
 
         strategy = orchestrator._select_strategy("NET1", intent=None, pads=pads)
@@ -161,8 +161,8 @@ class TestRoutingOrchestrator:
         intent.impedance = 90
 
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            Pad(x=0, y=0, width=1.0, height=1.0, net=1, net_name="USB_D+", pin="1"),
+            Pad(x=0, y=10.0, width=1.0, height=1.0, net=1, net_name="USB_D+", pin="2"),
         ]
 
         strategy = orchestrator._select_strategy("USB_D+", intent=intent, pads=pads)
@@ -173,8 +173,8 @@ class TestRoutingOrchestrator:
     def test_route_net_success(self, orchestrator):
         """Verify successful routing returns proper result."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            Pad(x=0, y=0, width=1.0, height=1.0, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=10.0, width=1.0, height=1.0, net=1, net_name="NET1", pin="2"),
         ]
 
         result = orchestrator.route_net("NET1", pads=pads)
@@ -189,8 +189,8 @@ class TestRoutingOrchestrator:
     def test_route_net_with_metrics(self, orchestrator):
         """Verify routing result includes performance metrics."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            Pad(x=0, y=0, width=1.0, height=1.0, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=10.0, width=1.0, height=1.0, net=1, net_name="NET1", pin="2"),
         ]
 
         result = orchestrator.route_net("NET1", pads=pads)
@@ -204,8 +204,8 @@ class TestRoutingOrchestrator:
     def test_needs_escape_routing_wide_pitch(self, orchestrator):
         """Verify wide-pitch pads don't trigger escape routing."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 2.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            Pad(x=0, y=0, width=1.0, height=1.0, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=2.0, width=1.0, height=1.0, net=1, net_name="NET1", pin="2"),
         ]
 
         needs_escape = orchestrator._needs_escape_routing(pads)
@@ -214,8 +214,8 @@ class TestRoutingOrchestrator:
     def test_needs_escape_routing_fine_pitch(self, orchestrator):
         """Verify fine-pitch pads trigger escape routing."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=0.4, height=0.4),
-            Pad(0, 0.6, 0, "2", 1, layer=0, width=0.4, height=0.4),
+            Pad(x=0, y=0, width=0.4, height=0.4, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=0.6, width=0.4, height=0.4, net=1, net_name="NET1", pin="2"),
         ]
 
         needs_escape = orchestrator._needs_escape_routing(pads)
@@ -224,8 +224,8 @@ class TestRoutingOrchestrator:
     def test_check_density_sparse(self, orchestrator):
         """Verify density calculation for sparse pads."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 20.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            Pad(x=0, y=0, width=1.0, height=1.0, net=1, net_name="NET1", pin="1"),
+            Pad(x=0, y=20.0, width=1.0, height=1.0, net=1, net_name="NET1", pin="2"),
         ]
 
         density = orchestrator._check_density(pads)
@@ -235,7 +235,15 @@ class TestRoutingOrchestrator:
         """Verify density calculation for dense pads."""
         # Create many pads in small area (1x1mm)
         pads = [
-            Pad(0, 0.2 * i, 0.2 * j, f"p{i}_{j}", 1, layer=0, width=0.15, height=0.15)
+            Pad(
+                x=0.2 * i,
+                y=0.2 * j,
+                width=0.15,
+                height=0.15,
+                net=1,
+                net_name="NET1",
+                pin=f"p{i}_{j}",
+            )
             for i in range(5)
             for j in range(5)
         ]

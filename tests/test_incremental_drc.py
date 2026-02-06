@@ -438,8 +438,8 @@ class TestIncrementalDRC:
         violations = drc.full_check()
         assert len(violations) == 0  # Start clean
 
-        # Move R1 very close to R2 (R2 is at 140, 140)
-        delta = drc.check_move("R1", 141.0, 140.0)
+        # Move R1 very close to R2 (R2 is at board-relative 40, 40)
+        delta = drc.check_move("R1", 41.0, 40.0)
 
         # Should detect new violations
         assert len(delta.new_violations) > 0

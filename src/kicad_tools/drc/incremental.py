@@ -466,11 +466,16 @@ class IncrementalDRC:
         dy = new_y - old_bounds.center_y
         new_bounds = old_bounds.translate(dx, dy)
 
-        # Find affected area (union of old and new positions, expanded by clearance)
-        affected_area = old_bounds.union(new_bounds).expand(self._max_clearance)
+        # Find affected areas around both old and new positions, expanded by clearance.
+        # We query both separately to handle large moves where the new position's
+        # neighbors may be far from the old position (and vice versa).
+        old_affected = old_bounds.expand(self._max_clearance)
+        new_affected = new_bounds.expand(self._max_clearance)
 
-        # Find components in affected area
-        nearby_refs = self.state.spatial_index.query(affected_area)
+        # Find components near either old or new position
+        nearby_refs_set = set(self.state.spatial_index.query(old_affected))
+        nearby_refs_set.update(self.state.spatial_index.query(new_affected))
+        nearby_refs = list(nearby_refs_set)
         if ref not in nearby_refs:
             nearby_refs.append(ref)
 
