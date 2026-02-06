@@ -199,6 +199,9 @@ known-first-party = ["kicad_tools"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--cov=kicad_tools --cov-report=term-missing --cov-report=html"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.coverage.run]
 source = ["src/kicad_tools"]

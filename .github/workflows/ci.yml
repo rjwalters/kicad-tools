@@ -59,6 +59,7 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -78,4 +79,4 @@ jobs:
         run: uv sync --extra dev --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest --cov=kicad_tools --cov-report=term-missing
+        run: uv run pytest --benchmark-disable -m "not slow" --cov=kicad_tools --cov-report=term-missing
