@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-02-05T22:54:37Z",
+  "generated_at": "2026-02-06T01:44:49Z",
   "loom_version": "{{LOOM_VERSION}}",
   "loom_commit": "{{LOOM_COMMIT}}",
   "file_count": 134,
@@ -534,8 +534,8 @@
       "size": 29265
     },
     "CLAUDE.md": {
-      "sha256": "dd9fc2f6c4b71a9089430d14da764347816c585804160dd9b8d47a3c4d86a14a",
-      "size": 31090
+      "sha256": "ef566e11dff33cda87c2d71576b55bb93d1a1b5b4d17352d2cb579fc3a619165",
+      "size": 31088
     },
     "loom": {
       "sha256": "30193930e2715dbb0b18a9072c77829fb658069585c7ea8b29c0b6e27a0e8402",
