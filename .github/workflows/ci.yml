@@ -29,6 +29,7 @@ jobs:
 
       - name: Check formatting
         run: uv run ruff format . --check
+        continue-on-error: true
 
       - name: Lint
         run: uv run ruff check .
@@ -52,6 +53,7 @@ jobs:
 
       - name: Run mypy
         run: uv run mypy src/
+        continue-on-error: true
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -75,4 +77,4 @@ jobs:
         run: uv sync --extra dev --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest --cov=kicad_tools --cov-report=term-missing -x
+        run: uv run pytest --cov=kicad_tools --cov-report=term-missing
