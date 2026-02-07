@@ -463,7 +463,7 @@ class SExp:
             # Check if needs quoting
             if self._needs_quoting(self.value):
                 escaped = self.value.replace("\\", "\\\\").replace('"', '\\"')
-                # Do NOT escape newlines/tabs - KiCad expects actual control chars in quoted strings
+                escaped = escaped.replace("\n", "\\n").replace("\t", "\\t")
                 return f'"{escaped}"'
             return self.value
         # For numbers, use original string if available (for round-trip preservation)
@@ -523,6 +523,8 @@ class SExp:
             "top",
             "bottom",
             "mirror",
+            "front",
+            "back",
             # Pin types
             "input",
             "output",
@@ -602,6 +604,9 @@ class SExp:
             "uvia_drill",
             "diff_pair_width",
             "diff_pair_gap",
+            # Other
+            "allow_missing_courtyard",
+            "allow_soldermask_bridges",
         }
 
         if s in unquoted_keywords:
