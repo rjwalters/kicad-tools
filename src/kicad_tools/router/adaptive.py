@@ -133,6 +133,8 @@ class AdaptiveAutorouter:
         )
 
         # Create autorouter with custom grid
+        # Uses __new__ to bypass __init__ for custom grid injection.
+        # Must manually initialize all attributes that __init__ sets.
         autorouter = Autorouter.__new__(Autorouter)
         autorouter.rules = self.rules
         autorouter.net_class_map = DEFAULT_NET_CLASS_MAP
@@ -143,6 +145,19 @@ class AdaptiveAutorouter:
         autorouter.nets = {}
         autorouter.net_names = {}
         autorouter.routes = []
+        autorouter.routing_failures = []
+        autorouter.record_decisions = False
+        autorouter._decision_store = None
+        autorouter._component_pitches = None
+        autorouter._force_python = False
+        autorouter._stackup = None
+        autorouter._physics_enabled = False
+        autorouter._transmission_line = None
+
+        # Initialize length tracker
+        from .length import LengthTracker
+
+        autorouter._length_tracker = LengthTracker()
 
         # Initialize zone manager
         from .zones import ZoneManager
