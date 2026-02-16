@@ -16,6 +16,16 @@ from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
 
+def _pad(x: float, y: float, net: int = 1, net_name: str = "NET1",
+         width: float = 1.0, height: float = 1.0,
+         ref: str = "U1", pin: str = "1") -> Pad:
+    """Helper to create Pad objects with sensible defaults."""
+    return Pad(
+        x=x, y=y, width=width, height=height,
+        net=net, net_name=net_name, ref=ref, pin=pin,
+    )
+
+
 @pytest.fixture
 def mock_pcb():
     """Create a mock PCB object."""
@@ -130,8 +140,8 @@ class TestRoutingOrchestrator:
         """Verify default strategy selection for standard nets."""
         # Create simple pads (wide spacing, not fine-pitch)
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=10.0, y=0, pin="2"),
         ]
 
         strategy = orchestrator._select_strategy("NET1", intent=None, pads=pads)
@@ -143,9 +153,9 @@ class TestRoutingOrchestrator:
         """Verify escape routing strategy for fine-pitch pads."""
         # Create fine-pitch pads (0.5mm spacing, below 0.8mm threshold)
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=0.4, height=0.4),
-            Pad(0, 0.5, 0, "2", 1, layer=0, width=0.4, height=0.4),
-            Pad(0, 1.0, 0, "3", 1, layer=0, width=0.4, height=0.4),
+            _pad(x=0, y=0, width=0.4, height=0.4, pin="1"),
+            _pad(x=0.5, y=0, width=0.4, height=0.4, pin="2"),
+            _pad(x=1.0, y=0, width=0.4, height=0.4, pin="3"),
         ]
 
         strategy = orchestrator._select_strategy("NET1", intent=None, pads=pads)
@@ -161,8 +171,8 @@ class TestRoutingOrchestrator:
         intent.impedance = 90
 
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=10.0, y=0, pin="2"),
         ]
 
         strategy = orchestrator._select_strategy("USB_D+", intent=intent, pads=pads)
@@ -173,8 +183,8 @@ class TestRoutingOrchestrator:
     def test_route_net_success(self, orchestrator):
         """Verify successful routing returns proper result."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
         ]
 
         result = orchestrator.route_net("NET1", pads=pads)
@@ -189,8 +199,8 @@ class TestRoutingOrchestrator:
     def test_route_net_with_metrics(self, orchestrator):
         """Verify routing result includes performance metrics."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 10.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
         ]
 
         result = orchestrator.route_net("NET1", pads=pads)
@@ -201,11 +211,77 @@ class TestRoutingOrchestrator:
         assert result.performance.routing_ms >= 0
         assert result.performance.backend_type == "cpu"
 
+    def test_route_global_computes_length(self, orchestrator):
+        """Verify global routing computes length from corridor waypoints."""
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=25.0, y=5.0, pin="2"),
+        ]
+
+        result = orchestrator._route_global("NET1", pads)
+
+        assert result.success is True
+        assert result.strategy_used == RoutingStrategy.GLOBAL_WITH_REPAIR
+        # Length should be approximately the distance between pads
+        assert result.metrics.total_length_mm > 0
+
+    def test_route_global_insufficient_pads(self, orchestrator):
+        """Verify global routing fails gracefully with insufficient pads."""
+        pads = [_pad(x=5.0, y=5.0, pin="1")]
+
+        result = orchestrator._route_global("NET1", pads)
+
+        assert result.success is False
+        assert "Insufficient" in result.error_message
+
+    def test_route_escape_then_global(self, orchestrator):
+        """Verify escape-then-global routing chains both phases."""
+        pads = [
+            _pad(x=5.0, y=5.0, width=0.4, height=0.4, pin="1"),
+            _pad(x=15.0, y=5.0, width=0.4, height=0.4, pin="2"),
+        ]
+
+        result = orchestrator._route_escape_then_global("NET1", pads)
+
+        assert result.strategy_used == RoutingStrategy.ESCAPE_THEN_GLOBAL
+        # Global routing phase should still succeed even without escape grid
+        assert result.success is True
+
+    def test_route_hierarchical_with_intent(self, orchestrator):
+        """Verify hierarchical routing accepts differential pair intent."""
+        intent = MagicMock()
+        intent.is_differential = True
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="USB_D+", ref="J1", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="USB_D+", ref="U1", pin="D+"),
+        ]
+
+        result = orchestrator._route_hierarchical("USB_D+", intent, pads)
+
+        assert result.strategy_used == RoutingStrategy.HIERARCHICAL_DIFF_PAIR
+        assert isinstance(result.metrics, RoutingMetrics)
+
+    def test_has_via_conflicts_no_grid(self, orchestrator):
+        """Verify via conflict check returns False when no grid available."""
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        # mock_pcb has no grid attribute, so should return False
+        assert orchestrator._has_via_conflicts("NET1", pads) is False
+
+    def test_has_via_conflicts_no_pads(self, orchestrator):
+        """Verify via conflict check returns False with no pads."""
+        assert orchestrator._has_via_conflicts("NET1", None) is False
+        assert orchestrator._has_via_conflicts("NET1", []) is False
+
     def test_needs_escape_routing_wide_pitch(self, orchestrator):
         """Verify wide-pitch pads don't trigger escape routing."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 2.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=2.0, y=0, pin="2"),
         ]
 
         needs_escape = orchestrator._needs_escape_routing(pads)
@@ -214,8 +290,8 @@ class TestRoutingOrchestrator:
     def test_needs_escape_routing_fine_pitch(self, orchestrator):
         """Verify fine-pitch pads trigger escape routing."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=0.4, height=0.4),
-            Pad(0, 0.6, 0, "2", 1, layer=0, width=0.4, height=0.4),
+            _pad(x=0, y=0, width=0.4, height=0.4, pin="1"),
+            _pad(x=0.6, y=0, width=0.4, height=0.4, pin="2"),
         ]
 
         needs_escape = orchestrator._needs_escape_routing(pads)
@@ -224,8 +300,8 @@ class TestRoutingOrchestrator:
     def test_check_density_sparse(self, orchestrator):
         """Verify density calculation for sparse pads."""
         pads = [
-            Pad(0, 0, 0, "1", 1, layer=0, width=1.0, height=1.0),
-            Pad(0, 20.0, 0, "2", 1, layer=0, width=1.0, height=1.0),
+            _pad(x=0, y=0, pin="1"),
+            _pad(x=20.0, y=0, pin="2"),
         ]
 
         density = orchestrator._check_density(pads)
@@ -235,7 +311,11 @@ class TestRoutingOrchestrator:
         """Verify density calculation for dense pads."""
         # Create many pads in small area (1x1mm)
         pads = [
-            Pad(0, 0.2 * i, 0.2 * j, f"p{i}_{j}", 1, layer=0, width=0.15, height=0.15)
+            _pad(
+                x=0.2 * i, y=0.2 * j,
+                width=0.15, height=0.15,
+                ref="U1", pin=f"p{i}_{j}",
+            )
             for i in range(5)
             for j in range(5)
         ]
