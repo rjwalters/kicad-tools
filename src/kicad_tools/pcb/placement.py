@@ -3,7 +3,6 @@ Component placement for PCB blocks.
 
 This module provides:
 - ComponentPlacement: Placement of a component within a block
-- FOOTPRINT_PADS: Standard pad positions for common footprints
 - get_footprint_pads: Get pad positions for a footprint
 """
 
@@ -138,4 +137,4 @@ def get_footprint_pads(footprint: str) -> dict[str, tuple[float, float]]:
     return {"1": (-0.8, 0), "2": (0.8, 0)}
 
 
-__all__ = ["ComponentPlacement", "FOOTPRINT_PADS", "get_footprint_pads"]
+__all__ = ["ComponentPlacement", "get_footprint_pads"]

@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["main", "BuildResult", "build_native"]
+__all__ = ["main", "BuildResult"]
 
 
 @dataclass

@@ -83,7 +83,6 @@ __all__ = [
     "symbols_main",
     "nets_main",
     "erc_main",
-    "erc_explain_main",
     "drc_main",
     "drc_summary_main",
     "bom_main",

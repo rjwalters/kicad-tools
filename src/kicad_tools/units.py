@@ -20,7 +20,6 @@ __all__ = [
     "UnitFormatter",
     "MM_PER_MIL",
     "get_unit_formatter",
-    "format_length",
     "format_coordinate",
 ]
 

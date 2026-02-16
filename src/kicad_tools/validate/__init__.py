@@ -55,9 +55,6 @@ from .models import (
     ValidationResult,
     ViolationCategory,
 )
-from .models import (
-    DRCViolation as DRCViolationNew,
-)
 from .netlist import NetlistValidator, SyncIssue, SyncResult
 from .placement import BOMPlacementVerifier, PlacementResult, PlacementStatus
 from .violations import DRCResults, DRCViolation
@@ -69,7 +66,6 @@ __all__ = [
     "Location",
     "BaseViolation",
     "ValidationResult",
-    "DRCViolationNew",
     "DRCResult",
     # DRC validation (legacy, for backwards compatibility)
     "DRCChecker",
