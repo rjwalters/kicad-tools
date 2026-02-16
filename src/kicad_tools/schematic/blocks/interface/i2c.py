@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from ..base import CircuitBlock
+from ..interfaces import DataPort, PowerPort
 
 if TYPE_CHECKING:
     from kicad_sch_helper import Schematic
@@ -202,6 +203,49 @@ class I2CPullups(CircuitBlock):
 
         # Store VCC bus Y position for rail connection
         self._vcc_y = r1_pin1[1]
+
+        # Register typed ports with I2C interface metadata
+        self._register_typed_ports()
+
+    def _register_typed_ports(self) -> None:
+        """Register typed ports with I2C interface metadata."""
+        for name, pos in self.ports.items():
+            if name == "SDA":
+                self.typed_ports[name] = DataPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="bidirectional",
+                    protocol="i2c",
+                    signal_role="sda",
+                    group="i2c_bus",
+                )
+            elif name == "SCL":
+                self.typed_ports[name] = DataPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="bidirectional",
+                    protocol="i2c",
+                    signal_role="scl",
+                    group="i2c_bus",
+                )
+            elif name == "VCC":
+                self.typed_ports[name] = PowerPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="power",
+                )
+            elif name == "GND":
+                self.typed_ports[name] = PowerPort(
+                    name=name,
+                    x=pos[0],
+                    y=pos[1],
+                    direction="passive",
+                    voltage_min=0.0,
+                    voltage_max=0.0,
+                )
 
     def connect_to_rails(
         self,
