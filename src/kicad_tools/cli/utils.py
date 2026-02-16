@@ -11,7 +11,7 @@ from kicad_tools.exceptions import KiCadToolsError
 if TYPE_CHECKING:
     from rich.console import Console
 
-__all__ = ["format_error", "print_error", "get_error_console"]
+__all__ = ["format_error", "print_error"]
 
 # Module-level console for error output, created lazily
 _error_console: Console | None = None

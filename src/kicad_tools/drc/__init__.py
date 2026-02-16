@@ -29,8 +29,6 @@ from .incremental import (
     IncrementalDRC,
     SpatialIndex,
 )
-from .incremental import Rectangle as DRCRectangle
-from .incremental import Violation as IncrementalViolation
 from .predictive import PredictiveAnalyzer, PredictiveWarning
 from .repair_clearance import ClearanceRepairer, NudgeResult, RepairResult
 from .report import (
@@ -73,8 +71,6 @@ __all__ = [
     "DRCState",
     "DRCDelta",
     "SpatialIndex",
-    "DRCRectangle",
-    "IncrementalViolation",
     # Predictive analysis
     "PredictiveAnalyzer",
     "PredictiveWarning",
