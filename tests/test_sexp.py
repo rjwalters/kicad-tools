@@ -306,17 +306,21 @@ class TestSExpSerialization:
         assert "42" in result
 
     def test_serialize_multiline_text(self):
-        """Serialize multiline text with actual newlines (not escape sequences).
+        """Serialize multiline text with escaped newlines.
 
-        KiCad expects actual newline characters in quoted strings, not \\n sequences.
-        See issue #602.
+        KiCad 9.x expects \\n escape sequences in quoted strings, not actual
+        newline characters. The parser's _ESCAPE_MAP converts these back to
+        real newlines on read, so roundtrip is preserved.
+
+        Updated from issue #602 based on real-world testing with KiCad 9.0.7
+        (PR #1163).
         """
         sexp = SExp("text")
         sexp.add("Line 1\nLine 2\nLine 3")
         result = serialize_sexp(sexp)
-        # Should contain actual newlines, not escape sequences
-        assert "\\n" not in result  # No literal backslash-n
-        assert "Line 1\nLine 2\nLine 3" in result  # Actual newlines preserved
+        # Should contain escape sequences, not actual newlines
+        assert "\\n" in result  # Escaped newlines
+        assert "Line 1\nLine 2\nLine 3" not in result  # No raw newlines
 
     def test_serialize_multiline_roundtrip(self):
         """Multiline text should survive parse-serialize-parse cycle."""
@@ -327,14 +331,32 @@ class TestSExpSerialization:
         reparsed = parse_sexp(serialized)
         assert reparsed.get_string(0) == original_text
 
-    def test_serialize_tabs_preserved(self):
-        """Tab characters should be preserved as actual tabs."""
+    def test_serialize_tabs_escaped(self):
+        """Tab characters should be escaped in output.
+
+        KiCad 9.x expects \\t escape sequences, not actual tab characters.
+        Updated from issue #602 based on real-world testing (PR #1163).
+        """
         sexp = SExp("text")
         sexp.add("Col1\tCol2\tCol3")
         result = serialize_sexp(sexp)
-        # Should contain actual tabs, not escape sequences
-        assert "\\t" not in result  # No literal backslash-t
-        assert "Col1\tCol2\tCol3" in result  # Actual tabs preserved
+        # Should contain escape sequences, not actual tabs
+        assert "\\t" in result  # Escaped tabs
+        assert "Col1\tCol2\tCol3" not in result  # No raw tabs
+
+    def test_serialize_kicad_keywords_unquoted(self):
+        """KiCad keywords like front, back should be output unquoted.
+
+        PR #1163: front, back, allow_missing_courtyard, and
+        allow_soldermask_bridges are valid KiCad keywords that must not
+        be quoted in S-expression output.
+        """
+        for keyword in ["front", "back", "allow_missing_courtyard", "allow_soldermask_bridges"]:
+            sexp = SExp("test")
+            sexp.add(keyword)
+            result = serialize_sexp(sexp)
+            assert f'"{keyword}"' not in result, f"{keyword} should not be quoted"
+            assert keyword in result
 
 
 class TestSExpFileIO:
