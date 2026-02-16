@@ -100,12 +100,14 @@ class TestGerberExporter:
         return pcb_path
 
     def test_init(self, mock_pcb_path):
-        exporter = GerberExporter(mock_pcb_path)
-        assert exporter.pcb_path == mock_pcb_path
+        with patch("kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            exporter = GerberExporter(mock_pcb_path)
+            assert exporter.pcb_path == mock_pcb_path
 
     def test_init_string_path(self, mock_pcb_path):
-        exporter = GerberExporter(str(mock_pcb_path))
-        assert exporter.pcb_path == mock_pcb_path
+        with patch("kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            exporter = GerberExporter(str(mock_pcb_path))
+            assert exporter.pcb_path == mock_pcb_path
 
     def test_preset_lookup(self, mock_pcb_path):
         # Test preset lookup via MANUFACTURER_PRESETS
