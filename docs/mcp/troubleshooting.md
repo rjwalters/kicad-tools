@@ -4,6 +4,24 @@ Solutions for common issues with the kicad-tools MCP server.
 
 ## Installation Issues
 
+### "kct binary not found" / MCP server fails on startup
+
+**Cause:** The MCP config references a `kct` binary path that doesn't exist
+(e.g., `~/.local/bin/kct`).
+
+**Solution:** Re-run setup to auto-detect the correct path:
+
+```bash
+# From the kicad-tools repo
+uv run kct mcp setup
+
+# Or for a global install
+kct mcp setup
+```
+
+This writes the correct command to `~/.claude/mcp.json` (Claude Code) or
+the Claude Desktop config file.
+
 ### "No module named 'kicad_tools'"
 
 **Cause:** kicad-tools is not installed or not in the Python path.
@@ -366,6 +384,7 @@ Include:
 
 | Error | Likely Cause | Quick Fix |
 |-------|--------------|-----------|
+| "kct binary not found" | Wrong path in MCP config | `uv run kct mcp setup` |
 | "No module named" | Not installed | `pip install "kicad-tools[mcp]"` |
 | "PCB file not found" | Wrong path | Use absolute path |
 | "Session not found" | Expired session | Start new session |
