@@ -45,10 +45,6 @@ jobs:
         with:
           version: "latest"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Install dependencies
         run: uv sync --extra dev
 
@@ -57,13 +53,9 @@ jobs:
         continue-on-error: true
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
+    name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -71,12 +63,8 @@ jobs:
         with:
           version: "latest"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
       - name: Install dependencies
-        run: uv sync --extra dev --python ${{ matrix.python-version }}
+        run: uv sync --extra dev
 
       - name: Run tests
         run: uv run pytest --benchmark-disable -m "not slow and not integration" --timeout=120 --cov=kicad_tools --cov-report=term-missing
