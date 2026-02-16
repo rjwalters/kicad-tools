@@ -51,6 +51,8 @@ The daemon will:
 | `/loom` | Start daemon in normal mode |
 | `/loom --merge` | Start in force mode (auto-promote, auto-merge) |
 | `/loom --force` | Alias for --merge |
+| `/loom -t 180` | Run for 3 hours then gracefully stop |
+| `/loom --timeout-min 60 --merge` | Merge mode for 1 hour |
 | `/loom --debug` | Start with debug logging |
 | `/loom status` | Check if daemon is running |
 | `/loom health` | Show daemon health status |

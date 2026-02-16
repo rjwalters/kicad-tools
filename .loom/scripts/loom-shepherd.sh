@@ -44,6 +44,16 @@ elif [[ -f "$REPO_ROOT/.loom/loom-source-path" ]]; then
         echo "  Re-run Loom installation or fix .loom/loom-source-path" >&2
         exit 1
     fi
+elif [[ -f "$REPO_ROOT/.loom/install-metadata.json" ]]; then
+    # Fallback: loom-source-path missing, try install-metadata.json
+    LOOM_SOURCE="$(sed -n 's/.*"loom_source" *: *"\(.*\)".*/\1/p' "$REPO_ROOT/.loom/install-metadata.json")"
+    if [[ -n "$LOOM_SOURCE" ]] && [[ -d "$LOOM_SOURCE/loom-tools" ]]; then
+        LOOM_TOOLS="$LOOM_SOURCE/loom-tools"
+        # Recreate loom-source-path for future runs
+        echo "$LOOM_SOURCE" > "$REPO_ROOT/.loom/loom-source-path"
+    else
+        LOOM_TOOLS=""
+    fi
 else
     # Neither found - will fall back to system-installed or error
     LOOM_TOOLS=""

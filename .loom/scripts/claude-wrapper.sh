@@ -42,6 +42,16 @@ TERMINAL_ID="${LOOM_TERMINAL_ID:-}"
 # Note: WORKSPACE may fail if CWD is invalid at startup - recover_cwd handles this
 WORKSPACE="${LOOM_WORKSPACE:-$(pwd 2>/dev/null || echo "$HOME")}"
 
+# Retry state file for external observability (see issue #2296).
+# When TERMINAL_ID is set, the wrapper writes its retry/backoff state to this
+# file so agent-wait-bg.sh and the shepherd can distinguish "wrapper retrying"
+# from "claude actively working".
+RETRY_STATE_DIR="${WORKSPACE}/.loom/retry-state"
+RETRY_STATE_FILE=""
+if [[ -n "${TERMINAL_ID}" ]]; then
+    RETRY_STATE_FILE="${RETRY_STATE_DIR}/${TERMINAL_ID}.json"
+fi
+
 # Logging helpers
 log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $*" >&2
@@ -53,6 +63,39 @@ log_warn() {
 
 log_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" >&2
+}
+
+# Write retry state to a JSON file for external observability (issue #2296).
+# Called when entering backoff or starting a new attempt so the shepherd
+# and agent-wait-bg.sh can see what the wrapper is doing.
+write_retry_state() {
+    if [[ -z "${RETRY_STATE_FILE}" ]]; then
+        return
+    fi
+    local status="$1"
+    local attempt="$2"
+    local last_error="${3:-}"
+    local next_retry_at="${4:-}"
+
+    mkdir -p "${RETRY_STATE_DIR}"
+    cat > "${RETRY_STATE_FILE}" <<EOJSON
+{
+  "status": "${status}",
+  "attempt": ${attempt},
+  "max_retries": ${MAX_RETRIES},
+  "last_error": $(printf '%s' "${last_error}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""'),
+  "next_retry_at": "${next_retry_at}",
+  "terminal_id": "${TERMINAL_ID}",
+  "updated_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+EOJSON
+}
+
+# Remove the retry state file on exit (success or permanent failure).
+clear_retry_state() {
+    if [[ -n "${RETRY_STATE_FILE}" ]] && [[ -f "${RETRY_STATE_FILE}" ]]; then
+        rm -f "${RETRY_STATE_FILE}"
+    fi
 }
 
 # Recover from deleted working directory
@@ -116,6 +159,139 @@ check_stop_signal() {
     return 1
 }
 
+# Resolve workspace root for MCP config lookup.
+# In worktrees, WORKSPACE may point to the worktree itself; the MCP config
+# (.mcp.json) lives in the git common directory (the main checkout).
+resolve_mcp_workspace() {
+    # If .mcp.json exists in WORKSPACE, use it directly
+    if [[ -f "${WORKSPACE}/.mcp.json" ]]; then
+        echo "${WORKSPACE}"
+        return
+    fi
+
+    # In a worktree, try the git common directory (main checkout)
+    local common_dir
+    if common_dir=$(git -C "${WORKSPACE}" rev-parse --git-common-dir 2>/dev/null); then
+        # common_dir is the .git dir; parent is the repo root
+        local repo_root
+        repo_root=$(cd "${common_dir}/.." 2>/dev/null && pwd)
+        if [[ -f "${repo_root}/.mcp.json" ]]; then
+            echo "${repo_root}"
+            return
+        fi
+    fi
+
+    # Fallback to WORKSPACE
+    echo "${WORKSPACE}"
+}
+
+# Pre-flight check: verify MCP server can start
+# Attempts to launch the mcp-loom Node.js server and checks for the startup
+# message on stderr. If the dist/ directory is missing or stale, attempts
+# a rebuild before retrying.
+check_mcp_server() {
+    local mcp_workspace
+    mcp_workspace=$(resolve_mcp_workspace)
+
+    local mcp_config="${mcp_workspace}/.mcp.json"
+    if [[ ! -f "${mcp_config}" ]]; then
+        log_warn "MCP config not found at ${mcp_config} - skipping MCP pre-flight"
+        return 0  # Non-fatal: MCP may not be configured
+    fi
+
+    # Extract the MCP server entry point from .mcp.json
+    local mcp_entry
+    mcp_entry=$(python3 -c "
+import json, sys
+with open('${mcp_config}') as f:
+    cfg = json.load(f)
+servers = cfg.get('mcpServers', {})
+for name, srv in servers.items():
+    args = srv.get('args', [])
+    if args:
+        print(args[-1])
+        sys.exit(0)
+" 2>/dev/null || echo "")
+
+    if [[ -z "${mcp_entry}" ]]; then
+        log_warn "Could not extract MCP entry point from ${mcp_config} - skipping MCP pre-flight"
+        return 0
+    fi
+
+    # Check if the entry point file exists
+    if [[ ! -f "${mcp_entry}" ]]; then
+        log_warn "MCP entry point missing: ${mcp_entry}"
+        _try_mcp_rebuild "${mcp_entry}"
+        return $?
+    fi
+
+    # Smoke test: start MCP server and verify it emits the startup message
+    # The MCP server writes "Loom MCP server running on stdio" to stderr on success.
+    # Use a short timeout - we just need to see the startup message.
+    local mcp_stderr
+    mcp_stderr=$(timeout 5 node "${mcp_entry}" </dev/null 2>&1 || true)
+
+    if echo "${mcp_stderr}" | grep -qi "running on stdio"; then
+        log_info "MCP server health check passed"
+        return 0
+    fi
+
+    # MCP server failed to start - log the error
+    log_warn "MCP server health check failed"
+    if [[ -n "${mcp_stderr}" ]]; then
+        log_warn "MCP stderr: ${mcp_stderr}"
+    fi
+
+    # Attempt rebuild and retry
+    _try_mcp_rebuild "${mcp_entry}"
+    return $?
+}
+
+# Attempt to rebuild the MCP server and re-verify
+_try_mcp_rebuild() {
+    local mcp_entry="$1"
+
+    # Derive the package directory from the entry point
+    # e.g., /path/to/mcp-loom/dist/index.js -> /path/to/mcp-loom
+    local mcp_dir
+    mcp_dir=$(dirname "$(dirname "${mcp_entry}")")
+
+    if [[ ! -f "${mcp_dir}/package.json" ]]; then
+        log_error "MCP package directory not found at ${mcp_dir} - cannot rebuild"
+        return 1
+    fi
+
+    log_info "Attempting MCP server rebuild in ${mcp_dir}..."
+
+    # Run npm build (suppressing verbose output)
+    if (cd "${mcp_dir}" && npm run build 2>&1 | tail -5) >&2; then
+        log_info "MCP rebuild completed"
+    else
+        log_error "MCP rebuild failed"
+        return 1
+    fi
+
+    # Re-check after rebuild
+    if [[ ! -f "${mcp_entry}" ]]; then
+        log_error "MCP entry point still missing after rebuild: ${mcp_entry}"
+        return 1
+    fi
+
+    local mcp_stderr
+    mcp_stderr=$(timeout 5 node "${mcp_entry}" </dev/null 2>&1 || true)
+
+    if echo "${mcp_stderr}" | grep -qi "running on stdio"; then
+        log_info "MCP server health check passed after rebuild"
+        return 0
+    fi
+
+    log_error "MCP server still fails after rebuild"
+    if [[ -n "${mcp_stderr}" ]]; then
+        log_error "MCP stderr after rebuild: ${mcp_stderr}"
+    fi
+    return 1
+}
+
 # Pre-flight check: verify Claude CLI is available
 check_cli_available() {
     if ! command -v claude &>/dev/null; then
@@ -124,6 +300,50 @@ check_cli_available() {
         return 1
     fi
     log_info "Claude CLI found: $(command -v claude)"
+    return 0
+}
+
+# Pre-flight check: verify authentication status
+# Uses `claude auth status --json` to confirm the CLI is logged in.
+# When CLAUDE_CONFIG_DIR is set, passes it through so the check uses
+# the same config the session will use.
+check_auth_status() {
+    local auth_output
+    local auth_exit_code
+
+    # Unset CLAUDECODE to avoid nested-session guard when running inside
+    # a Claude Code session (e.g., during testing or shepherd-spawned builds).
+    auth_output=$(CLAUDECODE='' claude auth status --json 2>&1) || auth_exit_code=$?
+    auth_exit_code="${auth_exit_code:-0}"
+
+    if [[ "${auth_exit_code}" -ne 0 ]]; then
+        log_error "Authentication check command failed (exit ${auth_exit_code})"
+        log_error "Output: ${auth_output}"
+        if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+            log_error "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}"
+            log_error "Run: CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR} claude auth login"
+        else
+            log_error "Run: claude auth login"
+        fi
+        return 1
+    fi
+
+    # Parse the loggedIn field from JSON output
+    local logged_in
+    logged_in=$(echo "${auth_output}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('loggedIn', False))" 2>/dev/null || echo "")
+
+    if [[ "${logged_in}" != "True" ]]; then
+        log_error "Authentication check failed: not logged in"
+        if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+            log_error "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR}"
+            log_error "Run: CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR} claude auth login"
+        else
+            log_error "Run: claude auth login"
+        fi
+        return 1
+    fi
+
+    log_info "Authentication check passed (logged in)"
     return 0
 }
 
@@ -175,6 +395,8 @@ is_transient_error() {
         "500 Internal Server Error"
         "overloaded"
         "temporarily unavailable"
+        "MCP server failed"
+        "MCP.*failed"
     )
 
     for pattern in "${patterns[@]}"; do
@@ -330,6 +552,7 @@ run_with_retry() {
         fi
 
         log_info "Attempt ${attempt}/${MAX_RETRIES}: Starting Claude CLI"
+        write_retry_state "running" "${attempt}"
 
         # Run Claude CLI, capturing both stdout and stderr
         # We need to capture output while also displaying it in real-time
@@ -345,10 +568,28 @@ run_with_retry() {
         # Use macOS `script` to preserve TTY (so Claude CLI sees isatty(stdout) = true)
         # while still capturing output to a file. A plain pipe (`| tee`) would replace
         # stdout with a pipe fd, causing Claude to switch to non-interactive --print mode.
+        # Falls back to direct execution when no TTY is available (e.g., when spawned
+        # from Claude Code's Bash tool rather than a tmux terminal).
         start_output_monitor "${temp_output}" "${monitor_pid_file}"
         set +e  # Temporarily disable errexit to capture exit code
-        script -q "${temp_output}" claude "$@"
-        exit_code=$?
+        unset CLAUDECODE  # Prevent nested session guard from blocking subprocess
+        # Export per-agent config dir if set (for session isolation)
+        if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+            export CLAUDE_CONFIG_DIR
+        fi
+        if [[ -n "${TMPDIR:-}" ]]; then
+            export TMPDIR
+        fi
+        if [ -t 0 ]; then
+            # TTY available - use script to preserve interactive mode
+            script -q "${temp_output}" claude "$@"
+            exit_code=$?
+        else
+            # No TTY (socket/pipe) - run claude directly, tee output for error detection
+            log_info "No TTY available, running claude directly (non-interactive mode)"
+            claude "$@" 2>&1 | tee "${temp_output}"
+            exit_code=${PIPESTATUS[0]}
+        fi
         set -e
         stop_output_monitor "${monitor_pid_file}"
 
@@ -358,6 +599,7 @@ run_with_retry() {
         # Check exit code
         if [[ "${exit_code}" -eq 0 ]]; then
             log_info "Claude CLI completed successfully"
+            clear_retry_state
             return 0
         fi
 
@@ -367,6 +609,7 @@ run_with_retry() {
         if ! is_transient_error "${output}" "${exit_code}"; then
             log_error "Non-transient error detected - not retrying"
             log_error "Output: ${output}"
+            clear_retry_state
             return "${exit_code}"
         fi
 
@@ -382,6 +625,14 @@ run_with_retry() {
 
         if [[ "${attempt}" -lt "${MAX_RETRIES}" ]]; then
             log_warn "Transient error detected. Waiting $(format_duration "${wait_time}") before retry..."
+
+            # Truncate error output for the retry state file (first 200 chars)
+            local error_snippet="${output:0:200}"
+            local next_retry_ts
+            next_retry_ts=$(date -u -v+"${wait_time}"S '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                || date -u -d "+${wait_time} seconds" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                || echo "")
+            write_retry_state "backoff" "${attempt}" "${error_snippet}" "${next_retry_ts}"
 
             # Sleep with periodic stop signal checks
             local elapsed=0
@@ -402,6 +653,7 @@ run_with_retry() {
 
     log_error "Max retries (${MAX_RETRIES}) exceeded"
     log_error "Last error: ${output}"
+    clear_retry_state
     return 1
 }
 
@@ -415,12 +667,25 @@ run_preflight_checks() {
 
     check_api_reachable  # Non-fatal, just logs
 
+    if ! check_auth_status; then
+        log_error "Authentication pre-flight check failed"
+        return 1
+    fi
+
+    if ! check_mcp_server; then
+        log_error "MCP server pre-flight check failed"
+        return 1
+    fi
+
     log_info "Pre-flight checks passed"
     return 0
 }
 
 # Main entry point
 main() {
+    # Ensure retry state file is cleaned up on exit (normal or abnormal)
+    trap clear_retry_state EXIT
+
     log_info "Claude wrapper starting"
     log_info "Arguments: $*"
     log_info "Workspace: ${WORKSPACE}"

@@ -17,6 +17,7 @@
 # Options (user-facing):
 #   --force, -f      Enable force mode (auto-promote proposals, auto-merge)
 #   --merge, -m      Alias for --force (for CLI parity with /loom --merge)
+#   --timeout-min N, -t N  Stop daemon after N minutes (0 = no timeout)
 #   --debug, -d      Enable debug logging
 #   --status         Check if daemon is running
 #   --health         Show daemon health status
@@ -45,6 +46,16 @@ elif [[ -f "$REPO_ROOT/.loom/loom-source-path" ]]; then
         echo "  The recorded Loom source path may be invalid." >&2
         echo "  Re-run Loom installation or fix .loom/loom-source-path" >&2
         exit 1
+    fi
+elif [[ -f "$REPO_ROOT/.loom/install-metadata.json" ]]; then
+    # Fallback: loom-source-path missing, try install-metadata.json
+    LOOM_SOURCE="$(sed -n 's/.*"loom_source" *: *"\(.*\)".*/\1/p' "$REPO_ROOT/.loom/install-metadata.json")"
+    if [[ -n "$LOOM_SOURCE" ]] && [[ -d "$LOOM_SOURCE/loom-tools" ]]; then
+        LOOM_TOOLS="$LOOM_SOURCE/loom-tools"
+        # Recreate loom-source-path for future runs
+        echo "$LOOM_SOURCE" > "$REPO_ROOT/.loom/loom-source-path"
+    else
+        LOOM_TOOLS=""
     fi
 else
     # Neither found - will fall back to system-installed or error
@@ -85,7 +96,19 @@ if [[ -n "$LOOM_TOOLS" ]] && [[ -x "$LOOM_TOOLS/.venv/bin/loom-daemon" ]]; then
     # Use venv from loom-tools directory
     exec "$LOOM_TOOLS/.venv/bin/loom-daemon" ${args[@]+"${args[@]}"}
 elif command -v loom-daemon &>/dev/null; then
-    # System-installed
+    # System-installed - verify loom_tools can be imported
+    if ! python3 -c "import loom_tools" 2>/dev/null; then
+        echo "[ERROR] loom-daemon is installed but cannot import loom_tools." >&2
+        echo "" >&2
+        echo "  This usually means the editable install source directory was deleted" >&2
+        echo "  (e.g., a worktree was removed while loom-tools was pip install -e'd from it)." >&2
+        echo "" >&2
+        echo "  To fix:" >&2
+        echo "    1. Reinstall loom-tools: pip install loom-tools" >&2
+        echo "    2. Or reinstall from source: pip install -e /path/to/loom/loom-tools" >&2
+        echo "" >&2
+        exit 1
+    fi
     exec loom-daemon ${args[@]+"${args[@]}"}
 else
     echo "[ERROR] Python daemon not available." >&2

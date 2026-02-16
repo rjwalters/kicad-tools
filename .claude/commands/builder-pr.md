@@ -278,6 +278,8 @@ Closes #123
 | Shellcheck fixes | `shellcheck <file>` or `find ... -exec shellcheck {} \;` |
 | TypeScript errors | `pnpm tsc --noEmit` |
 | Lint issues | `pnpm lint` or scoped `biome check <file>` |
+| Rust compilation | `cargo check` (see Language-Specific section below) |
+| Rust linting | `cargo clippy` (see Language-Specific section below) |
 | Rust formatting | `cargo fmt --all -- --check` (see Language-Specific section below) |
 | Test passes | `pnpm test -- <pattern>` |
 | File exists/content | `cat <file>` or `grep <pattern> <file>` |
@@ -290,6 +292,12 @@ Closes #123
 If you modified any `.rs` files, run these checks **before committing**:
 
 ```bash
+# Compile check - catches type errors, borrow issues, async Send violations
+cargo check
+
+# Lint - catches common mistakes, anti-patterns, correctness issues
+cargo clippy
+
 # Format all Rust files (applies formatting)
 cargo fmt
 
@@ -297,17 +305,20 @@ cargo fmt
 cargo fmt --all -- --check
 ```
 
-**Why format before commit (not just rely on CI)?**
+**Why check compilation before commit (not just rely on CI)?**
 
 1. **Defense in depth** - Pre-commit hooks can fail silently in worktrees or with PATH issues
-2. **Early feedback** - Catch formatting issues immediately instead of after CI failure
-3. **Save a Doctor cycle** - `pnpm check:ci` includes format verification; catching it early avoids a fix cycle
+2. **Early feedback** - Catch errors immediately instead of after CI failure
+3. **Save a Doctor cycle** - `pnpm check:ci` includes compilation; catching it early avoids a fix cycle
+4. **Async pitfalls** - Common Rust async errors (e.g., holding `MutexGuard` across `.await`) are only caught by the compiler, not by reading code
 
 **Add to your pre-PR checklist when modifying Rust:**
 
 ```markdown
 Local verification:
 - [ ] `pnpm check:ci` passes
+- [ ] `cargo check` returns 0 (Rust files only)
+- [ ] `cargo clippy` returns 0 (Rust files only)
 - [ ] `cargo fmt --all -- --check` returns 0 (Rust files only)
 ```
 

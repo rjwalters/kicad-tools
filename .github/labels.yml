@@ -68,3 +68,16 @@
 - name: loom:urgent
   description: Critical/blocking issue requiring immediate attention
   color: "DC2626"  # red-600
+
+# Tier Labels (Goal Alignment)
+- name: tier:goal-advancing
+  description: Directly implements a milestone deliverable or unblocks goal work
+  color: "0E8A16"  # green - highest priority
+
+- name: tier:goal-supporting
+  description: Infrastructure, testing, or docs for milestone features
+  color: "FBCA04"  # yellow - medium priority
+
+- name: tier:maintenance
+  description: Cleanup, refactoring, or improvements not tied to current goals
+  color: "D4C5F9"  # purple - lower priority

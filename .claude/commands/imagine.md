@@ -12,6 +12,7 @@ When invoked with `/imagine <description>`, you guide the user through:
 3. Creating the repository structure
 4. Installing Loom
 5. Seeding initial documentation
+6. Creating starter issues for immediate autonomous work
 
 ## Workflow
 
@@ -23,8 +24,9 @@ When invoked with `/imagine <description>`, you guide the user through:
 3. [Name]      → Brainstorm and select project name
 4. [Create]    → Initialize local repo and GitHub
 5. [Install]   → Run Loom installation
-6. [Seed]      → Create README.md and ROADMAP.md
-7. [Complete]  → Report success and next steps
+6. [Seed]      → Create README.md, WORK_PLAN.md, WORK_LOG.md
+7. [Issues]    → Create starter GitHub issues with loom:issue labels
+8. [Complete]  → Report success and next steps
 ```
 
 ## Phase 1: Parse Description
@@ -176,14 +178,27 @@ build/
 .DS_Store
 Thumbs.db
 
-# Loom
-.loom/config.json
+# Loom runtime state (don't commit these)
+.loom-in-use
 .loom/state.json
 .loom/daemon-state.json
-.loom/*.json
-!.loom/roles/*.json
+.loom/[0-9][0-9]-daemon-state.json
+.loom/daemon-metrics.json
+.loom/health-metrics.json
+.loom/stuck-history.json
+.loom/alerts.json
+.loom/manifest.json
 .loom/worktrees/
 .loom/interventions/
+.loom/claims/
+.loom/signals/
+.loom/status/
+.loom/progress/
+.loom/diagnostics/
+.loom/metrics/
+.loom/logs/
+.loom/*.log
+.loom/*.sock
 EOF
 
 # Initial commit
@@ -254,6 +269,9 @@ Create initial documentation based on user answers.
 
 {{VISION_STATEMENT}}
 
+Current milestone: M0 - Foundation
+Target: Core scaffolding, build setup, and initial feature implementation
+
 ## Features
 
 - [ ] {{FEATURE_1}}
@@ -278,52 +296,91 @@ cd {{PROJECT_NAME}}
 MIT
 ```
 
-### ROADMAP.md Template
+### WORK_PLAN.md Template
 
 ```markdown
-# {{PROJECT_NAME}} Roadmap
+# Work Plan
 
-## Phase 1: Foundation
-*Target: Initial setup and core functionality*
+Prioritized roadmap of upcoming work, maintained by the Guide role.
 
-- [ ] Project scaffolding and build setup
-- [ ] Core {{CORE_COMPONENT}} implementation
-- [ ] Basic {{PRIMARY_FEATURE}}
-- [ ] Initial test suite
+<!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
-## Phase 2: Core Features
-*Target: Primary use cases working*
+## Urgent
 
-- [ ] {{FEATURE_1}}
-- [ ] {{FEATURE_2}}
-- [ ] {{FEATURE_3}}
-- [ ] Documentation for core features
+Issues requiring immediate attention (`loom:urgent`).
 
-## Phase 3: Polish
-*Target: Ready for users*
+*No urgent issues.*
 
-- [ ] Error handling and edge cases
-- [ ] Performance optimization
-- [ ] User documentation
-- [ ] Release preparation
+## Ready
 
-## Future Considerations
+Human-approved issues ready for implementation (`loom:issue`).
 
-- {{FUTURE_1}}
-- {{FUTURE_2}}
+- **#1**: Project scaffolding and build setup
+- **#2**: Core {{CORE_COMPONENT}} implementation
+- **#3**: {{FEATURE_1}}
+- **#4**: {{FEATURE_2}}
+- **#5**: {{FEATURE_3}}
+
+## In Progress
+
+Issues actively being worked by shepherds (`loom:building`).
+
+*No issues currently being built.*
+
+## Proposed
+
+Issues under evaluation (`loom:architect`, `loom:hermit`, `loom:curated`).
+
+*No proposed issues.*
+
+## Epics
+
+Active epics with progress tracking.
+
+*No active epics.*
+
+## Backlog Balance
+
+| Tier | Count |
+|------|-------|
+| Tier 1 (goal-advancing) | 3 |
+| Tier 2 (goal-supporting) | 2 |
+| Tier 3 (maintenance) | 0 |
+
+**Note:** Initial backlog seeded from project bootstrapping. Issue numbers above are placeholders — update after GitHub issues are created.
+```
+
+### WORK_LOG.md Template
+
+```markdown
+# Work Log
+
+Chronological record of completed work in this repository, maintained by the Guide role.
+
+Entries are grouped by date, newest first. Each entry references the merged PR or closed issue.
+
+<!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
+
+### {{TODAY_DATE}}
+
+- **Project bootstrapped** with Loom orchestration
+  - Project type: {{PROJECT_TYPE}}
+  - Tech stack: {{TECH_STACK}}
+  - Visibility: {{VISIBILITY}}
+  - Initial issues seeded: {{ISSUE_COUNT}}
 ```
 
 ### Commit Documentation
 
 ```bash
 # Add documentation
-git add README.md ROADMAP.md
+git add README.md WORK_PLAN.md WORK_LOG.md
 git commit -m "$(cat <<'EOF'
-Add initial README and ROADMAP
+Add initial README, WORK_PLAN, and WORK_LOG
 
-- Project vision and description
-- Development phases from user requirements
-- Getting started with Loom
+- Project vision and description with milestone markers
+- Work plan with seeded backlog for Guide role
+- Work log with bootstrapping entry
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
@@ -332,7 +389,71 @@ EOF
 git push origin main
 ```
 
-## Phase 7: Completion Report
+## Phase 7: Seed GitHub Issues
+
+Create 3-5 GitHub issues from the user's feature list so `/loom` has work ready immediately. Shepherds can start building without waiting for Architect proposals or manual issue creation.
+
+```bash
+# Create issues from the discovery phase features
+# Each issue gets the loom:issue label so shepherds can claim them
+
+# Issue 1: Project scaffolding (always included)
+gh issue create \
+  --title "Project scaffolding and build setup" \
+  --label "loom:issue" \
+  --label "tier:goal-advancing" \
+  --body "$(cat <<'BODY'
+## Summary
+Set up the project build system, directory structure, and development tooling.
+
+## Acceptance Criteria
+- [ ] Build system configured ({{BUILD_TOOL}})
+- [ ] Directory structure matches project type conventions
+- [ ] Development dependencies installed
+- [ ] Basic CI configuration (if applicable)
+- [ ] Project compiles/runs with hello-world equivalent
+BODY
+)"
+
+# Issue 2: Core component (always included)
+gh issue create \
+  --title "Core {{CORE_COMPONENT}} implementation" \
+  --label "loom:issue" \
+  --label "tier:goal-advancing" \
+  --body "$(cat <<'BODY'
+## Summary
+Implement the core {{CORE_COMPONENT}} that other features build on.
+
+## Acceptance Criteria
+- [ ] Core data structures/types defined
+- [ ] Basic functionality working
+- [ ] Unit tests for core logic
+BODY
+)"
+
+# Issues 3-5: User-requested features
+gh issue create \
+  --title "{{FEATURE_1}}" \
+  --label "loom:issue" \
+  --label "tier:goal-advancing" \
+  --body "## Summary\n\n{{FEATURE_1_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
+
+gh issue create \
+  --title "{{FEATURE_2}}" \
+  --label "loom:issue" \
+  --label "tier:goal-supporting" \
+  --body "## Summary\n\n{{FEATURE_2_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
+
+gh issue create \
+  --title "{{FEATURE_3}}" \
+  --label "loom:issue" \
+  --label "tier:goal-supporting" \
+  --body "## Summary\n\n{{FEATURE_3_DESCRIPTION}}\n\n## Acceptance Criteria\n\n- [ ] Feature implemented\n- [ ] Tests passing"
+```
+
+After creating issues, update the WORK_PLAN.md `## Ready` section with the actual issue numbers.
+
+## Phase 8: Completion Report
 
 Provide a clear summary and next steps:
 
@@ -346,26 +467,29 @@ Provide a clear summary and next steps:
 - Git repository with initial commit
 - GitHub repository ({{VISIBILITY}})
 - Loom orchestration installed and configured
-- README.md with project vision
-- ROADMAP.md with development phases
+- README.md with project vision and milestone markers
+- WORK_PLAN.md with seeded backlog for Guide
+- WORK_LOG.md with bootstrapping entry
+- {{ISSUE_COUNT}} GitHub issues with `loom:issue` labels, ready for shepherds
 
 ### Next steps:
 
-1. Navigate to your new project:
+1. **Open a new Claude Code session** in your project directory:
    \`\`\`bash
    cd ../{{PROJECT_NAME}}
+   claude
    \`\`\`
 
-2. Start autonomous development:
+2. In the new session, start autonomous development:
    \`\`\`bash
    /loom
    \`\`\`
 
-3. Or create specific issues for Loom to work on:
-   \`\`\`bash
-   gh issue create --title "Implement core feature X" --body "Description..."
-   gh issue edit <number> --add-label "loom:issue"
-   \`\`\`
+   The daemon will immediately find your seeded issues and start building.
+
+> **Important**: You must open a **new** Claude Code session in the project
+> directory. Running `/loom` from this session (the Loom source repo) will
+> not work — the daemon needs to run from within your new project.
 
 Happy building! Your AI development team is ready.
 ```
@@ -469,10 +593,14 @@ Creating project...
 - Created GitHub repo: username/dotweave
 - Installed Loom orchestration
 - Merged Loom PR
-- Created README.md and ROADMAP.md
+- Created README.md, WORK_PLAN.md, and WORK_LOG.md
+- Created 5 starter issues with loom:issue labels
 - Ready for development!
 
-cd ../dotweave && /loom to start autonomous development
+Open a new Claude Code session to start:
+  cd ../dotweave
+  claude
+  /loom
 ```
 
 ## Terminal Probe Protocol

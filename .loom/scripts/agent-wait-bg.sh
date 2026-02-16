@@ -380,6 +380,15 @@ check_stuck_at_prompt() {
         command_at_prompt=true
     fi
 
+    # Check for interactive theme/style picker prompts from Claude Code onboarding.
+    # These appear when CLAUDE_CONFIG_DIR is isolated without .claude.json.
+    # Patterns: "Choose the text style", "Choose a theme", numbered option lines like "❯ 1. Dark mode"
+    STUCK_AT_THEME_PICKER=false
+    if echo "$pane_content" | grep -qE '(Choose the text style|Choose a theme|❯[[:space:]]*[0-9]+\.)'; then
+        command_at_prompt=true
+        STUCK_AT_THEME_PICKER=true
+    fi
+
     # Check for processing indicators that show Claude is working
     local processing=false
     if echo "$pane_content" | grep -qE "$PROCESSING_INDICATORS"; then
@@ -400,6 +409,13 @@ check_stuck_at_prompt() {
 attempt_prompt_stuck_recovery() {
     local session_name="$1"
     local role_cmd="$2"
+
+    # Theme picker stuck: Enter won't help, kill session so it can be respawned
+    if [[ "${STUCK_AT_THEME_PICKER:-false}" == "true" ]]; then
+        log_warn "Theme picker detected in $session_name - killing session for respawn"
+        tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+        return 1  # Signal failure so caller knows session was killed
+    fi
 
     # Strategy 1: Try an Enter key nudge first
     # The command is typically already visible at the prompt and just needs Enter to trigger processing
@@ -1277,9 +1293,27 @@ main() {
                 local elapsed=$((now - start_time))
                 local elapsed_min=$((elapsed / 60))
                 local phase_desc="${phase:-agent}"
+
+                # Check for wrapper retry state (issue #2296).
+                # When claude-wrapper.sh is in exponential backoff, report that
+                # instead of the generic "running" heartbeat so operators can
+                # distinguish "wrapper retrying" from "claude actively working".
+                local heartbeat_action="${phase_desc} running (${elapsed_min}m elapsed)"
+                local retry_state_file="${REPO_ROOT}/.loom/retry-state/${name}.json"
+                if [[ -f "$retry_state_file" ]]; then
+                    local retry_status retry_attempt retry_max
+                    retry_status=$(jq -r '.status // ""' "$retry_state_file" 2>/dev/null || echo "")
+                    retry_attempt=$(jq -r '.attempt // 0' "$retry_state_file" 2>/dev/null || echo "0")
+                    retry_max=$(jq -r '.max_retries // 0' "$retry_state_file" 2>/dev/null || echo "0")
+                    if [[ "$retry_status" == "backoff" ]]; then
+                        heartbeat_action="${phase_desc} wrapper retrying (attempt ${retry_attempt}/${retry_max}, ${elapsed_min}m elapsed)"
+                        log_warn "Wrapper in backoff: attempt ${retry_attempt}/${retry_max} for '${name}'"
+                    fi
+                fi
+
                 "$SCRIPT_DIR/report-milestone.sh" heartbeat \
                     --task-id "$task_id" \
-                    --action "${phase_desc} running (${elapsed_min}m elapsed)" \
+                    --action "$heartbeat_action" \
                     --quiet 2>/dev/null || true
             fi
         fi

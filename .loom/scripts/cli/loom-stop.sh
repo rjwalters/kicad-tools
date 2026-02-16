@@ -14,6 +14,11 @@
 
 set -euo pipefail
 
+# Source the process tree kill helper
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../kill-session-tree.sh
+source "$SCRIPT_DIR/../kill-session-tree.sh"
+
 # Find repository root
 find_repo_root() {
     local dir="$PWD"
@@ -123,8 +128,8 @@ stop_session() {
     local force="${2:-false}"
 
     if [[ "$force" == "true" ]]; then
-        # Force kill
-        tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+        # Force kill - kill process tree then destroy session
+        kill_session_tree "$session_name" "--force" "$TMUX_SOCKET"
     else
         # Send Ctrl+C to interrupt current operation
         tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" C-c 2>/dev/null || true
@@ -249,7 +254,7 @@ main() {
         echo -e "${BOLD}Stopping $session_name...${NC}"
 
         if [[ "$force" == "true" ]]; then
-            tmux -L "$TMUX_SOCKET" kill-session -t "$session_name"
+            kill_session_tree "$session_name" "--force" "$TMUX_SOCKET"
             echo -e "${GREEN}Session killed${NC}"
         else
             stop_session "$session_name" false
@@ -257,7 +262,7 @@ main() {
 
             if tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
                 echo -e "${YELLOW}Session still running, force killing...${NC}"
-                tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+                kill_session_tree "$session_name" "" "$TMUX_SOCKET"
             fi
             echo -e "${GREEN}Session stopped${NC}"
         fi
@@ -296,11 +301,14 @@ main() {
 
         get_running_sessions | while read -r session; do
             echo -e "  ${RED}Killing:${NC} $session"
-            tmux -L "$TMUX_SOCKET" kill-session -t "$session" 2>/dev/null || true
+            kill_session_tree "$session" "--force" "$TMUX_SOCKET"
         done
 
         echo ""
         echo -e "${GREEN}All sessions killed${NC}"
+
+        # Sweep for any orphaned claude processes that escaped
+        sweep_orphaned_claude_processes "--force"
     else
         echo -e "${CYAN}Starting graceful shutdown...${NC}"
         echo ""
@@ -326,9 +334,12 @@ main() {
 
             get_running_sessions | while read -r session; do
                 echo -e "  ${RED}Killing:${NC} $session"
-                tmux -L "$TMUX_SOCKET" kill-session -t "$session" 2>/dev/null || true
+                kill_session_tree "$session" "--force" "$TMUX_SOCKET"
             done
         fi
+
+        # Sweep for any orphaned claude processes that escaped
+        sweep_orphaned_claude_processes
 
         # Remove stop signal
         rm -f "$STOP_SIGNAL"

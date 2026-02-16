@@ -657,6 +657,9 @@ if git worktree add "${CREATE_ARGS[@]}"; then
     # Get absolute path to worktree
     ABS_WORKTREE_PATH=$(cd "$WORKTREE_PATH" && pwd)
 
+    # Set git hooks path so .githooks/ works in worktrees (no npx/husky needed)
+    git -C "$ABS_WORKTREE_PATH" config core.hooksPath .githooks
+
     # Store return-to directory if provided
     if [[ -n "$RETURN_TO_DIR" ]]; then
         ABS_RETURN_TO=$(cd "$RETURN_TO_DIR" && pwd)
