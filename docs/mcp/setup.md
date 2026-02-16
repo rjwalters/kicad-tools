@@ -53,7 +53,64 @@ pipx ensurepath
 pipx install "kicad-tools[mcp]"
 ```
 
-## Client Configuration
+## Quick Setup (Recommended)
+
+The easiest way to configure MCP is with the built-in setup command:
+
+```bash
+# For Claude Code (default)
+kct mcp setup
+
+# For Claude Desktop
+kct mcp setup --client claude-desktop
+
+# Preview without making changes
+kct mcp setup --dry-run
+```
+
+If you're developing from source with `uv`:
+
+```bash
+uv run kct mcp setup
+```
+
+This auto-detects the correct `kct` binary path and writes the
+appropriate MCP config file. It handles development installs (uv),
+global installs (pip/pipx), and virtual environments.
+
+## Manual Client Configuration
+
+### Claude Code
+
+1. **Config file**: `~/.claude/mcp.json`
+
+2. **For development installs** (using uv from the repo):
+   ```json
+   {
+     "mcpServers": {
+       "kicad-tools": {
+         "command": "uv",
+         "args": ["run", "--project", "/path/to/kicad-tools", "kct", "mcp", "serve"],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+3. **For global installs** (pip/pipx):
+   ```json
+   {
+     "mcpServers": {
+       "kicad-tools": {
+         "command": "kct",
+         "args": ["mcp", "serve"],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+4. **Restart Claude Code** to pick up the new MCP server.
 
 ### Claude Desktop (macOS)
 

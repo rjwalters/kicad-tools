@@ -2462,6 +2462,29 @@ def _add_mcp_parser(subparsers) -> None:
         help="Port for HTTP mode (default: 8080)",
     )
 
+    # mcp setup subcommand
+    setup_parser = mcp_subparsers.add_parser(
+        "setup",
+        help="Configure MCP client integration",
+        description=(
+            "Auto-detect the kct binary and write the MCP server config "
+            "for Claude Code or Claude Desktop."
+        ),
+    )
+    setup_parser.add_argument(
+        "--client",
+        "-c",
+        choices=["claude-code", "claude-desktop"],
+        default="claude-code",
+        help="MCP client to configure (default: claude-code)",
+    )
+    setup_parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Show what would be written without making changes",
+    )
+
 
 def _add_init_parser(subparsers) -> None:
     """Add init subcommand parser for project initialization."""
