@@ -35,6 +35,7 @@ class IssueSeverity(Enum):
 
     BLOCKING = "blocking"  # Must fix before manufacturing
     WARNING = "warning"  # Should review
+    FAB_ACCEPTABLE = "fab_acceptable"  # Within manufacturer limits (false positive)
     COSMETIC = "cosmetic"  # Can ignore
 
 
@@ -169,11 +170,13 @@ class DRCSummary:
     # By severity
     blocking: list[DRCViolation] = field(default_factory=list)
     warnings: list[DRCViolation] = field(default_factory=list)
+    fab_acceptable: list[DRCViolation] = field(default_factory=list)
     cosmetic: list[DRCViolation] = field(default_factory=list)
 
     # Counts by type within each severity
     blocking_by_type: Counter = field(default_factory=Counter)
     warning_by_type: Counter = field(default_factory=Counter)
+    fab_acceptable_by_type: Counter = field(default_factory=Counter)
     cosmetic_by_type: Counter = field(default_factory=Counter)
 
     # Manufacturer comparison results
@@ -193,6 +196,10 @@ class DRCSummary:
         return len(self.warnings)
 
     @property
+    def fab_acceptable_count(self) -> int:
+        return len(self.fab_acceptable)
+
+    @property
     def cosmetic_count(self) -> int:
         return len(self.cosmetic)
 
@@ -204,7 +211,16 @@ class DRCSummary:
     def verdict(self) -> str:
         """Generate verdict string."""
         if self.has_blocking:
+            if self.manufacturer:
+                mfr = self.manufacturer.upper()
+                return f"BLOCKING - {self.blocking_count} violation(s) fail {mfr} rules"
             return "BLOCKING - Fix issues before manufacturing"
+        elif self.fab_acceptable_count > 0 and self.manufacturer:
+            mfr = self.manufacturer.upper()
+            return (
+                f"FAB COMPATIBLE - All {self.fab_acceptable_count} "
+                f"violation(s) acceptable for {mfr}"
+            )
         elif self.warning_count > 0:
             return "WARNINGS - Review before fab"
         elif self.cosmetic_count > 0:
@@ -222,6 +238,7 @@ class DRCSummary:
             "counts": {
                 "blocking": self.blocking_count,
                 "warning": self.warning_count,
+                "fab_acceptable": self.fab_acceptable_count,
                 "cosmetic": self.cosmetic_count,
             },
             "blocking": {
@@ -232,6 +249,10 @@ class DRCSummary:
             "warnings": {
                 "count": self.warning_count,
                 "by_type": dict(self.warning_by_type),
+            },
+            "fab_acceptable": {
+                "count": self.fab_acceptable_count,
+                "by_type": dict(self.fab_acceptable_by_type),
             },
             "cosmetic": {
                 "count": self.cosmetic_count,
@@ -334,12 +355,36 @@ def compare_with_manufacturer(
     return None
 
 
+def _add_to_severity_bucket(
+    summary: DRCSummary,
+    violation: DRCViolation,
+    severity: IssueSeverity,
+) -> None:
+    """Add a violation to the appropriate severity bucket in the summary."""
+    if severity == IssueSeverity.BLOCKING:
+        summary.blocking.append(violation)
+        summary.blocking_by_type[violation.type_str] += 1
+    elif severity == IssueSeverity.FAB_ACCEPTABLE:
+        summary.fab_acceptable.append(violation)
+        summary.fab_acceptable_by_type[violation.type_str] += 1
+    elif severity == IssueSeverity.WARNING:
+        summary.warnings.append(violation)
+        summary.warning_by_type[violation.type_str] += 1
+    else:
+        summary.cosmetic.append(violation)
+        summary.cosmetic_by_type[violation.type_str] += 1
+
+
 def create_summary(
     report: DRCReport,
     manufacturer_id: str | None = None,
     layers: int = 2,
 ) -> DRCSummary:
-    """Create a structured DRC summary from a report."""
+    """Create a structured DRC summary from a report.
+
+    When manufacturer_id is specified, violations that pass manufacturer limits
+    are reclassified as FAB_ACCEPTABLE instead of their default severity.
+    """
     summary = DRCSummary(
         pcb_name=report.pcb_name,
         source_file=report.source_file,
@@ -356,32 +401,44 @@ def create_summary(
     for violation in report.violations:
         severity = get_severity(violation)
 
-        # Categorize by severity
-        if severity == IssueSeverity.BLOCKING:
-            summary.blocking.append(violation)
-            summary.blocking_by_type[violation.type_str] += 1
-        elif severity == IssueSeverity.WARNING:
-            summary.warnings.append(violation)
-            summary.warning_by_type[violation.type_str] += 1
-        else:
-            summary.cosmetic.append(violation)
-            summary.cosmetic_by_type[violation.type_str] += 1
-
         # Track unconnected items by net
         if violation.type == ViolationType.UNCONNECTED_ITEMS:
             for net in violation.nets:
                 summary.unconnected_by_net[net] += 1
 
-        # Compare with manufacturer limits
+        # Compare with manufacturer limits and reclassify if applicable
         if rules:
             comparison = compare_with_manufacturer(violation, rules, manufacturer_id)
             if comparison:
                 if comparison.is_false_positive:
                     summary.false_positives.append(comparison)
+                    # Reclassify as fab-acceptable
+                    _add_to_severity_bucket(summary, violation, IssueSeverity.FAB_ACCEPTABLE)
                 else:
                     summary.true_violations.append(comparison)
+                    _add_to_severity_bucket(summary, violation, severity)
+            else:
+                # No manufacturer comparison available - use default severity
+                _add_to_severity_bucket(summary, violation, severity)
+        else:
+            # No manufacturer specified - use default severity
+            _add_to_severity_bucket(summary, violation, severity)
 
     return summary
+
+
+def _build_fab_annotation(
+    type_str: str,
+    false_positives: list[ManufacturerComparison],
+    manufacturer_id: str,
+) -> str:
+    """Build annotation string for a fab-acceptable violation type."""
+    # Find a representative comparison for this type
+    for fp in false_positives:
+        if fp.violation.type_str == type_str and fp.actual_value is not None:
+            mfr = manufacturer_id.upper()
+            return f" ({fp.actual_value:.3f}mm >= {mfr} min {fp.manufacturer_limit:.3f}mm)"
+    return ""
 
 
 def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
@@ -390,7 +447,7 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
     print("=" * 60)
 
     # BLOCKING section
-    print("\nBLOCKING (must fix before manufacturing):")
+    print(f"\nBLOCKING ({summary.blocking_count} violations):")
     if summary.blocking_count == 0:
         print("  (none)")
     else:
@@ -402,11 +459,19 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
         print(f"VERDICT: {summary.verdict}")
         return
 
+    # FAB-ACCEPTABLE section (only shown when manufacturer is specified)
+    if summary.manufacturer and summary.fab_acceptable_count > 0:
+        mfr = summary.manufacturer.upper()
+        print(f"\nFAB-ACCEPTABLE ({summary.fab_acceptable_count} violations for {mfr}):")
+        for type_str, count in summary.fab_acceptable_by_type.most_common():
+            annotation = _build_fab_annotation(
+                type_str, summary.false_positives, summary.manufacturer
+            )
+            print(f"  ~ {count} {type_str}{annotation}")
+
     # WARNINGS section
-    print("\nWARNINGS (should review):")
-    if summary.warning_count == 0:
-        print("  (none)")
-    else:
+    if summary.warning_count > 0:
+        print(f"\nWARNINGS ({summary.warning_count} violations):")
         for type_str, count in summary.warning_by_type.most_common():
             print(f"  ! {count} {type_str}")
 
@@ -417,34 +482,17 @@ def output_table(summary: DRCSummary, blocking_only: bool = False) -> None:
             print(f"      {net_summary}")
 
     # COSMETIC section
-    print("\nCOSMETIC (can ignore):")
-    if summary.cosmetic_count == 0:
-        print("  (none)")
-    else:
+    if summary.cosmetic_count > 0:
+        print(f"\nCOSMETIC ({summary.cosmetic_count} violations):")
         for type_str, count in summary.cosmetic_by_type.most_common():
             print(f"  o {count} {type_str}")
 
-    # Manufacturer comparison section
+    # Summary line when manufacturer is specified
     if summary.manufacturer:
-        print(f"\n{'-' * 60}")
-        print(f"MANUFACTURER: {summary.manufacturer.upper()}")
-
-        if summary.false_positives:
-            print(f"\n  False positives ({len(summary.false_positives)}):")
-            for fp in summary.false_positives[:5]:
-                print(f"    - {fp.violation.type_str}: {fp.message}")
-            if len(summary.false_positives) > 5:
-                print(f"    ... and {len(summary.false_positives) - 5} more")
-
-        if summary.true_violations:
-            print(f"\n  Actual violations ({len(summary.true_violations)}):")
-            for tv in summary.true_violations[:5]:
-                print(
-                    f"    X {tv.violation.type_str}: actual {tv.actual_value:.3f}mm "
-                    f"< required {tv.manufacturer_limit:.3f}mm"
-                )
-            if len(summary.true_violations) > 5:
-                print(f"    ... and {len(summary.true_violations) - 5} more")
+        non_blocking = summary.fab_acceptable_count + summary.warning_count + summary.cosmetic_count
+        if non_blocking > 0 and summary.blocking_count > 0:
+            print(f"\n  Only {summary.blocking_count} of {summary.total_violations} "
+                  f"violations are blocking for {summary.manufacturer.upper()}")
 
     print(f"\n{'=' * 60}")
     print(f"VERDICT: {summary.verdict}")
