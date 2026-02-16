@@ -544,16 +544,18 @@ class TestExportNetlistStaleCache:
         stale_content = "(export (version D) (components) (nets))"
         netlist_file.write_text(stale_content)
 
-        # Mock subprocess to simulate kicad-cli not producing output (crash)
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+        # Mock find_kicad_cli so export_netlist proceeds to subprocess.run
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            # Mock subprocess to simulate kicad-cli not producing output (crash)
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
-            # This should raise because kicad-cli crashed (exit 139), fallback disabled
-            with pytest.raises(RuntimeError, match="kicad-cli crashed"):
-                export_netlist(sch_file, fallback=False)
+                # This should raise because kicad-cli crashed (exit 139), fallback disabled
+                with pytest.raises(RuntimeError, match="kicad-cli crashed"):
+                    export_netlist(sch_file, fallback=False)
 
-            # The stale file should have been deleted BEFORE running kicad-cli
-            # (verified by the fact that we got the crash error, not stale data)
+                # The stale file should have been deleted BEFORE running kicad-cli
+                # (verified by the fact that we got the crash error, not stale data)
 
     def test_export_netlist_detects_sigsegv_crash(self, tmp_path):
         """Test that exit code 139 (SIGSEGV) is detected with helpful message when fallback disabled."""
@@ -569,16 +571,17 @@ class TestExportNetlistStaleCache:
             )"""
         )
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
-            with pytest.raises(RuntimeError) as exc_info:
-                export_netlist(sch_file, fallback=False)
+                with pytest.raises(RuntimeError) as exc_info:
+                    export_netlist(sch_file, fallback=False)
 
-            error_msg = str(exc_info.value)
-            assert "SIGSEGV" in error_msg
-            assert "problematic symbol" in error_msg
-            assert "kicad" in error_msg.lower()
+                error_msg = str(exc_info.value)
+                assert "SIGSEGV" in error_msg
+                assert "problematic symbol" in error_msg
+                assert "kicad" in error_msg.lower()
 
     def test_export_netlist_detects_other_nonzero_exit_codes(self, tmp_path):
         """Test that other non-zero exit codes raise RuntimeError when fallback disabled."""
@@ -594,11 +597,12 @@ class TestExportNetlistStaleCache:
             )"""
         )
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=1, stderr="Some error message", stdout="")
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=1, stderr="Some error message", stdout="")
 
-            with pytest.raises(RuntimeError, match="kicad-cli failed"):
-                export_netlist(sch_file, fallback=False)
+                with pytest.raises(RuntimeError, match="kicad-cli failed"):
+                    export_netlist(sch_file, fallback=False)
 
     def test_export_netlist_succeeds_when_kicad_cli_works(self, tmp_path):
         """Test successful export when kicad-cli works properly."""
@@ -626,11 +630,12 @@ class TestExportNetlistStaleCache:
             netlist_file.write_text(valid_netlist)
             return Mock(returncode=0, stderr="", stdout="")
 
-        with patch("subprocess.run", side_effect=create_netlist):
-            result = export_netlist(sch_file)
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            with patch("subprocess.run", side_effect=create_netlist):
+                result = export_netlist(sch_file)
 
-            assert result is not None
-            assert result.source_file == "test.kicad_sch"
+                assert result is not None
+                assert result.source_file == "test.kicad_sch"
 
     def test_export_netlist_removes_stale_before_fresh_export(self, tmp_path):
         """Test stale netlist is removed even when fresh export succeeds."""
@@ -667,11 +672,12 @@ class TestExportNetlistStaleCache:
             netlist_file.write_text(fresh_netlist)
             return Mock(returncode=0, stderr="", stdout="")
 
-        with patch("subprocess.run", side_effect=track_and_create):
-            result = export_netlist(sch_file)
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            with patch("subprocess.run", side_effect=track_and_create):
+                result = export_netlist(sch_file)
 
-            assert result is not None
-            assert "FRESH" in result.date or result.tool == "Eeschema"
+                assert result is not None
+                assert "FRESH" in result.date or result.tool == "Eeschema"
 
 
 class TestExportNetlistPythonFallback:
@@ -759,11 +765,12 @@ class TestExportNetlistPythonFallback:
             )"""
         )
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
+        with patch("kicad_tools.operations.netlist.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=139, stderr="", stdout="")
 
-            with pytest.raises(RuntimeError, match="SIGSEGV"):
-                export_netlist(sch_file, fallback=False)
+                with pytest.raises(RuntimeError, match="SIGSEGV"):
+                    export_netlist(sch_file, fallback=False)
 
     def test_fallback_disabled_raises_on_cli_not_found(self, tmp_path):
         """Test that fallback=False raises FileNotFoundError when kicad-cli not found."""

@@ -6,6 +6,18 @@ import pytest
 
 from kicad_tools.schema.pcb import PCB
 
+try:
+    from kicad_tools.footprints.library_path import detect_kicad_library_path
+
+    _KICAD_FOOTPRINT_LIBS = detect_kicad_library_path().footprints_path is not None
+except Exception:
+    _KICAD_FOOTPRINT_LIBS = False
+
+requires_kicad_footprint_libs = pytest.mark.skipif(
+    not _KICAD_FOOTPRINT_LIBS,
+    reason="KiCad footprint libraries not installed",
+)
+
 
 class TestPCBCreate:
     """Tests for creating new PCBs from scratch."""
@@ -168,6 +180,7 @@ class TestPCBCreate:
         assert summary["segments"] == 0
         assert summary["vias"] == 0
 
+    @requires_kicad_footprint_libs
     def test_nets_inserted_before_footprints(self, tmp_path: Path):
         """Test that nets are inserted before footprints in S-expression.
 
@@ -217,6 +230,7 @@ class TestPCBCreate:
         assert 1 in reloaded.nets
         assert reloaded.nets[1].name == "GND"
 
+    @requires_kicad_footprint_libs
     def test_multiple_nets_inserted_in_order(self, tmp_path: Path):
         """Test that multiple nets are inserted in sequence before footprints."""
         pcb = PCB.create(width=100, height=100)

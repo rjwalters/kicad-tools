@@ -7,6 +7,18 @@ import pytest
 from kicad_tools import load_pcb
 from kicad_tools.schema import PCB
 
+try:
+    from kicad_tools.footprints.library_path import detect_kicad_library_path
+
+    _KICAD_FOOTPRINT_LIBS = detect_kicad_library_path().footprints_path is not None
+except Exception:
+    _KICAD_FOOTPRINT_LIBS = False
+
+requires_kicad_footprint_libs = pytest.mark.skipif(
+    not _KICAD_FOOTPRINT_LIBS,
+    reason="KiCad footprint libraries not installed",
+)
+
 
 def test_load_pcb(minimal_pcb: Path):
     """Load a PCB file."""
@@ -1681,6 +1693,7 @@ class TestPCBCreate:
         assert pcb.board_origin[0] == pytest.approx(0.0)
         assert pcb.board_origin[1] == pytest.approx(0.0)
 
+    @requires_kicad_footprint_libs
     def test_footprint_position_offset_centered_board(self, tmp_path: Path):
         """Test that footprint positions are offset by board origin for centered boards.
 
@@ -1739,6 +1752,7 @@ class TestPCBCreate:
         else:
             pytest.fail("Footprint R1 not found")
 
+    @requires_kicad_footprint_libs
     def test_footprint_position_no_offset_non_centered_board(self, tmp_path: Path):
         """Test that footprint positions match exactly for non-centered boards."""
         pcb = PCB.create(width=200, height=120, center=False)
@@ -1783,6 +1797,7 @@ class TestPCBCreate:
         else:
             pytest.fail("Footprint R1 not found")
 
+    @requires_kicad_footprint_libs
     def test_update_footprint_position_applies_offset(self, tmp_path: Path):
         """Test that update_footprint_position applies board origin offset."""
         # Create centered board
@@ -1842,6 +1857,7 @@ class TestBoardOriginCoordinateConversion:
     update_footprint_position() correctly adds the origin back when saving.
     """
 
+    @requires_kicad_footprint_libs
     def test_loaded_footprint_positions_are_board_relative(self, tmp_path: Path):
         """Test that footprint positions are converted to board-relative on load.
 
@@ -1877,6 +1893,7 @@ class TestBoardOriginCoordinateConversion:
         assert fp_reloaded.position[0] == pytest.approx(12.0)
         assert fp_reloaded.position[1] == pytest.approx(43.0)
 
+    @requires_kicad_footprint_libs
     def test_update_position_roundtrip_preserves_coordinates(self, tmp_path: Path):
         """Test that updating position and reloading preserves coordinates.
 
@@ -1928,6 +1945,7 @@ class TestBoardOriginCoordinateConversion:
         assert fp4.position[0] == pytest.approx(40.0)
         assert fp4.position[1] == pytest.approx(25.0)
 
+    @requires_kicad_footprint_libs
     def test_optimizer_workflow_preserves_board_bounds(self, tmp_path: Path):
         """Test that optimizer workflow keeps components within board bounds.
 
