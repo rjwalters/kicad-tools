@@ -24,6 +24,7 @@ from kicad_tools.cli.stitch_cmd import (
     is_pad_connected,
     main,
     point_to_segment_distance,
+    run_post_stitch_drc,
     run_stitch,
     segment_to_segment_distance,
 )
@@ -378,7 +379,7 @@ class TestRunStitch:
         new_content = stitch_test_pcb.read_text()
         # Find all (at ...) inside (via ...) blocks
         # Via at nodes should be (at X Y) not (at X Y 0)
-        via_at_pattern = re.compile(r'\(via\s.*?\(at\s+[\d.]+\s+[\d.]+\s+\d+\)', re.DOTALL)
+        via_at_pattern = re.compile(r"\(via\s.*?\(at\s+[\d.]+\s+[\d.]+\s+\d+\)", re.DOTALL)
         matches = via_at_pattern.findall(new_content)
         assert len(matches) == 0, (
             f"Found via(s) with rotation in at node: {matches[0][:80]}... "
@@ -868,8 +869,13 @@ class TestClearanceChecking:
         # Place a +3.3V track right next to where a via would go
         other_tracks = [
             TrackSegment(
-                start_x=100.8, start_y=99, end_x=100.8, end_y=101,
-                width=0.2, layer="F.Cu", net_number=2,
+                start_x=100.8,
+                start_y=99,
+                end_x=100.8,
+                end_y=101,
+                width=0.2,
+                layer="F.Cu",
+                net_number=2,
             ),
         ]
 
@@ -884,9 +890,7 @@ class TestClearanceChecking:
 
         if pos is not None:
             # Verify the via doesn't violate clearance to the track
-            dist = point_to_segment_distance(
-                pos[0], pos[1], 100.8, 99, 100.8, 101
-            )
+            dist = point_to_segment_distance(pos[0], pos[1], 100.8, 99, 100.8, 101)
             min_clearance = 0.45 / 2 + 0.2 / 2 + 0.2  # via_radius + track_half_width + clearance
             assert dist >= min_clearance - 0.001  # Small tolerance for floating point
 
@@ -941,20 +945,40 @@ class TestClearanceChecking:
         # Surround the pad with very close other-net tracks (box pattern)
         other_tracks = [
             TrackSegment(
-                start_x=99.0, start_y=99.5, end_x=101.0, end_y=99.5,
-                width=0.3, layer="F.Cu", net_number=2,
+                start_x=99.0,
+                start_y=99.5,
+                end_x=101.0,
+                end_y=99.5,
+                width=0.3,
+                layer="F.Cu",
+                net_number=2,
             ),
             TrackSegment(
-                start_x=99.0, start_y=100.5, end_x=101.0, end_y=100.5,
-                width=0.3, layer="F.Cu", net_number=2,
+                start_x=99.0,
+                start_y=100.5,
+                end_x=101.0,
+                end_y=100.5,
+                width=0.3,
+                layer="F.Cu",
+                net_number=2,
             ),
             TrackSegment(
-                start_x=99.5, start_y=99.0, end_x=99.5, end_y=101.0,
-                width=0.3, layer="F.Cu", net_number=2,
+                start_x=99.5,
+                start_y=99.0,
+                end_x=99.5,
+                end_y=101.0,
+                width=0.3,
+                layer="F.Cu",
+                net_number=2,
             ),
             TrackSegment(
-                start_x=100.5, start_y=99.0, end_x=100.5, end_y=101.0,
-                width=0.3, layer="F.Cu", net_number=2,
+                start_x=100.5,
+                start_y=99.0,
+                end_x=100.5,
+                end_y=101.0,
+                width=0.3,
+                layer="F.Cu",
+                net_number=2,
             ),
         ]
 
@@ -1366,40 +1390,70 @@ class TestSegmentToSegmentDistance:
     def test_parallel_segments(self):
         """Parallel segments should have correct perpendicular distance."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 2.0, 0.0,  # Segment A: horizontal at y=0
-            0.0, 1.0, 2.0, 1.0,  # Segment B: horizontal at y=1
+            0.0,
+            0.0,
+            2.0,
+            0.0,  # Segment A: horizontal at y=0
+            0.0,
+            1.0,
+            2.0,
+            1.0,  # Segment B: horizontal at y=1
         )
         assert dist == pytest.approx(1.0)
 
     def test_crossing_segments(self):
         """Crossing segments should have distance 0."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 2.0, 2.0,  # Segment A: diagonal
-            0.0, 2.0, 2.0, 0.0,  # Segment B: opposite diagonal (crosses A)
+            0.0,
+            0.0,
+            2.0,
+            2.0,  # Segment A: diagonal
+            0.0,
+            2.0,
+            2.0,
+            0.0,  # Segment B: opposite diagonal (crosses A)
         )
         assert dist == pytest.approx(0.0)
 
     def test_t_shaped_segments(self):
         """Perpendicular segments that don't cross."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 2.0, 0.0,  # Segment A: horizontal
-            1.0, 1.0, 1.0, 3.0,  # Segment B: vertical, starts 1 unit above A
+            0.0,
+            0.0,
+            2.0,
+            0.0,  # Segment A: horizontal
+            1.0,
+            1.0,
+            1.0,
+            3.0,  # Segment B: vertical, starts 1 unit above A
         )
         assert dist == pytest.approx(1.0)
 
     def test_collinear_separated_segments(self):
         """Collinear segments with a gap."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 1.0, 0.0,  # Segment A: (0,0)-(1,0)
-            3.0, 0.0, 4.0, 0.0,  # Segment B: (3,0)-(4,0)
+            0.0,
+            0.0,
+            1.0,
+            0.0,  # Segment A: (0,0)-(1,0)
+            3.0,
+            0.0,
+            4.0,
+            0.0,  # Segment B: (3,0)-(4,0)
         )
         assert dist == pytest.approx(2.0)
 
     def test_endpoint_to_endpoint(self):
         """Distance between segment endpoints when closest."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 1.0, 0.0,  # Segment A
-            2.0, 1.0, 3.0, 1.0,  # Segment B
+            0.0,
+            0.0,
+            1.0,
+            0.0,  # Segment A
+            2.0,
+            1.0,
+            3.0,
+            1.0,  # Segment B
         )
         expected = math.sqrt(1.0**2 + 1.0**2)  # dist from (1,0) to (2,1)
         assert dist == pytest.approx(expected)
@@ -1407,16 +1461,28 @@ class TestSegmentToSegmentDistance:
     def test_zero_length_segment(self):
         """Degenerate (zero-length) segment acts as point."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 0.0, 0.0,  # Point at origin
-            1.0, 0.0, 2.0, 0.0,  # Segment from (1,0) to (2,0)
+            0.0,
+            0.0,
+            0.0,
+            0.0,  # Point at origin
+            1.0,
+            0.0,
+            2.0,
+            0.0,  # Segment from (1,0) to (2,0)
         )
         assert dist == pytest.approx(1.0)
 
     def test_identical_segments(self):
         """Overlapping segments should have distance 0."""
         dist = segment_to_segment_distance(
-            0.0, 0.0, 2.0, 0.0,
-            0.0, 0.0, 2.0, 0.0,
+            0.0,
+            0.0,
+            2.0,
+            0.0,
+            0.0,
+            0.0,
+            2.0,
+            0.0,
         )
         assert dist == pytest.approx(0.0)
 
@@ -1451,8 +1517,13 @@ class TestTracePathClearance:
         # and the first via candidate in the +x direction (~100.82)
         other_tracks = [
             TrackSegment(
-                start_x=100.5, start_y=98.0, end_x=100.5, end_y=102.0,
-                width=0.2, layer="F.Cu", net_number=2,
+                start_x=100.5,
+                start_y=98.0,
+                end_x=100.5,
+                end_y=102.0,
+                width=0.2,
+                layer="F.Cu",
+                net_number=2,
             ),
         ]
 
@@ -1469,8 +1540,14 @@ class TestTracePathClearance:
         # If a position is found, verify the trace path doesn't cross the track
         if pos is not None:
             trace_dist = segment_to_segment_distance(
-                pad.x, pad.y, pos[0], pos[1],
-                100.5, 98.0, 100.5, 102.0,
+                pad.x,
+                pad.y,
+                pos[0],
+                pos[1],
+                100.5,
+                98.0,
+                100.5,
+                102.0,
             )
             min_clearance = 0.2 / 2 + 0.2 / 2 + 0.2  # trace_hw + track_hw + clearance
             assert trace_dist >= min_clearance - 0.001
@@ -1488,8 +1565,13 @@ class TestTracePathClearance:
         # This is within clearance (0.2/2 + 0.2/2 + 0.2 = 0.4mm needed, only 0.15mm apart)
         other_tracks = [
             TrackSegment(
-                start_x=99.5, start_y=100.15, end_x=101.5, end_y=100.15,
-                width=0.2, layer="F.Cu", net_number=2,
+                start_x=99.5,
+                start_y=100.15,
+                end_x=101.5,
+                end_y=100.15,
+                width=0.2,
+                layer="F.Cu",
+                net_number=2,
             ),
         ]
 
@@ -1506,8 +1588,14 @@ class TestTracePathClearance:
         # If a position is found, the trace path must clear the parallel track
         if pos is not None:
             trace_dist = segment_to_segment_distance(
-                pad.x, pad.y, pos[0], pos[1],
-                99.5, 100.15, 101.5, 100.15,
+                pad.x,
+                pad.y,
+                pos[0],
+                pos[1],
+                99.5,
+                100.15,
+                101.5,
+                100.15,
             )
             min_clearance = 0.2 / 2 + 0.2 / 2 + 0.2
             assert trace_dist >= min_clearance - 0.001
@@ -1519,8 +1607,13 @@ class TestTracePathClearance:
         # Place a track far away (y=105) that won't interfere with any direction
         other_tracks = [
             TrackSegment(
-                start_x=98.0, start_y=105.0, end_x=102.0, end_y=105.0,
-                width=0.2, layer="F.Cu", net_number=2,
+                start_x=98.0,
+                start_y=105.0,
+                end_x=102.0,
+                end_y=105.0,
+                width=0.2,
+                layer="F.Cu",
+                net_number=2,
             ),
         ]
 
@@ -1562,7 +1655,12 @@ class TestTracePathClearance:
         if pos is not None:
             # Verify the trace path doesn't violate clearance to the other via
             trace_dist = point_to_segment_distance(
-                100.5, 100.0, pad.x, pad.y, pos[0], pos[1],
+                100.5,
+                100.0,
+                pad.x,
+                pad.y,
+                pos[0],
+                pos[1],
             )
             min_clearance = 0.2 / 2 + 0.45 / 2 + 0.2  # trace_hw + via_radius + clearance
             assert trace_dist >= min_clearance - 0.001
@@ -1579,8 +1677,13 @@ class TestTracePathClearance:
         # but leave south direction clear
         other_tracks = [
             TrackSegment(
-                start_x=100.4, start_y=98.0, end_x=100.4, end_y=102.0,
-                width=0.2, layer="F.Cu", net_number=2,
+                start_x=100.4,
+                start_y=98.0,
+                end_x=100.4,
+                end_y=102.0,
+                width=0.2,
+                layer="F.Cu",
+                net_number=2,
             ),
         ]
 
@@ -1617,8 +1720,14 @@ class TestTracePathClearance:
         # The with-check version should use a different direction (south, etc.)
         # Verify the with-check version's trace path is actually clear
         trace_dist = segment_to_segment_distance(
-            pad.x, pad.y, pos_with_trace_check[0], pos_with_trace_check[1],
-            100.4, 98.0, 100.4, 102.0,
+            pad.x,
+            pad.y,
+            pos_with_trace_check[0],
+            pos_with_trace_check[1],
+            100.4,
+            98.0,
+            100.4,
+            102.0,
         )
         min_clearance = 0.2 / 2 + 0.2 / 2 + 0.2
         assert trace_dist >= min_clearance - 0.001
@@ -1672,8 +1781,14 @@ class TestTracePathClearance:
         for via in result.vias_added:
             for sx, sy, ex, ey in track_segments:
                 trace_dist = segment_to_segment_distance(
-                    via.pad.x, via.pad.y, via.via_x, via.via_y,
-                    sx, sy, ex, ey,
+                    via.pad.x,
+                    via.pad.y,
+                    via.via_x,
+                    via.via_y,
+                    sx,
+                    sy,
+                    ex,
+                    ey,
                 )
                 min_clearance = 0.2 / 2 + track_width / 2 + 0.2
                 assert trace_dist >= min_clearance - 0.01, (
@@ -2343,5 +2458,226 @@ class TestDoglegRouting:
         success_rate = placed_count / total_gnd_pads if total_gnd_pads > 0 else 0
         assert success_rate >= 0.5 or placed_count >= 2, (
             f"Dog-leg routing should achieve at least 50% success rate on fine-pitch. "
-            f"Got {placed_count}/{total_gnd_pads} ({success_rate*100:.0f}%)"
+            f"Got {placed_count}/{total_gnd_pads} ({success_rate * 100:.0f}%)"
         )
+
+
+class TestPostStitchDRC:
+    """Tests for the --drc flag and run_post_stitch_drc function."""
+
+    def test_drc_flag_accepted(self, stitch_test_pcb: Path, capsys):
+        """--drc flag should be accepted without error."""
+        # With --dry-run, DRC won't actually run (only runs when vias are added
+        # and not in dry-run mode)
+        exit_code = main([str(stitch_test_pcb), "--net", "GND", "--dry-run", "--drc"])
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+
+    def test_output_result_hides_drc_hint_when_drc_enabled(self, stitch_test_pcb: Path, capsys):
+        """When --drc is used, the 'Run DRC to verify' message should not appear."""
+        from unittest.mock import patch
+
+        # Mock find_kicad_cli to return None so DRC is skipped gracefully
+        with patch("kicad_tools.cli.stitch_cmd.run_post_stitch_drc", return_value=0):
+            exit_code = main([str(stitch_test_pcb), "--net", "GND", "--drc"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Run DRC to verify" not in captured.out
+
+    def test_output_result_shows_drc_hint_without_flag(self, stitch_test_pcb: Path, capsys):
+        """Without --drc, the 'Run DRC to verify' message should appear."""
+        exit_code = main([str(stitch_test_pcb), "--net", "GND"])
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Run DRC to verify" in captured.out
+
+    def test_run_post_stitch_drc_no_kicad_cli(self, tmp_path, capsys):
+        """run_post_stitch_drc should warn and return 1 when kicad-cli is not found."""
+        from unittest.mock import patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        with patch("kicad_tools.cli.runner.find_kicad_cli", return_value=None):
+            result = run_post_stitch_drc(pcb_path)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "kicad-cli not found" in captured.err
+
+    def test_run_post_stitch_drc_success(self, tmp_path, capsys):
+        """run_post_stitch_drc should display summary on successful DRC run."""
+        import json
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        # Create a mock DRC report JSON
+        drc_report = {
+            "source": str(pcb_path),
+            "coordinate_units": "mm",
+            "violations": [
+                {
+                    "type": "clearance",
+                    "severity": "warning",
+                    "description": "Clearance violation",
+                    "items": [],
+                }
+            ],
+            "unconnected_items": [],
+            "schematic_parity": [],
+        }
+        report_path = tmp_path / "drc_report.json"
+        report_path.write_text(json.dumps(drc_report))
+
+        mock_result = KiCadCLIResult(
+            success=True,
+            output_path=report_path,
+            return_code=0,
+        )
+
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch(
+                "kicad_tools.cli.runner.run_drc",
+                return_value=mock_result,
+            ),
+        ):
+            result = run_post_stitch_drc(pcb_path)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "POST-STITCH DRC RESULTS" in captured.out
+
+    def test_run_post_stitch_drc_with_errors(self, tmp_path, capsys):
+        """run_post_stitch_drc should show FAILED when DRC has errors."""
+        import json
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        drc_report = {
+            "source": str(pcb_path),
+            "coordinate_units": "mm",
+            "violations": [
+                {
+                    "type": "clearance",
+                    "severity": "error",
+                    "description": "Clearance violation (min 0.200mm; actual 0.150mm)",
+                    "items": [],
+                }
+            ],
+            "unconnected_items": [],
+            "schematic_parity": [],
+        }
+        report_path = tmp_path / "drc_report.json"
+        report_path.write_text(json.dumps(drc_report))
+
+        mock_result = KiCadCLIResult(
+            success=True,
+            output_path=report_path,
+            return_code=0,
+        )
+
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch(
+                "kicad_tools.cli.runner.run_drc",
+                return_value=mock_result,
+            ),
+        ):
+            result = run_post_stitch_drc(pcb_path)
+
+        assert result == 0  # DRC ran successfully, even though there are errors
+        captured = capsys.readouterr()
+        assert "DRC FAILED" in captured.out
+        assert "ERRORS (must fix)" in captured.out
+
+    def test_run_post_stitch_drc_clean(self, tmp_path, capsys):
+        """run_post_stitch_drc should show PASSED when no violations."""
+        import json
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        drc_report = {
+            "source": str(pcb_path),
+            "coordinate_units": "mm",
+            "violations": [],
+            "unconnected_items": [],
+            "schematic_parity": [],
+        }
+        report_path = tmp_path / "drc_report.json"
+        report_path.write_text(json.dumps(drc_report))
+
+        mock_result = KiCadCLIResult(
+            success=True,
+            output_path=report_path,
+            return_code=0,
+        )
+
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch(
+                "kicad_tools.cli.runner.run_drc",
+                return_value=mock_result,
+            ),
+        ):
+            result = run_post_stitch_drc(pcb_path)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "DRC PASSED" in captured.out
+        assert "Errors:   0" in captured.out
+
+    def test_run_post_stitch_drc_failure(self, tmp_path, capsys):
+        """run_post_stitch_drc should return 1 when DRC fails to run."""
+        from unittest.mock import patch
+
+        from kicad_tools.cli.runner import KiCadCLIResult
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        mock_result = KiCadCLIResult(
+            success=False,
+            stderr="kicad-cli crashed",
+            return_code=1,
+        )
+
+        with (
+            patch(
+                "kicad_tools.cli.runner.find_kicad_cli",
+                return_value=Path("/usr/bin/kicad-cli"),
+            ),
+            patch(
+                "kicad_tools.cli.runner.run_drc",
+                return_value=mock_result,
+            ),
+        ):
+            result = run_post_stitch_drc(pcb_path)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "DRC failed to run" in captured.err
