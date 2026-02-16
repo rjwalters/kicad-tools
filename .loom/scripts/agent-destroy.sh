@@ -17,6 +17,11 @@ set -euo pipefail
 TMUX_SOCKET="loom"
 SESSION_PREFIX="loom-"
 
+# Source the process tree kill helper
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=kill-session-tree.sh
+source "$SCRIPT_DIR/kill-session-tree.sh"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -95,16 +100,16 @@ main() {
         worktree_path=$(tmux -L "$TMUX_SOCKET" show-environment -t "$session_name" LOOM_WORKSPACE 2>/dev/null | sed 's/^LOOM_WORKSPACE=//' || true)
 
         if [[ "$force" == "true" ]]; then
-            tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+            kill_session_tree "$session_name" "--force" "$TMUX_SOCKET"
         else
             # Graceful: send Ctrl-C then exit
             tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" C-c 2>/dev/null || true
             sleep 1
             tmux -L "$TMUX_SOCKET" send-keys -t "$session_name" "exit" C-m 2>/dev/null || true
             sleep 2
-            # Force kill if still alive
+            # Kill process tree and session if still alive
             if tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
-                tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null || true
+                kill_session_tree "$session_name" "" "$TMUX_SOCKET"
             fi
         fi
         log_success "Destroyed session: $session_name"
@@ -129,17 +134,36 @@ main() {
                     log_info "CWD: $current_cwd"
                     log_info "Worktree: $worktree_real"
                 else
-                    log_info "Removing worktree: $worktree_path"
-                    git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || true
-                    worktree_cleaned=true
-                    log_success "Removed worktree: $worktree_path"
+                    # Safety check: Don't remove worktree if other processes have their CWD inside it
+                    local active_pids
+                    active_pids=$(lsof +d "$worktree_real" -F pt 2>/dev/null | awk '/^p/{pid=substr($0,2)} /^tcwd/{print pid}' | grep -v "$$" || true)
+                    if [[ -n "$active_pids" ]]; then
+                        log_warn "Skipping worktree removal: active processes detected (PIDs: $(echo "$active_pids" | tr '\n' ' '))"
+                        log_info "Use 'loom-clean' for deferred cleanup after processes exit"
+                    else
+                        log_info "Removing worktree: $worktree_path"
+                        git -C "$repo_root" worktree remove "$worktree_path" --force 2>/dev/null || true
+                        worktree_cleaned=true
+                        log_success "Removed worktree: $worktree_path"
+                    fi
                 fi
             fi
         fi
     fi
 
+    # Clean up per-agent CLAUDE_CONFIG_DIR
+    local config_cleaned=false
+    if repo_root=$(find_repo_root 2>/dev/null); then
+        local config_dir="$repo_root/.loom/claude-config/$name"
+        if [[ -d "$config_dir" ]]; then
+            rm -rf "$config_dir"
+            config_cleaned=true
+            log_success "Removed agent config dir: $config_dir"
+        fi
+    fi
+
     if [[ "$json_output" == "true" ]]; then
-        echo "{\"status\":\"destroyed\",\"name\":\"$name\",\"session\":\"$session_name\",\"session_existed\":$session_existed,\"worktree_cleaned\":$worktree_cleaned}"
+        echo "{\"status\":\"destroyed\",\"name\":\"$name\",\"session\":\"$session_name\",\"session_existed\":$session_existed,\"worktree_cleaned\":$worktree_cleaned,\"config_cleaned\":$config_cleaned}"
     fi
 
     exit 0

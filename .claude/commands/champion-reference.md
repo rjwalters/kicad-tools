@@ -482,6 +482,9 @@ echo ""
 echo "STEP 3/5: Executing squash merge..."
 echo ""
 
+# Ensure we're on main so .loom/scripts exists (issue #2289)
+git checkout main 2>/dev/null || true
+
 # Use merge-pr.sh for worktree-safe merge via GitHub API
 ./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto || {
   echo "Merge failed!"

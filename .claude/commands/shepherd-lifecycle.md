@@ -765,6 +765,9 @@ if [ "$PHASE" = "gate2" ]; then
   if [ "$FORCE_MODE" = "true" ]; then
     echo "Force mode: auto-merging PR"
 
+    # Ensure we're on main so .loom/scripts exists (issue #2289)
+    git checkout main 2>/dev/null || true
+
     # Use merge-pr.sh for worktree-safe merge via GitHub API
     ./.loom/scripts/merge-pr.sh $PR_NUMBER --cleanup-worktree || {
       echo "Merge failed for PR #$PR_NUMBER"

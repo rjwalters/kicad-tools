@@ -86,3 +86,7 @@ boards/*/output/*.kicad_pro
 .loom/state.json
 .loom/*.log
 .loom/*.sock
+.loom-checkpoint
+.loom/issue-failures.json
+.loom/usage-cache.json
+.loom/claude-config/
