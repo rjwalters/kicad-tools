@@ -14,6 +14,9 @@ Usage:
     kicad-pcb-stitch board.kicad_pcb --net GND --dry-run
     kicad-pcb-stitch board.kicad_pcb --net GND --via-size 0.45 --drill 0.2
 
+    # Stitch and run DRC (fills zones automatically via kicad-cli)
+    kicad-pcb-stitch board.kicad_pcb --drc
+
 Exit Codes:
     0 - Success
     1 - Error or no work to do
@@ -735,8 +738,14 @@ def calculate_via_position(
                 # Check trace path against other-net track segments
                 for seg in other_net_tracks:
                     dist = segment_to_segment_distance(
-                        pad.x, pad.y, via_x, via_y,
-                        seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                        pad.x,
+                        pad.y,
+                        via_x,
+                        via_y,
+                        seg.start_x,
+                        seg.start_y,
+                        seg.end_x,
+                        seg.end_y,
                     )
                     # Clearance from trace edge to track edge
                     min_dist = trace_half_width + seg.width / 2 + clearance
@@ -750,7 +759,12 @@ def calculate_via_position(
                 # Check trace path against other-net vias
                 for ovx, ovy, ov_size, _onet in other_net_vias:
                     dist = point_to_segment_distance(
-                        ovx, ovy, pad.x, pad.y, via_x, via_y,
+                        ovx,
+                        ovy,
+                        pad.x,
+                        pad.y,
+                        via_x,
+                        via_y,
                     )
                     # Clearance from trace edge to other via edge
                     min_dist = trace_half_width + ov_size / 2 + clearance
@@ -797,8 +811,14 @@ def _check_dogleg_path_clearance(
         # Check against other-net track segments
         for seg in other_net_tracks:
             dist = segment_to_segment_distance(
-                leg_sx, leg_sy, leg_ex, leg_ey,
-                seg.start_x, seg.start_y, seg.end_x, seg.end_y,
+                leg_sx,
+                leg_sy,
+                leg_ex,
+                leg_ey,
+                seg.start_x,
+                seg.start_y,
+                seg.end_x,
+                seg.end_y,
             )
             min_dist = trace_half_width + seg.width / 2 + clearance
             if dist < min_dist:
@@ -872,7 +892,8 @@ def calculate_dogleg_via_position(
     # Determine the dominant alignment direction based on nearby other-net pads
     # This helps us route along the pad row first, then escape perpendicular
     nearby_pads = [
-        (px, py) for px, py, _r, pnet in other_net_pads
+        (px, py)
+        for px, py, _r, pnet in other_net_pads
         if pnet != pad.net_number and abs(px - pad.x) < 1.5 and abs(py - pad.y) < 1.5
     ]
 
@@ -888,25 +909,48 @@ def calculate_dogleg_via_position(
         # -> axial movement should be horizontal, escape should be vertical
         if x_spread >= y_spread:
             axial_dirs = [(1, 0), (-1, 0)]  # Move along horizontal row
-            escape_dirs = [(0, 1), (0, -1), (0.707, 0.707), (-0.707, 0.707),
-                           (0.707, -0.707), (-0.707, -0.707)]  # Escape vertically
+            escape_dirs = [
+                (0, 1),
+                (0, -1),
+                (0.707, 0.707),
+                (-0.707, 0.707),
+                (0.707, -0.707),
+                (-0.707, -0.707),
+            ]  # Escape vertically
         else:
             axial_dirs = [(0, 1), (0, -1)]  # Move along vertical row
-            escape_dirs = [(1, 0), (-1, 0), (0.707, 0.707), (0.707, -0.707),
-                           (-0.707, 0.707), (-0.707, -0.707)]  # Escape horizontally
+            escape_dirs = [
+                (1, 0),
+                (-1, 0),
+                (0.707, 0.707),
+                (0.707, -0.707),
+                (-0.707, 0.707),
+                (-0.707, -0.707),
+            ]  # Escape horizontally
     else:
         # No clear row orientation, try all combinations
         axial_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        escape_dirs = [(1, 0), (-1, 0), (0, 1), (0, -1),
-                       (0.707, 0.707), (-0.707, 0.707),
-                       (-0.707, -0.707), (0.707, -0.707)]
+        escape_dirs = [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (0.707, 0.707),
+            (-0.707, 0.707),
+            (-0.707, -0.707),
+            (0.707, -0.707),
+        ]
 
     # Axial distances: how far to move along the row before turning
     axial_distances = [0.3, 0.5, 0.7, 1.0, 1.3]
 
     # Escape offsets: how far to move perpendicular after the axial step
-    escape_offsets = [pad_radius + offset * 0.75, pad_radius + offset,
-                      pad_radius + offset * 1.5, pad_radius + offset * 2]
+    escape_offsets = [
+        pad_radius + offset * 0.75,
+        pad_radius + offset,
+        pad_radius + offset * 1.5,
+        pad_radius + offset * 2,
+    ]
 
     for axial_dx, axial_dy in axial_dirs:
         for axial_dist in axial_distances:
@@ -971,9 +1015,12 @@ def calculate_dogleg_via_position(
                     # Check the entire L-shaped path for clearance
                     if trace_width > 0:
                         if not _check_dogleg_path_clearance(
-                            pad.x, pad.y,
-                            intermediate_x, intermediate_y,
-                            via_x, via_y,
+                            pad.x,
+                            pad.y,
+                            intermediate_x,
+                            intermediate_y,
+                            via_x,
+                            via_y,
                             trace_half_width,
                             other_net_tracks,
                             other_net_vias,
@@ -1256,7 +1303,102 @@ def run_stitch(
     return result
 
 
-def output_result(result: StitchResult, dry_run: bool = False) -> None:
+def run_post_stitch_drc(pcb_path: Path) -> int:
+    """Run DRC on the PCB after stitching and display summary.
+
+    kicad-cli pcb drc automatically fills zones before checking,
+    so this handles both zone fill and DRC validation in one step.
+
+    Returns:
+        0 if DRC ran successfully (regardless of violations),
+        1 if DRC could not be run.
+    """
+    from .runner import find_kicad_cli, run_drc
+
+    kicad_cli = find_kicad_cli()
+    if not kicad_cli:
+        print(
+            "\nWarning: kicad-cli not found, skipping DRC.",
+            file=sys.stderr,
+        )
+        print(
+            "Install KiCad 8 from: https://www.kicad.org/download/",
+            file=sys.stderr,
+        )
+        print(
+            f"\nRun DRC manually: kicad-cli pcb drc {pcb_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"\nRunning DRC on {pcb_path.name} (zones will be filled automatically)...")
+
+    result = run_drc(pcb_path, format="json", kicad_cli=kicad_cli)
+
+    if not result.success:
+        print(f"\nDRC failed to run: {result.stderr}", file=sys.stderr)
+        return 1
+
+    # Parse the report
+    from ..drc import DRCReport
+
+    try:
+        report = DRCReport.load(result.output_path)
+    except Exception as e:
+        print(f"\nError parsing DRC report: {e}", file=sys.stderr)
+        return 1
+    finally:
+        # Clean up temp file
+        if result.output_path:
+            result.output_path.unlink(missing_ok=True)
+
+    # Display summary
+    error_count = report.error_count
+    warning_count = report.warning_count
+
+    print(f"\n{'=' * 60}")
+    print("POST-STITCH DRC RESULTS")
+    print(f"{'=' * 60}")
+    print(f"  Errors:   {error_count}")
+    print(f"  Warnings: {warning_count}")
+
+    if error_count == 0 and warning_count == 0:
+        print("\nDRC PASSED - No violations found")
+    else:
+        # Group by type
+        by_type = report.violations_by_type()
+        print(f"\n{'-' * 60}")
+        print("BY TYPE:")
+        for vtype, violations in sorted(by_type.items(), key=lambda x: -len(x[1])):
+            errors = sum(1 for v in violations if v.is_error)
+            warnings = len(violations) - errors
+            parts = []
+            if errors:
+                parts.append(f"{errors} error{'s' if errors != 1 else ''}")
+            if warnings:
+                parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+            print(f"  {vtype.value}: {', '.join(parts)}")
+
+        if error_count > 0:
+            print(f"\n{'-' * 60}")
+            print("ERRORS (must fix):")
+            for v in report.errors[:10]:
+                print(f"  [X] {v.type_str}: {v.message}")
+            if error_count > 10:
+                print(f"  ... and {error_count - 10} more errors")
+
+        print(f"\n{'=' * 60}")
+        if error_count > 0:
+            print("DRC FAILED - Fix errors before manufacturing")
+        else:
+            print("DRC PASSED with warnings")
+
+        print(f"\nFor detailed results: kicad-drc {pcb_path}")
+
+    return 0
+
+
+def output_result(result: StitchResult, dry_run: bool = False, run_drc: bool = False) -> None:
     """Output the stitching result."""
     import sys
 
@@ -1332,7 +1474,7 @@ def output_result(result: StitchResult, dry_run: bool = False) -> None:
 
     if dry_run:
         print("\n(dry run - no changes made)")
-    else:
+    elif not run_drc:
         print(f"\nRun DRC to verify: kicad-cli pcb drc {result.pcb_name}")
 
 
@@ -1402,6 +1544,11 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         help="Output file (default: modify in place)",
     )
+    parser.add_argument(
+        "--drc",
+        action="store_true",
+        help="Run DRC after stitching (fills zones automatically via kicad-cli)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -1456,7 +1603,11 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
 
-        output_result(result, dry_run=args.dry_run)
+        output_result(result, dry_run=args.dry_run, run_drc=args.drc)
+
+        # Run DRC if requested (and not dry run, and vias were actually added)
+        if args.drc and not args.dry_run and result.vias_added:
+            run_post_stitch_drc(pcb_path)
 
         if result.vias_added:
             return 0
