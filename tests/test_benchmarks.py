@@ -715,7 +715,7 @@ class TestRouterBenchmarks:
         return f
 
     def test_route_small_board(self, benchmark, small_routable_pcb_file):
-        """Benchmark routing small board (~10 nets, 0.25mm grid).
+        """Benchmark routing small board (~10 nets, 0.1mm grid).
 
         Target: <5 seconds
         """
@@ -724,10 +724,10 @@ class TestRouterBenchmarks:
         def route_board():
             rules = DesignRules(
                 trace_width=0.2,
-                trace_clearance=0.15,
+                trace_clearance=0.2,
                 via_drill=0.3,
                 via_diameter=0.6,
-                grid_resolution=0.25,
+                grid_resolution=0.1,
             )
             router, _ = load_pcb_for_routing(
                 str(small_routable_pcb_file),
@@ -741,7 +741,7 @@ class TestRouterBenchmarks:
         assert result is not None
 
     def test_route_medium_board(self, benchmark, medium_routable_pcb_file):
-        """Benchmark routing medium board (~30 nets, 0.25mm grid).
+        """Benchmark routing medium board (~30 nets, 0.1mm grid).
 
         Target: <15 seconds
         """
@@ -750,10 +750,10 @@ class TestRouterBenchmarks:
         def route_board():
             rules = DesignRules(
                 trace_width=0.2,
-                trace_clearance=0.15,
+                trace_clearance=0.2,
                 via_drill=0.3,
                 via_diameter=0.6,
-                grid_resolution=0.25,
+                grid_resolution=0.1,
             )
             router, _ = load_pcb_for_routing(
                 str(medium_routable_pcb_file),
@@ -766,7 +766,7 @@ class TestRouterBenchmarks:
         assert result is not None
 
     def test_route_large_board_4layer(self, benchmark, large_routable_pcb_file):
-        """Benchmark routing large board (~50 nets, 4-layer, 0.25mm grid).
+        """Benchmark routing large board (~50 nets, 4-layer, 0.1mm grid).
 
         Target: <30 seconds
         """
@@ -775,10 +775,10 @@ class TestRouterBenchmarks:
         def route_board():
             rules = DesignRules(
                 trace_width=0.2,
-                trace_clearance=0.15,
+                trace_clearance=0.2,
                 via_drill=0.3,
                 via_diameter=0.6,
-                grid_resolution=0.25,
+                grid_resolution=0.1,
             )
             router, _ = load_pcb_for_routing(
                 str(large_routable_pcb_file),
@@ -800,7 +800,7 @@ class TestRouterBenchmarks:
         def route_board():
             rules = DesignRules(
                 trace_width=0.2,
-                trace_clearance=0.15,
+                trace_clearance=0.2,
                 via_drill=0.3,
                 via_diameter=0.6,
                 grid_resolution=0.1,

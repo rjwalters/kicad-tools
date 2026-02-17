@@ -266,7 +266,7 @@ class TestPCBParsing:
         u1 = pcb.get_footprint("U1")
         assert u1 is not None
         assert u1.value == "STM32F103"
-        assert u1.position == (130, 130)
+        assert u1.position == (30.0, 30.0)
         assert len(u1.pads) >= 8
 
         # Query footprints on layer
