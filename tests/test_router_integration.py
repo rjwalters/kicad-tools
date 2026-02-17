@@ -155,7 +155,7 @@ class TestRealBoardRouting:
 
         # Merge routes into PCB (validates output structure)
         try:
-            merged_pcb = merge_routes_into_pcb(original_pcb_text, router)
+            merged_pcb = merge_routes_into_pcb(original_pcb_text, router.to_sexp())
             assert merged_pcb is not None
             assert len(merged_pcb) > len(original_pcb_text), "Output should contain routes"
 

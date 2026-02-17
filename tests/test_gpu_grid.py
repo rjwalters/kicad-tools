@@ -220,9 +220,11 @@ class TestBackendAbstraction:
     """Tests for backend abstraction module."""
 
     def test_get_cpu_backend(self):
-        """Test getting CPU backend."""
+        """Test getting CPU backend returns an ArrayBackend wrapping numpy."""
+        from kicad_tools.acceleration.backend import ArrayBackend
+
         backend = get_backend(BackendType.CPU)
-        assert backend is np
+        assert isinstance(backend, ArrayBackend)
 
     def test_to_numpy_passthrough(self):
         """Test to_numpy with numpy array."""
