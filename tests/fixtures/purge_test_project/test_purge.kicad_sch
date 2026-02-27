@@ -1,0 +1,40 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(uuid "aabbccdd-1111-2222-3333-444455556666")
+	(paper "A4")
+	(lib_symbols
+		(symbol "my_project_lib:UsedSymbol"
+			(pin_names hide)
+			(symbol "UsedSymbol_0_1"
+				(rectangle
+					(start -1.016 -2.54)
+					(end 1.016 2.54)
+					(stroke (width 0.254))
+					(fill (type none))
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "my_project_lib:UsedSymbol")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "11111111-1111-1111-1111-111111111111")
+		(property "Reference" "U1"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "UsedSymbol"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "my_project_lib:UsedFootprint"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+	)
+)

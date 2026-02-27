@@ -698,6 +698,23 @@ def _add_lib_parser(subparsers) -> None:
     lib_export.add_argument("path", help="Path to library file or item")
     lib_export.add_argument("--format", choices=["json"], default="json")
 
+    # lib purge
+    lib_purge = lib_subparsers.add_parser(
+        "purge", help="List unused symbols/footprints in project-local libraries"
+    )
+    lib_purge.add_argument(
+        "project_dir",
+        nargs="?",
+        default=".",
+        help="Path to KiCad project directory (default: current directory)",
+    )
+    lib_purge.add_argument(
+        "--format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+
 
 def _add_footprint_parser(subparsers) -> None:
     """Add footprint subcommand parser."""

@@ -102,4 +102,22 @@ def run_lib_command(args) -> int:
     elif args.lib_command == "export":
         return export_library(args.path, args.format)
 
+    elif args.lib_command == "purge":
+        from kicad_tools.library.purge import UnusedLibraryAnalyzer
+
+        project_dir = Path(args.project_dir)
+        if not project_dir.is_dir():
+            print(f"Error: Not a directory: {project_dir}", file=sys.stderr)
+            return 1
+
+        analyzer = UnusedLibraryAnalyzer(project_dir)
+        result = analyzer.analyze()
+
+        if getattr(args, "format", "table") == "json":
+            print(result.format_json())
+        else:
+            print(result.format_table())
+
+        return 0
+
     return 1
