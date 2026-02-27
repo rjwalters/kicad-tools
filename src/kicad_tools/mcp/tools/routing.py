@@ -19,6 +19,7 @@ from kicad_tools.mcp.types import (
     RouteNetResult,
     UnroutedNetsResult,
 )
+from kicad_tools.router.strategies import RoutingStrategy
 from kicad_tools.schema.pcb import PCB
 
 logger = logging.getLogger(__name__)
