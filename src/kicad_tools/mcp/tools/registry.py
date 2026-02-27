@@ -1420,3 +1420,145 @@ register_tool(
     handler=_handler_list_mistake_categories,
     category="mistakes",
 )
+
+
+# -----------------------------------------------------------------------------
+# Placement Optimization Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle optimize_placement tool call."""
+    from kicad_tools.mcp.tools.optimize_placement import optimize_placement
+
+    return optimize_placement(
+        pcb_path=params["pcb_path"],
+        strategy=params.get("strategy", "cmaes"),
+        max_iterations=params.get("max_iterations", 200),
+        weights=params.get("weights"),
+        seed_method=params.get("seed_method", "force-directed"),
+        output_path=params.get("output_path"),
+    )
+
+
+register_tool(
+    name="optimize_placement",
+    description=(
+        "Optimize PCB component placement using CMA-ES evolutionary optimization. "
+        "Reads component positions and net connectivity from the board file, generates "
+        "a seed placement, and runs iterative optimization to minimize wirelength, "
+        "overlap, DRC violations, and boundary violations. Returns the optimized score "
+        "with convergence data. Use evaluate_placement first to assess whether "
+        "optimization is needed."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "strategy": {
+                "type": "string",
+                "description": "Optimization strategy",
+                "enum": ["cmaes"],
+                "default": "cmaes",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Maximum optimization iterations. Higher values give better results "
+                    "but take longer. 200 is a good default for quick optimization."
+                ),
+                "default": 200,
+            },
+            "weights": {
+                "type": "object",
+                "description": (
+                    "Cost function weight overrides. Keys: overlap, drc, boundary, "
+                    "wirelength, area. Higher weights penalize that metric more."
+                ),
+                "properties": {
+                    "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
+                    "drc": {"type": "number", "description": "DRC violation weight (default: 1e4)"},
+                    "boundary": {
+                        "type": "number",
+                        "description": "Boundary violation weight (default: 1e5)",
+                    },
+                    "wirelength": {
+                        "type": "number",
+                        "description": "Wirelength weight (default: 1.0)",
+                    },
+                    "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                },
+            },
+            "seed_method": {
+                "type": "string",
+                "description": "Initial placement seed method",
+                "enum": ["force-directed", "random"],
+                "default": "force-directed",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Path for output .kicad_pcb file with optimized placements. "
+                    "If not specified, the result is not written to disk."
+                ),
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_optimize_placement,
+    category="placement",
+)
+
+
+def _handler_evaluate_placement(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle evaluate_placement tool call."""
+    from kicad_tools.mcp.tools.optimize_placement import evaluate_placement
+
+    return evaluate_placement(
+        pcb_path=params["pcb_path"],
+        weights=params.get("weights"),
+    )
+
+
+register_tool(
+    name="evaluate_placement",
+    description=(
+        "Evaluate current PCB placement quality without optimizing. Returns a "
+        "placement score breakdown including wirelength, component overlap, DRC "
+        "violations, boundary violations, and bounding area. Use this to assess "
+        "board quality before deciding whether to run optimize_placement."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "weights": {
+                "type": "object",
+                "description": (
+                    "Cost function weight overrides. Keys: overlap, drc, boundary, "
+                    "wirelength, area. Higher weights penalize that metric more."
+                ),
+                "properties": {
+                    "overlap": {"type": "number", "description": "Overlap weight (default: 1e6)"},
+                    "drc": {"type": "number", "description": "DRC violation weight (default: 1e4)"},
+                    "boundary": {
+                        "type": "number",
+                        "description": "Boundary violation weight (default: 1e5)",
+                    },
+                    "wirelength": {
+                        "type": "number",
+                        "description": "Wirelength weight (default: 1.0)",
+                    },
+                    "area": {"type": "number", "description": "Area weight (default: 0.1)"},
+                },
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_evaluate_placement,
+    category="placement",
+)
