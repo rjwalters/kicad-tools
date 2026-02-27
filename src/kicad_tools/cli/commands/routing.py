@@ -1,6 +1,11 @@
-"""Routing command handlers (route, zones, optimize-traces)."""
+"""Routing command handlers (route, route-auto, zones, optimize-traces)."""
 
-__all__ = ["run_route_command", "run_zones_command", "run_optimize_command"]
+__all__ = [
+    "run_route_command",
+    "run_route_auto_command",
+    "run_zones_command",
+    "run_optimize_command",
+]
 
 
 def run_zones_command(args) -> int:
@@ -60,6 +65,72 @@ def run_zones_command(args) -> int:
         return zones_main(sub_argv) or 0
 
     return 1
+
+
+def run_route_auto_command(args) -> int:
+    """Handle route-auto command using RoutingOrchestrator."""
+    import sys
+
+    # Dry-run: preview strategy selection without routing
+    if args.dry_run:
+        print(f"[dry-run] Would route net '{args.net}' on '{args.pcb}' using RoutingOrchestrator")
+        print(f"  Strategy override: {args.strategy}")
+        print(f"  Repair enabled: {not args.no_repair}")
+        print(f"  Via resolution enabled: {not args.no_via_resolution}")
+        if args.output:
+            print(f"  Output: {args.output}")
+        return 0
+
+    from kicad_tools.mcp.tools.routing import route_net_auto
+
+    try:
+        result = route_net_auto(
+            pcb_path=args.pcb,
+            net_name=args.net,
+            output_path=args.output,
+            strategy=args.strategy,
+            enable_repair=not args.no_repair,
+            enable_via_resolution=not args.no_via_resolution,
+        )
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # Print result
+    if result["success"]:
+        metrics = result.get("metrics", {})
+        print(f"Routed net '{result['net_name']}' successfully")
+        print(f"  Strategy: {result.get('strategy_used', 'unknown')}")
+        if metrics:
+            length = metrics.get("total_length_mm", 0.0)
+            vias = metrics.get("via_count", 0)
+            repairs = metrics.get("repair_actions", 0)
+            if length:
+                print(f"  Total length: {length:.2f}mm")
+            if vias:
+                print(f"  Vias: {vias}")
+            if repairs:
+                print(f"  Repairs applied: {repairs}")
+        for warning in result.get("warnings", []):
+            print(f"  Warning: {warning}")
+        if result.get("output_path"):
+            print(f"  Saved to: {result['output_path']}")
+        return 0
+    else:
+        print(f"Routing failed for net '{result['net_name']}'", file=sys.stderr)
+        if result.get("error_message"):
+            print(f"  Error: {result['error_message']}", file=sys.stderr)
+        for alt in result.get("alternative_strategies", []):
+            strategy_name = alt.get("strategy", "unknown")
+            reason = alt.get("reason", "")
+            print(f"  Try: {strategy_name} - {reason}", file=sys.stderr)
+        return 1
 
 
 def run_route_command(args) -> int:

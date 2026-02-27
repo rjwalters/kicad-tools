@@ -12,7 +12,7 @@ Example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
@@ -1123,6 +1123,72 @@ register_tool(
         required=["pcb_path", "net_name"],
     ),
     handler=_handler_route_net,
+    category="routing",
+)
+
+
+def _handler_route_net_auto(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle route_net_auto tool call."""
+    from kicad_tools.mcp.tools.routing import route_net_auto
+
+    return route_net_auto(
+        pcb_path=params["pcb_path"],
+        net_name=params["net_name"],
+        output_path=params.get("output_path"),
+        strategy=params.get("strategy", "auto"),
+        enable_repair=params.get("enable_repair", True),
+        enable_via_resolution=params.get("enable_via_resolution", True),
+    )
+
+
+register_tool(
+    name="route_net_auto",
+    description=(
+        "Route a specific net using the RoutingOrchestrator with smart strategy "
+        "selection. Unlike route_net (which uses the simple Autorouter), this tool "
+        "analyzes net characteristics (pin pitch, differential pairs, density, via "
+        "conflicts) and automatically selects the optimal routing strategy. Returns "
+        "rich feedback including the strategy used, repair actions taken, and "
+        "performance statistics."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Path to .kicad_pcb file",
+            },
+            "net_name": {
+                "type": "string",
+                "description": "Name of the net to route (e.g., 'GND', 'SPI_CLK')",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output file path (optional, result not saved if not specified)",
+            },
+            "strategy": {
+                "type": "string",
+                "description": (
+                    "Strategy override. 'auto' (default) lets the orchestrator select. "
+                    "Other options: 'global', 'escape', 'hierarchical', 'subgrid', "
+                    "'via_resolution'."
+                ),
+                "enum": ["auto", "global", "escape", "hierarchical", "subgrid", "via_resolution"],
+                "default": "auto",
+            },
+            "enable_repair": {
+                "type": "boolean",
+                "description": "Enable automatic clearance repair after routing (default: true)",
+                "default": True,
+            },
+            "enable_via_resolution": {
+                "type": "boolean",
+                "description": "Enable via conflict resolution (default: true)",
+                "default": True,
+            },
+        },
+        required=["pcb_path", "net_name"],
+    ),
+    handler=_handler_route_net_auto,
     category="routing",
 )
 

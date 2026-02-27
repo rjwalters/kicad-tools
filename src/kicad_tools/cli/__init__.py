@@ -18,6 +18,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools parts <command>        - LCSC parts lookup and search
     kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
     kicad-tools route <pcb>            - Autoroute a PCB
+    kicad-tools route-auto <pcb>       - Orchestrator-based smart routing for a net
     kicad-tools zones <command>        - Add copper pour zones
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
@@ -66,6 +67,7 @@ from .commands import (
     run_pcb_command,
     run_placement_command,
     run_reason_command,
+    run_route_auto_command,
     run_route_command,
     run_run_command,
     run_sch_command,
@@ -312,6 +314,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "route":
         return run_route_command(args)
+
+    elif args.command == "route-auto":
+        return run_route_auto_command(args)
 
     elif args.command == "reason":
         return run_reason_command(args)
