@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-02-05*
+*Last updated: 2026-02-26*
 
 ---
 
@@ -10,71 +10,53 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 | # | Issue | Tier | Status |
 |---|-------|------|--------|
-| 1 | **#1156** Add GitHub Actions CI pipeline | goal-supporting | `loom:issue` — ready for Builder |
+| 1 | **#1192** Implement full pipeline strategy in routing orchestrator | goal-advancing | `loom:issue` — ready for Builder |
+| 2 | **#1193** Add route-auto MCP tool and CLI command for orchestrator-based routing | goal-advancing | `loom:issue` — ready for Builder |
+| 3 | **#1179** label-external-issues workflow fails on every push event | maintenance | `loom:issue` — ready for Builder |
 
 ## Ready for Work (`loom:issue`)
 
 | # | Issue | Tier |
 |---|-------|------|
-| 1 | **#1156** Add GitHub Actions CI pipeline for automated testing, linting, and type checking | goal-supporting |
+| 1 | **#1192** Implement full pipeline strategy in routing orchestrator | goal-advancing |
+| 2 | **#1193** Add route-auto MCP tool and CLI command for orchestrator-based routing | goal-advancing |
+| 3 | **#1179** label-external-issues workflow fails on every push event | maintenance |
+| 4 | **#1178** Add mypy configuration to pyproject.toml for v0.11.0 type safety | goal-supporting |
+| 5 | **#1177** Remove unused generate_grid_stress_test function (92 lines) | maintenance |
+| 6 | **#1181** Purge kicad footprints/symbols which are not referenced | maintenance |
 
-> Only 1 issue is approved for work. The pipeline is starved — proposals below need human promotion.
-
-## Recently Unblocked (Awaiting Approval)
-
-| # | Issue | Tier | Previous State |
-|---|-------|------|----------------|
-| 1 | **#1132** Router real-world validation — end-to-end signal routing on actual boards | goal-supporting | Unblocked 2026-02-05 |
-| 2 | **#1141** [force-mode] Follow-on: Work identified in PR #1140 | goal-advancing | Unblocked 2026-02-05 |
-
-## Still Blocked
-
-| # | Issue | Tier | Blocked By |
-|---|-------|------|------------|
-| 1 | **#1133** Fab-aware DRC violation categorization (JLCPCB/OSHPark profiles) | goal-supporting | Needs #1132 validation first |
-| 2 | **#1134** Post-stitch workflow — automatic zone fill and DRC validation | goal-supporting | Needs #1132, #1133 |
+> 6 issues approved for work. Healthy pipeline with clear priority ordering.
 
 ## Proposals Awaiting Human Approval
 
-### Architect Proposals (`loom:architect`)
-- **#1169** Add typed interface ports to circuit blocks for type-checked connections (v0.11.0) — *tier:goal-advancing*
-
-### Hermit Proposals (`loom:hermit`)
-- **#1171** Clean up 8 unused exports from `__all__` declarations across 7 modules — *tier:maintenance*
-
 ### Curated Issues (`loom:curated`)
-- **#1166** Implement Interval type system for parametric constraints (v0.11.0 foundation) — *tier:goal-advancing*
-- **#1158** 12 test failures on main branch (commit dedb9b8) — *tier:goal-supporting*
+- **#1192** Implement full pipeline strategy in routing orchestrator — *tier:goal-advancing* (also has `loom:issue`)
 
-## Other Open Issues (No Loom Label)
-
-| # | Issue | Tier | Notes |
-|---|-------|------|-------|
-| 1 | **#1149** MCP server fails: kct binary not found | goal-supporting | Needs triage |
-| 2 | **#1155** Remove 5 unused classes from exceptions.py (~540 LOC) | maintenance | Needs triage |
-| 3 | **#1173** 30 test failures on main (commit 35e7c78) | — | Tagged `loom:auditor` |
+### External Contributions (`loom:triage`)
+- **#1181** Purge kicad footprints/symbols which are not referenced — *tier:maintenance* (also has `loom:issue`)
 
 ## Backlog Health
 
 | Metric | Value |
 |--------|-------|
-| Total open issues | 12 |
-| Ready for work (`loom:issue`) | 1 |
-| Urgent (`loom:urgent`) | 1 |
+| Total open issues | 6 |
+| Ready for work (`loom:issue`) | 6 |
+| Urgent (`loom:urgent`) | 3 |
 | Building (`loom:building`) | 0 |
-| Blocked (`loom:blocked`) | 2 |
-| Proposals pending approval | 4 |
+| Blocked (`loom:blocked`) | 0 |
+| Proposals pending approval | 0 |
 | Active epics | 0 |
 
-**Assessment:** The backlog is critically low on approved work. Only 1 issue has `loom:issue`. Multiple curated and architect proposals await human promotion to keep Builders busy.
+**Assessment:** Healthy backlog with 6 approved issues. Routing orchestrator work (#1192, #1193) is the critical path — completing the epic started in #1141. Dependencies for #1192 (PRs #1194 and #1195) are already merged. Good mix of goal-advancing and maintenance work.
 
 ## Version Roadmap
 
 ### v0.11.0 — Typed Interfaces & Constraints (Next)
-- #1169 Typed interface ports *(architect proposal)*
-- #1166 Interval type system *(curated)*
+- #1178 mypy configuration *(ready, goal-supporting)*
+- #1192 Full pipeline routing strategy *(urgent, goal-advancing)*
+- #1193 route-auto MCP tool + CLI *(urgent, goal-advancing)*
 
-### Pre-v0.11.0 — Foundation Work
-- #1156 CI pipeline *(urgent, ready)*
-- #1173 / #1158 Fix test failures *(needs approval)*
-- #1132 Router validation *(unblocked, needs approval)*
+### Maintenance
+- #1179 Fix broken CI workflow *(urgent)*
+- #1177 Remove unused function *(ready)*
+- #1181 Library purge tool *(external contribution, ready)*
