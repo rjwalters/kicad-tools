@@ -4,6 +4,44 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ---
 
+### 2026-02-27
+
+- **PR #1198**: Install Loom 0.3.0
+
+### 2026-02-17
+
+- **PR #1197**: Fix 8 test failures from API and coordinate changes
+- **Issue #1173** (closed): 30 test failures on main branch (commit 35e7c78) — regression from 12
+
+### 2026-02-16
+
+- **PR #1195**: feat(router): wire via conflict resolution and clearance repair into orchestrator
+- **PR #1194**: feat(router): wire real router strategies into orchestrator placeholders
+- **PR #1189**: Remove 8 unused exports from __all__ declarations
+- **PR #1188**: feat(stitch): add --drc flag for post-stitch DRC validation
+- **PR #1187**: feat(drc): add fab-aware severity reclassification to kicad-drc-summary
+- **PR #1186**: feat(mcp): add kct mcp setup command to auto-configure MCP clients
+- **PR #1185**: Install Loom 0.2.3
+- **PR #1184**: Add typed interface ports for type-checked connections
+- **PR #1175**: docs: Guide document maintenance — initialize WORK_LOG and WORK_PLAN
+- **Issue #1191** (closed): Wire via conflict resolution and clearance repair into orchestrator
+- **Issue #1190** (closed): Wire real router strategies into orchestrator placeholders
+- **Issue #1171** (closed): Clean up 8 unused exports from __all__ declarations across 7 modules
+- **Issue #1169** (closed): Add typed interface ports to circuit blocks for type-checked connections (v0.11.0)
+- **Issue #1166** (closed): Implement Interval type system for parametric constraints (v0.11.0 foundation)
+- **Issue #1156** (closed): Add GitHub Actions CI pipeline for automated testing, linting, and type checking
+- **Issue #1155** (closed): Remove 5 unused classes and 2 unused functions from exceptions.py (~540 LOC)
+- **Issue #1149** (closed): MCP server fails: kct binary not found at ~/.local/bin/kct
+- **Issue #1141** (closed): [force-mode] Follow-on: Work identified in PR #1140
+
+### 2026-02-06
+
+- **PR #1183**: Install Loom 0.2.0
+- **PR #1182**: Install Loom 0.2.0 (c0154d2)
+- **PR #1180**: Install Loom 0.2.0 (18b26ef)
+- **PR #1176**: Install Loom 0.2.0 (c74dff3)
+- **Issue #1158** (closed): 12 test failures on main branch (commit dedb9b8)
+
 ### 2026-02-06
 
 - **PR #1174**: Install Loom 0.2.0 (130fa9f)
