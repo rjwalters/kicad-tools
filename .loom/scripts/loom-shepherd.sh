@@ -83,6 +83,21 @@ if [[ -n "$unmerged" ]]; then
     exit 1
 fi
 
+# Disable Python output buffering so stderr reaches callers immediately.
+# Without this, output is lost when invoked non-interactively (e.g., Claude Code
+# Bash tool, Task agents) because Python buffers stderr and may not flush before exit.
+export PYTHONUNBUFFERED=1
+
+# Set up log file for reliable output capture.
+# Shepherd output is teed to this file to ensure it's always accessible, even
+# when invoked with 2>&1 redirect in contexts where the capture buffer may be
+# dropped (e.g., Claude Code Bash tool for long-running processes). The log path
+# is printed immediately so it's visible even if subsequent output is invisible.
+LOG_DIR="$REPO_ROOT/.loom/logs"
+mkdir -p "$LOG_DIR"
+SHEPHERD_LOG="$LOG_DIR/loom-shepherd-issue-${1:-unknown}.log"
+printf '[INFO] Shepherd log: %s\n' "$SHEPHERD_LOG" >&2
+
 # Try Python implementation first
 # Priority order:
 #   1. Virtual environment in loom-tools (from source or recorded path)
@@ -91,10 +106,29 @@ fi
 
 if [[ -n "$LOOM_TOOLS" ]] && [[ -x "$LOOM_TOOLS/.venv/bin/loom-shepherd" ]]; then
     # Use venv from loom-tools directory
-    exec "$LOOM_TOOLS/.venv/bin/loom-shepherd" "${args[@]}"
+    # Note: intentionally NOT using exec. exec replaces the shell process,
+    # which causes output to be invisible in some CLI tool contexts (e.g.,
+    # Claude Code Bash tool) because the tool loses its output capture handle
+    # on the replaced process. Running as a child preserves output capture
+    # while set -e ensures exit code propagation.
+    #
+    # Output is teed to the log file (2>&1 merges stderr→stdout first so
+    # both streams land in the log). We disable set -e temporarily so the
+    # pipeline failure doesn't abort the script before we can capture
+    # PIPESTATUS[0]. Using || true would overwrite PIPESTATUS, so we use
+    # set +e/set -e instead.
+    set +e
+    "$LOOM_TOOLS/.venv/bin/loom-shepherd" "${args[@]}" 2>&1 | tee -a "$SHEPHERD_LOG"
+    _exit="${PIPESTATUS[0]}"
+    set -e
+    exit "$_exit"
 elif command -v loom-shepherd &>/dev/null; then
-    # System-installed
-    exec loom-shepherd "${args[@]}"
+    # System-installed (same rationale as above — no exec)
+    set +e
+    loom-shepherd "${args[@]}" 2>&1 | tee -a "$SHEPHERD_LOG"
+    _exit="${PIPESTATUS[0]}"
+    set -e
+    exit "$_exit"
 else
     echo "[ERROR] Python shepherd not available." >&2
     echo "" >&2

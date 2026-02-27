@@ -4,6 +4,16 @@
 # Claude Code PreToolUse hook that intercepts Bash commands before execution.
 # Receives JSON on stdin with tool_input.command and cwd fields.
 #
+# IMPORTANT: This hook only fires when Claude Code is invoked with:
+#   --dangerously-skip-permissions  ← hooks FIRE (used by Loom agents)
+#
+# It does NOT fire with:
+#   --permission-mode bypassPermissions  ← hooks SKIPPED entirely
+#
+# If you have a shell alias like 'alias claude="claude --permission-mode bypassPermissions"',
+# this safety hook will be silently disabled in interactive sessions.
+# Use --dangerously-skip-permissions instead for automation that needs hooks.
+#
 # Decisions:
 #   - Block (deny): Dangerous commands that should never run
 #   - Ask: Commands that need human confirmation
@@ -26,7 +36,7 @@ log_hook_error() {
     local msg="$1"
     # Ensure log directory exists
     mkdir -p "$(dirname "$HOOK_ERROR_LOG")" 2>/dev/null || true
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [guard-destructive] $msg" >> "$HOOK_ERROR_LOG" 2>/dev/null || true
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [guard-destructive] $msg" >> "$HOOK_ERROR_LOG" 2>/dev/null || true
 }
 
 # Top-level error trap: on ANY unexpected error, output valid JSON "allow"
@@ -299,6 +309,26 @@ done
 
 if echo "$COMMAND" | grep -qE 'gh\s+pr\s+merge'; then
     deny "Use ./.loom/scripts/merge-pr.sh <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors."
+fi
+
+# =============================================================================
+# LOOM: Block pip install -e inside worktrees (issue #2495)
+#
+# Editable pip installs overwrite a global .pth file in site-packages.
+# When multiple builders run in parallel worktrees, each 'pip install -e .'
+# clobbers the .pth to point at its own worktree, causing all other Python
+# processes to import from the wrong source tree.
+#
+# PYTHONPATH is already set by agent-spawn.sh and _build_worktree_env()
+# so editable installs are unnecessary inside worktrees.
+# =============================================================================
+
+WORKTREE_PATH="${LOOM_WORKTREE_PATH:-}"
+if [[ -n "$WORKTREE_PATH" ]]; then
+    if echo "$COMMAND" | grep -qE '(pip|pip3|uv pip)\s+install\s+.*-e\s' || \
+       echo "$COMMAND" | grep -qE '(pip|pip3|uv pip)\s+install\s+.*--editable\s'; then
+        deny "BLOCKED: 'pip install -e' is not allowed inside worktrees. Editable installs overwrite the global .pth file, breaking parallel builders (see issue #2495). PYTHONPATH is already configured for this worktree — imports resolve correctly without editable installs."
+    fi
 fi
 
 # =============================================================================

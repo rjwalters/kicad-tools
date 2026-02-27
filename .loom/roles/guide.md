@@ -206,6 +206,41 @@ gh issue view <number>
 gh issue edit <number> --add-label "tier:goal-advancing"  # or other tier
 ```
 
+### Duplicate and Overlap Detection
+
+**Check for overlapping work during triage** to catch issues that duplicate recently merged PRs or closed issues. This prevents duplicate work when a near-identical issue arrives right after its counterpart's PR merges.
+
+```bash
+# For each issue being triaged, check for overlaps
+TITLE=$(gh issue view <number> --json title --jq .title)
+BODY=$(gh issue view <number> --json body --jq .body)
+
+# Check against open issues, merged PRs, and closed issues
+if ! ./.loom/scripts/check-duplicate.sh --include-merged-prs "$TITLE" "$BODY"; then
+    # Overlap detected - flag for review before it enters the build pipeline
+    echo "Potential overlap detected - review before prioritizing"
+fi
+```
+
+**When overlaps are found:**
+
+1. **Overlaps with merged PR**: The work may already be done. Flag for human review:
+   ```bash
+   gh issue edit <number> --add-label "loom:blocked"
+   gh issue comment <number> --body "⚠️ **Potential overlap with merged PR**
+
+   This issue may overlap with recently merged work. Needs human review to confirm.
+
+   Run \`check-duplicate.sh --include-merged-prs\` for details."
+   ```
+
+2. **Overlaps with closed issue**: Work was already completed or intentionally closed:
+   ```bash
+   gh issue comment <number> --body "⚠️ **Potential overlap with closed issue** - needs human review to determine if this is distinct work."
+   ```
+
+3. **Overlaps with open issue**: Standard duplicate — leave for Curator to handle during curation.
+
 ### Traditional Priority Criteria
 
 For each `loom:issue` issue, also consider these traditional factors:

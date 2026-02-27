@@ -13,7 +13,10 @@
 # OAuth token from the macOS Keychain and calls the Anthropic usage API.
 
 if command -v loom-usage &>/dev/null; then
-    exec loom-usage "$@"
+    # No exec — exec makes output invisible in CLI tool contexts
+    # (e.g., Claude Code Bash tool). See loom-shepherd.sh for full rationale.
+    loom-usage "$@"
+    exit $?
 fi
 
-exec python3 -m loom_tools.common.usage "$@"
+python3 -m loom_tools.common.usage "$@"

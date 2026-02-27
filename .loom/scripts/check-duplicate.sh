@@ -6,9 +6,14 @@
 # keyword matching and similarity heuristics. Used by Architect, Hermit, and
 # Auditor roles before creating new issues.
 #
+# With --include-merged-prs, also checks recently merged PRs and recently
+# closed issues to catch near-duplicate issues that arrive right after their
+# counterpart's PR merges.
+#
 # Usage:
 #   check-duplicate.sh "Issue title" ["Issue body"]
 #   check-duplicate.sh --title "Issue title" [--body "Issue body"]
+#   check-duplicate.sh --include-merged-prs --title "Issue title"
 #   check-duplicate.sh --help
 #
 # Exit codes:
@@ -19,6 +24,7 @@
 # Output format (when duplicates found):
 #   DUPLICATE_FOUND
 #   #<number>: <title> (similarity: <percent>%)
+#   PR #<number>: <title> (similarity: <percent>%)
 #   ...
 
 set -euo pipefail
@@ -56,13 +62,15 @@ USAGE:
     check-duplicate.sh "Issue title" ["Issue body"]
     check-duplicate.sh --title "Issue title" [--body "Issue body"]
     check-duplicate.sh --threshold 50 --title "Title"
+    check-duplicate.sh --include-merged-prs --title "Title"
 
 OPTIONS:
-    --title TEXT        The title of the issue to check
-    --body TEXT         The body/description of the issue (optional)
-    --threshold NUM     Similarity threshold percentage (default: 60)
-    --json              Output results as JSON
-    --help              Show this help message
+    --title TEXT            The title of the issue to check
+    --body TEXT             The body/description of the issue (optional)
+    --threshold NUM         Similarity threshold percentage (default: 60)
+    --include-merged-prs    Also check recently merged PRs and closed issues
+    --json                  Output results as JSON
+    --help                  Show this help message
 
 EXAMPLES:
     # Check if an issue about button styling might be a duplicate
@@ -73,6 +81,9 @@ EXAMPLES:
 
     # Use custom threshold (lower = more matches)
     check-duplicate.sh --threshold 40 "Refactor authentication module"
+
+    # Also check recently merged PRs and closed issues
+    check-duplicate.sh --include-merged-prs "Refactor authentication module"
 
 EXIT CODES:
     0  No duplicates found, safe to create issue
@@ -86,6 +97,12 @@ INTEGRATION:
         gh issue create --title "My issue title" ...
     else
         echo "Potential duplicate detected, skipping creation"
+    fi
+
+    Use with --include-merged-prs in Curator/Guide roles:
+
+    if ! ./.loom/scripts/check-duplicate.sh --include-merged-prs "$TITLE" "$BODY"; then
+        echo "Potential overlap with merged PR or closed issue"
     fi
 EOF
 }
@@ -202,12 +219,119 @@ search_similar_issues() {
     return 0
 }
 
+# Search for similar recently merged PRs
+search_merged_prs() {
+    local title="$1"
+    local body="${2:-}"
+    local threshold="${3:-60}"
+
+    # Extract keywords from new issue
+    local new_keywords
+    new_keywords=$(extract_keywords "$title $body")
+
+    if [[ -z "$new_keywords" ]]; then
+        return 0
+    fi
+
+    # Search recently merged PRs
+    local prs
+    if ! prs=$(gh pr list --state=merged --limit=20 --json number,title,body 2>&1); then
+        print_warning "Failed to fetch merged PRs: $prs"
+        return 0
+    fi
+
+    # Process each PR for similarity
+    local found_duplicates=false
+    local duplicates=""
+
+    while IFS= read -r pr; do
+        local num title_text body_text
+        num=$(echo "$pr" | jq -r '.number')
+        title_text=$(echo "$pr" | jq -r '.title')
+        body_text=$(echo "$pr" | jq -r '.body // ""')
+
+        # Skip if no number
+        [[ -z "$num" || "$num" == "null" ]] && continue
+
+        # Extract keywords from existing PR
+        local existing_keywords
+        existing_keywords=$(extract_keywords "$title_text $body_text")
+
+        # Calculate similarity
+        local similarity
+        similarity=$(calculate_similarity "$new_keywords" "$existing_keywords")
+
+        if [[ $similarity -ge $threshold ]]; then
+            found_duplicates=true
+            duplicates+="PR #${num}: ${title_text} (similarity: ${similarity}%)"$'\n'
+        fi
+    done < <(echo "$prs" | jq -c '.[]')
+
+    if $found_duplicates; then
+        echo "$duplicates"
+    fi
+}
+
+# Search for similar recently closed issues
+search_closed_issues() {
+    local title="$1"
+    local body="${2:-}"
+    local threshold="${3:-60}"
+
+    # Extract keywords from new issue
+    local new_keywords
+    new_keywords=$(extract_keywords "$title $body")
+
+    if [[ -z "$new_keywords" ]]; then
+        return 0
+    fi
+
+    # Search recently closed issues
+    local issues
+    if ! issues=$(gh issue list --state=closed --limit=20 --json number,title,body 2>&1); then
+        print_warning "Failed to fetch closed issues: $issues"
+        return 0
+    fi
+
+    # Process each issue for similarity
+    local found_duplicates=false
+    local duplicates=""
+
+    while IFS= read -r issue; do
+        local num title_text body_text
+        num=$(echo "$issue" | jq -r '.number')
+        title_text=$(echo "$issue" | jq -r '.title')
+        body_text=$(echo "$issue" | jq -r '.body // ""')
+
+        # Skip if no number
+        [[ -z "$num" || "$num" == "null" ]] && continue
+
+        # Extract keywords from existing issue
+        local existing_keywords
+        existing_keywords=$(extract_keywords "$title_text $body_text")
+
+        # Calculate similarity
+        local similarity
+        similarity=$(calculate_similarity "$new_keywords" "$existing_keywords")
+
+        if [[ $similarity -ge $threshold ]]; then
+            found_duplicates=true
+            duplicates+="Closed #${num}: ${title_text} (similarity: ${similarity}%)"$'\n'
+        fi
+    done < <(echo "$issues" | jq -c '.[]')
+
+    if $found_duplicates; then
+        echo "$duplicates"
+    fi
+}
+
 # Main function
 main() {
     local title=""
     local body=""
     local threshold=60
     local json_output=false
+    local include_merged_prs=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -227,6 +351,9 @@ main() {
             --threshold)
                 shift
                 threshold="$1"
+                ;;
+            --include-merged-prs)
+                include_merged_prs=true
                 ;;
             --json)
                 json_output=true
@@ -282,6 +409,29 @@ main() {
     local exit_code=0
     result=$(search_similar_issues "$title" "$body" "$threshold") || exit_code=$?
 
+    # If --include-merged-prs, also search merged PRs and closed issues
+    local merged_result=""
+    local closed_result=""
+    if $include_merged_prs; then
+        merged_result=$(search_merged_prs "$title" "$body" "$threshold")
+        closed_result=$(search_closed_issues "$title" "$body" "$threshold")
+
+        # If we found matches in merged PRs or closed issues, flag as duplicate
+        if [[ -n "$merged_result" || -n "$closed_result" ]]; then
+            if [[ $exit_code -eq 0 ]]; then
+                # No open issue duplicates found, but merged/closed matches exist
+                result="DUPLICATE_FOUND"$'\n'
+                exit_code=1
+            fi
+            if [[ -n "$merged_result" ]]; then
+                result+="$merged_result"
+            fi
+            if [[ -n "$closed_result" ]]; then
+                result+="$closed_result"
+            fi
+        fi
+    fi
+
     if $json_output; then
         if [[ $exit_code -eq 0 ]]; then
             echo '{"duplicate_found": false, "matches": []}'
@@ -292,15 +442,27 @@ main() {
                 [[ "$line" == "DUPLICATE_FOUND" ]] && continue
                 [[ -z "$line" ]] && continue
 
-                # Parse "#123: Title (similarity: 75%)"
-                local num title_part sim
-                num=$(echo "$line" | sed -n 's/^#\([0-9]*\):.*/\1/p')
-                title_part=$(echo "$line" | sed -n 's/^#[0-9]*: \(.*\) (similarity:.*/\1/p')
+                # Parse "#123: Title (similarity: 75%)" or "PR #123: Title (similarity: 75%)"
+                # or "Closed #123: Title (similarity: 75%)"
+                local num title_part sim match_type
+                if [[ "$line" == PR\ * ]]; then
+                    match_type="pr"
+                    num=$(echo "$line" | sed -n 's/^PR #\([0-9]*\):.*/\1/p')
+                    title_part=$(echo "$line" | sed -n 's/^PR #[0-9]*: \(.*\) (similarity:.*/\1/p')
+                elif [[ "$line" == Closed\ * ]]; then
+                    match_type="closed_issue"
+                    num=$(echo "$line" | sed -n 's/^Closed #\([0-9]*\):.*/\1/p')
+                    title_part=$(echo "$line" | sed -n 's/^Closed #[0-9]*: \(.*\) (similarity:.*/\1/p')
+                else
+                    match_type="issue"
+                    num=$(echo "$line" | sed -n 's/^#\([0-9]*\):.*/\1/p')
+                    title_part=$(echo "$line" | sed -n 's/^#[0-9]*: \(.*\) (similarity:.*/\1/p')
+                fi
                 sim=$(echo "$line" | sed -n 's/.*(similarity: \([0-9]*\)%).*/\1/p')
 
                 if [[ -n "$num" ]]; then
-                    matches=$(echo "$matches" | jq --arg n "$num" --arg t "$title_part" --arg s "$sim" \
-                        '. + [{"number": ($n | tonumber), "title": $t, "similarity": ($s | tonumber)}]')
+                    matches=$(echo "$matches" | jq --arg n "$num" --arg t "$title_part" --arg s "$sim" --arg type "$match_type" \
+                        '. + [{"number": ($n | tonumber), "title": $t, "similarity": ($s | tonumber), "type": $type}]')
                 fi
             done <<< "$result"
 

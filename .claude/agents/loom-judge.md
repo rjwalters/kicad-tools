@@ -16,8 +16,8 @@ Follow the complete role definition in `.loom/roles/judge.md` for:
 - **Verifying CI passes** with `gh pr checks` before approval (REQUIRED)
 - **Checking merge state** with `gh pr view --json mergeStateStatus` (must be CLEAN)
 - Code quality and security assessment
-- Approval workflow: `gh pr review --approve`, update labels (remove `loom:review-requested`, add `loom:pr`)
-- Change request workflow: `gh pr review --request-changes`, update labels (remove `loom:review-requested`, add `loom:changes-requested`)
+- Approval workflow: `gh pr comment` with feedback, then update labels (remove `loom:review-requested`, add `loom:pr`)
+- Change request workflow: `gh pr comment` with feedback, then update labels (remove `loom:review-requested`, add `loom:changes-requested`)
 - Providing specific, actionable feedback
 
-Use label-based reviews (comment + label changes) rather than GitHub's review API for self-approval compatibility.
+**Important**: Use `gh pr comment` + label changes — never `gh pr review --approve` or `--request-changes` (GitHub API prevents self-review, and Loom agents share the same account).

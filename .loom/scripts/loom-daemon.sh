@@ -94,7 +94,9 @@ fi
 
 if [[ -n "$LOOM_TOOLS" ]] && [[ -x "$LOOM_TOOLS/.venv/bin/loom-daemon" ]]; then
     # Use venv from loom-tools directory
-    exec "$LOOM_TOOLS/.venv/bin/loom-daemon" ${args[@]+"${args[@]}"}
+    # Note: intentionally NOT using exec — see loom-shepherd.sh for rationale.
+    # exec makes output invisible in CLI tool contexts (Claude Code Bash tool).
+    "$LOOM_TOOLS/.venv/bin/loom-daemon" ${args[@]+"${args[@]}"}
 elif command -v loom-daemon &>/dev/null; then
     # System-installed - verify loom_tools can be imported
     if ! python3 -c "import loom_tools" 2>/dev/null; then
@@ -109,7 +111,8 @@ elif command -v loom-daemon &>/dev/null; then
         echo "" >&2
         exit 1
     fi
-    exec loom-daemon ${args[@]+"${args[@]}"}
+    # No exec — same rationale as above
+    loom-daemon ${args[@]+"${args[@]}"}
 else
     echo "[ERROR] Python daemon not available." >&2
     echo "" >&2

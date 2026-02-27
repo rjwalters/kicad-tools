@@ -279,11 +279,16 @@ Do NOT remove the proposal label (`loom:curated`, `loom:architect`, `loom:hermit
 
 ---
 
-## Issue Promotion Rate Limiting
+## Issue Promotion Batch Processing
 
-**Promote at most 2 issues per iteration.**
+**Process all qualifying issues in one iteration, governed by tier-based limits.**
 
-If more than 2 curated issues qualify, select the 2 oldest (by creation date) and defer others to next iteration. This prevents overwhelming the Builder queue.
+Work through all available curated issues, applying the tier-based rate limits to prevent backlog flooding:
+- Tier 1 (goal-advancing): Promote all qualifying proposals — no limit
+- Tier 2 (goal-supporting): Promote up to 2 per iteration
+- Tier 3 (maintenance): Promote only 1 per iteration, and only if fewer than 5 Tier 3 issues already in backlog
+
+Continue evaluating issues until all have been processed or all applicable tier limits are reached. This prevents issues from waiting unnecessarily across multiple 10-minute intervals when they've already met quality criteria.
 
 ---
 
