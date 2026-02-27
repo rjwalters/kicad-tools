@@ -46,6 +46,15 @@ from .vector import (
     decode,
     encode,
 )
+from .visualization import (
+    IterationRecord,
+    LayoutStyle,
+    OptimizationRecorder,
+    ParetoPoint,
+    plot_convergence,
+    plot_layout,
+    plot_pareto_front,
+)
 from .wirelength import (
     HPWLResult,
     NetWirelength,
@@ -77,9 +86,16 @@ __all__ = [
     "PlacementVector",
     "StrategyConfig",
     "TransformedPad",
+    "IterationRecord",
+    "LayoutStyle",
+    "OptimizationRecorder",
+    "ParetoPoint",
     "bounds",
     "compute_hpwl",
     "compute_hpwl_breakdown",
     "decode",
     "encode",
+    "plot_convergence",
+    "plot_layout",
+    "plot_pareto_front",
 ]

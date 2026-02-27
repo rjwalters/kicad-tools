@@ -124,6 +124,10 @@ cuda = [
 metal = [
     "mlx>=0.5",
 ]
+# Placement optimization visualization
+visualization = [
+    "matplotlib>=3.5",
+]
 # All optional features
 all = [
     "rtree>=1.0",
@@ -137,6 +141,7 @@ all = [
     "pydantic>=2.0",
     "cupy-cuda12x>=13.0",
     "mlx>=0.5",
+    "matplotlib>=3.5",
 ]
 # Development dependencies
 dev = [
@@ -153,6 +158,7 @@ dev = [
     "pyyaml>=6.0",
     "fastmcp>=2.0,<3",
     "pydantic>=2.0",
+    "matplotlib>=3.5",
 ]
 
 [tool.hatch.build.targets.wheel]
