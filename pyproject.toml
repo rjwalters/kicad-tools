@@ -224,6 +224,35 @@ exclude_lines = [
 show_missing = true
 precision = 2
 
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+namespace_packages = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "kicad_tools.intent.*",
+    "kicad_tools.constraints.*",
+    "kicad_tools.schematic.blocks.base",
+    "kicad_tools.validate.models",
+]
+disallow_untyped_defs = true
+disallow_any_generics = true
+warn_return_any = true
+
 [dependency-groups]
 dev = [
     "pytest-cov>=7.0.0",
