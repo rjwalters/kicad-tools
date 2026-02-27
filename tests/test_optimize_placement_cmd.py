@@ -27,7 +27,6 @@ from kicad_tools.placement.cost import (
     PlacementCostConfig,
     PlacementScore,
 )
-from kicad_tools.placement.seed import random_placement
 from kicad_tools.placement.strategy import StrategyConfig
 from kicad_tools.placement.vector import (
     ComponentDef,
@@ -35,7 +34,6 @@ from kicad_tools.placement.vector import (
     PlacementVector,
     bounds,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -504,12 +502,6 @@ class TestOptimizationConvergence:
         """Verify the optimizer can improve upon a random initial placement."""
         cost_config = PlacementCostConfig()
         footprint_sizes = _build_footprint_sizes(simple_components)
-
-        # Random seed placement
-        random_vec = random_placement(simple_components, board, seed=99)
-        initial_score = _evaluate(
-            random_vec, simple_components, simple_nets, rules, board, cost_config, footprint_sizes
-        )
 
         # Run a few iterations of CMA-ES
         placement_bounds = bounds(board, simple_components)
