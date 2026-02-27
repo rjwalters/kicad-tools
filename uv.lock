@@ -307,6 +307,19 @@ wheels = [
 ]
 
 [[package]]
+name = "cmaes"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/4b/9633e72dcd9ac28ab72c661feeb7ece5d01b55e7c9b0ef3331fb102e1506/cmaes-0.12.0.tar.gz", hash = "sha256:6aab41eee2f38bf917560a7e7d1ba0060632cd44cdf7ac2a10704da994624182", size = 52779, upload-time = "2025-07-23T07:01:53.576Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/57/f78b7ed51b3536cc80b4322db2cbbb9d1f409736b852eef0493d9fd8474d/cmaes-0.12.0-py3-none-any.whl", hash = "sha256:d0e3e50ce28a36294bffa16a5626c15d23155824cf6b0a373db30dbbea9b2256", size = 64519, upload-time = "2025-07-23T07:01:52.358Z" },
+]
+
+[[package]]
 name = "cmake"
 version = "4.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -921,6 +934,7 @@ name = "kicad-tools"
 version = "0.10.3"
 source = { editable = "." }
 dependencies = [
+    { name = "cmaes" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic" },
@@ -998,6 +1012,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cmaes", specifier = ">=0.12.0" },
     { name = "cmake", marker = "extra == 'native'", specifier = ">=3.15" },
     { name = "cupy-cuda12x", marker = "extra == 'all'", specifier = ">=13.0" },
     { name = "cupy-cuda12x", marker = "extra == 'cuda'", specifier = ">=13.0" },

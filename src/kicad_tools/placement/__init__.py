@@ -19,6 +19,7 @@ Usage:
 """
 
 from .analyzer import DesignRules, PlacementAnalyzer
+from .cmaes_strategy import CMAESStrategy
 from .collision import (
     CollisionResult,
     DRCResult,
@@ -33,6 +34,7 @@ from .conflict import (
     PlacementFix,
 )
 from .fixer import PlacementFixer
+from .strategy import PlacementStrategy, StrategyConfig
 from .vector import (
     ComponentDef,
     PadDef,
@@ -52,6 +54,7 @@ from .wirelength import (
 )
 
 __all__ = [
+    "CMAESStrategy",
     "CollisionResult",
     "ComponentDef",
     "HPWLResult",
@@ -69,8 +72,10 @@ __all__ = [
     "PlacementCollision",
     "PlacementFix",
     "PlacementFixer",
+    "PlacementStrategy",
     "PlacementValidationResult",
     "PlacementVector",
+    "StrategyConfig",
     "TransformedPad",
     "bounds",
     "compute_hpwl",
