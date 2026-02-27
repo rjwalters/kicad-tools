@@ -560,8 +560,3 @@ progress:
 """
 
 
-def _format_template(template: str) -> str:
-    """Format template with current date."""
-    from datetime import date
-
-    return template.format(date=date.today().isoformat())
