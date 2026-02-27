@@ -40,6 +40,18 @@ from .conflict import (
     PlacementFix,
 )
 from .fixer import PlacementFixer
+from .priors import (
+    AffinityGraph,
+    ComponentGroup,
+    SignalFlowResult,
+    build_affinity_graph,
+    detect_power_domains,
+    detect_signal_flow,
+    find_clusters,
+    power_domain_clustering,
+    prior_mean_position,
+    schematic_proximity_prior,
+)
 from .strategy import PlacementStrategy, StrategyConfig
 from .vector import (
     ComponentDef,
@@ -69,10 +81,12 @@ from .wirelength import (
 )
 
 __all__ = [
+    "AffinityGraph",
     "BayesianOptStrategy",
     "CMAESStrategy",
     "CollisionResult",
     "ComponentDef",
+    "ComponentGroup",
     "HPWLResult",
     "Conflict",
     "ConflictSeverity",
@@ -91,6 +105,7 @@ __all__ = [
     "PlacementStrategy",
     "PlacementValidationResult",
     "PlacementVector",
+    "SignalFlowResult",
     "StrategyConfig",
     "TransformedPad",
     "IterationRecord",
@@ -98,11 +113,18 @@ __all__ = [
     "OptimizationRecorder",
     "ParetoPoint",
     "bounds",
+    "build_affinity_graph",
     "compute_hpwl",
     "compute_hpwl_breakdown",
     "decode",
+    "detect_power_domains",
+    "detect_signal_flow",
     "encode",
+    "find_clusters",
     "plot_convergence",
     "plot_layout",
     "plot_pareto_front",
+    "power_domain_clustering",
+    "prior_mean_position",
+    "schematic_proximity_prior",
 ]
