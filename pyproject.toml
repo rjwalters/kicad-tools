@@ -128,6 +128,11 @@ metal = [
 visualization = [
     "matplotlib>=3.5",
 ]
+# Bayesian Optimization placement strategy (Ax/BoTorch)
+bayesian = [
+    "ax-platform>=0.4.0",
+    "botorch>=0.12.0",
+]
 # All optional features
 all = [
     "rtree>=1.0",
@@ -142,6 +147,8 @@ all = [
     "cupy-cuda12x>=13.0",
     "mlx>=0.5",
     "matplotlib>=3.5",
+    "ax-platform>=0.4.0",
+    "botorch>=0.12.0",
 ]
 # Development dependencies
 dev = [
@@ -246,7 +253,7 @@ namespace_packages = true
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*"]
+module = ["numpy.*", "scipy.*", "rtree.*", "cupy.*", "mlx.*", "ax.*", "botorch.*", "torch.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

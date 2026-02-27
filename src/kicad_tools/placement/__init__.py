@@ -18,7 +18,13 @@ Usage:
     fixes = fixer.suggest_fixes(conflicts)
 """
 
+import contextlib
+
 from .analyzer import DesignRules, PlacementAnalyzer
+
+with contextlib.suppress(ImportError):
+    from .bo_strategy import BayesianOptStrategy
+
 from .cmaes_strategy import CMAESStrategy
 from .collision import (
     CollisionResult,
@@ -63,6 +69,7 @@ from .wirelength import (
 )
 
 __all__ = [
+    "BayesianOptStrategy",
     "CMAESStrategy",
     "CollisionResult",
     "ComponentDef",
