@@ -33,6 +33,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools zones <command>        - Add copper pour zones
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
+    kicad-tools optimize-placement     - Run CMA-ES placement optimization
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
     kicad-tools validate-footprints    - Validate footprint pad spacing
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
@@ -154,6 +155,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_datasheet_parser(subparsers)
     _add_decisions_parser(subparsers)
     _add_placement_parser(subparsers)
+    _add_optimize_placement_parser(subparsers)
     # NOTE: config parser has been migrated to new_commands/config.py
     # and is registered via auto-discovery below.
     _add_interactive_parser(subparsers)
@@ -1707,6 +1709,68 @@ def _add_placement_parser(subparsers) -> None:
 ## NOTE: _add_config_parser has been removed.
 ## The config command is now defined in new_commands/config.py
 ## and registered via auto-discovery in create_parser().
+
+
+def _add_optimize_placement_parser(subparsers) -> None:
+    """Add optimize-placement subcommand parser."""
+    op_parser = subparsers.add_parser(
+        "optimize-placement",
+        help="Run CMA-ES placement optimization on a KiCad PCB",
+    )
+    op_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    op_parser.add_argument(
+        "--strategy",
+        choices=["cmaes"],
+        default="cmaes",
+        help="Optimization strategy (default: cmaes)",
+    )
+    op_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=1000,
+        help="Maximum number of optimizer iterations (default: 1000)",
+    )
+    op_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output PCB file path (default: overwrite input)",
+    )
+    op_parser.add_argument(
+        "--seed",
+        choices=["force-directed", "random"],
+        default="force-directed",
+        dest="seed_method",
+        help="Seed placement method (default: force-directed)",
+    )
+    op_parser.add_argument(
+        "--weights",
+        metavar="JSON",
+        help=(
+            'Custom cost weights as JSON, e.g. \'{"wirelength": 2.0, "overlap": 1e6}\'. '
+            "Keys: overlap, drc, boundary, wirelength, area"
+        ),
+    )
+    op_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Evaluate current placement without optimizing",
+    )
+    op_parser.add_argument(
+        "--progress",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Print score every N iterations (0 = no progress output)",
+    )
+    op_parser.add_argument(
+        "--checkpoint",
+        metavar="DIR",
+        help="Directory for checkpoint save/resume of optimizer state",
+    )
+    op_parser.add_argument("-v", "--verbose", action="store_true")
+    op_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
 
 
 def _add_interactive_parser(subparsers) -> None:
