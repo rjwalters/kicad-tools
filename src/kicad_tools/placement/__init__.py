@@ -44,16 +44,24 @@ from .vector import (
     decode,
     encode,
 )
+from .wirelength import (
+    HPWLResult,
+    NetWirelength,
+    compute_hpwl,
+    compute_hpwl_breakdown,
+)
 
 __all__ = [
     "CollisionResult",
     "ComponentDef",
+    "HPWLResult",
     "Conflict",
     "ConflictSeverity",
     "ConflictType",
     "DesignRules",
     "DRCResult",
     "DRCViolation",
+    "NetWirelength",
     "PadDef",
     "PlacedComponent",
     "PlacementAnalyzer",
@@ -65,6 +73,8 @@ __all__ = [
     "PlacementVector",
     "TransformedPad",
     "bounds",
+    "compute_hpwl",
+    "compute_hpwl_breakdown",
     "decode",
     "encode",
 ]
