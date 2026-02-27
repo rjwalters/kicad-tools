@@ -19,7 +19,6 @@ from kicad_tools.mcp.types import (
     RouteNetResult,
     UnroutedNetsResult,
 )
-from kicad_tools.router.strategies import RoutingStrategy
 from kicad_tools.schema.pcb import PCB
 
 logger = logging.getLogger(__name__)
@@ -392,6 +391,165 @@ def route_net(
             error_message="Autorouter could not find a valid path",
             suggestions=_generate_suggestions(net_status, net_pads, pcb),
         )
+
+
+def route_net_auto(
+    pcb_path: str,
+    net_name: str,
+    output_path: str | None = None,
+    strategy: str = "auto",
+    enable_repair: bool = True,
+    enable_via_resolution: bool = True,
+) -> dict:
+    """Route a specific net using the RoutingOrchestrator.
+
+    Uses smart strategy selection via RoutingOrchestrator rather than the
+    simple Autorouter used by route_net(). The orchestrator analyzes net
+    characteristics (pin pitch, differential pairs, density, via conflicts)
+    and automatically selects the optimal routing strategy.
+
+    Args:
+        pcb_path: Absolute path to .kicad_pcb file
+        net_name: Name of the net to route (e.g., "GND", "SPI_CLK")
+        output_path: Path for output file. If None, result is not saved.
+        strategy: Strategy override ("auto", "global", "escape", "hierarchical",
+                  "subgrid", or "via_resolution"). Use "auto" for smart selection.
+        enable_repair: Whether to enable automatic clearance repair after routing
+        enable_via_resolution: Whether to enable via conflict resolution
+
+    Returns:
+        Dictionary with routing result including:
+        - success: Whether routing succeeded
+        - net_name: Name of the net routed
+        - strategy_used: Name of the strategy that was applied
+        - metrics: Quantitative metrics (length, vias, layer changes, repairs)
+        - repair_actions: List of repairs applied
+        - warnings: Non-fatal warnings
+        - performance: Timing breakdown
+        - error_message: Error description if success is False
+        - alternative_strategies: Suggestions if routing failed
+
+    Raises:
+        FileNotFoundError: If the PCB file does not exist
+        ParseError: If the PCB file cannot be parsed
+        ValueError: If the net name is not found in the design
+
+    Example:
+        >>> result = route_net_auto("/path/to/board.kicad_pcb", "SPI_CLK")
+        >>> if result["success"]:
+        ...     print(f"Routed with strategy: {result['strategy_used']}")
+        ...     print(f"Total length: {result['metrics']['total_length_mm']:.2f}mm")
+        ... else:
+        ...     print(f"Failed: {result['error_message']}")
+    """
+    path = Path(pcb_path)
+    if not path.exists():
+        raise KiCadFileNotFoundError(f"PCB file not found: {pcb_path}")
+
+    if path.suffix != ".kicad_pcb":
+        raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        raise ParseError(f"Failed to parse PCB file: {e}") from e
+
+    # Find the net
+    net_number = None
+    for num, net in pcb.nets.items():
+        if net.name == net_name:
+            net_number = num
+            break
+
+    if net_number is None:
+        raise ValueError(f"Net '{net_name}' not found in design")
+
+    # Import router components
+    try:
+        from kicad_tools.router.io import parse_pcb_design_rules
+        from kicad_tools.router.orchestrator import RoutingOrchestrator
+        from kicad_tools.router.strategies import RoutingStrategy
+    except ImportError as e:
+        return {
+            "success": False,
+            "net_name": net_name,
+            "error_message": f"Router module not available: {e}",
+            "strategy_used": "unknown",
+            "metrics": {},
+            "repair_actions": [],
+            "warnings": ["Ensure kicad_tools router module is installed"],
+            "performance": {},
+            "alternative_strategies": [],
+        }
+
+    # Extract design rules from PCB
+    pcb_text = path.read_text()
+    pcb_rules = parse_pcb_design_rules(pcb_text)
+    design_rules = pcb_rules.to_design_rules()
+
+    # Build a lightweight PCB-like object for the orchestrator
+    # The orchestrator needs pcb.width, pcb.height, and optionally pcb.grid
+    outline = pcb.get_board_outline()
+    if outline:
+        min_x = min(p[0] for p in outline)
+        max_x = max(p[0] for p in outline)
+        min_y = min(p[1] for p in outline)
+        max_y = max(p[1] for p in outline)
+        board_width = max_x - min_x
+        board_height = max_y - min_y
+    else:
+        board_width = 100.0
+        board_height = 100.0
+
+    # Attach dimensions to the pcb object for orchestrator use
+    pcb.width = board_width  # type: ignore[attr-defined]
+    pcb.height = board_height  # type: ignore[attr-defined]
+    pcb.path = path  # type: ignore[attr-defined]
+
+    # Resolve strategy override
+    strategy_map = {
+        "global": RoutingStrategy.GLOBAL_WITH_REPAIR,
+        "escape": RoutingStrategy.ESCAPE_THEN_GLOBAL,
+        "hierarchical": RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+        "subgrid": RoutingStrategy.SUBGRID_ADAPTIVE,
+        "via_resolution": RoutingStrategy.VIA_CONFLICT_RESOLUTION,
+    }
+
+    # Create orchestrator
+    orchestrator = RoutingOrchestrator(
+        pcb=pcb,  # type: ignore[arg-type]
+        rules=design_rules,
+        enable_repair=enable_repair,
+        enable_via_conflict_resolution=enable_via_resolution,
+    )
+
+    # If a strategy override is requested, patch the strategy selection
+    if strategy != "auto" and strategy in strategy_map:
+        forced_strategy = strategy_map[strategy]
+
+        def _forced_select(net, intent, pads):
+            return forced_strategy
+
+        orchestrator._select_strategy = _forced_select  # type: ignore[method-assign]
+
+    # Route the net
+    result = orchestrator.route_net(net=net_name)
+
+    # Convert to dict with net_name included
+    result_dict = result.to_dict()
+    result_dict["net_name"] = net_name
+
+    # Save output if requested and routing succeeded
+    if output_path and result.success:
+        try:
+            pcb.save(output_path)
+            result_dict["output_path"] = output_path
+        except Exception as e:
+            result_dict["warnings"] = result_dict.get("warnings", []) + [
+                f"Routing succeeded but save failed: {e}"
+            ]
+
+    return result_dict
 
 
 def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:

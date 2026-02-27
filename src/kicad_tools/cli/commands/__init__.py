@@ -33,7 +33,12 @@ from .pcb import run_pcb_command
 from .placement import run_placement_command
 from .project import run_clean_command, run_init_command
 from .reasoning import run_reason_command
-from .routing import run_optimize_command, run_route_command, run_zones_command
+from .routing import (
+    run_optimize_command,
+    run_route_auto_command,
+    run_route_command,
+    run_zones_command,
+)
 from .run import run_run_command
 from .schematic import run_sch_command
 from .spec import run_spec_command
@@ -60,6 +65,7 @@ __all__ = [
     "run_lib_command",
     # Routing
     "run_route_command",
+    "run_route_auto_command",
     "run_zones_command",
     "run_optimize_command",
     # Benchmark

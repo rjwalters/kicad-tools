@@ -143,6 +143,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_mfr_parser(subparsers)
     _add_zones_parser(subparsers)
     _add_route_parser(subparsers)
+    _add_route_auto_parser(subparsers)
     _add_reason_parser(subparsers)
     _add_optimize_parser(subparsers)
     _add_validate_footprints_parser(subparsers)
@@ -924,6 +925,47 @@ def _add_route_parser(subparsers) -> None:
             "Use high-performance mode with aggressive parallelization and more trials. "
             "Uses calibrated settings if available (run 'kicad-tools calibrate' first)."
         ),
+    )
+
+
+def _add_route_auto_parser(subparsers) -> None:
+    """Add route-auto subcommand parser."""
+    route_auto_parser = subparsers.add_parser(
+        "route-auto",
+        help="Route a net using RoutingOrchestrator smart strategy selection",
+    )
+    route_auto_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    route_auto_parser.add_argument(
+        "--net",
+        required=True,
+        metavar="NAME",
+        help="Net to route (e.g., 'GND', 'SPI_CLK')",
+    )
+    route_auto_parser.add_argument(
+        "--strategy",
+        choices=["auto", "global", "escape", "hierarchical", "subgrid", "via_resolution"],
+        default="auto",
+        help=(
+            "Strategy override (default: auto). "
+            "'auto' lets the orchestrator select the best strategy. "
+            "Other values force a specific strategy."
+        ),
+    )
+    route_auto_parser.add_argument(
+        "--no-repair",
+        action="store_true",
+        help="Disable automatic clearance repair after routing (repair enabled by default)",
+    )
+    route_auto_parser.add_argument(
+        "--no-via-resolution",
+        action="store_true",
+        help="Disable via conflict resolution (enabled by default)",
+    )
+    route_auto_parser.add_argument("-o", "--output", help="Output PCB file path")
+    route_auto_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview strategy selection without routing",
     )
 
 
