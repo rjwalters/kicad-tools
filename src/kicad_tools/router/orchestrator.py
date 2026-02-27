@@ -754,28 +754,174 @@ class RoutingOrchestrator:
     ) -> RoutingResult:
         """Execute complete routing pipeline with all stages.
 
+        Chains all routing strategies in sequence:
+        1. Escape routing (if fine-pitch pads detected)
+        2. Global routing for coarse path planning
+        3. Sub-grid adaptive routing for dense areas
+        4. Via conflict resolution (if conflicts detected)
+        5. Clearance repair on final result
+
+        Each phase handles failures gracefully — if an early phase fails,
+        later phases still attempt routing. Metrics are aggregated across
+        all phases.
+
         Args:
             net: Net identifier
             intent: Optional design intent
             pads: List of pads
 
         Returns:
-            RoutingResult from full pipeline
+            RoutingResult from full pipeline with aggregated metrics
         """
-        # Placeholder implementation
-        return RoutingResult(
-            success=True,
+        if pads is None or len(pads) < 2:
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=RoutingStrategy.FULL_PIPELINE,
+                error_message="Insufficient pads for full pipeline routing",
+            )
+
+        strategies_used: list[str] = []
+        all_segments: list = []
+        all_vias: list = []
+        all_warnings: list[str] = []
+        total_length = 0.0
+        total_via_count = 0
+        total_layer_changes = 0
+        total_escape_segments = 0
+        total_repair_actions = 0
+        pipeline_success = False
+
+        # Phase 1: Escape routing (if fine-pitch pads detected)
+        if self._needs_escape_routing(pads):
+            try:
+                escape_result = self._route_escape_then_global(net, pads)
+                strategies_used.append("escape_then_global")
+                if escape_result.success:
+                    pipeline_success = True
+                    all_segments.extend(escape_result.segments)
+                    all_vias.extend(escape_result.vias)
+                    total_length += escape_result.metrics.total_length_mm
+                    total_via_count += escape_result.metrics.via_count
+                    total_layer_changes += escape_result.metrics.layer_changes
+                    total_escape_segments += escape_result.metrics.escape_segments
+                else:
+                    all_warnings.append(
+                        f"Escape routing failed: {escape_result.error_message}"
+                    )
+            except Exception as e:
+                logger.warning("Full pipeline: escape routing phase failed: %s", e)
+                all_warnings.append(f"Escape routing exception: {e}")
+        else:
+            # Phase 2: Global routing (when escape routing is not needed)
+            try:
+                global_result = self._route_global(net, pads)
+                strategies_used.append("global")
+                if global_result.success:
+                    pipeline_success = True
+                    all_segments.extend(global_result.segments)
+                    all_vias.extend(global_result.vias)
+                    total_length += global_result.metrics.total_length_mm
+                    total_via_count += global_result.metrics.via_count
+                    total_layer_changes += global_result.metrics.layer_changes
+                else:
+                    all_warnings.append(
+                        f"Global routing failed: {global_result.error_message}"
+                    )
+            except Exception as e:
+                logger.warning("Full pipeline: global routing phase failed: %s", e)
+                all_warnings.append(f"Global routing exception: {e}")
+
+        # Phase 3: Sub-grid adaptive routing for dense areas
+        if self._check_density(pads) > self.density_threshold:
+            try:
+                subgrid_result = self._route_subgrid_adaptive(net, pads)
+                strategies_used.append("subgrid_adaptive")
+                if subgrid_result.success:
+                    total_escape_segments += subgrid_result.metrics.escape_segments
+                else:
+                    all_warnings.append(
+                        f"Sub-grid adaptive failed: {subgrid_result.error_message}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Full pipeline: sub-grid adaptive phase failed: %s", e
+                )
+                all_warnings.append(f"Sub-grid adaptive exception: {e}")
+
+        # Phase 4: Via conflict resolution (if conflicts detected)
+        if self.enable_via_conflict_resolution and self._has_via_conflicts(net, pads):
+            try:
+                via_result = self._route_with_via_resolution(net, pads)
+                strategies_used.append("via_conflict_resolution")
+                if via_result.success:
+                    # Via resolution re-routes, so use its metrics if prior routing
+                    # failed or if it produced a better result
+                    if not pipeline_success:
+                        pipeline_success = True
+                        all_segments = list(via_result.segments)
+                        all_vias = list(via_result.vias)
+                        total_length = via_result.metrics.total_length_mm
+                        total_via_count = via_result.metrics.via_count
+                        total_layer_changes = via_result.metrics.layer_changes
+                all_warnings.extend(via_result.warnings)
+            except Exception as e:
+                logger.warning(
+                    "Full pipeline: via conflict resolution phase failed: %s", e
+                )
+                all_warnings.append(f"Via conflict resolution exception: {e}")
+
+        # Build the result before clearance repair
+        result = RoutingResult(
+            success=pipeline_success,
             net=net,
             strategy_used=RoutingStrategy.FULL_PIPELINE,
+            segments=all_segments,
+            vias=all_vias,
             metrics=RoutingMetrics(
-                total_length_mm=14.0,
-                via_count=3,
-                layer_changes=2,
-                escape_segments=2,
-                repair_actions=1,
+                total_length_mm=total_length,
+                via_count=total_via_count,
+                layer_changes=total_layer_changes,
+                escape_segments=total_escape_segments,
+                repair_actions=total_repair_actions,
             ),
-            warnings=["Full pipeline: placeholder implementation"],
+            warnings=all_warnings,
         )
+
+        if not pipeline_success:
+            result.error_message = "All routing phases failed"
+            result.alternative_strategies = self._suggest_alternatives(
+                RoutingStrategy.FULL_PIPELINE
+            )
+
+        # Phase 5: Clearance repair on final result
+        if pipeline_success and self.enable_repair and result.violations:
+            try:
+                repair_count = self._apply_clearance_repair(result)
+                if repair_count > 0:
+                    strategies_used.append("clearance_repair")
+                    total_repair_actions += repair_count
+                    result.metrics.repair_actions = total_repair_actions
+            except Exception as e:
+                logger.warning(
+                    "Full pipeline: clearance repair phase failed: %s", e
+                )
+                result.warnings.append(f"Clearance repair exception: {e}")
+
+        # Record which strategies were used
+        if strategies_used:
+            result.warnings.insert(
+                0, f"Full pipeline phases: {', '.join(strategies_used)}"
+            )
+
+        logger.info(
+            "Full pipeline complete: net=%s, success=%s, phases=%s",
+            net,
+            pipeline_success,
+            strategies_used,
+        )
+
+        return result
 
     def _apply_clearance_repair(self, result: RoutingResult) -> int:
         """Apply automatic clearance repair to fix violations.
