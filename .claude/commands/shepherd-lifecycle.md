@@ -1,5 +1,13 @@
 # Shepherd Lifecycle Reference
 
+> **Note**: This document describes what the **Python shepherd** (`loom-shepherd.sh` /
+> `loom_tools.shepherd.cli`) does once it is running. The Python shepherd is spawned by
+> the standalone daemon as a direct subprocess — it is **not** invoked by the
+> `/shepherd` Claude Code skill directly. The `/shepherd` skill writes a
+> `spawn_shepherd` signal to `.loom/signals/` and then observes progress via
+> `.loom/progress/` and `daemon-state.json`. See `shepherd.md` for the skill's
+> signal-writer + observer pattern.
+
 This document contains detailed workflow implementation for the Shepherd role. For core role definition, principles, and phase flow overview, see `shepherd.md`.
 
 ## Label State Machine
@@ -37,7 +45,7 @@ This section documents the expected GitHub label states at each shepherd phase b
 | Phase | Issue Labels | PR Labels | Recovery |
 |-------|--------------|-----------|----------|
 | Curator | (unchanged) | - | Retry curator |
-| Builder (test failure) | `loom:needs-fix` | - | Worktree preserved, Doctor/Builder fixes tests |
+| Builder (test failure) | `loom:blocked` | - | Worktree preserved, Doctor/Builder fixes tests |
 | Builder (other failure) | `loom:blocked` | - | See diagnostics comment |
 | Judge | `loom:blocked` | (unchanged) | Manual review required |
 | Doctor | `loom:blocked` | (unchanged) | Manual fix required |
@@ -55,16 +63,12 @@ Issue Lifecycle:
                     ┌─────────────┐                         ┌─────────────┐
                     │loom:blocked │ ◀─── (failure) ─────── │loom:building│
                     └─────────────┘                         └─────────────┘
-                                                             │     │
-                                                   (test fail) (PR merged)
-                                                             ▼        ▼
-                                                  ┌───────────────┐ ┌─────────────┐
-                                                  │loom:needs-fix │ │  (closed)   │
-                                                  └───────────────┘ └─────────────┘
-                                                          │
-                                                  (Doctor fixes tests)
-                                                          ▼
-                                                  back to loom:building
+                                                                    │
+                                                              (PR merged)
+                                                                    ▼
+                                                             ┌─────────────┐
+                                                             │  (closed)   │
+                                                             └─────────────┘
 
 PR Lifecycle:
 ┌─────────────────────┐     ┌───────────────────────┐     ┌─────────────┐

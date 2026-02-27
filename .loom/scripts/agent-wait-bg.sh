@@ -17,8 +17,8 @@
 #
 # Stuck Detection Environment Variables:
 #   LOOM_STUCK_WARNING   - Seconds without progress before warning (default: 300)
-#   LOOM_STUCK_CRITICAL  - Seconds without progress before critical (default: 600)
-#   LOOM_STUCK_ACTION    - Action on stuck: warn, pause, restart, retry (default: warn)
+#   LOOM_STUCK_CRITICAL  - Seconds without progress before kill+retry (default: 600)
+#   LOOM_STUCK_ACTION    - Action on stuck: warn, pause, restart, retry (default: retry)
 #   LOOM_PROMPT_STUCK_CHECK_INTERVAL - Check interval for 'stuck at prompt' detection (default: 10)
 #   LOOM_PROMPT_STUCK_AGE_THRESHOLD - How long stuck before triggering detection (default: 30)
 #   LOOM_PROMPT_STUCK_RECOVERY_COOLDOWN - Seconds before re-attempting recovery (default: 60)
@@ -56,9 +56,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log_info() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $*" >&2; }
-log_success() { echo -e "${GREEN}[$(date '+%H:%M:%S')] ✓${NC} $*" >&2; }
-log_warn() { echo -e "${YELLOW}[$(date '+%H:%M:%S')] ⚠${NC} $*" >&2; }
+log_info() { echo -e "${BLUE}[$(date -u '+%Y-%m-%dT%H:%M:%SZ')]${NC} $*" >&2; }
+log_success() { echo -e "${GREEN}[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] ✓${NC} $*" >&2; }
+log_warn() { echo -e "${YELLOW}[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] ⚠${NC} $*" >&2; }
 
 # Default poll interval for signal checking
 DEFAULT_SIGNAL_POLL=5
@@ -90,10 +90,28 @@ CONTRACT_INTERVAL_OVERRIDE=${LOOM_CONTRACT_INTERVAL_OVERRIDE:-0}
 CONTRACT_INITIAL_DELAY=180
 
 # Stuck detection thresholds (configurable via environment variables)
-# Note: Set high to avoid killing agents mid-work (see issue #2001)
-STUCK_WARNING_THRESHOLD=${LOOM_STUCK_WARNING:-3600}   # 1 hour default
-STUCK_CRITICAL_THRESHOLD=${LOOM_STUCK_CRITICAL:-7200} # 2 hour default
-STUCK_ACTION=${LOOM_STUCK_ACTION:-warn}              # warn, pause, restart, retry
+#
+# Two independent stuck-detection subsystems exist:
+#
+# 1. **General idle detection** (this section): Monitors tmux pane content
+#    changes and worktree file modifications.  If neither changes for
+#    STUCK_WARNING_THRESHOLD seconds, a warning fires.  At STUCK_CRITICAL_THRESHOLD,
+#    the STUCK_ACTION is taken (default: retry = kill and retry the phase).
+#    Use --max-idle to set the critical threshold and force action=retry.
+#
+# 2. **Prompt-stuck detection** (next section): Detects the specific failure
+#    mode where a command is visible at the prompt but not processing.  This
+#    fires much faster (~30s) via PROMPT_STUCK_AGE_THRESHOLD.
+#
+# These subsystems are complementary: prompt-stuck catches "command not
+# dispatched" failures quickly, while general idle catches "agent running
+# but producing nothing" failures over minutes.
+#
+# Lowered from 3600/7200 (issue #2001) to 300/600 (issue #2406) after a
+# stuck builder ran undetected for 150 minutes.
+STUCK_WARNING_THRESHOLD=${LOOM_STUCK_WARNING:-300}    # 5 min default
+STUCK_CRITICAL_THRESHOLD=${LOOM_STUCK_CRITICAL:-600}  # 10 min default
+STUCK_ACTION=${LOOM_STUCK_ACTION:-retry}              # warn, pause, restart, retry
 
 # "Stuck at prompt" detection - command visible but not processing
 # This is a distinct, faster-detectable failure mode from general stuck detection.
@@ -165,8 +183,10 @@ ${YELLOW}OPTIONS:${NC}
     --issue <N>                Issue number for per-issue abort checking
     --task-id <id>             Shepherd task ID for heartbeat emission during long waits
     --phase <phase>            Phase name (curator, builder, judge, doctor) for contract checking
-    --min-idle-elapsed <secs>  Override idle prompt detection threshold for agent-wait.sh (default: 10)
-    --worktree <path>          Worktree path for builder phase recovery
+    --max-idle <seconds>       Max seconds without progress before kill+retry (sets critical threshold and action=retry)
+    --min-session-age <secs>   Minimum session age before idle prompt detection activates (default: 10)
+    --min-idle-elapsed <secs>  Deprecated alias for --min-session-age
+    --worktree <path>          Worktree path for builder phase recovery and file-change detection
     --pr <N>                   PR number for judge/doctor phase validation
     --grace-period <seconds>   Deprecated (no-op). Agent is terminated immediately on completion detection.
     --idle-timeout <seconds>   Time without output before checking phase contract (default: $DEFAULT_IDLE_TIMEOUT)
@@ -208,12 +228,15 @@ ${YELLOW}COMPLETION DETECTION:${NC}
     - Curator: Issue labeled with loom:curated
 
 ${YELLOW}STUCK DETECTION:${NC}
-    Monitors agent progress by tracking tmux pane content changes.
-    Configure via environment variables:
+    Monitors agent progress by tracking tmux pane content changes and
+    worktree file modifications (when --worktree is provided).
+    Configure via environment variables or --max-idle flag:
 
     LOOM_STUCK_WARNING   Seconds without progress before warning (default: 300)
-    LOOM_STUCK_CRITICAL  Seconds without progress before critical (default: 600)
-    LOOM_STUCK_ACTION    Action on stuck: warn, pause, restart (default: warn)
+    LOOM_STUCK_CRITICAL  Seconds without progress before kill+retry (default: 600)
+    LOOM_STUCK_ACTION    Action on stuck: warn, pause, restart, retry (default: retry)
+
+    --max-idle <seconds> sets STUCK_CRITICAL and forces action=retry
 
 ${YELLOW}PROMPT STUCK DETECTION:${NC}
     Fast detection of 'stuck at prompt' state - command visible but not processing.
@@ -282,8 +305,12 @@ init_progress_tracking() {
     rm -f "$hash_file"
 }
 
-# Check for progress by comparing tmux pane content hash
-# Returns 0 if progress detected, 1 if no change
+# Check for progress by comparing tmux pane content hash and worktree file changes.
+# Returns 0 if progress detected, 1 if no change.
+#
+# Progress signals (any one resets the idle timer):
+#   1. Tmux pane content changed (agent produced visible output)
+#   2. Worktree has modified/new files (agent is writing code even if pane is static)
 check_progress() {
     local name="$1"
     local session_name="$2"
@@ -291,27 +318,49 @@ check_progress() {
     local progress_file="$PROGRESS_DIR/${name}"
     local hash_file="${progress_file}.hash"
     local time_file="${progress_file}.time"
+    local worktree_hash_file="${progress_file}.worktree_hash"
 
-    # Capture current pane content and hash it
+    local progress_detected=false
+
+    # Signal 1: Tmux pane content changed
     local current_content
     current_content=$(tmux -L "$TMUX_SOCKET" capture-pane -t "$session_name" -p 2>/dev/null || echo "")
 
-    if [[ -z "$current_content" ]]; then
-        # Can't capture pane - session may be gone
-        return 1
+    if [[ -n "$current_content" ]]; then
+        local current_hash
+        current_hash=$(echo "$current_content" | md5 -q 2>/dev/null || echo "$current_content" | md5sum 2>/dev/null | cut -d' ' -f1)
+
+        local last_hash=""
+        if [[ -f "$hash_file" ]]; then
+            last_hash=$(cat "$hash_file" 2>/dev/null || echo "")
+        fi
+
+        if [[ "$current_hash" != "$last_hash" ]]; then
+            echo "$current_hash" > "$hash_file"
+            progress_detected=true
+        fi
     fi
 
-    local current_hash
-    current_hash=$(echo "$current_content" | md5 -q 2>/dev/null || echo "$current_content" | md5sum 2>/dev/null | cut -d' ' -f1)
+    # Signal 2: Worktree file changes (if --worktree was provided)
+    # Uses git status hash to detect new/modified files without expensive I/O.
+    if [[ -n "${worktree:-}" ]] && [[ -d "${worktree}" ]]; then
+        local wt_status
+        wt_status=$(git -C "$worktree" status --porcelain 2>/dev/null || echo "")
+        local wt_hash
+        wt_hash=$(echo "$wt_status" | md5 -q 2>/dev/null || echo "$wt_status" | md5sum 2>/dev/null | cut -d' ' -f1)
 
-    local last_hash=""
-    if [[ -f "$hash_file" ]]; then
-        last_hash=$(cat "$hash_file" 2>/dev/null || echo "")
+        local last_wt_hash=""
+        if [[ -f "$worktree_hash_file" ]]; then
+            last_wt_hash=$(cat "$worktree_hash_file" 2>/dev/null || echo "")
+        fi
+
+        if [[ "$wt_hash" != "$last_wt_hash" ]]; then
+            echo "$wt_hash" > "$worktree_hash_file"
+            progress_detected=true
+        fi
     fi
 
-    if [[ "$current_hash" != "$last_hash" ]]; then
-        # Content changed - progress detected
-        echo "$current_hash" > "$hash_file"
+    if [[ "$progress_detected" == "true" ]]; then
         date +%s > "$time_file"
         return 0  # Progress detected
     fi
@@ -570,6 +619,7 @@ cleanup_progress_files() {
     local name="$1"
 
     rm -f "$PROGRESS_DIR/${name}.hash"
+    rm -f "$PROGRESS_DIR/${name}.worktree_hash"
     rm -f "$PROGRESS_DIR/${name}.time"
     rm -f "$PROGRESS_DIR/${name}"
 }
@@ -802,7 +852,7 @@ main() {
     local phase=""
     local worktree=""
     local pr_number=""
-    local min_idle_elapsed=""
+    local min_session_age=""
     local json_output=false
 
     if [[ $# -lt 1 ]]; then
@@ -847,8 +897,18 @@ main() {
                 phase="$2"
                 shift 2
                 ;;
+            --max-idle)
+                STUCK_CRITICAL_THRESHOLD="$2"
+                STUCK_ACTION="retry"
+                shift 2
+                ;;
+            --min-session-age)
+                min_session_age="$2"
+                shift 2
+                ;;
             --min-idle-elapsed)
-                min_idle_elapsed="$2"
+                # Deprecated alias for --min-session-age
+                min_session_age="$2"
                 shift 2
                 ;;
             --worktree)
@@ -901,8 +961,8 @@ main() {
     local wait_output
     wait_output=$(mktemp "${TMPDIR:-/tmp}/agent-wait-output.XXXXXX")
     local wait_cmd=("${SCRIPT_DIR}/agent-wait.sh" "$name" --timeout "$timeout" --poll-interval "$poll_interval" --json)
-    if [[ -n "$min_idle_elapsed" ]]; then
-        wait_cmd+=(--min-idle-elapsed "$min_idle_elapsed")
+    if [[ -n "$min_session_age" ]]; then
+        wait_cmd+=(--min-session-age "$min_session_age")
     fi
     "${wait_cmd[@]}" > "$wait_output" &
     local wait_pid=$!

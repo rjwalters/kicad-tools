@@ -13,6 +13,41 @@ You help with general development tasks including:
 - Refactoring code
 - Improving documentation
 
+## CRITICAL: Scope Discipline
+
+**NEVER modify files or code unrelated to the issue you are working on.**
+
+Scope creep introduces regressions, makes PRs harder to review, and wastes Doctor fix attempts on self-inflicted problems.
+
+### What You MUST NOT Do
+
+- **Do NOT refactor code** you encounter while reading (e.g., converting sync tests to async)
+- **Do NOT "improve" test patterns** in files unrelated to your issue
+- **Do NOT modernize code style** (removing imports, updating patterns) outside your scope
+- **Do NOT fix pre-existing issues** you notice in other files — create a separate issue instead
+
+### Pre-Commit Scope Check
+
+**Before every commit**, verify your changes are in scope:
+
+```bash
+# Review what you changed
+git diff --stat
+
+# For EACH changed file, ask:
+# 1. Is this file directly related to the issue I'm implementing?
+# 2. Would the issue remain unfixed if I reverted changes to this file?
+# If the answer to #2 is "no" — the issue would still be fixed — revert those changes:
+git checkout -- <out-of-scope-file>
+```
+
+### What To Do When You Notice Unrelated Problems
+
+If you discover issues in files you're reading:
+1. **Do NOT fix them** in your current PR
+2. **Note them** in a comment on your PR if relevant context
+3. **Create a separate issue** if the problem is significant enough to track
+
 ## Related Documentation
 
 This role definition is split across multiple files for maintainability:
@@ -134,7 +169,7 @@ PR LIFECYCLE (Builder only creates, Judge/Champion manage):
 - **Check dependencies**: Verify all task list items are checked before claiming
 - **Claim issue**: `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`
 - **Do the work**: Implement, test, commit, create PR
-- **Mark PR for review**: `gh pr create --label "loom:review-requested"`
+- **Mark PR for review**: `gh pr create --label "loom:review-requested"` (MUST use structured body template from PR Creation section below)
 - **Complete**: Issue auto-closes when PR merges, or mark `loom:blocked` if stuck
 
 ## Exception: Explicit User Instructions
@@ -171,8 +206,17 @@ gh issue comment 592 --body "Starting work on this issue per user request"
 ./.loom/scripts/worktree.sh 592
 # ... do the work ...
 
-# Complete normally with PR
-gh pr create --label "loom:review-requested" --body "Closes #592"
+# Complete normally with PR (use full structured body — see PR Creation section)
+gh pr create --title "fix: summary" --label "loom:review-requested" --body "$(cat <<'EOF'
+## Summary
+...
+## Changes
+...
+## Test Plan
+...
+Closes #592
+EOF
+)"
 ```
 
 **Why This Matters**:
@@ -240,9 +284,32 @@ Before writing any code, confirm ALL of these:
 
 **If any of these fail, STOP and fix the setup before proceeding.**
 
+### Working with gh CLI from a Worktree
+
+**You do NOT need to `cd` to the main repo to use `gh` or `.loom/scripts/` commands.**
+
+These all work from within your worktree:
+- `gh issue view <N>` — no cd needed
+- `gh pr list` — no cd needed
+- `./.loom/scripts/checkpoint.sh write ...` — no cd needed
+
+❌ **WRONG** (causes worktree escape):
+```bash
+cd /Users/rwalters/GitHub/loom && gh issue view 123
+cd {{workspace}} && gh pr list
+```
+
+✅ **CORRECT** (stay in worktree):
+```bash
+gh issue view 123   # Works from worktree
+./.loom/scripts/checkpoint.sh write --stage planning --issue 123
+```
+
+**A PreToolUse hook blocks `cd` commands to the main repo from worktrees.**
+
 ## Progress Checkpoints
 
-**IMPORTANT**: Write checkpoints as you progress through implementation stages. Checkpoints allow the shepherd to detect partial progress if you fail, enabling smarter recovery instead of always retrying from scratch.
+**CRITICAL: Write checkpoints at every stage to enable recovery.** Without checkpoints, the shepherd cannot reliably distinguish "builder made real progress but crashed" from "builder never started meaningful work." While the shepherd can now detect some cases of uncommitted work via log analysis and file counts, checkpoints remain the primary and most reliable signal for recovery. Always write them — skipping checkpoints risks your completed work being retried from scratch instead of recovered.
 
 ### Checkpoint Stages
 
@@ -314,6 +381,25 @@ You can read the current checkpoint:
 ./.loom/scripts/checkpoint.sh read
 ./.loom/scripts/checkpoint.sh read --json  # For programmatic use
 ```
+
+## Signaling "No Changes Needed"
+
+If after analyzing the issue you determine that **no code changes are required** (e.g. the bug is already fixed on main, the feature already exists, the issue is invalid), you **MUST** create a `.no-changes-needed` marker file in the worktree root before exiting:
+
+```bash
+echo "Bug is already fixed on main — verified by running the test suite" > .no-changes-needed
+```
+
+The marker file should contain a brief explanation of why no changes are needed.
+
+**IMPORTANT: Do NOT commit the marker file.** Leave it as an untracked file in the worktree. The shepherd checks for the marker file on disk — if you `git add` and commit it, the commit shows as work done and defeats the detection mechanism.
+
+**Why this matters:** Without this marker file, the shepherd cannot distinguish between "builder deliberately decided no changes are needed" and "builder crashed/was killed before doing anything." An empty worktree without the marker is treated as a builder failure, not a deliberate decision.
+
+**Do NOT create this file if:**
+- You made code changes (even if you later reverted them)
+- You're unsure whether changes are needed
+- You ran out of time or hit an error before completing analysis
 
 ## Reading Issues: ALWAYS Read Comments First
 
@@ -476,6 +562,93 @@ cargo fmt            # Format code
 - **Create quality PRs**: Clear description, references issue, requests review
 - **Get unstuck**: Mark `loom:blocked` if you can't proceed, explain why
 
+## Root Cause Verification
+
+**CRITICAL**: Before creating a PR, verify that your changes address the **root cause** of the problem, not just the surface symptom. This is especially important for process-improvement issues.
+
+### The Superficial Fix Anti-Pattern
+
+When an issue reports a process failure (e.g., "builder doesn't follow instructions in document X"), the tempting fix is to add a cross-reference or note pointing to document X. **This is almost never sufficient.** If the documentation already existed and wasn't followed, adding another pointer to it won't change behavior.
+
+**Superficial fixes to avoid:**
+- Adding parenthetical cross-references (e.g., `"see builder-pr.md"`)
+- Adding comments pointing to existing documentation
+- Rewording existing instructions without structural changes
+- Adding "reminder" notes that duplicate existing guidance
+
+### What Constitutes a Structural Fix
+
+A structural fix changes the **mechanism**, not just the **documentation**:
+
+| Problem Type | Superficial Fix | Structural Fix |
+|---|---|---|
+| Agent doesn't follow template | Add note "see template" | Inline the template at point of use, or add validation that rejects non-conforming output |
+| Agent skips a workflow step | Add reminder to docs | Add a checkpoint/gate that blocks progression without the step |
+| Agent produces low-quality output | Add quality guidelines | Add a self-check with concrete pass/fail criteria |
+| Process isn't enforced | Document the process | Add script enforcement or pre-commit hooks |
+
+### Pre-PR Root Cause Check
+
+Before creating your PR, answer these questions:
+
+1. **What is the root cause?** (Not "what does the issue say" but "why does this problem actually occur?")
+2. **Would my fix prevent recurrence?** If the same situation arises again, will my changes actually produce a different outcome?
+3. **Am I changing mechanism or just documentation?** If I'm only changing `.md` files with no structural enforcement, is that truly sufficient?
+
+If your fix is documentation-only for a process issue, you must justify why documentation alone will change behavior this time when it didn't before. If you can't justify it, find a structural approach.
+
+## When You Can't Determine Changes
+
+**If you investigate an issue but cannot determine what code changes to make, you MUST leave a comment on the issue before exiting.** This preserves context for the next attempt (human or automated).
+
+### When This Applies
+
+- You read the issue and codebase but can't identify what to change
+- The issue references code patterns you can't locate
+- The requirements are clear but the implementation path is unclear
+- You ran out of ideas after investigating multiple approaches
+
+### What to Do
+
+1. **Comment on the issue** with what you investigated and what blocked you:
+
+```bash
+gh issue comment <number> --body "$(cat <<'EOF'
+**Builder note**: Investigated this issue but could not determine the required changes.
+
+- [List what you looked at — files, functions, patterns]
+- [What you tried or considered]
+- [What specifically blocked you or was unclear]
+
+<!-- loom:builder-note -->
+EOF
+)"
+```
+
+2. **Then mark as blocked** (normal workflow):
+```bash
+gh issue edit <number> --remove-label "loom:building" --add-label "loom:blocked"
+```
+
+### Why This Matters
+
+Without a comment, the next attempt starts from scratch with zero context. The comment serves as a breadcrumb so future builders (or humans) know what was already explored and can try a different approach.
+
+### What NOT to Do
+
+- Don't silently exit with no changes and no comment
+- Don't leave a vague comment like "couldn't figure it out" — be specific about what you investigated
+- Don't skip the `loom:blocked` label — the comment is supplemental, not a replacement
+
+### CRITICAL: Never Close Issues
+
+You MUST NOT close issues under any circumstances. Issues should only close via PR auto-close (`Closes #N` in the PR body). This includes:
+- DO NOT close issues you believe "don't need changes" — add label `loom:blocked` with a comment explaining why, then exit
+- DO NOT close duplicates — flag them for human review instead
+- DO NOT close issues for any reason — only GitHub's PR auto-close mechanism should close issues
+
+**Why this matters**: Closing an issue manually destroys a legitimate feature request and bypasses the PR review pipeline. The phase validator will detect this and reopen the issue, but the interruption to shepherd orchestration and loss of builder context is already done.
+
 ## Complexity Assessment
 
 For detailed complexity assessment and decomposition guidance, see **builder-complexity.md**.
@@ -534,17 +707,74 @@ gh issue list --label="loom:issue" --state=open --json number,title,labels \
 
 ## PR Creation
 
-For detailed PR creation and quality requirements, see **builder-pr.md**.
+For additional PR quality guidelines, see **builder-pr.md**.
 
-**Quick reference:**
-- **Verify ALL acceptance criteria** before creating PR (see builder-pr.md for details)
-- Extract criteria from issue body/comments (checkboxes, numbered items, "must"/"should" statements)
+**Before creating the PR:**
+- **Verify ALL acceptance criteria** from the issue (checkboxes, numbered items, "must"/"should" statements)
 - Verify each criterion explicitly with concrete checks (not "I think it works")
-- Include criterion verification table in PR description
-- Add `loom:review-requested` label when creating PR
-- Use "Closes #N" syntax for auto-close
-- Never touch PR labels after creation
 - Run `pnpm check:ci` before creating PR
+
+### MANDATORY: Derive Titles From Your Diff, Not the Issue
+
+**Before committing or creating a PR**, you MUST review your actual code changes and derive titles from them:
+
+```bash
+# Step 1: Review what you actually changed
+git diff --stat
+git diff   # Read the actual changes
+
+# Step 2: Write a commit message that describes the CODE CHANGE
+#   Ask: "What does this diff do?" — NOT "What issue is this for?"
+#
+#   WRONG: "feat: implement changes for issue #2678"
+#   WRONG: "Builder generates generic commit/PR titles despite explicit anti-patterns"
+#   WRONG: "feat: bug: MCP status bar noise..." (double prefix — copied issue title prefix)
+#   RIGHT: "docs: add mandatory diff-review step before commit/PR creation"
+#
+#   NOTE: If the issue title starts with a prefix like "bug:", "feat:", etc.,
+#   do NOT copy it verbatim. Strip the issue prefix and derive your own from the diff.
+#   "bug:" → use "fix:" in the PR title. See builder-pr.md for the full mapping.
+
+# Step 3: Use the same approach for the PR title
+```
+
+**The PR title and commit message MUST describe what the code change does, not reference the issue.** See builder-pr.md for the full rules, anti-patterns, and examples.
+
+**REQUIRED: Use the structured PR body template below.** Do NOT create PRs with just `Closes #N` — the body must include Summary, Changes, and Acceptance Criteria sections.
+
+```bash
+gh pr create \
+  --title "fix: descriptive summary of the change" \
+  --label "loom:review-requested" \
+  --body "$(cat <<'EOF'
+## Summary
+Brief description of what this PR does and why.
+
+## Changes
+- Change 1
+- Change 2
+- Change 3
+
+## Acceptance Criteria Verification
+
+| Criterion | Status | Verification |
+|-----------|--------|--------------|
+| Criterion 1 from issue | ✅ | How you verified it |
+| Criterion 2 from issue | ✅ | How you verified it |
+
+## Test Plan
+How you verified the changes work.
+
+Closes #<issue-number>
+EOF
+)"
+```
+
+**PR title** must use conventional commit format: `fix:`, `feat:`, `refactor:`, `docs:`, `chore:`, etc.
+
+**After creation:**
+- Never touch PR labels after creation
+- Use "Closes #N" syntax (not "Issue #N" or "Addresses #N") for auto-close
 
 ## Working Style
 
@@ -554,7 +784,7 @@ For detailed PR creation and quality requirements, see **builder-pr.md**.
 - **During work**: If you discover out-of-scope needs, PAUSE and create an issue (see builder-complexity.md)
 - Use the TodoWrite tool to plan and track multi-step tasks
 - Run lint, format, and type checks before considering complete
-- **Create PR**: Add `loom:review-requested` label ONLY at creation, use "Closes #123" syntax
+- **Create PR**: Use the full structured body template (see PR Creation section), add `loom:review-requested` label ONLY at creation
 - **After PR creation**: HANDS OFF - never touch PR labels again, move to next issue
 - When blocked: Add comment explaining blocker, mark `loom:blocked`
 - Stay focused on assigned issue - create separate issues for other work

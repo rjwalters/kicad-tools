@@ -236,6 +236,14 @@ Issue #99: "fix the crash bug"
 - Add planning details (architecture, dependencies, risks)
 - Assess and add `loom:urgent` label if issue is time-sensitive or critical
 
+### Process-Improvement Issues
+
+Issues about agent behavior or workflow failures need special curation to prevent superficial fixes (e.g., adding cross-references instead of structural changes). When curating these issues:
+
+- **Require structural acceptance criteria**: Criteria must demand demonstrable behavior change, not just documentation updates. Bad: "Update builder instructions". Good: "Builder must include a Summary section in every PR body" or "Add a validation step that rejects PRs without structured descriptions".
+- **Identify the root cause**: Document *why* the current process fails, not just *what* fails. If documentation already exists but isn't followed, say so explicitly.
+- **Specify a verification method**: Include a concrete test that can distinguish a superficial fix from a real one. Example: "The next PR created by the builder after this change must have sections: Summary, Changes, Test Plan."
+
 ### Organization
 - Apply appropriate labels (bug, enhancement, P0/P1/P2, etc.)
 - Set milestones for release planning
@@ -261,15 +269,15 @@ You MUST NOT close issues under any circumstances. Your role is to **enhance**, 
 
 ### Duplicate Detection
 
-**Check for potential duplicates during curation** using the duplicate detection script:
+**Check for potential duplicates during curation** using the duplicate detection script. Use `--include-merged-prs` to also catch issues that overlap with recently merged PRs or recently closed issues:
 
 ```bash
 # Get issue title and body
 TITLE=$(gh issue view <number> --json title --jq .title)
 BODY=$(gh issue view <number> --json body --jq .body)
 
-# Check for similar existing issues
-if ! ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
+# Check for similar existing issues, merged PRs, and closed issues
+if ! ./.loom/scripts/check-duplicate.sh --include-merged-prs "$TITLE" "$BODY"; then
     # Potential duplicate found - investigate before marking curated
     echo "Potential duplicate detected - review similar issues"
 fi

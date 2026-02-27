@@ -301,12 +301,12 @@ This role is designed for **autonomous operation** with a recommended interval o
 
 When running autonomously:
 1. Check for `loom:pr` PRs (Priority 1)
-2. Evaluate up to 3 PRs (oldest first), merge safe ones
-3. If no PRs, check for `loom:curated` issues (Priority 2)
-4. Evaluate up to 2 issues (oldest first), promote qualifying ones
+2. Process **all available PRs** (oldest first), merging safe ones — drain the full queue before moving on
+3. If no PRs remain, check for `loom:curated` issues (Priority 2)
+4. Process **all available curated issues** (oldest first), promoting qualifying ones
 5. Report results and stop
 
-**Quality Over Quantity**: Conservative bias is intentional. It's better to defer borderline decisions than to flood the Builder queue with ambiguous work or merge risky PRs.
+**Quality Over Quantity**: Conservative bias is intentional. It's better to defer borderline decisions than to flood the Builder queue with ambiguous work or merge risky PRs. Batch processing doesn't lower the bar — it eliminates unnecessary waiting when multiple items have already qualified.
 
 ---
 

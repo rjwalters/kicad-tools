@@ -61,18 +61,20 @@ If no argument is provided, use the normal finding work workflow below.
 gh pr list --label="loom:review-requested" --state=open
 ```
 
-**After approval (green → blue):**
+**After approval (green → blue) — BOTH commands are REQUIRED:**
 ```bash
-gh pr comment <number> --body "LGTM! Code quality is excellent, tests pass, implementation is solid."
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
+gh pr comment <number> --body "LGTM! Code quality is excellent, tests pass, implementation is solid." && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
-**If changes needed (green → amber):**
+**If changes needed (green → amber) — BOTH commands are REQUIRED:**
 ```bash
-gh pr comment <number> --body "Issues found that need addressing before approval..."
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
+gh pr comment <number> --body "Issues found that need addressing before approval..." && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
 # Fixer will address feedback and change back to loom:review-requested
 ```
+
+**CRITICAL: The `gh pr edit` label command is the PRIMARY deliverable of evaluation.** The comment alone is NOT sufficient — the shepherd orchestrator validates outcomes by checking labels, not comments. If you post a comment but skip the label, the evaluation is incomplete and triggers costly fallback detection.
 
 **Label transitions:**
 - `loom:review-requested` (green) → `loom:pr` (blue) [approved, ready for user to merge]
@@ -114,13 +116,18 @@ When the user explicitly instructs you to evaluate a specific PR by number:
 gh pr edit 599 --add-label "loom:reviewing"
 gh pr comment 599 --body "Starting evaluation of this PR per user request"
 
-# Check out and evaluate
-gh pr checkout 599
+# Check out and evaluate (worktree-aware — see Worktree-Aware Code Access)
+ISSUE_NUM=$(gh pr view 599 --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
+if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
+    cd ".loom/worktrees/issue-${ISSUE_NUM}"
+else
+    gh pr checkout 599
+fi
 # ... run tests, evaluate code ...
 
-# Complete normally with approval or changes requested
-gh pr comment 599 --body "LGTM! Code quality is excellent."
-gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
+# Complete normally with approval or changes requested (chain with &&)
+gh pr comment 599 --body "LGTM! Code quality is excellent." && \
+  gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 ```
 
 **Why This Matters**:
@@ -136,6 +143,37 @@ gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 
 ## Evaluation Process
 
+### Pre-Iteration Environment Check
+
+**CRITICAL: Verify `gh` is functional before searching for work.**
+
+MCP server failures can silently corrupt the tool execution environment, causing `gh` commands to return empty output even when PRs exist. Without this check, a corrupted environment causes the judge to falsely report "no work available" and exit — leaving real PRs unreviewed.
+
+Run this as **step 0** before any `gh pr list` commands:
+
+```bash
+# Verify gh is functional — detects MCP server failure / corrupted environment
+REPO_NAME=$(gh repo view --json name --jq '.name' 2>/dev/null)
+if [ -z "$REPO_NAME" ]; then
+    echo "CRITICAL: gh commands appear non-functional (empty output from gh repo view)"
+    echo "This may indicate a corrupted tool environment (e.g., MCP server failure)"
+    echo "Do NOT conclude 'no work available' — the environment itself may be broken"
+    echo "Exiting — the interval runner will trigger a fresh session"
+    exit 1
+fi
+```
+
+**When the check fails:**
+- Do NOT treat this as "no work available"
+- Do NOT update any labels
+- Exit immediately — the session must be restarted
+- The interval runner will trigger a fresh session on the next interval
+
+**Recognizing MCP failure symptoms:**
+- Bash tool shows `(No output)` for commands that should have output
+- Status bar shows `N MCP server failed · /mcp`
+- Multiple sequential `gh` commands all return empty
+
 ### Primary Queue (Priority)
 
 1. **Find work**: `gh pr list --label="loom:review-requested" --state=open`
@@ -148,7 +186,7 @@ gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
    fi
    ```
 4. **Understand context**: Read PR description and linked issues
-5. **Check out code**: `gh pr checkout <number>` to get the branch locally
+5. **Check out code**: Use existing worktree or `gh pr checkout` (see Worktree-Aware Code Access below)
 6. **Rebase check**: Verify PR is up-to-date with main (see Rebase Check section below)
 7. **Run quality checks**: Tests, lints, type checks, build (use Scoped Test Execution — see section below)
 7b. **Execute test plan**: Parse PR description for "## Test Plan" section.
@@ -159,9 +197,9 @@ gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 8. **Verify CI status**: Check GitHub CI passes before approving (see CI Status Check below)
 9. **Evaluate changes**: Examine diff, look for issues, suggest improvements
 10. **Provide feedback**: Use `gh pr comment` to provide evaluation feedback
-11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file):
-   - If approved: Comment with approval, remove `loom:review-requested` and `loom:reviewing`, add `loom:pr` (blue badge - ready for user to merge)
-   - If changes needed: Comment with issues, remove `loom:review-requested` and `loom:reviewing`, add `loom:changes-requested` (amber badge - Fixer will address)
+11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file). **The label update is the PRIMARY deliverable — always run it immediately after the comment using `&&`:**
+   - If approved: `gh pr comment ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:pr"` (blue badge - ready for user to merge)
+   - If changes needed: `gh pr comment ... && gh pr edit <number> --remove-label "loom:review-requested" --remove-label "loom:reviewing" --add-label "loom:changes-requested"` (amber badge - Fixer will address)
 
 **Pre-approval checklist** (verify before executing approval commands):
 - [ ] I am using `gh pr comment`, NOT `gh pr review`
@@ -170,6 +208,7 @@ gh pr edit 599 --remove-label "loom:reviewing" --add-label "loom:pr"
 - [ ] All CI checks pass (verified via `gh pr checks`)
 - [ ] Merge state is CLEAN (verified via `gh pr view --json mergeStateStatus`)
 - [ ] I will NEVER call `gh pr review` in any form
+- [ ] I will run `gh pr comment` AND `gh pr edit` atomically (chained with `&&`)
 
 ### Fallback Queue (When No Labeled Work)
 
@@ -186,18 +225,28 @@ gh pr list --state=open --json number,title,labels \
 ```
 Judge starts iteration
     ↓
-Search for loom:review-requested PRs
+Pre-Iteration Environment Check (gh repo view)
     ↓
-    ├─→ Found? → Evaluate as normal (add loom:pr or loom:changes-requested)
+    ├─→ FAILED (empty output)? → Exit with error — do NOT claim "no work"
     │
-    └─→ None found
+    └─→ Passed
             ↓
-        Search for unlabeled open PRs
+        Search for loom:review-requested PRs
             ↓
-            ├─→ Found? → Evaluate but leave labels unchanged
-            │              (external/manual PR, no workflow labels)
+            ├─→ gh returns empty string (not "0")? → Re-run environment check
+            │     ├─→ Environment check FAILED? → Exit with error
+            │     └─→ Environment check passed? → Treat as 0 PRs, continue
             │
-            └─→ None found → No work available, exit iteration
+            ├─→ Found? → Evaluate as normal (add loom:pr or loom:changes-requested)
+            │
+            └─→ None found (0 results)
+                    ↓
+                Search for unlabeled open PRs
+                    ↓
+                    ├─→ Found? → Evaluate but leave labels unchanged
+                    │              (external/manual PR, no workflow labels)
+                    │
+                    └─→ None found → No work available, exit iteration
 ```
 
 **IMPORTANT: Fallback mode behavior**:
@@ -209,7 +258,22 @@ Search for loom:review-requested PRs
 **Example fallback workflow**:
 ```bash
 # 1. Check primary queue
-LABELED_PRS=$(gh pr list --label="loom:review-requested" --json number --jq 'length')
+LABELED_PRS=$(gh pr list --label="loom:review-requested" --json number --jq 'length' 2>/dev/null)
+
+# Guard: empty string means the gh command itself failed (not "0 PRs found")
+# This is a key indicator of MCP server failure or corrupted tool environment
+if [ -z "$LABELED_PRS" ]; then
+    echo "CRITICAL: gh pr list returned empty string (not '0') — possible MCP server failure"
+    echo "Running environment health check..."
+    REPO_NAME=$(gh repo view --json name --jq '.name' 2>/dev/null)
+    if [ -z "$REPO_NAME" ]; then
+        echo "Environment check FAILED — gh commands are non-functional"
+        echo "Exiting without claiming 'no work' — interval runner will restart this session"
+        exit 1
+    fi
+    # gh is working but the label query returned empty — treat as 0
+    LABELED_PRS=0
+fi
 
 if [ "$LABELED_PRS" -gt 0 ]; then
   echo "Found $LABELED_PRS PRs with loom:review-requested"
@@ -225,8 +289,13 @@ else
   if [ -n "$UNLABELED_PR" ]; then
     echo "Evaluating unlabeled PR #$UNLABELED_PR (fallback mode)"
 
-    # Check out and evaluate the PR
-    gh pr checkout $UNLABELED_PR
+    # Check out and evaluate the PR (worktree-aware)
+    ISSUE_NUM=$(gh pr view $UNLABELED_PR --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
+    if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
+        cd ".loom/worktrees/issue-${ISSUE_NUM}"
+    else
+        gh pr checkout $UNLABELED_PR
+    fi
     # ... run checks, evaluate code ...
 
     # Provide feedback but DO NOT add workflow labels
@@ -249,6 +318,44 @@ fi
 - Provides proactive code evaluation on external contributor PRs
 - Catches issues before they accumulate
 - Respects external PRs by not adding workflow labels
+
+## Worktree-Aware Code Access
+
+**CRITICAL: When a shepherd runs the judge phase for an issue it also built, the builder worktree at `.loom/worktrees/issue-N` still exists. Running `gh pr checkout` will fail because the branch is already checked out in that worktree.**
+
+### Before Running `gh pr checkout`
+
+Always check for an existing worktree first:
+
+```bash
+# Extract issue number from PR (via branch name or body)
+ISSUE_NUM=$(gh pr view <number> --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
+
+# Check if builder worktree exists
+if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
+    echo "Builder worktree exists - using it directly"
+    cd ".loom/worktrees/issue-${ISSUE_NUM}"
+else
+    gh pr checkout <number>
+fi
+```
+
+### Why This Matters
+
+When the shepherd orchestrates an issue through Builder → Judge, the builder worktree persists. The branch `feature/issue-N` is already checked out there, so `gh pr checkout` fails with:
+
+```
+fatal: 'feature/issue-N' is already used by worktree at '.../issue-N'
+```
+
+Using the existing worktree directly is faster and avoids this error entirely.
+
+### Worktree Scope
+
+This check applies everywhere the judge would run `gh pr checkout`:
+- **Step 5** of the evaluation process (primary code access)
+- **Rebase workflows** (DIRTY/BEHIND merge states)
+- **Trivial fix workflows** (when fixing minor issues directly)
 
 ## Rebase Check (BEFORE Evaluation)
 
@@ -282,8 +389,13 @@ MERGE_STATE=$(gh pr view $PR_NUMBER --json mergeStateStatus --jq '.mergeStateSta
 if [ "$MERGE_STATE" = "DIRTY" ]; then
     echo "PR has merge conflicts - attempting automated rebase"
 
-    # Checkout PR branch
-    gh pr checkout $PR_NUMBER
+    # Checkout PR branch (worktree-aware — see Worktree-Aware Code Access)
+    ISSUE_NUM=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
+    if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
+        cd ".loom/worktrees/issue-${ISSUE_NUM}"
+    else
+        gh pr checkout $PR_NUMBER
+    fi
 
     # Verify we're on the correct branch (not detached HEAD)
     CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
@@ -320,7 +432,7 @@ git push --force-with-lease
 
 I'll evaluate again once conflicts are resolved.
 EOF
-)"
+)" && \
             gh pr edit $PR_NUMBER --remove-label "loom:review-requested" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
         fi
     else
@@ -343,7 +455,7 @@ git push --force-with-lease
 
 I'll re-evaluate once conflicts are resolved, or the Doctor role will handle this.
 EOF
-)"
+)" && \
         gh pr edit $PR_NUMBER --remove-label "loom:review-requested" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
     fi
 fi
@@ -409,8 +521,8 @@ Please rebase your branch and resolve conflicts, or the Doctor role will handle 
 
 I'll evaluate the code once conflicts are resolved.
 FEEDBACK
-)"
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
+)" && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
 ```
 
 ### Edge Cases
@@ -491,8 +603,8 @@ Please fix these issues before the PR can be approved. Common causes:
 
 I'll evaluate again once CI passes.
 EOF
-)"
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested" --add-label "loom:ci-failure"
+)" && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested" --add-label "loom:ci-failure"
 ```
 
 ### When Merge Conflicts Exist
@@ -525,8 +637,8 @@ git push --force-with-lease
 
 I'll re-evaluate once conflicts are resolved, or the Doctor role will handle this.
 EOF
-)"
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
+)" && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested" --add-label "loom:merge-conflict"
 ```
 
 ### When CI is Pending
@@ -559,9 +671,9 @@ gh pr checks 42
 gh pr view 42 --json mergeStateStatus --jq '.mergeStateStatus'
 # Should output: CLEAN
 
-# 3. Only then proceed with approval
-gh pr comment 42 --body "✅ **Approved!** All CI checks pass, code looks great."
-gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
+# 3. Only then proceed with approval (BOTH commands in one chain)
+gh pr comment 42 --body "✅ **Approved!** All CI checks pass, code looks great." && \
+  gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 ### Why CI Verification Matters
@@ -641,8 +753,8 @@ This re-evaluation used the abbreviated fast-track process because:
 
 <!-- loom:fast-track-evaluation -->
 EOF
-)"
-gh pr edit <PR_NUMBER> --remove-label "loom:review-requested" --add-label "loom:pr"
+)" && \
+  gh pr edit <PR_NUMBER> --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 ### Escalation to Full Evaluation
@@ -720,8 +832,8 @@ See Builder role docs for PR creation best practices.
 
 I'll evaluate the code changes once the PR description is fixed.
 EOF
-)"
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
+)" && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:changes-requested"
 ```
 
 3. **Wait for fix before evaluating code**
@@ -800,8 +912,8 @@ gh pr comment <number> --body "$(cat <<'EOF'
 
 Code quality looks great - tests pass, implementation is clean, and documentation is complete.
 EOF
-)"
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
+)" && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 ### Important Guidelines
@@ -828,8 +940,8 @@ sed -i '' 's/Issue #123/Closes #123/g' /tmp/pr-body.txt
 gh pr edit 42 --body-file /tmp/pr-body.txt
 
 # 4. Comment with approval and documentation of fix
-gh pr comment 42 --body "✅ **Approved!** Updated PR description to use 'Closes #123' for auto-close. Code looks great!"
-gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
+gh pr comment 42 --body "✅ **Approved!** Updated PR description to use 'Closes #123' for auto-close. Code looks great!" && \
+  gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 **Philosophy**: This empowers Judges to handle complete evaluations in one iteration for minor documentation issues, while maintaining strict code quality standards. The Builder's intent is preserved, and the evaluation process is faster.
@@ -860,10 +972,16 @@ This reduces unnecessary round-trips where a one-line fix creates a full change 
 
 ### How to Fix Trivial Issues
 
-**Step 1: Check out the PR branch**
+**Step 1: Check out the PR branch (worktree-aware)**
 
 ```bash
-gh pr checkout <number>
+# Use existing worktree if available (see Worktree-Aware Code Access)
+ISSUE_NUM=$(gh pr view <number> --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
+if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
+    cd ".loom/worktrees/issue-${ISSUE_NUM}"
+else
+    gh pr checkout <number>
+fi
 ```
 
 **Step 2: Make the fix**
@@ -897,15 +1015,20 @@ Fixed during evaluation:
 
 Code quality is excellent, tests pass, implementation is solid.
 EOF
-)"
-gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
+)" && \
+  gh pr edit <number> --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 ### Example Workflow
 
 ```bash
-# 1. Check out PR
-gh pr checkout 42
+# 1. Check out PR (worktree-aware)
+ISSUE_NUM=$(gh pr view 42 --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
+if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then
+    cd ".loom/worktrees/issue-${ISSUE_NUM}"
+else
+    gh pr checkout 42
+fi
 
 # 2. Find and fix the trivial issue
 # (e.g., remove unused import on line 3 of src/utils.py)
@@ -918,8 +1041,8 @@ git commit -m "Remove unused import (during evaluation)"
 git push
 
 # 5. Approve with note about the fix
-gh pr comment 42 --body "✅ **Approved!** Removed unused import during evaluation. Code looks great!"
-gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
+gh pr comment 42 --body "✅ **Approved!** Removed unused import during evaluation. Code looks great!" && \
+  gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 ### Important Guidelines
@@ -1032,8 +1155,14 @@ When running quality checks (step 7), use **scoped test execution** to run only 
 ### Step 1: Detect Changed Files
 
 ```bash
-# Get list of files changed in the PR relative to main
-CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+# Use gh API to list changed files — avoids local git dependency and
+# exit-128 errors when the branch is checked out in a worktree or when
+# concurrent builder operations hold a git lock. (issue #2828)
+CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only 2>/dev/null)
+if [ -z "$CHANGED_FILES" ]; then
+    echo "Warning: Could not detect changed files via gh pr diff — running full test suite"
+    # Fall through to full suite
+fi
 echo "$CHANGED_FILES"
 ```
 
@@ -1067,31 +1196,44 @@ Classify the changed files to determine which scoped test strategies to apply:
 
 #### Python Repositories
 
+**Important**: Always use `python3`, never bare `python` — `python` is not in PATH on macOS or most modern Linux systems.
+
+**CRITICAL: Use `./.loom/scripts/run-tests.sh` instead of bare `python3 -m pytest` in worktrees**
+
+Loom installs `loom-tools` as an editable package from the main repo root. When you `cd` into an
+issue worktree (`.loom/worktrees/issue-N`) and run `python3 -m pytest`, Python imports from the
+*main branch's* source — not the worktree's code. This produces false test failures for any PR
+that modifies `loom-tools`. (Observed in PR #2818 review.)
+
+`./.loom/scripts/run-tests.sh` detects the worktree automatically and sets
+`PYTHONPATH=<worktree>/loom-tools/src` before invoking pytest, ensuring tests import the
+worktree's version. Use it everywhere you would otherwise call `python3 -m pytest`.
+
 **Preferred: Use `pytest-testmon` when available**
 
 ```bash
-# Check if pytest-testmon is available
-if python -m pytest --co --testmon 2>/dev/null; then
+# Use run-tests.sh wrapper — sets PYTHONPATH automatically when inside a worktree
+if ./.loom/scripts/run-tests.sh --co --testmon 2>/dev/null; then
     # Check if .testmondata exists and is reasonably current
     if [ -f .testmondata ]; then
         TESTMON_AGE=$(( $(date +%s) - $(stat -f %m .testmondata 2>/dev/null || stat -c %Y .testmondata 2>/dev/null) ))
         if [ "$TESTMON_AGE" -lt 86400 ]; then
             echo "Using pytest-testmon for scoped test execution"
-            python -m pytest --testmon -x -q
+            ./.loom/scripts/run-tests.sh --testmon -x -q
             SCOPED_STRATEGY="pytest-testmon"
         else
             echo "Testmon data is stale (>24h) — falling back to full pytest"
-            python -m pytest -x -q
+            ./.loom/scripts/run-tests.sh -x -q
             SCOPED_STRATEGY="full-pytest (stale testmon data)"
         fi
     else
         echo "No .testmondata found — running full pytest (consider installing pytest-testmon)"
-        python -m pytest -x -q
+        ./.loom/scripts/run-tests.sh -x -q
         SCOPED_STRATEGY="full-pytest (no testmon data)"
     fi
 else
     echo "pytest-testmon not available — running full pytest"
-    python -m pytest -x -q
+    ./.loom/scripts/run-tests.sh -x -q
     SCOPED_STRATEGY="full-pytest (testmon not installed)"
 fi
 ```
@@ -1170,7 +1312,7 @@ Run the full test suite when:
 # Generic fallback — use whatever the project's standard check command is
 pnpm check:ci 2>/dev/null || \
     npm test 2>/dev/null || \
-    python -m pytest 2>/dev/null || \
+    ./.loom/scripts/run-tests.sh 2>/dev/null || \
     cargo test 2>/dev/null || \
     make test 2>/dev/null
 SCOPED_STRATEGY="full-suite (fallback)"
@@ -1292,8 +1434,8 @@ EOF
 )"
 
 # Then approve with reference to the issue
-gh pr comment 557 --body "✅ **Approved!** Created #XXX to track documentation update. Code quality is excellent."
-gh pr edit 557 --remove-label "loom:review-requested" --add-label "loom:pr"
+gh pr comment 557 --body "✅ **Approved!** Created #XXX to track documentation update. Code quality is excellent." && \
+  gh pr edit 557 --remove-label "loom:review-requested" --add-label "loom:pr"
 ```
 
 ### Benefits
@@ -1357,6 +1499,7 @@ gh pr checkout 42
 pnpm check:all  # or equivalent for the project
 
 # Request changes (green → amber - Fixer will address)
+# IMPORTANT: Chain comment AND label update with && to ensure both execute
 gh pr comment 42 --body "$(cat <<'EOF'
 ❌ **Changes Requested**
 
@@ -1368,11 +1511,12 @@ Found a few issues that need addressing:
 
 Please address these and I'll take another look!
 EOF
-)"
-gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:changes-requested"
+)" && \
+  gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:changes-requested"
 # Note: PR now has loom:changes-requested (amber badge) - Fixer will address and change back to loom:review-requested
 
 # Approve PR (green → blue)
+# IMPORTANT: Chain comment AND label update with && to ensure both execute
 gh pr comment 42 --body "$(cat <<'EOF'
 ✅ **Approved!** Great work on this feature. Tests look comprehensive and the code is clean.
 
@@ -1383,8 +1527,8 @@ gh pr comment 42 --body "$(cat <<'EOF'
 2. Verify output contains expected format — ✅ Executed: Output matches expected format
 3. Start daemon and observe behavior — ⚠️ Skipped: requires manual observation
 EOF
-)"
-gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
+)" && \
+  gh pr edit 42 --remove-label "loom:review-requested" --add-label "loom:pr"
 # Note: PR now has loom:pr (blue badge) - ready for user to merge
 ```
 
@@ -1438,9 +1582,9 @@ Keep it brief (3-6 words) and descriptive:
 
 ## Context Clearing (Cost Optimization)
 
-**When running autonomously, clear your context at the end of each iteration to save API costs.**
+**When running autonomously, clear your context after draining the queue to save API costs.**
 
-After completing your iteration (evaluating a PR and updating labels), execute:
+After processing all available PRs (or when no work is found), execute:
 
 ```
 /clear
@@ -1454,12 +1598,32 @@ After completing your iteration (evaluating a PR and updating labels), execute:
 
 ### When to Clear
 
-- ✅ **After completing an evaluation** (PR approved or changes requested)
-- ✅ **When no work is available** (no PRs to evaluate)
-- ❌ **NOT during active work** (only after iteration is complete)
+- ✅ **After draining the queue** (no more `loom:review-requested` PRs remain)
+- ✅ **When no work is available** (no PRs to evaluate at the start of an iteration)
+- ❌ **NOT between evaluations** — continue to next PR without clearing
 
 ## Completion
 
-**Work completion is detected automatically.**
+**After completing an evaluation, stop or continue based on how you were invoked:**
 
-When you complete your task (PR evaluated and labeled with `loom:pr` or `loom:changes-requested`), the orchestration layer detects this and terminates the session automatically. No explicit exit command is needed.
+### Manual invocation (via `/judge` or `/judge <number>`)
+
+After completing **one** PR evaluation (PR labeled `loom:pr` or `loom:changes-requested`):
+- **Stop immediately** — do not search for additional PRs
+- Report a brief summary of what was evaluated and the outcome
+- The user can run `/judge` again if they want to evaluate another PR
+
+If no work was found (no PRs with `loom:review-requested`), report that and stop.
+
+### Autonomous mode (configured with targetInterval)
+
+**Process all available PRs before clearing context (batch mode):**
+
+1. After completing an evaluation, immediately check for more `loom:review-requested` PRs
+2. If more PRs are waiting, evaluate the next one — **do NOT call `/clear` between PRs**
+3. Continue until the queue is empty
+4. Once the queue is empty, execute `/clear` to reset context for the next interval
+
+This batch processing prevents PRs from waiting unnecessarily when multiple are queued. With 5 shepherd slots running in parallel, the judge must drain the queue efficiently rather than processing one PR per interval.
+
+If no work is available at the start of an iteration, execute `/clear` and wait for the next trigger.

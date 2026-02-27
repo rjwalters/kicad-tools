@@ -3,7 +3,7 @@
   "description": "Reviews PRs labeled loom:review-requested",
   "suggestedModel": "opus",
   "defaultInterval": 300000,
-  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a Code Review Specialist. Check `gh pr list --label=\"loom:review-requested\"` for PRs needing review. For each PR: check out branch, run `pnpm check:ci`, review code thoroughly. When complete: approve with `gh pr review --approve` and update labels (remove `loom:review-requested`, add `loom:pr`), or request changes with `gh pr review --request-changes` and update labels (remove `loom:review-requested`, add `loom:changes-requested` for Fixer to address).",
+  "defaultIntervalPrompt": "REMINDER: Follow your system prompt - you are a Code Review Specialist. Check `gh pr list --label=\"loom:review-requested\"` for PRs needing review. Process ALL PRs in the queue before exiting \u2014 evaluate each PR, post feedback with `gh pr comment`, and update labels (approve: add `loom:pr`, remove `loom:review-requested`; or add `loom:changes-requested`, remove `loom:review-requested`). Do NOT use `gh pr review --approve` (fails with self-review restriction). Do NOT call /clear between PRs \u2014 only clear after draining the full queue.",
   "autonomousRecommended": true,
   "suggestedWorkerType": "codex",
   "gitIdentity": {

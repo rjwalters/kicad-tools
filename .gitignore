@@ -90,3 +90,4 @@ boards/*/output/*.kicad_pro
 .loom/issue-failures.json
 .loom/usage-cache.json
 .loom/claude-config/
+.loom/retry-state/

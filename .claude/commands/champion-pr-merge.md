@@ -716,11 +716,13 @@ Keeping \`loom:pr\` label. A human will need to manually merge this PR or addres
 
 ---
 
-## PR Auto-Merge Rate Limiting
+## PR Auto-Merge Batch Processing
 
-**Merge at most 3 PRs per iteration.**
+**Process all qualifying PRs in one iteration — drain the full queue.**
 
-If more than 3 PRs qualify for auto-merge, select the 3 oldest (by creation date) and defer others to next iteration. This prevents overwhelming the main branch with simultaneous merges.
+Evaluate and merge qualifying PRs sequentially (oldest first) until the queue is empty. Sequential processing is safe and prevents the bottleneck that occurs when PRs accumulate while the champion waits for the next interval.
+
+If an individual merge fails, continue to the next PR rather than aborting the entire iteration.
 
 ---
 

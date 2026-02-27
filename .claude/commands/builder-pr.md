@@ -88,6 +88,52 @@ This review happens BEFORE creating your worktree:
 4. Create worktree
 5. Implement (using patterns learned from review)
 
+## Write PR Body Before Running Tests
+
+**CRITICAL**: Before running the test suite, write your PR description to `.loom/pr-body.md`.
+
+This ensures a high-quality PR description is preserved even if context runs out during testing. The shepherd uses this file when creating the PR automatically.
+
+### Why This Matters
+
+The builder commonly exhausts its context window during test verification. When this happens, the shepherd creates the PR automatically — but it can only generate a boilerplate description unless you've pre-written the body.
+
+### How to Write the PR Body
+
+After implementing your changes (but BEFORE running tests):
+
+```bash
+cat > .loom/pr-body.md << 'EOF'
+## Summary
+[1-2 sentences describing what this PR does and why]
+
+## Changes
+- [Key change 1 - what you changed and why]
+- [Key change 2]
+- [Key change 3]
+
+## Acceptance Criteria Verification
+
+| Criterion | Status | Verification |
+|-----------|--------|--------------|
+| [Criterion from issue] | ✅ | [How you verified it] |
+
+## Test Plan
+- [ ] [Test 1]
+- [ ] [Test 2]
+
+Closes #N
+EOF
+```
+
+Replace `#N` with the actual issue number. Write this BEFORE running `pnpm check:ci` or any test suite.
+
+### When to Update It
+
+If you discover additional changes during testing, update `.loom/pr-body.md` to reflect them before committing.
+
+---
+
 ## Test Output: Truncate for Token Efficiency
 
 **IMPORTANT**: When running tests, truncate verbose output to conserve tokens in long-running sessions.
@@ -245,6 +291,11 @@ Issue #123 acceptance criteria:
 2. [ ] Criterion B - Verified by: [describe how you checked]
 3. [ ] Criterion C - Verified by: [describe how you checked]
 
+Root cause verification (for process/behavior issues):
+- [ ] Changes address root cause, not just surface symptom
+- [ ] Fix is structural (enforcement, validation, inlining) not just documentation
+- [ ] If documentation-only: justified why docs will change behavior this time
+
 Local verification:
 - [ ] `pnpm check:ci` passes (or equivalent)
 - [ ] Relevant tests pass
@@ -334,6 +385,142 @@ Local verification:
 1. Go back to Step 1 and re-extract criteria
 2. Verify each one explicitly
 3. Only then create the PR
+
+---
+
+## PR Titles: Conventional Commit Style Required
+
+**CRITICAL:** PR titles MUST describe the actual change. Never use generic or issue-referencing titles.
+
+### Format
+
+```
+<type>: <concise summary of what the code change does>
+```
+
+### Allowed Prefixes
+
+| Prefix | When to Use |
+|--------|------------|
+| `fix:` | Bug fixes |
+| `feat:` | New features or capabilities |
+| `refactor:` | Code restructuring without behavior change |
+| `docs:` | Documentation-only changes |
+| `test:` | Adding or updating tests |
+| `chore:` | Build, config, or tooling changes |
+| `perf:` | Performance improvements |
+
+### How to Derive the Title
+
+1. **Look at your diff**, not the issue title — what files changed and what do the changes accomplish?
+2. **Pick the correct prefix** based on the nature of the change (bug fix → `fix:`, new capability → `feat:`, etc.)
+3. **Summarize the change itself** in a few words — a reader should understand the change without opening the PR
+4. **Keep it under 70 characters** total (prefix + description)
+
+**Ask yourself:** "If someone reads only this title in `git log --oneline`, will they understand what changed?" If the answer is no, rewrite it.
+
+### Examples
+
+**WRONG (generic body that just references the issue):**
+```
+feat: implement changes for issue #2584
+fix: address issue #2557
+feat: implement feature from issue #123
+```
+
+**WRONG (bare issue number):**
+```
+Issue #2557
+```
+
+**WRONG (raw issue title copied as PR title):**
+```
+Builder should generate descriptive PR titles instead of generic 'Issue #N'
+```
+
+**WRONG (double prefix — issue title's own prefix copied and another prefix prepended):**
+```
+feat: bug: MCP status bar noise misclassifies builder failures as MCP failures
+fix: feat: add workspace snapshot caching for daemon state
+```
+
+**CORRECT (describes what the code change actually does):**
+```
+fix: standardize timestamp format to ISO 8601 UTC across log scripts
+feat: add workspace snapshot caching for daemon state
+refactor: rename instant-exit to low-output terminology
+docs: update troubleshooting guide for worktree cleanup
+fix: prevent duplicate label transitions in shepherd phase validator
+```
+
+### Issue Title Prefix Mapping
+
+Issue titles sometimes use non-standard prefixes (like `bug:`) that are **not** valid conventional commit types. If you're tempted to use an issue title as inspiration for your PR title, be aware that you must strip and remap the issue prefix — never copy it verbatim.
+
+| Issue Title Prefix | Correct PR Prefix | Notes |
+|-------------------|-------------------|-------|
+| `bug:` | `fix:` | `bug:` is not a conventional commit type |
+| `feature:` | `feat:` | Abbreviate to `feat:` |
+| `feat:` | `feat:` | Already valid — but still rewrite the description |
+| `fix:` | `fix:` | Already valid — but still rewrite the description |
+| `docs:` | `docs:` | Already valid — but still rewrite the description |
+| `chore:` | `chore:` | Already valid — but still rewrite the description |
+
+**CRITICAL**: Never prepend a new prefix to a title that already has one. `feat: bug: MCP status bar...` is malformed. Instead:
+1. Strip the issue title prefix entirely
+2. Map to the correct conventional commit type using the table above
+3. Rewrite the summary to describe what your **code change does**, not what the issue says
+
+Remember: even if an issue title has a valid prefix, the PR title should describe your diff — not copy the issue title.
+
+### Why This Matters
+
+- `gh pr list`, `git log --oneline`, and release notes become readable at a glance
+- Generic titles like "implement changes for issue #N" provide zero information
+- Aligns with the existing commit style in this repository
+- Enables automated changelog generation
+
+### PR Title Checklist
+
+Before creating a PR, verify your title:
+- [ ] Starts with a conventional commit prefix (`fix:`, `feat:`, etc.)
+- [ ] Describes what the PR **does**, not what issue it addresses
+- [ ] Does NOT contain generic phrases like "implement changes for", "address issue", or "implement feature from"
+- [ ] Does NOT reference an issue number in the title (issue references go in the PR body)
+- [ ] Does NOT contain double prefixes (e.g., `feat: bug:`, `fix: feat:`) — strip any prefix from the issue title before composing your own
+- [ ] Is under 70 characters
+- [ ] A reader can understand the change from the title alone without looking at the diff
+
+---
+
+## Commit Messages: Same Rules as PR Titles
+
+Commit messages follow the **exact same rules** as PR titles above. Since this repo uses squash merge, the PR title becomes the final commit on main — but individual commit messages still matter for worktree history and debugging.
+
+### How to Write Commit Messages
+
+```bash
+# Step 1: Review your diff BEFORE writing the commit message
+git diff --stat
+git diff
+
+# Step 2: Describe what the code change does
+git commit -m "fix: validate PR title format in shepherd phase validator"
+
+# NOT: git commit -m "feat: implement changes for issue #2678"
+# NOT: git commit -m "fix: address issue #2557"
+```
+
+### Commit Message Anti-Patterns
+
+These patterns are **WRONG** — the shepherd will reject PRs with titles matching them:
+
+| Anti-Pattern | Why It's Wrong |
+|-------------|---------------|
+| `feat: implement changes for issue #N` | Describes the issue, not the code change |
+| `fix: address issue #N` | Says nothing about what was fixed |
+| `feat: implement feature from issue #N` | Generic — could be any feature |
+| `<copy of issue title>` | Issue titles describe problems; commits describe solutions |
 
 ---
 
@@ -430,19 +617,21 @@ GitHub's auto-close feature only works with specific keywords at the start of a 
 
 When creating a PR, verify:
 
-1. **Acceptance criteria verified** - Each criterion from issue explicitly checked (see "Acceptance Criteria Verification" above)
-2. PR description uses "Closes #X" syntax (not "Issue #X" or "Addresses #X")
-3. Issue number is correct
-4. PR has `loom:review-requested` label
-5. All CI checks pass (`pnpm check:ci` locally)
-6. PR description includes verification table for each criterion
-7. Tests added/updated as needed
+1. **PR title uses conventional commit format** - e.g., `fix: descriptive summary` (see "PR Titles" above)
+2. **Acceptance criteria verified** - Each criterion from issue explicitly checked (see "Acceptance Criteria Verification" above)
+3. PR description uses "Closes #X" syntax (not "Issue #X" or "Addresses #X")
+4. Issue number is correct
+5. PR has `loom:review-requested` label
+6. All CI checks pass (`pnpm check:ci` locally)
+7. PR description includes verification table for each criterion
+8. Tests added/updated as needed
 
 ### Creating the PR
 
 ```bash
 # CORRECT way to create PR
-gh pr create --label "loom:review-requested" --body "$(cat <<'EOF'
+# Title MUST use conventional commit format: "fix:", "feat:", "refactor:", etc.
+gh pr create --title "fix: descriptive summary of the change" --label "loom:review-requested" --body "$(cat <<'EOF'
 ## Summary
 Brief description of what this PR does and why.
 
