@@ -62,7 +62,6 @@ from .rules import (
     DesignRules,
     LengthConstraint,
     NetClassRouting,
-    assign_layer_preferences,
 )
 from .sparse import Corridor, SparseRouter, Waypoint
 from .tuning import (
@@ -610,14 +609,6 @@ class Autorouter:
         """Add an obstacle (keepout area, mounting hole, etc.)."""
         obs = Obstacle(x, y, width, height, layer)
         self.grid.add_obstacle(obs)
-
-    def add_zones(self, zones: list) -> None:
-        """Add zones (copper pours) to the router."""
-        pad_list = list(self.pads.values())
-        filled = self.zone_manager.fill_all_zones(zones, pad_list, apply_to_grid=True)
-        zone_count = len(filled)
-        total_cells = sum(len(z.filled_cells) for z in filled)
-        print(f"  Zones: {zone_count} zones, {total_cells} cells filled")
 
     def clear_zones(self) -> None:
         """Remove all zone markings from the grid."""
@@ -2647,36 +2638,6 @@ class Autorouter:
             layer_stack=self.layer_stack,
         )
 
-    def enable_auto_layer_preferences(self) -> None:
-        """Enable automatic layer preference assignment (Issue #625).
-
-        Analyzes the layer stack and updates the net class map with
-        appropriate layer preferences based on signal types:
-
-        - Power/Ground: Inner layers adjacent to planes
-        - High-speed/Clock: Layers with reference planes
-        - Analog: Outer layers (away from digital noise)
-        - Digital: Outer layers (easy access)
-
-        This should be called before routing if you want intelligent
-        layer assignment based on signal type.
-
-        Requires a layer_stack to be set on the autorouter.
-        """
-        if self.layer_stack is None:
-            # No layer stack - can't determine layer preferences
-            return
-
-        # Update net class map with layer preferences
-        self.net_class_map = assign_layer_preferences(
-            self.net_class_map,
-            self.layer_stack,
-        )
-
-        # Also update the router's net class map
-        if hasattr(self.router, "net_class_map"):
-            self.router.net_class_map = self.net_class_map
-
     # =========================================================================
     # Length Constraint API (Issue #630)
     # =========================================================================
@@ -3503,33 +3464,6 @@ class Autorouter:
                 flush_print(failure_summary)
 
         return result.all_routes
-
-    def get_subgrid_statistics(self) -> dict:
-        """Get statistics about sub-grid routing.
-
-        Returns:
-            Dictionary with sub-grid routing stats:
-            - off_grid_pads: Number of off-grid pads detected
-            - escaped_pads: Number of pads with escape segments
-            - failed_pads: Number of pads where escape failed
-            - unblocked_cells: Grid cells unblocked for routing
-        """
-        if self._subgrid_router is None:
-            return {
-                "off_grid_pads": 0,
-                "escaped_pads": 0,
-                "failed_pads": 0,
-                "unblocked_cells": 0,
-            }
-
-        pad_list = list(self.pads.values())
-        analysis = self._subgrid.analyze_pads(pad_list)
-        return {
-            "off_grid_pads": analysis.off_grid_count,
-            "on_grid_pads": len(analysis.on_grid_pads),
-            "total_pads": analysis.total_pads,
-            "off_grid_percentage": analysis.off_grid_percentage,
-        }
 
     # =========================================================================
     # PROGRESSIVE CLEARANCE RELAXATION
