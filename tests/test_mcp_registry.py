@@ -86,6 +86,8 @@ class TestToolRegistry:
             "list_pattern_components",
             "detect_mistakes",
             "list_mistake_categories",
+            "optimize_placement",
+            "evaluate_placement",
         ]
 
         for tool_name in expected_tools:
