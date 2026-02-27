@@ -33,18 +33,38 @@ from .conflict import (
     PlacementFix,
 )
 from .fixer import PlacementFixer
+from .vector import (
+    ComponentDef,
+    PadDef,
+    PlacedComponent,
+    PlacementBounds,
+    PlacementVector,
+    TransformedPad,
+    bounds,
+    decode,
+    encode,
+)
 
 __all__ = [
     "CollisionResult",
+    "ComponentDef",
     "Conflict",
     "ConflictSeverity",
     "ConflictType",
     "DesignRules",
     "DRCResult",
     "DRCViolation",
+    "PadDef",
+    "PlacedComponent",
     "PlacementAnalyzer",
+    "PlacementBounds",
     "PlacementCollision",
     "PlacementFix",
     "PlacementFixer",
     "PlacementValidationResult",
+    "PlacementVector",
+    "TransformedPad",
+    "bounds",
+    "decode",
+    "encode",
 ]
