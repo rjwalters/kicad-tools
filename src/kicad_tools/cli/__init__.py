@@ -63,6 +63,7 @@ from .commands import (
     run_mcp_command,
     run_mfr_command,
     run_optimize_command,
+    run_optimize_placement_command,
     run_parts_command,
     run_pcb_command,
     run_placement_command,
@@ -323,6 +324,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "placement":
         return run_placement_command(args)
+
+    elif args.command == "optimize-placement":
+        return run_optimize_placement_command(args)
 
     elif args.command == "optimize-traces":
         return run_optimize_command(args)
