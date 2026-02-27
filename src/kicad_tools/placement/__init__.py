@@ -40,6 +40,17 @@ from .conflict import (
     PlacementFix,
 )
 from .fixer import PlacementFixer
+from .multi_fidelity import (
+    DefaultFidelitySelector,
+    FidelityConfig,
+    FidelityLevel,
+    FidelityResult,
+    FidelitySelector,
+    RoutabilityResult,
+    evaluate_placement_multifidelity,
+    make_adaptive_evaluator,
+    make_fixed_fidelity_evaluator,
+)
 from .priors import (
     AffinityGraph,
     ComponentGroup,
@@ -87,6 +98,11 @@ __all__ = [
     "CollisionResult",
     "ComponentDef",
     "ComponentGroup",
+    "DefaultFidelitySelector",
+    "FidelityConfig",
+    "FidelityLevel",
+    "FidelityResult",
+    "FidelitySelector",
     "HPWLResult",
     "Conflict",
     "ConflictSeverity",
@@ -105,6 +121,7 @@ __all__ = [
     "PlacementStrategy",
     "PlacementValidationResult",
     "PlacementVector",
+    "RoutabilityResult",
     "SignalFlowResult",
     "StrategyConfig",
     "TransformedPad",
@@ -120,7 +137,10 @@ __all__ = [
     "detect_power_domains",
     "detect_signal_flow",
     "encode",
+    "evaluate_placement_multifidelity",
     "find_clusters",
+    "make_adaptive_evaluator",
+    "make_fixed_fidelity_evaluator",
     "plot_convergence",
     "plot_layout",
     "plot_pareto_front",
