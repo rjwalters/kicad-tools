@@ -178,7 +178,8 @@ Available MCP tools:
 - **Export**: `export_gerbers`, `export_bom`, `export_assembly`
 - **Placement**: `placement_analyze`, `placement_suggestions`
 - **Sessions**: `start_session`, `query_move`, `apply_move`, `commit`, `rollback`
-- **Routing**: `route_net`, `get_unrouted_nets`
+- **Routing**: `route_net`, `route_auto`, `get_unrouted_nets`
+- **Optimization**: `optimize_placement`, `evaluate_placement`
 
 See `docs/mcp/` for complete documentation.
 
@@ -465,6 +466,8 @@ for table in tables:
 | `kct route <pcb>` | Autoroute a PCB |
 | `kct reason <pcb>` | LLM-driven PCB layout reasoning |
 | `kct placement <pcb>` | Detect and optimize component placement |
+| `kct optimize-placement <pcb>` | CMA-ES/Bayesian global placement optimization |
+| `kct route-auto <pcb>` | Orchestrator-based multi-strategy autorouting |
 | `kct optimize-traces <pcb>` | Optimize routed traces |
 | `kct datasheet <subcommand>` | Search, download, parse datasheets |
 | `kct mcp serve` | Start MCP server for AI agent integration |

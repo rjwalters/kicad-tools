@@ -6,7 +6,47 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-02-27
 
+- **PR #1237**: refactor: remove 4 dead methods from router/core.py and spec/parser.py
+- **PR #1236**: feat(mcp): add optimize_placement and evaluate_placement tools
+- **PR #1235**: feat(placement): add Bayesian Optimization strategy using Ax/BoTorch
+- **PR #1234**: feat(cli): add optimize-placement command for CMA-ES board optimization
+- **PR #1233**: feat(placement): add multi-fidelity evaluation pipeline
+- **PR #1231**: feat(placement): add netlist graph analysis for placement priors
+- **PR #1230**: feat(placement): add optimization progress visualization module
+- **PR #1229**: feat(placement): add benchmark test boards for placement optimizer validation
+- **PR #1228**: feat(placement): add DRC clearance checker for courtyard and pad spacing
+- **PR #1227**: feat(placement): add PlacementStrategy ABC and CMA-ES optimizer
+- **PR #1226**: feat(placement): add force-directed and random seed placement heuristics
+- **PR #1225**: feat(placement): add overlap and boundary violation geometry detectors
+- **PR #1224**: feat(placement): add HPWL wirelength estimator using transformed pad coordinates
+- **PR #1223**: feat(placement): define PlacementVector type and placement decode/encode
+- **PR #1222**: feat(library): add unused symbol/footprint detection for project libraries
+- **PR #1220**: feat: add route-auto MCP tool and CLI command for orchestrator-based routing
+- **PR #1219**: feat: implement weighted cost function aggregator for placement scoring
+- **PR #1218**: feat: implement full pipeline strategy in routing orchestrator
+- **PR #1217**: fix: remove push trigger from label-external-issues workflow
+- **PR #1216**: feat: add mypy configuration to pyproject.toml for v0.11.0 type safety
+- **PR #1215**: Remove unused generate_grid_stress_test function
+- **PR #1200**: docs: Guide document maintenance update
 - **PR #1198**: Install Loom 0.3.0
+- **Issue #1232** (closed): Remove 4 dead methods/functions from router/core.py and spec/parser.py
+- **Issue #1214** (closed): Add MCP tool for agent-driven placement optimization
+- **Issue #1213** (closed): Create benchmark test boards for placement optimizer validation
+- **Issue #1212** (closed): Add placement optimization progress visualization
+- **Issue #1211** (closed): Add netlist graph analysis for placement priors
+- **Issue #1210** (closed): Add multi-fidelity evaluation pipeline for placement scoring
+- **Issue #1209** (closed): Add Bayesian Optimization placement strategy (Ax/BoTorch)
+- **Issue #1208** (closed): Add optimize-placement CLI command
+- **Issue #1207** (closed): Add initial placement heuristic (force-directed seed)
+- **Issue #1206** (closed): Implement PlacementStrategy ABC and CMA-ES optimizer
+- **Issue #1205** (closed): Implement weighted cost function aggregator for placement scoring
+- **Issue #1204** (closed): Implement placement DRC clearance checker
+- **Issue #1203** (closed): Implement component overlap and board boundary violation detectors
+- **Issue #1202** (closed): Implement HPWL wirelength estimator for placement scoring
+- **Issue #1201** (closed): Define PlacementVector type and placement decode/encode
+- **Issue #1199** (closed): Global Optimization Framework for PCB Component Placement and Routing
+- **Issue #1193** (closed): Add route-auto MCP tool and CLI command for orchestrator-based routing
+- **Issue #1192** (closed): Implement full pipeline strategy in routing orchestrator
 
 ### 2026-02-17
 
