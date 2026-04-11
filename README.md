@@ -595,6 +595,11 @@ uv run mypy src/
 uv run ruff format . --check && uv run ruff check . && uv run pytest
 ```
 
+## Related Projects
+
+- **[Zeo](https://github.com/zeodotdev/zeo)** — A KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
+- **[kipy](https://github.com/zeodotdev/zeo-python)** — Python bindings for the KiCad 9.0+ IPC API. Could be used to push kicad-tools optimization results into a running KiCad instance.
+
 ## License
 
 MIT
