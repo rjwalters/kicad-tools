@@ -456,3 +456,79 @@ class TestScreenshotBoardIntegration:
         assert result["success"] is True
         assert result["width_px"] <= 1568
         assert result["height_px"] <= 1568
+
+
+class TestScreenshotSchematicIntegration:
+    """Integration tests for screenshot_schematic with real kicad-cli."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_kicad_cli(self):
+        """Skip if kicad-cli is not available."""
+        from kicad_tools.cli.runner import find_kicad_cli
+
+        if find_kicad_cli() is None:
+            pytest.skip("kicad-cli not found")
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_cairosvg(self):
+        """Skip if cairosvg is not installed."""
+        if not _check_cairosvg():
+            pytest.skip("cairosvg not installed")
+
+    @pytest.mark.skipif(
+        not Path(VOLTAGE_DIVIDER_SCH).exists(),
+        reason="voltage divider schematic fixture not found",
+    )
+    def test_screenshot_schematic_success(self):
+        """Screenshot of voltage divider schematic succeeds."""
+        result = screenshot_schematic(sch_path=VOLTAGE_DIVIDER_SCH)
+
+        assert result["success"] is True
+        assert result["image_base64"] is not None
+        assert len(result["image_base64"]) > 0
+        assert result["width_px"] > 0
+        assert result["height_px"] > 0
+        assert result["error_message"] is None
+
+    @pytest.mark.skipif(
+        not Path(VOLTAGE_DIVIDER_SCH).exists(),
+        reason="voltage divider schematic fixture not found",
+    )
+    def test_screenshot_schematic_base64_decodes_to_valid_png(self):
+        """Base64 data from schematic screenshot decodes to valid PNG bytes."""
+        result = screenshot_schematic(sch_path=VOLTAGE_DIVIDER_SCH)
+
+        assert result["success"] is True
+        png_bytes = base64.b64decode(result["image_base64"])
+        assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+
+    @pytest.mark.skipif(
+        not Path(VOLTAGE_DIVIDER_SCH).exists(),
+        reason="voltage divider schematic fixture not found",
+    )
+    def test_screenshot_schematic_max_size_respected(self):
+        """Schematic image dimensions respect max_size_px constraint."""
+        result = screenshot_schematic(
+            sch_path=VOLTAGE_DIVIDER_SCH,
+            max_size_px=800,
+        )
+
+        assert result["success"] is True
+        assert max(result["width_px"], result["height_px"]) <= 800
+
+    @pytest.mark.skipif(
+        not Path(VOLTAGE_DIVIDER_SCH).exists(),
+        reason="voltage divider schematic fixture not found",
+    )
+    def test_screenshot_schematic_output_path(self, tmp_path):
+        """Schematic screenshot is saved to output_path when specified."""
+        output = tmp_path / "test_schematic.png"
+        result = screenshot_schematic(
+            sch_path=VOLTAGE_DIVIDER_SCH,
+            output_path=str(output),
+        )
+
+        assert result["success"] is True
+        assert output.exists()
+        assert output.stat().st_size > 0
+        assert result["output_path"] == str(output)

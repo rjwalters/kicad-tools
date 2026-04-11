@@ -453,17 +453,19 @@ def screenshot_schematic(
         }
 
     with tempfile.TemporaryDirectory(prefix="kicad_screenshot_") as tmpdir:
-        svg_path = Path(tmpdir) / "schematic.svg"
-        png_path = Path(tmpdir) / "schematic.png"
+        tmp_path = Path(tmpdir)
+        png_path = tmp_path / "schematic.png"
 
-        # Export schematic to SVG
+        # Export schematic to SVG.
+        # kicad-cli sch export svg --output expects a DIRECTORY, not a file
+        # path. It auto-generates filenames based on sheet names inside tmpdir.
         cmd = [
             str(kicad_cli),
             "sch",
             "export",
             "svg",
             "--output",
-            str(svg_path),
+            str(tmp_path),
         ]
 
         if black_and_white:
@@ -482,7 +484,11 @@ def screenshot_schematic(
                 timeout=60,
             )
 
-            if not svg_path.exists() or svg_path.stat().st_size == 0:
+            # Find the generated SVG file(s) in the output directory.
+            # For single-sheet schematics there will be one file; for
+            # multi-sheet there may be several — use the first (main sheet).
+            svg_files = sorted(tmp_path.glob("*.svg"))
+            if not svg_files:
                 stderr = result.stderr.strip() if result.stderr else "SVG export produced no output"
                 return {
                     "success": False,
@@ -493,6 +499,7 @@ def screenshot_schematic(
                     "output_path": None,
                     "error_message": f"kicad-cli schematic SVG export failed: {stderr}",
                 }
+            svg_path = svg_files[0]
 
         except FileNotFoundError:
             return {
