@@ -19,4 +19,5 @@ def run_optimize_placement_command(args) -> int:
         checkpoint_dir=args.checkpoint,
         verbose=args.verbose,
         quiet=getattr(args, "quiet", False) or getattr(args, "global_quiet", False),
+        no_slide_off=getattr(args, "no_slide_off", False),
     )

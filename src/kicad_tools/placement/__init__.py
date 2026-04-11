@@ -63,6 +63,7 @@ from .priors import (
     prior_mean_position,
     schematic_proximity_prior,
 )
+from .slide_off import SlideOffResult, slide_off_overlaps
 from .strategy import PlacementStrategy, StrategyConfig
 from .vector import (
     ComponentDef,
@@ -93,6 +94,7 @@ from .wirelength import (
 
 __all__ = [
     "AffinityGraph",
+    "SlideOffResult",
     "BayesianOptStrategy",
     "CMAESStrategy",
     "CollisionResult",
@@ -147,4 +149,5 @@ __all__ = [
     "power_domain_clustering",
     "prior_mean_position",
     "schematic_proximity_prior",
+    "slide_off_overlaps",
 ]

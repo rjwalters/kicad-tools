@@ -1794,10 +1794,14 @@ def _add_optimize_placement_parser(subparsers) -> None:
         metavar="DIR",
         help="Directory for checkpoint save/resume of optimizer state",
     )
-    op_parser.add_argument("-v", "--verbose", action="store_true")
     op_parser.add_argument(
-        "-q", "--quiet", action="store_true", help="Suppress progress output"
+        "--no-slide-off",
+        action="store_true",
+        default=False,
+        help="Disable slide-off overlap pre-processing on the seed placement",
     )
+    op_parser.add_argument("-v", "--verbose", action="store_true")
+    op_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
 
 def _add_interactive_parser(subparsers) -> None:
