@@ -12,6 +12,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -1730,4 +1731,165 @@ register_tool(
     ),
     handler=_handler_resolve_placement_overlaps,
     category="placement",
+)
+
+
+# -----------------------------------------------------------------------------
+# Screenshot Tools
+# -----------------------------------------------------------------------------
+
+
+def _handler_screenshot_board(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle screenshot_board tool call.
+
+    Returns a dict with a special ``_mcp_content`` key so that the MCP
+    server can emit an ``image`` content block alongside the JSON text.
+    """
+    from kicad_tools.mcp.tools.screenshot import screenshot_board
+
+    result = screenshot_board(
+        pcb_path=params["pcb_path"],
+        layers=params.get("layers"),
+        max_size_px=params.get("max_size_px", 1568),
+        output_path=params.get("output_path"),
+        black_and_white=params.get("black_and_white", False),
+        theme=params.get("theme"),
+    )
+
+    # Build MCP content blocks: text metadata + image if available
+    if result.get("success") and result.get("image_base64"):
+        meta = {k: v for k, v in result.items() if k != "image_base64"}
+        content = [
+            {"type": "text", "text": json.dumps(meta, indent=2)},
+            {
+                "type": "image",
+                "data": result["image_base64"],
+                "mimeType": "image/png",
+            },
+        ]
+        result["_mcp_content"] = content
+
+    return result
+
+
+register_tool(
+    name="screenshot_board",
+    description=(
+        "Capture a screenshot of a KiCad PCB board. Exports the board as SVG "
+        "using kicad-cli, converts to PNG, and returns a base64-encoded image "
+        "suitable for vision API analysis. Supports layer selection via named "
+        "presets ('default', 'copper', 'assembly', 'front', 'back') or explicit "
+        "layer lists. The image is automatically resized to fit within the vision "
+        "API maximum dimension (1568px). Use this to visually inspect board layout, "
+        "component placement, and routing before or after modifications."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "layers": {
+                "type": "string",
+                "description": (
+                    "Layer specification. Either a preset name ('default', 'copper', "
+                    "'assembly', 'front', 'back') or a comma-separated list of KiCad "
+                    "layer names (e.g. 'F.Cu,B.Cu,Edge.Cuts'). Default: composite view "
+                    "with copper, silkscreen, mask, and edge cuts."
+                ),
+            },
+            "max_size_px": {
+                "type": "integer",
+                "description": (
+                    "Maximum image dimension in pixels. Default: 1568 (Claude vision API limit)."
+                ),
+                "default": 1568,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional file path to save the PNG image to disk.",
+            },
+            "black_and_white": {
+                "type": "boolean",
+                "description": "Use black and white rendering for compact, high-contrast images.",
+                "default": False,
+            },
+            "theme": {
+                "type": "string",
+                "description": "KiCad color theme name (optional, uses default if not specified).",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_screenshot_board,
+    category="screenshot",
+)
+
+
+def _handler_screenshot_schematic(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle screenshot_schematic tool call."""
+    from kicad_tools.mcp.tools.screenshot import screenshot_schematic
+
+    result = screenshot_schematic(
+        sch_path=params["sch_path"],
+        max_size_px=params.get("max_size_px", 1568),
+        output_path=params.get("output_path"),
+        black_and_white=params.get("black_and_white", False),
+        theme=params.get("theme"),
+    )
+
+    if result.get("success") and result.get("image_base64"):
+        meta = {k: v for k, v in result.items() if k != "image_base64"}
+        content = [
+            {"type": "text", "text": json.dumps(meta, indent=2)},
+            {
+                "type": "image",
+                "data": result["image_base64"],
+                "mimeType": "image/png",
+            },
+        ]
+        result["_mcp_content"] = content
+
+    return result
+
+
+register_tool(
+    name="screenshot_schematic",
+    description=(
+        "Capture a screenshot of a KiCad schematic. Exports the schematic as SVG "
+        "using kicad-cli, converts to PNG, and returns a base64-encoded image. "
+        "Useful for reviewing circuit design, verifying connections, and providing "
+        "visual context to AI agents."
+    ),
+    parameters=_make_params(
+        properties={
+            "sch_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_sch file",
+            },
+            "max_size_px": {
+                "type": "integer",
+                "description": (
+                    "Maximum image dimension in pixels. Default: 1568 (Claude vision API limit)."
+                ),
+                "default": 1568,
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Optional file path to save the PNG image to disk.",
+            },
+            "black_and_white": {
+                "type": "boolean",
+                "description": "Use black and white rendering.",
+                "default": False,
+            },
+            "theme": {
+                "type": "string",
+                "description": "KiCad color theme name (optional).",
+            },
+        },
+        required=["sch_path"],
+    ),
+    handler=_handler_screenshot_schematic,
+    category="screenshot",
 )

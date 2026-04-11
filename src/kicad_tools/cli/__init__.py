@@ -413,6 +413,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "calibrate":
         return _run_calibrate_command(args)
 
+    elif args.command == "screenshot":
+        return _run_screenshot_command(args)
+
     return 0
 
 
@@ -563,6 +566,26 @@ def net_status_main() -> int:
     from .net_status_cmd import main
 
     return main()
+
+
+def _run_screenshot_command(args) -> int:
+    """Run the screenshot command."""
+    from .screenshot_cmd import main as screenshot_cmd
+
+    sub_argv = [args.screenshot_input]
+
+    if hasattr(args, "screenshot_output") and args.screenshot_output:
+        sub_argv.extend(["-o", args.screenshot_output])
+    if hasattr(args, "screenshot_layers") and args.screenshot_layers:
+        sub_argv.extend(["--layers", args.screenshot_layers])
+    if hasattr(args, "screenshot_max_size") and args.screenshot_max_size != 1568:
+        sub_argv.extend(["--max-size", str(args.screenshot_max_size)])
+    if hasattr(args, "screenshot_bw") and args.screenshot_bw:
+        sub_argv.append("--bw")
+    if hasattr(args, "screenshot_theme") and args.screenshot_theme:
+        sub_argv.extend(["--theme", args.screenshot_theme])
+
+    return screenshot_cmd(sub_argv)
 
 
 if __name__ == "__main__":

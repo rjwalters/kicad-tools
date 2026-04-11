@@ -177,6 +177,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_explain_parser(subparsers)
     _add_detect_mistakes_parser(subparsers)
     _add_calibrate_parser(subparsers)
+    _add_screenshot_parser(subparsers)
 
     return parser
 
@@ -3315,4 +3316,52 @@ def _add_calibrate_parser(subparsers) -> None:
         action="store_true",
         dest="calibrate_verbose",
         help="Show detailed progress information",
+    )
+
+
+def _add_screenshot_parser(subparsers) -> None:
+    """Add screenshot subcommand parser."""
+    screenshot_parser = subparsers.add_parser(
+        "screenshot",
+        help="Capture a PNG screenshot of a KiCad board or schematic",
+    )
+    screenshot_parser.add_argument(
+        "screenshot_input",
+        help="Path to .kicad_pcb or .kicad_sch file",
+    )
+    screenshot_parser.add_argument(
+        "-o",
+        "--output",
+        dest="screenshot_output",
+        help="Output PNG file path (default: <input>.png)",
+    )
+    screenshot_parser.add_argument(
+        "--layers",
+        dest="screenshot_layers",
+        default=None,
+        help=(
+            "Layer specification for PCB screenshots. "
+            "Preset name (default, copper, assembly, front, back) "
+            "or comma-separated layer list"
+        ),
+    )
+    screenshot_parser.add_argument(
+        "--max-size",
+        type=int,
+        dest="screenshot_max_size",
+        default=1568,
+        help="Maximum image dimension in pixels (default: 1568)",
+    )
+    screenshot_parser.add_argument(
+        "--bw",
+        "--black-and-white",
+        action="store_true",
+        dest="screenshot_bw",
+        help="Use black and white rendering",
+    )
+    screenshot_parser.add_argument(
+        "--theme",
+        dest="screenshot_theme",
+        default=None,
+        help="KiCad color theme name",
     )

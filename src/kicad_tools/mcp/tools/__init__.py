@@ -59,6 +59,10 @@ from kicad_tools.mcp.tools.routing import (
     get_unrouted_nets,
     route_net,
 )
+from kicad_tools.mcp.tools.screenshot import (
+    screenshot_board,
+    screenshot_schematic,
+)
 
 __all__ = [
     # Registry exports
@@ -96,6 +100,8 @@ __all__ = [
     "record_decision",
     "restore_checkpoint",
     "route_net",
+    "screenshot_board",
+    "screenshot_schematic",
     "search_available_rules",
     "validate_design",
     "validate_move",
