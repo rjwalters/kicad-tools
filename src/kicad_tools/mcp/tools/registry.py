@@ -1032,6 +1032,107 @@ register_tool(
 )
 
 
+def _handler_board_summary(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle board_summary tool call."""
+    from kicad_tools.mcp.tools.analysis import analyze_board
+
+    result = analyze_board(pcb_path=params["pcb_path"])
+    return result.to_dict()
+
+
+register_tool(
+    name="board_summary",
+    description=(
+        "Get a comprehensive summary of a KiCad PCB file. Returns board dimensions, "
+        "layer information, component counts by type, net summary with routing status, "
+        "zone list, and overall routing completion percentage. Works entirely offline "
+        "(no running KiCad required). Use this as a first step to understand a board "
+        "before performing more detailed inspection or analysis."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_board_summary,
+    category="analysis",
+)
+
+
+def _handler_board_inspect(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle board_inspect tool call."""
+    from kicad_tools.mcp.tools.analysis import board_inspect
+
+    return board_inspect(
+        pcb_path=params["pcb_path"],
+        aspect=params["aspect"],
+        layer=params.get("layer"),
+        reference_prefix=params.get("reference_prefix"),
+        unrouted_only=params.get("unrouted_only", False),
+        net_name=params.get("net_name"),
+    )
+
+
+register_tool(
+    name="board_inspect",
+    description=(
+        "Inspect a specific aspect of a KiCad PCB file in detail. Unlike board_summary "
+        "which returns a high-level overview, board_inspect returns focused, detailed "
+        "data for one aspect at a time: footprints (with position, type, pads), nets "
+        "(with per-net routing status), layers (with stackup info), design_rules "
+        "(setup parameters), or zones (with thermal relief settings). Supports "
+        "optional filters to narrow results. Works entirely offline."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "aspect": {
+                "type": "string",
+                "description": "Which aspect to inspect",
+                "enum": ["footprints", "nets", "layers", "design_rules", "zones"],
+            },
+            "layer": {
+                "type": "string",
+                "description": (
+                    "Filter by layer name (e.g., 'F.Cu', 'B.Cu'). "
+                    "Applies to footprints and zones aspects."
+                ),
+            },
+            "reference_prefix": {
+                "type": "string",
+                "description": (
+                    "Filter footprints by reference prefix (e.g., 'R' for resistors, "
+                    "'C' for capacitors, 'U' for ICs). Applies to footprints aspect only."
+                ),
+            },
+            "unrouted_only": {
+                "type": "boolean",
+                "description": (
+                    "If true, only return unrouted or incomplete nets. Applies to nets aspect only."
+                ),
+                "default": False,
+            },
+            "net_name": {
+                "type": "string",
+                "description": (
+                    "Filter zones by net name (e.g., 'GND'). Applies to zones aspect only."
+                ),
+            },
+        },
+        required=["pcb_path", "aspect"],
+    ),
+    handler=_handler_board_inspect,
+    category="analysis",
+)
+
+
 # -----------------------------------------------------------------------------
 # Routing Tools
 # -----------------------------------------------------------------------------

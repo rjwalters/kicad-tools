@@ -601,3 +601,375 @@ class TestTypeDataclasses:
         assert data["total_airwires"] == 3
         assert data["total_trace_length_mm"] == 1234.57
         assert data["via_count"] == 25
+
+
+# =============================================================================
+# board_inspect tests
+# =============================================================================
+
+
+class TestBoardInspectFootprints:
+    """Tests for board_inspect with aspect='footprints'."""
+
+    def test_inspect_footprints_basic(self):
+        """Test inspecting footprints returns expected structure."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "footprints")
+
+            assert result["aspect"] == "footprints"
+            assert result["count"] == 2
+            assert len(result["footprints"]) == 2
+
+            refs = {fp["reference"] for fp in result["footprints"]}
+            assert "R1" in refs
+            assert "C1" in refs
+
+            # Verify footprint structure
+            r1 = next(fp for fp in result["footprints"] if fp["reference"] == "R1")
+            assert r1["value"] == "10k"
+            assert r1["layer"] == "F.Cu"
+            assert "position" in r1
+            assert r1["position"]["x"] == 10.0
+            assert r1["position"]["y"] == 10.0
+            assert r1["type"] == "smd"
+            assert r1["pad_count"] == 2
+            assert isinstance(r1["nets"], list)
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_footprints_filter_by_layer(self):
+        """Test filtering footprints by layer."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(PCB_WITH_VIAS)
+        try:
+            result = board_inspect(pcb_path, "footprints", layer="F.Cu")
+
+            assert result["count"] == 1
+            assert result["footprints"][0]["reference"] == "R1"
+            assert result["filters"]["layer"] == "F.Cu"
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_footprints_filter_by_reference_prefix(self):
+        """Test filtering footprints by reference prefix."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "footprints", reference_prefix="R")
+
+            assert result["count"] == 1
+            assert result["footprints"][0]["reference"] == "R1"
+            assert result["filters"]["reference_prefix"] == "R"
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_footprints_through_hole(self):
+        """Test inspecting through-hole footprints."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(THROUGH_HOLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "footprints")
+
+            assert result["count"] == 1
+            u1 = result["footprints"][0]
+            assert u1["reference"] == "U1"
+            assert u1["type"] == "through_hole"
+            assert u1["pad_count"] == 8
+        finally:
+            Path(pcb_path).unlink()
+
+
+class TestBoardInspectNets:
+    """Tests for board_inspect with aspect='nets'."""
+
+    def test_inspect_nets_basic(self):
+        """Test inspecting nets returns per-net routing status."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "nets")
+
+            assert result["aspect"] == "nets"
+            assert result["count"] > 0
+            assert "summary" in result
+            assert result["summary"]["total_nets"] == 3
+
+            # Verify net structure
+            assert len(result["nets"]) > 0
+            net = result["nets"][0]
+            assert "net_name" in net
+            assert "status" in net
+            assert "total_pads" in net
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_nets_unrouted_only(self):
+        """Test filtering to unrouted nets only."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "nets", unrouted_only=True)
+
+            assert result["filters"]["unrouted_only"] is True
+            # All returned nets should be non-complete
+            for net in result["nets"]:
+                assert net["status"] != "complete"
+        finally:
+            Path(pcb_path).unlink()
+
+
+class TestBoardInspectLayers:
+    """Tests for board_inspect with aspect='layers'."""
+
+    def test_inspect_layers_two_layer(self):
+        """Test inspecting layers on a 2-layer board."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "layers")
+
+            assert result["aspect"] == "layers"
+            assert result["copper_layer_count"] == 2
+            assert result["has_internal_planes"] is False
+
+            layer_names = [l["name"] for l in result["copper_layers"]]
+            assert "F.Cu" in layer_names
+            assert "B.Cu" in layer_names
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_layers_four_layer(self):
+        """Test inspecting layers on a 4-layer board with internal planes."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(MULTILAYER_PCB)
+        try:
+            result = board_inspect(pcb_path, "layers")
+
+            assert result["copper_layer_count"] == 4
+            assert result["has_internal_planes"] is True
+
+            layer_names = [l["name"] for l in result["copper_layers"]]
+            assert "In1.Cu" in layer_names
+            assert "In2.Cu" in layer_names
+
+            # Verify layer detail structure
+            in1 = next(l for l in result["copper_layers"] if l["name"] == "In1.Cu")
+            assert in1["type"] == "power"
+        finally:
+            Path(pcb_path).unlink()
+
+
+class TestBoardInspectDesignRules:
+    """Tests for board_inspect with aspect='design_rules'."""
+
+    def test_inspect_design_rules_basic(self):
+        """Test inspecting design rules returns setup data."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "design_rules")
+
+            assert result["aspect"] == "design_rules"
+            assert "setup" in result
+            assert "design_rules" in result
+            assert "pad_to_mask_clearance_mm" in result["setup"]
+        finally:
+            Path(pcb_path).unlink()
+
+
+class TestBoardInspectZones:
+    """Tests for board_inspect with aspect='zones'."""
+
+    def test_inspect_zones_with_zones(self):
+        """Test inspecting zones on a board with zones."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(MULTILAYER_PCB)
+        try:
+            result = board_inspect(pcb_path, "zones")
+
+            assert result["aspect"] == "zones"
+            assert result["count"] == 1
+
+            zone = result["zones"][0]
+            assert zone["net_name"] == "GND"
+            assert zone["layer"] == "In1.Cu"
+            assert zone["is_filled"] is True
+            assert "thermal_gap_mm" in zone
+            assert "clearance_mm" in zone
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_zones_empty(self):
+        """Test inspecting zones on a board with no zones."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = board_inspect(pcb_path, "zones")
+
+            assert result["count"] == 0
+            assert result["zones"] == []
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_zones_filter_by_net_name(self):
+        """Test filtering zones by net name."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(MULTILAYER_PCB)
+        try:
+            result = board_inspect(pcb_path, "zones", net_name="GND")
+            assert result["count"] == 1
+
+            result = board_inspect(pcb_path, "zones", net_name="NONEXISTENT")
+            assert result["count"] == 0
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_inspect_zones_filter_by_layer(self):
+        """Test filtering zones by layer."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(MULTILAYER_PCB)
+        try:
+            result = board_inspect(pcb_path, "zones", layer="In1.Cu")
+            assert result["count"] == 1
+
+            result = board_inspect(pcb_path, "zones", layer="F.Cu")
+            assert result["count"] == 0
+        finally:
+            Path(pcb_path).unlink()
+
+
+class TestBoardInspectErrors:
+    """Tests for board_inspect error handling."""
+
+    def test_invalid_aspect(self):
+        """Test that ValueError is raised for invalid aspect."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            with pytest.raises(ValueError, match="Invalid aspect"):
+                board_inspect(pcb_path, "invalid_aspect")
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_file_not_found(self):
+        """Test that FileNotFoundError is raised for missing files."""
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        with pytest.raises(KiCadFileNotFoundError):
+            board_inspect("/nonexistent/path/to/board.kicad_pcb", "footprints")
+
+    def test_invalid_file_extension(self):
+        """Test that ParseError is raised for invalid file extensions."""
+        import tempfile
+
+        from kicad_tools.mcp.tools.analysis import board_inspect
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"not a pcb file")
+            path = f.name
+        try:
+            with pytest.raises(ParseError):
+                board_inspect(path, "footprints")
+        finally:
+            Path(path).unlink()
+
+
+class TestBoardSummaryRegistry:
+    """Tests for board_summary tool registration in registry."""
+
+    def test_board_summary_registered(self):
+        """Test that board_summary is in the tool registry."""
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        tool = get_tool("board_summary")
+        assert tool is not None
+        assert tool.name == "board_summary"
+        assert tool.category == "analysis"
+
+    def test_board_summary_handler(self):
+        """Test that board_summary handler works via registry."""
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        tool = get_tool("board_summary")
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = tool.handler({"pcb_path": pcb_path})
+
+            assert isinstance(result, dict)
+            assert "file_path" in result
+            assert "board_dimensions" in result
+            assert "layers" in result
+            assert "components" in result
+            assert "nets" in result
+            assert "zones" in result
+            assert "routing_status" in result
+
+            # Verify specific values
+            assert result["components"]["total_count"] == 2
+            assert result["layers"]["copper_layers"] == 2
+        finally:
+            Path(pcb_path).unlink()
+
+
+class TestBoardInspectRegistry:
+    """Tests for board_inspect tool registration in registry."""
+
+    def test_board_inspect_registered(self):
+        """Test that board_inspect is in the tool registry."""
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        tool = get_tool("board_inspect")
+        assert tool is not None
+        assert tool.name == "board_inspect"
+        assert tool.category == "analysis"
+
+    def test_board_inspect_handler(self):
+        """Test that board_inspect handler works via registry."""
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        tool = get_tool("board_inspect")
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = tool.handler({"pcb_path": pcb_path, "aspect": "footprints"})
+
+            assert isinstance(result, dict)
+            assert result["aspect"] == "footprints"
+            assert result["count"] == 2
+        finally:
+            Path(pcb_path).unlink()
+
+    def test_board_inspect_handler_with_filters(self):
+        """Test that board_inspect handler passes filter params correctly."""
+        from kicad_tools.mcp.tools.registry import get_tool
+
+        tool = get_tool("board_inspect")
+        pcb_path = write_temp_pcb(SIMPLE_PCB)
+        try:
+            result = tool.handler(
+                {
+                    "pcb_path": pcb_path,
+                    "aspect": "footprints",
+                    "reference_prefix": "C",
+                }
+            )
+
+            assert result["count"] == 1
+            assert result["footprints"][0]["reference"] == "C1"
+        finally:
+            Path(pcb_path).unlink()

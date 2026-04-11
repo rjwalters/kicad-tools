@@ -13,7 +13,7 @@ import re
 import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from kicad_tools.analysis.net_status import NetStatusAnalyzer
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
@@ -82,6 +82,298 @@ def analyze_board(pcb_path: str) -> BoardAnalysis:
         zones=_extract_zones(pcb),
         routing_status=_compute_routing_status(pcb),
     )
+
+
+VALID_ASPECTS = ("footprints", "nets", "layers", "design_rules", "zones")
+
+
+def board_inspect(
+    pcb_path: str,
+    aspect: str,
+    *,
+    layer: str | None = None,
+    reference_prefix: str | None = None,
+    unrouted_only: bool = False,
+    net_name: str | None = None,
+) -> dict[str, Any]:
+    """Inspect a specific aspect of a KiCad PCB file.
+
+    Returns focused, structured data for a single aspect of the board,
+    keeping responses concise enough for LLM context windows.
+
+    Args:
+        pcb_path: Absolute path to .kicad_pcb file
+        aspect: What to inspect. One of: footprints, nets, layers,
+                design_rules, zones
+        layer: Filter by layer name (applies to footprints, zones)
+        reference_prefix: Filter footprints by reference prefix (e.g. "R", "C", "U")
+        unrouted_only: If True, only return unrouted/incomplete nets
+                       (applies to nets aspect)
+        net_name: Filter zones by net name (applies to zones aspect)
+
+    Returns:
+        Dict with aspect-specific structured data
+
+    Raises:
+        FileNotFoundError: If the PCB file does not exist
+        ParseError: If the PCB file cannot be parsed
+        ValueError: If aspect is not one of the valid values
+    """
+    if aspect not in VALID_ASPECTS:
+        raise ValueError(f"Invalid aspect: {aspect!r}. Must be one of: {', '.join(VALID_ASPECTS)}")
+
+    path = Path(pcb_path)
+    if not path.exists():
+        raise KiCadFileNotFoundError(f"PCB file not found: {pcb_path}")
+
+    if path.suffix != ".kicad_pcb":
+        raise ParseError(f"Invalid file extension: {path.suffix} (expected .kicad_pcb)")
+
+    try:
+        pcb = PCB.load(pcb_path)
+    except Exception as e:
+        raise ParseError(f"Failed to parse PCB file: {e}") from e
+
+    if aspect == "footprints":
+        return _inspect_footprints(pcb, layer=layer, reference_prefix=reference_prefix)
+    elif aspect == "nets":
+        return _inspect_nets(pcb, unrouted_only=unrouted_only)
+    elif aspect == "layers":
+        return _inspect_layers(pcb)
+    elif aspect == "design_rules":
+        return _inspect_design_rules(pcb)
+    elif aspect == "zones":
+        return _inspect_zones(pcb, layer=layer, net_name=net_name)
+    else:
+        # Should not reach here due to validation above
+        raise ValueError(f"Invalid aspect: {aspect!r}")
+
+
+def _inspect_footprints(
+    pcb: PCB,
+    *,
+    layer: str | None = None,
+    reference_prefix: str | None = None,
+) -> dict[str, Any]:
+    """Inspect footprints on the board.
+
+    Args:
+        pcb: Loaded PCB object
+        layer: Filter by layer name
+        reference_prefix: Filter by reference prefix (e.g. "R", "C")
+
+    Returns:
+        Dict with footprint list and count
+    """
+    footprints_iter = pcb.footprints_on_layer(layer) if layer else pcb.footprints
+
+    items = []
+    for fp in footprints_iter:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+
+        if reference_prefix:
+            prefix_match = re.match(r"^([A-Za-z]+)", fp.reference)
+            if not prefix_match or prefix_match.group(1).upper() != reference_prefix.upper():
+                continue
+
+        pad_count = len(fp.pads)
+        pad_nets = set()
+        for pad in fp.pads:
+            if pad.net_number > 0:
+                pad_nets.add(pad.net_name)
+
+        items.append(
+            {
+                "reference": fp.reference,
+                "value": fp.value,
+                "footprint": fp.name,
+                "layer": fp.layer,
+                "position": {"x": round(fp.position[0], 3), "y": round(fp.position[1], 3)},
+                "rotation": fp.rotation,
+                "type": fp.attr or "unknown",
+                "pad_count": pad_count,
+                "nets": sorted(pad_nets),
+            }
+        )
+
+    return {
+        "aspect": "footprints",
+        "count": len(items),
+        "filters": {
+            "layer": layer,
+            "reference_prefix": reference_prefix,
+        },
+        "footprints": items,
+    }
+
+
+def _inspect_nets(pcb: PCB, *, unrouted_only: bool = False) -> dict[str, Any]:
+    """Inspect nets on the board.
+
+    Args:
+        pcb: Loaded PCB object
+        unrouted_only: If True, only return unrouted/incomplete nets
+
+    Returns:
+        Dict with per-net routing status
+    """
+    analyzer = NetStatusAnalyzer(pcb)
+    result = analyzer.analyze()
+
+    nets = []
+    for net_status in result.nets:
+        if unrouted_only and net_status.status == "complete":
+            continue
+
+        nets.append(net_status.to_dict())
+
+    return {
+        "aspect": "nets",
+        "count": len(nets),
+        "filters": {
+            "unrouted_only": unrouted_only,
+        },
+        "summary": {
+            "total_nets": result.total_nets,
+            "complete": result.complete_count,
+            "incomplete": result.incomplete_count,
+            "unrouted": result.unrouted_count,
+        },
+        "nets": nets,
+    }
+
+
+def _inspect_layers(pcb: PCB) -> dict[str, Any]:
+    """Inspect layer information on the board.
+
+    Args:
+        pcb: Loaded PCB object
+
+    Returns:
+        Dict with copper layer details and stackup info
+    """
+    copper_layers = pcb.copper_layers
+    layer_details = []
+    for layer_obj in copper_layers:
+        layer_details.append(
+            {
+                "number": layer_obj.number,
+                "name": layer_obj.name,
+                "type": layer_obj.type,
+            }
+        )
+
+    # Stackup information from setup
+    stackup_info = []
+    if pcb.setup and pcb.setup.stackup:
+        for sl in pcb.setup.stackup:
+            stackup_info.append(
+                {
+                    "name": sl.name,
+                    "type": sl.type,
+                    "thickness_mm": sl.thickness,
+                    "material": sl.material,
+                    "epsilon_r": sl.epsilon_r,
+                }
+            )
+
+    return {
+        "aspect": "layers",
+        "copper_layer_count": len(copper_layers),
+        "has_internal_planes": any(l.type == "power" for l in copper_layers),
+        "copper_layers": layer_details,
+        "stackup": stackup_info,
+    }
+
+
+def _inspect_design_rules(pcb: PCB) -> dict[str, Any]:
+    """Inspect design rules / setup on the board.
+
+    Args:
+        pcb: Loaded PCB object
+
+    Returns:
+        Dict with setup parameters and design rule info
+    """
+    setup_data: dict[str, Any] = {}
+    if pcb.setup:
+        setup_data["pad_to_mask_clearance_mm"] = pcb.setup.pad_to_mask_clearance
+        setup_data["copper_finish"] = pcb.setup.copper_finish
+
+        if pcb.setup.stackup:
+            setup_data["stackup_layer_count"] = len(pcb.setup.stackup)
+    else:
+        setup_data["pad_to_mask_clearance_mm"] = 0.0
+        setup_data["copper_finish"] = ""
+
+    # Check for design rules on the PCB object
+    design_rules: dict[str, Any] = {}
+    if hasattr(pcb, "_design_rules") and pcb._design_rules is not None:
+        dr = pcb._design_rules
+        if hasattr(dr, "min_clearance"):
+            design_rules["min_clearance_mm"] = dr.min_clearance
+        if hasattr(dr, "min_track_width"):
+            design_rules["min_track_width_mm"] = dr.min_track_width
+        if hasattr(dr, "min_via_diameter"):
+            design_rules["min_via_diameter_mm"] = dr.min_via_diameter
+        if hasattr(dr, "min_via_drill"):
+            design_rules["min_via_drill_mm"] = dr.min_via_drill
+
+    return {
+        "aspect": "design_rules",
+        "setup": setup_data,
+        "design_rules": design_rules,
+    }
+
+
+def _inspect_zones(
+    pcb: PCB,
+    *,
+    layer: str | None = None,
+    net_name: str | None = None,
+) -> dict[str, Any]:
+    """Inspect copper zones on the board.
+
+    Args:
+        pcb: Loaded PCB object
+        layer: Filter by layer name
+        net_name: Filter by net name
+
+    Returns:
+        Dict with zone list and count
+    """
+    zones = []
+    for zone in pcb.zones:
+        if layer and zone.layer != layer:
+            continue
+        if net_name and zone.net_name != net_name:
+            continue
+
+        zones.append(
+            {
+                "net_name": zone.net_name,
+                "layer": zone.layer,
+                "priority": zone.priority,
+                "is_filled": zone.is_filled,
+                "fill_type": zone.fill_type,
+                "clearance_mm": zone.clearance,
+                "thermal_gap_mm": zone.thermal_gap,
+                "thermal_bridge_width_mm": zone.thermal_bridge_width,
+                "connect_pads": zone.connect_pads,
+                "min_thickness_mm": zone.min_thickness,
+            }
+        )
+
+    return {
+        "aspect": "zones",
+        "count": len(zones),
+        "filters": {
+            "layer": layer,
+            "net_name": net_name,
+        },
+        "zones": zones,
+    }
 
 
 def _extract_dimensions(pcb: PCB) -> BoardDimensions:
