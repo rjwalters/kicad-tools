@@ -31,12 +31,14 @@ from kicad_tools.placement.cost import (
 )
 from kicad_tools.placement.strategy import StrategyConfig
 from kicad_tools.placement.vector import (
+    FIELDS_PER_COMPONENT,
     ComponentDef,
     PadDef,
     PlacementVector,
     bounds,
     decode,
 )
+from kicad_tools.placement.wirelength import compute_per_footprint_ratsnest
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +228,43 @@ def _build_footprint_sizes(
 ) -> dict[str, tuple[float, float]]:
     """Build a footprint_sizes dict from component definitions."""
     return {c.reference: (c.width, c.height) for c in components}
+
+
+def _build_placed_components(
+    placements: Sequence[ComponentPlacement],
+    components: Sequence[ComponentDef],
+) -> list:
+    """Build PlacedComponent objects from ComponentPlacement + ComponentDef.
+
+    Creates a PlacementVector from the placement positions and decodes it
+    with the component definitions to produce PlacedComponent objects that
+    have fully transformed pad coordinates.
+
+    Args:
+        placements: Current component positions.
+        components: Component definitions with pad geometry.
+
+    Returns:
+        List of PlacedComponent with transformed pad coordinates.
+    """
+    import numpy as np
+
+    ref_to_placement = {p.reference: p for p in placements}
+
+    n = len(components)
+    data = np.zeros(n * FIELDS_PER_COMPONENT, dtype=np.float64)
+    for i, comp_def in enumerate(components):
+        cp = ref_to_placement.get(comp_def.reference)
+        if cp is None:
+            continue
+        base = i * FIELDS_PER_COMPONENT
+        data[base] = cp.x
+        data[base + 1] = cp.y
+        data[base + 2] = float(int(round(cp.rotation / 90.0)) % 4)
+        data[base + 3] = 0.0  # side: assume front
+
+    vector = PlacementVector(data=data)
+    return decode(vector, components)
 
 
 def _breakdown_to_dict(breakdown: CostBreakdown) -> dict[str, float]:
@@ -455,6 +494,10 @@ def optimize_placement(
     else:
         improvement_pct = 0.0
 
+    # Compute per-footprint ratsnest on the best placement
+    best_placed = decode(best_vector, components)
+    ratsnest_list = compute_per_footprint_ratsnest(best_placed, nets)
+
     result: dict[str, Any] = {
         "success": True,
         "initial_score": {
@@ -475,6 +518,9 @@ def optimize_placement(
         "component_count": len(components),
         "net_count": len(nets),
         "convergence_data": convergence_data,
+        "per_component_ratsnest": [
+            {"reference": fr.reference, "ratsnest_mm": fr.ratsnest_mm} for fr in ratsnest_list
+        ],
     }
 
     # Write output if requested
@@ -569,6 +615,10 @@ def evaluate_placement(
         current_placements, nets, rules, board_outline, cost_config, footprint_sizes
     )
 
+    # Compute per-footprint ratsnest distances
+    placed_components = _build_placed_components(current_placements, components)
+    ratsnest_list = compute_per_footprint_ratsnest(placed_components, nets)
+
     return {
         "success": True,
         "score": round(score.total, 4),
@@ -580,6 +630,9 @@ def evaluate_placement(
             "width_mm": round(board_outline.width, 2),
             "height_mm": round(board_outline.height, 2),
         },
+        "per_component_ratsnest": [
+            {"reference": fr.reference, "ratsnest_mm": fr.ratsnest_mm} for fr in ratsnest_list
+        ],
     }
 
 
