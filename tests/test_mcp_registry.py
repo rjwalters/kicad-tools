@@ -78,6 +78,8 @@ class TestToolRegistry:
             "restore_checkpoint",
             "get_session_summary",
             "measure_clearance",
+            "board_summary",
+            "board_inspect",
             "get_unrouted_nets",
             "route_net",
             "validate_pattern",

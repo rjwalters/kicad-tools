@@ -8,6 +8,7 @@ used by both stdio and HTTP transports.
 
 from kicad_tools.mcp.tools.analysis import (
     analyze_board,
+    board_inspect,
     get_drc_violations,
     measure_clearance,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "adapt_pattern",
     "add_subsystem",
     "analyze_board",
+    "board_inspect",
     "annotate_decision",
     "create_checkpoint",
     "detect_mistakes",
