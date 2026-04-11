@@ -350,6 +350,7 @@ def run_optimize_placement(
     checkpoint_dir: str | None = None,
     verbose: bool = False,
     quiet: bool = False,
+    no_slide_off: bool = False,
 ) -> int:
     """Run placement optimization.
 
@@ -365,6 +366,7 @@ def run_optimize_placement(
         checkpoint_dir: Directory for checkpoint save/resume.
         verbose: Enable verbose output.
         quiet: Suppress non-essential output.
+        no_slide_off: If True, skip slide-off overlap pre-processing.
 
     Returns:
         Exit code (0 for success, 1 for failure).
@@ -470,6 +472,22 @@ def run_optimize_placement(
 
         # Generate initial seed
         seed_vector = _generate_seed(seed_method, components, nets, board_outline)
+
+        # Apply slide-off pre-processing
+        if not no_slide_off:
+            from kicad_tools.placement.slide_off import slide_off_overlaps
+
+            seed_vector, slide_result = slide_off_overlaps(
+                seed_vector,
+                components,
+                board_outline,
+            )
+            if not quiet:
+                print(
+                    f"  Slide-off: resolved {slide_result.overlaps_resolved} overlaps "
+                    f"({slide_result.overlaps_remaining} remaining, "
+                    f"{slide_result.iterations_run} iterations)"
+                )
 
         # Evaluate seed
         seed_score = _evaluate(

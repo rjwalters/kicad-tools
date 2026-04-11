@@ -264,6 +264,7 @@ def optimize_placement(
     weights: dict[str, float] | None = None,
     seed_method: str = "force-directed",
     output_path: str | None = None,
+    pre_slide_off: bool = True,
 ) -> dict[str, Any]:
     """Optimize component placement on a PCB board using CMA-ES.
 
@@ -279,6 +280,8 @@ def optimize_placement(
             overlap, drc, boundary, wirelength, area.
         seed_method: Seed placement method ("force-directed" or "random").
         output_path: Path for output file. If None, does not write to disk.
+        pre_slide_off: If True, run slide-off overlap resolution on the seed
+            placement before passing it to the optimizer.
 
     Returns:
         Dictionary with optimization results:
@@ -365,6 +368,16 @@ def optimize_placement(
             "component_count": len(components),
             "net_count": len(nets),
         }
+
+    # Apply slide-off pre-processing to resolve seed overlaps
+    if pre_slide_off:
+        from kicad_tools.placement.slide_off import slide_off_overlaps
+
+        seed_vector, _slide_result = slide_off_overlaps(
+            seed_vector,
+            components,
+            board_outline,
+        )
 
     # Evaluate seed
     seed_score = _evaluate_vector(
@@ -637,3 +650,118 @@ def _write_placements_to_pcb(
         output_lines.append(line)
 
     Path(output_path).write_text("\n".join(output_lines))
+
+
+# ---------------------------------------------------------------------------
+# Standalone overlap resolution tool
+# ---------------------------------------------------------------------------
+
+
+def resolve_placement_overlaps(
+    pcb_path: str,
+    output_path: str | None = None,
+    margin_mm: float = 0.5,
+    max_iterations: int = 5,
+    max_displacement_mm: float = 20.0,
+) -> dict[str, Any]:
+    """Resolve component overlaps in a PCB using the slide-off algorithm.
+
+    Reads component positions from the board file, runs iterative
+    slide-off overlap resolution, and optionally writes the modified
+    board to *output_path*.
+
+    Args:
+        pcb_path: Absolute path to .kicad_pcb file.
+        output_path: Path for output file. If None, does not write to disk.
+        margin_mm: Extra clearance margin beyond zero overlap (mm).
+        max_iterations: Maximum settling iterations.
+        max_displacement_mm: Maximum per-component displacement (mm).
+
+    Returns:
+        Dictionary with overlap resolution results:
+        - success: Whether resolution completed successfully.
+        - overlaps_resolved: Number of overlap pairs resolved.
+        - overlaps_remaining: Number of overlap pairs still present.
+        - iterations_run: Number of iterations executed.
+        - max_displacement_applied: Maximum component displacement (mm).
+        - component_count: Number of components processed.
+        - output_path: Path to output file (if written).
+        - error_message: Error description if success is False.
+    """
+    _validate_pcb_path(pcb_path)
+
+    try:
+        components, nets, board_outline, rules = _read_board_data(pcb_path)
+    except Exception as e:
+        raise ParseError(f"Failed to parse PCB file: {e}") from e
+
+    if not components:
+        return {
+            "success": False,
+            "error_message": "No components found in PCB file",
+            "component_count": 0,
+        }
+
+    # Build a PlacementVector from current positions
+    from kicad_tools.schema.pcb import PCB as SchemaPCB
+
+    pcb = SchemaPCB.load(pcb_path)
+
+    from kicad_tools.placement.vector import (
+        FIELDS_PER_COMPONENT as FPC,
+    )
+    from kicad_tools.placement.vector import (
+        PlacementVector as PV,
+    )
+
+    # Map reference -> ComponentDef index
+    ref_to_idx = {c.reference: i for i, c in enumerate(components)}
+
+    import numpy as np
+
+    data = np.zeros(len(components) * FPC, dtype=np.float64)
+    for fp in pcb.footprints:
+        ref = fp.reference
+        if not ref or ref not in ref_to_idx:
+            continue
+        idx = ref_to_idx[ref]
+        base = idx * FPC
+        data[base] = fp.position[0]
+        data[base + 1] = fp.position[1]
+        rot_idx = int(round(fp.rotation / 90.0)) % 4
+        data[base + 2] = float(rot_idx)
+        # Determine side from layer
+        layer = getattr(fp, "layer", "F.Cu")
+        data[base + 3] = 1.0 if "B." in str(layer) else 0.0
+
+    vector = PV(data=data)
+
+    # Run slide-off
+    from kicad_tools.placement.slide_off import slide_off_overlaps
+
+    new_vector, slide_result = slide_off_overlaps(
+        vector,
+        components,
+        board_outline,
+        margin_mm=margin_mm,
+        max_iterations=max_iterations,
+        max_displacement_mm=max_displacement_mm,
+    )
+
+    result: dict[str, Any] = {
+        "success": True,
+        "overlaps_resolved": slide_result.overlaps_resolved,
+        "overlaps_remaining": slide_result.overlaps_remaining,
+        "iterations_run": slide_result.iterations_run,
+        "max_displacement_applied": round(slide_result.max_displacement_applied, 4),
+        "component_count": len(components),
+    }
+
+    if output_path:
+        try:
+            _write_placements_to_pcb(pcb_path, output_path, new_vector, components)
+            result["output_path"] = output_path
+        except Exception as e:
+            result["warnings"] = [f"Resolution succeeded but save failed: {e}"]
+
+    return result

@@ -1438,6 +1438,7 @@ def _handler_optimize_placement(params: dict[str, Any]) -> dict[str, Any]:
         weights=params.get("weights"),
         seed_method=params.get("seed_method", "force-directed"),
         output_path=params.get("output_path"),
+        pre_slide_off=params.get("pre_slide_off", True),
     )
 
 
@@ -1504,6 +1505,15 @@ register_tool(
                     "If not specified, the result is not written to disk."
                 ),
             },
+            "pre_slide_off": {
+                "type": "boolean",
+                "description": (
+                    "If true, run slide-off overlap resolution on the seed "
+                    "placement before optimization. Reduces initial overlap "
+                    "penalty for faster convergence. Default: true."
+                ),
+                "default": True,
+            },
         },
         required=["pcb_path"],
     ),
@@ -1560,5 +1570,63 @@ register_tool(
         required=["pcb_path"],
     ),
     handler=_handler_evaluate_placement,
+    category="placement",
+)
+
+
+def _handler_resolve_placement_overlaps(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle resolve_placement_overlaps tool call."""
+    from kicad_tools.mcp.tools.optimize_placement import resolve_placement_overlaps
+
+    return resolve_placement_overlaps(
+        pcb_path=params["pcb_path"],
+        output_path=params.get("output_path"),
+        margin_mm=params.get("margin_mm", 0.5),
+        max_iterations=params.get("max_iterations", 5),
+        max_displacement_mm=params.get("max_displacement_mm", 20.0),
+    )
+
+
+register_tool(
+    name="resolve_placement_overlaps",
+    description=(
+        "Resolve component placement overlaps using the slide-off algorithm. "
+        "Iteratively pushes overlapping component bounding boxes apart until "
+        "no overlaps remain or limits are reached. Components on opposite "
+        "board sides are not affected. Useful as a standalone cleanup step "
+        "or before running full placement optimization."
+    ),
+    parameters=_make_params(
+        properties={
+            "pcb_path": {
+                "type": "string",
+                "description": "Absolute path to .kicad_pcb file",
+            },
+            "output_path": {
+                "type": "string",
+                "description": (
+                    "Path for output .kicad_pcb file with resolved placements. "
+                    "If not specified, the result is not written to disk."
+                ),
+            },
+            "margin_mm": {
+                "type": "number",
+                "description": ("Extra clearance margin in mm beyond zero overlap. Default: 0.5"),
+                "default": 0.5,
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": ("Maximum number of settling iterations. Default: 5"),
+                "default": 5,
+            },
+            "max_displacement_mm": {
+                "type": "number",
+                "description": ("Maximum displacement per component in mm. Default: 20.0"),
+                "default": 20.0,
+            },
+        },
+        required=["pcb_path"],
+    ),
+    handler=_handler_resolve_placement_overlaps,
     category="placement",
 )
