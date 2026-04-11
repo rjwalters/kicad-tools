@@ -50,6 +50,7 @@ from .commands import (
     run_build_native_command,
     run_check_command,
     run_clean_command,
+    run_config_command,
     run_constraints_command,
     run_datasheet_command,
     run_decisions_command,
@@ -142,18 +143,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch_command(args) -> int:
-    """Dispatch to the appropriate command handler.
-
-    New-style commands (those implementing the Command protocol) are
-    dispatched via the _command_class attribute set by the registry.
-    Legacy commands fall through to the elif chain below.
-    """
-    # New-style command dispatch: if the subparser set _command_class,
-    # use the command's run() method directly.
-    command_class = getattr(args, "_command_class", None)
-    if command_class is not None:
-        return command_class.run(args)
-
+    """Dispatch to the appropriate command handler."""
     if args.command == "symbols":
         from .symbols import main as symbols_cmd
 
@@ -347,8 +337,8 @@ def _dispatch_command(args) -> int:
 
         return run_repair_clearance_command(args)
 
-    # NOTE: "config" command has been migrated to the new Command protocol.
-    # It is dispatched via _command_class above.
+    elif args.command == "config":
+        return run_config_command(args)
 
     elif args.command == "interactive":
         return run_interactive_command(args)
