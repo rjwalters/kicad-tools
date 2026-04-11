@@ -21,6 +21,7 @@ Usage::
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -166,3 +167,90 @@ def compute_hpwl_breakdown(
         total += result.hpwl
 
     return HPWLResult(total=total, per_net=tuple(per_net))
+
+
+# ---------------------------------------------------------------------------
+# Per-footprint ratsnest distance
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FootprintRatsnest:
+    """Ratsnest distance for a single footprint.
+
+    Attributes:
+        reference: Component reference designator.
+        ratsnest_mm: Sum of minimum nearest-pad distances to each connected
+            net's other footprints, using actual pad coordinates.
+    """
+
+    reference: str
+    ratsnest_mm: float
+
+
+def compute_per_footprint_ratsnest(
+    placements: Sequence[PlacedComponent],
+    nets: Sequence[Net],
+) -> list[FootprintRatsnest]:
+    """Compute per-footprint ratsnest distance.
+
+    For each footprint F, the ratsnest distance is the sum over all nets N
+    containing F of the minimum Euclidean distance from any pad of F on net N
+    to the nearest pad of any OTHER footprint on net N.  This is the sum of
+    "nearest airwire" distances -- exactly what KiCad draws as ratsnest lines.
+
+    The result list is sorted descending by ``ratsnest_mm`` so the worst-placed
+    components appear first.  Footprints with no net connections have
+    ``ratsnest_mm == 0.0``.
+
+    Args:
+        placements: Decoded placements with transformed pad coordinates.
+        nets: Net connectivity information.
+
+    Returns:
+        List of :class:`FootprintRatsnest` sorted descending by ratsnest_mm.
+    """
+    # Build a lookup: (reference, pad_name) -> (x, y)
+    pad_positions: dict[tuple[str, str], tuple[float, float]] = {}
+    all_refs: list[str] = []
+    for comp in placements:
+        all_refs.append(comp.reference)
+        for pad in comp.pads:
+            pad_positions[(comp.reference, pad.name)] = (pad.x, pad.y)
+
+    # Accumulate ratsnest distance per footprint
+    ratsnest: dict[str, float] = dict.fromkeys(all_refs, 0.0)
+
+    for net in nets:
+        # Collect pads grouped by footprint for this net
+        fp_pads: dict[str, list[tuple[float, float]]] = {}
+        for ref, pad_name in net.pins:
+            pos = pad_positions.get((ref, pad_name))
+            if pos is not None:
+                fp_pads.setdefault(ref, []).append(pos)
+
+        refs = list(fp_pads.keys())
+        if len(refs) < 2:
+            continue
+
+        # For each footprint in this net, find minimum distance to the
+        # nearest pad on a different footprint in the same net
+        for i, ref_a in enumerate(refs):
+            min_dist = math.inf
+            for j, ref_b in enumerate(refs):
+                if i == j:
+                    continue
+                for pad_a in fp_pads[ref_a]:
+                    for pad_b in fp_pads[ref_b]:
+                        dist = math.hypot(pad_a[0] - pad_b[0], pad_a[1] - pad_b[1])
+                        if dist < min_dist:
+                            min_dist = dist
+            if min_dist < math.inf:
+                ratsnest[ref_a] += min_dist
+
+    # Build result list sorted descending by ratsnest distance
+    result = [
+        FootprintRatsnest(reference=ref, ratsnest_mm=round(ratsnest[ref], 3)) for ref in all_refs
+    ]
+    result.sort(key=lambda fr: -fr.ratsnest_mm)
+    return result

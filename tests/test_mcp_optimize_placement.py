@@ -175,6 +175,36 @@ class TestEvaluatePlacement:
         assert result["success"] is True
         assert isinstance(result["score"], float)
 
+    @pytest.mark.skipif(
+        not Path(VOLTAGE_DIVIDER_PCB).exists(),
+        reason="Voltage divider board not available",
+    )
+    def test_evaluate_placement_includes_per_component_ratsnest(self):
+        """evaluate_placement response includes per_component_ratsnest field."""
+        result = evaluate_placement(VOLTAGE_DIVIDER_PCB)
+
+        assert result["success"] is True
+        assert "per_component_ratsnest" in result
+
+        ratsnest = result["per_component_ratsnest"]
+        assert isinstance(ratsnest, list)
+        assert len(ratsnest) > 0
+
+        # Each entry has reference and ratsnest_mm
+        for entry in ratsnest:
+            assert "reference" in entry
+            assert "ratsnest_mm" in entry
+            assert isinstance(entry["reference"], str)
+            assert isinstance(entry["ratsnest_mm"], (int, float))
+            assert entry["ratsnest_mm"] >= 0.0
+
+        # Result should be sorted descending by ratsnest_mm
+        distances = [entry["ratsnest_mm"] for entry in ratsnest]
+        assert distances == sorted(distances, reverse=True)
+
+        # Number of entries should match component_count
+        assert len(ratsnest) == result["component_count"]
+
 
 # ---------------------------------------------------------------------------
 # Integration tests for optimize_placement
@@ -213,6 +243,33 @@ class TestOptimizePlacement:
         assert result["component_count"] > 0
         assert "convergence_data" in result
         assert isinstance(result["convergence_data"], list)
+
+    @pytest.mark.skipif(
+        not Path(VOLTAGE_DIVIDER_PCB).exists(),
+        reason="Voltage divider board not available",
+    )
+    def test_optimize_placement_includes_per_component_ratsnest(self):
+        """optimize_placement final result includes per_component_ratsnest."""
+        result = optimize_placement(
+            VOLTAGE_DIVIDER_PCB,
+            max_iterations=3,
+        )
+
+        assert result["success"] is True
+        assert "per_component_ratsnest" in result
+
+        ratsnest = result["per_component_ratsnest"]
+        assert isinstance(ratsnest, list)
+        assert len(ratsnest) > 0
+
+        for entry in ratsnest:
+            assert "reference" in entry
+            assert "ratsnest_mm" in entry
+            assert entry["ratsnest_mm"] >= 0.0
+
+        # Sorted descending
+        distances = [entry["ratsnest_mm"] for entry in ratsnest]
+        assert distances == sorted(distances, reverse=True)
 
     @pytest.mark.skipif(
         not Path(VOLTAGE_DIVIDER_PCB).exists(),
