@@ -47,6 +47,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #1199** (closed): Global Optimization Framework for PCB Component Placement and Routing
 - **Issue #1193** (closed): Add route-auto MCP tool and CLI command for orchestrator-based routing
 - **Issue #1192** (closed): Implement full pipeline strategy in routing orchestrator
+- **Issue #1181** (closed): Purge kicad footprints/symbols which are not referenced
+- **Issue #1179** (closed): label-external-issues workflow fails on every push event
+- **Issue #1178** (closed): Add mypy configuration to pyproject.toml for v0.11.0 type safety
+- **Issue #1177** (closed): Remove unused generate_grid_stress_test function (92 lines)
 
 ### 2026-02-17
 

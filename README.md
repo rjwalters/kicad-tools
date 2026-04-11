@@ -178,7 +178,7 @@ Available MCP tools:
 - **Export**: `export_gerbers`, `export_bom`, `export_assembly`
 - **Placement**: `placement_analyze`, `placement_suggestions`
 - **Sessions**: `start_session`, `query_move`, `apply_move`, `commit`, `rollback`
-- **Routing**: `route_net`, `route_auto`, `get_unrouted_nets`
+- **Routing**: `route_net`, `route_net_auto`, `get_unrouted_nets`
 - **Optimization**: `optimize_placement`, `evaluate_placement`
 
 See `docs/mcp/` for complete documentation.
