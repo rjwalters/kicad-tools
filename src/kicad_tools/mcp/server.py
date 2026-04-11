@@ -129,14 +129,20 @@ class MCPServer:
                 tool_name = params.get("name", "")
                 arguments = params.get("arguments", {})
                 tool_result = self.call_tool(tool_name, arguments)
-                result = {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(tool_result, indent=2),
-                        }
-                    ],
-                }
+
+                # If the handler provides pre-built MCP content blocks
+                # (e.g. with image data), use those directly.
+                if isinstance(tool_result, dict) and "_mcp_content" in tool_result:
+                    result = {"content": tool_result["_mcp_content"]}
+                else:
+                    result = {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(tool_result, indent=2),
+                            }
+                        ],
+                    }
             elif method == "notifications/initialized":
                 # Client notification, no response needed
                 return {}
@@ -243,6 +249,7 @@ def _register_fastmcp_tool(mcp: FastMCP, tool_spec: ToolSpec) -> None:
         mcp: The FastMCP server instance
         tool_spec: The tool specification from the registry
     """
+
     # Create a dynamic wrapper function that FastMCP can introspect
     # The function calls the registry handler with its kwargs as a dict
     def create_handler(spec: ToolSpec) -> Callable:
