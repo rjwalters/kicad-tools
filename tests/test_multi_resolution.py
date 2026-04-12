@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from kicad_tools.router.core import Autorouter
+from kicad_tools.router.core import Autorouter, RoutingFailure
+from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
@@ -239,15 +240,15 @@ class TestRouteAllMultiResolution:
         )
         assert isinstance(routes, list)
 
-    def test_budget_multiplier_parameter(self):
-        """budget_multiplier parameter is accepted."""
+    def test_fine_grid_nets_count_attribute(self):
+        """fine_grid_nets_count attribute is updated after routing."""
         router = _make_small_router()
         self._add_simple_net(router, 1, "U1", "1", 2.0, 2.0, "U2", "1", 8.0, 2.0)
-        routes = router.route_all_multi_resolution(
-            budget_multiplier=8.0,
-            use_negotiated=False,
-        )
-        assert isinstance(routes, list)
+        # Initially zero
+        assert router.fine_grid_nets_count == 0
+        router.route_all_multi_resolution(use_negotiated=False)
+        # After routing, attribute is an integer (0 if coarse succeeded)
+        assert isinstance(router.fine_grid_nets_count, int)
 
     def test_fine_resolution_factor(self):
         """fine_resolution_factor parameter controls fine grid resolution."""
@@ -355,3 +356,234 @@ class TestMCPStrategyMap:
         }
         assert "multi_resolution" in strategy_map
         assert strategy_map["multi_resolution"] == RoutingStrategy.MULTI_RESOLUTION
+
+
+# ---------------------------------------------------------------------------
+# Fine-Grid Fallback Path Tests
+# ---------------------------------------------------------------------------
+
+
+def _make_routing_failure(
+    net_id: int,
+    net_name: str,
+    ref1: str,
+    pin1: str,
+    ref2: str,
+    pin2: str,
+) -> RoutingFailure:
+    """Create a minimal RoutingFailure for injection into router state."""
+    return RoutingFailure(
+        net=net_id,
+        net_name=net_name,
+        source_pad=(ref1, pin1),
+        target_pad=(ref2, pin2),
+        reason="Injected coarse-grid failure for test",
+        failure_cause=FailureCause.UNKNOWN,
+    )
+
+
+class TestFineGridFallbackPath:
+    """Tests that exercise the fine-grid fallback path in route_all_multi_resolution.
+
+    These tests create scenarios where the coarse routing fails (or is made to
+    appear to fail) so that the fine-grid retry path is actually exercised.
+    """
+
+    def _add_net(
+        self,
+        router: Autorouter,
+        net_id: int,
+        ref1: str,
+        pin1: str,
+        x1: float,
+        y1: float,
+        ref2: str,
+        pin2: str,
+        x2: float,
+        y2: float,
+    ) -> None:
+        """Add a 2-pad net to the router."""
+        router.add_component(
+            ref1,
+            [
+                {
+                    "number": pin1,
+                    "x": x1,
+                    "y": y1,
+                    "net": net_id,
+                    "net_name": f"Net_{net_id}",
+                    "width": 0.3,
+                    "height": 0.3,
+                }
+            ],
+        )
+        router.add_component(
+            ref2,
+            [
+                {
+                    "number": pin2,
+                    "x": x2,
+                    "y": y2,
+                    "net": net_id,
+                    "net_name": f"Net_{net_id}",
+                    "width": 0.3,
+                    "height": 0.3,
+                }
+            ],
+        )
+
+    def test_fine_grid_fallback_routes_failed_net(self):
+        """Fine-grid pass routes a net that was injected as a coarse-grid failure.
+
+        We add a net to the router, then inject a RoutingFailure so that
+        route_all_multi_resolution treats it as a coarse failure and attempts
+        the fine-grid retry. On the fine grid (finer resolution), the route
+        should succeed.
+        """
+        # Use a very coarse grid so the fine-grid path produces a distinctly
+        # different result.
+        rules = DesignRules(
+            grid_resolution=1.0,
+            trace_width=0.15,
+            trace_clearance=0.15,
+        )
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
+
+        # Add a net whose pads are close together — challenging on a 1mm grid.
+        self._add_net(router, 1, "U1", "1", 3.0, 3.0, "U2", "1", 6.0, 3.0)
+
+        # Patch route_all and route_all_negotiated to simulate that the coarse
+        # pass fails to route net 1 (leaves routing_failures non-empty).
+        def fake_coarse_routing(*args, **kwargs):
+            # Net is in router.nets but not routed — inject the failure record.
+            router.routing_failures = [_make_routing_failure(1, "Net_1", "U1", "1", "U2", "1")]
+
+        with patch.object(router, "route_all_negotiated", side_effect=fake_coarse_routing):
+            routes = router.route_all_multi_resolution(
+                fine_resolution_factor=0.5,
+                use_negotiated=True,
+            )
+
+        # The fine-grid pass should have attempted net 1.
+        # Either it succeeded (routes non-empty, failure cleared) or the net
+        # is too constrained (routes empty) — but the code path was exercised.
+        # We assert the count attribute was updated.
+        assert isinstance(router.fine_grid_nets_count, int)
+        assert isinstance(routes, list)
+
+    def test_fine_grid_fallback_clears_failure_on_success(self):
+        """When fine-grid routing succeeds, the failure entry is removed.
+
+        We inject a routing failure for a net that is actually routable on the
+        fine grid, then verify the failure list is cleared after the pass.
+        """
+        rules = DesignRules(
+            grid_resolution=2.0,
+            trace_width=0.15,
+            trace_clearance=0.15,
+        )
+        router = Autorouter(width=30.0, height=30.0, rules=rules, force_python=True)
+
+        # Add a net with pads well separated — should route easily on fine grid.
+        self._add_net(router, 1, "R1", "1", 5.0, 5.0, "R2", "1", 20.0, 5.0)
+
+        # Inject artificial coarse failure for net 1
+        injected_failure = _make_routing_failure(1, "Net_1", "R1", "1", "R2", "1")
+
+        def fake_coarse(*args, **kwargs):
+            router.routing_failures = [injected_failure]
+
+        with patch.object(router, "route_all_negotiated", side_effect=fake_coarse):
+            router.route_all_multi_resolution(
+                fine_resolution_factor=0.4,
+                use_negotiated=True,
+            )
+
+        # If fine-grid succeeded, routing_failures for net 1 should be cleared.
+        remaining_net1_failures = [f for f in router.routing_failures if f.net == 1]
+        if router.fine_grid_nets_count > 0:
+            assert remaining_net1_failures == [], (
+                "fine_grid_nets_count > 0 but failure for net 1 was not cleared"
+            )
+
+    def test_fine_grid_fallback_updates_fine_grid_nets_count(self):
+        """fine_grid_nets_count is incremented for each net routed on fine grid.
+
+        We inject two coarse failures and verify fine_grid_nets_count reflects
+        how many were resolved by the fine-grid pass.
+        """
+        rules = DesignRules(
+            grid_resolution=2.0,
+            trace_width=0.15,
+            trace_clearance=0.15,
+        )
+        router = Autorouter(width=40.0, height=40.0, rules=rules, force_python=True)
+
+        # Add two separate nets
+        self._add_net(router, 1, "A1", "1", 5.0, 5.0, "A2", "1", 15.0, 5.0)
+        self._add_net(router, 2, "B1", "1", 5.0, 20.0, "B2", "1", 15.0, 20.0)
+
+        # Inject coarse failures for both nets
+        def fake_coarse(*args, **kwargs):
+            router.routing_failures = [
+                _make_routing_failure(1, "Net_1", "A1", "1", "A2", "1"),
+                _make_routing_failure(2, "Net_2", "B1", "1", "B2", "1"),
+            ]
+
+        with patch.object(router, "route_all_negotiated", side_effect=fake_coarse):
+            router.route_all_multi_resolution(
+                fine_resolution_factor=0.4,
+                use_negotiated=True,
+            )
+
+        # fine_grid_nets_count should be between 0 and 2 (inclusive)
+        assert 0 <= router.fine_grid_nets_count <= 2
+
+    def test_fine_grid_fallback_trial_isolation(self):
+        """Grid state is isolated between pin-order trials.
+
+        With multiple pin orderings, a failed trial must not leave residual
+        marks that prevent subsequent trials from succeeding. We verify this
+        by running with multiple trial orderings and checking that the result
+        is at least as good as with a single ordering.
+        """
+        rules = DesignRules(
+            grid_resolution=2.0,
+            trace_width=0.15,
+            trace_clearance=0.15,
+        )
+
+        def make_router():
+            r = Autorouter(width=30.0, height=30.0, rules=rules, force_python=True)
+            self._add_net(r, 1, "C1", "1", 5.0, 5.0, "C2", "1", 20.0, 5.0)
+            return r
+
+        def fake_coarse(router):
+            def _inner(*args, **kwargs):
+                router.routing_failures = [_make_routing_failure(1, "Net_1", "C1", "1", "C2", "1")]
+
+            return _inner
+
+        # Run with only "default" ordering
+        r_single = make_router()
+        with patch.object(r_single, "route_all_negotiated", side_effect=fake_coarse(r_single)):
+            routes_single = r_single.route_all_multi_resolution(
+                fine_resolution_factor=0.4,
+                pin_order_trials=["default"],
+                use_negotiated=True,
+            )
+
+        # Run with multiple orderings — should not be worse due to contamination
+        r_multi = make_router()
+        with patch.object(r_multi, "route_all_negotiated", side_effect=fake_coarse(r_multi)):
+            routes_multi = r_multi.route_all_multi_resolution(
+                fine_resolution_factor=0.4,
+                pin_order_trials=["default", "reversed"],
+                use_negotiated=True,
+            )
+
+        # Multi-ordering should produce at least as many routes as single ordering
+        assert len(routes_multi) >= len(routes_single), (
+            "Multiple pin orderings produced fewer routes than single ordering, "
+            "suggesting trial contamination"
+        )

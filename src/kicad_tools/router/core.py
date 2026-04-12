@@ -357,6 +357,9 @@ class Autorouter:
         # Routing failure tracking (Issue #688)
         self.routing_failures: list[RoutingFailure] = []
 
+        # Fine-grid routing count (updated by route_all_multi_resolution)
+        self.fine_grid_nets_count: int = 0
+
         # Decision recording (Issue #829)
         self.record_decisions = record_decisions
         self._decision_store: DecisionStore | None = None
@@ -3482,7 +3485,6 @@ class Autorouter:
         self,
         fine_resolution_factor: float = 0.5,
         pin_order_trials: list[str] | None = None,
-        budget_multiplier: float = 4.0,
         use_negotiated: bool = True,
         max_iterations: int = 10,
         progress_callback: ProgressCallback | None = None,
@@ -3500,9 +3502,6 @@ class Autorouter:
             pin_order_trials: List of pin orderings to try on the fine grid.
                 Options: "default", "reversed", "shuffled".
                 Default is ["default"].
-            budget_multiplier: A* node expansion budget multiplier for
-                fine-grid retries. Higher values allow more exploration
-                at the cost of speed. Default 4.0.
             use_negotiated: Use negotiated congestion routing for the
                 initial coarse pass. Default True.
             max_iterations: Max iterations for negotiated routing. Default 10.
@@ -3530,7 +3529,6 @@ class Autorouter:
         flush_print("\n=== Multi-Resolution Routing ===")
         flush_print(f"  Fine grid factor: {fine_resolution_factor}")
         flush_print(f"  Pin order trials: {pin_order_trials}")
-        flush_print(f"  Budget multiplier: {budget_multiplier}")
 
         # --- Pass 1: Route on the current (coarse) grid ---
         flush_print("\n--- Pass 1: Coarse grid routing ---")
@@ -3663,16 +3661,17 @@ class Autorouter:
         fine_router = create_hybrid_router(fine_grid, fine_rules, force_python=self._force_python)
 
         fine_grid_nets_count = 0
-        remaining_timeout = None
+        fine_grid_deadline: float | None = None
         if timeout:
             remaining_timeout = timeout - (time.time() - start_time)
             if remaining_timeout <= 0:
                 flush_print("  Timeout reached before fine-grid routing")
                 return list(self.routes)
+            fine_grid_deadline = time.time() + remaining_timeout
 
         # Try each failed net with pin order trials
         for net_id in failed_net_ids:
-            if timeout and (time.time() - start_time) >= timeout:
+            if fine_grid_deadline is not None and time.time() >= fine_grid_deadline:
                 flush_print("  Timeout reached during fine-grid pass")
                 break
 
@@ -3690,6 +3689,10 @@ class Autorouter:
             net_name = self.net_names.get(net_id, f"Net {net_id}")
             best_routes: list[Route] = []
 
+            import numpy as _np
+
+            mst_router = MSTRouter(fine_grid, fine_router, fine_rules, self.net_class_map)
+
             for trial in pin_order_trials:
                 trial_pads = list(pad_objs)
 
@@ -3700,44 +3703,58 @@ class Autorouter:
                     random.shuffle(trial_pads)
                 # "default" keeps original order
 
-                # Use MST routing on the fine grid with increased budget
-                mst_router = MSTRouter(fine_grid, fine_router, fine_rules, self.net_class_map)
+                # Snapshot fine grid state before this trial so we can roll
+                # back if the trial fails, preventing route marks from one
+                # ordering from polluting subsequent orderings.
+                blocked_snapshot = _np.copy(fine_grid._blocked)
+                net_snapshot = _np.copy(fine_grid._net)
+                routes_snapshot = list(fine_grid.routes)
 
                 trial_routes: list[Route] = []
 
-                def mark_fine_route(route: Route) -> None:
+                def mark_fine_route(route: Route, _tl: list = trial_routes) -> None:
                     fine_grid.mark_route(route)
-                    trial_routes.append(route)
+                    _tl.append(route)
 
-                mst_router.route_mst(
+                mst_router.route_net(
                     trial_pads,
                     mark_route_callback=mark_fine_route,
                 )
 
                 if trial_routes and (not best_routes or len(trial_routes) > len(best_routes)):
-                    best_routes = trial_routes
+                    best_routes = list(trial_routes)
                     if len(trial_routes) >= len(pads_keys) - 1:
                         # Fully routed, no need to try more orderings
                         break
+                    # Partial success: roll back and try next ordering
+                    fine_grid._blocked = blocked_snapshot
+                    fine_grid._net = net_snapshot
+                    fine_grid.routes = routes_snapshot
+                else:
+                    # Trial produced no improvement: roll back
+                    fine_grid._blocked = blocked_snapshot
+                    fine_grid._net = net_snapshot
+                    fine_grid.routes = routes_snapshot
 
             if best_routes:
                 fine_grid_nets_count += 1
-                # Mark these routes on the main grid and add to our routes
+                # Re-apply winning routes to the fine grid so subsequent nets
+                # see them as obstacles, then mark on the main grid too.
                 for route in best_routes:
+                    if route not in fine_grid.routes:
+                        fine_grid.mark_route(route)
                     self._mark_route(route)
                     self.routes.append(route)
 
                 # Remove from routing failures
-                self.routing_failures = [
-                    f for f in self.routing_failures if f.net != net_id
-                ]
+                self.routing_failures = [f for f in self.routing_failures if f.net != net_id]
 
-                flush_print(
-                    f"    {net_name}: routed on fine grid "
-                    f"({len(best_routes)} routes)"
-                )
+                flush_print(f"    {net_name}: routed on fine grid ({len(best_routes)} routes)")
             else:
                 flush_print(f"    {net_name}: still failed on fine grid")
+
+        # Persist fine-grid count so callers can read it (e.g. for RoutingMetrics)
+        self.fine_grid_nets_count = fine_grid_nets_count
 
         # --- Summary ---
         final_stats = self.get_statistics()
@@ -3749,9 +3766,7 @@ class Autorouter:
         flush_print(f"  Fine grid fallback: {fine_grid_nets_count} nets")
 
         if self.routing_failures:
-            flush_print(
-                f"  Still failed: {len(self.routing_failures)} net(s)"
-            )
+            flush_print(f"  Still failed: {len(self.routing_failures)} net(s)")
 
         return list(self.routes)
 
