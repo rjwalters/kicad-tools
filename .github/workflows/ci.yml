@@ -55,7 +55,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -67,5 +67,5 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run tests
-        run: uv run pytest --benchmark-disable -m "not slow and not integration" --timeout=120 --cov=kicad_tools --cov-report=term-missing
+        run: uv run pytest -n auto -o addopts= --benchmark-disable --timeout=120 --cov=kicad_tools --cov-report=term-missing
         continue-on-error: true
