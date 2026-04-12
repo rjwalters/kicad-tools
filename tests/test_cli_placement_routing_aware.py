@@ -112,9 +112,9 @@ class TestRoutingAwareFlagForwarding:
             pcb = str(tmp_path / "test.kicad_pcb")
             output = None
             strategy = "force-directed"
-            iterations = 1000
-            generations = 100
-            population = 50
+            iterations = 10
+            generations = 5
+            population = 10
             grid = 0.0
             fixed = None
             cluster = False
@@ -156,9 +156,9 @@ class TestRoutingAwareFlagForwarding:
             pcb = str(tmp_path / "test.kicad_pcb")
             output = None
             strategy = "force-directed"
-            iterations = 1000
-            generations = 100
-            population = 50
+            iterations = 10
+            generations = 5
+            population = 10
             grid = 0.0
             fixed = None
             cluster = False

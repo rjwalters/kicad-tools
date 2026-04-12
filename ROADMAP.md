@@ -15,7 +15,7 @@ file manipulation. We complement KiCad—we don't replace it.
 
 ---
 
-## Current State (v0.10.0)
+## Current State (v0.11.0)
 
 The complete agent PCB design workflow is now supported:
 
@@ -31,6 +31,7 @@ The complete agent PCB design workflow is now supported:
 | AI agent integration | MCP server, sessions | v0.8.0 |
 | Design intent & feedback | `intent` module, incremental DRC | v0.9.0 |
 | Pattern library & explanations | `patterns`, `explain` modules | v0.10.0 |
+| Placement optimization | CMA-ES, Bayesian, routing orchestration | v0.11.0 |
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
 
@@ -44,7 +45,7 @@ we plan to address them:
 | Challenge | Description | Solution |
 |-----------|-------------|----------|
 | Incomplete Information | Tools don't understand design intent | ✅ Design Intent System (v0.9) |
-| Combinatorial Explosion | Huge placement/routing solution space | ✅ Pattern Library (v0.10) |
+| Combinatorial Explosion | Huge placement/routing solution space | ✅ Placement Optimizer (v0.11) |
 | Feedback Latency | Problems discovered late in process | ✅ Continuous Validation (v0.9) |
 | Knowledge Gap | Agents lack PCB design expertise | ✅ Patterns + Explanations (v0.10) |
 | Communication Overhead | Verbose state, repeated context | ✅ Context Persistence (v0.9) |
@@ -174,7 +175,34 @@ library of validated design patterns accelerates iteration and improves quality.
 
 ---
 
-### v0.11.0 - Typed Interfaces & Constraints
+### v0.11.0 - Placement Optimization & Routing Orchestration ✅ RELEASED
+
+**Focus**: Intelligent placement optimization and unified routing orchestration.
+
+**Placement Optimization System**
+- [x] PlacementVector encoding for search space definition
+- [x] Multi-objective cost functions (HPWL wirelength, overlap, boundary violations)
+- [x] CMA-ES evolutionary optimizer
+- [x] Bayesian Optimization strategy (Ax/BoTorch)
+- [x] Force-directed and random seed heuristics
+- [x] Multi-fidelity evaluation pipeline
+- [x] Netlist graph analysis for connectivity-aware priors
+- [x] CLI (`kct optimize-placement`) and MCP tools
+
+**Routing Orchestration**
+- [x] Unified multi-strategy routing orchestrator
+- [x] Hierarchical routing with global channel assignment
+- [x] Adaptive grid (fine near pads, coarse in channels)
+- [x] Fine-pitch support (sub-grid, dog-leg, escape routing)
+- [x] Via conflict resolution and clearance repair
+
+**Type System Foundations**
+- [x] Interval types for parametric constraints
+- [x] Typed interface ports for type-checked connections
+
+---
+
+### v0.12.0 - Typed Interfaces & Constraints
 
 **Focus**: Type-safe circuit blocks and parametric part selection.
 
@@ -187,7 +215,6 @@ library of validated design patterns accelerates iteration and improves quality.
 - [ ] Parameter validation on connection (voltage/current compatibility)
 
 **Constraint-Based Part Selection**
-- [ ] Interval types for tolerances (`Interval(9.5k, 10.5k)` for 10kΩ ±5%)
 - [ ] Unit-aware interval arithmetic (prevent ohms + volts)
 - [ ] Parameter constraints with equations (`v_out = v_in * ratio`)
 - [ ] LCSC API integration for parametric queries

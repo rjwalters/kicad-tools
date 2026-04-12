@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-tools"
-version = "0.10.3"
+version = "0.11.0"
 description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
 readme = "README.md"
 license = "MIT"
@@ -158,6 +158,7 @@ all = [
 # Development dependencies
 dev = [
     "pytest>=7.0",
+    "pytest-xdist>=3.5",
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",
     "pytest-timeout>=2.3",

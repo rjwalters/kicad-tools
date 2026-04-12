@@ -773,7 +773,7 @@ class TestRoutingDiagnostics:
             )
             multi_net_pcb_state.traces.append(trace)
 
-        config = InterpreterConfig(use_astar=True)
+        config = InterpreterConfig(use_astar=True, grid_size=0.5)
         interp = CommandInterpreter(
             pcb_path=str(pcb_file),
             state=multi_net_pcb_state,

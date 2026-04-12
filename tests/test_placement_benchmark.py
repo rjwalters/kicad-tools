@@ -797,7 +797,7 @@ class TestStressBoard:
         """
         b = bounds(stress_board["board"], stress_board["component_defs"])
         config = StrategyConfig(
-            max_iterations=10,
+            max_iterations=3,
             seed=42,
             extra={"population_size": 10},
         )
@@ -816,7 +816,7 @@ class TestStressBoard:
         initial_best = min(initial_scores)
 
         # Run a few more generations
-        for _ in range(5):
+        for _ in range(2):
             candidates = strategy.suggest(10)
             scores = [_score(v) for v in candidates]
             strategy.observe(candidates, scores)

@@ -4,8 +4,19 @@ import pytest
 
 from kicad_tools.exceptions import RoutingError
 from kicad_tools.router.grid import RoutingGrid
+from kicad_tools.router.heuristics import (
+    DEFAULT_HEURISTIC,
+    DIAGONAL_COST,
+    CongestionAwareHeuristic,
+    DirectionBiasHeuristic,
+    GreedyHeuristic,
+    HeuristicContext,
+    ManhattanHeuristic,
+    WeightedCongestionHeuristic,
+    octile_distance,
+)
 from kicad_tools.router.layers import Layer, LayerStack
-from kicad_tools.router.primitives import Obstacle, Pad, Route, Segment, Via
+from kicad_tools.router.primitives import GridCell, Obstacle, Pad, Point, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
@@ -1174,3 +1185,392 @@ class TestGeometricClearanceValidation:
         assert len(grid._pads) == 2
         assert grid._pads[0] is pad1
         assert grid._pads[1] is pad2
+
+
+class TestHeuristics:
+    """Tests for heuristic classes."""
+
+    def test_manhattan_heuristic(self):
+        """Test Manhattan distance heuristic."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            diagonal_routing=False,  # Use Manhattan distance
+        )
+        heuristic = ManhattanHeuristic()
+
+        # Distance from (0,0) to (10,10) = 20 * cost_straight
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        assert estimate == 20.0
+
+    def test_manhattan_heuristic_name(self):
+        """Test heuristic name."""
+        h = ManhattanHeuristic()
+        assert h.name == "Manhattan"
+
+    def test_direction_bias_heuristic(self):
+        """Test direction bias heuristic."""
+        rules = DesignRules()
+        context = HeuristicContext(goal_x=10, goal_y=0, goal_layer=0, rules=rules)
+        heuristic = DirectionBiasHeuristic(turn_penalty_factor=0.5)
+
+        # Moving in goal direction
+        estimate_aligned = heuristic.estimate(0, 0, 0, (1, 0), context)
+        # Moving perpendicular
+        estimate_perpendicular = heuristic.estimate(0, 0, 0, (0, 1), context)
+
+        # Perpendicular should have higher cost
+        assert estimate_perpendicular > estimate_aligned
+
+    def test_direction_bias_heuristic_name(self):
+        """Test direction bias name."""
+        h = DirectionBiasHeuristic(turn_penalty_factor=0.5)
+        assert "DirectionBias" in h.name
+        assert "0.5" in h.name
+
+    def test_congestion_aware_heuristic(self):
+        """Test congestion-aware heuristic."""
+        rules = DesignRules()
+
+        def get_congestion_cost(x, y, layer):
+            return 0.5  # Constant congestion
+
+        context = HeuristicContext(
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            get_congestion_cost=get_congestion_cost,
+            diagonal_routing=False,  # Use Manhattan distance for predictable base
+        )
+        heuristic = CongestionAwareHeuristic()
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        # Should include congestion cost (base Manhattan = 20)
+        assert estimate > 20.0
+
+    def test_congestion_aware_heuristic_name(self):
+        """Test congestion-aware name."""
+        h = CongestionAwareHeuristic()
+        assert h.name == "CongestionAware"
+
+    def test_weighted_congestion_heuristic(self):
+        """Test weighted congestion heuristic."""
+        rules = DesignRules()
+
+        def get_congestion_cost(x, y, layer):
+            return 1.0
+
+        context = HeuristicContext(
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            get_congestion_cost=get_congestion_cost,
+            diagonal_routing=False,  # Use Manhattan distance for predictable base
+        )
+        heuristic = WeightedCongestionHeuristic(num_samples=3, congestion_multiplier=2.0)
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        assert estimate > 20.0
+
+    def test_weighted_congestion_heuristic_name(self):
+        """Test weighted congestion name."""
+        h = WeightedCongestionHeuristic(congestion_multiplier=2.0)
+        assert "WeightedCongestion" in h.name
+        assert "2.0" in h.name
+
+    def test_greedy_heuristic(self):
+        """Test greedy heuristic."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            diagonal_routing=False,  # Use Manhattan distance
+        )
+        heuristic = GreedyHeuristic(greed_factor=2.0)
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        # Should be 2x Manhattan distance
+        assert estimate == 40.0
+
+    def test_greedy_heuristic_name(self):
+        """Test greedy heuristic name."""
+        h = GreedyHeuristic(greed_factor=2.0)
+        assert "Greedy" in h.name
+        assert "2.0" in h.name
+
+    def test_default_heuristic(self):
+        """Test default heuristic."""
+        assert DEFAULT_HEURISTIC is not None
+        assert isinstance(DEFAULT_HEURISTIC, CongestionAwareHeuristic)
+
+    def test_heuristic_with_cost_multiplier(self):
+        """Test heuristic with net class cost multiplier."""
+        rules = DesignRules()
+        context = HeuristicContext(
+            goal_x=10,
+            goal_y=10,
+            goal_layer=0,
+            rules=rules,
+            cost_multiplier=0.5,  # Power net priority
+            diagonal_routing=False,  # Use Manhattan distance
+        )
+        heuristic = ManhattanHeuristic()
+
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        assert estimate == 10.0  # 20 * 0.5
+
+    def test_heuristic_layer_change(self):
+        """Test heuristic with layer change."""
+        rules = DesignRules()
+        context = HeuristicContext(goal_x=0, goal_y=0, goal_layer=1, rules=rules)
+        heuristic = ManhattanHeuristic()
+
+        # At goal position but different layer
+        estimate = heuristic.estimate(0, 0, 0, (0, 0), context)
+        assert estimate == rules.cost_via  # Layer change cost
+
+
+class TestRoutingGrid:
+    """Tests for RoutingGrid class."""
+
+    def test_grid_creation(self):
+        """Test creating a routing grid."""
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        assert grid.width == 10.0
+        assert grid.height == 10.0
+        assert grid.resolution == 0.5
+        assert grid.cols == 21  # (10 / 0.5) + 1
+        assert grid.rows == 21
+
+    def test_grid_with_origin(self):
+        """Test grid with custom origin."""
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(10.0, 10.0, rules, origin_x=100, origin_y=50)
+
+        assert grid.origin_x == 100
+        assert grid.origin_y == 50
+
+    def test_world_to_grid(self):
+        """Test world to grid coordinate conversion."""
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(10.0, 10.0, rules, origin_x=0, origin_y=0)
+
+        gx, gy = grid.world_to_grid(2.5, 3.5)
+        assert gx == 5
+        assert gy == 7
+
+    def test_grid_to_world(self):
+        """Test grid to world coordinate conversion."""
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(10.0, 10.0, rules, origin_x=0, origin_y=0)
+
+        x, y = grid.grid_to_world(5, 7)
+        assert x == 2.5
+        assert y == 3.5
+
+    def test_world_to_grid_with_origin(self):
+        """Test coordinate conversion with origin offset."""
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(10.0, 10.0, rules, origin_x=100, origin_y=50)
+
+        gx, gy = grid.world_to_grid(102.5, 53.5)
+        assert gx == 5
+        assert gy == 7
+
+    def test_layer_stack_default(self):
+        """Test default layer stack is 2-layer."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        assert grid.num_layers == 2
+        assert grid.layers == 2  # Alias
+
+    def test_layer_stack_custom(self):
+        """Test custom layer stack."""
+        rules = DesignRules()
+        stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        grid = RoutingGrid(10.0, 10.0, rules, layer_stack=stack)
+
+        assert grid.num_layers == 4
+
+    def test_layer_to_index(self):
+        """Test layer enum to grid index mapping."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        idx = grid.layer_to_index(Layer.F_CU.value)
+        assert idx == 0
+
+    def test_index_to_layer(self):
+        """Test grid index to layer enum mapping."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        layer_value = grid.index_to_layer(0)
+        assert layer_value == Layer.F_CU.value
+
+    def test_layer_to_index_invalid(self):
+        """Test invalid layer value raises."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        with pytest.raises(RoutingError):
+            grid.layer_to_index(999)
+
+    def test_index_to_layer_invalid(self):
+        """Test invalid grid index raises."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        with pytest.raises(RoutingError):
+            grid.index_to_layer(999)
+
+    def test_get_routable_indices(self):
+        """Test getting routable layer indices."""
+        rules = DesignRules()
+        stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        grid = RoutingGrid(10.0, 10.0, rules, layer_stack=stack)
+
+        indices = grid.get_routable_indices()
+        assert 0 in indices  # F.Cu
+        assert 3 in indices  # B.Cu
+
+    def test_is_plane_layer(self):
+        """Test plane layer check."""
+        rules = DesignRules()
+        stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        grid = RoutingGrid(10.0, 10.0, rules, layer_stack=stack)
+
+        assert grid.is_plane_layer(1) is True  # GND
+        assert grid.is_plane_layer(0) is False  # F.Cu signal
+
+    def test_congestion_tracking(self):
+        """Test congestion tracking."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        # Initial congestion should be 0
+        congestion = grid.get_congestion(5, 5, 0)
+        assert congestion == 0.0
+
+    def test_congestion_map(self):
+        """Test congestion statistics."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        stats = grid.get_congestion_map()
+        assert "max_congestion" in stats
+        assert "avg_congestion" in stats
+        assert "congested_regions" in stats
+        assert stats["max_congestion"] == 0.0
+
+    def test_add_obstacle(self):
+        """Test adding obstacle to grid."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        obs = Obstacle(5.0, 5.0, 1.0, 1.0, Layer.F_CU)
+        grid.add_obstacle(obs)
+
+        # The obstacle should block some cells
+        # Check center of obstacle region
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        cell = grid.grid[0][gy][gx]
+        assert cell.blocked is True
+
+    def test_add_pad(self):
+        """Test adding pad to grid."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        pad = Pad(x=5.0, y=5.0, width=0.5, height=0.5, net=1, net_name="VCC", layer=Layer.F_CU)
+        grid.add_pad(pad)
+
+        # Pad should be added (verify grid was modified)
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        cell = grid.grid[0][gy][gx]
+        # Cell should be assigned to net
+        assert cell.net == 1
+
+    def test_add_pad_sets_pad_ownership(self):
+        """Test that add_pad sets pad_blocked and original_net fields."""
+        rules = DesignRules()
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        pad = Pad(x=5.0, y=5.0, width=0.5, height=0.5, net=3, net_name="VCC", layer=Layer.F_CU)
+        grid.add_pad(pad)
+
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        cell = grid.grid[0][gy][gx]
+
+        # Pad cells should be marked as pad-blocked with original_net set
+        assert cell.pad_blocked is True
+        assert cell.original_net == 3
+        assert cell.net == 3
+
+    def test_unmark_route_preserves_pad_cells(self):
+        """Test that unmarking a route doesn't corrupt pad cells.
+
+        This is the key bug fix from issue #294: when a route passes over a pad
+        cell and then gets ripped up, the pad cell should remain blocked with
+        its original net, not be cleared to net=0.
+        """
+        rules = DesignRules(trace_clearance=0.1, trace_width=0.2)
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        # Add a pad at (5, 5) with net=3
+        pad = Pad(x=5.0, y=5.0, width=0.5, height=0.5, net=3, net_name="VCC", layer=Layer.F_CU)
+        grid.add_pad(pad)
+
+        # Verify pad cell state before marking route
+        gx, gy = grid.world_to_grid(5.0, 5.0)
+        cell = grid.grid[0][gy][gx]
+        assert cell.pad_blocked is True
+        assert cell.original_net == 3
+        assert cell.net == 3
+        assert cell.blocked is True
+
+        # Create a route that passes through the pad area (same net)
+        route = Route(net=3, net_name="VCC")
+        route.segments.append(
+            Segment(x1=4.0, y1=5.0, x2=6.0, y2=5.0, width=0.2, layer=Layer.F_CU, net=3)
+        )
+
+        # Mark the route
+        grid.mark_route(route)
+
+        # Cell should still be blocked with net=3
+        assert cell.blocked is True
+        assert cell.net == 3
+
+        # Now unmark (rip-up) the route
+        grid.unmark_route(route)
+
+        # BUG FIX: Pad cell should STILL be blocked with its original net
+        # Before the fix, this would have been cleared to blocked=False, net=0
+        assert cell.blocked is True, "Pad cell should remain blocked after route rip-up"
+        assert cell.net == 3, "Pad cell should retain its original net after route rip-up"
+        assert cell.pad_blocked is True, "pad_blocked flag should be preserved"
+
+    def test_grid_bounds_clamping(self):
+        """Test coordinate clamping at grid boundaries."""
+        rules = DesignRules(grid_resolution=0.5)
+        grid = RoutingGrid(10.0, 10.0, rules)
+
+        # Coordinates beyond grid should be clamped
+        gx, gy = grid.world_to_grid(-10.0, -10.0)
+        assert gx == 0
+        assert gy == 0
+
+        gx, gy = grid.world_to_grid(100.0, 100.0)
+        assert gx == grid.cols - 1
+        assert gy == grid.rows - 1

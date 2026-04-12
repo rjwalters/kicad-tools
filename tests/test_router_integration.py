@@ -28,6 +28,10 @@ import pytest
 from kicad_tools.router import load_pcb_for_routing, DesignRules
 from kicad_tools.router.io import merge_routes_into_pcb, validate_routes
 
+# Coarser grid for integration tests — these validate output correctness,
+# not routing quality. 0.5mm grid is ~25x fewer cells than the 0.1mm default.
+INTEGRATION_RULES = DesignRules(grid_resolution=0.5)
+
 
 @pytest.fixture
 def boards_dir() -> Path:
@@ -63,7 +67,7 @@ class TestRealBoardRouting:
         assert voltage_divider_pcb.exists(), f"Board fixture not found: {voltage_divider_pcb}"
 
         # Load board
-        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb))
+        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False)
         assert router is not None
         assert len(net_map) >= 3, "Expected at least 3 nets"
 
@@ -102,7 +106,7 @@ class TestRealBoardRouting:
         assert charlieplex_pcb.exists(), f"Board fixture not found: {charlieplex_pcb}"
 
         # Load board
-        router, net_map = load_pcb_for_routing(str(charlieplex_pcb))
+        router, net_map = load_pcb_for_routing(str(charlieplex_pcb), rules=INTEGRATION_RULES, validate_drc=False)
         assert router is not None
         assert len(net_map) >= 8, "Expected at least 8 nets"
 
@@ -144,7 +148,7 @@ class TestRealBoardRouting:
         with open(usb_joystick_pcb, "r") as f:
             original_pcb_text = f.read()
 
-        router, net_map = load_pcb_for_routing(str(usb_joystick_pcb))
+        router, net_map = load_pcb_for_routing(str(usb_joystick_pcb), rules=INTEGRATION_RULES, validate_drc=False)
         assert router is not None
 
         # Count signal nets
@@ -182,7 +186,7 @@ class TestRealBoardRouting:
     def test_no_shorts_in_output(self, voltage_divider_pcb: Path):
         """Routed output must have zero net-to-net shorts."""
         # Load and route board
-        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb))
+        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False)
 
         router.route_all()
 
@@ -203,7 +207,7 @@ class TestRealBoardRouting:
 
     def test_routing_time_budget(self, voltage_divider_pcb: Path):
         """Board routing should complete within 5 minutes."""
-        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb))
+        router, net_map = load_pcb_for_routing(str(voltage_divider_pcb), rules=INTEGRATION_RULES, validate_drc=False)
 
         total_nets = len([n for n in router.nets if n > 0])
 

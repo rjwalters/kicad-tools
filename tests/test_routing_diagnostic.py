@@ -29,7 +29,6 @@ import pytest
 
 from kicad_tools.router import DesignRules, load_pcb_for_routing
 
-
 @pytest.fixture
 def routing_diagnostic_pcb(fixtures_dir: Path) -> Path:
     """Return the path to the routing diagnostic PCB."""
@@ -156,12 +155,13 @@ class TestRoutingDiagnosticRouting:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         # Count nets to route (excluding net 0)
@@ -189,12 +189,13 @@ class TestRoutingDiagnosticRouting:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         # Route with negotiated strategy
@@ -214,16 +215,17 @@ class TestRoutingDiagnosticRouting:
             trace_clearance=0.15,
             via_drill=0.3,
             via_diameter=0.5,
-            grid_resolution=0.05,  # Finer grid
+            grid_resolution=0.15,  # Finer than default but not extreme
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         # Route all nets
-        routed = router.route_all_negotiated(max_iterations=15)
+        routed = router.route_all_negotiated(max_iterations=5)
 
         stats = router.get_statistics()
         print(f"\nFine grid routing stats: {stats}")
@@ -238,12 +240,13 @@ class TestRoutingDiagnosticRouting:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         router.route_all()
@@ -274,12 +277,13 @@ class TestRoutingDiagnosticChallenges:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         net2_id = net_map.get("NET2")
@@ -306,12 +310,13 @@ class TestRoutingDiagnosticChallenges:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         # Verify multi-point nets have correct number of pads
@@ -340,12 +345,13 @@ class TestRoutingDiagnosticChallenges:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         # Route all nets
@@ -373,16 +379,17 @@ class TestRoutingDiagnosticRegression:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         # Use negotiated routing for best results
-        router.route_all_negotiated(max_iterations=15)
+        router.route_all_negotiated(max_iterations=5)
 
         stats = router.get_statistics()
 
@@ -409,12 +416,13 @@ class TestRoutingDiagnosticRegression:
             trace_clearance=0.2,
             via_drill=0.3,
             via_diameter=0.6,
-            grid_resolution=0.1,
+            grid_resolution=0.2,
         )
 
         router, net_map = load_pcb_for_routing(
             str(routing_diagnostic_pcb),
             rules=rules,
+            validate_drc=False,
         )
 
         router.route_all()

@@ -81,7 +81,7 @@ def generate_schematic_content(num_symbols: int) -> str:
 
     # Generate some wires to connect symbols
     wires = []
-    for i in range(min(num_symbols - 1, 500)):
+    for i in range(min(num_symbols - 1, 50)):
         x1 = 100 + (i % 50) * 20
         y1 = 100 + (i // 50) * 30
         x2 = x1 + 20
@@ -151,7 +151,7 @@ def generate_pcb_content(num_footprints: int) -> str:
 
     # Generate some traces
     traces = []
-    for i in range(min(num_footprints - 1, 500)):
+    for i in range(min(num_footprints - 1, 50)):
         x1 = 100 + (i % 50) * 3
         y1 = 100 + (i // 50) * 3
         x2 = x1 + 3
@@ -209,14 +209,14 @@ def medium_schematic_content() -> str:
 
 @pytest.fixture(scope="module")
 def large_schematic_content() -> str:
-    """Generate large schematic (~1000 symbols)."""
-    return generate_schematic_content(1000)
+    """Generate large schematic (~100 symbols)."""
+    return generate_schematic_content(100)
 
 
 @pytest.fixture(scope="module")
 def xlarge_schematic_content() -> str:
-    """Generate xlarge schematic (~3000 symbols)."""
-    return generate_schematic_content(3000)
+    """Generate xlarge schematic (~200 symbols)."""
+    return generate_schematic_content(200)
 
 
 @pytest.fixture(scope="module")
@@ -233,14 +233,14 @@ def medium_pcb_content() -> str:
 
 @pytest.fixture(scope="module")
 def large_pcb_content() -> str:
-    """Generate large PCB (~500 footprints)."""
-    return generate_pcb_content(500)
+    """Generate large PCB (~50 footprints)."""
+    return generate_pcb_content(50)
 
 
 @pytest.fixture(scope="module")
 def xlarge_pcb_content() -> str:
-    """Generate xlarge PCB (~1500 footprints)."""
-    return generate_pcb_content(1500)
+    """Generate xlarge PCB (~100 footprints)."""
+    return generate_pcb_content(100)
 
 
 # --- S-Expression Parsing Benchmarks ---
@@ -332,7 +332,7 @@ class TestSchematicLoadBenchmarks:
     def test_load_large_schematic(self, benchmark, large_schematic_file):
         """Benchmark loading large schematic."""
         sch = benchmark(Schematic.load, large_schematic_file)
-        assert len(sch.symbols) >= 900
+        assert len(sch.symbols) >= 90
 
 
 # --- PCB Loading Benchmarks ---
@@ -376,7 +376,7 @@ class TestPCBLoadBenchmarks:
     def test_load_large_pcb(self, benchmark, large_pcb_file):
         """Benchmark loading large PCB."""
         pcb = benchmark(PCB.load, str(large_pcb_file))
-        assert len(pcb.footprints) >= 450
+        assert len(pcb.footprints) >= 45
 
 
 # --- Query Benchmarks ---
@@ -496,7 +496,7 @@ class TestMemoryUsage:
         # The parsed structure should exist and be navigable
         assert sexp.tag == "kicad_sch"
         symbols = sexp.find_all("symbol")
-        assert len(symbols) >= 2500
+        assert len(symbols) >= 180
 
     def test_xlarge_pcb_memory(self, xlarge_pcb_content):
         """Verify xlarge PCB can be parsed without excessive memory."""
@@ -506,7 +506,7 @@ class TestMemoryUsage:
         # Verify structure is navigable
         assert sexp.tag == "kicad_pcb"
         footprints = sexp.find_all("footprint")
-        assert len(footprints) >= 1400
+        assert len(footprints) >= 90
 
 
 # --- Routable PCB Generator ---

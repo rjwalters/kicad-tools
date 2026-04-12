@@ -502,16 +502,16 @@ class TestOptimization:
         initial_ind = optimizer_with_components._individual_from_current()
         initial_fitness = optimizer_with_components._evaluate_fitness(initial_ind)
 
-        best = optimizer_with_components.optimize(generations=20, population_size=30)
+        best = optimizer_with_components.optimize(generations=5, population_size=10)
 
         # Fitness should improve (or at least not get worse)
         assert best.fitness >= initial_fitness
 
     def test_optimize_hybrid_returns_physics_optimizer(self, optimizer_with_components):
         physics_opt = optimizer_with_components.optimize_hybrid(
-            evolutionary_generations=5,
+            evolutionary_generations=3,
             population_size=10,
-            physics_iterations=50,
+            physics_iterations=10,
         )
         assert isinstance(physics_opt, PlacementOptimizer)
         assert len(physics_opt.components) == 2

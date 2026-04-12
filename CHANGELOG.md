@@ -5,6 +5,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-04-12
+
+### Added
+
+#### Placement Optimization (`placement/`)
+
+A complete placement optimization system with multiple strategies, cost evaluation,
+and CLI/MCP integration for AI-driven component placement.
+
+- **PlacementVector & Encoding** (#1223) - Define placement search space
+  - Encode/decode component positions and rotations as optimization vectors
+  - Board-relative coordinate system with boundary constraints
+
+- **Cost Functions** (#1224, #1225, #1219) - Multi-objective placement evaluation
+  - HPWL wirelength estimator using transformed pad coordinates
+  - Overlap and boundary violation geometry detectors
+  - Weighted cost function aggregator for combining objectives
+
+- **Placement Strategies**
+  - Force-directed and random seed heuristics (#1226)
+  - CMA-ES evolutionary optimizer with `PlacementStrategy` ABC (#1227)
+  - Bayesian Optimization strategy using Ax/BoTorch (#1235)
+
+- **DRC Integration** (#1228) - Courtyard and pad spacing clearance checker
+
+- **Evaluation Pipeline** (#1233) - Multi-fidelity evaluation
+  - Fast/cheap evaluations for early filtering, full DRC for promising candidates
+
+- **Netlist Graph Analysis** (#1231) - Connectivity-aware placement priors
+
+- **Visualization** (#1230) - Optimization progress plots and convergence tracking
+
+- **Benchmark Boards** (#1229) - Test boards for optimizer validation
+
+- **CLI** (#1234) - `kct optimize-placement` command for CMA-ES optimization
+
+- **MCP Tools** (#1236) - `optimize_placement` and `evaluate_placement` tools
+
+#### Routing Orchestration
+
+Unified multi-strategy routing with hierarchical planning and fine-pitch support.
+
+- **Routing Orchestrator** (#1140, #1194, #1195, #1218) - Coordinate multiple routing strategies
+  - Full pipeline strategy with via conflict resolution and clearance repair
+  - Wire real router strategies into orchestrator
+
+- **Hierarchical Router** (#1127) - Global routing foundation with channel assignment
+
+- **Adaptive Grid** (#1157) - Fine grid near pads, coarse grid in open channels
+
+- **Fine-Pitch Support**
+  - Sub-grid routing for fine-pitch components (#1120)
+  - Dog-leg routing for fine-pitch components (#1150)
+  - Escape routing for SSOP/TSSOP packages
+
+- **GPU-Accelerated Pathfinding** - Batch pathfinding for fine-grid routing
+
+- **Via Conflict Management** (#1124) - Handle blocked pad access points
+
+- **Automatic Power Plane Stitching** - Via stitching for power planes
+
+- **CLI & MCP** (#1220) - `route-auto` command and MCP tool for orchestrator-based routing
+
+#### DRC & Validation
+
+- **Trace Clearance Repair** (#1121) - Nudge traces to fix DRC violations
+- **Fab-Aware Severity** (#1187) - Reclassify DRC severity based on manufacturer capabilities
+- **Post-Stitch DRC** (#1188) - `--drc` flag for zone fill and DRC validation after stitching
+
+#### Type System
+
+- **Interval Types** (#1170) - Parametric constraint system with unit-aware arithmetic
+- **Typed Interface Ports** (#1184) - Type-checked circuit connections
+
+#### Library & Tooling
+
+- **Unused Symbol Detection** (#1222) - Find unused symbols/footprints in project libraries
+- **MCP Client Setup** (#1186) - `kct mcp setup` auto-configures MCP clients
+- **CLI Flags** - `--routing-aware` and `--check-routability` in unified CLI
+- **C++ Backend Warnings** (#1125) - Improved discoverability and performance guidance
+- **CI Pipeline** (#1165) - GitHub Actions CI with pytest, ruff, and mypy
+
+### Changed
+
+- **Command Protocol** (#1126) - Add command protocol for CLI migration
+- **Type Consolidation** - Merge duplicate `Severity` and `Layer` enum types
+
+### Removed
+
+- **Dead Code Cleanup**
+  - Remove stalled command protocol migration infrastructure (#1240)
+  - Remove 4 dead methods from `router/core.py` and `spec/parser.py` (#1237)
+  - Remove unused classes and functions from `exceptions.py` (~540 LOC) (#1167)
+  - Remove unused `generate_grid_stress_test` function (#1215)
+  - Remove 8 unused exports from `__all__` declarations (#1189)
+
+### Fixed
+
+- **Stitch Reliability** - Multiple fixes for via stitching correctness
+  - Pad clearance checking to prevent shorts (#1143)
+  - Copy `.kicad_pro` alongside PCB output for DRC compatibility (#1144)
+  - Trace path clearance to prevent shorts from pad-to-via connections (#1142)
+  - Clearance against other-net copper before placing vias (#1119)
+  - Pad-to-via trace segments for electrical connectivity (#1116)
+  - Remove invalid rotation parameter from via format (#1115)
+
+- **Router Fixes**
+  - Correct single-paren removal to fix invalid PCB output (#1118)
+  - Cross-check annular ring requirement when sizing vias (#1117)
+  - Add `start`/`end` properties to `Segment` class
+
+- **S-Expression Parser** (#1163) - Fix bugs in `SExp.to_string()`
+- **Coordinate System** (#1172, #1197) - Resolve test failures from API and coordinate changes
+- **Placement Loader** - Convert footprint positions to board-relative on load
+
 ## [0.10.3] - 2026-01-24
 
 ### Added

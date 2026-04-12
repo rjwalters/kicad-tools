@@ -4,7 +4,7 @@
     "total_nets": 2,
     "routed_nets": 0,
     "completion_rate": 0.0,
-    "routing_time": 1.0967254638671875e-05,
+    "routing_time": 2.1457672119140625e-06,
     "failures": 0,
     "segments": 0,
     "vias": 0
@@ -14,7 +14,7 @@
     "total_nets": 8,
     "routed_nets": 0,
     "completion_rate": 0.0,
-    "routing_time": 1.71661376953125e-05,
+    "routing_time": 5.0067901611328125e-06,
     "failures": 0,
     "segments": 0,
     "vias": 0
@@ -24,7 +24,7 @@
     "total_nets": 14,
     "routed_nets": 0,
     "completion_rate": 0.0,
-    "routing_time": 1.7881393432617188e-05,
+    "routing_time": 5.9604644775390625e-06,
     "failures": 0,
     "segments": 0,
     "vias": 0

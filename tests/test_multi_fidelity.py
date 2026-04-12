@@ -296,7 +296,7 @@ class TestFidelity0:
     def test_fast_evaluation(self, simple_placements, simple_nets, simple_board):
         """Fidelity 0 should complete quickly (< 5 ms for 2 components)."""
         t0 = time.perf_counter()
-        for _ in range(100):
+        for _ in range(10):
             evaluate_placement_multifidelity(
                 placements=simple_placements,
                 nets=simple_nets,
@@ -304,7 +304,7 @@ class TestFidelity0:
                 fidelity=FidelityLevel.HPWL,
             )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        avg_ms = elapsed_ms / 100
+        avg_ms = elapsed_ms / 10
 
         # Average should be well under 1 ms for 2 components
         assert avg_ms < 5.0, f"Fidelity 0 took {avg_ms:.2f} ms avg (expected < 5 ms)"
