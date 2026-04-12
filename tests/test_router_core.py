@@ -2100,3 +2100,291 @@ class TestAutorouterOffGridPads:
             "Bidirectional A* should succeed with sub-grid pad connections (Issue #996)"
         )
         assert len(route.segments) > 0, "Route should have segments"
+
+
+class TestCrossingPenalty:
+    """Tests for crossing-aware A* pathfinding (Issue #1250)."""
+
+    def test_segments_intersect_crossing(self):
+        """Test that intersecting segments are detected."""
+        from kicad_tools.router.pathfinder import Router
+
+        # X-shaped crossing
+        assert Router._segments_intersect(0, 0, 10, 10, 0, 10, 10, 0) is True
+
+    def test_segments_intersect_parallel(self):
+        """Test that parallel segments are not detected as crossing."""
+        from kicad_tools.router.pathfinder import Router
+
+        # Parallel horizontal segments
+        assert Router._segments_intersect(0, 0, 10, 0, 0, 5, 10, 5) is False
+
+    def test_segments_intersect_shared_endpoint(self):
+        """Test that segments sharing an endpoint do not count as crossing."""
+        from kicad_tools.router.pathfinder import Router
+
+        # T-junction: share endpoint at (5,5)
+        assert Router._segments_intersect(0, 5, 5, 5, 5, 0, 5, 10) is False
+
+    def test_segments_intersect_non_overlapping(self):
+        """Test that non-overlapping segments are not detected."""
+        from kicad_tools.router.pathfinder import Router
+
+        # Segments in different quadrants
+        assert Router._segments_intersect(0, 0, 1, 1, 5, 5, 6, 6) is False
+
+    def test_add_and_clear_routed_segments(self):
+        """Test add_routed_segments and clear_routed_segments API on Router."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(crossing_penalty=5.0, grid_resolution=0.5)
+        grid = RoutingGrid(20.0, 20.0, rules)
+        router = Router(grid, rules)
+
+        assert len(router._routed_segments) == 0
+
+        seg = Segment(x1=2.0, y1=2.0, x2=8.0, y2=2.0, width=0.2, layer=Layer.F_CU, net=1)
+        router.add_routed_segments([seg])
+        assert len(router._routed_segments) == 1
+
+        router.clear_routed_segments()
+        assert len(router._routed_segments) == 0
+
+    def test_count_edge_crossings_same_layer_different_net(self):
+        """Test that crossings are counted for same-layer, different-net segments."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(crossing_penalty=5.0, grid_resolution=0.5)
+        grid = RoutingGrid(20.0, 20.0, rules)
+        router = Router(grid, rules)
+
+        # Add a horizontal routed segment on layer 0, net 1, from (5,10) to (15,10)
+        # in grid coords
+        router._routed_segments.append((5, 10, 15, 10, 0, 1))
+
+        # Vertical edge from (10,5) to (10,15) on layer 0 for net 2 should cross it
+        count = router._count_edge_crossings(10, 5, 10, 15, 0, 2)
+        assert count == 1
+
+    def test_count_edge_crossings_same_net_ignored(self):
+        """Test that same-net segments are NOT counted as crossings."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(crossing_penalty=5.0, grid_resolution=0.5)
+        grid = RoutingGrid(20.0, 20.0, rules)
+        router = Router(grid, rules)
+
+        # Segment on net 1
+        router._routed_segments.append((5, 10, 15, 10, 0, 1))
+
+        # Edge for net 1 should not count
+        count = router._count_edge_crossings(10, 5, 10, 15, 0, 1)
+        assert count == 0
+
+    def test_count_edge_crossings_different_layer_ignored(self):
+        """Test that crossings on different layers are NOT counted."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(crossing_penalty=5.0, grid_resolution=0.5)
+        grid = RoutingGrid(20.0, 20.0, rules)
+        router = Router(grid, rules)
+
+        # Segment on layer 0, net 1
+        router._routed_segments.append((5, 10, 15, 10, 0, 1))
+
+        # Edge on layer 1, net 2 should not cross (different layer)
+        count = router._count_edge_crossings(10, 5, 10, 15, 1, 2)
+        assert count == 0
+
+    def test_mark_route_feeds_routed_segments(self):
+        """Test that _mark_route updates router._routed_segments."""
+        rules = DesignRules(crossing_penalty=5.0)
+        router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+        # Check initial state -- the Python pathfinder should have the attribute
+        from kicad_tools.router.pathfinder import Router as PyRouter
+
+        if isinstance(router.router, PyRouter):
+            assert len(router.router._routed_segments) == 0
+
+            route = Route(
+                net=1,
+                net_name="NET1",
+                segments=[
+                    Segment(
+                        x1=2.0,
+                        y1=5.0,
+                        x2=8.0,
+                        y2=5.0,
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=1,
+                    ),
+                    Segment(
+                        x1=8.0,
+                        y1=5.0,
+                        x2=8.0,
+                        y2=10.0,
+                        width=0.2,
+                        layer=Layer.F_CU,
+                        net=1,
+                    ),
+                ],
+            )
+            router._mark_route(route)
+            assert len(router.router._routed_segments) == 2
+
+    def test_crossing_penalty_zero_no_regression(self):
+        """Test that crossing_penalty=0.0 produces same behavior as before."""
+        rules = DesignRules(crossing_penalty=0.0)
+        router = Autorouter(width=30.0, height=20.0, rules=rules)
+
+        pads = [
+            {
+                "number": "1",
+                "x": 5.0,
+                "y": 10.0,
+                "net": 1,
+                "net_name": "NET1",
+                "through_hole": True,
+                "drill": 0.8,
+            },
+            {
+                "number": "2",
+                "x": 25.0,
+                "y": 10.0,
+                "net": 1,
+                "net_name": "NET1",
+                "through_hole": True,
+                "drill": 0.8,
+            },
+        ]
+        router.add_component("J1", pads)
+        routes = router.route_net(1)
+        assert len(routes) > 0, "Should route successfully with crossing_penalty=0.0"
+
+    def test_crossing_penalty_reduces_crossings(self):
+        """Test that crossing_penalty > 0 reduces crossings on a synthetic layout.
+
+        Sets up a board where two nets must cross unless the router detours.
+        With crossing_penalty=0.0 the router may take the shortest (crossing) path.
+        With crossing_penalty=5.0 the router should find a non-crossing or
+        fewer-crossing alternative.
+        """
+
+        def _count_route_crossings(
+            route_segments: list[Segment], other_segments: list[Segment]
+        ) -> int:
+            """Count crossings between two sets of segments."""
+            from kicad_tools.router.pathfinder import Router
+
+            crossings = 0
+            for seg_a in route_segments:
+                for seg_b in other_segments:
+                    if seg_a.layer != seg_b.layer:
+                        continue
+                    # Convert to int grid-like coords (multiply by 10 for precision)
+                    ax1 = int(seg_a.x1 * 10)
+                    ay1 = int(seg_a.y1 * 10)
+                    ax2 = int(seg_a.x2 * 10)
+                    ay2 = int(seg_a.y2 * 10)
+                    bx1 = int(seg_b.x1 * 10)
+                    by1 = int(seg_b.y1 * 10)
+                    bx2 = int(seg_b.x2 * 10)
+                    by2 = int(seg_b.y2 * 10)
+                    if Router._segments_intersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2):
+                        crossings += 1
+            return crossings
+
+        # Board: 20x20mm, two nets arranged to encourage crossing
+        # Net 1: top-left to bottom-right (diagonal tendency)
+        # Net 2: bottom-left to top-right (diagonal tendency)
+        def _route_board(penalty: float) -> tuple[list[Segment], list[Segment]]:
+            rules = DesignRules(crossing_penalty=penalty)
+            router = Autorouter(width=20.0, height=20.0, rules=rules)
+
+            # Net 1: pads on opposite corners (top-left -> bottom-right)
+            pads_net1 = [
+                {
+                    "number": "1",
+                    "x": 3.0,
+                    "y": 3.0,
+                    "net": 1,
+                    "net_name": "NET1",
+                    "through_hole": True,
+                    "drill": 0.8,
+                },
+                {
+                    "number": "2",
+                    "x": 17.0,
+                    "y": 17.0,
+                    "net": 1,
+                    "net_name": "NET1",
+                    "through_hole": True,
+                    "drill": 0.8,
+                },
+            ]
+            router.add_component("J1", pads_net1)
+
+            # Net 2: pads on opposite corners (bottom-left -> top-right)
+            pads_net2 = [
+                {
+                    "number": "1",
+                    "x": 3.0,
+                    "y": 17.0,
+                    "net": 2,
+                    "net_name": "NET2",
+                    "through_hole": True,
+                    "drill": 0.8,
+                },
+                {
+                    "number": "2",
+                    "x": 17.0,
+                    "y": 3.0,
+                    "net": 2,
+                    "net_name": "NET2",
+                    "through_hole": True,
+                    "drill": 0.8,
+                },
+            ]
+            router.add_component("J2", pads_net2)
+
+            # Route net 1 first, then net 2
+            routes1 = router.route_net(1)
+            routes2 = router.route_net(2)
+
+            segs1 = [s for r in routes1 for s in r.segments]
+            segs2 = [s for r in routes2 for s in r.segments]
+            return segs1, segs2
+
+        # Route without penalty
+        segs1_no_penalty, segs2_no_penalty = _route_board(0.0)
+        crossings_no_penalty = _count_route_crossings(segs1_no_penalty, segs2_no_penalty)
+
+        # Route with penalty
+        segs1_with_penalty, segs2_with_penalty = _route_board(5.0)
+        crossings_with_penalty = _count_route_crossings(segs1_with_penalty, segs2_with_penalty)
+
+        # With penalty, crossings should be <= without penalty
+        assert crossings_with_penalty <= crossings_no_penalty, (
+            f"Crossing penalty should reduce crossings: "
+            f"got {crossings_with_penalty} with penalty vs "
+            f"{crossings_no_penalty} without"
+        )
+
+    def test_empty_routed_segments_no_penalty(self):
+        """Test that first net to route never gets penalized (empty segments list)."""
+        from kicad_tools.router.grid import RoutingGrid
+        from kicad_tools.router.pathfinder import Router
+
+        rules = DesignRules(crossing_penalty=5.0, grid_resolution=0.5)
+        grid = RoutingGrid(20.0, 20.0, rules)
+        router = Router(grid, rules)
+
+        # No routed segments -- count should be 0
+        count = router._count_edge_crossings(0, 0, 10, 10, 0, 1)
+        assert count == 0

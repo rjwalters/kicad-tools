@@ -280,6 +280,16 @@ class TestDesignRules:
         assert rules.cost_turn == 5.0
         assert rules.cost_via == 10.0
 
+    def test_crossing_penalty_default(self):
+        """Test that crossing_penalty defaults to 0.0 for backward compatibility."""
+        rules = DesignRules()
+        assert rules.crossing_penalty == 0.0
+
+    def test_crossing_penalty_custom(self):
+        """Test setting a custom crossing_penalty value."""
+        rules = DesignRules(crossing_penalty=5.0)
+        assert rules.crossing_penalty == 5.0
+
 
 class TestNetClassRouting:
     """Tests for NetClassRouting class."""
@@ -4599,14 +4609,14 @@ class TestInsertSexpBeforeClosing:
     def test_removes_only_last_closing_paren(self):
         """Verify only the last ')' is removed, not all trailing ones."""
         # This PCB has nested structure with ')' at end of inner elements
-        pcb_content = "(kicad_pcb\n  (version 20240108)\n  (net 1 \"VCC\")\n)"
+        pcb_content = '(kicad_pcb\n  (version 20240108)\n  (net 1 "VCC")\n)'
         route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
 
         result = _insert_sexp_before_closing(pcb_content, route_sexp)
 
         # Should still contain the inner closing parens
         assert "(version 20240108)" in result
-        assert "(net 1 \"VCC\")" in result
+        assert '(net 1 "VCC")' in result
         assert "(segment" in result
         assert result.strip().endswith(")")
 
@@ -4626,8 +4636,8 @@ class TestInsertSexpBeforeClosing:
 
     def test_balanced_parentheses_in_result(self):
         """The critical test: output must have balanced parentheses."""
-        pcb_content = "(kicad_pcb\n  (version 20240108)\n  (generator \"test\")\n)"
-        route_sexp = "(segment (start 1 2) (end 3 4) (width 0.25) (layer \"F.Cu\") (net 1))"
+        pcb_content = '(kicad_pcb\n  (version 20240108)\n  (generator "test")\n)'
+        route_sexp = '(segment (start 1 2) (end 3 4) (width 0.25) (layer "F.Cu") (net 1))'
 
         result = _insert_sexp_before_closing(pcb_content, route_sexp)
 
@@ -4651,13 +4661,15 @@ class TestInsertSexpBeforeClosing:
         S-expression structure.
         """
         # PCB content that ends with nested closing parens
-        pcb_content = "(kicad_pcb\n  (footprint \"R0603\"\n    (pad 1 smd rect (at 0 0) (size 0.6 0.5))\n  )\n)"
+        pcb_content = (
+            '(kicad_pcb\n  (footprint "R0603"\n    (pad 1 smd rect (at 0 0) (size 0.6 0.5))\n  )\n)'
+        )
         route_sexp = "(segment (start 0 0) (end 10 10) (width 0.2))"
 
         result = _insert_sexp_before_closing(pcb_content, route_sexp)
 
         # The footprint block must remain intact
-        assert "(footprint \"R0603\"" in result
+        assert '(footprint "R0603"' in result
         assert "(pad 1 smd rect" in result
         # Parentheses must be balanced
         assert _validate_sexp_parentheses(result)
@@ -4681,7 +4693,7 @@ class TestValidateSexpParentheses:
         assert _validate_sexp_parentheses("(kicad_pcb)")
 
     def test_balanced_nested(self):
-        assert _validate_sexp_parentheses("(kicad_pcb (version 1) (net 1 \"VCC\"))")
+        assert _validate_sexp_parentheses('(kicad_pcb (version 1) (net 1 "VCC"))')
 
     def test_balanced_with_strings(self):
         """Parentheses inside quoted strings should be ignored."""

@@ -92,6 +92,12 @@ class DesignRules:
     congestion_threshold: float = 0.3  # Density above which region is congested
     congestion_grid_size: int = 10  # Cells per congestion region
 
+    # Crossing-aware routing (Issue #1250)
+    # Penalizes candidate edges that cross already-routed segments on the same layer.
+    # This steers A* toward non-crossing paths while still permitting crossings when
+    # no alternative exists. Default 0.0 disables the feature for backward compatibility.
+    crossing_penalty: float = 0.0  # Additive cost per crossing with a routed segment
+
     # Zone-specific rules
     zone_rules: ZoneRules = field(default_factory=ZoneRules)
 

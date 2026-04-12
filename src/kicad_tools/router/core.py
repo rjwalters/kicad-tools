@@ -480,9 +480,16 @@ class Autorouter:
 
         This is the unified method that should be used instead of calling
         self.grid.mark_route() directly, to ensure grid synchronization.
+
+        Issue #1250: Also feeds committed segments to the pathfinder for
+        crossing-aware cost computation in subsequent A* searches.
         """
         self.grid.mark_route(route)
         self._mark_route_on_cpp_grid(route)
+
+        # Issue #1250: Feed committed segments to pathfinder for crossing detection
+        if hasattr(self.router, "add_routed_segments"):
+            self.router.add_routed_segments(route.segments)
 
     @property
     def physics_available(self) -> bool:

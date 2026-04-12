@@ -172,6 +172,108 @@ class Router:
         self._via_impact_enabled: bool = False
         self._init_via_impact_scoring()
 
+        # Issue #1250: Crossing-aware routing
+        # Stores previously routed segments for crossing detection.
+        # Each entry is (x1, y1, x2, y2, layer_index, net_id) in grid coordinates.
+        self._routed_segments: list[tuple[int, int, int, int, int, int]] = []
+
+    def add_routed_segments(self, segments: list[Segment]) -> None:
+        """Add committed route segments for crossing detection.
+
+        Issue #1250: Called after each route is committed so that subsequent
+        A* searches can penalize edges that cross these segments.
+
+        Args:
+            segments: List of Segment objects from a committed route.
+        """
+        for seg in segments:
+            gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
+            gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
+            layer_idx = self.grid.layer_to_index(seg.layer.value)
+            self._routed_segments.append((gx1, gy1, gx2, gy2, layer_idx, seg.net))
+
+    def clear_routed_segments(self) -> None:
+        """Clear the routed segments list.
+
+        Call this when starting a fresh routing session or when all routes
+        have been removed.
+        """
+        self._routed_segments.clear()
+
+    @staticmethod
+    def _segments_intersect(
+        ax1: int,
+        ay1: int,
+        ax2: int,
+        ay2: int,
+        bx1: int,
+        by1: int,
+        bx2: int,
+        by2: int,
+    ) -> bool:
+        """Test whether two line segments intersect using cross-product sign changes.
+
+        Uses the standard computational geometry approach: two segments intersect
+        if and only if each segment straddles the line containing the other.
+
+        Args:
+            ax1, ay1, ax2, ay2: Endpoints of segment A (grid coords).
+            bx1, by1, bx2, by2: Endpoints of segment B (grid coords).
+
+        Returns:
+            True if the segments properly intersect (share an interior point).
+            Shared endpoints are NOT counted as intersections.
+        """
+
+        def cross(ox: int, oy: int, px: int, py: int, qx: int, qy: int) -> int:
+            """Sign of cross product (OP x OQ)."""
+            return (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
+
+        d1 = cross(bx1, by1, bx2, by2, ax1, ay1)
+        d2 = cross(bx1, by1, bx2, by2, ax2, ay2)
+        d3 = cross(ax1, ay1, ax2, ay2, bx1, by1)
+        d4 = cross(ax1, ay1, ax2, ay2, bx2, by2)
+
+        # Proper intersection: each segment straddles the line of the other
+        if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and (
+            (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)
+        ):
+            return True
+
+        # Collinear / endpoint touching are NOT counted as crossings
+        return False
+
+    def _count_edge_crossings(
+        self,
+        cx: int,
+        cy: int,
+        nx: int,
+        ny: int,
+        nlayer: int,
+        current_net: int,
+    ) -> int:
+        """Count how many routed segments the candidate edge crosses.
+
+        Only counts crossings on the same layer with a different net.
+
+        Args:
+            cx, cy: Current node grid coordinates (edge start).
+            nx, ny: Neighbor node grid coordinates (edge end).
+            nlayer: Layer index of the candidate edge.
+            current_net: Net ID of the route being searched.
+
+        Returns:
+            Number of crossing segments.
+        """
+        count = 0
+        for sx1, sy1, sx2, sy2, seg_layer, seg_net in self._routed_segments:
+            # Only same layer, different net
+            if seg_layer != nlayer or seg_net == current_net:
+                continue
+            if self._segments_intersect(cx, cy, nx, ny, sx1, sy1, sx2, sy2):
+                count += 1
+        return count
+
     def _init_via_impact_scoring(self) -> None:
         """Initialize via impact scoring based on design rules.
 
@@ -1244,6 +1346,14 @@ class Router:
                 # Add layer preference cost (Issue #625)
                 layer_pref_mult = self._get_layer_preference_cost(nlayer, net_class)
 
+                # Issue #1250: Crossing penalty for edges crossing routed segments
+                crossing_cost = 0.0
+                if self.rules.crossing_penalty > 0.0 and self._routed_segments:
+                    num_crossings = self._count_edge_crossings(
+                        current.x, current.y, nx, ny, nlayer, start.net
+                    )
+                    crossing_cost = self.rules.crossing_penalty * num_crossings
+
                 new_g = (
                     current.g_score
                     + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
@@ -1251,6 +1361,7 @@ class Router:
                     + congestion_cost
                     + negotiated_cost
                     + zone_cost
+                    + crossing_cost
                 ) * cost_mult
 
                 if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
@@ -2025,6 +2136,14 @@ class Router:
             net_class = self._get_net_class(source_pad.net_name)
             layer_pref_mult = self._get_layer_preference_cost(nlayer, net_class)
 
+            # Issue #1250: Crossing penalty for edges crossing routed segments
+            crossing_cost = 0.0
+            if self.rules.crossing_penalty > 0.0 and self._routed_segments:
+                num_crossings = self._count_edge_crossings(
+                    current.x, current.y, nx, ny, nlayer, source_pad.net
+                )
+                crossing_cost = self.rules.crossing_penalty * num_crossings
+
             new_g = (
                 current.g_score
                 + neighbor_cost_mult * self.rules.cost_straight * layer_pref_mult
@@ -2032,6 +2151,7 @@ class Router:
                 + congestion_cost
                 + negotiated_cost
                 + zone_cost
+                + crossing_cost
             ) * cost_mult
 
             if neighbor_key not in g_scores or new_g < g_scores[neighbor_key]:
