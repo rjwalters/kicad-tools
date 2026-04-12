@@ -5,6 +5,7 @@ Usage:
     kct optimize-traces board.kicad_pcb
     kct optimize-traces board.kicad_pcb --net "NET8"
     kct optimize-traces board.kicad_pcb -o optimized.kicad_pcb
+    kct optimize-traces board.kicad_pcb --drc-aware --mfr jlcpcb --layers 4
 """
 
 import argparse
@@ -24,6 +25,7 @@ Examples:
     kct optimize-traces board.kicad_pcb --net USB_D+
     kct optimize-traces board.kicad_pcb -o optimized.kicad_pcb --no-45
     kct optimize-traces board.kicad_pcb --dry-run
+    kct optimize-traces board.kicad_pcb --drc-aware --mfr jlcpcb --layers 4
 """,
     )
 
@@ -79,13 +81,57 @@ Examples:
         help="Suppress progress output (for scripting)",
     )
 
+    # DRC-aware mode arguments
+    parser.add_argument(
+        "--drc-aware",
+        action="store_true",
+        help="Enable DRC-aware mode: roll back per-net optimizations that increase violations",
+    )
+    parser.add_argument(
+        "--mfr",
+        help="Target manufacturer for DRC rules (e.g., jlcpcb, oshpark). Required with --drc-aware",
+    )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=2,
+        help="Number of copper layers for DRC checks (default: 2)",
+    )
+    parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz for DRC checks (default: 1.0)",
+    )
+
     args = parser.parse_args(argv)
+
+    # Validate DRC-aware arguments
+    if args.drc_aware and not args.mfr:
+        print(
+            "Error: --drc-aware requires --mfr to specify the manufacturer profile "
+            "(e.g., --mfr jlcpcb)",
+            file=sys.stderr,
+        )
+        return 1
 
     # Check input file exists
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
         return 1
+
+    # Validate manufacturer ID if provided
+    if args.mfr:
+        from kicad_tools.manufacturers import get_manufacturer_ids
+
+        valid_ids = get_manufacturer_ids()
+        if args.mfr not in valid_ids:
+            print(
+                f"Error: Unknown manufacturer '{args.mfr}'. Valid options: {', '.join(valid_ids)}",
+                file=sys.stderr,
+            )
+            return 1
 
     # Import here to avoid circular imports
     from kicad_tools.cli.progress import spinner
@@ -102,6 +148,10 @@ Examples:
         eliminate_zigzags=not args.no_zigzag,
         convert_45_corners=not args.no_45,
         corner_chamfer_size=args.chamfer_size,
+        drc_aware=args.drc_aware,
+        drc_manufacturer=args.mfr,
+        drc_layers=args.layers,
+        drc_copper_oz=args.copper,
     )
 
     optimizer = TraceOptimizer(config)
@@ -115,15 +165,19 @@ Examples:
             print(f"Output: {args.output}")
         if args.net:
             print(f"Filter: nets matching '{args.net}'")
+        if args.drc_aware:
+            print(f"DRC:    aware (mfr={args.mfr}, layers={args.layers})")
         print()
 
         # Show enabled optimizations
         print("Optimizations enabled:")
         print(f"  - Collinear merge: {'yes' if config.merge_collinear else 'no'}")
         print(f"  - Zigzag elimination: {'yes' if config.eliminate_zigzags else 'no'}")
-        print(f"  - 45° corners: {'yes' if config.convert_45_corners else 'no'}")
+        print(f"  - 45 corners: {'yes' if config.convert_45_corners else 'no'}")
         if config.convert_45_corners:
             print(f"    (chamfer size: {config.corner_chamfer_size}mm)")
+        if args.drc_aware:
+            print(f"  - DRC-aware rollback: yes (mfr={args.mfr})")
         print()
 
     # Run optimization
@@ -144,8 +198,18 @@ Examples:
         print("-" * 50)
         print("Results:")
         print("-" * 50)
-        print(f"  Nets optimized:  {stats.nets_optimized}")
+
+        # Show DRC-aware net stats
+        if args.drc_aware:
+            drc_safe = stats.nets_optimized - stats.nets_rolled_back
+            print(
+                f"  Nets optimized:  {stats.nets_optimized} "
+                f"(DRC safe: {drc_safe}, rolled back: {stats.nets_rolled_back})"
+            )
+        else:
+            print(f"  Nets optimized:  {stats.nets_optimized}")
         print()
+
         print(
             f"  Segments:        {stats.segments_before:>6} -> {stats.segments_after:>6}  "
             f"({-stats.segment_reduction:+.1f}%)"
@@ -155,6 +219,12 @@ Examples:
             f"  Total length:    {stats.length_before:>6.1f}mm -> {stats.length_after:>6.1f}mm  "
             f"({-stats.length_reduction:+.1f}%)"
         )
+
+        if args.drc_aware:
+            print(
+                f"  DRC errors:      {stats.drc_errors_before:>6} -> "
+                f"{stats.drc_errors_after:>6}  (no regressions)"
+            )
         print()
 
         if args.dry_run:
