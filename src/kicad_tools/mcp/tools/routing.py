@@ -413,7 +413,8 @@ def route_net_auto(
         net_name: Name of the net to route (e.g., "GND", "SPI_CLK")
         output_path: Path for output file. If None, result is not saved.
         strategy: Strategy override ("auto", "global", "escape", "hierarchical",
-                  "subgrid", or "via_resolution"). Use "auto" for smart selection.
+                  "subgrid", "via_resolution", or "multi_resolution").
+                  Use "auto" for smart selection.
         enable_repair: Whether to enable automatic clearance repair after routing
         enable_via_resolution: Whether to enable via conflict resolution
 
@@ -513,6 +514,7 @@ def route_net_auto(
         "hierarchical": RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
         "subgrid": RoutingStrategy.SUBGRID_ADAPTIVE,
         "via_resolution": RoutingStrategy.VIA_CONFLICT_RESOLUTION,
+        "multi_resolution": RoutingStrategy.MULTI_RESOLUTION,
     }
 
     # Create orchestrator

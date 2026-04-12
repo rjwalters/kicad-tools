@@ -37,6 +37,9 @@ class RoutingStrategy(Enum):
     FULL_PIPELINE = auto()
     """Complete pipeline: escape → global → sub-grid → via resolution → repair."""
 
+    MULTI_RESOLUTION = auto()
+    """Multi-resolution routing: coarse grid first, fine-grid fallback for failed nets."""
+
 
 @dataclass
 class RoutingMetrics:
@@ -59,6 +62,7 @@ class RoutingMetrics:
     grid_points_used: int = 0
     escape_segments: int = 0
     repair_actions: int = 0
+    fine_grid_nets: int = 0
 
 
 @dataclass
@@ -194,6 +198,7 @@ class RoutingResult:
                 "grid_points_used": self.metrics.grid_points_used,
                 "escape_segments": self.metrics.escape_segments,
                 "repair_actions": self.metrics.repair_actions,
+                "fine_grid_nets": self.metrics.fine_grid_nets,
             },
             "performance": {
                 "total_time_ms": self.performance.total_time_ms,

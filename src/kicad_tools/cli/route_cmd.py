@@ -601,7 +601,13 @@ def route_with_layer_escalation(
             print(f"\n  Routing ({args.strategy})...")
 
         try:
-            if args.strategy == "negotiated":
+            if getattr(args, "multi_resolution", False):
+                router.route_all_multi_resolution(
+                    use_negotiated=(args.strategy == "negotiated"),
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
+            elif args.strategy == "negotiated":
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
@@ -923,7 +929,13 @@ def route_with_rule_relaxation(
             print(f"\n  Routing ({args.strategy})...")
 
         try:
-            if args.strategy == "negotiated":
+            if getattr(args, "multi_resolution", False):
+                router.route_all_multi_resolution(
+                    use_negotiated=(args.strategy == "negotiated"),
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
+            elif args.strategy == "negotiated":
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
@@ -1263,7 +1275,13 @@ def route_with_combined_escalation(
 
             # Route
             try:
-                if args.strategy == "negotiated":
+                if getattr(args, "multi_resolution", False):
+                    router.route_all_multi_resolution(
+                        use_negotiated=(args.strategy == "negotiated"),
+                        max_iterations=args.iterations,
+                        timeout=args.timeout,
+                    )
+                elif args.strategy == "negotiated":
                     router.route_all_negotiated(
                         max_iterations=args.iterations,
                         timeout=args.timeout,
@@ -1856,6 +1874,17 @@ def main(argv: list[str] | None = None) -> int:
             "to establish corridors, then refines with the fine grid only "
             "near pads and congestion points. Can significantly speed up "
             "fine-grid routing (0.05mm-0.1mm) on large boards."
+        ),
+    )
+    parser.add_argument(
+        "--multi-resolution",
+        action="store_true",
+        help=(
+            "Enable multi-resolution routing with fine-grid fallback. "
+            "First routes all nets on the coarse grid, then retries failed "
+            "nets on a finer grid (2x resolution) scoped to their bounding "
+            "boxes. Useful for boards where some nets fail due to grid "
+            "resolution limitations."
         ),
     )
     parser.add_argument(
@@ -2496,6 +2525,12 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.timeout,
                 )
                 return routes
+            elif getattr(args, "multi_resolution", False):
+                return router.route_all_multi_resolution(
+                    use_negotiated=(args.strategy == "negotiated"),
+                    max_iterations=args.iterations,
+                    timeout=args.timeout,
+                )
             elif args.strategy == "negotiated":
                 return router.route_all_negotiated(
                     max_iterations=args.iterations,
