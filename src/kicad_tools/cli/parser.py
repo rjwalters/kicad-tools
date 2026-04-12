@@ -827,6 +827,18 @@ def _add_zones_parser(subparsers) -> None:
     zones_batch.add_argument("-v", "--verbose", action="store_true")
     zones_batch.add_argument("--dry-run", action="store_true")
 
+    # zones fill
+    zones_fill = zones_subparsers.add_parser("fill", help="Fill all zones in a PCB")
+    zones_fill.add_argument("pcb", help="Path to .kicad_pcb file")
+    zones_fill.add_argument(
+        "-o", "--output", help="Output file path (default: overwrites input)"
+    )
+    zones_fill.add_argument("--net", help="Fill only zones for this net (e.g., GND)")
+    zones_fill.add_argument("-v", "--verbose", action="store_true")
+    zones_fill.add_argument(
+        "--dry-run", action="store_true", help="Show what would be done, no output"
+    )
+
 
 def _add_route_parser(subparsers) -> None:
     """Add route subcommand parser."""
