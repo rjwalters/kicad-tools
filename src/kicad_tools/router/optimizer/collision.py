@@ -16,7 +16,8 @@ class CollisionChecker(Protocol):
     Implementations can use different strategies:
     - Grid-based: Use RoutingGrid obstacle data
     - Segment intersection: Check for crossings with other nets
-    - Quadtree: Spatial indexing for efficient queries
+    - R-tree: Spatial indexing for efficient segment clearance queries
+      (implemented in RoutingGrid via per-layer rtree.index.Index, Issue #1249)
 
     The collision checker should return True if the path is clear,
     False if it would cross obstacles or other nets.

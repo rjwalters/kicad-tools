@@ -38,6 +38,21 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 
+# Try to import rtree for spatial indexing, gracefully handle missing dependency.
+# Matches the pattern established in drc/incremental.py.
+try:
+    from rtree import index as rtree_index
+
+    RTREE_AVAILABLE = True
+except ImportError:
+    RTREE_AVAILABLE = False
+    rtree_index = None  # type: ignore[assignment]
+
+# Minimum number of indexed segments before R-tree queries are used.
+# Below this threshold, brute-force iteration is faster due to R-tree overhead.
+# Based on Parkour's empirical threshold for spatial index break-even.
+RTREE_SEGMENT_THRESHOLD = 32
+
 if TYPE_CHECKING:
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
@@ -331,6 +346,16 @@ class RoutingGrid:
         # Issue #750: Grid-based checking is approximate; we need precise geometry
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
+
+        # R-tree spatial index for segment clearance queries (Issue #1249).
+        # Per-layer rtree.index.Index for fast envelope-based candidate pruning
+        # in validate_segment_clearance, replacing O(R*S) brute-force iteration.
+        # Falls back to brute-force when rtree is unavailable or segment count
+        # is below RTREE_SEGMENT_THRESHOLD.
+        self._seg_rtree: dict[int, Any] = {}  # layer_idx -> rtree Index
+        self._seg_rtree_items: dict[int, dict[int, Segment]] = {}  # layer_idx -> id -> Segment
+        self._seg_rtree_count: int = 0  # total indexed segments across all layers
+        self._rtree_available = RTREE_AVAILABLE
 
     def _select_backend(self) -> tuple[BackendType, Any]:
         """Select the appropriate backend based on config and grid size.
@@ -855,18 +880,45 @@ class RoutingGrid:
                 has_violation = True
                 violation_loc = (pad.x, pad.y)
 
-        # Check against segments from existing routes
-        for route in self.routes:
-            # Skip same-net routes
-            if route.net == exclude_net:
-                continue
+        # Check against segments from existing routes.
+        # Issue #1249: Use R-tree spatial index when available and segment count
+        # exceeds RTREE_SEGMENT_THRESHOLD. The R-tree narrows candidates via
+        # envelope intersection, then we do exact distance checks on candidates.
+        seg_layer_idx = self.layer_to_index(seg.layer.value)
+        use_rtree = (
+            self._rtree_available
+            and self._seg_rtree_count >= RTREE_SEGMENT_THRESHOLD
+            and seg_layer_idx in self._seg_rtree
+        )
 
-            for other_seg in route.segments:
-                # Skip segments on different layers
-                if other_seg.layer != seg.layer:
+        if use_rtree:
+            # Query R-tree for candidate segments whose envelopes overlap the
+            # query segment's envelope. We expand by a generous search radius
+            # so that min_actual_clearance is computed accurately for nearby
+            # segments, not just those within the violation threshold. Segments
+            # beyond search_radius have clearance >= search_radius which is
+            # sufficient for reporting purposes.
+            search_radius = max(min_clearance * 10, 5.0)
+            query_envelope = (
+                min(seg.x1, seg.x2) - seg_half_width - search_radius,
+                min(seg.y1, seg.y2) - seg_half_width - search_radius,
+                max(seg.x1, seg.x2) + seg_half_width + search_radius,
+                max(seg.y1, seg.y2) + seg_half_width + search_radius,
+            )
+            candidate_ids = list(
+                self._seg_rtree[seg_layer_idx].intersection(query_envelope)
+            )
+            layer_items = self._seg_rtree_items.get(seg_layer_idx, {})
+
+            for cand_id in candidate_ids:
+                other_seg = layer_items.get(cand_id)
+                if other_seg is None:
+                    continue
+                # Skip same-net segments
+                if other_seg.net == exclude_net:
                     continue
 
-                # Segment-to-segment distance
+                # Exact segment-to-segment distance
                 dist = self._segment_to_segment_distance(
                     seg.x1,
                     seg.y1,
@@ -884,14 +936,53 @@ class RoutingGrid:
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
                 if clearance < min_clearance:
-                    # Violation location at midpoint
                     has_violation = True
                     violation_loc = (
                         (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
                         (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
                     )
+        else:
+            # Brute-force path: iterate all routes and segments.
+            for route in self.routes:
+                # Skip same-net routes
+                if route.net == exclude_net:
+                    continue
 
-            # Check against vias from existing routes
+                for other_seg in route.segments:
+                    # Skip segments on different layers
+                    if other_seg.layer != seg.layer:
+                        continue
+
+                    # Segment-to-segment distance
+                    dist = self._segment_to_segment_distance(
+                        seg.x1,
+                        seg.y1,
+                        seg.x2,
+                        seg.y2,
+                        other_seg.x1,
+                        other_seg.y1,
+                        other_seg.x2,
+                        other_seg.y2,
+                    )
+
+                    # Edge-to-edge clearance (both segment half-widths)
+                    clearance = dist - seg_half_width - other_seg.width / 2
+
+                    if clearance < min_actual_clearance:
+                        min_actual_clearance = clearance
+                    if clearance < min_clearance:
+                        # Violation location at midpoint
+                        has_violation = True
+                        violation_loc = (
+                            (seg.x1 + seg.x2 + other_seg.x1 + other_seg.x2) / 4,
+                            (seg.y1 + seg.y2 + other_seg.y1 + other_seg.y2) / 4,
+                        )
+
+        # Check against vias from existing routes (not in R-tree; typically few)
+        for route in self.routes:
+            if route.net == exclude_net:
+                continue
+
             for via in route.vias:
                 via_radius = via.diameter / 2
 
@@ -1006,6 +1097,77 @@ class RoutingGrid:
 
         return pitches
 
+    # =========================================================================
+    # R-TREE SPATIAL INDEX MANAGEMENT (Issue #1249)
+    # =========================================================================
+
+    def _get_rtree_for_layer(self, layer_idx: int) -> Any:
+        """Get or create an R-tree index for the given layer.
+
+        Returns None if rtree is not available.
+        """
+        if not self._rtree_available:
+            return None
+        if layer_idx not in self._seg_rtree:
+            # Create a new in-memory R-tree index with default properties
+            p = rtree_index.Property()
+            p.dimension = 2
+            self._seg_rtree[layer_idx] = rtree_index.Index(properties=p)
+            self._seg_rtree_items[layer_idx] = {}
+        return self._seg_rtree[layer_idx]
+
+    @staticmethod
+    def _segment_envelope(seg: Segment) -> tuple[float, float, float, float]:
+        """Compute the axis-aligned bounding box for a segment, expanded by half-width.
+
+        Returns:
+            (min_x, min_y, max_x, max_y) tuple suitable for R-tree insertion/query.
+        """
+        hw = seg.width / 2
+        return (
+            min(seg.x1, seg.x2) - hw,
+            min(seg.y1, seg.y2) - hw,
+            max(seg.x1, seg.x2) + hw,
+            max(seg.y1, seg.y2) + hw,
+        )
+
+    def _rtree_insert_segment(self, seg: Segment, layer_idx: int) -> None:
+        """Insert a segment into the per-layer R-tree index."""
+        idx = self._get_rtree_for_layer(layer_idx)
+        if idx is None:
+            return
+        seg_id = id(seg)
+        envelope = self._segment_envelope(seg)
+        idx.insert(seg_id, envelope)
+        self._seg_rtree_items[layer_idx][seg_id] = seg
+        self._seg_rtree_count += 1
+
+    def _rtree_remove_segment(self, seg: Segment, layer_idx: int) -> None:
+        """Remove a segment from the per-layer R-tree index."""
+        if not self._rtree_available:
+            return
+        if layer_idx not in self._seg_rtree:
+            return
+        seg_id = id(seg)
+        if seg_id not in self._seg_rtree_items.get(layer_idx, {}):
+            return
+        envelope = self._segment_envelope(seg)
+        self._seg_rtree[layer_idx].delete(seg_id, envelope)
+        del self._seg_rtree_items[layer_idx][seg_id]
+        self._seg_rtree_count = max(0, self._seg_rtree_count - 1)
+
+    def _rtree_insert_route(self, route: Route) -> None:
+        """Insert all segments of a route into the R-tree index."""
+        for seg in route.segments:
+            layer_idx = self.layer_to_index(seg.layer.value)
+            self._rtree_insert_segment(seg, layer_idx)
+
+    def _rtree_remove_route(self, route: Route) -> None:
+        """Remove all segments of a route from the R-tree index."""
+        for seg in route.segments:
+            layer_idx = self.layer_to_index(seg.layer.value)
+            self._rtree_remove_segment(seg, layer_idx)
+
     def mark_route(self, route: Route) -> None:
         """Mark a route's cells as used.
 
@@ -1020,6 +1182,8 @@ class RoutingGrid:
             for via in route.vias:
                 self._mark_via(via)
             self.routes.append(route)
+            # Maintain R-tree index for fast clearance queries (Issue #1249)
+            self._rtree_insert_route(route)
 
     def _mark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Mark cells along a segment as blocked (with clearance buffer)."""
@@ -1107,6 +1271,8 @@ class RoutingGrid:
                 self._unmark_via(via)
 
             if route in self.routes:
+                # Remove from R-tree index before removing from list (Issue #1249)
+                self._rtree_remove_route(route)
                 self.routes.remove(route)
 
     def _unmark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
