@@ -1187,6 +1187,7 @@ def load_pcb_for_routing(
     edge_clearance: float | None = None,
     layer_stack: LayerStack | None = None,
     force_python: bool = False,
+    load_existing_routes: bool = False,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -1228,6 +1229,12 @@ def load_pcb_for_routing(
         force_python: If True, force use of Python router backend even if the
                      C++ backend is available. Default False uses C++ when
                      available for 10-100x performance improvement.
+        load_existing_routes: If True, parse existing ``(segment ...)`` and
+                     ``(via ...)`` elements from the PCB file and mark them as
+                     obstacles on the routing grid. This is essential for
+                     multi-pass routing where Pass 2 must see Pass 1 geometry
+                     to avoid overlapping traces and co-located vias.
+                     Default is False for backward compatibility.
 
     Returns:
         Tuple of (Autorouter instance, net_map dict)
@@ -1253,6 +1260,10 @@ def load_pcb_for_routing(
         >>> from kicad_tools.router import LayerStack
         >>> stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         >>> router, nets = load_pcb_for_routing("board.kicad_pcb", layer_stack=stack)
+        >>>
+        >>> # Load existing routes as obstacles for multi-pass routing
+        >>> router, nets = load_pcb_for_routing("pass1.kicad_pcb",
+        ...     load_existing_routes=True)
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
@@ -1484,6 +1495,48 @@ def load_pcb_for_routing(
             if blocked_cells > 0:
                 print(f"  Edge clearance: {edge_clearance}mm, {blocked_cells} cells blocked")
 
+    # Load existing routes as obstacles for multi-pass routing
+    if load_existing_routes:
+        from .optimizer.pcb import parse_segments, parse_vias
+        from .primitives import Route
+
+        existing_segments = parse_segments(pcb_text)
+        existing_vias = parse_vias(pcb_text)
+
+        # Collect all net names across segments and vias
+        all_net_names = set(existing_segments.keys()) | set(existing_vias.keys())
+
+        route_count = 0
+        for net_name in all_net_names:
+            segs = existing_segments.get(net_name, [])
+            vias = existing_vias.get(net_name, [])
+            if not segs and not vias:
+                continue
+
+            # Determine net ID from first available element
+            net_id = segs[0].net if segs else vias[0].net
+
+            route = Route(
+                net=net_id,
+                net_name=net_name,
+                segments=segs,
+                vias=vias,
+            )
+            # Mark on grid as obstacles (blocked cells) but do NOT add to
+            # router.routes — these are fixed geometry, not re-routable nets.
+            router.grid.mark_route(route)
+            route_count += 1
+
+        if route_count > 0:
+            total_segs = sum(len(s) for s in existing_segments.values())
+            total_vias = sum(len(v) for v in existing_vias.values())
+            logger.info(
+                "Loaded %d existing routes as obstacles (%d segments, %d vias)",
+                route_count,
+                total_segs,
+                total_vias,
+            )
+
     return router, net_map
 
 
@@ -1555,6 +1608,8 @@ def generate_netclass_setup(
 def merge_routes_into_pcb(
     pcb_content: str,
     route_sexp: str,
+    detect_via_conflicts: bool = False,
+    via_clearance: float = 0.2,
 ) -> str:
     """
     Merge routed traces into an existing PCB file content.
@@ -1564,10 +1619,21 @@ def merge_routes_into_pcb(
     add any net_settings or net_class blocks, as routes already have
     correct trace widths and via sizes embedded.
 
+    When ``detect_via_conflicts`` is enabled, the merged result is scanned
+    for co-located vias belonging to different nets.  Any duplicate vias
+    whose centres fall within ``via_clearance`` mm of each other on
+    different nets are removed from the output and a warning is logged.
+
     Args:
         pcb_content: Original PCB file content as string
         route_sexp: Route S-expressions as a string. This must be the output
             of ``Autorouter.to_sexp()``, NOT the Autorouter object itself.
+        detect_via_conflicts: If True, scan the merged output for co-located
+            vias on different nets and remove duplicates.  Default False for
+            backward compatibility.
+        via_clearance: Minimum centre-to-centre distance (mm) below which
+            two vias on different nets are considered co-located.  Only used
+            when ``detect_via_conflicts`` is True.  Default is 0.2 mm.
 
     Returns:
         Modified PCB content with routes inserted.
@@ -1623,5 +1689,90 @@ def merge_routes_into_pcb(
     result = content + "\n\n"
     result += f"  {route_sexp}\n"
     result += ")\n"
+
+    # Post-merge co-located via detection
+    if detect_via_conflicts:
+        result = _remove_conflicting_vias(result, via_clearance)
+
+    return result
+
+
+def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
+    """Remove co-located vias on different nets from merged PCB text.
+
+    Scans all ``(via ...)`` blocks, groups them by position (within
+    *clearance* mm), and removes duplicates where two vias from
+    different nets occupy the same location.  The first via encountered
+    is kept; later conflicting vias are stripped.
+
+    Args:
+        pcb_text: Full PCB text content (after merge).
+        clearance: Centre-to-centre distance threshold in mm.
+
+    Returns:
+        PCB text with conflicting vias removed.
+    """
+    # Parse via positions and net IDs from the text
+    via_pattern = re.compile(
+        r"(\(via\s+"
+        r"\(at\s+([\d.-]+)\s+([\d.-]+)\)\s*"
+        r"\(size\s+[\d.]+\)\s*"
+        r"\(drill\s+[\d.]+\)\s*"
+        r'\(layers\s+"[^"]+"\s+"[^"]+"\)\s*'
+        r"\(net\s+(\d+)\)"
+        r"[^)]*\))",
+        re.DOTALL,
+    )
+
+    # Collect all vias with their positions, nets, and match spans
+    vias: list[tuple[float, float, int, re.Match]] = []  # type: ignore[type-arg]
+    for match in via_pattern.finditer(pcb_text):
+        x = float(match.group(2))
+        y = float(match.group(3))
+        net = int(match.group(4))
+        vias.append((x, y, net, match))
+
+    if len(vias) < 2:
+        return pcb_text
+
+    # Identify conflicting vias (different net, within clearance distance)
+    # Keep the first via encountered at each location; remove later conflicts
+    spans_to_remove: list[tuple[int, int]] = []
+    for i in range(len(vias)):
+        x_i, y_i, net_i, match_i = vias[i]
+        # Skip vias already marked for removal
+        if (match_i.start(), match_i.end()) in spans_to_remove:
+            continue
+        for j in range(i + 1, len(vias)):
+            x_j, y_j, net_j, match_j = vias[j]
+            if net_i == net_j:
+                continue
+            dist = math.sqrt((x_i - x_j) ** 2 + (y_i - y_j) ** 2)
+            if dist < clearance:
+                span = (match_j.start(), match_j.end())
+                if span not in spans_to_remove:
+                    spans_to_remove.append(span)
+                    logger.warning(
+                        "Removed conflicting via at (%.4f, %.4f) net %d "
+                        "(co-located with net %d, distance %.4fmm)",
+                        x_j,
+                        y_j,
+                        net_j,
+                        net_i,
+                        dist,
+                    )
+
+    if not spans_to_remove:
+        return pcb_text
+
+    # Remove spans in reverse order to preserve character offsets
+    spans_to_remove.sort(reverse=True)
+    result = pcb_text
+    for start, end in spans_to_remove:
+        # Also strip trailing whitespace/newline after the removed via
+        trail = end
+        while trail < len(result) and result[trail] in (" ", "\t", "\n", "\r"):
+            trail += 1
+        result = result[:start] + result[trail:]
 
     return result
