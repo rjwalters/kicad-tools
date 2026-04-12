@@ -266,6 +266,9 @@ class RoutingOrchestrator:
             elif strategy == RoutingStrategy.FULL_PIPELINE:
                 return self._route_full_pipeline(net, intent, pads)
 
+            elif strategy == RoutingStrategy.MULTI_RESOLUTION:
+                return self._route_multi_resolution(net, pads)
+
             else:
                 error_msg = f"Unknown strategy: {strategy}"
                 logger.error(error_msg)
@@ -1007,6 +1010,38 @@ class RoutingOrchestrator:
             logger.warning("Clearance repair failed: %s", e)
             return 0
 
+    def _route_multi_resolution(
+        self,
+        net: str | int,
+        pads: list[Pad] | None,
+    ) -> RoutingResult:
+        """Route a net using multi-resolution strategy.
+
+        This delegates to the global router first and, on failure, notes
+        that multi-resolution retry is recommended. The actual fine-grid
+        retry is best performed at the board level via
+        ``Autorouter.route_all_multi_resolution()`` since it requires
+        grid reconstruction.
+
+        Args:
+            net: Net identifier
+            pads: Optional list of pads
+
+        Returns:
+            RoutingResult with multi-resolution metadata
+        """
+        # First attempt with global routing
+        result = self._route_global(net, pads)
+        result.strategy_used = RoutingStrategy.MULTI_RESOLUTION
+
+        if not result.success:
+            result.warnings.append(
+                "Net failed on coarse grid. Use Autorouter.route_all_multi_resolution() "
+                "for automatic fine-grid retry."
+            )
+
+        return result
+
     def _suggest_alternatives(self, failed_strategy: RoutingStrategy) -> list[AlternativeStrategy]:
         """Suggest alternative strategies when a strategy fails.
 
@@ -1018,8 +1053,16 @@ class RoutingOrchestrator:
         """
         alternatives = []
 
-        # If global routing failed, try hierarchical
+        # If global routing failed, try multi-resolution then hierarchical
         if failed_strategy == RoutingStrategy.GLOBAL_WITH_REPAIR:
+            alternatives.append(
+                AlternativeStrategy(
+                    strategy=RoutingStrategy.MULTI_RESOLUTION,
+                    reason="Fine-grid retry may resolve geometry-constrained failures",
+                    estimated_cost=1.5,
+                    success_probability=0.65,
+                )
+            )
             alternatives.append(
                 AlternativeStrategy(
                     strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,

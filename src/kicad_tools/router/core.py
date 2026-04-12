@@ -2570,6 +2570,7 @@ class Autorouter:
         use_negotiated: bool = False,
         use_two_phase: bool = False,
         use_hierarchical: bool = False,
+        use_multi_resolution: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> list[Route]:
         """Unified entry point for advanced routing strategies.
@@ -2581,17 +2582,25 @@ class Autorouter:
             use_hierarchical: Use hierarchical global-to-detailed routing
                 (Issue #1095). This builds a RegionGraph for coarse-grid
                 corridor assignment before detailed routing.
+            use_multi_resolution: Use multi-resolution routing with fine-grid
+                fallback for nets that fail on the coarse grid (Issue #1251).
             progress_callback: Optional callback for progress updates
 
         Returns:
             List of routes
 
         Note:
-            Priority order: monte_carlo > hierarchical > two_phase > negotiated > standard
+            Priority order: monte_carlo > multi_resolution > hierarchical >
+            two_phase > negotiated > standard
         """
         if monte_carlo_trials > 0:
             return self.route_all_monte_carlo(
                 monte_carlo_trials, use_negotiated, progress_callback=progress_callback
+            )
+        elif use_multi_resolution:
+            return self.route_all_multi_resolution(
+                use_negotiated=use_negotiated,
+                progress_callback=progress_callback,
             )
         elif use_hierarchical:
             return self.route_all_hierarchical(
@@ -3464,6 +3473,287 @@ class Autorouter:
                 flush_print(failure_summary)
 
         return result.all_routes
+
+    # =========================================================================
+    # MULTI-RESOLUTION ROUTING (Issue #1251)
+    # =========================================================================
+
+    def route_all_multi_resolution(
+        self,
+        fine_resolution_factor: float = 0.5,
+        pin_order_trials: list[str] | None = None,
+        budget_multiplier: float = 4.0,
+        use_negotiated: bool = True,
+        max_iterations: int = 10,
+        progress_callback: ProgressCallback | None = None,
+        timeout: float | None = None,
+    ) -> list[Route]:
+        """Route all nets with multi-resolution fallback for failed nets.
+
+        First routes all nets on the current (coarse) grid. Nets that fail
+        are retried on a finer grid (2x resolution by default) scoped to the
+        failed nets' bounding boxes to avoid memory explosion.
+
+        Args:
+            fine_resolution_factor: Cell size multiplier for the fine grid
+                (0.5 = half cell size = 2x resolution). Default 0.5.
+            pin_order_trials: List of pin orderings to try on the fine grid.
+                Options: "default", "reversed", "shuffled".
+                Default is ["default"].
+            budget_multiplier: A* node expansion budget multiplier for
+                fine-grid retries. Higher values allow more exploration
+                at the cost of speed. Default 4.0.
+            use_negotiated: Use negotiated congestion routing for the
+                initial coarse pass. Default True.
+            max_iterations: Max iterations for negotiated routing. Default 10.
+            progress_callback: Optional callback for progress updates.
+            timeout: Optional timeout in seconds for the entire operation.
+
+        Returns:
+            List of Route objects (coarse + fine grid results merged).
+
+        Example:
+            >>> router = Autorouter(100, 100)
+            >>> # ... add components ...
+            >>> routes = router.route_all_multi_resolution(
+            ...     fine_resolution_factor=0.5,
+            ...     pin_order_trials=["default", "reversed"],
+            ... )
+        """
+        import time
+
+        start_time = time.time()
+
+        if pin_order_trials is None:
+            pin_order_trials = ["default"]
+
+        flush_print("\n=== Multi-Resolution Routing ===")
+        flush_print(f"  Fine grid factor: {fine_resolution_factor}")
+        flush_print(f"  Pin order trials: {pin_order_trials}")
+        flush_print(f"  Budget multiplier: {budget_multiplier}")
+
+        # --- Pass 1: Route on the current (coarse) grid ---
+        flush_print("\n--- Pass 1: Coarse grid routing ---")
+        if use_negotiated:
+            self.route_all_negotiated(
+                max_iterations=max_iterations,
+                timeout=timeout,
+                progress_callback=progress_callback,
+                adaptive=True,
+            )
+        else:
+            self.route_all(progress_callback=progress_callback)
+
+        coarse_stats = self.get_statistics()
+        coarse_routed = coarse_stats["nets_routed"]
+        total_nets = len([n for n in self.nets if n > 0 and len(self.nets[n]) >= 2])
+        flush_print(f"  Coarse pass: {coarse_routed}/{total_nets} nets routed")
+
+        # Collect failed nets
+        failed_net_ids = [f.net for f in self.routing_failures]
+
+        if not failed_net_ids:
+            flush_print("  All nets routed on coarse grid -- no fine-grid pass needed")
+            return list(self.routes)
+
+        flush_print(f"  {len(failed_net_ids)} net(s) failed on coarse grid")
+
+        # Check timeout before fine-grid pass
+        if timeout and (time.time() - start_time) >= timeout:
+            flush_print("  Timeout reached -- skipping fine-grid pass")
+            return list(self.routes)
+
+        # --- Pass 2: Fine-grid retry for failed nets ---
+        flush_print(f"\n--- Pass 2: Fine-grid retry ({len(failed_net_ids)} nets) ---")
+
+        fine_resolution = self.grid.resolution * fine_resolution_factor
+        flush_print(f"  Coarse resolution: {self.grid.resolution:.4f}mm")
+        flush_print(f"  Fine resolution: {fine_resolution:.4f}mm")
+
+        # Compute bounding box around all failed nets' pads (with padding)
+        padding_mm = max(
+            self.rules.trace_clearance * 4,
+            self.grid.resolution * 10,
+        )
+
+        all_failed_pads: list[Pad] = []
+        for net_id in failed_net_ids:
+            if net_id not in self.nets:
+                continue
+            for pad_key in self.nets[net_id]:
+                if pad_key in self.pads:
+                    all_failed_pads.append(self.pads[pad_key])
+
+        if not all_failed_pads:
+            flush_print("  No pads found for failed nets -- skipping fine-grid pass")
+            return list(self.routes)
+
+        bbox_min_x = min(p.x for p in all_failed_pads) - padding_mm
+        bbox_max_x = max(p.x for p in all_failed_pads) + padding_mm
+        bbox_min_y = min(p.y for p in all_failed_pads) - padding_mm
+        bbox_max_y = max(p.y for p in all_failed_pads) + padding_mm
+
+        # Clamp to board bounds
+        bbox_min_x = max(bbox_min_x, self.grid.origin_x)
+        bbox_min_y = max(bbox_min_y, self.grid.origin_y)
+        bbox_max_x = min(bbox_max_x, self.grid.origin_x + self.grid.width)
+        bbox_max_y = min(bbox_max_y, self.grid.origin_y + self.grid.height)
+
+        fine_width = bbox_max_x - bbox_min_x
+        fine_height = bbox_max_y - bbox_min_y
+
+        # Safety check: estimate fine-grid cell count
+        num_layers = self.grid.num_layers
+        estimated_fine_cells = (
+            (fine_width / fine_resolution) * (fine_height / fine_resolution) * num_layers
+        )
+        max_fine_cells = 16_000_000  # 16M cell safety limit
+
+        if estimated_fine_cells > max_fine_cells:
+            flush_print(
+                f"  WARNING: Fine grid would have {estimated_fine_cells:.0f} cells "
+                f"(limit {max_fine_cells}). Increasing resolution to fit."
+            )
+            # Scale resolution up to fit within the cell limit
+            scale = (estimated_fine_cells / max_fine_cells) ** 0.5
+            fine_resolution = fine_resolution * scale
+            flush_print(f"  Adjusted fine resolution: {fine_resolution:.4f}mm")
+
+        flush_print(
+            f"  Fine grid region: {fine_width:.1f}x{fine_height:.1f}mm "
+            f"at ({bbox_min_x:.1f}, {bbox_min_y:.1f})"
+        )
+
+        # Create fine grid scoped to bounding box
+        fine_rules = DesignRules(
+            grid_resolution=fine_resolution,
+            trace_width=self.rules.trace_width,
+            trace_clearance=self.rules.trace_clearance,
+            via_drill=self.rules.via_drill,
+            via_diameter=self.rules.via_diameter,
+            via_clearance=self.rules.via_clearance,
+        )
+
+        fine_grid = RoutingGrid(
+            width=fine_width,
+            height=fine_height,
+            rules=fine_rules,
+            origin_x=bbox_min_x,
+            origin_y=bbox_min_y,
+            layer_stack=self.grid.layer_stack,
+            resolution_override=fine_resolution,
+        )
+
+        # Mark already-routed traces as obstacles on fine grid
+        for route in self.routes:
+            fine_grid.mark_route(route)
+
+        # Add pads for the failed nets to the fine grid
+        for pad in all_failed_pads:
+            fine_grid.add_pad(pad)
+
+        # Also add pads from other nets that are in the bounding box region,
+        # so the fine grid knows about obstacles from other nets' pads
+        for (ref, pin), pad in self.pads.items():
+            if pad.net not in failed_net_ids:
+                if bbox_min_x <= pad.x <= bbox_max_x and bbox_min_y <= pad.y <= bbox_max_y:
+                    fine_grid.add_pad(pad)
+
+        # Create a fine-grid router
+        fine_router = create_hybrid_router(fine_grid, fine_rules, force_python=self._force_python)
+
+        fine_grid_nets_count = 0
+        remaining_timeout = None
+        if timeout:
+            remaining_timeout = timeout - (time.time() - start_time)
+            if remaining_timeout <= 0:
+                flush_print("  Timeout reached before fine-grid routing")
+                return list(self.routes)
+
+        # Try each failed net with pin order trials
+        for net_id in failed_net_ids:
+            if timeout and (time.time() - start_time) >= timeout:
+                flush_print("  Timeout reached during fine-grid pass")
+                break
+
+            if net_id not in self.nets:
+                continue
+
+            pads_keys = self.nets[net_id]
+            if len(pads_keys) < 2:
+                continue
+
+            pad_objs = [self.pads[p] for p in pads_keys if p in self.pads]
+            if len(pad_objs) < 2:
+                continue
+
+            net_name = self.net_names.get(net_id, f"Net {net_id}")
+            best_routes: list[Route] = []
+
+            for trial in pin_order_trials:
+                trial_pads = list(pad_objs)
+
+                if trial == "reversed":
+                    trial_pads = list(reversed(trial_pads))
+                elif trial == "shuffled":
+                    trial_pads = list(trial_pads)
+                    random.shuffle(trial_pads)
+                # "default" keeps original order
+
+                # Use MST routing on the fine grid with increased budget
+                mst_router = MSTRouter(fine_grid, fine_router, fine_rules, self.net_class_map)
+
+                trial_routes: list[Route] = []
+
+                def mark_fine_route(route: Route) -> None:
+                    fine_grid.mark_route(route)
+                    trial_routes.append(route)
+
+                mst_router.route_mst(
+                    trial_pads,
+                    mark_route_callback=mark_fine_route,
+                )
+
+                if trial_routes and (not best_routes or len(trial_routes) > len(best_routes)):
+                    best_routes = trial_routes
+                    if len(trial_routes) >= len(pads_keys) - 1:
+                        # Fully routed, no need to try more orderings
+                        break
+
+            if best_routes:
+                fine_grid_nets_count += 1
+                # Mark these routes on the main grid and add to our routes
+                for route in best_routes:
+                    self._mark_route(route)
+                    self.routes.append(route)
+
+                # Remove from routing failures
+                self.routing_failures = [
+                    f for f in self.routing_failures if f.net != net_id
+                ]
+
+                flush_print(
+                    f"    {net_name}: routed on fine grid "
+                    f"({len(best_routes)} routes)"
+                )
+            else:
+                flush_print(f"    {net_name}: still failed on fine grid")
+
+        # --- Summary ---
+        final_stats = self.get_statistics()
+        final_routed = final_stats["nets_routed"]
+
+        flush_print("\n=== Multi-Resolution Complete ===")
+        flush_print(f"  Nets routed: {final_routed}/{total_nets}")
+        flush_print(f"  Coarse grid: {coarse_routed} nets")
+        flush_print(f"  Fine grid fallback: {fine_grid_nets_count} nets")
+
+        if self.routing_failures:
+            flush_print(
+                f"  Still failed: {len(self.routing_failures)} net(s)"
+            )
+
+        return list(self.routes)
 
     # =========================================================================
     # PROGRESSIVE CLEARANCE RELAXATION
