@@ -89,8 +89,6 @@ class ViolationType(Enum):
             if "micro" in s_lower:
                 return cls.MICRO_VIA_HOLE_TOO_SMALL
         if "drill" in s_lower:
-            if "clearance" in s_lower:
-                return cls.DRILL_CLEARANCE
             return cls.DRILL_HOLE_TOO_SMALL
         if "silk" in s_lower:
             if "copper" in s_lower:

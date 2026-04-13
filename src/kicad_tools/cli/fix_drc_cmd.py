@@ -5,9 +5,6 @@ This command repairs multiple types of DRC violations:
 - clearance_segment_segment: nudge traces via ClearanceRepairer
 - dimension_drill_clearance: de-duplicate or slide vias via DrillClearanceRepairer
 
-It iterates up to N passes, re-checking violations after each pass until all
-targeted violations are resolved or no further progress is made.
-
 Usage:
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --dry-run
@@ -65,12 +62,6 @@ Examples:
         type=float,
         default=0.01,
         help="Extra clearance margin beyond minimum in mm (default: 0.01)",
-    )
-    parser.add_argument(
-        "--max-passes",
-        type=int,
-        default=3,
-        help="Maximum number of repair passes (default: 3)",
     )
     parser.add_argument(
         "--only",
