@@ -5,6 +5,7 @@ convergence for negotiated congestion routing.
 """
 
 from kicad_tools.router.algorithms.negotiated import (
+    _is_monotonically_diverging,
     calculate_history_increment,
     calculate_present_cost,
     detect_oscillation,
@@ -119,6 +120,99 @@ class TestShouldTerminateEarly:
         """Should not terminate when making progress."""
         history = [50, 40, 30, 20, 10, 5]
         assert should_terminate_early(history, iteration=6, min_iterations=5) is False
+
+    def test_terminates_on_diverging_overflow_from_issue_1266(self):
+        """Should terminate on the exact diverging pattern from issue #1266.
+
+        The sequence [90, 96, 88, 130, 148, 155] was reported as running all
+        the way to max_iterations because:
+        - The stale baseline ([float('inf')]) masked the no-improvement check
+        - The dip to 88 in the second half defeated the half-split worsening check
+        - detect_oscillation missed it because it is not an A-B-A-B cycle
+        """
+        history = [90, 96, 88, 130, 148, 155]
+        assert should_terminate_early(history, iteration=5, min_iterations=5) is True
+
+    def test_terminates_with_stale_baseline_at_exactly_5_entries(self):
+        """Should use first value as baseline when history has exactly 5 entries.
+
+        Previously, earlier defaulted to [float('inf')] making the
+        no-improvement check always False with exactly 5 history entries.
+        """
+        # All 5 values are >= the first value (90), so no improvement
+        history = [90, 95, 92, 93, 91]
+        assert should_terminate_early(history, iteration=5, min_iterations=5) is True
+
+    def test_no_false_positive_on_genuine_convergence_with_dip(self):
+        """Should NOT terminate on a converging sequence with a transient dip.
+
+        A sequence like [90, 85, 80, 75, 70] is genuinely improving even
+        though early values are higher.  The monotonic divergence check must
+        not fire here.
+        """
+        history = [90, 85, 80, 75, 70]
+        assert should_terminate_early(history, iteration=5, min_iterations=5) is False
+
+    def test_no_false_positive_on_slow_convergence(self):
+        """Should NOT terminate when overflow is slowly decreasing.
+
+        Sequence [100, 98, 95, 93, 88, 85] has recent min (85) below
+        earlier min (100), so the no-improvement check should not fire.
+        """
+        history = [100, 98, 95, 93, 88, 85]
+        assert should_terminate_early(history, iteration=6, min_iterations=5) is False
+
+    def test_terminates_on_monotonic_divergence_longer_history(self):
+        """Should terminate when trailing values diverge monotonically.
+
+        After an initial improvement the overflow starts climbing and the
+        last 3 values are strictly increasing and all above the best seen.
+        """
+        history = [50, 40, 35, 38, 45, 55, 60, 70]
+        assert should_terminate_early(history, iteration=8, min_iterations=5) is True
+
+    def test_handles_fewer_than_5_entries_gracefully(self):
+        """Should return False with fewer than 5 entries regardless of pattern."""
+        assert should_terminate_early([100, 200, 300], iteration=5, min_iterations=3) is False
+        assert should_terminate_early([100, 200, 300, 400], iteration=5, min_iterations=3) is False
+
+
+class TestIsMonotonicallyDiverging:
+    """Tests for _is_monotonically_diverging helper."""
+
+    def test_detects_strict_increasing_above_best(self):
+        """Should detect [90, 88, 130, 148, 155] — last 3 are 130<148<155, all > 88."""
+        assert _is_monotonically_diverging([90, 88, 130, 148, 155], window=3) is True
+
+    def test_rejects_decreasing_sequence(self):
+        """Should reject a converging sequence."""
+        assert _is_monotonically_diverging([100, 90, 80, 70, 60], window=3) is False
+
+    def test_rejects_flat_sequence(self):
+        """Should reject a flat sequence (not strictly increasing)."""
+        assert _is_monotonically_diverging([50, 100, 100, 100], window=3) is False
+
+    def test_rejects_when_recent_includes_best(self):
+        """Should reject when one of the recent values equals the best seen."""
+        # best_seen=40, recent=[40, 50, 60] — 40 is not > 40
+        assert _is_monotonically_diverging([50, 40, 40, 50, 60], window=3) is False
+
+    def test_rejects_insufficient_history(self):
+        """Should return False with too few entries."""
+        assert _is_monotonically_diverging([10, 20, 30], window=3) is False
+        assert _is_monotonically_diverging([10, 20], window=3) is False
+        assert _is_monotonically_diverging([], window=3) is False
+
+    def test_detects_with_custom_window(self):
+        """Should work with non-default window sizes."""
+        # window=4: last 4 values [120, 130, 140, 150] all > best=100, strictly increasing
+        assert _is_monotonically_diverging([100, 110, 120, 130, 140, 150], window=4) is True
+        # window=2: last 2 values [140, 150] > best=100, strictly increasing
+        assert _is_monotonically_diverging([100, 110, 140, 150], window=2) is True
+
+    def test_issue_1266_exact_sequence(self):
+        """Should detect the exact sequence from the bug report."""
+        assert _is_monotonically_diverging([90, 96, 88, 130, 148, 155], window=3) is True
 
 
 class TestCalculatePresentCost:

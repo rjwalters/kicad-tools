@@ -115,6 +115,37 @@ def detect_oscillation(overflow_history: list[int], window: int = 4) -> bool:
     return False
 
 
+def _is_monotonically_diverging(overflow_history: list[int], window: int = 3) -> bool:
+    """Detect monotonically increasing overflow above the best-seen value.
+
+    This catches diverging sequences like [90, 96, 88, 130, 148, 155] where
+    the last ``window`` values are all strictly increasing and all above the
+    overall best (minimum) value.  Standard oscillation detection misses this
+    pattern because it looks for A-B-A-B cycles, and the half-split worsening
+    check is defeated by an early dip that lands in the second half.
+
+    Args:
+        overflow_history: List of overflow values from previous iterations.
+        window: Number of trailing values to inspect (default: 3).
+
+    Returns:
+        True if the last ``window`` values form a strictly increasing
+        sequence that is entirely above the historical minimum.
+    """
+    if len(overflow_history) < window + 1:
+        return False
+
+    recent = overflow_history[-window:]
+    best_seen = min(overflow_history)
+
+    # All recent values must be strictly above the best seen
+    if not all(v > best_seen for v in recent):
+        return False
+
+    # The recent window must be strictly increasing
+    return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
+
+
 def should_terminate_early(
     overflow_history: list[int],
     iteration: int,
@@ -132,6 +163,7 @@ def should_terminate_early(
 
     Terminates when:
     - No improvement in last 5 iterations
+    - Monotonic divergence detected (overflow climbing away from best)
     - Oscillation detected
     - Overflow is getting worse over time
     """
@@ -143,9 +175,23 @@ def should_terminate_early(
 
     recent = overflow_history[-5:]
 
-    # No improvement in last 5 iterations
-    earlier = overflow_history[:-5] if len(overflow_history) > 5 else [float("inf")]
+    # No improvement in last 5 iterations.
+    # When len(overflow_history) == 5 there is no earlier window; use the
+    # first recorded value as baseline instead of float('inf') which would
+    # make this check unreachable and mask stale-baseline divergence.
+    if len(overflow_history) > 5:
+        earlier = overflow_history[:-5]
+    else:
+        earlier = overflow_history[:1]
     if min(recent) >= min(earlier):
+        return True
+
+    # Monotonic divergence: the last N values are strictly increasing and
+    # all above the best-seen minimum.  This catches patterns like
+    # [90, 96, 88, 130, 148, 155] that slip past the half-split check
+    # because a single dip (88) in the second half keeps min(second_half)
+    # low.
+    if _is_monotonically_diverging(overflow_history, window=3):
         return True
 
     # Oscillating with no progress
