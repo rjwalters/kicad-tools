@@ -396,6 +396,82 @@ def _kicad_drc_supports_refill(kicad_cli: Path) -> bool:
         return False
 
 
+def _snapshot_net_declarations(pcb_path: Path) -> list:
+    """Snapshot net declaration S-expression nodes from a PCB file.
+
+    Returns a list of ``(net N "name")`` SExp nodes extracted from the
+    PCB's top-level children.  These can be used later by
+    :func:`_restore_net_declarations` to repair a PCB whose net table
+    was stripped by kicad-cli.
+
+    Returns an empty list if the file cannot be read (e.g. it does not
+    exist).  In that scenario the subsequent DRC subprocess call will
+    also fail, so skipping the snapshot is harmless.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+
+    try:
+        sexp = load_pcb(str(pcb_path))
+    except Exception:
+        return []
+    return [child for child in sexp.children if child.name == "net"]
+
+
+def _restore_net_declarations(target_pcb: Path, net_nodes: list) -> None:
+    """Restore net declarations in *target_pcb* from a snapshot.
+
+    kicad-cli may strip ``(net N "name")`` header declarations when
+    re-serializing a PCB that was not originally written by KiCad itself.
+    This function replaces the output file's net declarations with those
+    captured before the DRC run, preserving all other content (including
+    filled zone polygons).
+
+    The function is a no-op when the output already has at least as many
+    net declarations as the snapshot (i.e. kicad-cli kept them intact).
+    """
+    from kicad_tools.core.sexp_file import load_pcb, save_pcb
+
+    output_sexp = load_pcb(str(target_pcb))
+
+    # Count existing nets in the output
+    output_net_nodes = [child for child in output_sexp.children if child.name == "net"]
+
+    if len(output_net_nodes) >= len(net_nodes):
+        # Net table was not stripped — nothing to do.
+        return
+
+    # Remove whatever net declarations remain in the output.
+    for node in output_net_nodes:
+        output_sexp.children.remove(node)
+
+    # Find insertion point: nets go after ``setup`` / ``title_block`` and
+    # before ``footprint`` / ``segment`` / ``via`` / ``zone`` / ``gr_*``.
+    # Walk backward from the first content element to find the right spot.
+    insert_index = len(output_sexp.children)
+    content_tags = {
+        "footprint",
+        "segment",
+        "via",
+        "zone",
+        "gr_line",
+        "gr_arc",
+        "gr_text",
+        "gr_rect",
+        "gr_circle",
+        "gr_poly",
+    }
+    for i, child in enumerate(output_sexp.children):
+        if child.name in content_tags:
+            insert_index = i
+            break
+
+    # Insert the snapshotted net declarations at the computed position.
+    for offset, net_node in enumerate(net_nodes):
+        output_sexp.children.insert(insert_index + offset, net_node)
+
+    save_pcb(output_sexp, target_pcb)
+
+
 def _run_fill_zones_via_drc(
     pcb_path: Path,
     output_path: Path | None,
@@ -409,8 +485,18 @@ def _run_fill_zones_via_drc(
 
     A non-zero exit code caused by DRC *violations* does **not** indicate
     a fill failure.
+
+    After a successful DRC run the output PCB's net declarations are
+    verified against the input.  If kicad-cli stripped the net table
+    (a known issue when the PCB was serialized by kicad-tools rather
+    than KiCad itself), the original net declarations are restored so
+    that segments and vias retain their net assignments.
     """
     import os
+
+    # Snapshot input net declarations *before* DRC runs — the DRC
+    # may modify the file in-place when no output_path is given.
+    input_net_nodes = _snapshot_net_declarations(pcb_path)
 
     # DRC modifies the input file in-place.  If the caller requested a
     # separate output file, copy the source first and run DRC on the copy.
@@ -448,6 +534,9 @@ def _run_fill_zones_via_drc(
         # are still filled.  We treat it as success when the DRC report
         # was actually produced (meaning the command ran to completion).
         if drc_report.exists() and drc_report.stat().st_size > 0:
+            # Restore net declarations if kicad-cli stripped them.
+            _restore_net_declarations(target_pcb, input_net_nodes)
+
             return KiCadCLIResult(
                 success=True,
                 output_path=target_pcb,
