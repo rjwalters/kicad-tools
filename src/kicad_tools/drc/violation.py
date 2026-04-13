@@ -16,6 +16,7 @@ class ViolationType(Enum):
 
     # Clearance violations
     CLEARANCE = "clearance"
+    CLEARANCE_SEGMENT_VIA = "clearance_segment_via"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
     COURTYARD_OVERLAP = "courtyard_overlap"
 
@@ -72,6 +73,8 @@ class ViolationType(Enum):
         if "clearance" in s_lower:
             if "edge" in s_lower:
                 return cls.COPPER_EDGE_CLEARANCE
+            if "segment" in s_lower and "via" in s_lower:
+                return cls.CLEARANCE_SEGMENT_VIA
             return cls.CLEARANCE
         if "unconnected" in s_lower:
             return cls.UNCONNECTED_ITEMS
@@ -181,7 +184,11 @@ class DRCViolation:
     @property
     def is_clearance(self) -> bool:
         """Check if this is a clearance violation."""
-        return self.type in (ViolationType.CLEARANCE, ViolationType.COPPER_EDGE_CLEARANCE)
+        return self.type in (
+            ViolationType.CLEARANCE,
+            ViolationType.CLEARANCE_SEGMENT_VIA,
+            ViolationType.COPPER_EDGE_CLEARANCE,
+        )
 
     @property
     def is_connection(self) -> bool:

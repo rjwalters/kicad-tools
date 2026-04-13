@@ -3,6 +3,7 @@
 
 This command repairs multiple types of DRC violations:
 - clearance_segment_segment: nudge traces via ClearanceRepairer
+- clearance_segment_via: nudge traces away from enlarged vias via ClearanceRepairer
 - dimension_drill_clearance: de-duplicate or slide vias via DrillClearanceRepairer
 
 Usage:
@@ -112,7 +113,14 @@ Examples:
     do_clearance = args.only is None or args.only == "clearance"
     do_drill = args.only is None or args.only == "drill-clearance"
 
-    clearance_violations = report.by_type(ViolationType.CLEARANCE) if do_clearance else []
+    clearance_violations = (
+        (
+            report.by_type(ViolationType.CLEARANCE)
+            + report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+        )
+        if do_clearance
+        else []
+    )
     drill_violations = (
         (
             report.by_type(ViolationType.DRILL_CLEARANCE)

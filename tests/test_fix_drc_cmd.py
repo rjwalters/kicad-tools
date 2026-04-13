@@ -109,6 +109,49 @@ PCB_WITH_MIXED = """\
 )
 """
 
+# PCB with a segment too close to a via (segment-via clearance violation)
+PCB_WITH_SEGMENT_VIA_CLEARANCE = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-sv-1"))
+)
+"""
+
+# PCB with a segment near a <no net> via (net 0)
+PCB_WITH_NO_NET_VIA = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 0) (uuid "via-nn-1"))
+)
+"""
+
 # ── DRC report fixtures ─────────────────────────────────────────────
 
 DRC_REPORT_CLEARANCE = """\
@@ -167,6 +210,34 @@ DRC_REPORT_MIXED = """\
     Rule: min drill clearance; error
     @(115.0000 mm, 105.2000 mm): Via [GND] on F.Cu - B.Cu
     @(115.0000 mm, 105.2000 mm): Via [+3.3V] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_SEGMENT_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.1000 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+DRC_REPORT_NO_NET_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.1000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [] on F.Cu - B.Cu
 
 ** Found 0 Footprint errors **
 ** End of Report **
@@ -239,6 +310,34 @@ def report_same_net_drill(tmp_path: Path) -> Path:
 def report_mixed(tmp_path: Path) -> Path:
     f = tmp_path / "mixed-drc.rpt"
     f.write_text(DRC_REPORT_MIXED)
+    return f
+
+
+@pytest.fixture
+def pcb_segment_via(tmp_path: Path) -> Path:
+    f = tmp_path / "segment_via.kicad_pcb"
+    f.write_text(PCB_WITH_SEGMENT_VIA_CLEARANCE)
+    return f
+
+
+@pytest.fixture
+def pcb_no_net_via(tmp_path: Path) -> Path:
+    f = tmp_path / "no_net_via.kicad_pcb"
+    f.write_text(PCB_WITH_NO_NET_VIA)
+    return f
+
+
+@pytest.fixture
+def report_segment_via(tmp_path: Path) -> Path:
+    f = tmp_path / "segment-via-drc.rpt"
+    f.write_text(DRC_REPORT_SEGMENT_VIA)
+    return f
+
+
+@pytest.fixture
+def report_no_net_via(tmp_path: Path) -> Path:
+    f = tmp_path / "no-net-via-drc.rpt"
+    f.write_text(DRC_REPORT_NO_NET_VIA)
     return f
 
 
@@ -533,6 +632,23 @@ class TestViolationTypeMapping:
         """clearance_segment_segment should map to CLEARANCE via partial match."""
         assert ViolationType.from_string("clearance_segment_segment") == ViolationType.CLEARANCE
 
+    def test_clearance_segment_via(self):
+        """clearance_segment_via should map to CLEARANCE_SEGMENT_VIA."""
+        assert (
+            ViolationType.from_string("clearance_segment_via")
+            == ViolationType.CLEARANCE_SEGMENT_VIA
+        )
+
+    def test_clearance_segment_via_is_clearance(self):
+        """CLEARANCE_SEGMENT_VIA violations should be considered clearance issues."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+        )
+        assert v.is_clearance
+
 
 # ── CLI integration tests ───────────────────────────────────────────
 
@@ -724,6 +840,69 @@ class TestFixDRCCLI:
             ]
         )
         assert result == 0
+
+    def test_segment_via_clearance_counted(
+        self, pcb_segment_via: Path, report_segment_via: Path, capsys
+    ):
+        """clearance_segment_via violations should be counted in clearance total."""
+        main(
+            [
+                str(pcb_segment_via),
+                "--drc-report",
+                str(report_segment_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The segment-via violation should appear in the clearance count
+        assert data["clearance"]["violations"] >= 1
+
+    def test_segment_via_clearance_repair(
+        self, pcb_segment_via: Path, report_segment_via: Path, capsys
+    ):
+        """Segment-to-via clearance should be repaired by moving the segment."""
+        main(
+            [
+                str(pcb_segment_via),
+                "--drc-report",
+                str(report_segment_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The violation should be repaired (segment nudged)
+        assert data["clearance"]["repaired"] >= 1
+        # Verify it was a segment nudge (not a via move)
+        if data["clearance"]["nudges"]:
+            assert data["clearance"]["nudges"][0]["object_type"] == "segment"
+
+    def test_no_net_via_clearance_repair(
+        self, pcb_no_net_via: Path, report_no_net_via: Path, capsys
+    ):
+        """Via with no net should not be excluded from clearance repair."""
+        main(
+            [
+                str(pcb_no_net_via),
+                "--drc-report",
+                str(report_no_net_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The violation should be repaired (via found despite having no net)
+        assert data["clearance"]["repaired"] >= 1
 
     def test_max_displacement_zero_skips_nudges(
         self, pcb_clearance: Path, report_clearance: Path, capsys
