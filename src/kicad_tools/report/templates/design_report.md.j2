@@ -1,0 +1,146 @@
+# {{ project_name }} - Design Report
+
+| Field | Value |
+|-------|-------|
+| **Project** | {{ project_name }} |
+| **Revision** | {{ revision }} |
+| **Date** | {{ date }} |
+| **Manufacturer** | {{ manufacturer }} |
+| **Tool Version** | {{ tool_version }} |
+{% if git_hash %}
+| **Git Hash** | {{ git_hash }} |
+{% endif %}
+
+---
+
+{% if board_stats %}
+## Design Summary
+
+| Metric | Value |
+|--------|-------|
+{% if board_stats.layer_count is defined and board_stats.layer_count is not none %}
+| Layers | {{ board_stats.layer_count }} |
+{% endif %}
+{% if board_stats.component_count is defined and board_stats.component_count is not none %}
+| Components | {{ board_stats.component_count }} |
+{% endif %}
+{% if board_stats.net_count is defined and board_stats.net_count is not none %}
+| Nets | {{ board_stats.net_count }} |
+{% endif %}
+{% if board_stats.board_area is defined and board_stats.board_area is not none %}
+| Board Area | {{ board_stats.board_area }} |
+{% endif %}
+{% for key, value in board_stats.items() %}
+{% if key not in ("layer_count", "component_count", "net_count", "board_area") %}
+| {{ key | replace("_", " ") | title }} | {{ value }} |
+{% endif %}
+{% endfor %}
+
+{% endif %}
+{% if schematic_sheets %}
+## Schematic Overview
+
+{% for sheet in schematic_sheets %}
+### {{ sheet.name }}
+
+![{{ sheet.name }}]({{ sheet.figure_path }})
+
+{% endfor %}
+{% endif %}
+{% if pcb_figures %}
+## PCB Layout
+
+{% if pcb_figures.front is defined and pcb_figures.front %}
+### Front
+
+![PCB Front]({{ pcb_figures.front }})
+
+{% endif %}
+{% if pcb_figures.back is defined and pcb_figures.back %}
+### Back
+
+![PCB Back]({{ pcb_figures.back }})
+
+{% endif %}
+{% if pcb_figures.copper is defined and pcb_figures.copper %}
+### Copper
+
+![PCB Copper]({{ pcb_figures.copper }})
+
+{% endif %}
+{% endif %}
+{% if bom_groups %}
+## Bill of Materials
+
+| Value | Footprint | Qty | References | MPN | LCSC |
+|-------|-----------|-----|------------|-----|------|
+{% for item in bom_groups %}
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) }} | {{ item.mpn | default("", true) }} | {{ item.lcsc | default("", true) }} |
+{% endfor %}
+
+{% endif %}
+{% if drc %}
+## DRC Status
+
+| Metric | Count |
+|--------|-------|
+| Errors | {{ drc.error_count | default(0) }} |
+| Warnings | {{ drc.warning_count | default(0) }} |
+| Blocking | {{ drc.blocking_count | default(0) }} |
+
+**Status**: {% if drc.passed | default(false) %}PASS{% else %}FAIL{% endif %}
+
+{% endif %}
+{% if audit %}
+## Manufacturing Readiness
+
+**Verdict**: {{ audit.verdict | default("unknown") | upper }}
+
+{% if audit.action_items is defined and audit.action_items %}
+### Action Items
+
+{% for item in audit.action_items %}
+- {{ item }}
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% if net_status %}
+## Routing Status
+
+| Metric | Value |
+|--------|-------|
+| Completion | {{ net_status.completion_percent | default(0) }}% |
+| Unrouted Nets | {{ net_status.unrouted_count | default(0) }} |
+
+{% if net_status.unrouted_nets is defined and net_status.unrouted_nets %}
+### Unrouted Nets
+
+{% for net in net_status.unrouted_nets %}
+- {{ net }}
+{% endfor %}
+{% endif %}
+
+{% endif %}
+{% if cost %}
+## Cost Estimate
+
+| Metric | Value |
+|--------|-------|
+{% if cost.per_unit is defined and cost.per_unit is not none %}
+| Per Unit | {{ cost.per_unit }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.batch_qty is defined and cost.batch_qty is not none %}
+| Batch Quantity | {{ cost.batch_qty }} |
+{% endif %}
+{% if cost.batch_total is defined and cost.batch_total is not none %}
+| Batch Total | {{ cost.batch_total }} {{ cost.currency | default("USD") }} |
+{% endif %}
+
+{% endif %}
+{% if notes %}
+## Notes
+
+{{ notes }}
+
+{% endif %}

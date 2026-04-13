@@ -431,6 +431,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "screenshot":
         return _run_screenshot_command(args)
 
+    elif args.command == "report":
+        return _run_report_command(args)
+
     return 0
 
 
@@ -601,6 +604,32 @@ def _run_screenshot_command(args) -> int:
         sub_argv.extend(["--theme", args.screenshot_theme])
 
     return screenshot_cmd(sub_argv)
+
+
+def _run_report_command(args) -> int:
+    """Run the report command."""
+    from .report_cmd import main as report_cmd
+
+    sub_argv: list[str] = []
+
+    report_command = getattr(args, "report_command", None)
+    if not report_command:
+        return report_cmd(["--help"])
+
+    sub_argv.append(report_command)
+
+    if report_command == "generate":
+        sub_argv.append(args.report_input)
+        if hasattr(args, "report_mfr") and args.report_mfr:
+            sub_argv.extend(["--mfr", args.report_mfr])
+        if hasattr(args, "report_output") and args.report_output:
+            sub_argv.extend(["-o", args.report_output])
+        if hasattr(args, "report_data_dir") and args.report_data_dir:
+            sub_argv.extend(["--data-dir", args.report_data_dir])
+        if hasattr(args, "report_template") and args.report_template:
+            sub_argv.extend(["--template", args.report_template])
+
+    return report_cmd(sub_argv)
 
 
 if __name__ == "__main__":

@@ -182,6 +182,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_detect_mistakes_parser(subparsers)
     _add_calibrate_parser(subparsers)
     _add_screenshot_parser(subparsers)
+    _add_report_parser(subparsers)
 
     return parser
 
@@ -3575,4 +3576,44 @@ def _add_screenshot_parser(subparsers) -> None:
         dest="screenshot_theme",
         default=None,
         help="KiCad color theme name",
+    )
+
+
+def _add_report_parser(subparsers) -> None:
+    """Add report subcommand parser."""
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Generate a Markdown design report",
+    )
+    report_sub = report_parser.add_subparsers(dest="report_command")
+
+    gen_parser = report_sub.add_parser("generate", help="Generate a design report")
+    gen_parser.add_argument(
+        "report_input",
+        help="Path to .kicad_pro or .kicad_pcb file",
+    )
+    gen_parser.add_argument(
+        "--mfr",
+        dest="report_mfr",
+        default="unknown",
+        help="Target manufacturer (default: unknown)",
+    )
+    gen_parser.add_argument(
+        "-o",
+        "--output",
+        dest="report_output",
+        default="reports",
+        help="Output directory for versioned reports (default: reports/)",
+    )
+    gen_parser.add_argument(
+        "--data-dir",
+        dest="report_data_dir",
+        default=None,
+        help="Directory containing pre-collected data/ and figures/ snapshots",
+    )
+    gen_parser.add_argument(
+        "--template",
+        dest="report_template",
+        default=None,
+        help="Path to a custom Jinja2 template file",
     )

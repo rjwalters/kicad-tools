@@ -1787,6 +1787,7 @@ all = [
     { name = "cairosvg" },
     { name = "cupy-cuda12x" },
     { name = "fastmcp" },
+    { name = "jinja2" },
     { name = "markdown" },
     { name = "markitdown" },
     { name = "matplotlib" },
@@ -1820,6 +1821,7 @@ datasheet = [
 ]
 dev = [
     { name = "fastmcp" },
+    { name = "jinja2" },
     { name = "markdown" },
     { name = "matplotlib" },
     { name = "mypy" },
@@ -1857,6 +1859,7 @@ parts = [
     { name = "requests" },
 ]
 report = [
+    { name = "jinja2" },
     { name = "markdown" },
     { name = "weasyprint" },
 ]
@@ -1869,6 +1872,7 @@ visualization = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "jinja2" },
     { name = "pytest-cov" },
 ]
 
@@ -1887,6 +1891,9 @@ requires-dist = [
     { name = "fastmcp", marker = "extra == 'all'", specifier = ">=2.0,<3" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=2.0,<3" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0,<3" },
+    { name = "jinja2", marker = "extra == 'all'", specifier = ">=3.1" },
+    { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
+    { name = "jinja2", marker = "extra == 'report'", specifier = ">=3.1" },
     { name = "markdown", marker = "extra == 'all'", specifier = ">=3.5" },
     { name = "markdown", marker = "extra == 'dev'", specifier = ">=3.5" },
     { name = "markdown", marker = "extra == 'report'", specifier = ">=3.5" },
@@ -1937,7 +1944,10 @@ requires-dist = [
 provides-extras = ["drc", "parts", "datasheet", "constraints", "mcp", "native", "cuda", "metal", "visualization", "bayesian", "screenshot", "report", "all", "dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest-cov", specifier = ">=7.0.0" }]
+dev = [
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+]
 
 [[package]]
 name = "kiwisolver"
