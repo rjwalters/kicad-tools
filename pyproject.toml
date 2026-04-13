@@ -137,6 +137,11 @@ bayesian = [
 screenshot = [
     "cairosvg>=2.6",
 ]
+# Report rendering (Markdown to HTML/PDF)
+report = [
+    "markdown>=3.5",
+    "weasyprint>=60.0",
+]
 # All optional features
 all = [
     "rtree>=1.0",
@@ -154,6 +159,8 @@ all = [
     "ax-platform>=0.4.0",
     "botorch>=0.12.0",
     "cairosvg>=2.6",
+    "markdown>=3.5",
+    "weasyprint>=60.0",
 ]
 # Development dependencies
 dev = [
@@ -172,6 +179,7 @@ dev = [
     "fastmcp>=2.0,<3",
     "pydantic>=2.0",
     "matplotlib>=3.5",
+    "markdown>=3.5",
 ]
 
 [tool.hatch.build.targets.wheel]

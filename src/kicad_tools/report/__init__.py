@@ -1,9 +1,14 @@
-"""Report generation subpackage for kicad-tools.
+"""Report generation and rendering for KiCad design reports.
 
-Provides tools for generating report figures (PCB renders, schematic
-screenshots) and structured manifests for design review documents.
+This package provides tools for generating professional design reports
+from KiCad project data, with support for Markdown, HTML, and PDF output formats.
+Includes figure generation (PCB renders, schematic screenshots) and
+structured manifests for design review documents.
 """
 
-from kicad_tools.report.figures import FigureEntry, ReportFigureGenerator
+from __future__ import annotations
 
-__all__ = ["FigureEntry", "ReportFigureGenerator"]
+from kicad_tools.report.figures import FigureEntry, ReportFigureGenerator
+from kicad_tools.report.renderers import render_html, render_pdf
+
+__all__ = ["FigureEntry", "ReportFigureGenerator", "render_html", "render_pdf"]
