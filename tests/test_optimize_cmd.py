@@ -383,3 +383,134 @@ class TestDrcAwareStatsFields:
         assert config.drc_manufacturer is None
         assert config.drc_layers == 2
         assert config.drc_copper_oz == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: DRC-aware display message formatting
+# ---------------------------------------------------------------------------
+
+
+class TestDrcAwareDisplayMessage:
+    """Test that the DRC summary line correctly reflects error changes."""
+
+    def _make_stats(self, **kwargs):
+        """Create an OptimizationStats with given overrides."""
+        from kicad_tools.router.optimizer.config import OptimizationStats
+
+        return OptimizationStats(**kwargs)
+
+    def test_drc_output_shows_regression_count(self, simple_pcb_path: Path, capsys):
+        """When errors increase, output should show new error count, not 'no regressions'."""
+        stats = self._make_stats(
+            drc_errors_before=5,
+            drc_errors_after=10,
+            nets_rolled_back=3,
+            nets_optimized=5,
+            segments_before=20,
+            segments_after=15,
+            length_before=100.0,
+            length_after=95.0,
+        )
+        with patch(
+            "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
+            return_value=stats,
+        ):
+            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "5 new errors" in captured.out
+        assert "3 nets rolled back" in captured.out
+        assert "no regressions" not in captured.out
+
+    def test_drc_output_shows_no_regressions_with_rollback(self, simple_pcb_path: Path, capsys):
+        """When errors do not increase but rollbacks occurred, show both facts."""
+        stats = self._make_stats(
+            drc_errors_before=5,
+            drc_errors_after=3,
+            nets_rolled_back=1,
+            nets_optimized=4,
+            segments_before=20,
+            segments_after=15,
+            length_before=100.0,
+            length_after=95.0,
+        )
+        with patch(
+            "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
+            return_value=stats,
+        ):
+            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "no regressions" in captured.out
+        assert "1 nets rolled back" in captured.out
+        assert "new errors" not in captured.out
+
+    def test_drc_output_shows_no_regressions_without_rollback(self, simple_pcb_path: Path, capsys):
+        """When errors unchanged and no rollbacks, show simple 'no regressions'."""
+        stats = self._make_stats(
+            drc_errors_before=5,
+            drc_errors_after=5,
+            nets_rolled_back=0,
+            nets_optimized=4,
+            segments_before=20,
+            segments_after=15,
+            length_before=100.0,
+            length_after=95.0,
+        )
+        with patch(
+            "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
+            return_value=stats,
+        ):
+            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(no regressions)" in captured.out
+        assert "nets rolled back" not in captured.out
+        assert "new errors" not in captured.out
+
+    def test_drc_output_shows_no_regressions_when_errors_decrease(
+        self, simple_pcb_path: Path, capsys
+    ):
+        """When errors decrease with no rollbacks, show simple 'no regressions'."""
+        stats = self._make_stats(
+            drc_errors_before=10,
+            drc_errors_after=7,
+            nets_rolled_back=0,
+            nets_optimized=4,
+            segments_before=20,
+            segments_after=15,
+            length_before=100.0,
+            length_after=95.0,
+        )
+        with patch(
+            "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
+            return_value=stats,
+        ):
+            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "(no regressions)" in captured.out
+        assert "new errors" not in captured.out
+
+    def test_drc_output_error_count_is_correct_delta(self, simple_pcb_path: Path, capsys):
+        """The new error count should be exactly drc_errors_after - drc_errors_before."""
+        stats = self._make_stats(
+            drc_errors_before=79,
+            drc_errors_after=120,
+            nets_rolled_back=3,
+            nets_optimized=10,
+            segments_before=200,
+            segments_after=150,
+            length_before=500.0,
+            length_after=480.0,
+        )
+        with patch(
+            "kicad_tools.router.optimizer.TraceOptimizer.optimize_pcb",
+            return_value=stats,
+        ):
+            result = main([str(simple_pcb_path), "--drc-aware", "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+        captured = capsys.readouterr()
+        # delta = 120 - 79 = 41
+        assert "41 new errors" in captured.out
+        assert "3 nets rolled back" in captured.out

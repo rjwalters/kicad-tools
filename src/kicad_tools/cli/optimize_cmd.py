@@ -221,9 +221,16 @@ Examples:
         )
 
         if args.drc_aware:
+            delta = stats.drc_errors_after - stats.drc_errors_before
+            if delta > 0:
+                suffix = f"({delta} new errors, {stats.nets_rolled_back} nets rolled back)"
+            elif stats.nets_rolled_back > 0:
+                suffix = f"(no regressions, {stats.nets_rolled_back} nets rolled back)"
+            else:
+                suffix = "(no regressions)"
             print(
                 f"  DRC errors:      {stats.drc_errors_before:>6} -> "
-                f"{stats.drc_errors_after:>6}  (no regressions)"
+                f"{stats.drc_errors_after:>6}  {suffix}"
             )
         print()
 
