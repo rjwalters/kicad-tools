@@ -21,6 +21,7 @@ Examples:
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,16 +58,17 @@ class ViaClearanceWarning:
 
 def get_design_rules(
     mfr: str | None, layers: int, copper: float, drill: float | None, diameter: float | None
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     """Get the target drill and diameter from manufacturer or explicit values.
 
     Returns:
-        Tuple of (min_drill_mm, min_diameter_mm, min_annular_ring_mm).
+        Tuple of (min_drill_mm, min_diameter_mm, min_annular_ring_mm, min_clearance_mm).
         min_annular_ring_mm is 0.0 when explicit values are used (no
         manufacturer annular ring cross-check needed).
+        min_clearance_mm is 0.2 as a default when no manufacturer is specified.
     """
     if drill is not None and diameter is not None:
-        return drill, diameter, 0.0
+        return drill, diameter, 0.0, 0.2
 
     if mfr:
         try:
@@ -90,12 +92,46 @@ def get_design_rules(
             annular_ring_min_diameter = target_drill + 2 * min_annular_ring
             effective_min_diameter = max(mfr_min_diameter, annular_ring_min_diameter)
             target_diameter = diameter if diameter is not None else effective_min_diameter
-            return target_drill, target_diameter, min_annular_ring
+            min_clearance = rules.min_clearance_mm
+            return target_drill, target_diameter, min_annular_ring, min_clearance
         except FileNotFoundError:
             print(f"Warning: No configuration found for manufacturer '{mfr}'", file=sys.stderr)
 
     # Default values if nothing specified
-    return drill or 0.3, diameter or 0.6, 0.0
+    return drill or 0.3, diameter or 0.6, 0.0, 0.2
+
+
+def _closest_point_on_segment(
+    x1: float, y1: float, x2: float, y2: float, px: float, py: float
+) -> tuple[float, float, float]:
+    """Find the closest point on a line segment to a given point.
+
+    Args:
+        x1, y1: Segment start point.
+        x2, y2: Segment end point.
+        px, py: Query point.
+
+    Returns:
+        (closest_x, closest_y, distance) tuple.
+    """
+    dx = x2 - x1
+    dy = y2 - y1
+    seg_len_sq = dx * dx + dy * dy
+
+    if seg_len_sq < 1e-10:
+        # Segment is essentially a point
+        dist = math.sqrt((x1 - px) ** 2 + (y1 - py) ** 2)
+        return (x1, y1, dist)
+
+    # Project point onto line, clamped to segment
+    t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq
+    t = max(0.0, min(1.0, t))
+
+    cx = x1 + t * dx
+    cy = y1 + t * dy
+    dist = math.sqrt((cx - px) ** 2 + (cy - py) ** 2)
+
+    return (cx, cy, dist)
 
 
 def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int, str]]:
@@ -132,13 +168,16 @@ def find_all_vias(doc: SExp) -> list[tuple[SExp, float, float, float, float, int
 
 def find_nearby_items(
     doc: SExp, x: float, y: float, radius: float
-) -> list[tuple[str, float, float]]:
+) -> list[tuple[str, float, float, float]]:
     """Find PCB items near a point.
 
     Returns:
-        List of (item_type, ix, iy) for items within radius
+        List of (item_type, ix, iy, item_width) for items within radius.
+        ``item_width`` is the physical width/size of the item (e.g. trace
+        width, via diameter, or pad size) so that callers can account for it
+        when computing edge-to-edge clearance.
     """
-    items = []
+    items: list[tuple[str, float, float, float]] = []
 
     # Check pads (in footprints)
     for fp_node in doc.find_all("footprint"):
@@ -150,7 +189,17 @@ def find_nearby_items(
                 py = float(at_atoms[1]) if len(at_atoms) > 1 else 0
                 dist = ((px - x) ** 2 + (py - y) ** 2) ** 0.5
                 if dist < radius:
-                    items.append(("pad", px, py))
+                    # Use pad size if available (take the smaller dimension
+                    # as a conservative approximation for round pads)
+                    size_node = pad_node.find("size")
+                    if size_node:
+                        size_atoms = size_node.get_atoms()
+                        pad_w = float(size_atoms[0]) if size_atoms else 0
+                        pad_h = float(size_atoms[1]) if len(size_atoms) > 1 else pad_w
+                        pad_size = min(pad_w, pad_h)
+                    else:
+                        pad_size = 0.0
+                    items.append(("pad", px, py, pad_size))
 
     # Check other vias
     for via_node in doc.find_all("via"):
@@ -164,9 +213,11 @@ def find_nearby_items(
                 continue
             dist = ((vx - x) ** 2 + (vy - y) ** 2) ** 0.5
             if dist < radius:
-                items.append(("via", vx, vy))
+                size_node = via_node.find("size")
+                via_diameter = float(size_node.get_first_atom()) if size_node else 0.0
+                items.append(("via", vx, vy, via_diameter))
 
-    # Check track segments (but not endpoints at the via position - those are connected)
+    # Check track segments using closest-point-on-segment geometry
     for seg_node in doc.find_all("segment"):
         start_node = seg_node.find("start")
         end_node = seg_node.find("end")
@@ -184,11 +235,12 @@ def find_nearby_items(
             if abs(ex - x) < 0.001 and abs(ey - y) < 0.001:
                 continue
 
-            # Check distance from via to line segment midpoint
-            mx, my = (sx + ex) / 2, (sy + ey) / 2
-            dist = ((mx - x) ** 2 + (my - y) ** 2) ** 0.5
+            # Use closest point on segment instead of midpoint
+            cx, cy, dist = _closest_point_on_segment(sx, sy, ex, ey, x, y)
             if dist < radius:
-                items.append(("track", mx, my))
+                width_node = seg_node.find("width")
+                trace_width = float(width_node.get_first_atom()) if width_node else 0.0
+                items.append(("track", cx, cy, trace_width))
 
     return items
 
@@ -258,9 +310,11 @@ def fix_vias(
         if size_increase > 0:
             check_radius = new_diameter / 2 + min_clearance * 2
             nearby = find_nearby_items(doc, x, y, check_radius)
-            for item_type, ix, iy in nearby:
+            for item_type, ix, iy, item_width in nearby:
                 dist = ((ix - x) ** 2 + (iy - y) ** 2) ** 0.5
-                clearance = dist - new_diameter / 2
+                # Edge-to-edge clearance: subtract both the via radius and
+                # half the width/size of the nearby item
+                clearance = dist - new_diameter / 2 - item_width / 2
                 if clearance < min_clearance:
                     warnings.append(
                         ViaClearanceWarning(
@@ -469,7 +523,7 @@ Examples:
         return 1
 
     # Get target dimensions
-    target_drill, target_diameter, min_annular_ring = get_design_rules(
+    target_drill, target_diameter, min_annular_ring, min_clearance = get_design_rules(
         args.mfr, args.layers, args.copper, args.drill, args.diameter
     )
 
@@ -485,6 +539,7 @@ Examples:
         doc,
         target_drill,
         target_diameter,
+        min_clearance=min_clearance,
         dry_run=args.dry_run,
         min_annular_ring=min_annular_ring,
     )
