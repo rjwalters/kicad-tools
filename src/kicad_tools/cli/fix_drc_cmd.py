@@ -209,6 +209,7 @@ Examples:
             max_displacement=args.max_displacement,
             margin=args.margin,
             dry_run=args.dry_run,
+            pass_number=pass_num,
         )
 
         repaired_this_pass = clearance_result.repaired + drill_result.repaired
@@ -240,6 +241,7 @@ Examples:
             args.format,
             args.dry_run,
             args.max_displacement,
+            args.max_passes,
         )
 
     # Exit code: 0 only when final state has zero remaining violations
@@ -260,6 +262,7 @@ def _run_single_pass(
     max_displacement: float,
     margin: float,
     dry_run: bool,
+    pass_number: int = 1,
 ) -> tuple[RepairResult, DrillRepairResult]:
     """Execute a single repair pass (clearance + drill) and return results."""
     clearance_result = RepairResult()
@@ -267,7 +270,10 @@ def _run_single_pass(
 
     if clearance_violations:
         try:
-            repairer = ClearanceRepairer(pcb_path)
+            # For pass 2+, load from output_path (which has the previous pass's saved result).
+            # On pass 1, output_path may equal pcb_path (no --output given), so this is safe.
+            load_path = output_path if pass_number > 1 else pcb_path
+            repairer = ClearanceRepairer(load_path)
             clearance_result = repairer.repair_from_report(
                 report,
                 max_displacement=max_displacement,
@@ -404,10 +410,11 @@ def _print_results(
     output_format: str,
     dry_run: bool,
     max_displacement: float,
+    max_passes: int = 1,
 ) -> None:
     """Print combined repair results."""
     if output_format == "json":
-        _print_json(pass_results, dry_run, max_displacement)
+        _print_json(pass_results, dry_run, max_displacement, max_passes)
     elif output_format == "summary":
         _print_summary(pass_results, dry_run)
     else:
@@ -418,6 +425,7 @@ def _print_json(
     pass_results: list[PassResult],
     dry_run: bool,
     max_displacement: float,
+    max_passes: int = 1,
 ) -> None:
     """Print results as JSON."""
     # Aggregate totals from the last pass for backward-compatible top-level keys
@@ -488,8 +496,8 @@ def _print_json(
         },
     }
 
-    # Add passes array for multi-pass runs (or any run with max_passes > 1 intent)
-    if len(pass_results) > 1 or (pass_results and pass_results[0].pass_number >= 1):
+    # Add passes array only when the user requested multi-pass mode
+    if max_passes > 1:
         data["passes"] = [
             {
                 "pass": p.pass_number,

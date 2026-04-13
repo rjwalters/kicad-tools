@@ -1421,7 +1421,7 @@ class TestMultiPassIteration:
         self, pcb_same_net_vias: Path, report_same_net_drill: Path, capsys
     ):
         """Multi-pass on a board with dedup-able vias should converge."""
-        result = main(
+        main(
             [
                 str(pcb_same_net_vias),
                 "--drc-report",
@@ -1437,5 +1437,51 @@ class TestMultiPassIteration:
         data = json.loads(captured.out)
 
         # Should have resolved the violation
+        assert data["total_repaired"] >= 1
+
+    def test_multi_pass_output_path_not_stale(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, capsys
+    ):
+        """Pass 2+ must load from --output, not the original pcb_path.
+
+        Regression test for the stale-file bug: ClearanceRepairer was always
+        constructed with ``pcb_path`` instead of ``output_path``, so in a
+        multi-pass run the second pass silently re-read the unrepaired original
+        board and discarded the first pass's repairs.
+        """
+        output_file = tmp_path / "repaired.kicad_pcb"
+        original_content = pcb_clearance.read_text()
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--output",
+                str(output_file),
+                "--max-passes",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+
+        # The output file must have been created with the repaired content.
+        assert output_file.exists(), "output file should be written after repair"
+
+        output_content = output_file.read_text()
+        # The repaired file must differ from the original (repairs were applied).
+        assert output_content != original_content, (
+            "output file content should differ from the original after repair; "
+            "if it matches, pass 2+ likely loaded the stale original input"
+        )
+
+        # The original input file must not have been modified.
+        assert pcb_clearance.read_text() == original_content, (
+            "original pcb_path should remain untouched when --output is given"
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
         assert data["total_repaired"] >= 1
         assert result == 0
