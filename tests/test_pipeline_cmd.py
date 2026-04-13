@@ -418,10 +418,10 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order."""
+        """Steps execute in the correct order: fix-vias before route."""
         expected = [
-            PipelineStep.ROUTE,
             PipelineStep.FIX_VIAS,
+            PipelineStep.ROUTE,
             PipelineStep.FIX_DRC,
             PipelineStep.OPTIMIZE,
             PipelineStep.ZONES,

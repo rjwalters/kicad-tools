@@ -30,8 +30,8 @@ from .mcp import run_mcp_command
 from .native import run_build_native_command
 from .optimize_placement import run_optimize_placement_command
 from .parts import run_parts_command
-from .pipeline import run_pipeline_command
 from .pcb import run_pcb_command
+from .pipeline import run_pipeline_command
 from .placement import run_placement_command
 from .project import run_clean_command, run_init_command
 from .reasoning import run_reason_command

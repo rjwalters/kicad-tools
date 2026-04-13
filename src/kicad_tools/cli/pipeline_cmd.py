@@ -3,8 +3,8 @@ Pipeline command for end-to-end repair workflow on existing PCBs.
 
 Orchestrates the full repair pipeline:
 1. Load board state (detect routing status)
-2. [Optional] Route (if board is unrouted)
-3. Fix vias (manufacturer compliance)
+2. Fix vias (manufacturer compliance)
+3. [Optional] Route (if board is unrouted)
 4. Fix DRC violations
 5. Optimize traces
 6. Zone fill (requires kicad-cli)
@@ -49,8 +49,8 @@ class PipelineStep(str, Enum):
 
 # Ordered list of all pipeline steps
 ALL_STEPS = [
-    PipelineStep.ROUTE,
     PipelineStep.FIX_VIAS,
+    PipelineStep.ROUTE,
     PipelineStep.FIX_DRC,
     PipelineStep.OPTIMIZE,
     PipelineStep.ZONES,
