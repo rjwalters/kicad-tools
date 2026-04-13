@@ -94,6 +94,25 @@ class TwoPhaseRouter:
         # Get nets to route in priority order
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
         net_order = [n for n in net_order if n != 0]
+
+        # Issue #1295: Filter out pour nets — they are connected via zone fills.
+        pour_nets = []
+        signal_nets = []
+        for n in net_order:
+            net_name = self.net_names.get(n, "")
+            net_class = (self.net_class_map or {}).get(net_name)
+            if net_class and net_class.is_pour_net:
+                pour_nets.append(n)
+            else:
+                signal_nets.append(n)
+        if pour_nets:
+            pour_names = [self.net_names.get(n, f"Net {n}") for n in pour_nets]
+            flush_print(
+                f"  Skipping {len(pour_nets)} pour net(s) "
+                f"(use zone fill instead): {pour_names}"
+            )
+        net_order = signal_nets
+
         total_nets = len(net_order)
 
         if total_nets == 0:

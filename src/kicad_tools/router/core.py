@@ -59,6 +59,7 @@ from .placement_feedback import PlacementFeedbackLoop, PlacementFeedbackResult
 from .primitives import Obstacle, Pad, Route
 from .rules import (
     DEFAULT_NET_CLASS_MAP,
+    SIMPLE_NET_THRESHOLD_MM,
     DesignRules,
     LengthConstraint,
     NetClassRouting,
@@ -1089,26 +1090,83 @@ class Autorouter:
 
         return score
 
-    def _get_net_priority(self, net_id: int) -> tuple[int, float, int, float]:
-        """Get routing priority for a net (lower = higher priority).
+    def _is_pour_net(self, net_id: int) -> bool:
+        """Check if a net is a pour net (e.g. GND, VCC) that should be skipped.
 
-        Returns a 4-tuple used for sorting:
-        1. Net class priority (1-10, where 1 = highest priority like POWER)
-        2. Negative constraint score (higher constraint = route first, so negate)
-        3. Pad count (fewer pads = higher priority, simpler nets first)
-        4. Bounding box diagonal (shorter nets first, leaves room for longer nets)
+        Pour nets are intended to be connected via copper pours (zone fills)
+        rather than individual traces.  They are identified by the
+        ``is_pour_net`` flag on their :class:`NetClassRouting` entry.
 
-        Issue #1020: Adds constraint-aware ordering. Nets connecting to fine-pitch
-        ICs are routed before unconstrained nets within the same priority class.
-        This improves routing success by giving highly-constrained nets first access
-        to limited routing resources (escape channels, narrow clearances).
+        Args:
+            net_id: The net ID to check.
 
-        This ordering strategy routes critical signal classes first (power, clock),
-        then within each class routes highly-constrained nets (fine-pitch IC connections)
-        before simpler/shorter nets, giving constrained nets the best routing freedom.
+        Returns:
+            True if the net's class has ``is_pour_net=True``, False otherwise.
         """
         net_name = self.net_names.get(net_id, "")
         net_class = self.net_class_map.get(net_name)
+        return bool(net_class and net_class.is_pour_net)
+
+    def _filter_pour_nets(self, net_order: list[int]) -> list[int]:
+        """Remove pour nets from a net ordering and log a warning.
+
+        Pour nets (GND, VCC, etc.) should be connected via zone fills, not
+        individual traces.  This helper filters them out of the routing order
+        and emits a single warning listing the skipped net names.
+
+        Args:
+            net_order: List of net IDs in routing order.
+
+        Returns:
+            Filtered list with pour nets removed.
+        """
+        pour_nets = [n for n in net_order if self._is_pour_net(n)]
+        if not pour_nets:
+            return net_order
+
+        pour_names = [self.net_names.get(n, f"Net {n}") for n in pour_nets]
+        flush_print(
+            f"  Skipping {len(pour_nets)} pour net(s) "
+            f"(use zone fill instead): {pour_names}"
+        )
+        return [n for n in net_order if not self._is_pour_net(n)]
+
+    def _get_net_priority(self, net_id: int) -> tuple[int, int, float, int, float]:
+        """Get routing priority for a net (lower = higher priority).
+
+        Returns a 5-tuple used for sorting:
+        1. Net class priority (1-10 for signal nets, 99 for pour nets)
+        2. Complexity tier (0 = simple 2-pin short net, 1 = complex/multi-pin)
+        3. Negative constraint score (higher constraint = route first, so negate)
+        4. Pad count (fewer pads = higher priority, simpler nets first)
+        5. Bounding box diagonal (shorter nets first, leaves room for longer nets)
+
+        Pour nets (``is_pour_net=True``) are assigned priority 99 so they sort
+        to the very end.  They are additionally filtered out before the routing
+        loop by :meth:`_filter_pour_nets`, but the high priority value acts as
+        a safety net for callers that bypass the filter.
+
+        Issue #1020: Adds constraint-aware ordering. Nets connecting to fine-pitch
+        ICs are routed before unconstrained nets within the same priority class
+        and complexity tier.
+
+        Issue #1295: Adds complexity-tier ordering and pour-net deprioritisation.
+        Within each priority class, simple 2-pin short nets are routed before
+        complex multi-pin or long-span nets.  Within each tier, more constrained
+        (fine-pitch) nets still route first.
+
+        The resulting ordering for signal nets is:
+        - Clock/diff-pair (class priority 2) > Digital (4) > Debug (5) > Default (10)
+        - Within each class: simple 2-pin short > complex multi-pin/long-span
+        - Within each tier: fine-pitch constrained > unconstrained
+        """
+        net_name = self.net_names.get(net_id, "")
+        net_class = self.net_class_map.get(net_name)
+
+        # Pour nets get pushed to the very back of the ordering.
+        if net_class and net_class.is_pour_net:
+            return (99, 0, 0.0, 0, 0.0)
+
         priority = net_class.priority if net_class else 10
         pad_count = len(self.nets.get(net_id, []))
         distance = self._get_net_bounding_box_diagonal(net_id)
@@ -1116,7 +1174,13 @@ class Autorouter:
         # Issue #1020: Constraint score (negated so higher constraint = lower tuple value)
         constraint_score = self._calculate_constraint_score(net_id)
 
-        return (priority, -constraint_score, pad_count, distance)
+        # Issue #1295: Complexity tier — simple 2-pin short nets (tier 0) before
+        # multi-pin or long-span nets (tier 1).
+        complexity_tier = (
+            0 if (pad_count == 2 and distance < SIMPLE_NET_THRESHOLD_MM) else 1
+        )
+
+        return (priority, complexity_tier, -constraint_score, pad_count, distance)
 
     def _compute_mst_edges(self, net_id: int) -> list[MSTEdgeInfo]:
         """Compute MST edges for a net and return them sorted by distance.
@@ -1309,15 +1373,19 @@ class Autorouter:
         if interleaved:
             return self.route_all_interleaved(progress_callback=progress_callback)
 
+        if net_order is None:
+            net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+
+        # Issue #1295: Filter out pour nets (GND, VCC, etc.) — they should be
+        # connected via zone fills, not routed as individual traces.
+        net_order = self._filter_pour_nets(net_order)
+
         if parallel:
             return self.route_all_parallel(
                 net_order=net_order,
                 progress_callback=progress_callback,
                 max_workers=max_workers,
             )
-
-        if net_order is None:
-            net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
 
         nets_to_route = [n for n in net_order if n != 0]
         total_nets = len(nets_to_route)
@@ -1386,6 +1454,8 @@ class Autorouter:
 
         # Get interleaved ordering and MST cache
         net_order, mst_cache = self._get_interleaved_net_order(use_interleaving=True)
+        # Issue #1295: Filter out pour nets before routing
+        net_order = self._filter_pour_nets(net_order)
         nets_to_route = [n for n in net_order if n != 0]
         total_nets = len(nets_to_route)
 
@@ -1822,6 +1892,8 @@ class Autorouter:
         escape_strategy_index = 0
 
         net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+        # Issue #1295: Filter out pour nets before negotiated routing
+        net_order = self._filter_pour_nets(net_order)
         net_order = [n for n in net_order if n != 0]
         total_nets = len(net_order)
 

@@ -258,8 +258,8 @@ class TestAutorouter:
         # MST should produce N-1 routes for N pads
         assert len(routes) >= 1
 
-    def test_get_net_priority_with_net_class(self):
-        """Test net priority calculation."""
+    def test_get_net_priority_with_pour_net_class(self):
+        """Test net priority for pour nets (power nets) returns 99."""
         net_classes = create_net_class_map(power_nets=["VCC"])
         router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
 
@@ -270,9 +270,25 @@ class TestAutorouter:
             ],
         )
 
-        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
-        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
-        assert priority == 1  # Power net has highest priority
+        # Issue #1295: Pour nets (is_pour_net=True) return priority 99
+        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        assert priority == 99  # Pour net pushed to back
+
+    def test_get_net_priority_with_signal_net_class(self):
+        """Test net priority for non-pour signal net classes."""
+        net_classes = create_net_class_map(clock_nets=["CLK"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "CLK"},
+            ],
+        )
+
+        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
+        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        assert priority == 2  # Clock net has priority 2
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
 
@@ -287,8 +303,8 @@ class TestAutorouter:
             ],
         )
 
-        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
-        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
+        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert priority == 10  # Default low priority
         assert distance == 0.0  # Single pad has no distance
 
@@ -366,17 +382,20 @@ class TestAutorouter:
 
     def test_shuffle_within_tiers(self):
         """Test net shuffling preserves priority tiers."""
-        net_classes = create_net_class_map(power_nets=["VCC", "GND"])
+        # Issue #1295: Use clock (priority 2) and signal (priority 10) to test
+        # tier-preserving shuffle. Power nets are now pour nets (priority 99)
+        # and would sort last, not first.
+        net_classes = create_net_class_map(clock_nets=["CLK1", "CLK2"])
         router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
 
-        # Add power nets (priority 1) and signal nets (priority 10)
+        # Add clock nets (priority 2) and signal nets (priority 10)
         router.add_component(
             "U1",
             [
-                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-                {"number": "2", "x": 12.0, "y": 10.0, "net": 1, "net_name": "VCC"},
-                {"number": "3", "x": 14.0, "y": 10.0, "net": 2, "net_name": "GND"},
-                {"number": "4", "x": 16.0, "y": 10.0, "net": 2, "net_name": "GND"},
+                {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "CLK1"},
+                {"number": "2", "x": 12.0, "y": 10.0, "net": 1, "net_name": "CLK1"},
+                {"number": "3", "x": 14.0, "y": 10.0, "net": 2, "net_name": "CLK2"},
+                {"number": "4", "x": 16.0, "y": 10.0, "net": 2, "net_name": "CLK2"},
             ],
         )
         router.add_component(
@@ -387,11 +406,11 @@ class TestAutorouter:
             ],
         )
 
-        net_order = [1, 2, 3]  # VCC, GND, SIG1
+        net_order = [1, 2, 3]  # CLK1, CLK2, SIG1
         shuffled = router._shuffle_within_tiers(net_order)
 
-        # Power nets should come before signal nets
-        assert set(shuffled[:2]) == {1, 2}  # Power nets first
+        # Clock nets should come before signal nets
+        assert set(shuffled[:2]) == {1, 2}  # Clock nets first
         assert shuffled[2] == 3  # Signal net last
 
     def test_create_intra_ic_routes(self):

@@ -71,8 +71,9 @@ class TestRealBoardRouting:
         assert router is not None
         assert len(net_map) >= 3, "Expected at least 3 nets"
 
-        # Count signal nets (exclude net 0 which is unconnected)
-        total_nets = len([n for n in router.nets if n > 0])
+        # Count routable signal nets (exclude net 0 and pour nets like GND/VCC)
+        # Issue #1295: Pour nets are now auto-skipped, so exclude them from denominator
+        total_nets = len([n for n in router.nets if n > 0 and not router._is_pour_net(n)])
         assert total_nets > 0, "No signal nets to route"
 
         # Route all nets
