@@ -140,6 +140,8 @@ def run_monte_carlo(
             print(f"  Parallel workers: {num_workers}")
 
     base_order = sorted(autorouter.nets.keys(), key=lambda n: autorouter._get_net_priority(n))
+    # Issue #1295: Filter out pour nets before Monte Carlo trials
+    base_order = autorouter._filter_pour_nets(base_order)
     base_order = [n for n in base_order if n != 0]
 
     best_routes: list[Route] | None = None

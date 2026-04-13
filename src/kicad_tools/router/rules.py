@@ -442,6 +442,12 @@ def create_net_class_map(
     return net_class_map
 
 
+# Threshold for classifying a 2-pin signal net as "simple" (short) vs "complex" (long).
+# Nets with a bounding-box diagonal below this value (in mm) are considered simple and
+# are routed before longer/multi-pin nets within the same priority class.  This gives
+# short connections first access to routing channels.
+SIMPLE_NET_THRESHOLD_MM: float = 10.0
+
 # Default net class map with common net names
 DEFAULT_NET_CLASS_MAP: dict[str, NetClassRouting] = create_net_class_map(
     power_nets=["+5V", "+3.3V", "+3.3VA", "+1.8V", "VCC", "VDD", "GND", "GNDA", "PGND"],

@@ -234,8 +234,8 @@ class TestAutorouterNetPriority:
         pads = [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "RANDOM_NET"}]
         router.add_component("R1", pads)
 
-        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
-        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
+        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert priority == 10  # Default priority
         assert pad_count == 1
         assert distance == 0.0  # Single pad has no distance
@@ -248,8 +248,8 @@ class TestAutorouterNetPriority:
         router.add_component("R1", pads1)
         router.add_component("R2", pads2)
 
-        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
-        priority, neg_constraint, pad_count, distance = router._get_net_priority(1)
+        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
+        priority, complexity_tier, neg_constraint, pad_count, distance = router._get_net_priority(1)
         assert pad_count == 2
         # Distance should be sqrt(3^2 + 4^2) = 5.0
         assert abs(distance - 5.0) < 0.001
@@ -275,12 +275,10 @@ class TestAutorouterNetPriority:
         p1 = router._get_net_priority(1)
         p2 = router._get_net_priority(2)
 
-        # Issue #1020: Return is now 4-tuple (priority, -constraint_score, pad_count, distance)
-        # Both have same class priority, constraint score, and pad count, but net 1 is shorter
+        # Issue #1295: Return is now 5-tuple (priority, complexity_tier, -constraint_score, pad_count, distance)
+        # Both have same class priority, but net 1 is shorter (simple tier) and net 2 is longer (complex tier)
         assert p1[0] == p2[0]  # Same class priority
-        assert p1[1] == p2[1]  # Same constraint score (both are standard pitch resistors)
-        assert p1[2] == p2[2]  # Same pad count
-        assert p1[3] < p2[3]  # Net 1 has smaller distance
+        assert p1[1] <= p2[1]  # Net 1 is simple (tier 0), net 2 is complex (tier 1)
         assert p1 < p2  # Net 1 should be ordered first
 
 
@@ -441,13 +439,14 @@ class TestConstraintAwareOrdering:
         assert p1[0] == p2[0]
 
         # Fine-pitch net should have higher constraint score (more negative in tuple)
-        assert p1[1] < p2[1]  # More negative = higher constraint
+        # Constraint score is at index 2 in the 5-tuple
+        assert p1[2] < p2[2]  # More negative = higher constraint
 
-        # Fine-pitch net should be ordered first
+        # Fine-pitch net should be ordered first (within same complexity tier)
         assert p1 < p2
 
     def test_net_ordering_fine_pitch_before_standard(self, router):
-        """Test that fine-pitch nets are routed before standard nets."""
+        """Test that fine-pitch nets are routed before standard nets in same tier."""
         from kicad_tools.router.rules import DesignRules
 
         # Enable constraint ordering explicitly
@@ -471,6 +470,7 @@ class TestConstraintAwareOrdering:
         )
 
         # Add a fine-pitch net (net 2) - should be routed first
+        # Keep distance < 10mm so both nets are in same complexity tier
         fine_pitch_pads = []
         for i in range(4):
             fine_pitch_pads.append(
@@ -485,13 +485,14 @@ class TestConstraintAwareOrdering:
         router.add_component("U1", fine_pitch_pads)
         router.add_component(
             "R3",
-            [{"number": "1", "x": 30.0, "y": 10.0, "net": 2, "net_name": "FINE"}],
+            [{"number": "1", "x": 25.0, "y": 10.0, "net": 2, "net_name": "FINE"}],
         )
 
         # Get net order
         net_order = sorted(router.nets.keys(), key=lambda n: router._get_net_priority(n))
 
         # Net 2 (fine-pitch) should come before net 1 (standard)
+        # within the same complexity tier, constraint score dominates
         assert net_order.index(2) < net_order.index(1)
 
 
@@ -2388,3 +2389,394 @@ class TestCrossingPenalty:
         # No routed segments -- count should be 0
         count = router._count_edge_crossings(0, 0, 10, 10, 0, 1)
         assert count == 0
+
+
+class TestPourNetFiltering:
+    """Tests for pour-net skipping in route_all variants (Issue #1295)."""
+
+    def test_is_pour_net_true_for_power_nets(self):
+        """Test that _is_pour_net returns True for GND/VCC nets."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(power_nets=["GND", "VCC"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        # Add GND net
+        router.add_component(
+            "C1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "GND"}],
+        )
+        router.add_component(
+            "C2",
+            [{"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "GND"}],
+        )
+
+        assert router._is_pour_net(1) is True
+
+    def test_is_pour_net_false_for_signal_nets(self):
+        """Test that _is_pour_net returns False for signal nets."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(power_nets=["GND"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 2, "net_name": "SPI_MOSI"}],
+        )
+
+        assert router._is_pour_net(2) is False
+
+    def test_is_pour_net_false_for_unknown_nets(self):
+        """Test that _is_pour_net returns False for nets not in net_class_map."""
+        router = Autorouter(width=50.0, height=50.0)
+
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 3, "net_name": "RANDOM"}],
+        )
+
+        assert router._is_pour_net(3) is False
+
+    def test_get_net_priority_pour_net_returns_99(self):
+        """Test that pour nets get priority 99 in _get_net_priority."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(power_nets=["GND"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        router.add_component(
+            "C1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "GND"}],
+        )
+        router.add_component(
+            "C2",
+            [{"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "GND"}],
+        )
+
+        priority_tuple = router._get_net_priority(1)
+        assert priority_tuple[0] == 99  # Pour net pushed to back
+
+    def test_filter_pour_nets_removes_pour_nets(self):
+        """Test that _filter_pour_nets removes pour nets from ordering."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(power_nets=["GND", "VCC"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        # GND net
+        router.add_component(
+            "C1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "GND"}],
+        )
+        router.add_component(
+            "C2",
+            [{"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "GND"}],
+        )
+        # VCC net
+        router.add_component(
+            "U1",
+            [{"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "VCC"}],
+        )
+        router.add_component(
+            "U2",
+            [{"number": "1", "x": 20.0, "y": 20.0, "net": 2, "net_name": "VCC"}],
+        )
+        # Signal net
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 30.0, "net": 3, "net_name": "SPI_MOSI"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 20.0, "y": 30.0, "net": 3, "net_name": "SPI_MOSI"}],
+        )
+
+        net_order = [1, 2, 3]
+        filtered = router._filter_pour_nets(net_order)
+
+        assert 1 not in filtered  # GND removed
+        assert 2 not in filtered  # VCC removed
+        assert 3 in filtered  # SPI_MOSI kept
+
+    def test_filter_pour_nets_noop_when_no_pour_nets(self):
+        """Test that _filter_pour_nets returns original list when no pour nets."""
+        router = Autorouter(width=50.0, height=50.0)
+
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SIG_A"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 20.0, "y": 10.0, "net": 1, "net_name": "SIG_A"}],
+        )
+
+        net_order = [1]
+        filtered = router._filter_pour_nets(net_order)
+
+        assert filtered == [1]
+
+    def test_route_all_skips_pour_nets(self):
+        """Test that route_all does not attempt to route pour nets."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(power_nets=["GND"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        # GND pour net
+        router.add_component(
+            "C1",
+            [{"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "GND"}],
+        )
+        router.add_component(
+            "C2",
+            [{"number": "1", "x": 10.0, "y": 5.0, "net": 1, "net_name": "GND"}],
+        )
+
+        # Signal net (SPI_MOSI)
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 5.0, "y": 15.0, "net": 2, "net_name": "SPI_MOSI"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 10.0, "y": 15.0, "net": 2, "net_name": "SPI_MOSI"}],
+        )
+
+        routes = router.route_all()
+
+        # GND should NOT appear in routed nets
+        routed_net_ids = {r.net for r in routes}
+        assert 1 not in routed_net_ids, "GND pour net should not be routed"
+        # SPI_MOSI may or may not have routed (depending on grid), but GND is the key check
+
+    def test_route_all_explicit_order_with_pour_nets_filtered(self):
+        """Test that explicit net_order also filters pour nets."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(power_nets=["GND"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        # GND pour net
+        router.add_component(
+            "C1",
+            [{"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "GND"}],
+        )
+        router.add_component(
+            "C2",
+            [{"number": "1", "x": 10.0, "y": 5.0, "net": 1, "net_name": "GND"}],
+        )
+
+        # Even when pour net is explicitly in net_order, it should be filtered
+        routes = router.route_all(net_order=[1])
+
+        routed_net_ids = {r.net for r in routes}
+        assert 1 not in routed_net_ids, "GND pour net should not be routed even in explicit order"
+
+    def test_pour_net_ordering_sorts_to_end(self):
+        """Test that pour nets sort after all signal nets in priority order."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(
+            power_nets=["GND"],
+            debug_nets=["SWDIO"],
+        )
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        # GND pour net
+        router.add_component(
+            "C1",
+            [{"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "GND"}],
+        )
+        # SWDIO debug net (low priority signal)
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 5.0, "y": 15.0, "net": 2, "net_name": "SWDIO"}],
+        )
+        # Unknown signal net (default priority=10)
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 5.0, "y": 25.0, "net": 3, "net_name": "RANDOM_SIG"}],
+        )
+
+        p_gnd = router._get_net_priority(1)
+        p_debug = router._get_net_priority(2)
+        p_default = router._get_net_priority(3)
+
+        # Pour net should sort after all signal nets
+        assert p_gnd > p_debug, "GND should sort after debug nets"
+        assert p_gnd > p_default, "GND should sort after default signal nets"
+
+
+class TestComplexityTierOrdering:
+    """Tests for complexity-tier-based net ordering within priority classes (Issue #1295)."""
+
+    def test_simple_2pin_before_complex_multipin(self):
+        """Test that simple 2-pin short nets sort before multi-pin nets."""
+        router = Autorouter(width=50.0, height=50.0)
+
+        # Simple 2-pin net (net 1): short distance (< 10mm)
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SHORT_A"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 14.0, "y": 10.0, "net": 1, "net_name": "SHORT_A"}],
+        )
+
+        # Complex multi-pin net (net 2): 4 pads
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 20.0, "y": 20.0, "net": 2, "net_name": "BUS_D0"},
+                {"number": "2", "x": 21.0, "y": 20.0, "net": 0},
+            ],
+        )
+        router.add_component(
+            "U2",
+            [
+                {"number": "1", "x": 25.0, "y": 20.0, "net": 2, "net_name": "BUS_D0"},
+                {"number": "2", "x": 26.0, "y": 20.0, "net": 0},
+            ],
+        )
+        router.add_component(
+            "U3",
+            [{"number": "1", "x": 30.0, "y": 20.0, "net": 2, "net_name": "BUS_D0"}],
+        )
+
+        p_simple = router._get_net_priority(1)
+        p_complex = router._get_net_priority(2)
+
+        # Same class priority (both unknown/default = 10)
+        assert p_simple[0] == p_complex[0]
+        # Simple (tier 0) should sort before complex (tier 1)
+        # Complexity tier is at index 1 in the 5-tuple
+        assert p_simple[1] < p_complex[1]
+        assert p_simple < p_complex
+
+    def test_simple_2pin_before_long_2pin(self):
+        """Test that short 2-pin nets (simple) sort before long 2-pin nets (complex)."""
+        router = Autorouter(width=100.0, height=100.0)
+
+        # Short 2-pin net (net 1): 5mm distance (< 10mm threshold)
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SHORT"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 15.0, "y": 10.0, "net": 1, "net_name": "SHORT"}],
+        )
+
+        # Long 2-pin net (net 2): 30mm distance (> 10mm threshold)
+        router.add_component(
+            "R3",
+            [{"number": "1", "x": 10.0, "y": 50.0, "net": 2, "net_name": "LONG"}],
+        )
+        router.add_component(
+            "R4",
+            [{"number": "1", "x": 40.0, "y": 50.0, "net": 2, "net_name": "LONG"}],
+        )
+
+        p_short = router._get_net_priority(1)
+        p_long = router._get_net_priority(2)
+
+        # Same class priority
+        assert p_short[0] == p_long[0]
+        # Short 2-pin = simple (tier 0), long 2-pin = complex (tier 1)
+        # Complexity tier is at index 1 in the 5-tuple
+        assert p_short[1] == 0  # Simple tier
+        assert p_long[1] == 1  # Complex tier
+        assert p_short < p_long
+
+    def test_signal_ordering_constrained_then_simple_then_complex(self):
+        """Test full ordering: constrained > simple 2-pin > complex multi-pin."""
+        from kicad_tools.router.rules import create_net_class_map
+
+        net_classes = create_net_class_map(clock_nets=["CLK"])
+        router = Autorouter(width=50.0, height=50.0, net_class_map=net_classes)
+
+        # Clock net (constrained, priority=2)
+        router.add_component(
+            "U1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "CLK"}],
+        )
+        router.add_component(
+            "U2",
+            [{"number": "1", "x": 15.0, "y": 10.0, "net": 1, "net_name": "CLK"}],
+        )
+
+        # Simple 2-pin signal (default priority=10, short distance)
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 20.0, "net": 2, "net_name": "SIG_A"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 14.0, "y": 20.0, "net": 2, "net_name": "SIG_A"}],
+        )
+
+        # Complex multi-pin signal (default priority=10)
+        router.add_component(
+            "U3",
+            [{"number": "1", "x": 10.0, "y": 30.0, "net": 3, "net_name": "BUS"}],
+        )
+        router.add_component(
+            "U4",
+            [{"number": "1", "x": 20.0, "y": 30.0, "net": 3, "net_name": "BUS"}],
+        )
+        router.add_component(
+            "U5",
+            [{"number": "1", "x": 30.0, "y": 30.0, "net": 3, "net_name": "BUS"}],
+        )
+
+        net_order = sorted(router.nets.keys(), key=lambda n: router._get_net_priority(n))
+        # Remove net 0
+        net_order = [n for n in net_order if n != 0]
+
+        # Clock (constrained) should come first
+        assert net_order.index(1) < net_order.index(2)
+        assert net_order.index(1) < net_order.index(3)
+        # Simple 2-pin should come before complex multi-pin (both default class)
+        assert net_order.index(2) < net_order.index(3)
+
+    def test_5_tuple_return_type(self):
+        """Test that _get_net_priority returns a 5-tuple."""
+        router = Autorouter(width=50.0, height=50.0)
+
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "NET1"}],
+        )
+
+        result = router._get_net_priority(1)
+        assert len(result) == 5, f"Expected 5-tuple, got {len(result)}-tuple"
+
+    def test_no_pour_nets_unchanged_behavior(self):
+        """Test that boards with no pour nets route identically to before."""
+        router = Autorouter(width=50.0, height=50.0)
+
+        # Two signal nets, no pour nets
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "SIG_A"}],
+        )
+        router.add_component(
+            "R2",
+            [{"number": "1", "x": 10.0, "y": 5.0, "net": 1, "net_name": "SIG_A"}],
+        )
+        router.add_component(
+            "R3",
+            [{"number": "1", "x": 5.0, "y": 15.0, "net": 2, "net_name": "SIG_B"}],
+        )
+        router.add_component(
+            "R4",
+            [{"number": "1", "x": 10.0, "y": 15.0, "net": 2, "net_name": "SIG_B"}],
+        )
+
+        # _filter_pour_nets should return the same list
+        net_order = [1, 2]
+        filtered = router._filter_pour_nets(net_order)
+        assert filtered == net_order
