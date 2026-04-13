@@ -3024,14 +3024,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Exit codes:
     # 0 = All nets routed AND (DRC passed OR DRC not run)
-    # 1 = Not all nets routed OR DRC errors detected
+    # 1 = Not all nets routed (routing failure)
+    # 2 = Interrupted by SIGINT (handled earlier in the function)
+    # 3 = All nets routed but DRC violations detected
     if all_nets_routed and drc_passed:
         return 0
     elif not all_nets_routed:
         return 1
     else:
         # All nets routed but DRC failed
-        return 1
+        return 3
 
 
 if __name__ == "__main__":
