@@ -202,7 +202,14 @@ Examples:
 
 
 def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | None:
-    """Load or generate a DRC report."""
+    """Load or generate a DRC report.
+
+    Resolution order:
+    1. If ``--drc-report`` is given, load the file directly.
+    2. If kicad-cli is available, run it and parse the resulting report.
+    3. Fall back to the pure-Python ``DRCChecker`` so that segment-to-via
+       violations are detected even without kicad-cli installed.
+    """
     if drc_report_path:
         report_path = Path(drc_report_path)
         if not report_path.exists():
@@ -219,34 +226,75 @@ def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | 
         from kicad_tools.cli.runner import find_kicad_cli, run_drc
 
         kicad_cli = find_kicad_cli()
-        if not kicad_cli:
-            print(
-                "Error: No DRC report provided and kicad-cli not found.",
-                file=sys.stderr,
-            )
-            print(
-                "Provide a DRC report with --drc-report, or install KiCad 8.",
-                file=sys.stderr,
-            )
-            return None
+        if kicad_cli:
+            print(f"Running DRC on: {pcb_path.name}")
+            drc_result = run_drc(pcb_path)
+            if not drc_result.success:
+                print(f"Error running DRC: {drc_result.stderr}", file=sys.stderr)
+                return None
 
-        print(f"Running DRC on: {pcb_path.name}")
-        drc_result = run_drc(pcb_path)
-        if not drc_result.success:
-            print(f"Error running DRC: {drc_result.stderr}", file=sys.stderr)
-            return None
-
-        report = DRCReport.load(drc_result.output_path)
-        if drc_result.output_path:
-            drc_result.output_path.unlink(missing_ok=True)
-        return report
+            report = DRCReport.load(drc_result.output_path)
+            if drc_result.output_path:
+                drc_result.output_path.unlink(missing_ok=True)
+            return report
     except ImportError:
-        print(
-            "Error: No DRC report provided and kicad-cli runner not available.",
-            file=sys.stderr,
+        pass
+
+    # Fall back to the pure-Python DRC checker
+    return _run_python_drc(pcb_path)
+
+
+def _run_python_drc(pcb_path: Path) -> DRCReport | None:
+    """Run pure-Python DRC and convert results into a DRCReport.
+
+    This allows ``fix-drc`` to detect segment-to-via clearance violations
+    even when kicad-cli is not installed.
+    """
+    try:
+        from kicad_tools.core.types import Severity
+        from kicad_tools.drc.violation import DRCViolation as ReportViolation
+        from kicad_tools.drc.violation import Location, ViolationType
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.checker import DRCChecker
+
+        print(f"Running pure-Python DRC on: {pcb_path.name}")
+        pcb = PCB.load(pcb_path)
+        checker = DRCChecker(pcb)
+        results = checker.check_clearances()
+
+        violations: list[ReportViolation] = []
+        for v in results.violations:
+            vtype = ViolationType.from_string(v.rule_id)
+            loc_list: list[Location] = []
+            if v.location:
+                loc_list.append(
+                    Location(x_mm=v.location[0], y_mm=v.location[1], layer=v.layer or "")
+                )
+
+            violations.append(
+                ReportViolation(
+                    type=vtype,
+                    type_str=v.rule_id,
+                    severity=Severity.from_string(v.severity),
+                    message=v.message,
+                    locations=loc_list,
+                    items=list(v.items),
+                    required_value_mm=v.required_value,
+                    actual_value_mm=v.actual_value,
+                )
+            )
+
+        return DRCReport(
+            source_file=str(pcb_path),
+            created_at=None,
+            pcb_name=pcb_path.name,
+            violations=violations,
         )
+
+    except Exception as e:
+        print(f"Error running pure-Python DRC: {e}", file=sys.stderr)
         print(
-            "Provide a DRC report with --drc-report.",
+            "Provide a DRC report with --drc-report, or install KiCad 8.",
             file=sys.stderr,
         )
         return None
