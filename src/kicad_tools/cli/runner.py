@@ -281,6 +281,25 @@ def run_netlist_export(
         return KiCadCLIResult(success=False, stderr=f"Failed to export netlist: {e}")
 
 
+def _kicad_cli_has_fill_zones(kicad_cli: Path) -> bool:
+    """Check whether the installed kicad-cli supports 'pcb fill-zones'.
+
+    This subcommand does not exist in KiCad 8, 9, or 10 but may be
+    added in a future release.
+    """
+    try:
+        result = subprocess.run(
+            [str(kicad_cli), "pcb", "fill-zones", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        # kicad-cli returns 0 and prints the parent help when a subcommand
+        # is unknown, so we check stdout for "fill-zones" to confirm support.
+        return result.returncode == 0 and "fill-zones" in result.stdout
+    except Exception:
+        return False
+
+
 def run_fill_zones(
     pcb_path: Path,
     output_path: Path | None = None,
@@ -288,7 +307,13 @@ def run_fill_zones(
 ) -> KiCadCLIResult:
     """Fill all copper zones in a PCB using kicad-cli.
 
-    Delegates to ``kicad-cli pcb fill-zones`` (KiCad 8+).
+    Attempts ``kicad-cli pcb fill-zones`` first (for future KiCad versions
+    that may add it).  When that subcommand is unavailable (KiCad 8/9/10),
+    falls back to ``kicad-cli pcb drc`` which fills all zones as a side
+    effect before running design-rule checks.
+
+    With the DRC fallback a non-zero exit code caused by DRC *violations*
+    (not a fill failure) is treated as success — the zones were still filled.
 
     Args:
         pcb_path: Path to .kicad_pcb file
@@ -306,7 +331,20 @@ def run_fill_zones(
                 stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
             )
 
-    # Build command
+    # If a future KiCad ships a native fill-zones subcommand, prefer it.
+    if _kicad_cli_has_fill_zones(kicad_cli):
+        return _run_fill_zones_native(pcb_path, output_path, kicad_cli)
+
+    # Fallback: use DRC which fills zones as a side effect.
+    return _run_fill_zones_via_drc(pcb_path, output_path, kicad_cli)
+
+
+def _run_fill_zones_native(
+    pcb_path: Path,
+    output_path: Path | None,
+    kicad_cli: Path,
+) -> KiCadCLIResult:
+    """Fill zones using the native ``kicad-cli pcb fill-zones`` subcommand."""
     cmd = [str(kicad_cli), "pcb", "fill-zones"]
 
     if output_path is not None:
@@ -317,7 +355,6 @@ def run_fill_zones(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        # Determine which file should exist after the operation
         expected_path = output_path if output_path is not None else pcb_path
 
         if result.returncode == 0:
@@ -340,6 +377,98 @@ def run_fill_zones(
         return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
     except subprocess.SubprocessError as e:
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
+
+
+def _kicad_drc_supports_refill(kicad_cli: Path) -> bool:
+    """Check whether ``kicad-cli pcb drc`` supports ``--refill-zones``.
+
+    KiCad 10+ added explicit ``--refill-zones`` and ``--save-board`` flags.
+    Earlier versions (8, 9) always refill zones as part of DRC.
+    """
+    try:
+        result = subprocess.run(
+            [str(kicad_cli), "pcb", "drc", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        return "--refill-zones" in result.stdout
+    except Exception:
+        return False
+
+
+def _run_fill_zones_via_drc(
+    pcb_path: Path,
+    output_path: Path | None,
+    kicad_cli: Path,
+) -> KiCadCLIResult:
+    """Fill zones by running ``kicad-cli pcb drc`` as a side-effect.
+
+    ``kicad-cli pcb drc`` fills all zones before performing design-rule
+    checks.  In KiCad 8/9 this happens automatically; in KiCad 10+ the
+    ``--refill-zones`` and ``--save-board`` flags must be passed explicitly.
+
+    A non-zero exit code caused by DRC *violations* does **not** indicate
+    a fill failure.
+    """
+    import os
+
+    # DRC modifies the input file in-place.  If the caller requested a
+    # separate output file, copy the source first and run DRC on the copy.
+    if output_path is not None:
+        shutil.copy2(pcb_path, output_path)
+        target_pcb = output_path
+    else:
+        target_pcb = pcb_path
+
+    # Create a temp file for the DRC report (we don't need it).
+    fd, drc_report_path = tempfile.mkstemp(suffix=".json", prefix="drc_fill_")
+    os.close(fd)
+    drc_report = Path(drc_report_path)
+
+    cmd = [
+        str(kicad_cli),
+        "pcb",
+        "drc",
+        "--output",
+        str(drc_report),
+        "--format",
+        "json",
+    ]
+
+    # KiCad 10+ requires explicit flags to refill zones and persist changes.
+    if _kicad_drc_supports_refill(kicad_cli):
+        cmd.extend(["--refill-zones", "--save-board"])
+
+    cmd.append(str(target_pcb))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # DRC returns non-zero when there are violations, but the zones
+        # are still filled.  We treat it as success when the DRC report
+        # was actually produced (meaning the command ran to completion).
+        if drc_report.exists() and drc_report.stat().st_size > 0:
+            return KiCadCLIResult(
+                success=True,
+                output_path=target_pcb,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        else:
+            return KiCadCLIResult(
+                success=False,
+                stderr=result.stderr or "Zone fill via DRC failed — no report produced",
+                return_code=result.returncode,
+            )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
+    finally:
+        # Clean up the temporary DRC report.
+        drc_report.unlink(missing_ok=True)
 
 
 def get_kicad_version(kicad_cli: Path | None = None) -> str | None:

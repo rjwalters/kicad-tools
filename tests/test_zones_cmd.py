@@ -13,6 +13,8 @@ from kicad_tools.cli.zones_cmd import main
 _FIND_CLI = "kicad_tools.cli.runner.find_kicad_cli"
 _RUN_FILL = "kicad_tools.cli.runner.run_fill_zones"
 _SUBPROCESS_RUN = "kicad_tools.cli.runner.subprocess.run"
+_HAS_FILL_ZONES = "kicad_tools.cli.runner._kicad_cli_has_fill_zones"
+_DRC_SUPPORTS_REFILL = "kicad_tools.cli.runner._kicad_drc_supports_refill"
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -235,48 +237,16 @@ class TestRunFillZones:
         assert result.success is False
         assert "kicad-cli not found" in result.stderr
 
-    def test_builds_correct_command_in_place(self, tmp_pcb):
-        from kicad_tools.cli.runner import run_fill_zones
-
-        with patch(_SUBPROCESS_RUN) as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
-        assert result.success is True
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "/usr/bin/kicad-cli"
-        assert cmd[1:3] == ["pcb", "fill-zones"]
-        # No --output flag for in-place
-        assert "--output" not in cmd
-        assert str(tmp_pcb) == cmd[-1]
-
-    def test_builds_correct_command_with_output(self, tmp_pcb, tmp_path):
-        from kicad_tools.cli.runner import run_fill_zones
-
-        out = tmp_path / "filled.kicad_pcb"
-        with patch(_SUBPROCESS_RUN) as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
-        assert result.success is True
-        cmd = mock_run.call_args[0][0]
-        assert "--output" in cmd
-        idx = cmd.index("--output")
-        assert cmd[idx + 1] == str(out)
-
-    def test_nonzero_return_code_is_failure(self, tmp_pcb):
-        from kicad_tools.cli.runner import run_fill_zones
-
-        with patch(_SUBPROCESS_RUN) as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="zone fill error")
-            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
-        assert result.success is False
-        assert "zone fill error" in result.stderr
-
     def test_file_not_found_error(self):
         from kicad_tools.cli.runner import run_fill_zones
 
-        with patch(
-            _SUBPROCESS_RUN,
-            side_effect=FileNotFoundError("not found"),
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(
+                _SUBPROCESS_RUN,
+                side_effect=FileNotFoundError("not found"),
+            ),
         ):
             result = run_fill_zones(
                 Path("/some/board.kicad_pcb"),
@@ -290,13 +260,217 @@ class TestRunFillZones:
 
         from kicad_tools.cli.runner import run_fill_zones
 
-        with patch(
-            _SUBPROCESS_RUN,
-            side_effect=subprocess.SubprocessError("boom"),
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(
+                _SUBPROCESS_RUN,
+                side_effect=subprocess.SubprocessError("boom"),
+            ),
         ):
             result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
         assert result.success is False
         assert "Failed to fill zones" in result.stderr
+
+
+class TestRunFillZonesNative:
+    """Unit tests for the native fill-zones path (future KiCad versions)."""
+
+    def test_uses_native_when_available(self, tmp_pcb):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=True),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "/usr/bin/kicad-cli"
+        assert cmd[1:3] == ["pcb", "fill-zones"]
+        assert str(tmp_pcb) == cmd[-1]
+
+    def test_native_with_output(self, tmp_pcb, tmp_path):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        out = tmp_path / "filled.kicad_pcb"
+        with (
+            patch(_HAS_FILL_ZONES, return_value=True),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is True
+        cmd = mock_run.call_args[0][0]
+        assert "--output" in cmd
+        idx = cmd.index("--output")
+        assert cmd[idx + 1] == str(out)
+
+    def test_native_nonzero_return_code_is_failure(self, tmp_pcb):
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=True),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="zone fill error")
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+        assert result.success is False
+        assert "zone fill error" in result.stderr
+
+
+class TestRunFillZonesDRCFallback:
+    """Unit tests for the DRC-based zone fill fallback (KiCad 8/9/10)."""
+
+    def test_drc_fallback_runs_drc_command(self, tmp_pcb, tmp_path):
+        """When fill-zones is unavailable, run_fill_zones uses DRC."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        # Create a fake DRC report so the success check passes
+        def fake_run(cmd, **kwargs):
+            # The DRC command writes a report to the --output path
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd[1:3] == ["pcb", "drc"]
+        assert str(tmp_pcb) == cmd[-1]
+
+    def test_drc_fallback_with_output_copies_input(self, tmp_pcb, tmp_path):
+        """When output_path is set, input is copied and DRC runs on the copy."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        assert result.output_path == out
+        # The copy should exist (made from the source PCB)
+        assert out.exists()
+        # DRC should have been run on the copy, not the original
+        cmd = mock_run.call_args[0][0]
+        assert str(out) == cmd[-1]
+
+    def test_drc_violations_do_not_cause_failure(self, tmp_pcb):
+        """DRC exit code != 0 due to violations is still a fill success."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text(
+                '{"violations": [{"type": "clearance", "severity": "error"}]}'
+            )
+            # Non-zero exit code because of DRC violations
+            return MagicMock(returncode=5, stdout="", stderr="DRC violations found")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run),
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        # Fill succeeded even though DRC found violations
+        assert result.success is True
+
+    def test_drc_no_report_is_failure(self, tmp_pcb):
+        """If DRC produces no report file, the fill is treated as failure."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN) as mock_run,
+        ):
+            # DRC fails to produce a report
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="DRC execution error")
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is False
+
+    def test_drc_report_cleaned_up(self, tmp_pcb, tmp_path):
+        """The temporary DRC report file is cleaned up after fill."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        created_reports = []
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            created_reports.append(report_path)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run),
+        ):
+            run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        # The temp DRC report should have been deleted
+        assert len(created_reports) == 1
+        assert not Path(created_reports[0]).exists()
+
+    def test_kicad8_no_refill_flags(self, tmp_pcb):
+        """KiCad 8/9: DRC command should NOT include --refill-zones."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        cmd = mock_run.call_args[0][0]
+        assert "--refill-zones" not in cmd
+        assert "--save-board" not in cmd
+
+    def test_kicad10_includes_refill_flags(self, tmp_pcb):
+        """KiCad 10+: DRC command should include --refill-zones --save-board."""
+        from kicad_tools.cli.runner import run_fill_zones
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=True),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run) as mock_run,
+        ):
+            run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        cmd = mock_run.call_args[0][0]
+        assert "--refill-zones" in cmd
+        assert "--save-board" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -304,8 +478,8 @@ class TestRunFillZones:
 # ---------------------------------------------------------------------------
 
 
-def _kicad_cli_has_fill_zones() -> bool:
-    """Check whether the installed kicad-cli supports 'pcb fill-zones'."""
+def _kicad_cli_available() -> bool:
+    """Check whether kicad-cli is installed and can run ``pcb drc``."""
     import subprocess
 
     cli = shutil.which("kicad-cli")
@@ -313,26 +487,24 @@ def _kicad_cli_has_fill_zones() -> bool:
         return False
     try:
         result = subprocess.run(
-            [cli, "pcb", "fill-zones", "--help"],
+            [cli, "pcb", "drc", "--help"],
             capture_output=True,
             text=True,
         )
-        # kicad-cli returns 0 and prints the parent help when a subcommand
-        # is unknown, so we check stdout for "fill-zones" to confirm support.
-        return result.returncode == 0 and "fill-zones" in result.stdout
+        return result.returncode == 0
     except Exception:
         return False
 
 
 @pytest.mark.skipif(
-    not _kicad_cli_has_fill_zones(),
-    reason="kicad-cli does not support 'pcb fill-zones'",
+    not _kicad_cli_available(),
+    reason="kicad-cli not installed or 'pcb drc' unavailable",
 )
 class TestFillIntegration:
-    """Integration tests that actually run kicad-cli fill-zones.
+    """Integration tests that actually run kicad-cli to fill zones.
 
-    Note: 'kicad-cli pcb fill-zones' may not exist in all KiCad versions.
-    These tests are skipped when the subcommand is unavailable.
+    Uses ``kicad-cli pcb drc`` which fills zones as a side effect.
+    These tests are skipped when kicad-cli is not installed.
     """
 
     def test_fill_zones_on_fixture(self, tmp_pcb, tmp_path):
