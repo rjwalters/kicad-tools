@@ -337,6 +337,11 @@ def _dispatch_command(args) -> int:
 
         return run_repair_clearance_command(args)
 
+    elif args.command == "fix-drc":
+        from .commands import run_fix_drc_command
+
+        return run_fix_drc_command(args)
+
     elif args.command == "config":
         return run_config_command(args)
 

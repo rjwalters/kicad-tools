@@ -31,6 +31,7 @@ from .incremental import (
 )
 from .predictive import PredictiveAnalyzer, PredictiveWarning
 from .repair_clearance import ClearanceRepairer, NudgeResult, RepairResult
+from .repair_drill_clearance import DrillClearanceRepairer, DrillRepairAction, DrillRepairResult
 from .report import (
     DRCReport,
     parse_json_report,
@@ -78,4 +79,8 @@ __all__ = [
     "ClearanceRepairer",
     "NudgeResult",
     "RepairResult",
+    # Drill clearance repair
+    "DrillClearanceRepairer",
+    "DrillRepairAction",
+    "DrillRepairResult",
 ]

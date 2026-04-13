@@ -151,6 +151,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_footprints_parser(subparsers)
     _add_fix_vias_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
+    _add_fix_drc_parser(subparsers)
     _add_parts_parser(subparsers)
     _add_datasheet_parser(subparsers)
     _add_decisions_parser(subparsers)
@@ -1212,6 +1213,57 @@ def _add_repair_clearance_parser(subparsers) -> None:
         help="Preview changes without modifying files",
     )
     repair_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_fix_drc_parser(subparsers) -> None:
+    """Add fix-drc subcommand parser."""
+    fix_drc_parser = subparsers.add_parser(
+        "fix-drc", help="Automated DRC violation repair (clearance + drill)"
+    )
+    fix_drc_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_drc_parser.add_argument(
+        "--drc-report",
+        help="Path to existing DRC report (.rpt or .json)",
+    )
+    fix_drc_parser.add_argument(
+        "--max-displacement",
+        type=float,
+        default=0.25,
+        help="Maximum nudge/slide distance in mm (default: 0.25)",
+    )
+    fix_drc_parser.add_argument(
+        "--margin",
+        type=float,
+        default=0.01,
+        help="Extra clearance margin beyond minimum in mm (default: 0.01)",
+    )
+    fix_drc_parser.add_argument(
+        "--max-passes",
+        type=int,
+        default=3,
+        help="Maximum number of repair passes (default: 3)",
+    )
+    fix_drc_parser.add_argument(
+        "--only",
+        choices=["clearance", "drill-clearance"],
+        help="Only fix a specific violation type",
+    )
+    fix_drc_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    fix_drc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_drc_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
