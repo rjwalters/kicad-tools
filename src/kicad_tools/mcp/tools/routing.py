@@ -502,10 +502,13 @@ def route_net_auto(
         board_width = 100.0
         board_height = 100.0
 
-    # Attach dimensions to the pcb object for orchestrator use
+    # Attach dimensions to the pcb object for orchestrator use.
+    # (width/height are not @property on PCB, so dynamic assignment is safe;
+    # the orchestrator reads them via getattr with fallback defaults.)
     pcb.width = board_width  # type: ignore[attr-defined]
     pcb.height = board_height  # type: ignore[attr-defined]
-    pcb.path = path  # type: ignore[attr-defined]
+    # Note: pcb.path is a read-only @property already set by PCB.load(),
+    # so we must NOT assign to it here.
 
     # Resolve strategy override
     strategy_map = {

@@ -991,6 +991,12 @@ def _add_route_auto_parser(subparsers) -> None:
         action="store_true",
         help="Preview strategy selection without routing",
     )
+    route_auto_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show full traceback on error",
+    )
 
 
 def _add_reason_parser(subparsers) -> None:

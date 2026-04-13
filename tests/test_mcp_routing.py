@@ -507,3 +507,163 @@ class TestRouteNetResultType:
         assert result_dict["net_name"] == "GND"
         assert result_dict["error_message"] == "Routing blocked by obstacles"
         assert "Check placement" in result_dict["suggestions"]
+
+
+class TestRouteNetAuto:
+    """Tests for route_net_auto function (issue #1268 regression)."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "routing-diagnostic.kicad_pcb"
+
+    def test_no_attribute_error_on_fixture(self) -> None:
+        """route_net_auto must not raise AttributeError on a real PCB file.
+
+        Regression test for GH-1268: the old code assigned to the read-only
+        PCB.path property, causing ``AttributeError: can't set attribute 'path'``
+        on every real board.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # The fixture has NET1 with pads on two footprints.
+        result = route_net_auto(
+            pcb_path=str(self.FIXTURE),
+            net_name="NET1",
+        )
+        # The call must return a dict (not raise).
+        assert isinstance(result, dict)
+        assert "success" in result
+        assert result["net_name"] == "NET1"
+
+    def test_pcb_path_property_not_overwritten(self) -> None:
+        """PCB.path should remain the value set by PCB.load(), not be monkey-patched."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(self.FIXTURE))
+        original_path = pcb.path
+
+        # Importing route_net_auto and calling it should not change pcb.path
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        route_net_auto(pcb_path=str(self.FIXTURE), net_name="NET1")
+
+        # Reload to verify path is still correct
+        pcb2 = PCB.load(str(self.FIXTURE))
+        assert pcb2.path == original_path
+
+    def test_no_attribute_error_missing_outline(self, tmp_path: Path) -> None:
+        """route_net_auto falls back to default dimensions when outline is absent."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # A minimal PCB without Edge.Cuts outline
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+  )
+)
+"""
+        pcb_file = tmp_path / "no_outline.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        result = route_net_auto(pcb_path=str(pcb_file), net_name="VCC")
+        assert isinstance(result, dict)
+        assert "success" in result
+
+
+class TestRouteAutoParserVerbose:
+    """Tests for the --verbose flag on route-auto subcommand (issue #1268)."""
+
+    def test_route_auto_parser_has_verbose_flag(self) -> None:
+        """kct route-auto --help should include -v/--verbose."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        # Parse a minimal route-auto invocation with --verbose
+        args = parser.parse_args(["route-auto", "board.kicad_pcb", "--net", "GND", "--verbose"])
+        assert args.verbose is True
+
+    def test_route_auto_parser_verbose_default_false(self) -> None:
+        """--verbose defaults to False when omitted."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route-auto", "board.kicad_pcb", "--net", "GND"])
+        assert args.verbose is False
+
+    def test_route_auto_parser_short_verbose_flag(self) -> None:
+        """-v should work as shorthand for --verbose."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route-auto", "board.kicad_pcb", "--net", "GND", "-v"])
+        assert args.verbose is True
+
+
+class TestRouteAutoCommandErrorHandling:
+    """Tests for error handling in run_route_auto_command (issue #1268)."""
+
+    def test_verbose_shows_traceback(self, capsys) -> None:
+        """With --verbose, the bare except handler should print a traceback."""
+        import types
+
+        from kicad_tools.cli.commands.routing import run_route_auto_command
+
+        # Build a fake args namespace that will trigger an error
+        args = types.SimpleNamespace(
+            pcb="/nonexistent/path/board.kicad_pcb",
+            net="GND",
+            output=None,
+            strategy="auto",
+            no_repair=False,
+            no_via_resolution=False,
+            dry_run=False,
+            verbose=True,
+        )
+
+        ret = run_route_auto_command(args)
+        assert ret == 1
+
+        captured = capsys.readouterr()
+        # The error message should be on stderr
+        assert "Error:" in captured.err
+        # With verbose, a traceback should also appear on stderr
+        assert "Traceback" in captured.err
+
+    def test_no_verbose_hides_traceback(self, capsys) -> None:
+        """Without --verbose, only the concise error line should appear."""
+        import types
+
+        from kicad_tools.cli.commands.routing import run_route_auto_command
+
+        args = types.SimpleNamespace(
+            pcb="/nonexistent/path/board.kicad_pcb",
+            net="GND",
+            output=None,
+            strategy="auto",
+            no_repair=False,
+            no_via_resolution=False,
+            dry_run=False,
+            verbose=False,
+        )
+
+        ret = run_route_auto_command(args)
+        assert ret == 1
+
+        captured = capsys.readouterr()
+        assert "Error:" in captured.err
+        # Without verbose, no traceback should appear
+        assert "Traceback" not in captured.err
