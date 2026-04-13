@@ -150,6 +150,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_validate_footprints_parser(subparsers)
     _add_fix_footprints_parser(subparsers)
     _add_fix_vias_parser(subparsers)
+    _add_fix_silkscreen_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
     _add_fix_drc_parser(subparsers)
     _add_parts_parser(subparsers)
@@ -1205,6 +1206,53 @@ def _add_fix_vias_parser(subparsers) -> None:
         help="Preview changes without modifying files",
     )
     fix_vias_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_fix_silkscreen_parser(subparsers) -> None:
+    """Add fix-silkscreen subcommand parser."""
+    fix_silk_parser = subparsers.add_parser(
+        "fix-silkscreen", help="Fix silkscreen line widths to meet manufacturer specifications"
+    )
+    fix_silk_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fix_silk_parser.add_argument(
+        "--mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Manufacturer to use for design rules (default: jlcpcb)",
+    )
+    fix_silk_parser.add_argument(
+        "--layers",
+        type=int,
+        default=2,
+        help="Number of PCB layers (default: 2)",
+    )
+    fix_silk_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Outer copper weight in oz (default: 1.0)",
+    )
+    fix_silk_parser.add_argument(
+        "--min-width",
+        type=float,
+        help="Minimum silkscreen line width in mm (overrides manufacturer rules)",
+    )
+    fix_silk_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrite input)",
+    )
+    fix_silk_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_silk_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",

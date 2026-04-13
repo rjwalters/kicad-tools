@@ -9,6 +9,7 @@ __all__ = [
     "run_validate_footprints_command",
     "run_fix_footprints_command",
     "run_fix_vias_command",
+    "run_fix_silkscreen_command",
     "run_repair_clearance_command",
     "run_fix_drc_command",
     "run_constraints_command",
@@ -84,6 +85,31 @@ def run_fix_vias_command(args) -> int:
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return fix_vias_main(sub_argv)
+
+
+def run_fix_silkscreen_command(args) -> int:
+    """Handle fix-silkscreen command."""
+    from ..fix_silkscreen_cmd import main as fix_silkscreen_main
+
+    sub_argv = [args.pcb]
+    if args.mfr != "jlcpcb":
+        sub_argv.extend(["--mfr", args.mfr])
+    if args.layers != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if args.copper != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
+    if getattr(args, "min_width", None):
+        sub_argv.extend(["--min-width", str(args.min_width)])
+    if args.output:
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_silkscreen_main(sub_argv)
 
 
 def run_repair_clearance_command(args) -> int:
