@@ -19,7 +19,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools route-auto <pcb>       - Orchestrator-based smart routing for a net
-    kicad-tools zones <command>        - Add copper pour zones
+    kicad-tools zones <command>        - Add and fill copper pour zones
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces

@@ -281,6 +281,67 @@ def run_netlist_export(
         return KiCadCLIResult(success=False, stderr=f"Failed to export netlist: {e}")
 
 
+def run_fill_zones(
+    pcb_path: Path,
+    output_path: Path | None = None,
+    kicad_cli: Path | None = None,
+) -> KiCadCLIResult:
+    """Fill all copper zones in a PCB using kicad-cli.
+
+    Delegates to ``kicad-cli pcb fill-zones`` (KiCad 8+).
+
+    Args:
+        pcb_path: Path to .kicad_pcb file
+        output_path: Where to save the filled PCB (default: overwrites input)
+        kicad_cli: Path to kicad-cli (auto-detected if not provided)
+
+    Returns:
+        KiCadCLIResult with success status and output path
+    """
+    if kicad_cli is None:
+        kicad_cli = find_kicad_cli()
+        if kicad_cli is None:
+            return KiCadCLIResult(
+                success=False,
+                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            )
+
+    # Build command
+    cmd = [str(kicad_cli), "pcb", "fill-zones"]
+
+    if output_path is not None:
+        cmd.extend(["--output", str(output_path)])
+
+    cmd.append(str(pcb_path))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        # Determine which file should exist after the operation
+        expected_path = output_path if output_path is not None else pcb_path
+
+        if result.returncode == 0:
+            return KiCadCLIResult(
+                success=True,
+                output_path=expected_path,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=result.returncode,
+            )
+        else:
+            return KiCadCLIResult(
+                success=False,
+                stdout=result.stdout,
+                stderr=result.stderr or "Zone fill failed",
+                return_code=result.returncode,
+            )
+
+    except FileNotFoundError as e:
+        return KiCadCLIResult(success=False, stderr=f"kicad-cli not found: {e}")
+    except subprocess.SubprocessError as e:
+        return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
+
+
 def get_kicad_version(kicad_cli: Path | None = None) -> str | None:
     """Get KiCad version string.
 

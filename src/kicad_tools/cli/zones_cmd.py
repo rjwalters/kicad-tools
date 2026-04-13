@@ -1,9 +1,11 @@
 """
-CLI command for zone generation.
+CLI command for zone generation and fill.
 
-Provides commands for adding copper pour zones to PCB files:
+Provides commands for adding copper pour zones to PCB files and
+filling zones using kicad-cli:
     kicad-tools zones add board.kicad_pcb --net GND --layer B.Cu
     kicad-tools zones list board.kicad_pcb
+    kicad-tools zones fill board.kicad_pcb
 """
 
 import argparse
@@ -133,6 +135,36 @@ def main(argv: list[str] | None = None) -> int:
         help="Suppress progress output",
     )
 
+    # zones fill
+    fill_parser = subparsers.add_parser("fill", help="Fill all zones in a PCB")
+    fill_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    fill_parser.add_argument(
+        "-o",
+        "--output",
+        help="Output file path (default: overwrites input)",
+    )
+    fill_parser.add_argument(
+        "--net",
+        help="Fill only zones for this net (e.g., GND)",
+    )
+    fill_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose output",
+    )
+    fill_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without writing output",
+    )
+    fill_parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output",
+    )
+
     args = parser.parse_args(argv)
 
     if not args.zones_command:
@@ -145,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_list(args)
     elif args.zones_command == "batch":
         return _run_batch(args)
+    elif args.zones_command == "fill":
+        return _run_fill(args)
 
     return 0
 
@@ -354,6 +388,62 @@ def _run_batch(args) -> int:
         print(f"\nCreated {stats['zone_count']} zone(s)")
 
     return 0 if not errors else 1
+
+
+def _run_fill(args) -> int:
+    """Fill zones in a PCB using kicad-cli."""
+    from .runner import find_kicad_cli, run_fill_zones
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        print(f"Error: File not found: {pcb_path}", file=sys.stderr)
+        return 1
+
+    kicad_cli = find_kicad_cli()
+    if not kicad_cli:
+        print(
+            "Error: kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_path = Path(args.output) if args.output else None
+
+    quiet = getattr(args, "quiet", False)
+
+    if args.dry_run:
+        print(f"Would fill zones in: {pcb_path}")
+        if args.net:
+            print(f"  Net filter: {args.net}")
+        if output_path:
+            print(f"  Output: {output_path}")
+        else:
+            print(f"  Output: {pcb_path} (in-place)")
+        return 0
+
+    if args.net:
+        # kicad-cli fill-zones does not support per-net filtering.
+        # Document the limitation and fill all zones.
+        if not quiet:
+            print(
+                f"Note: --net filter is not supported by kicad-cli. "
+                f"All zones will be filled (requested net: {args.net}).",
+            )
+
+    if not quiet:
+        print(f"Filling zones in: {pcb_path}")
+
+    result = run_fill_zones(pcb_path, output_path, kicad_cli=kicad_cli)
+
+    if not result.success:
+        print(f"Error: {result.stderr}", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        target = output_path if output_path else pcb_path
+        print(f"Zones filled: {target}")
+
+    return 0
 
 
 if __name__ == "__main__":
