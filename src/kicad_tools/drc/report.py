@@ -295,8 +295,11 @@ def parse_json_report(content: str, source_file: str = "") -> DRCReport:
                 if net and net not in nets:
                     nets.append(net)
 
+        raw_type = ViolationType.from_string(type_str)
+        refined_type = _infer_segment_via_type(raw_type, items)
+
         violation = DRCViolation(
-            type=ViolationType.from_string(type_str),
+            type=refined_type,
             type_str=type_str,
             severity=severity,
             message=message,
@@ -350,18 +353,49 @@ def _extract_values(data: dict, message: str) -> None:
         data["actual_value_mm"] = float(width_match.group(2))
 
 
+def _infer_segment_via_type(vtype: ViolationType, items: list[str]) -> ViolationType:
+    """Refine a generic CLEARANCE type to CLEARANCE_SEGMENT_VIA when items indicate it.
+
+    kicad-cli emits ``[clearance]`` for all clearance sub-types in its text
+    and JSON reports.  The item descriptions, however, distinguish "Track"
+    (segment) from "Via".  When one item is a Track and the other is a Via
+    the violation is actually segment-to-via and should be classified as
+    ``CLEARANCE_SEGMENT_VIA`` so that ``fix-drc`` can detect and repair it.
+    """
+    if vtype != ViolationType.CLEARANCE:
+        return vtype
+
+    has_track = False
+    has_via = False
+    for item in items:
+        item_lower = item.lower()
+        if item_lower.startswith("track ") or item_lower.startswith("track\t"):
+            has_track = True
+        elif item_lower.startswith("via ") or item_lower.startswith("via\t"):
+            has_via = True
+
+    if has_track and has_via:
+        return ViolationType.CLEARANCE_SEGMENT_VIA
+
+    return vtype
+
+
 def _build_violation(data: dict) -> DRCViolation:
     """Build a DRCViolation from parsed data."""
     from kicad_tools.feedback import generate_drc_suggestions
 
+    raw_type = ViolationType.from_string(data["type_str"])
+    items = data.get("items", [])
+    refined_type = _infer_segment_via_type(raw_type, items)
+
     violation = DRCViolation(
-        type=ViolationType.from_string(data["type_str"]),
+        type=refined_type,
         type_str=data["type_str"],
         severity=data["severity"],
         message=data["message"],
         rule=data.get("rule", ""),
         locations=data.get("locations", []),
-        items=data.get("items", []),
+        items=items,
         nets=data.get("nets", []),
         required_value_mm=data.get("required_value_mm"),
         actual_value_mm=data.get("actual_value_mm"),

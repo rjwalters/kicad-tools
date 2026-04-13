@@ -970,3 +970,254 @@ class TestEdgeCases:
         result = repairer.repair(violations, max_displacement=0.5, dry_run=True)
         # Should succeed via direct push (no connected trace)
         assert result.repaired == 1 or result.skipped_infeasible >= 0
+
+
+# ── Report inference: kicad-cli clearance -> CLEARANCE_SEGMENT_VIA ──
+
+
+# DRC text report where kicad-cli outputs [clearance] for a Track-to-Via pair.
+# This is the real-world scenario: kicad-cli doesn't emit [clearance_segment_via].
+DRC_REPORT_KICAD_CLI_SEGMENT_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.1000 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# DRC text report with a Track-to-Track pair (should stay CLEARANCE).
+DRC_REPORT_KICAD_CLI_SEGMENT_SEGMENT = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# DRC text report with both Track-to-Track and Track-to-Via violations.
+DRC_REPORT_KICAD_CLI_MIXED_CLEARANCE = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 2 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1500 mm): Track [+3.3V] on F.Cu
+
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(108.0000 mm, 100.1000 mm): Track [+3.3V] on F.Cu
+    @(108.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+# JSON report where kicad-cli uses "clearance" for a Track-to-Via pair.
+DRC_JSON_KICAD_CLI_SEGMENT_VIA = json.dumps(
+    {
+        "source": "test.kicad_pcb",
+        "date": "2025-12-28T21:29:34-08:00",
+        "violations": [
+            {
+                "type": "clearance",
+                "description": "Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)",
+                "severity": "error",
+                "items": [
+                    {
+                        "description": "Track [+3.3V] on F.Cu",
+                        "pos": {"x": 105.0, "y": 100.1},
+                        "net": "+3.3V",
+                    },
+                    {
+                        "description": "Via [GND] on F.Cu - B.Cu",
+                        "pos": {"x": 105.0, "y": 100.0},
+                        "net": "GND",
+                    },
+                ],
+            }
+        ],
+    }
+)
+
+
+class TestSegmentViaInference:
+    """Tests that kicad-cli's generic [clearance] is reclassified when items indicate a via."""
+
+    def test_text_report_track_via_becomes_segment_via(self):
+        """Text report with [clearance] + Track + Via -> CLEARANCE_SEGMENT_VIA."""
+        from kicad_tools.drc.report import parse_text_report
+
+        report = parse_text_report(DRC_REPORT_KICAD_CLI_SEGMENT_VIA)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE_SEGMENT_VIA
+
+    def test_text_report_track_track_stays_clearance(self):
+        """Text report with [clearance] + Track + Track -> CLEARANCE (unchanged)."""
+        from kicad_tools.drc.report import parse_text_report
+
+        report = parse_text_report(DRC_REPORT_KICAD_CLI_SEGMENT_SEGMENT)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE
+
+    def test_text_report_mixed_no_double_counting(self):
+        """Mixed Track-Track and Track-Via should not double-count."""
+        from kicad_tools.drc.report import parse_text_report
+
+        report = parse_text_report(DRC_REPORT_KICAD_CLI_MIXED_CLEARANCE)
+        assert len(report.violations) == 2
+
+        clearance_only = report.by_type(ViolationType.CLEARANCE)
+        segment_via = report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+
+        assert len(clearance_only) == 1
+        assert len(segment_via) == 1
+
+    def test_json_report_track_via_becomes_segment_via(self):
+        """JSON report with "clearance" type + Track + Via -> CLEARANCE_SEGMENT_VIA."""
+        from kicad_tools.drc.report import parse_json_report
+
+        report = parse_json_report(DRC_JSON_KICAD_CLI_SEGMENT_VIA)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE_SEGMENT_VIA
+
+    def test_explicit_segment_via_not_reclassified(self):
+        """Pre-classified [clearance_segment_via] is preserved, not double-reclassified."""
+        from kicad_tools.drc.report import parse_text_report
+
+        # Re-use the existing fixture that already uses [clearance_segment_via] tag
+        report = parse_text_report(DRC_REPORT_SEGMENT_VIA)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE_SEGMENT_VIA
+
+    def test_pad_clearance_stays_clearance(self):
+        """[clearance] with Pad + Track should remain CLEARANCE (not segment-via)."""
+        from kicad_tools.drc.report import parse_text_report
+
+        pad_report = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Pad 1 [+3.3V] of U1 on F.Cu
+    @(105.0000 mm, 100.1000 mm): Track [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report = parse_text_report(pad_report)
+        assert len(report.violations) == 1
+        assert report.violations[0].type == ViolationType.CLEARANCE
+
+    def test_kicad_cli_report_fix_drc_detects_segment_via(
+        self, pcb_segment_via: Path, tmp_path: Path, capsys
+    ):
+        """fix-drc CLI with kicad-cli-style [clearance] report finds segment-to-via violations."""
+        report_file = tmp_path / "kicad-cli-drc.rpt"
+        report_file.write_text(DRC_REPORT_KICAD_CLI_SEGMENT_VIA)
+
+        main(
+            [
+                str(pcb_segment_via),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The segment-via violation should appear in the clearance count
+        assert data["clearance"]["violations"] >= 1
+
+
+# ── Pure-Python DRC fallback tests ────────────────────────────────────
+
+
+class TestPurePythonDRCFallback:
+    """Tests for _run_python_drc() which converts DRCChecker results to DRCReport."""
+
+    def test_fallback_detects_clearance_violations(self, tmp_path: Path):
+        """Pure-Python DRC should detect segment clearance violations."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+        assert report.violation_count > 0
+
+    def test_fallback_detects_segment_via_violations(self, tmp_path: Path):
+        """Pure-Python DRC should detect segment-to-via clearance violations."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SEGMENT_VIA_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+
+        segment_via_violations = report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+        assert len(segment_via_violations) > 0
+
+    def test_fallback_violations_have_locations(self, tmp_path: Path):
+        """Converted violations should carry location data."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+
+        for v in report.violations:
+            assert len(v.locations) > 0, "Converted violation should have at least one location"
+
+    def test_fallback_violations_have_values(self, tmp_path: Path):
+        """Converted violations should carry required and actual values."""
+        from kicad_tools.cli.fix_drc_cmd import _run_python_drc
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        report = _run_python_drc(pcb_file)
+        assert report is not None
+
+        for v in report.violations:
+            assert v.required_value_mm is not None
+            assert v.actual_value_mm is not None
+
+    def test_fallback_used_when_no_kicad_cli(self, tmp_path: Path, monkeypatch):
+        """_get_drc_report should fall back to pure-Python DRC when kicad-cli is missing."""
+        from kicad_tools.cli import fix_drc_cmd
+
+        # Make find_kicad_cli return None
+        monkeypatch.setattr(
+            "kicad_tools.cli.runner.find_kicad_cli",
+            lambda: None,
+        )
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SEGMENT_VIA_CLEARANCE)
+
+        report = fix_drc_cmd._get_drc_report(None, pcb_file)
+        assert report is not None
+        assert report.violation_count > 0
