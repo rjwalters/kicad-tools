@@ -1,0 +1,400 @@
+"""Data snapshot collection for report generation.
+
+Gathers board summary, DRC, BOM, audit, net connectivity, and analysis
+results into JSON snapshots. Each sub-collector is fault-tolerant: failures
+produce a warning log and null result rather than propagating exceptions.
+
+Example:
+    >>> from kicad_tools.report import ReportDataCollector
+    >>> collector = ReportDataCollector(Path("board.kicad_pcb"))
+    >>> files = collector.collect_all(Path("output/data"))
+    >>> for name, path in files.items():
+    ...     print(f"{name}: {path}")
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+
+
+def _make_envelope(data: dict[str, Any] | None, pcb_path: Path) -> dict[str, Any]:
+    """Wrap data in a standard envelope with schema version and timestamp."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "pcb_path": str(pcb_path),
+        "data": data,
+    }
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write a JSON file with consistent formatting."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+class ReportDataCollector:
+    """Collects data snapshots for report generation.
+
+    Orchestrates calls to existing analysis APIs and serializes their
+    results as JSON files. ManufacturingAudit is run once and its results
+    are distributed to both the DRC and audit snapshots.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file.
+        manufacturer: Target manufacturer ID (default: "jlcpcb").
+        quantity: Quantity for cost estimation (default: 5).
+        skip_erc: Skip ERC check (default: False).
+    """
+
+    def __init__(
+        self,
+        pcb_path: Path,
+        manufacturer: str = "jlcpcb",
+        quantity: int = 5,
+        skip_erc: bool = False,
+    ) -> None:
+        self.pcb_path = Path(pcb_path)
+        self.manufacturer = manufacturer
+        self.quantity = quantity
+        self.skip_erc = skip_erc
+
+    def collect_all(self, output_dir: Path) -> dict[str, Path]:
+        """Run all collectors, write JSON files, return mapping of name to path.
+
+        Runs ManufacturingAudit once and reuses the result for both DRC and
+        audit snapshots. Each sub-collector is wrapped in try/except so a
+        failure in one does not prevent the others from running.
+
+        Args:
+            output_dir: Directory to write JSON snapshot files into.
+
+        Returns:
+            Mapping of snapshot name to file path for each successfully
+            written file.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        files: dict[str, Path] = {}
+        pcb = PCB.load(self.pcb_path)
+
+        # Run ManufacturingAudit once and reuse for DRC + audit snapshots.
+        audit_result = None
+        try:
+            from kicad_tools.audit.auditor import ManufacturingAudit
+
+            audit = ManufacturingAudit(
+                self.pcb_path,
+                manufacturer=self.manufacturer,
+                quantity=self.quantity,
+                skip_erc=self.skip_erc,
+            )
+            audit_result = audit.run()
+        except Exception:
+            logger.warning(
+                "ManufacturingAudit failed; DRC and audit snapshots will be null", exc_info=True
+            )
+
+        # Board summary
+        self._safe_collect(
+            "board_summary",
+            output_dir,
+            files,
+            lambda: self.collect_board_summary(pcb),
+        )
+
+        # DRC summary (from audit result)
+        self._safe_collect(
+            "drc_summary",
+            output_dir,
+            files,
+            lambda: self.collect_drc(audit_result),
+        )
+
+        # BOM
+        sch_path = self.pcb_path.with_suffix(".kicad_sch")
+        if sch_path.exists():
+            self._safe_collect(
+                "bom",
+                output_dir,
+                files,
+                lambda: self.collect_bom(sch_path),
+            )
+        else:
+            logger.warning("No schematic found at %s; skipping BOM collection", sch_path)
+
+        # Audit
+        self._safe_collect(
+            "audit",
+            output_dir,
+            files,
+            lambda: self.collect_audit(audit_result),
+        )
+
+        # Net status
+        self._safe_collect(
+            "net_status",
+            output_dir,
+            files,
+            lambda: self.collect_net_status(pcb),
+        )
+
+        # Analysis (congestion + SI + thermal)
+        self._safe_collect(
+            "analysis",
+            output_dir,
+            files,
+            lambda: self.collect_analysis(pcb),
+        )
+
+        return files
+
+    # ------------------------------------------------------------------
+    # Individual sub-collectors
+    # ------------------------------------------------------------------
+
+    def collect_board_summary(self, pcb: Any) -> dict[str, Any]:
+        """Collect board summary: layers, footprints, nets, traces, vias, dimensions.
+
+        Args:
+            pcb: Loaded PCB object.
+
+        Returns:
+            Dictionary with board summary data.
+        """
+        # Layer info
+        copper_layers = pcb.copper_layers
+        layer_names = [layer.name for layer in copper_layers]
+
+        # Footprint breakdown
+        total_fp = len(pcb.footprints)
+        smd_count = sum(1 for fp in pcb.footprints if fp.attr == "smd")
+        tht_count = sum(1 for fp in pcb.footprints if fp.attr == "through_hole")
+        other_count = total_fp - smd_count - tht_count
+
+        # Board dimensions via Edge.Cuts parsing (same pattern as ManufacturingAudit)
+        board_width, board_height = self._get_board_dimensions(pcb)
+
+        return {
+            "layer_count": len(copper_layers),
+            "layer_names": layer_names,
+            "footprint_count": total_fp,
+            "footprint_smd": smd_count,
+            "footprint_tht": tht_count,
+            "footprint_other": other_count,
+            "net_count": len(pcb.nets),
+            "segment_count": len(pcb.segments),
+            "via_count": len(pcb.vias),
+            "board_width_mm": round(board_width, 2),
+            "board_height_mm": round(board_height, 2),
+        }
+
+    def collect_drc(self, audit_result: Any | None) -> dict[str, Any] | None:
+        """Extract DRC sub-section from a pre-run AuditResult.
+
+        Args:
+            audit_result: Result from ManufacturingAudit.run(), or None if
+                the audit failed.
+
+        Returns:
+            DRC data dictionary, or None if audit_result is None.
+        """
+        if audit_result is None:
+            return None
+        return audit_result.drc.to_dict()
+
+    def collect_bom(self, sch_path: Path) -> dict[str, Any]:
+        """Collect BOM grouped by value+footprint with LCSC numbers.
+
+        Args:
+            sch_path: Path to .kicad_sch file.
+
+        Returns:
+            Dictionary with BOM data.
+        """
+        from kicad_tools.schema.bom import extract_bom
+
+        bom = extract_bom(str(sch_path))
+        groups = bom.grouped()
+
+        return {
+            "total_components": bom.total_components,
+            "unique_parts": bom.unique_parts,
+            "dnp_count": bom.dnp_count,
+            "groups": [g.to_dict() for g in groups],
+        }
+
+    def collect_audit(self, audit_result: Any | None) -> dict[str, Any] | None:
+        """Full manufacturing audit snapshot.
+
+        Args:
+            audit_result: Result from ManufacturingAudit.run(), or None if
+                the audit failed.
+
+        Returns:
+            Audit data dictionary, or None if audit_result is None.
+        """
+        if audit_result is None:
+            return None
+        return audit_result.to_dict()
+
+    def collect_net_status(self, pcb: Any) -> dict[str, Any]:
+        """Routing completion summary.
+
+        Args:
+            pcb: Loaded PCB object.
+
+        Returns:
+            Dictionary with net status data including totals and completion
+            percentage.
+        """
+        from kicad_tools.analysis.net_status import NetStatusAnalyzer
+
+        analyzer = NetStatusAnalyzer(pcb)
+        result = analyzer.analyze()
+
+        completion_pct = 0.0
+        if result.total_nets > 0:
+            completion_pct = round(100.0 * result.complete_count / result.total_nets, 1)
+
+        return {
+            "total_nets": result.total_nets,
+            "complete_count": result.complete_count,
+            "incomplete_count": result.incomplete_count,
+            "unrouted_count": result.unrouted_count,
+            "total_unconnected_pads": result.total_unconnected_pads,
+            "completion_pct": completion_pct,
+        }
+
+    def collect_analysis(self, pcb: Any) -> dict[str, Any]:
+        """Combined congestion, signal integrity, and thermal snapshots.
+
+        Each section is collected independently. If any analyzer raises,
+        that section is set to None with a warning log.
+
+        Args:
+            pcb: Loaded PCB object.
+
+        Returns:
+            Dictionary with congestion, signal_integrity, and thermal
+            sections. Each section may be None on error.
+        """
+        result: dict[str, Any] = {
+            "congestion": None,
+            "signal_integrity": None,
+            "thermal": None,
+        }
+
+        # Congestion
+        try:
+            from kicad_tools.analysis.congestion import CongestionAnalyzer
+
+            reports = CongestionAnalyzer().analyze(pcb)
+            result["congestion"] = {
+                "hotspot_count": len(reports),
+                "severity_breakdown": self._severity_breakdown(reports),
+                "hotspots": [r.to_dict() for r in reports],
+            }
+        except Exception:
+            logger.warning("Congestion analysis failed", exc_info=True)
+
+        # Signal integrity
+        try:
+            from kicad_tools.analysis.signal_integrity import SignalIntegrityAnalyzer
+
+            si = SignalIntegrityAnalyzer()
+            crosstalk = si.analyze_crosstalk(pcb)
+            impedance = si.analyze_impedance(pcb)
+            result["signal_integrity"] = {
+                "crosstalk_risk_count": len(crosstalk),
+                "impedance_discontinuity_count": len(impedance),
+                "crosstalk_risks": [r.to_dict() for r in crosstalk],
+                "impedance_discontinuities": [d.to_dict() for d in impedance],
+            }
+        except Exception:
+            logger.warning("Signal integrity analysis failed", exc_info=True)
+
+        # Thermal
+        try:
+            from kicad_tools.analysis.thermal import ThermalAnalyzer
+
+            hotspots = ThermalAnalyzer().analyze(pcb)
+            result["thermal"] = {
+                "hotspot_count": len(hotspots),
+                "hotspots": [h.to_dict() for h in hotspots],
+            }
+        except Exception:
+            logger.warning("Thermal analysis failed", exc_info=True)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _safe_collect(
+        self,
+        name: str,
+        output_dir: Path,
+        files: dict[str, Path],
+        collector_fn: Any,
+    ) -> None:
+        """Run a collector function, wrap in envelope, and write JSON.
+
+        If the collector raises, the file is still written with
+        ``data: null`` so downstream consumers can distinguish between
+        'not collected' (file absent) and 'collection failed' (data null).
+        """
+        try:
+            data = collector_fn()
+        except Exception:
+            logger.warning("Collector '%s' failed", name, exc_info=True)
+            data = None
+
+        path = output_dir / f"{name}.json"
+        _write_json(path, _make_envelope(data, self.pcb_path))
+        files[name] = path
+
+    def _get_board_dimensions(self, pcb: Any) -> tuple[float, float]:
+        """Get board dimensions (width, height) in mm from Edge.Cuts."""
+        min_x = min_y = float("inf")
+        max_x = max_y = float("-inf")
+
+        for item in pcb.graphic_items:
+            if item.layer == "Edge.Cuts":
+                if hasattr(item, "start"):
+                    min_x = min(min_x, item.start[0])
+                    min_y = min(min_y, item.start[1])
+                    max_x = max(max_x, item.start[0])
+                    max_y = max(max_y, item.start[1])
+                if hasattr(item, "end"):
+                    min_x = min(min_x, item.end[0])
+                    min_y = min(min_y, item.end[1])
+                    max_x = max(max_x, item.end[0])
+                    max_y = max(max_y, item.end[1])
+
+        if min_x != float("inf"):
+            return (max_x - min_x, max_y - min_y)
+
+        return (0.0, 0.0)
+
+    @staticmethod
+    def _severity_breakdown(reports: list[Any]) -> dict[str, int]:
+        """Count congestion reports by severity level."""
+        breakdown: dict[str, int] = {}
+        for r in reports:
+            key = r.severity.value
+            breakdown[key] = breakdown.get(key, 0) + 1
+        return breakdown
