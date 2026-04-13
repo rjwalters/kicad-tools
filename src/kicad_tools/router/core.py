@@ -2039,6 +2039,11 @@ class Autorouter:
                             timed_out = True
                             break
 
+                        net_name = self.net_names.get(failed_net, f"Net_{failed_net}")
+                        flush_print(
+                            f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
+                        )
+
                         # Find blocking nets for this failed net
                         pads = pads_by_net.get(failed_net, [])
                         if len(pads) < 2:
@@ -2205,6 +2210,11 @@ class Autorouter:
                                 )
                                 timed_out = True
                                 break
+
+                            net_name = self.net_names.get(net, f"Net_{net}")
+                            flush_print(
+                                f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
+                            )
 
                             routes = self._route_net_negotiated(net, present_factor)
                             if routes:
