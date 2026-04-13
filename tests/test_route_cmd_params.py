@@ -21,7 +21,7 @@ class TestRouteCommandGridParameter:
             output=None,
             strategy="negotiated",
             skip_nets=None,
-            grid=0.1,  # Non-default value
+            grid="0.1",  # Non-default value (string, as parser now emits)
             trace_width=0.2,
             clearance=0.15,
             via_drill=0.3,
@@ -54,7 +54,7 @@ class TestRouteCommandGridParameter:
             output=None,
             strategy="negotiated",
             skip_nets=None,
-            grid=0.25,  # Default value - should not be passed
+            grid="0.25",  # Default value (string) - should not be passed
             trace_width=0.2,
             clearance=0.15,
             via_drill=0.3,
@@ -75,6 +75,68 @@ class TestRouteCommandGridParameter:
             call_args = mock_main.call_args[0][0]
             assert "--grid" not in call_args
 
+    def test_grid_auto_passed_through(self):
+        """Grid 'auto' value is always passed through to route_cmd."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="auto",  # Auto mode
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--grid" in call_args
+            grid_idx = call_args.index("--grid")
+            assert call_args[grid_idx + 1] == "auto"
+
+    def test_grid_auto_uppercase_passed_through(self):
+        """Grid 'AUTO' (uppercase) value is passed through to route_cmd."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="AUTO",  # Auto mode uppercase
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--grid" in call_args
+            grid_idx = call_args.index("--grid")
+            assert call_args[grid_idx + 1] == "AUTO"
+
 
 class TestRouteCommandClearanceParameter:
     """Tests for --clearance parameter handling in route command."""
@@ -89,7 +151,7 @@ class TestRouteCommandClearanceParameter:
             output=None,
             strategy="negotiated",
             skip_nets=None,
-            grid=0.25,
+            grid="0.25",
             trace_width=0.2,
             clearance=0.127,  # Non-default value
             via_drill=0.3,
@@ -122,7 +184,7 @@ class TestRouteCommandClearanceParameter:
             output=None,
             strategy="negotiated",
             skip_nets=None,
-            grid=0.25,
+            grid="0.25",
             trace_width=0.2,
             clearance=0.15,  # Default value - should not be passed
             via_drill=0.3,
@@ -159,11 +221,27 @@ class TestRouteCommandDefaultConsistency:
         args = parser.parse_args(["route", "test.kicad_pcb", "--dry-run"])
 
         # These should match the checks in routing.py
-        assert args.grid == 0.25, "Grid default should be 0.25"
+        assert args.grid == "0.25", "Grid default should be '0.25'"
         assert args.clearance == 0.15, "Clearance default should be 0.15"
         assert args.trace_width == 0.2, "Trace width default should be 0.2"
         assert args.via_drill == 0.3, "Via drill default should be 0.3"
         assert args.via_diameter == 0.6, "Via diameter default should be 0.6"
+
+    def test_parser_accepts_grid_auto(self):
+        """Top-level parser accepts --grid auto without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--grid", "auto"])
+        assert args.grid == "auto", "Parser should accept 'auto' as a grid value"
+
+    def test_parser_accepts_grid_numeric(self):
+        """Top-level parser accepts --grid with numeric values as strings."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--grid", "0.1"])
+        assert args.grid == "0.1", "Parser should accept '0.1' as a grid value"
 
     def test_route_cmd_defaults_match_parser_defaults(self):
         """Verify route_cmd.py defaults match parser.py defaults."""
