@@ -137,8 +137,9 @@ bayesian = [
 screenshot = [
     "cairosvg>=2.6",
 ]
-# Report rendering (Markdown to HTML/PDF)
+# Report generation (Jinja2 Markdown templates) and rendering (Markdown to HTML/PDF)
 report = [
+    "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
 ]
@@ -159,6 +160,7 @@ all = [
     "ax-platform>=0.4.0",
     "botorch>=0.12.0",
     "cairosvg>=2.6",
+    "jinja2>=3.1",
     "markdown>=3.5",
     "weasyprint>=60.0",
 ]
@@ -179,6 +181,7 @@ dev = [
     "fastmcp>=2.0,<3",
     "pydantic>=2.0",
     "matplotlib>=3.5",
+    "jinja2>=3.1",
     "markdown>=3.5",
 ]
 
@@ -284,4 +287,5 @@ warn_return_any = true
 [dependency-groups]
 dev = [
     "pytest-cov>=7.0.0",
+    "jinja2>=3.1",
 ]

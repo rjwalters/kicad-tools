@@ -1,0 +1,435 @@
+"""Tests for the report generation module."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from kicad_tools.report.generator import ReportGenerator
+from kicad_tools.report.models import ReportData
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+def _full_data(**overrides) -> ReportData:
+    """Return a fully-populated ``ReportData`` instance."""
+    defaults: dict = {
+        "project_name": "TestBoard",
+        "revision": "A",
+        "date": "2026-04-12",
+        "manufacturer": "jlcpcb",
+        "board_stats": {
+            "layer_count": 4,
+            "component_count": 42,
+            "net_count": 80,
+            "board_area": "50x30 mm",
+        },
+        "bom_groups": [
+            {
+                "value": "100nF",
+                "footprint": "0402",
+                "qty": 10,
+                "refs": "C1-C10",
+                "mpn": "CL05B104KO5NNNC",
+                "lcsc": "C1525",
+            },
+            {
+                "value": "10k",
+                "footprint": "0402",
+                "qty": 5,
+                "refs": "R1-R5",
+                "mpn": "RC0402FR-0710KL",
+                "lcsc": "C25744",
+            },
+        ],
+        "drc": {
+            "error_count": 0,
+            "warning_count": 2,
+            "blocking_count": 0,
+            "passed": True,
+        },
+        "audit": {
+            "verdict": "ready",
+            "action_items": ["Review silkscreen placement"],
+        },
+        "net_status": {
+            "completion_percent": 95.5,
+            "unrouted_count": 3,
+            "unrouted_nets": ["GND", "VCC", "SDA"],
+        },
+        "cost": {
+            "per_unit": 2.50,
+            "batch_qty": 100,
+            "batch_total": 250.00,
+            "currency": "USD",
+        },
+        "schematic_sheets": [
+            {"name": "Main Sheet", "figure_path": "figures/main_sheet.png"},
+            {"name": "Power", "figure_path": "figures/power.png"},
+        ],
+        "pcb_figures": {
+            "front": "figures/pcb_front.png",
+            "back": "figures/pcb_back.png",
+            "copper": "figures/pcb_copper.png",
+        },
+        "notes": "This is a prototype build.",
+        "tool_version": "0.11.0",
+        "git_hash": "abc1234",
+    }
+    defaults.update(overrides)
+    return ReportData(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# TestReportData
+# ---------------------------------------------------------------------------
+
+
+class TestReportData:
+    """Test the ReportData dataclass."""
+
+    def test_full_instantiation(self) -> None:
+        data = _full_data()
+        assert data.project_name == "TestBoard"
+        assert data.revision == "A"
+        assert data.date == "2026-04-12"
+        assert data.manufacturer == "jlcpcb"
+        assert data.board_stats is not None
+        assert data.bom_groups is not None
+        assert data.drc is not None
+        assert data.audit is not None
+        assert data.net_status is not None
+        assert data.cost is not None
+        assert data.schematic_sheets is not None
+        assert data.pcb_figures is not None
+        assert data.notes == "This is a prototype build."
+        assert data.tool_version == "0.11.0"
+        assert data.git_hash == "abc1234"
+
+    def test_defaults(self) -> None:
+        data = ReportData(
+            project_name="Minimal",
+            revision="1",
+            date="2026-01-01",
+            manufacturer="pcbway",
+        )
+        assert data.board_stats is None
+        assert data.bom_groups is None
+        assert data.notes == ""
+        assert data.tool_version == ""
+        assert data.git_hash == ""
+
+
+# ---------------------------------------------------------------------------
+# TestReportGenerator
+# ---------------------------------------------------------------------------
+
+
+class TestReportGenerator:
+    """Test the ReportGenerator class."""
+
+    def test_full_render(self, tmp_path: Path) -> None:
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        assert report_path.exists()
+        content = report_path.read_text(encoding="utf-8")
+
+        # All 10 section headings must appear
+        assert "# TestBoard - Design Report" in content
+        assert "## Design Summary" in content
+        assert "## Schematic Overview" in content
+        assert "## PCB Layout" in content
+        assert "## Bill of Materials" in content
+        assert "## DRC Status" in content
+        assert "## Manufacturing Readiness" in content
+        assert "## Routing Status" in content
+        assert "## Cost Estimate" in content
+        assert "## Notes" in content
+
+        # No None literals
+        assert "None" not in content
+
+        # Verify some data rendered
+        assert "jlcpcb" in content
+        assert "100nF" in content
+        assert "PASS" in content
+        assert "READY" in content
+        assert "95.5%" in content
+        assert "abc1234" in content
+
+    def test_partial_data_omits_sections(self, tmp_path: Path) -> None:
+        data = ReportData(
+            project_name="Sparse",
+            revision="1",
+            date="2026-01-01",
+            manufacturer="pcbway",
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+
+        # Header is always present
+        assert "# Sparse - Design Report" in content
+
+        # Optional sections must be absent
+        assert "## Design Summary" not in content
+        assert "## Schematic Overview" not in content
+        assert "## PCB Layout" not in content
+        assert "## Bill of Materials" not in content
+        assert "## DRC Status" not in content
+        assert "## Manufacturing Readiness" not in content
+        assert "## Routing Status" not in content
+        assert "## Cost Estimate" not in content
+        assert "## Notes" not in content
+
+        # No None literals
+        assert "None" not in content
+
+    def test_immutability_guard(self, tmp_path: Path) -> None:
+        """If the computed next version directory already contains report.md,
+        generate() must raise FileExistsError.
+
+        Simulates a race condition by monkey-patching the version scanner
+        to return a directory that already holds a report.
+        """
+        data = _full_data()
+        gen = ReportGenerator()
+
+        # Generate v1 normally
+        path1 = gen.generate(data, tmp_path)
+        assert path1.exists()
+
+        # Monkey-patch _next_version_dir to always return v1 (already has report.md)
+        gen._next_version_dir = staticmethod(lambda output_dir: tmp_path / "v1")  # type: ignore[assignment]
+
+        with pytest.raises(FileExistsError, match="must not be overwritten"):
+            gen.generate(data, tmp_path)
+
+    def test_metadata_written(self, tmp_path: Path) -> None:
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        metadata_path = report_path.parent / "metadata.json"
+        assert metadata_path.exists()
+
+        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert "timestamp" in meta
+        assert "kicad_tools_version" in meta
+        assert "git_hash" in meta
+        assert "template_sha256" in meta
+
+        # template_sha256 must be a valid hex string
+        sha = meta["template_sha256"]
+        assert len(sha) == 64
+        assert all(c in "0123456789abcdef" for c in sha)
+
+        # Version and hash from data
+        assert meta["kicad_tools_version"] == "0.11.0"
+        assert meta["git_hash"] == "abc1234"
+
+    def test_auto_version_increment(self, tmp_path: Path) -> None:
+        data = _full_data()
+        gen = ReportGenerator()
+
+        p1 = gen.generate(data, tmp_path)
+        p2 = gen.generate(data, tmp_path)
+        p3 = gen.generate(data, tmp_path)
+
+        assert p1.parent.name == "v1"
+        assert p2.parent.name == "v2"
+        assert p3.parent.name == "v3"
+
+    def test_custom_template(self, tmp_path: Path) -> None:
+        template_dir = tmp_path / "custom_templates"
+        template_dir.mkdir()
+        custom_template = template_dir / "custom.md.j2"
+        custom_template.write_text("# {{ project_name }} custom report\n")
+
+        data = _full_data()
+        output_dir = tmp_path / "output"
+        gen = ReportGenerator(template_path=custom_template)
+        report_path = gen.generate(data, output_dir)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "# TestBoard custom report" in content
+
+    def test_figure_paths_not_validated(self, tmp_path: Path) -> None:
+        """Figure paths are strings in the output, not validated on disk."""
+        data = _full_data(
+            pcb_figures={
+                "front": "figures/nonexistent.png",
+                "back": "figures/also_missing.png",
+            },
+            schematic_sheets=[
+                {"name": "Ghost", "figure_path": "figures/ghost.png"},
+            ],
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "figures/nonexistent.png" in content
+        assert "figures/ghost.png" in content
+
+    def test_empty_notes_omitted(self, tmp_path: Path) -> None:
+        """Empty notes string means no Notes section."""
+        data = _full_data(notes="")
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## Notes" not in content
+
+    def test_nonempty_notes_included(self, tmp_path: Path) -> None:
+        data = _full_data(notes="Ship by Friday.")
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## Notes" in content
+        assert "Ship by Friday." in content
+
+    def test_drc_fail_status(self, tmp_path: Path) -> None:
+        data = _full_data(
+            drc={
+                "error_count": 3,
+                "warning_count": 1,
+                "blocking_count": 2,
+                "passed": False,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "FAIL" in content
+
+
+# ---------------------------------------------------------------------------
+# TestImportError
+# ---------------------------------------------------------------------------
+
+
+class TestReportImportError:
+    """Test graceful degradation when jinja2 is absent."""
+
+    def test_import_error_message(self) -> None:
+        """Verify that when jinja2 is absent the module still imports but
+        ReportData and ReportGenerator are not exported."""
+        # Save and remove the real jinja2 module
+        saved = {}
+        for key in list(sys.modules.keys()):
+            if key == "jinja2" or key.startswith("jinja2."):
+                saved[key] = sys.modules.pop(key)
+
+        # Also remove cached report modules so they re-import
+        for key in list(sys.modules.keys()):
+            if "kicad_tools.report" in key:
+                saved[key] = sys.modules.pop(key)
+
+        try:
+            with mock.patch.dict(sys.modules, {"jinja2": None}):
+                import importlib
+
+                mod = importlib.import_module("kicad_tools.report")
+                # Core figure/render exports must always be available
+                assert hasattr(mod, "FigureEntry")
+                assert hasattr(mod, "ReportFigureGenerator")
+                assert hasattr(mod, "render_html")
+                assert hasattr(mod, "render_pdf")
+                # Jinja2-dependent exports must be absent
+                assert not hasattr(mod, "ReportData")
+                assert not hasattr(mod, "ReportGenerator")
+        finally:
+            # Restore all saved modules
+            sys.modules.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# TestReportCLI
+# ---------------------------------------------------------------------------
+
+
+class TestReportCLI:
+    """Test the CLI entry point."""
+
+    def test_help(self) -> None:
+        """kct report generate --help must exit 0."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        with pytest.raises(SystemExit) as exc_info:
+            report_main(["generate", "--help"])
+        assert exc_info.value.code == 0
+
+    def test_report_parser_registered(self) -> None:
+        """The report subcommand must be recognized by the main parser."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["report", "generate", "test.kicad_pro", "--mfr", "jlcpcb"])
+        assert args.command == "report"
+        assert args.report_command == "generate"
+        assert args.report_input == "test.kicad_pro"
+        assert args.report_mfr == "jlcpcb"
+
+    def test_generate_skeleton(self, tmp_path: Path) -> None:
+        """Calling generate without a data-dir should produce a skeleton report."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            ["generate", "test.kicad_pro", "--mfr", "testmfr", "-o", str(output_dir)]
+        )
+        assert result == 0
+
+        report_path = output_dir / "v1" / "report.md"
+        assert report_path.exists()
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "# test - Design Report" in content
+        assert "testmfr" in content
+
+    def test_generate_with_data_dir(self, tmp_path: Path) -> None:
+        """Calling generate with --data-dir loads JSON files."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        # Write a board_stats JSON file
+        (data_dir / "board_stats.json").write_text(
+            json.dumps({"layer_count": 2, "component_count": 10})
+        )
+        (data_dir / "drc.json").write_text(
+            json.dumps({"error_count": 0, "warning_count": 0, "blocking_count": 0, "passed": True})
+        )
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "pcbway",
+                "-o",
+                str(output_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert result == 0
+
+        content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
+        assert "## Design Summary" in content
+        assert "## DRC Status" in content
+        assert "PASS" in content
