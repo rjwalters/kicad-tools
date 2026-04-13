@@ -274,3 +274,72 @@ class TestCheckJsonSchema:
         # CI-friendly check: counts are integers
         assert isinstance(data["summary"]["errors"], int)
         assert isinstance(data["summary"]["warnings"], int)
+
+
+class TestCheckLayerAutoDetection:
+    """Tests for automatic copper layer count detection."""
+
+    def test_auto_detect_2_layer_board(self, drc_clean_pcb: Path, capsys):
+        """Test that a 2-layer board auto-detects 2 layers (no regression)."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb), "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 2
+
+    def test_auto_detect_4_layer_board(self, four_layer_pcb: Path, capsys):
+        """Test that a 4-layer board auto-detects 4 layers without --layers flag."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(four_layer_pcb), "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 4
+
+    def test_auto_detect_6_layer_board(self, six_layer_pcb: Path, capsys):
+        """Test that a 6-layer board auto-detects 6 layers."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(six_layer_pcb), "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 6
+
+    def test_explicit_layers_overrides_detection(self, four_layer_pcb: Path, capsys):
+        """Test that --layers flag overrides auto-detection."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(four_layer_pcb), "--layers", "2", "--format", "json"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["layers"] == 2
+
+    def test_auto_detect_4_layer_table_output(self, four_layer_pcb: Path, capsys):
+        """Test that table output shows auto-detected layer count."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(four_layer_pcb)])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Layers: 4" in captured.out
+
+    def test_help_text_mentions_auto_detection(self, capsys):
+        """Test that --layers help text indicates auto-detection."""
+        from kicad_tools.cli.check_cmd import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "auto-detect" in captured.out.lower()
