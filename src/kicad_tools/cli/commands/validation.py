@@ -130,6 +130,8 @@ def run_fix_drc_command(args) -> int:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:
         sub_argv.append("--dry-run")
+    if getattr(args, "max_passes", 1) != 1:
+        sub_argv.extend(["--max-passes", str(args.max_passes)])
     if args.format != "text":
         sub_argv.extend(["--format", args.format])
     # Use global quiet flag

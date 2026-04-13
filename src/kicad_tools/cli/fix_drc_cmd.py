@@ -11,6 +11,7 @@ Usage:
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --dry-run
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only clearance
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only drill-clearance
+    kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --max-passes 3
 """
 
 from __future__ import annotations
@@ -18,12 +19,34 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from kicad_tools.drc.repair_clearance import ClearanceRepairer, RepairResult
 from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer, DrillRepairResult
 from kicad_tools.drc.report import DRCReport
 from kicad_tools.drc.violation import ViolationType
+
+
+@dataclass
+class PassResult:
+    """Statistics for a single repair pass."""
+
+    pass_number: int
+    violations_before: int
+    repaired: int
+    clearance_result: RepairResult
+    drill_result: DrillRepairResult
+
+    @property
+    def violations_after(self) -> int:
+        """Number of violations remaining after this pass."""
+        return self.violations_before - self.repaired
+
+    @property
+    def converged(self) -> bool:
+        """Whether this pass made no progress."""
+        return self.repaired == 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,6 +68,9 @@ Examples:
 
     # Only fix drill clearance violations
     kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --only drill-clearance
+
+    # Run up to 3 iterative repair passes
+    kct fix-drc board.kicad_pcb --drc-report board-drc.rpt --max-passes 3
         """,
     )
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -80,6 +106,16 @@ Examples:
         help="Preview changes without modifying files",
     )
     parser.add_argument(
+        "--max-passes",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of detect-repair cycles (default: 1). "
+            "Each pass re-runs DRC detection on the modified PCB. "
+            "Iteration stops early when no violations are repaired in a pass."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
@@ -104,47 +140,128 @@ Examples:
         print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
         return 1
 
-    # Get DRC report
+    # Validate max_passes
+    if args.max_passes < 1:
+        print("Error: --max-passes must be at least 1", file=sys.stderr)
+        return 1
+
+    # Effective max passes: dry-run forces single pass since no geometry changes
+    effective_max_passes = 1 if args.dry_run else args.max_passes
+
+    # Get initial DRC report
     report = _get_drc_report(args.drc_report, pcb_path)
     if report is None:
         return 1
 
-    # Classify violations
-    do_clearance = args.only is None or args.only == "clearance"
-    do_drill = args.only is None or args.only == "drill-clearance"
+    # Determine output path used for saving
+    output_path = Path(args.output) if args.output else pcb_path
 
-    clearance_violations = (
-        (
-            report.by_type(ViolationType.CLEARANCE)
-            + report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+    pass_results: list[PassResult] = []
+
+    for pass_num in range(1, effective_max_passes + 1):
+        # Classify violations from current report
+        do_clearance = args.only is None or args.only == "clearance"
+        do_drill = args.only is None or args.only == "drill-clearance"
+
+        clearance_violations = (
+            (
+                report.by_type(ViolationType.CLEARANCE)
+                + report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+            )
+            if do_clearance
+            else []
         )
-        if do_clearance
-        else []
-    )
-    drill_violations = (
-        (
-            report.by_type(ViolationType.DRILL_CLEARANCE)
-            + report.by_type(ViolationType.HOLE_NEAR_HOLE)
+        drill_violations = (
+            (
+                report.by_type(ViolationType.DRILL_CLEARANCE)
+                + report.by_type(ViolationType.HOLE_NEAR_HOLE)
+            )
+            if do_drill
+            else []
         )
-        if do_drill
-        else []
-    )
 
-    total_targeted = len(clearance_violations) + len(drill_violations)
+        total_targeted = len(clearance_violations) + len(drill_violations)
 
-    if total_targeted == 0:
-        if not args.quiet:
-            print("No targeted violations found. Nothing to repair.")
+        if total_targeted == 0:
+            if pass_num == 1:
+                # No violations at all on first pass
+                if not args.quiet:
+                    print("No targeted violations found. Nothing to repair.")
+                return 0
+            else:
+                # All violations resolved by previous passes
+                break
+
+        if not args.quiet and args.format == "text" and pass_num == 1:
+            print(f"Found {total_targeted} targeted violation(s):")
+            if clearance_violations:
+                print(f"  Clearance: {len(clearance_violations)}")
+            if drill_violations:
+                print(f"  Drill clearance: {len(drill_violations)}")
+
+        # Run single-pass repairs
+        clearance_result, drill_result = _run_single_pass(
+            report=report,
+            pcb_path=pcb_path,
+            output_path=output_path,
+            clearance_violations=clearance_violations,
+            drill_violations=drill_violations,
+            max_displacement=args.max_displacement,
+            margin=args.margin,
+            dry_run=args.dry_run,
+        )
+
+        repaired_this_pass = clearance_result.repaired + drill_result.repaired
+
+        pass_results.append(
+            PassResult(
+                pass_number=pass_num,
+                violations_before=total_targeted,
+                repaired=repaired_this_pass,
+                clearance_result=clearance_result,
+                drill_result=drill_result,
+            )
+        )
+
+        # Stop if no progress
+        if repaired_this_pass == 0:
+            break
+
+        # Re-run detection for next pass (unless this is the last allowed pass)
+        if pass_num < effective_max_passes:
+            report = _run_python_drc(output_path)
+            if report is None:
+                break
+
+    # Output results
+    if not args.quiet:
+        _print_results(
+            pass_results,
+            args.format,
+            args.dry_run,
+            args.max_displacement,
+        )
+
+    # Exit code: 0 only when final state has zero remaining violations
+    final_pass = pass_results[-1] if pass_results else None
+    if final_pass is None:
         return 0
+    remaining = final_pass.violations_before - final_pass.repaired
+    return 0 if remaining == 0 else 1
 
-    if not args.quiet and args.format == "text":
-        print(f"Found {total_targeted} targeted violation(s):")
-        if clearance_violations:
-            print(f"  Clearance: {len(clearance_violations)}")
-        if drill_violations:
-            print(f"  Drill clearance: {len(drill_violations)}")
 
-    # Run repairs
+def _run_single_pass(
+    *,
+    report: DRCReport,
+    pcb_path: Path,
+    output_path: Path,
+    clearance_violations: list,
+    drill_violations: list,
+    max_displacement: float,
+    margin: float,
+    dry_run: bool,
+) -> tuple[RepairResult, DrillRepairResult]:
+    """Execute a single repair pass (clearance + drill) and return results."""
     clearance_result = RepairResult()
     drill_result = DrillRepairResult()
 
@@ -153,12 +270,11 @@ Examples:
             repairer = ClearanceRepairer(pcb_path)
             clearance_result = repairer.repair_from_report(
                 report,
-                max_displacement=args.max_displacement,
-                margin=args.margin,
-                dry_run=args.dry_run,
+                max_displacement=max_displacement,
+                margin=margin,
+                dry_run=dry_run,
             )
-            if clearance_result.repaired > 0 and not args.dry_run:
-                output_path = Path(args.output) if args.output else pcb_path
+            if clearance_result.repaired > 0 and not dry_run:
                 repairer.save(output_path)
         except Exception as e:
             print(f"Error during clearance repair: {e}", file=sys.stderr)
@@ -167,38 +283,22 @@ Examples:
         try:
             # If clearance repair already wrote to output, load from there
             load_path = pcb_path
-            if clearance_result.repaired > 0 and not args.dry_run:
-                load_path = Path(args.output) if args.output else pcb_path
+            if clearance_result.repaired > 0 and not dry_run:
+                load_path = output_path
 
             drill_repairer = DrillClearanceRepairer(load_path)
             drill_result = drill_repairer.repair(
                 drill_violations,
-                max_displacement=args.max_displacement,
-                margin=args.margin,
-                dry_run=args.dry_run,
+                max_displacement=max_displacement,
+                margin=margin,
+                dry_run=dry_run,
             )
-            if drill_result.repaired > 0 and not args.dry_run:
-                output_path = Path(args.output) if args.output else pcb_path
+            if drill_result.repaired > 0 and not dry_run:
                 drill_repairer.save(output_path)
         except Exception as e:
             print(f"Error during drill clearance repair: {e}", file=sys.stderr)
 
-    # Output results
-    total_repaired = clearance_result.repaired + drill_result.repaired
-    total_violations = clearance_result.total_violations + drill_result.total_violations
-
-    if not args.quiet:
-        _print_results(
-            clearance_result,
-            drill_result,
-            args.format,
-            args.dry_run,
-            args.max_displacement,
-        )
-
-    # Exit code: 0 if all targeted violations repaired, 1 otherwise
-    remaining = total_violations - total_repaired
-    return 0 if remaining == 0 else 1
+    return clearance_result, drill_result
 
 
 def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | None:
@@ -257,7 +357,6 @@ def _run_python_drc(pcb_path: Path) -> DRCReport | None:
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.checker import DRCChecker
 
-        print(f"Running pure-Python DRC on: {pcb_path.name}")
         pcb = PCB.load(pcb_path)
         checker = DRCChecker(pcb)
         results = checker.check_clearances()
@@ -301,32 +400,45 @@ def _run_python_drc(pcb_path: Path) -> DRCReport | None:
 
 
 def _print_results(
-    clearance_result: RepairResult,
-    drill_result: DrillRepairResult,
+    pass_results: list[PassResult],
     output_format: str,
     dry_run: bool,
     max_displacement: float,
 ) -> None:
     """Print combined repair results."""
     if output_format == "json":
-        _print_json(clearance_result, drill_result, dry_run, max_displacement)
+        _print_json(pass_results, dry_run, max_displacement)
     elif output_format == "summary":
-        _print_summary(clearance_result, drill_result, dry_run)
+        _print_summary(pass_results, dry_run)
     else:
-        _print_text(clearance_result, drill_result, dry_run, max_displacement)
+        _print_text(pass_results, dry_run, max_displacement)
 
 
 def _print_json(
-    clearance_result: RepairResult,
-    drill_result: DrillRepairResult,
+    pass_results: list[PassResult],
     dry_run: bool,
     max_displacement: float,
 ) -> None:
     """Print results as JSON."""
-    total_violations = clearance_result.total_violations + drill_result.total_violations
-    total_repaired = clearance_result.repaired + drill_result.repaired
+    # Aggregate totals from the last pass for backward-compatible top-level keys
+    last = pass_results[-1] if pass_results else None
+    clearance_result = last.clearance_result if last else RepairResult()
+    drill_result = last.drill_result if last else DrillRepairResult()
 
-    data = {
+    # Compute overall totals across all passes
+    total_repaired_all = sum(p.repaired for p in pass_results)
+
+    # For single-pass (or backward compat), use the single-pass totals
+    if len(pass_results) == 1:
+        total_violations = clearance_result.total_violations + drill_result.total_violations
+        total_repaired = clearance_result.repaired + drill_result.repaired
+    else:
+        # Multi-pass: first pass had the original count; total repaired is cumulative
+        first = pass_results[0]
+        total_violations = first.violations_before
+        total_repaired = total_repaired_all
+
+    data: dict = {
         "dry_run": dry_run,
         "max_displacement_mm": max_displacement,
         "total_violations": total_violations,
@@ -375,34 +487,71 @@ def _print_json(
             ],
         },
     }
+
+    # Add passes array for multi-pass runs (or any run with max_passes > 1 intent)
+    if len(pass_results) > 1 or (pass_results and pass_results[0].pass_number >= 1):
+        data["passes"] = [
+            {
+                "pass": p.pass_number,
+                "violations_before": p.violations_before,
+                "repaired": p.repaired,
+                "violations_after": p.violations_after,
+            }
+            for p in pass_results
+        ]
+
     print(json.dumps(data, indent=2))
 
 
 def _print_summary(
-    clearance_result: RepairResult,
-    drill_result: DrillRepairResult,
+    pass_results: list[PassResult],
     dry_run: bool,
 ) -> None:
     """Print a compact summary."""
-    total_violations = clearance_result.total_violations + drill_result.total_violations
-    total_repaired = clearance_result.repaired + drill_result.repaired
     action = "Would repair" if dry_run else "Repaired"
-    print(f"{action} {total_repaired}/{total_violations} DRC violations")
-    if clearance_result.total_violations > 0:
-        print(f"  Clearance: {clearance_result.repaired}/{clearance_result.total_violations}")
-    if drill_result.total_violations > 0:
-        print(f"  Drill clearance: {drill_result.repaired}/{drill_result.total_violations}")
+
+    if len(pass_results) <= 1:
+        # Single-pass: backward-compatible output
+        last = pass_results[-1] if pass_results else None
+        clearance_result = last.clearance_result if last else RepairResult()
+        drill_result = last.drill_result if last else DrillRepairResult()
+        total_violations = clearance_result.total_violations + drill_result.total_violations
+        total_repaired = clearance_result.repaired + drill_result.repaired
+        print(f"{action} {total_repaired}/{total_violations} DRC violations")
+        if clearance_result.total_violations > 0:
+            print(f"  Clearance: {clearance_result.repaired}/{clearance_result.total_violations}")
+        if drill_result.total_violations > 0:
+            print(f"  Drill clearance: {drill_result.repaired}/{drill_result.total_violations}")
+    else:
+        # Multi-pass: per-pass progress
+        total_repaired_all = sum(p.repaired for p in pass_results)
+        first_violations = pass_results[0].violations_before
+        print(f"{action} {total_repaired_all}/{first_violations} DRC violations")
+        for p in pass_results:
+            if p.converged:
+                print(
+                    f"  Pass {p.pass_number}: {p.violations_before} -> "
+                    f"{p.violations_before} (converged)"
+                )
+            else:
+                print(
+                    f"  Pass {p.pass_number}: {p.violations_before} -> "
+                    f"{p.violations_after} (-{p.repaired})"
+                )
 
 
 def _print_text(
-    clearance_result: RepairResult,
-    drill_result: DrillRepairResult,
+    pass_results: list[PassResult],
     dry_run: bool,
     max_displacement: float,
 ) -> None:
     """Print detailed text output."""
-    total_violations = clearance_result.total_violations + drill_result.total_violations
-    total_repaired = clearance_result.repaired + drill_result.repaired
+    # Aggregate across all passes
+    total_repaired_all = sum(p.repaired for p in pass_results)
+    first_violations = pass_results[0].violations_before if pass_results else 0
+    last = pass_results[-1] if pass_results else None
+    clearance_result = last.clearance_result if last else RepairResult()
+    drill_result = last.drill_result if last else DrillRepairResult()
     action = "Would repair" if dry_run else "Repaired"
 
     print(f"\n{'=' * 60}")
@@ -410,6 +559,23 @@ def _print_text(
     print(f"{'=' * 60}")
     print(f"Max displacement: {max_displacement}mm")
     print(f"Mode: {'DRY RUN' if dry_run else 'APPLY'}")
+
+    if len(pass_results) > 1:
+        # Multi-pass progress lines
+        for p in pass_results:
+            if p.converged:
+                print(
+                    f"  Pass {p.pass_number}: {p.violations_before} -> "
+                    f"{p.violations_before} (converged)"
+                )
+            else:
+                print(
+                    f"  Pass {p.pass_number}: {p.violations_before} -> "
+                    f"{p.violations_after} (-{p.repaired})"
+                )
+
+    total_violations = first_violations
+    total_repaired = total_repaired_all
     print(f"\n{action} {total_repaired}/{total_violations} violations")
 
     if clearance_result.total_violations > 0:
@@ -465,8 +631,8 @@ def _print_text(
 
     print(f"\n{'=' * 60}")
 
-    remaining = total_violations - total_repaired
-    if remaining == 0:
+    remaining = first_violations - total_repaired_all
+    if remaining <= 0:
         print("All targeted violations repaired!")
     else:
         print(f"{remaining} violation(s) require manual repair")
