@@ -31,40 +31,87 @@ def parse_net_names(pcb_text: str) -> dict[int, str]:
     return net_names
 
 
+def _extract_balanced_blocks(text: str, keyword: str) -> list[tuple[int, int, str]]:
+    """Extract balanced S-expression blocks starting with ``(keyword ...)``.
+
+    Walks *text* looking for occurrences of ``(keyword`` followed by
+    whitespace.  For each hit it counts balanced parentheses to find the
+    matching close, returning a list of ``(start, end, block_text)``
+    tuples.  This correctly handles nested sub-expressions like
+    ``(uuid "...")``, ``(locked yes)``, or any other field that contains
+    parentheses.
+    """
+    blocks: list[tuple[int, int, str]] = []
+    opener = f"({keyword}"
+    opener_len = len(opener)
+    i = 0
+    while i < len(text):
+        pos = text.find(opener, i)
+        if pos == -1:
+            break
+        # Ensure the character after the keyword is whitespace or ')'
+        after = pos + opener_len
+        if after < len(text) and not text[after].isspace() and text[after] != ")":
+            i = after
+            continue
+        # Walk balanced parens
+        depth = 0
+        j = pos
+        while j < len(text):
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        block_text = text[pos:j]
+        blocks.append((pos, j, block_text))
+        i = j
+    return blocks
+
+
+# Field-extraction patterns used by parse_segments.  These match
+# individual fields *anywhere* inside a balanced segment block so the
+# parser is order-independent.
+_RE_START = re.compile(r"\(start\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
+_RE_END = re.compile(r"\(end\s+([\d.eE+-]+)\s+([\d.eE+-]+)\)")
+_RE_WIDTH = re.compile(r"\(width\s+([\d.eE+-]+)\)")
+_RE_LAYER = re.compile(r'\(layer\s+"([^"]+)"\)')
+_RE_NET = re.compile(r"\(net\s+(\d+)\)")
+
+
 def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
-    """Parse segments from PCB file text, grouped by net name."""
+    """Parse segments from PCB file text, grouped by net name.
+
+    Uses a balanced-parentheses walker so that fields may appear in any
+    order and extra fields (``uuid``, ``locked``, ``tstamp``, etc.) are
+    silently ignored.
+    """
     segments_by_net: dict[str, list[Segment]] = {}
 
     # First, build net ID to name mapping
     net_names = parse_net_names(pcb_text)
 
-    # Match segment S-expressions (multiline format)
-    # (segment
-    #     (start X Y)
-    #     (end X Y)
-    #     (width W)
-    #     (layer "L")
-    #     (net N)
-    #     ...
-    # )
-    pattern = re.compile(
-        r"\(segment\s+"
-        r"\(start\s+([\d.-]+)\s+([\d.-]+)\)\s*"
-        r"\(end\s+([\d.-]+)\s+([\d.-]+)\)\s*"
-        r"\(width\s+([\d.]+)\)\s*"
-        r'\(layer\s+"([^"]+)"\)\s*'
-        r"\(net\s+(\d+)\)",
-        re.DOTALL,
-    )
+    for _start, _end, block in _extract_balanced_blocks(pcb_text, "segment"):
+        m_start = _RE_START.search(block)
+        m_end = _RE_END.search(block)
+        m_width = _RE_WIDTH.search(block)
+        m_layer = _RE_LAYER.search(block)
+        m_net = _RE_NET.search(block)
 
-    for match in pattern.finditer(pcb_text):
-        x1 = float(match.group(1))
-        y1 = float(match.group(2))
-        x2 = float(match.group(3))
-        y2 = float(match.group(4))
-        width = float(match.group(5))
-        layer_name = match.group(6)
-        net = int(match.group(7))
+        # All five core fields are required; skip malformed blocks.
+        if not (m_start and m_end and m_width and m_layer and m_net):
+            continue
+
+        x1 = float(m_start.group(1))
+        y1 = float(m_start.group(2))
+        x2 = float(m_end.group(1))
+        y2 = float(m_end.group(2))
+        width = float(m_width.group(1))
+        layer_name = m_layer.group(1)
+        net = int(m_net.group(1))
         net_name = net_names.get(net, f"Net{net}")
 
         # Convert layer name to Layer enum
@@ -169,28 +216,44 @@ def replace_segments(
     original: dict[str, list[Segment]],
     optimized: dict[str, list[Segment]],
 ) -> str:
-    """Replace original segments with optimized ones in PCB text."""
-    result = pcb_text
+    """Replace original segments with optimized ones in PCB text.
 
-    # Get net IDs for each net name
+    Uses a balanced-parentheses walker to identify complete ``(segment ...)``
+    blocks, then checks each block for a matching ``(net N)`` field.  This
+    correctly handles segments that contain nested sub-expressions such as
+    ``(uuid "...")``, ``(locked yes)``, or any other field that the fragile
+    ``[^)]*`` character class would trip over.
+    """
+    # Collect net IDs whose segments should be replaced.
     net_ids_to_remove: set[int] = set()
     for net_name, segs in original.items():
         if net_name in optimized and segs:
             net_ids_to_remove.add(segs[0].net)
 
-    # Remove existing segment blocks for nets we optimized
-    # Match the multiline segment format:
-    # (segment
-    #     (start X Y)
-    #     ...
-    #     (net N)
-    #     ...
-    # )
-    for net_id in net_ids_to_remove:
-        pattern = re.compile(
-            r"\(segment\s+[^)]*\(net\s+" + str(net_id) + r"\)[^)]*\)\s*", re.DOTALL
-        )
-        result = pattern.sub("", result)
+    # Build the set of (start, end) byte-spans to remove by walking
+    # balanced segment blocks and checking the net field inside each one.
+    spans_to_remove: list[tuple[int, int]] = []
+    for blk_start, blk_end, block_text in _extract_balanced_blocks(pcb_text, "segment"):
+        m_net = _RE_NET.search(block_text)
+        if m_net and int(m_net.group(1)) in net_ids_to_remove:
+            # Also consume any trailing whitespace so blank lines don't
+            # accumulate after removal.
+            trail = blk_end
+            while trail < len(pcb_text) and pcb_text[trail] in (" ", "\t", "\n", "\r"):
+                trail += 1
+            spans_to_remove.append((blk_start, trail))
+
+    # Rebuild the text, skipping removed spans.
+    if spans_to_remove:
+        parts: list[str] = []
+        prev = 0
+        for rm_start, rm_end in spans_to_remove:
+            parts.append(pcb_text[prev:rm_start])
+            prev = rm_end
+        parts.append(pcb_text[prev:])
+        result = "".join(parts)
+    else:
+        result = pcb_text
 
     # Add optimized segments before the closing parenthesis
     new_segments_sexp = []
