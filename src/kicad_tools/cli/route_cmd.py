@@ -600,8 +600,15 @@ def route_with_layer_escalation(
         if not quiet:
             print(f"\n  Routing ({args.strategy})...")
 
+        escape_flag = _resolve_escape_routing_flag(args)
+
         try:
-            if getattr(args, "multi_resolution", False):
+            if _should_use_escape_routing(router, escape_flag, quiet):
+                router.route_with_escape(
+                    use_negotiated=(args.strategy == "negotiated"),
+                    timeout=args.timeout,
+                )
+            elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
@@ -929,8 +936,15 @@ def route_with_rule_relaxation(
         if not quiet:
             print(f"\n  Routing ({args.strategy})...")
 
+        escape_flag = _resolve_escape_routing_flag(args)
+
         try:
-            if getattr(args, "multi_resolution", False):
+            if _should_use_escape_routing(router, escape_flag, quiet):
+                router.route_with_escape(
+                    use_negotiated=(args.strategy == "negotiated"),
+                    timeout=args.timeout,
+                )
+            elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
                     use_negotiated=(args.strategy == "negotiated"),
                     max_iterations=args.iterations,
@@ -1276,8 +1290,15 @@ def route_with_combined_escalation(
             nets_to_route = len(multi_pad_nets)
 
             # Route
+            escape_flag = _resolve_escape_routing_flag(args)
+
             try:
-                if getattr(args, "multi_resolution", False):
+                if _should_use_escape_routing(router, escape_flag, quiet):
+                    router.route_with_escape(
+                        use_negotiated=(args.strategy == "negotiated"),
+                        timeout=args.timeout,
+                    )
+                elif getattr(args, "multi_resolution", False):
                     router.route_all_multi_resolution(
                         use_negotiated=(args.strategy == "negotiated"),
                         max_iterations=args.iterations,
@@ -1514,6 +1535,52 @@ def route_with_combined_escalation(
             )
 
     return 0 if final_result.success else 1
+
+
+def _resolve_escape_routing_flag(args) -> bool | None:
+    """Resolve --escape-routing / --no-escape-routing into a tri-state value.
+
+    Returns:
+        True if escape routing is explicitly enabled,
+        False if explicitly disabled,
+        None for auto-detect (default).
+    """
+    no_escape = getattr(args, "no_escape_routing", False)
+    escape = getattr(args, "escape_routing", None)
+
+    if no_escape:
+        return False
+    if escape:
+        return True
+    return None
+
+
+def _should_use_escape_routing(router, escape_flag: bool | None, quiet: bool) -> bool:
+    """Determine whether to use escape routing for the current board.
+
+    Args:
+        router: The Autorouter instance.
+        escape_flag: True=force on, False=force off, None=auto-detect.
+        quiet: Suppress progress output.
+
+    Returns:
+        True if escape routing should be used.
+    """
+    if escape_flag is True:
+        if not quiet:
+            print("  Escape routing: enabled (--escape-routing)")
+        return True
+    if escape_flag is False:
+        return False
+
+    # Auto-detect dense packages
+    dense_packages = router.detect_dense_packages()
+    if dense_packages:
+        if not quiet:
+            refs = [p.ref for p in dense_packages]
+            print(f"  Escape routing: auto-enabled (dense packages: {refs})")
+        return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1888,6 +1955,28 @@ def main(argv: list[str] | None = None) -> int:
             "nets on a finer grid (2x resolution) scoped to their bounding "
             "boxes. Useful for boards where some nets fail due to grid "
             "resolution limitations."
+        ),
+    )
+    parser.add_argument(
+        "--escape-routing",
+        action="store_true",
+        default=None,
+        help=(
+            "Enable escape routing phase before global routing. "
+            "Generates escape routes for dense QFP/QFN/BGA packages "
+            "where pin pitch is too small for traces to pass between "
+            "adjacent pins. Without this flag, escape routing is "
+            "auto-detected based on package density."
+        ),
+    )
+    parser.add_argument(
+        "--no-escape-routing",
+        action="store_true",
+        help=(
+            "Disable automatic escape routing detection. By default, "
+            "the router auto-detects dense packages and enables escape "
+            "routing when needed. Use this flag to skip escape routing "
+            "even when dense packages are present."
         ),
     )
     parser.add_argument(
@@ -2547,9 +2636,20 @@ def main(argv: list[str] | None = None) -> int:
         import time
         routing_start_time = time.time()
 
+        # Resolve escape routing flag: True=force on, False=force off, None=auto-detect
+        escape_routing_flag = _resolve_escape_routing_flag(args)
+
         # Define routing function for profiling
         def do_routing():
             nonlocal diffpair_warnings, relaxed_nets_report
+
+            # Check if escape routing should run as a pre-phase
+            if _should_use_escape_routing(router, escape_routing_flag, quiet):
+                return router.route_with_escape(
+                    use_negotiated=(args.strategy == "negotiated"),
+                    timeout=args.timeout,
+                )
+
             # Progressive clearance relaxation mode
             if getattr(args, "progressive_clearance", False):
                 routes, relaxed_nets_report = router.route_with_progressive_clearance(

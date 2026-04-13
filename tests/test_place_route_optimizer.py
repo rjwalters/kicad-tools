@@ -596,3 +596,121 @@ class TestPlaceRouteOptimizerIntegration:
 
         assert result.success is False
         assert "Could not route" in result.message
+
+
+class TestEscapeRoutingIntegration:
+    """Tests for escape routing integration in PlaceRouteOptimizer."""
+
+    def test_escape_routing_enabled_calls_route_with_escape(self, tmp_path):
+        """When escape_routing=True, optimizer calls route_with_escape."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.route_with_escape.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=True,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.route_with_escape.assert_called_once()
+        mock_router.route_all.assert_not_called()
+
+    def test_escape_routing_disabled_calls_route_all(self, tmp_path):
+        """When escape_routing=False, optimizer calls route_all."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.route_all.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=False,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.route_all.assert_called_once()
+        mock_router.route_with_escape.assert_not_called()
+
+    def test_escape_routing_auto_detects_dense(self, tmp_path):
+        """When escape_routing=None, auto-detection checks for dense packages."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.detect_dense_packages.return_value = [MagicMock(ref="U1")]
+        mock_router.route_with_escape.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=None,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.detect_dense_packages.assert_called_once()
+        mock_router.route_with_escape.assert_called_once()
+
+    def test_escape_routing_auto_no_dense_packages(self, tmp_path):
+        """When auto-detect finds no dense packages, uses route_all."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        mock_router = MagicMock()
+        mock_router.nets = {1: [("R1", "1"), ("R2", "1")]}
+        mock_router.pads = {}
+        mock_router.detect_dense_packages.return_value = []
+        mock_router.route_all.return_value = [MagicMock(net=1)]
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(analyze=MagicMock(return_value=[])),
+            fixer=MagicMock(),
+            router_factory=lambda: mock_router,
+            verbose=False,
+            escape_routing=None,
+        )
+
+        routes, failed = optimizer._run_routing_phase()
+
+        mock_router.detect_dense_packages.assert_called_once()
+        mock_router.route_all.assert_called_once()
+        mock_router.route_with_escape.assert_not_called()
+
+    def test_default_escape_routing_is_none(self, tmp_path):
+        """Verify escape_routing defaults to None (auto-detect)."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(SIMPLE_PCB)
+
+        optimizer = PlaceRouteOptimizer(
+            pcb_path=pcb_path,
+            analyzer=MagicMock(),
+            fixer=MagicMock(),
+            router_factory=MagicMock,
+            verbose=False,
+        )
+
+        assert optimizer.escape_routing is None

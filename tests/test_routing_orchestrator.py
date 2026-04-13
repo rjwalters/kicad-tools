@@ -310,6 +310,55 @@ class TestRoutingOrchestrator:
         needs_escape = orchestrator._needs_escape_routing(pads)
         assert needs_escape is True
 
+    def test_needs_escape_routing_per_component(self, orchestrator):
+        """Verify escape routing checks per-component, not across net endpoints.
+
+        A net connecting an MCU pin (dense QFP) to a far-away peripheral
+        pad has large inter-endpoint distance but should still trigger escape
+        routing because the MCU component is dense.
+        """
+        # Build pads from two different components on the same net:
+        # U1 is a dense QFP (many pads at fine pitch 0.5mm)
+        dense_pads = []
+        for i in range(20):
+            dense_pads.append(
+                _pad(x=i * 0.5, y=0.0, width=0.3, height=0.8, ref="U1", pin=str(i + 1))
+            )
+
+        # R1 is a far-away resistor pad (single pad on the same net)
+        far_pad = _pad(x=50.0, y=50.0, width=1.0, height=1.0, ref="R1", pin="1")
+
+        # Combined pads for a net that spans both components
+        all_pads = dense_pads + [far_pad]
+
+        # Old behavior would check inter-pad distance across all pads,
+        # which might not detect density because the far pad inflates distances.
+        # New behavior checks per-component: U1 has 20 pads at 0.5mm pitch,
+        # which is dense with trace_width=0.2, clearance=0.2 (threshold=0.8mm).
+        assert orchestrator._needs_escape_routing(all_pads) is True
+
+    def test_needs_escape_routing_no_dense_components(self, orchestrator):
+        """Verify escape routing not triggered when no component is dense."""
+        # Two components with wide pitch (2mm apart)
+        pads = [
+            _pad(x=0, y=0, ref="R1", pin="1"),
+            _pad(x=2.0, y=0, ref="R1", pin="2"),
+            _pad(x=10.0, y=0, ref="R2", pin="1"),
+            _pad(x=12.0, y=0, ref="R2", pin="2"),
+        ]
+
+        assert orchestrator._needs_escape_routing(pads) is False
+
+    def test_needs_escape_routing_empty_ref(self, orchestrator):
+        """Verify pads with empty ref are handled gracefully."""
+        pads = [
+            _pad(x=0, y=0, ref="", pin="1"),
+            _pad(x=0.5, y=0, ref="", pin="2"),
+        ]
+
+        # Empty ref pads are skipped (no component grouping possible)
+        assert orchestrator._needs_escape_routing(pads) is False
+
     def test_check_density_sparse(self, orchestrator):
         """Verify density calculation for sparse pads."""
         pads = [
