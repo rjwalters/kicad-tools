@@ -1221,3 +1221,267 @@ class TestPurePythonDRCFallback:
         report = fix_drc_cmd._get_drc_report(None, pcb_file)
         assert report is not None
         assert report.violation_count > 0
+
+
+# ── Multi-pass iteration tests ─────────────────────────────────────
+
+
+class TestMultiPassIteration:
+    """Tests for the --max-passes iterative repair cycle."""
+
+    def test_max_passes_1_matches_single_pass(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """--max-passes 1 output should be identical to current single-pass behaviour."""
+        # Run without --max-passes (default=1)
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        baseline_out = capsys.readouterr().out
+
+        # Run with explicit --max-passes 1
+        # Reset the PCB file in case it was modified
+        pcb_clearance.write_text(PCB_WITH_CLEARANCE)
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+                "--max-passes",
+                "1",
+            ]
+        )
+        explicit_out = capsys.readouterr().out
+
+        baseline_data = json.loads(baseline_out)
+        explicit_data = json.loads(explicit_out)
+
+        # Core fields should match
+        assert baseline_data["total_violations"] == explicit_data["total_violations"]
+        assert baseline_data["total_repaired"] == explicit_data["total_repaired"]
+        assert baseline_data["clearance"]["repaired"] == explicit_data["clearance"]["repaired"]
+
+    def test_max_passes_no_progress_exits_early(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """When all violations exceed --max-displacement, iteration exits after pass 1."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                "0",
+                "--max-passes",
+                "5",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Should have only 1 pass since no repairs were made
+        assert "passes" in data
+        assert len(data["passes"]) == 1
+        assert data["passes"][0]["repaired"] == 0
+
+        # Exit code non-zero (violations remain)
+        assert result == 1
+
+    def test_max_passes_json_output_has_passes_array(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """JSON output should contain a 'passes' key."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+                "--max-passes",
+                "3",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "passes" in data
+        assert isinstance(data["passes"], list)
+        assert len(data["passes"]) >= 1
+
+        # Each pass entry should have required keys
+        for p in data["passes"]:
+            assert "pass" in p
+            assert "violations_before" in p
+            assert "repaired" in p
+            assert "violations_after" in p
+
+    def test_dry_run_max_passes_single_detection(
+        self, pcb_clearance: Path, report_clearance: Path, capsys
+    ):
+        """--dry-run --max-passes 3 should only run one pass (no geometry changes)."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--dry-run",
+                "--format",
+                "json",
+                "--max-passes",
+                "3",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Dry-run forces effective_max_passes=1
+        assert "passes" in data
+        assert len(data["passes"]) == 1
+
+    def test_max_passes_zero_errors(self, pcb_clearance: Path, report_clearance: Path):
+        """--max-passes 0 should return error."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-passes",
+                "0",
+            ]
+        )
+        assert result == 1
+
+    def test_max_passes_clean_board_exits_pass_1(self, pcb_clearance: Path, report_empty: Path):
+        """Already-clean board with --max-passes 100 should exit after pass 1."""
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_empty),
+                "--max-passes",
+                "100",
+            ]
+        )
+        assert result == 0
+
+    def test_max_passes_summary_output(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """Summary format with --max-passes should report per-pass progress."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-passes",
+                "3",
+                "--format",
+                "summary",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Should contain repair count info
+        assert "/" in captured.out
+
+    def test_max_passes_text_output(self, pcb_clearance: Path, report_clearance: Path, capsys):
+        """Text format with --max-passes should produce valid output."""
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-passes",
+                "3",
+                "--format",
+                "text",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        # Should contain the repair header
+        assert "DRC VIOLATION REPAIR" in captured.out
+
+    def test_max_passes_converges_dedup(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, capsys
+    ):
+        """Multi-pass on a board with dedup-able vias should converge."""
+        main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "--max-passes",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # Should have resolved the violation
+        assert data["total_repaired"] >= 1
+
+    def test_multi_pass_output_path_not_stale(
+        self, pcb_clearance: Path, report_clearance: Path, tmp_path: Path, capsys
+    ):
+        """Pass 2+ must load from --output, not the original pcb_path.
+
+        Regression test for the stale-file bug: ClearanceRepairer was always
+        constructed with ``pcb_path`` instead of ``output_path``, so in a
+        multi-pass run the second pass silently re-read the unrepaired original
+        board and discarded the first pass's repairs.
+        """
+        output_file = tmp_path / "repaired.kicad_pcb"
+        original_content = pcb_clearance.read_text()
+
+        result = main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--output",
+                str(output_file),
+                "--max-passes",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+
+        # The output file must have been created with the repaired content.
+        assert output_file.exists(), "output file should be written after repair"
+
+        output_content = output_file.read_text()
+        # The repaired file must differ from the original (repairs were applied).
+        assert output_content != original_content, (
+            "output file content should differ from the original after repair; "
+            "if it matches, pass 2+ likely loaded the stale original input"
+        )
+
+        # The original input file must not have been modified.
+        assert pcb_clearance.read_text() == original_content, (
+            "original pcb_path should remain untouched when --output is given"
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["total_repaired"] >= 1
+        assert result == 0

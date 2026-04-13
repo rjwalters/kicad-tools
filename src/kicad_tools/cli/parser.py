@@ -831,9 +831,7 @@ def _add_zones_parser(subparsers) -> None:
     # zones fill
     zones_fill = zones_subparsers.add_parser("fill", help="Fill all zones in a PCB")
     zones_fill.add_argument("pcb", help="Path to .kicad_pcb file")
-    zones_fill.add_argument(
-        "-o", "--output", help="Output file path (default: overwrites input)"
-    )
+    zones_fill.add_argument("-o", "--output", help="Output file path (default: overwrites input)")
     zones_fill.add_argument("--net", help="Fill only zones for this net (e.g., GND)")
     zones_fill.add_argument("-v", "--verbose", action="store_true")
     zones_fill.add_argument(
@@ -1301,6 +1299,16 @@ def _add_fix_drc_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Preview changes without modifying files",
+    )
+    fix_drc_parser.add_argument(
+        "--max-passes",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of detect-repair cycles (default: 1). "
+            "Each pass re-runs DRC detection on the modified PCB. "
+            "Iteration stops early when no violations are repaired in a pass."
+        ),
     )
     fix_drc_parser.add_argument(
         "--format",
