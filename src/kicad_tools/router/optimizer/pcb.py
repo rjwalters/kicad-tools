@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -135,6 +136,51 @@ def replace_segments(
     return result
 
 
+def _run_drc_error_count(
+    pcb_text: str,
+    manufacturer: str,
+    layers: int,
+    copper_oz: float,
+) -> int:
+    """Run DRC on PCB text and return the error count.
+
+    Writes text to a temporary file, loads it as a PCB object,
+    runs clearance and dimension checks, and returns the error count.
+
+    Args:
+        pcb_text: Full PCB file text content.
+        manufacturer: Manufacturer ID for design rules.
+        layers: Number of copper layers.
+        copper_oz: Copper weight in oz.
+
+    Returns:
+        Number of DRC errors found.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".kicad_pcb", delete=False) as tmp:
+        tmp.write(pcb_text)
+        tmp_path = tmp.name
+
+    try:
+        pcb = PCB.load(tmp_path)
+        checker = DRCChecker(
+            pcb,
+            manufacturer=manufacturer,
+            layers=layers,
+            copper_oz=copper_oz,
+        )
+        # Check clearances and dimensions (the DRC categories relevant to
+        # trace optimization -- silkscreen and edge clearance are unaffected
+        # by segment reshaping)
+        results = checker.check_clearances()
+        results.merge(checker.check_dimensions())
+        return results.error_count
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def optimize_pcb(
     pcb_path: str,
     output_path: str | None,
@@ -144,6 +190,10 @@ def optimize_pcb(
     dry_run: bool = False,
 ) -> OptimizationStats:
     """Optimize traces in a PCB file.
+
+    When ``config.drc_aware`` is True, the optimizer runs DRC before and
+    after optimization. Any net whose optimized segments increase the
+    total DRC error count is rolled back to its original segments.
 
     Args:
         pcb_path: Path to input .kicad_pcb file.
@@ -174,6 +224,17 @@ def optimize_pcb(
         stats.corners_before += count_corners(segs, config.tolerance)
         stats.length_before += total_length(segs)
 
+    # DRC baseline (when drc_aware is enabled)
+    baseline_errors = 0
+    if config.drc_aware and config.drc_manufacturer:
+        baseline_errors = _run_drc_error_count(
+            pcb_text,
+            manufacturer=config.drc_manufacturer,
+            layers=config.drc_layers,
+            copper_oz=config.drc_copper_oz,
+        )
+        stats.drc_errors_before = baseline_errors
+
     # Optimize each net
     optimized_segments: dict[str, list[Segment]] = {}
     for net, segs in segments_by_net.items():
@@ -181,7 +242,58 @@ def optimize_pcb(
         optimized_segments[net] = optimized
         stats.nets_optimized += 1
 
-    # Calculate after stats
+    # DRC-aware per-net rollback
+    if config.drc_aware and config.drc_manufacturer:
+        # Build fully-optimized text and check DRC
+        full_optimized_text = replace_segments(pcb_text, segments_by_net, optimized_segments)
+        full_errors = _run_drc_error_count(
+            full_optimized_text,
+            manufacturer=config.drc_manufacturer,
+            layers=config.drc_layers,
+            copper_oz=config.drc_copper_oz,
+        )
+
+        if full_errors > baseline_errors:
+            # Some nets made things worse -- try rolling back one net at a time.
+            # For each net, test keeping its original segments while all
+            # other nets remain optimized.  If reverting a net reduces errors
+            # back to (or below) baseline, mark it as rolled back.
+            final_segments: dict[str, list[Segment]] = dict(optimized_segments)
+
+            for net in list(optimized_segments.keys()):
+                # Skip nets whose optimization did not change the segments
+                if optimized_segments[net] == segments_by_net[net]:
+                    continue
+
+                # Try reverting this single net
+                trial = dict(final_segments)
+                trial[net] = segments_by_net[net]
+                trial_text = replace_segments(pcb_text, segments_by_net, trial)
+                trial_errors = _run_drc_error_count(
+                    trial_text,
+                    manufacturer=config.drc_manufacturer,
+                    layers=config.drc_layers,
+                    copper_oz=config.drc_copper_oz,
+                )
+
+                if trial_errors < full_errors:
+                    # Reverting this net helped -- keep original segments
+                    final_segments[net] = segments_by_net[net]
+                    stats.nets_rolled_back += 1
+                    full_errors = trial_errors
+
+                    # If we are back at or below baseline, stop rolling back
+                    if full_errors <= baseline_errors:
+                        break
+
+            optimized_segments = final_segments
+
+        stats.drc_errors_after = full_errors
+
+    # Recalculate after stats (may have changed due to rollbacks)
+    stats.segments_after = 0
+    stats.corners_after = 0
+    stats.length_after = 0.0
     for net, segs in optimized_segments.items():
         stats.segments_after += len(segs)
         stats.corners_after += count_corners(segs, config.tolerance)

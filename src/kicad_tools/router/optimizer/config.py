@@ -42,6 +42,18 @@ class OptimizationConfig:
     tolerance: float = 1e-4
     """Tolerance for floating-point comparisons (mm)."""
 
+    drc_aware: bool = False
+    """Enable DRC-aware mode: roll back per-net optimizations that increase violations."""
+
+    drc_manufacturer: str | None = None
+    """Manufacturer ID for DRC rules (e.g., 'jlcpcb'). Required when drc_aware=True."""
+
+    drc_layers: int = 2
+    """Number of PCB copper layers for DRC checks."""
+
+    drc_copper_oz: float = 1.0
+    """Copper weight in oz for DRC checks."""
+
 
 @dataclass
 class OptimizationStats:
@@ -56,6 +68,9 @@ class OptimizationStats:
     nets_optimized: int = 0
     vias_before: int = 0
     vias_after: int = 0
+    nets_rolled_back: int = 0
+    drc_errors_before: int = 0
+    drc_errors_after: int = 0
 
     @property
     def segment_reduction(self) -> float:
