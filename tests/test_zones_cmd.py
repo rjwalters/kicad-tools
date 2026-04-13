@@ -472,6 +472,171 @@ class TestRunFillZonesDRCFallback:
         assert "--refill-zones" in cmd
         assert "--save-board" in cmd
 
+    def test_drc_fallback_preserves_net_count(self, tmp_pcb, tmp_path):
+        """Net declarations survive DRC fallback even when kicad-cli strips them."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_net_count = input_pcb.net_count
+        assert input_net_count > 1, "Fixture must have named nets for this test"
+
+        def fake_run_strips_nets(cmd, **kwargs):
+            """Simulate kicad-cli stripping net declarations from the PCB."""
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            # Read the target PCB (last arg), strip net declarations,
+            # and write it back -- mimicking kicad-cli's broken behaviour.
+            target = Path(cmd[-1])
+            content = target.read_text()
+            import re
+
+            # Remove all (net N "name") top-level declarations but keep
+            # the rest (zones, segments, etc.) intact.  Replace with a
+            # single (net 0 "") to simulate kicad-cli's output.
+            content = re.sub(r'\n\t\(net \d+ "[^"]*"\)', "", content)
+            # Ensure at least the empty net 0 exists (kicad-cli always writes it)
+            content = content.replace('(net 0 "")', '(net 0 "")', 1)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+        assert output_pcb.net_count == input_net_count
+
+    def test_drc_fallback_preserves_nets_inplace(self, tmp_pcb):
+        """Net declarations are restored when DRC modifies the PCB in place."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_net_count = input_pcb.net_count
+        input_net_names = {n.name for n in input_pcb.nets.values()}
+
+        def fake_run_strips_nets(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            import re
+
+            content = re.sub(r'\n\t\(net \d+ "[^"]*"\)', "", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(tmp_pcb))
+        assert output_pcb.net_count == input_net_count
+        output_net_names = {n.name for n in output_pcb.nets.values()}
+        assert output_net_names == input_net_names
+
+    def test_drc_fallback_noop_when_nets_intact(self, tmp_pcb, tmp_path):
+        """Restoration is a no-op when kicad-cli keeps nets intact."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_net_count = input_pcb.net_count
+
+        def fake_run_keeps_nets(cmd, **kwargs):
+            """Simulate kicad-cli that does NOT strip nets."""
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            # Don't modify the PCB at all -- nets stay intact.
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+        assert output_pcb.net_count == input_net_count
+
+    def test_drc_fallback_preserves_net_names(self, tmp_pcb, tmp_path):
+        """Individual net names (GND, +3V3, +5V) are preserved after restoration."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_nets = {n.number: n.name for n in input_pcb.nets.values()}
+
+        def fake_run_strips_nets(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            import re
+
+            content = re.sub(r'\n\t\(net \d+ "[^"]*"\)', "", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+        output_nets = {n.number: n.name for n in output_pcb.nets.values()}
+        assert output_nets == input_nets
+
+    def test_drc_fallback_only_net0_noop(self, tmp_path):
+        """A PCB with only net 0 should not trigger restoration."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        # Create a minimal PCB with only the default net 0
+        pcb = PCB.create(width=50, height=50)
+        pcb_path = tmp_path / "minimal.kicad_pcb"
+        pcb.save(str(pcb_path))
+
+        def fake_run(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run),
+        ):
+            result = run_fill_zones(pcb_path, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(pcb_path))
+        # Should still have net 0 at minimum
+        assert output_pcb.net_count >= 1
+
 
 # ---------------------------------------------------------------------------
 # Integration test: requires kicad-cli
