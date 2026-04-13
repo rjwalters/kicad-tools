@@ -537,8 +537,13 @@ def route_net_auto(
 
         orchestrator._select_strategy = _forced_select  # type: ignore[method-assign]
 
+    # Build pad list from PCB footprints so the orchestrator can
+    # perform strategy selection and routing (without pads every
+    # strategy returns "Insufficient pads").
+    pads = _build_pads_for_net(pcb, net_number, net_name)
+
     # Route the net
-    result = orchestrator.route_net(net=net_name)
+    result = orchestrator.route_net(net=net_name, pads=pads)
 
     # Convert to dict with net_name included
     result_dict = result.to_dict()
@@ -585,6 +590,68 @@ def _build_pad_positions(pcb: PCB) -> dict[int, list[tuple[float, float]]]:
                 positions[pad.net_number].append((fp_x + rx, fp_y + ry))
 
     return positions
+
+
+def _build_pads_for_net(pcb: PCB, net_number: int, net_name: str) -> list:
+    """Build a list of router Pad objects for a specific net.
+
+    Extracts pad positions from the loaded PCB footprints and converts
+    them to the router's Pad primitive type, which the RoutingOrchestrator
+    needs for strategy selection and routing execution.
+
+    Args:
+        pcb: Loaded PCB object
+        net_number: Numeric net ID to filter pads
+        net_name: Name of the net (stored on each Pad)
+
+    Returns:
+        List of router Pad objects for the given net
+    """
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Pad as RouterPad
+
+    pads: list[RouterPad] = []
+    for fp in pcb.footprints:
+        if not fp.reference or fp.reference.startswith("#"):
+            continue
+
+        fp_x, fp_y = fp.position
+        rot_rad = math.radians(-fp.rotation)
+        cos_r, sin_r = math.cos(rot_rad), math.sin(rot_rad)
+
+        for pad in fp.pads:
+            if pad.net_number != net_number:
+                continue
+
+            px, py = pad.position
+            abs_x = fp_x + px * cos_r - py * sin_r
+            abs_y = fp_y + px * sin_r + py * cos_r
+
+            # Determine layer
+            pad_layer = Layer.F_CU
+            pad_layers = pad.layers or []
+            if "B.Cu" in pad_layers and "F.Cu" not in pad_layers:
+                pad_layer = Layer.B_CU
+
+            is_through_hole = "*.Cu" in pad_layers
+
+            pads.append(
+                RouterPad(
+                    x=abs_x,
+                    y=abs_y,
+                    width=pad.size[0] if pad.size else 1.0,
+                    height=pad.size[1] if pad.size else 1.0,
+                    net=net_number,
+                    net_name=net_name,
+                    layer=pad_layer,
+                    ref=fp.reference,
+                    pin=pad.number,
+                    through_hole=is_through_hole,
+                    drill=pad.drill,
+                )
+            )
+
+    return pads
 
 
 def _estimate_routing_length(pad_positions: list[tuple[float, float]]) -> float:
