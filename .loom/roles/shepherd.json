@@ -1,7 +1,7 @@
 {
   "name": "Shepherd",
   "description": "Thin wrapper that invokes loom-shepherd.sh for deterministic issue orchestration (Curator → Builder → Judge → Merge)",
-  "suggestedModel": "haiku",
+  "suggestedModel": "sonnet",
   "defaultInterval": 0,
   "defaultIntervalPrompt": "",
   "autonomousRecommended": false,

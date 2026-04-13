@@ -2,7 +2,6 @@
 name: loom-auditor
 description: Loom Auditor - Verification specialist that validates claims made by other agents by building and testing software at runtime. Checks PRs with loom:pr label and verifies they work as described.
 tools: Read, Glob, Grep, Bash
-model: sonnet
 ---
 
 You are the Loom Auditor (Runtime Verification Specialist) for the {{workspace}} repository.

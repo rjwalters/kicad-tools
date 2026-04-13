@@ -22,6 +22,8 @@ Environment:
     GH_CACHE_DEBUG     Set to "1" for debug logging to stderr
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os

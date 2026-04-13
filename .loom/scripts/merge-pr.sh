@@ -6,9 +6,14 @@
 # "already used by worktree" errors when merging from inside a worktree.
 #
 # Options:
-#   --cleanup-worktree   Remove local worktree after successful merge
-#   --dry-run            Show what would happen without merging
-#   --auto               Enable auto-merge instead of immediate merge
+#   --no-cleanup-worktree  Skip local worktree cleanup after merge
+#   --cleanup-worktree     (no-op, worktree cleanup is now the default)
+#   --dry-run              Show what would happen without merging
+#   --auto                 Enable auto-merge instead of immediate merge
+#
+# By default, the local worktree is cleaned up after a successful merge.
+# Pass --no-cleanup-worktree to skip this (e.g., when other terminals may
+# have their CWD inside the worktree).
 #
 # Exit codes:
 #   0 = merged (or auto-merge enabled)
@@ -57,26 +62,41 @@ REPO_ROOT="$(find_main_repo_root)" || \
   error "Not in a git repository"
 
 # Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+# Verify the Python interpreter works too — a broken runtime (e.g. unaccepted
+# Xcode license) would make every subsequent gh call fail with a misleading error.
 GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
-if [[ -x "$GH_CACHED" ]]; then
+if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
     GH="$GH_CACHED"
 else
     GH="gh"
 fi
 
-# Auto-detect owner/repo from git remote
-REPO_NWO="$($GH repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" || \
+# Auto-detect owner/repo with fallback for worktree contexts
+# Primary: gh repo view (uses GitHub API, most reliable when authenticated)
+# Fallback: parse git remote URL (local operation, works when gh fails in worktrees)
+detect_repo_nwo() {
+  local nwo
+  # Try gh repo view first (works in most cases)
+  nwo="$($GH repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" && [[ -n "$nwo" ]] && echo "$nwo" && return 0
+  # Fallback: parse origin remote URL from the main repo root
+  # Handles both HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git)
+  nwo="$(cd "$REPO_ROOT" && git remote get-url origin 2>/dev/null | sed -E 's|\.git$||; s|.*[:/]([^/]+/[^/]+)$|\1|')" && [[ -n "$nwo" ]] && echo "$nwo" && return 0
+  return 1
+}
+
+REPO_NWO="$(detect_repo_nwo)" || \
   error "Could not determine repository. Is 'gh' authenticated?"
 
 # Parse arguments
 PR_NUMBER=""
-CLEANUP_WORKTREE=false
+CLEANUP_WORKTREE=true
 DRY_RUN=false
 AUTO_MERGE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cleanup-worktree) CLEANUP_WORKTREE=true; shift ;;
+    --cleanup-worktree) shift ;;  # no-op, cleanup is now the default
+    --no-cleanup-worktree) CLEANUP_WORKTREE=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --auto) AUTO_MERGE=true; shift ;;
     -*)  error "Unknown option: $1" ;;
@@ -91,7 +111,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--cleanup-worktree] [--dry-run] [--auto]"
+[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--dry-run] [--auto]"
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || error "PR number must be numeric: $PR_NUMBER"
 
 # Fetch PR state
@@ -213,24 +233,9 @@ fi
 
 success "PR #$PR_NUMBER merged successfully"
 
-# Clean up workflow labels on linked issue
-info "Cleaning up workflow labels on linked issue..."
-PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
-LINKED_ISSUE=$(echo "$PR_BODY" | grep -oE '(Closes|closes|Fixes|fixes|Resolves|resolves) #[0-9]+' | grep -oE '[0-9]+' | head -1)
-
-if [[ -n "$LINKED_ISSUE" ]]; then
-  info "Found linked issue: #$LINKED_ISSUE"
-  # Remove workflow labels that shouldn't persist on closed issues
-  # NOTE: Origin labels (loom:architect, loom:hermit, loom:auditor) are intentionally
-  # preserved for audit trail - they indicate where the issue originated from
-  for label in loom:building loom:issue loom:curated loom:curating loom:treating loom:blocked; do
-    gh issue edit "$LINKED_ISSUE" --remove-label "$label" 2>/dev/null && \
-      info "  Removed label: $label" || true
-  done
-  success "Workflow labels cleaned up for issue #$LINKED_ISSUE"
-else
-  info "No linked issue found in PR body (no 'Closes #N' pattern)"
-fi
+# NOTE: Label cleanup on linked issues is intentionally skipped.
+# Labels on closed/merged items are harmless — all agents filter by open state.
+# See: https://github.com/rjwalters/loom/issues/2838
 
 # Delete remote branch (skip if GitHub auto-deletes on merge)
 DELETE_BRANCH_ON_MERGE=$($GH api "repos/$REPO_NWO" --jq '.delete_branch_on_merge' 2>/dev/null || echo "false")

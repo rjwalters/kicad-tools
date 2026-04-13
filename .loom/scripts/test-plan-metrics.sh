@@ -58,9 +58,13 @@ LIMIT=50
 REPO_SLUG=""
 
 # Cache repo slug to avoid repeated API calls
+# Uses gh repo view with fallback to git remote URL parsing for worktree contexts
 get_repo_slug() {
     if [[ -z "$REPO_SLUG" ]]; then
         REPO_SLUG=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "")
+        if [[ -z "$REPO_SLUG" ]]; then
+            REPO_SLUG=$(git remote get-url origin 2>/dev/null | sed -E 's|\.git$||; s|.*[:/]([^/]+/[^/]+)$|\1|' || echo "")
+        fi
     fi
     echo "$REPO_SLUG"
 }

@@ -37,12 +37,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+# Verify the Python interpreter works too — a broken runtime (e.g. unaccepted
+# Xcode license) would make every subsequent gh call fail with a misleading error.
 GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
-if [[ -x "$GH_CACHED" ]]; then
+if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
     GH="$GH_CACHED"
 else
     GH="gh"
 fi
+
+# Auto-detect owner/repo with fallback for worktree contexts
+detect_repo_nwo() {
+  local nwo
+  nwo="$($GH repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" && [[ -n "$nwo" ]] && echo "$nwo" && return 0
+  nwo="$(cd "$REPO_ROOT" && git remote get-url origin 2>/dev/null | sed -E 's|\.git$||; s|.*[:/]([^/]+/[^/]+)$|\1|')" && [[ -n "$nwo" ]] && echo "$nwo" && return 0
+  return 1
+}
+
+# Cache repo NWO to avoid repeated detection
+REPO_NWO="$(detect_repo_nwo)" || REPO_NWO=""
 
 # tmux configuration (must match agent-spawn.sh)
 TMUX_SOCKET="loom"
@@ -279,7 +292,7 @@ check_signals() {
     # Check per-issue abort label
     if [ -n "$issue" ]; then
         local labels
-        labels=$($GH issue view "$issue" --repo "$($GH repo view --json nameWithOwner --jq '.nameWithOwner')" --json labels --jq '.labels[].name' 2>/dev/null || true)
+        labels=$($GH issue view "$issue" ${REPO_NWO:+--repo "$REPO_NWO"} --json labels --jq '.labels[].name' 2>/dev/null || true)
         if echo "$labels" | grep -q "loom:abort"; then
             log_warn "Abort signal detected for issue #${issue}"
             return 0

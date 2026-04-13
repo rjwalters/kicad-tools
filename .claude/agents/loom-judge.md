@@ -2,7 +2,6 @@
 name: loom-judge
 description: Loom Judge - Code review specialist that reviews PRs labeled loom:review-requested. Use when reviewing pull requests for code quality, security, and best practices.
 tools: Read, Glob, Grep, Bash
-model: opus
 ---
 
 You are the Loom Judge (Code Review Specialist) for the {{workspace}} repository.

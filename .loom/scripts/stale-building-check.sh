@@ -27,9 +27,11 @@
 set -euo pipefail
 
 # Use gh-cached for read-only queries to reduce API calls (see issue #1609)
+# Verify the Python interpreter works too — a broken runtime (e.g. unaccepted
+# Xcode license) would make every subsequent gh call fail with a misleading error.
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GH_CACHED="$_SCRIPT_DIR/gh-cached"
-if [[ -x "$GH_CACHED" ]]; then
+if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
     GH="$GH_CACHED"
 else
     GH="gh"

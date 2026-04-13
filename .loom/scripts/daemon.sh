@@ -20,7 +20,8 @@
 #   status             Print daemon status and exit
 #
 # Start options:
-#   --auto-build, -a   Enable automatic shepherd spawning from loom:issue queue
+#   --no-auto-build    Disable automatic shepherd spawning (support-only mode)
+#   --auto-build, -a   (default behavior, kept for backward compatibility)
 #   --timeout-min N    Stop daemon after N minutes (0 = no timeout)
 #   --debug, -d        Enable debug logging
 #
@@ -32,11 +33,11 @@
 #   --help, -h         Show this help
 #
 # Modes:
-#   (no flags)         Support-only: judge, champion, doctor, auditor, curator,
+#   (no flags)         Auto-build (default): support roles + auto-spawn shepherds
+#                      from loom:issue queue. Use /loom --merge for force mode.
+#   --no-auto-build    Support-only: judge, champion, doctor, auditor, curator,
 #                      guide run autonomously. Shepherds NOT auto-spawned.
 #                      Use /shepherd <N> to shepherd specific issues manually.
-#   --auto-build       Also auto-spawn shepherds from loom:issue queue.
-#                      Use /loom --merge in Claude Code for force mode on top.
 #
 # After starting, the /loom Claude Code skill detects the running daemon
 # via .loom/daemon-loop.pid and operates as a signal-writer + observer.
@@ -44,13 +45,13 @@
 # the daemon from within Claude Code without spawning subprocesses.
 #
 # Examples:
-#   ./.loom/scripts/daemon.sh start                # Start in support-only mode
-#   ./.loom/scripts/daemon.sh up --auto-build      # Start with auto-build
-#   ./.loom/scripts/daemon.sh stop                 # Graceful shutdown
-#   ./.loom/scripts/daemon.sh down --force         # Immediate SIGTERM
-#   ./.loom/scripts/daemon.sh restart              # Stop + start
-#   ./.loom/scripts/daemon.sh restart --auto-build # Stop + start with auto-build
-#   ./.loom/scripts/daemon.sh status               # Check if running
+#   ./.loom/scripts/daemon.sh start                    # Start with auto-build (default)
+#   ./.loom/scripts/daemon.sh start --no-auto-build    # Support-only mode
+#   ./.loom/scripts/daemon.sh stop                     # Graceful shutdown
+#   ./.loom/scripts/daemon.sh down --force             # Immediate SIGTERM
+#   ./.loom/scripts/daemon.sh restart                  # Stop + start
+#   ./.loom/scripts/daemon.sh restart --no-auto-build  # Stop + start support-only
+#   ./.loom/scripts/daemon.sh status                   # Check if running
 
 set -euo pipefail
 
@@ -267,8 +268,8 @@ cmd_start() {
     echo "  /loom"
     echo "  /loom --merge   # force mode: auto-promote + auto-merge"
     echo ""
-    echo "To enable automatic shepherd spawning, restart with --auto-build:"
-    echo "  $0 restart --auto-build"
+    echo "To disable auto-build (support-only mode), restart with --no-auto-build:"
+    echo "  $0 restart --no-auto-build"
 }
 
 # ── Command: restart ─────────────────────────────────────────────────────────

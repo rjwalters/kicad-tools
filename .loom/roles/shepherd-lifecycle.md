@@ -773,7 +773,7 @@ if [ "$PHASE" = "gate2" ]; then
     git checkout main 2>/dev/null || true
 
     # Use merge-pr.sh for worktree-safe merge via GitHub API
-    ./.loom/scripts/merge-pr.sh $PR_NUMBER --cleanup-worktree || {
+    ./.loom/scripts/merge-pr.sh $PR_NUMBER || {
       echo "Merge failed for PR #$PR_NUMBER"
       exit 1
     }
