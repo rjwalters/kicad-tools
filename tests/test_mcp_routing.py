@@ -520,10 +520,13 @@ class TestRouteNetAuto:
         Regression test for GH-1268: the old code assigned to the read-only
         PCB.path property, causing ``AttributeError: can't set attribute 'path'``
         on every real board.
+
+        Strengthened for GH-1282: also asserts routing actually succeeds
+        (not silently failing with 'Insufficient pads').
         """
         from kicad_tools.mcp.tools.routing import route_net_auto
 
-        # The fixture has NET1 with pads on two footprints.
+        # The fixture has NET1 with pads on three footprints (R1, U1, J1).
         result = route_net_auto(
             pcb_path=str(self.FIXTURE),
             net_name="NET1",
@@ -532,6 +535,77 @@ class TestRouteNetAuto:
         assert isinstance(result, dict)
         assert "success" in result
         assert result["net_name"] == "NET1"
+        # Routing must actually succeed for a net with 3 pads.
+        assert result["success"] is True, (
+            f"Expected routing success but got error: {result.get('error_message')}"
+        )
+        # Must not contain the old "Insufficient pads" error.
+        assert "Insufficient pads" not in (result.get("error_message") or "")
+
+    def test_route_net_auto_routes_multi_pad_net(self) -> None:
+        """A net with 3+ pads in routing-diagnostic.kicad_pcb returns success.
+
+        Regression test for GH-1282: route_net_auto() was not passing pad
+        positions to the orchestrator, so every strategy guard returned
+        'Insufficient pads for global routing' even for nets with many pads.
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        # NET1 has 3 pads: R1:1, U1:1, J1:1
+        result = route_net_auto(
+            pcb_path=str(self.FIXTURE),
+            net_name="NET1",
+        )
+
+        assert isinstance(result, dict)
+        assert result["success"] is True, (
+            f"Routing NET1 (3 pads) should succeed, got: {result.get('error_message')}"
+        )
+        assert result["net_name"] == "NET1"
+        # Strategy should have been selected and applied
+        assert "strategy_used" in result
+        assert result["strategy_used"] != "unknown"
+
+    def test_route_net_auto_single_pad_net_graceful_failure(self, tmp_path: Path) -> None:
+        """A net with only 1 pad should fail gracefully, not crash."""
+        from kicad_tools.mcp.tools.routing import route_net_auto
+
+        pcb_text = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "SOLO")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "SOLO"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+        pcb_file = tmp_path / "single_pad.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        result = route_net_auto(pcb_path=str(pcb_file), net_name="SOLO")
+        assert isinstance(result, dict)
+        assert "success" in result
+        # Should fail gracefully (not enough pads to route) but not crash
+        assert result["success"] is False
+        assert "Insufficient pads" in (result.get("error_message") or "")
 
     def test_pcb_path_property_not_overwritten(self) -> None:
         """PCB.path should remain the value set by PCB.load(), not be monkey-patched."""
