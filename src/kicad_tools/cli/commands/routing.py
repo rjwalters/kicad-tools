@@ -232,4 +232,13 @@ def run_optimize_command(args) -> int:
     # Use command-level quiet or global quiet
     if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
+    # DRC-aware mode arguments
+    if getattr(args, "drc_aware", False):
+        sub_argv.append("--drc-aware")
+    if getattr(args, "mfr", None):
+        sub_argv.extend(["--mfr", args.mfr])
+    if getattr(args, "layers", 2) != 2:
+        sub_argv.extend(["--layers", str(args.layers)])
+    if getattr(args, "copper", 1.0) != 1.0:
+        sub_argv.extend(["--copper", str(args.copper)])
     return optimize_main(sub_argv)

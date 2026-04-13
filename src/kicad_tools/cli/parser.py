@@ -1061,6 +1061,28 @@ def _add_optimize_parser(subparsers) -> None:
     optimize_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress output"
     )
+    # DRC-aware mode arguments
+    optimize_parser.add_argument(
+        "--drc-aware",
+        action="store_true",
+        help="Enable DRC-aware mode: roll back per-net optimizations that increase violations",
+    )
+    optimize_parser.add_argument(
+        "--mfr",
+        help="Target manufacturer for DRC rules (e.g., jlcpcb, oshpark). Required with --drc-aware",
+    )
+    optimize_parser.add_argument(
+        "--layers",
+        type=int,
+        default=2,
+        help="Number of copper layers for DRC checks (default: 2)",
+    )
+    optimize_parser.add_argument(
+        "--copper",
+        type=float,
+        default=1.0,
+        help="Copper weight in oz for DRC checks (default: 1.0)",
+    )
 
 
 def _add_validate_footprints_parser(subparsers) -> None:
