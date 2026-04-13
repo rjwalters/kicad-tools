@@ -1720,7 +1720,7 @@ def _remove_conflicting_vias(pcb_text: str, clearance: float) -> str:
         r"\(drill\s+[\d.]+\)\s*"
         r'\(layers\s+"[^"]+"\s+"[^"]+"\)\s*'
         r"\(net\s+(\d+)\)"
-        r"[^)]*\))",
+        r"[^)]*\)[^)]*\))",
         re.DOTALL,
     )
 

@@ -2648,6 +2648,7 @@ class TestMergeRoutesViaConflicts:
         # The conflicting via (net 2) should have been removed; only net 1 remains
         assert result.count("(via") == 1
         assert "(net 1)" in result
+        assert _validate_sexp_parentheses(result), "Removal of conflicting via must not leave orphaned parentheses"
 
     def test_merge_keeps_same_net_vias(self):
         """Co-located vias on the same net are not removed."""
@@ -2679,6 +2680,7 @@ class TestMergeRoutesViaConflicts:
         )
         assert result.count("(via") == 1
         assert "(net 1)" in result
+        assert _validate_sexp_parentheses(result), "Removal of within-clearance via must not leave orphaned parentheses"
 
     def test_merge_no_conflict_outside_clearance(self):
         """Vias outside clearance distance on different nets are kept."""
