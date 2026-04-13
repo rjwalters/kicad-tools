@@ -398,3 +398,66 @@ class TestNetClassPatternsCompleteness:
                 NetClass.HIGH_SPEED,
                 NetClass.DIFFERENTIAL,
             ), f"Expected HIGH_SPEED or DIFFERENTIAL for {net}"
+
+
+class TestIssue1285NetClassification:
+    """Tests for net classification of nets from issue #1285.
+
+    Verifies that site-specific names like MCLK_DAC and GNDA are
+    correctly classified, and that classify_and_apply_rules assigns
+    is_pour_net=True for ground/power nets.
+    """
+
+    def test_gnda_classified_as_ground(self):
+        """Verify GNDA is classified as GROUND."""
+        assert classify_from_name("GNDA") == NetClass.GROUND
+
+    def test_mclk_dac_classified_as_clock(self):
+        """Verify MCLK_DAC is classified as CLOCK via substring match."""
+        assert classify_from_name("MCLK_DAC") == NetClass.CLOCK
+
+    def test_mclk_mcu_classified_as_clock(self):
+        """Verify MCLK_MCU is classified as CLOCK via substring match."""
+        assert classify_from_name("MCLK_MCU") == NetClass.CLOCK
+
+    def test_nrst_classified_as_debug(self):
+        """Verify NRST is classified as DEBUG."""
+        assert classify_from_name("NRST") == NetClass.DEBUG
+
+    def test_classify_and_apply_rules_pour_net_ground(self):
+        """Verify ground nets get is_pour_net=True from classify_and_apply_rules."""
+        net_names = {1: "GND", 2: "GNDA"}
+        rules = classify_and_apply_rules(net_names)
+
+        assert "GND" in rules
+        assert rules["GND"].is_pour_net is True
+        assert "GNDA" in rules
+        assert rules["GNDA"].is_pour_net is True
+
+    def test_classify_and_apply_rules_pour_net_power(self):
+        """Verify power nets get is_pour_net=True from classify_and_apply_rules."""
+        net_names = {1: "+3.3V", 2: "+5V"}
+        rules = classify_and_apply_rules(net_names)
+
+        assert "+3.3V" in rules
+        assert rules["+3.3V"].is_pour_net is True
+        assert "+5V" in rules
+        assert rules["+5V"].is_pour_net is True
+
+    def test_classify_and_apply_rules_clock_not_pour(self):
+        """Verify clock nets do NOT get is_pour_net=True."""
+        net_names = {1: "MCLK_DAC", 2: "MCLK_MCU"}
+        rules = classify_and_apply_rules(net_names)
+
+        assert "MCLK_DAC" in rules
+        assert rules["MCLK_DAC"].is_pour_net is False
+        assert "MCLK_MCU" in rules
+        assert rules["MCLK_MCU"].is_pour_net is False
+
+    def test_classify_and_apply_rules_debug_not_pour(self):
+        """Verify debug nets do NOT get is_pour_net=True."""
+        net_names = {1: "NRST", 2: "SWDIO"}
+        rules = classify_and_apply_rules(net_names)
+
+        assert "NRST" in rules
+        assert rules["NRST"].is_pour_net is False

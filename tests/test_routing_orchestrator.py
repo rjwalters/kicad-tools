@@ -13,16 +13,29 @@ from kicad_tools.router import (
     RoutingStrategy,
 )
 from kicad_tools.router.primitives import Pad
-from kicad_tools.router.rules import DesignRules
+from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 
-def _pad(x: float, y: float, net: int = 1, net_name: str = "NET1",
-         width: float = 1.0, height: float = 1.0,
-         ref: str = "U1", pin: str = "1") -> Pad:
+def _pad(
+    x: float,
+    y: float,
+    net: int = 1,
+    net_name: str = "NET1",
+    width: float = 1.0,
+    height: float = 1.0,
+    ref: str = "U1",
+    pin: str = "1",
+) -> Pad:
     """Helper to create Pad objects with sensible defaults."""
     return Pad(
-        x=x, y=y, width=width, height=height,
-        net=net, net_name=net_name, ref=ref, pin=pin,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        net=net,
+        net_name=net_name,
+        ref=ref,
+        pin=pin,
     )
 
 
@@ -312,9 +325,12 @@ class TestRoutingOrchestrator:
         # Create many pads in small area (1x1mm)
         pads = [
             _pad(
-                x=0.2 * i, y=0.2 * j,
-                width=0.15, height=0.15,
-                ref="U1", pin=f"p{i}_{j}",
+                x=0.2 * i,
+                y=0.2 * j,
+                width=0.15,
+                height=0.15,
+                ref="U1",
+                pin=f"p{i}_{j}",
             )
             for i in range(5)
             for j in range(5)
@@ -322,6 +338,247 @@ class TestRoutingOrchestrator:
 
         density = orchestrator._check_density(pads)
         assert density > 0.5  # Dense area
+
+
+class TestPourNetSkip:
+    """Test that pour nets (power/ground) are auto-skipped by the orchestrator."""
+
+    def test_pour_net_gnd_skipped_with_success(self, mock_pcb, design_rules):
+        """Verify GND net with is_pour_net=True is skipped with success result."""
+        net_class_map = {
+            "GND": NetClassRouting(
+                name="Ground",
+                priority=1,
+                is_pour_net=True,
+            ),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="GND", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="GND", pin="2"),
+        ]
+
+        result = orch.route_net("GND", pads=pads)
+
+        assert result.success is True
+        assert result.net == "GND"
+        assert len(result.warnings) == 1
+        assert "pour net" in result.warnings[0].lower()
+        assert "zone fill" in result.warnings[0].lower()
+
+    def test_pour_net_gnda_skipped_with_success(self, mock_pcb, design_rules):
+        """Verify GNDA net with is_pour_net=True is skipped with success."""
+        net_class_map = {
+            "GNDA": NetClassRouting(
+                name="Ground",
+                priority=1,
+                is_pour_net=True,
+            ),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        result = orch.route_net(
+            "GNDA",
+            pads=[
+                _pad(x=0, y=0, net=2, net_name="GNDA", pin="1"),
+                _pad(x=10, y=0, net=2, net_name="GNDA", pin="2"),
+            ],
+        )
+
+        assert result.success is True
+        assert any("GNDA" in w for w in result.warnings)
+
+    def test_pour_net_power_skipped_with_warning(self, mock_pcb, design_rules):
+        """Verify power net with is_pour_net=True is skipped with zone fill warning."""
+        net_class_map = {
+            "+3.3V": NetClassRouting(
+                name="Power",
+                priority=1,
+                is_pour_net=True,
+            ),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        result = orch.route_net(
+            "+3.3V",
+            pads=[
+                _pad(x=0, y=0, net=3, net_name="+3.3V", pin="1"),
+                _pad(x=10, y=0, net=3, net_name="+3.3V", pin="2"),
+            ],
+        )
+
+        assert result.success is True
+        assert any("zone fill" in w.lower() for w in result.warnings)
+        assert any("power" in w.lower() for w in result.warnings)
+
+    def test_non_pour_net_not_skipped(self, mock_pcb, design_rules):
+        """Verify non-pour nets are routed normally (not skipped)."""
+        net_class_map = {
+            "GND": NetClassRouting(name="Ground", priority=1, is_pour_net=True),
+            "SPI_MOSI": NetClassRouting(name="Digital", priority=4, is_pour_net=False),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=4, net_name="SPI_MOSI", pin="1"),
+            _pad(x=15.0, y=5.0, net=4, net_name="SPI_MOSI", pin="2"),
+        ]
+
+        result = orch.route_net("SPI_MOSI", pads=pads)
+
+        # SPI_MOSI should be routed normally, not skipped
+        assert result.success is True
+        assert not any("pour net" in w.lower() for w in result.warnings)
+
+    def test_no_net_class_map_routes_normally(self, orchestrator):
+        """Verify orchestrator without net_class_map routes all nets normally."""
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="GND", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="GND", pin="2"),
+        ]
+
+        # Default orchestrator has no net_class_map, so GND is not recognized as pour
+        result = orchestrator.route_net("GND", pads=pads)
+
+        assert result.success is True
+        assert not any("pour net" in w.lower() for w in result.warnings)
+
+    def test_pour_net_skip_includes_performance_stats(self, mock_pcb, design_rules):
+        """Verify skipped pour nets still return performance stats."""
+        net_class_map = {
+            "GND": NetClassRouting(name="Ground", priority=1, is_pour_net=True),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        result = orch.route_net(
+            "GND",
+            pads=[
+                _pad(x=0, y=0, net=1, net_name="GND", pin="1"),
+                _pad(x=10, y=0, net=1, net_name="GND", pin="2"),
+            ],
+        )
+
+        assert result.performance is not None
+        assert result.performance.total_time_ms >= 0
+        assert result.performance.backend_type == "cpu"
+
+    def test_pour_net_with_integer_net_id_not_skipped(self, mock_pcb, design_rules):
+        """Verify integer net IDs are not looked up in net_class_map (string keys only)."""
+        net_class_map = {
+            "GND": NetClassRouting(name="Ground", priority=1, is_pour_net=True),
+        }
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, net=1, net_name="GND", pin="1"),
+            _pad(x=15.0, y=5.0, net=1, net_name="GND", pin="2"),
+        ]
+
+        # Using integer net ID - should not be looked up in string-keyed map
+        result = orch.route_net(1, pads=pads)
+
+        assert result.success is True
+        assert not any("pour net" in w.lower() for w in result.warnings)
+
+    def test_classify_and_apply_rules_integration(self, mock_pcb, design_rules):
+        """Verify classify_and_apply_rules output integrates with orchestrator."""
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        net_names = {1: "GND", 2: "GNDA", 3: "+3.3V", 4: "MCLK_DAC", 5: "SPI_MOSI"}
+        net_class_map = classify_and_apply_rules(net_names)
+
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            net_class_map=net_class_map,
+        )
+
+        # GND should be skipped (is_pour_net=True from Ground class)
+        gnd_result = orch.route_net(
+            "GND",
+            pads=[
+                _pad(x=0, y=0, net=1, net_name="GND", pin="1"),
+                _pad(x=10, y=0, net=1, net_name="GND", pin="2"),
+            ],
+        )
+        assert gnd_result.success is True
+        assert any("pour net" in w.lower() for w in gnd_result.warnings)
+
+        # GNDA should be skipped (is_pour_net=True from Ground class)
+        gnda_result = orch.route_net(
+            "GNDA",
+            pads=[
+                _pad(x=0, y=0, net=2, net_name="GNDA", pin="1"),
+                _pad(x=10, y=0, net=2, net_name="GNDA", pin="2"),
+            ],
+        )
+        assert gnda_result.success is True
+        assert any("pour net" in w.lower() for w in gnda_result.warnings)
+
+        # +3.3V should be skipped (is_pour_net=True from Power class)
+        power_result = orch.route_net(
+            "+3.3V",
+            pads=[
+                _pad(x=0, y=0, net=3, net_name="+3.3V", pin="1"),
+                _pad(x=10, y=0, net=3, net_name="+3.3V", pin="2"),
+            ],
+        )
+        assert power_result.success is True
+        assert any("pour net" in w.lower() for w in power_result.warnings)
+
+        # MCLK_DAC should NOT be skipped (clock net, is_pour_net=False)
+        clk_result = orch.route_net(
+            "MCLK_DAC",
+            pads=[
+                _pad(x=0, y=0, net=4, net_name="MCLK_DAC", pin="1"),
+                _pad(x=10, y=0, net=4, net_name="MCLK_DAC", pin="2"),
+            ],
+        )
+        assert clk_result.success is True
+        assert not any("pour net" in w.lower() for w in clk_result.warnings)
+
+        # SPI_MOSI should NOT be skipped (digital signal, is_pour_net=False)
+        spi_result = orch.route_net(
+            "SPI_MOSI",
+            pads=[
+                _pad(x=0, y=0, net=5, net_name="SPI_MOSI", pin="1"),
+                _pad(x=10, y=0, net=5, net_name="SPI_MOSI", pin="2"),
+            ],
+        )
+        assert spi_result.success is True
+        assert not any("pour net" in w.lower() for w in spi_result.warnings)
 
 
 class TestRoutingMetrics:
