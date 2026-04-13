@@ -364,6 +364,8 @@ def run_post_route_drc(
                         print(f"    ... and {warning_count - (5 - shown)} more warnings")
 
                 print(f"\n  Run 'kct check {output_path} --mfr {manufacturer}' for full details")
+                if error_count > 0:
+                    print(f"  Run 'kct fix-drc {output_path}' to auto-repair clearance violations")
 
         return error_count, warning_count
 
@@ -372,6 +374,62 @@ def run_post_route_drc(
             print("\n--- DRC Validation ---")
             print(f"  Warning: DRC check failed: {e}")
         return -1, -1  # Indicate failure to run DRC
+
+
+def _run_auto_fix(
+    output_path: Path,
+    max_passes: int = 1,
+    quiet: bool = False,
+) -> int:
+    """Run fix-drc on the routed PCB to auto-repair DRC violations.
+
+    Args:
+        output_path: Path to the routed PCB file to repair.
+        max_passes: Number of iterative repair passes.
+        quiet: If True, suppress output.
+
+    Returns:
+        Exit code from fix_drc_cmd.main() (0 = all violations fixed).
+    """
+    from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+    if not quiet:
+        print("\n--- Auto-Fix DRC Violations ---")
+
+    fix_argv = [
+        str(output_path),
+        "--max-passes",
+        str(max_passes),
+    ]
+    if quiet:
+        fix_argv.append("--quiet")
+
+    result = fix_drc_main(fix_argv)
+
+    if not quiet:
+        if result == 0:
+            print("  Auto-fix: all targeted violations repaired!")
+        else:
+            print("  Auto-fix: some violations remain (manual repair may be needed)")
+
+    return result
+
+
+def _should_auto_fix(args) -> bool:
+    """Determine whether auto-fix should run based on CLI flags.
+
+    Auto-fix runs when --auto-fix is set (which is also implied by
+    --auto-fix-passes), but is suppressed by --dry-run and --skip-drc.
+    """
+    auto_fix = getattr(args, "auto_fix", False)
+    dry_run = getattr(args, "dry_run", False)
+    skip_drc = getattr(args, "skip_drc", False)
+
+    if not auto_fix:
+        return False
+    if dry_run or skip_drc:
+        return False
+    return True
 
 
 @dataclass
@@ -618,7 +676,8 @@ def route_with_layer_escalation(
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
-                    batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                    batch_routing=getattr(args, "batch_routing", False)
+                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                 )
             elif args.strategy == "basic":
@@ -769,12 +828,20 @@ def route_with_layer_escalation(
 
     # Run DRC validation unless skipped
     if not args.skip_drc and final_result.nets_routed > 0:
-        run_post_route_drc(
+        drc_errors, _ = run_post_route_drc(
             output_path=output_path,
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
         )
+
+        # Auto-fix DRC violations if requested
+        if drc_errors > 0 and _should_auto_fix(args):
+            _run_auto_fix(
+                output_path=output_path,
+                max_passes=getattr(args, "auto_fix_passes", 1),
+                quiet=quiet,
+            )
 
     # Final summary
     if not quiet:
@@ -954,7 +1021,8 @@ def route_with_rule_relaxation(
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
-                    batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                    batch_routing=getattr(args, "batch_routing", False)
+                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                 )
             elif args.strategy == "basic":
@@ -1118,12 +1186,20 @@ def route_with_rule_relaxation(
 
     # Run DRC validation unless skipped
     if not args.skip_drc and final_result.nets_routed > 0:
-        run_post_route_drc(
+        drc_errors, _ = run_post_route_drc(
             output_path=output_path,
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
         )
+
+        # Auto-fix DRC violations if requested
+        if drc_errors > 0 and _should_auto_fix(args):
+            _run_auto_fix(
+                output_path=output_path,
+                max_passes=getattr(args, "auto_fix_passes", 1),
+                quiet=quiet,
+            )
 
     # Final summary
     if not quiet:
@@ -1308,7 +1384,8 @@ def route_with_combined_escalation(
                     router.route_all_negotiated(
                         max_iterations=args.iterations,
                         timeout=args.timeout,
-                        batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                        batch_routing=getattr(args, "batch_routing", False)
+                        or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
                     )
                 elif args.strategy == "basic":
@@ -1506,12 +1583,20 @@ def route_with_combined_escalation(
 
     # Run DRC validation unless skipped
     if not args.skip_drc and final_result.nets_routed > 0:
-        run_post_route_drc(
+        drc_errors, _ = run_post_route_drc(
             output_path=output_path,
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
             quiet=quiet,
         )
+
+        # Auto-fix DRC violations if requested
+        if drc_errors > 0 and _should_auto_fix(args):
+            _run_auto_fix(
+                output_path=output_path,
+                max_passes=getattr(args, "auto_fix_passes", 1),
+                quiet=quiet,
+            )
 
     # Final summary
     if not quiet:
@@ -1807,6 +1892,26 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--auto-fix",
+        action="store_true",
+        help=(
+            "Automatically run 'kct fix-drc' after routing if DRC violations are "
+            "detected. Suppressed by --dry-run and --skip-drc. Uses iterative "
+            "repair to fix clearance and drill violations."
+        ),
+    )
+    parser.add_argument(
+        "--auto-fix-passes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Number of repair passes for --auto-fix (default: 3). "
+            "Implies --auto-fix. Multiple passes can fix cascading violations "
+            "where fixing one violation exposes or resolves others."
+        ),
+    )
+    parser.add_argument(
         "--no-optimize",
         action="store_true",
         help=(
@@ -2034,6 +2139,16 @@ def main(argv: list[str] | None = None) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Normalize --auto-fix-passes: explicit value implies --auto-fix
+    if args.auto_fix_passes is not None:
+        if args.auto_fix_passes < 1:
+            print("Error: --auto-fix-passes must be at least 1", file=sys.stderr)
+            return 1
+        args.auto_fix = True
+    else:
+        # Default to 3 passes when --auto-fix is used without explicit --auto-fix-passes
+        args.auto_fix_passes = 3
+
     # Validate --auto-layers is not used with explicit --layers
     if args.auto_layers and args.layers != "auto":
         print(
@@ -2201,10 +2316,7 @@ def main(argv: list[str] | None = None) -> int:
             if auto_skip:
                 skip_nets.extend(auto_skip)
                 if not args.quiet:
-                    print(
-                        f"Auto-skip: {', '.join(sorted(auto_skip))} "
-                        f"(pour nets — use zone fill)"
-                    )
+                    print(f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets — use zone fill)")
     except Exception:
         pass  # Fall back to user-supplied skip_nets only
 
@@ -2376,9 +2488,12 @@ def main(argv: list[str] | None = None) -> int:
         backend_info = router.backend_info
         grid_cells = router.grid.cols * router.grid.rows * router.grid.num_layers
         from kicad_tools.router.cpp_backend import format_backend_status
+
         backend_status = format_backend_status(backend_info, grid_cells)
         print(f"  Backend:    {backend_status}")
-        print(f"  Grid:       {router.grid.cols}x{router.grid.rows}x{router.grid.num_layers} = {grid_cells:,} cells")
+        print(
+            f"  Grid:       {router.grid.cols}x{router.grid.rows}x{router.grid.num_layers} = {grid_cells:,} cells"
+        )
         print(f"  Total nets: {len(net_map)}")
         print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
 
@@ -2589,7 +2704,9 @@ def main(argv: list[str] | None = None) -> int:
             if cached_result is not None:
                 if not quiet:
                     print(f"  Cache HIT: {cached_result.success_count} nets routed")
-                    print(f"  Segments: {cached_result.total_segments}, Vias: {cached_result.total_vias}")
+                    print(
+                        f"  Segments: {cached_result.total_segments}, Vias: {cached_result.total_vias}"
+                    )
                     print(f"  Original compute time: {cached_result.compute_time_ms}ms")
 
                 # Deserialize and apply cached routes
@@ -2604,7 +2721,9 @@ def main(argv: list[str] | None = None) -> int:
                 if not quiet:
                     print(f"  Cache MISS (key: {cache_key.full_key[:32]}...)")
                 if args.cache_only:
-                    print("Error: --cache-only specified but no cached result found", file=sys.stderr)
+                    print(
+                        "Error: --cache-only specified but no cached result found", file=sys.stderr
+                    )
                     return 1
         except Exception as e:
             if not quiet:
@@ -2634,6 +2753,7 @@ def main(argv: list[str] | None = None) -> int:
                 flush_print(f"  Profiling enabled: {profile_output}")
 
         import time
+
         routing_start_time = time.time()
 
         # Resolve escape routing flag: True=force on, False=force off, None=auto-detect
@@ -2669,7 +2789,8 @@ def main(argv: list[str] | None = None) -> int:
                 return router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
-                    batch_routing=getattr(args, "batch_routing", False) or getattr(args, "high_performance", False),
+                    batch_routing=getattr(args, "batch_routing", False)
+                    or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
                 )
             elif args.differential_pairs and args.strategy == "basic":
@@ -2735,8 +2856,11 @@ def main(argv: list[str] | None = None) -> int:
         # Cache the routing result (if caching enabled and routing succeeded)
         if use_cache and cache_key is not None and router.routes:
             import time
+
             try:
-                routing_time_ms = int((time.time() - routing_start_time) * 1000) if routing_start_time else 0
+                routing_time_ms = (
+                    int((time.time() - routing_start_time) * 1000) if routing_start_time else 0
+                )
                 stats = router.get_statistics()
                 cache.put(cache_key, router.routes, stats, routing_time_ms)
                 if not quiet:
@@ -2883,9 +3007,7 @@ def main(argv: list[str] | None = None) -> int:
                 if route_sexp:
                     fragments.append(route_sexp)
                 combined_sexp = "\n  ".join(fragments)
-                output_content = _insert_sexp_before_closing(
-                    original_content, combined_sexp
-                )
+                output_content = _insert_sexp_before_closing(original_content, combined_sexp)
             else:
                 output_content = original_content
                 if not quiet:
@@ -2956,6 +3078,16 @@ def main(argv: list[str] | None = None) -> int:
             quiet=quiet,
         )
 
+        # Auto-fix DRC violations if requested
+        if drc_errors > 0 and _should_auto_fix(args):
+            fix_result = _run_auto_fix(
+                output_path=output_path,
+                max_passes=getattr(args, "auto_fix_passes", 1),
+                quiet=quiet,
+            )
+            if fix_result == 0:
+                drc_errors = 0
+
     # Summary
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
@@ -2995,10 +3127,12 @@ def main(argv: list[str] | None = None) -> int:
             print("This board cannot be manufactured without fixing DRC errors.")
             print()
             print("Suggestions:")
+            print(f"  - Auto-repair DRC violations: kct fix-drc {output_path} --max-passes 3")
             print("  - Try Monte Carlo routing: kct route --trials 10")
             print("  - Increase board area")
             print("  - Reduce component density")
             print("  - Try 4-layer routing: kct route --layers 4")
+            print(f"  - Or re-route with auto-fix: kct route {args.pcb} --auto-fix")
             print()
             print(f"  Run 'kct check {output_path} --mfr {args.manufacturer}' for full details")
         else:
@@ -3018,8 +3152,12 @@ def main(argv: list[str] | None = None) -> int:
                 # Verbose mode shows detailed path analysis for each failure
                 verbose = args.verbose or args.diagnostics
                 show_routing_summary(
-                    router, net_map, nets_to_route,
-                    quiet=quiet, verbose=verbose, current_strategy=args.strategy,
+                    router,
+                    net_map,
+                    nets_to_route,
+                    quiet=quiet,
+                    verbose=verbose,
+                    current_strategy=args.strategy,
                 )
 
     # Exit codes:
