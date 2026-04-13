@@ -1243,12 +1243,6 @@ def _add_fix_drc_parser(subparsers) -> None:
         help="Extra clearance margin beyond minimum in mm (default: 0.01)",
     )
     fix_drc_parser.add_argument(
-        "--max-passes",
-        type=int,
-        default=3,
-        help="Maximum number of repair passes (default: 3)",
-    )
-    fix_drc_parser.add_argument(
         "--only",
         choices=["clearance", "drill-clearance"],
         help="Only fix a specific violation type",

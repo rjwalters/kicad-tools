@@ -124,8 +124,6 @@ def run_fix_drc_command(args) -> int:
         sub_argv.extend(["--max-displacement", str(args.max_displacement)])
     if args.margin != 0.01:
         sub_argv.extend(["--margin", str(args.margin)])
-    if getattr(args, "max_passes", 3) != 3:
-        sub_argv.extend(["--max-passes", str(args.max_passes)])
     if getattr(args, "only", None):
         sub_argv.extend(["--only", args.only])
     if getattr(args, "output", None):
