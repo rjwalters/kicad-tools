@@ -784,6 +784,7 @@ def route_with_layer_escalation(
                 final_result.net_map,
                 final_result.nets_to_route,
                 quiet=quiet,
+                current_strategy=args.strategy,
             )
 
     return 0 if final_result.success else 1
@@ -1130,6 +1131,7 @@ def route_with_rule_relaxation(
                 final_result.net_map,
                 final_result.nets_to_route,
                 quiet=quiet,
+                current_strategy=args.strategy,
             )
 
     return 0 if final_result.success else 1
@@ -1508,6 +1510,7 @@ def route_with_combined_escalation(
                 final_result.net_map,
                 final_result.nets_to_route,
                 quiet=quiet,
+                current_strategy=args.strategy,
             )
 
     return 0 if final_result.success else 1
@@ -2877,11 +2880,16 @@ def main(argv: list[str] | None = None) -> int:
             # Show comprehensive routing summary with successes, failures, and suggestions
             # Use JSON format if requested
             if args.format == "json":
-                print_routing_diagnostics_json(router, net_map, nets_to_route)
+                print_routing_diagnostics_json(
+                    router, net_map, nets_to_route, current_strategy=args.strategy
+                )
             else:
                 # Verbose mode shows detailed path analysis for each failure
                 verbose = args.verbose or args.diagnostics
-                show_routing_summary(router, net_map, nets_to_route, quiet=quiet, verbose=verbose)
+                show_routing_summary(
+                    router, net_map, nets_to_route,
+                    quiet=quiet, verbose=verbose, current_strategy=args.strategy,
+                )
 
     # Exit codes:
     # 0 = All nets routed AND (DRC passed OR DRC not run)

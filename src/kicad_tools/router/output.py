@@ -22,6 +22,7 @@ def show_routing_summary(
     nets_to_route: int,
     quiet: bool = False,
     verbose: bool = False,
+    current_strategy: str = "basic",
 ) -> None:
     """Show comprehensive routing summary with successes, failures, and suggestions.
 
@@ -36,6 +37,9 @@ def show_routing_summary(
         nets_to_route: Total number of nets that should be routed
         quiet: If True, skip output
         verbose: If True, show detailed path analysis for failures
+        current_strategy: The routing strategy that was used (e.g. "basic",
+            "negotiated", "monte-carlo"). Suggestions will exclude this strategy
+            since the user already tried it.
     """
     if quiet:
         return
@@ -98,9 +102,7 @@ def show_routing_summary(
             else:
                 # Fallback to basic format
                 cause_name = (
-                    failure.failure_cause.value
-                    if hasattr(failure, "failure_cause")
-                    else "unknown"
+                    failure.failure_cause.value if hasattr(failure, "failure_cause") else "unknown"
                 )
                 print(f"  {net_name}: {cause_name} - {failure.reason}")
         else:
@@ -132,16 +134,18 @@ def show_routing_summary(
 
     # Show verbose details for each failed net
     if verbose and unrouted_ids:
-        print(f"\n{'=' * 60}")
-        print("Detailed Failure Analysis")
-        print(f"{'=' * 60}")
+        # Only print section if at least one net has failure records
+        nets_with_detail = [
+            net_id for net_id in sorted(unrouted_ids) if failures_by_net.get(net_id)
+        ]
+        if nets_with_detail:
+            print(f"\n{'=' * 60}")
+            print("Detailed Failure Analysis")
+            print(f"{'=' * 60}")
 
-        for net_id in sorted(unrouted_ids):
+        for net_id in nets_with_detail:
             net_name = reverse_net.get(net_id, f"Net_{net_id}")
-            net_failures = failures_by_net.get(net_id, [])
-
-            if not net_failures:
-                continue
+            net_failures = failures_by_net[net_id]
 
             failure = net_failures[0]
             analysis = getattr(failure, "analysis", None)
@@ -152,17 +156,31 @@ def show_routing_summary(
             if hasattr(failure, "source_coords") and failure.source_coords:
                 src = failure.source_coords
                 tgt = failure.target_coords
-                src_ref = f"{failure.source_pad[0]}.{failure.source_pad[1]}" if failure.source_pad else "?"
-                tgt_ref = f"{failure.target_pad[0]}.{failure.target_pad[1]}" if failure.target_pad else "?"
-                print(f"  Path: {src_ref} ({src[0]:.1f}, {src[1]:.1f}) -> {tgt_ref} ({tgt[0]:.1f}, {tgt[1]:.1f})")
+                src_ref = (
+                    f"{failure.source_pad[0]}.{failure.source_pad[1]}"
+                    if failure.source_pad
+                    else "?"
+                )
+                tgt_ref = (
+                    f"{failure.target_pad[0]}.{failure.target_pad[1]}"
+                    if failure.target_pad
+                    else "?"
+                )
+                print(
+                    f"  Path: {src_ref} ({src[0]:.1f}, {src[1]:.1f}) -> {tgt_ref} ({tgt[0]:.1f}, {tgt[1]:.1f})"
+                )
 
             if analysis:
-                print(f"  Root cause: {analysis.root_cause.value} ({analysis.confidence:.0%} confidence)")
+                print(
+                    f"  Root cause: {analysis.root_cause.value} ({analysis.confidence:.0%} confidence)"
+                )
                 print(f"  Congestion score: {analysis.congestion_score:.0%}")
 
                 # Show blocked area info
                 area = analysis.failure_area
-                print(f"  Blocked area: ({area.min_x:.1f}, {area.min_y:.1f}) to ({area.max_x:.1f}, {area.max_y:.1f})")
+                print(
+                    f"  Blocked area: ({area.min_x:.1f}, {area.min_y:.1f}) to ({area.max_x:.1f}, {area.max_y:.1f})"
+                )
                 print(f"                Size: {area.width:.1f}mm x {area.height:.1f}mm")
 
                 if analysis.clearance_margin != float("inf"):
@@ -270,7 +288,14 @@ def show_routing_summary(
                 if len(blocking_nets) > 5:
                     net_list += f" +{len(blocking_nets) - 5} more"
                 print(f"   Blocking nets: {net_list}")
-            print("   Try: kct route --strategy negotiated (allows rip-up and reroute)\n")
+            if current_strategy != "negotiated":
+                print("   Try: kct route --strategy negotiated (allows rip-up and reroute)\n")
+            elif current_strategy != "monte-carlo":
+                print(
+                    "   Try: kct route --strategy monte-carlo --mc-trials 20 (randomized rerouting)\n"
+                )
+            else:
+                print("   Try: Reposition components to reduce routing-order conflicts\n")
 
         # Check for BLOCKED_PATH issues
         blocked_failures = failures_by_cause.get("blocked_path", [])
@@ -305,10 +330,18 @@ def show_routing_summary(
         # General suggestions if nothing specific
         if suggestions_shown == 0:
             num_layers = getattr(router.grid, "num_layers", 2)
-            print("1. Try negotiated routing: kct route --strategy negotiated")
-            print("2. Try Monte Carlo routing: kct route --strategy monte-carlo --mc-trials 20")
+            suggestion_num = 0
+            all_strategies = {
+                "negotiated": "Try negotiated routing: kct route --strategy negotiated",
+                "monte-carlo": "Try Monte Carlo routing: kct route --strategy monte-carlo --mc-trials 20",
+            }
+            for strategy_name, suggestion_text in all_strategies.items():
+                if strategy_name != current_strategy:
+                    suggestion_num += 1
+                    print(f"{suggestion_num}. {suggestion_text}")
             if num_layers <= 2:
-                print("3. Consider 4-layer routing: kct route --layers 4")
+                suggestion_num += 1
+                print(f"{suggestion_num}. Consider 4-layer routing: kct route --layers 4")
 
     print(f"\n{'=' * 60}")
 
@@ -334,6 +367,7 @@ def get_routing_diagnostics_json(
     router: Autorouter,
     net_map: dict[str, int],
     nets_to_route: int,
+    current_strategy: str = "basic",
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -343,6 +377,8 @@ def get_routing_diagnostics_json(
         router: The Autorouter instance with completed routing
         net_map: Mapping of net names to net IDs
         nets_to_route: Total number of nets that should be routed
+        current_strategy: The routing strategy that was used. Suggestions will
+            exclude this strategy since the user already tried it.
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
@@ -454,6 +490,41 @@ def get_routing_diagnostics_json(
             }
         )
 
+    if failures_by_cause.get("routing_order", 0) > 0:
+        fix_text = (
+            "--strategy negotiated (allows rip-up and reroute)"
+            if current_strategy != "negotiated"
+            else "--strategy monte-carlo --mc-trials 20 (randomized rerouting)"
+            if current_strategy != "monte-carlo"
+            else "Reposition components to reduce routing-order conflicts"
+        )
+        suggestions.append(
+            {
+                "category": "ROUTING_ORDER",
+                "affected_nets": failures_by_cause["routing_order"],
+                "description": "Earlier routed nets are blocking paths",
+                "fix": fix_text,
+            }
+        )
+
+    # Add general strategy suggestions if no cause-specific suggestions
+    if not suggestions:
+        all_strategy_suggestions = {
+            "negotiated": {
+                "category": "STRATEGY",
+                "description": "Try negotiated routing for rip-up and reroute",
+                "fix": "--strategy negotiated",
+            },
+            "monte-carlo": {
+                "category": "STRATEGY",
+                "description": "Try Monte Carlo routing for randomized optimization",
+                "fix": "--strategy monte-carlo --mc-trials 20",
+            },
+        }
+        for strategy_name, suggestion in all_strategy_suggestions.items():
+            if strategy_name != current_strategy:
+                suggestions.append(suggestion)
+
     return {
         "summary": {
             "nets_requested": nets_to_route,
@@ -474,6 +545,7 @@ def print_routing_diagnostics_json(
     router: Autorouter,
     net_map: dict[str, int],
     nets_to_route: int,
+    current_strategy: str = "basic",
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -481,8 +553,12 @@ def print_routing_diagnostics_json(
         router: The Autorouter instance with completed routing
         net_map: Mapping of net names to net IDs
         nets_to_route: Total number of nets that should be routed
+        current_strategy: The routing strategy that was used. Suggestions will
+            exclude this strategy since the user already tried it.
     """
-    diagnostics = get_routing_diagnostics_json(router, net_map, nets_to_route)
+    diagnostics = get_routing_diagnostics_json(
+        router, net_map, nets_to_route, current_strategy=current_strategy
+    )
     print(json.dumps(diagnostics, indent=2))
 
 
