@@ -99,8 +99,8 @@ def main(argv: list[str] | None = None) -> int:
         "--layers",
         "-l",
         type=int,
-        default=2,
-        help="Number of copper layers (default: 2)",
+        default=None,
+        help="Number of copper layers (auto-detected from board if not specified)",
     )
     parser.add_argument(
         "--copper",
@@ -182,12 +182,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error loading PCB: {e}", file=sys.stderr)
         return 1
 
+    # Auto-detect layer count from PCB if not explicitly provided
+    if args.layers is not None:
+        layers = args.layers
+    else:
+        detected = len(pcb.copper_layers)
+        layers = detected if detected > 0 else 2
+
     # Create checker with manufacturer rules
     try:
         checker = DRCChecker(
             pcb,
             manufacturer=args.mfr,
-            layers=args.layers,
+            layers=layers,
             copper_oz=args.copper,
         )
     except ValueError as e:
@@ -204,11 +211,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output results
     if args.format == "json":
-        output_json(violations, results, pcb_path, args.mfr, args.layers)
+        output_json(violations, results, pcb_path, args.mfr, layers)
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
     else:
-        output_table(violations, results, pcb_path, args.mfr, args.layers, args.verbose)
+        output_table(violations, results, pcb_path, args.mfr, layers, args.verbose)
 
     # Determine exit code
     error_count = sum(1 for v in violations if v.is_error)
