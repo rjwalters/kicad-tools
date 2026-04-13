@@ -159,8 +159,9 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--strategy", args.strategy])
     if args.skip_nets:
         sub_argv.extend(["--skip-nets", args.skip_nets])
-    if args.grid != 0.25:
-        sub_argv.extend(["--grid", str(args.grid)])
+    grid_val = str(args.grid)
+    if grid_val.lower() == "auto" or grid_val != "0.25":
+        sub_argv.extend(["--grid", grid_val])
     if args.trace_width != 0.2:
         sub_argv.extend(["--trace-width", str(args.trace_width)])
     if args.clearance != 0.15:
