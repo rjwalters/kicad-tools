@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..design_intent import NetIntent
     from .primitives import PCB, Pad
-    from .rules import DesignRules
+    from .rules import DesignRules, NetClassRouting
 
 from .adaptive import AdaptiveAutorouter
 from .adaptive_grid import AdaptiveGridRouter, identify_fine_pitch_components
@@ -94,6 +94,10 @@ class RoutingOrchestrator:
         density_threshold: Grid cell utilization above this triggers sub-grid routing
         enable_repair: Whether to enable automatic clearance repair
         enable_via_conflict_resolution: Whether to enable via conflict resolution
+        net_class_map: Optional mapping of net names to NetClassRouting objects.
+            When provided, the orchestrator uses this to auto-skip pour nets
+            (nets with ``is_pour_net=True``) and return a success result with a
+            warning directing users to zone fill instead of trace routing.
     """
 
     def __init__(
@@ -105,6 +109,7 @@ class RoutingOrchestrator:
         density_threshold: float = 0.7,
         enable_repair: bool = True,
         enable_via_conflict_resolution: bool = True,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         self.pcb = pcb
         self.rules = rules
@@ -113,6 +118,7 @@ class RoutingOrchestrator:
         self.density_threshold = density_threshold
         self.enable_repair = enable_repair
         self.enable_via_conflict_resolution = enable_via_conflict_resolution
+        self.net_class_map: dict[str, NetClassRouting] = net_class_map or {}
 
         # Lazy-initialized routers (created on first use)
         self._global_router: GlobalRouter | None = None
@@ -126,6 +132,19 @@ class RoutingOrchestrator:
             f"RoutingOrchestrator initialized: backend={backend}, "
             f"corridor_width={corridor_width}mm, density_threshold={density_threshold}"
         )
+
+    def _get_net_class_routing(self, net: str | int) -> NetClassRouting | None:
+        """Look up the NetClassRouting for a net by name.
+
+        Args:
+            net: Net name or ID. Only string names are looked up in the map.
+
+        Returns:
+            NetClassRouting if found, None otherwise.
+        """
+        if isinstance(net, str) and net in self.net_class_map:
+            return self.net_class_map[net]
+        return None
 
     def route_net(
         self,
@@ -149,6 +168,23 @@ class RoutingOrchestrator:
         """
         start_time = time.time()
         perf = PerformanceStats(backend_type=self.backend or "cpu")
+
+        # Check for pour nets (power/ground handled by zone fill, not traces)
+        net_class_routing = self._get_net_class_routing(net)
+        if net_class_routing is not None and net_class_routing.is_pour_net:
+            perf.total_time_ms = (time.time() - start_time) * 1000
+            warning_msg = (
+                f"Net '{net}' is a {net_class_routing.name.lower()} pour net. "
+                f"Skipping trace routing — use zone fill instead."
+            )
+            logger.warning("Skipping pour net %s: %s", net, warning_msg)
+            return RoutingResult(
+                success=True,
+                net=net,
+                strategy_used=RoutingStrategy.GLOBAL_WITH_REPAIR,
+                warnings=[warning_msg],
+                performance=perf,
+            )
 
         # Phase 1: Strategy selection
         strategy_start = time.time()
@@ -215,9 +251,7 @@ class RoutingOrchestrator:
 
         # Check 3: Dense area requiring sub-grid routing?
         if pads and self._check_density(pads) > self.density_threshold:
-            logger.debug(
-                f"Net {net}: High density detected, using sub-grid adaptive routing"
-            )
+            logger.debug(f"Net {net}: High density detected, using sub-grid adaptive routing")
             return RoutingStrategy.SUBGRID_ADAPTIVE
 
         # Check 4: Via conflicts present?
@@ -370,9 +404,7 @@ class RoutingOrchestrator:
 
         net_id = net if isinstance(net, int) else 0
         for pad in pads:
-            conflicts = self._via_manager.find_blocking_vias(
-                pad=pad, pad_net=net_id
-            )
+            conflicts = self._via_manager.find_blocking_vias(pad=pad, pad_net=net_id)
             if conflicts:
                 return True
         return False
@@ -434,9 +466,7 @@ class RoutingOrchestrator:
             ),
         )
 
-    def _route_escape_then_global(
-        self, net: str | int, pads: list[Pad] | None
-    ) -> RoutingResult:
+    def _route_escape_then_global(self, net: str | int, pads: list[Pad] | None) -> RoutingResult:
         """Execute escape routing followed by global routing.
 
         Phase 1: Uses EscapeRouter to generate escape routes for dense
@@ -586,9 +616,7 @@ class RoutingOrchestrator:
 
         for route in adaptive_result.routes:
             for seg in route.segments:
-                length = math.sqrt(
-                    (seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2
-                )
+                length = math.sqrt((seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2)
                 total_length += length
                 all_segments.append(seg)
             via_count += len(route.vias)
@@ -607,9 +635,7 @@ class RoutingOrchestrator:
             ),
         )
 
-    def _route_subgrid_adaptive(
-        self, net: str | int, pads: list[Pad] | None
-    ) -> RoutingResult:
+    def _route_subgrid_adaptive(self, net: str | int, pads: list[Pad] | None) -> RoutingResult:
         """Execute sub-grid adaptive routing for dense areas.
 
         Uses AdaptiveGridRouter for two-phase routing:
@@ -668,9 +694,7 @@ class RoutingOrchestrator:
             ),
         )
 
-    def _route_with_via_resolution(
-        self, net: str | int, pads: list[Pad] | None
-    ) -> RoutingResult:
+    def _route_with_via_resolution(self, net: str | int, pads: list[Pad] | None) -> RoutingResult:
         """Execute routing with via conflict resolution.
 
         Detects vias from other nets that block access to this net's pads,
@@ -741,9 +765,7 @@ class RoutingOrchestrator:
         result.strategy_used = RoutingStrategy.VIA_CONFLICT_RESOLUTION
 
         # Add via conflict resolution info to result
-        successful_resolutions = sum(
-            1 for r in resolutions if getattr(r, "success", False)
-        )
+        successful_resolutions = sum(1 for r in resolutions if getattr(r, "success", False))
         if unique_conflicts:
             result.warnings.append(
                 f"Via conflict resolution: {len(unique_conflicts)} conflicts found, "
@@ -809,9 +831,7 @@ class RoutingOrchestrator:
                     total_layer_changes += escape_result.metrics.layer_changes
                     total_escape_segments += escape_result.metrics.escape_segments
                 else:
-                    all_warnings.append(
-                        f"Escape routing failed: {escape_result.error_message}"
-                    )
+                    all_warnings.append(f"Escape routing failed: {escape_result.error_message}")
             except Exception as e:
                 logger.warning("Full pipeline: escape routing phase failed: %s", e)
                 all_warnings.append(f"Escape routing exception: {e}")
@@ -828,9 +848,7 @@ class RoutingOrchestrator:
                     total_via_count += global_result.metrics.via_count
                     total_layer_changes += global_result.metrics.layer_changes
                 else:
-                    all_warnings.append(
-                        f"Global routing failed: {global_result.error_message}"
-                    )
+                    all_warnings.append(f"Global routing failed: {global_result.error_message}")
             except Exception as e:
                 logger.warning("Full pipeline: global routing phase failed: %s", e)
                 all_warnings.append(f"Global routing exception: {e}")
@@ -843,13 +861,9 @@ class RoutingOrchestrator:
                 if subgrid_result.success:
                     total_escape_segments += subgrid_result.metrics.escape_segments
                 else:
-                    all_warnings.append(
-                        f"Sub-grid adaptive failed: {subgrid_result.error_message}"
-                    )
+                    all_warnings.append(f"Sub-grid adaptive failed: {subgrid_result.error_message}")
             except Exception as e:
-                logger.warning(
-                    "Full pipeline: sub-grid adaptive phase failed: %s", e
-                )
+                logger.warning("Full pipeline: sub-grid adaptive phase failed: %s", e)
                 all_warnings.append(f"Sub-grid adaptive exception: {e}")
 
         # Phase 4: Via conflict resolution (if conflicts detected)
@@ -869,9 +883,7 @@ class RoutingOrchestrator:
                         total_layer_changes = via_result.metrics.layer_changes
                 all_warnings.extend(via_result.warnings)
             except Exception as e:
-                logger.warning(
-                    "Full pipeline: via conflict resolution phase failed: %s", e
-                )
+                logger.warning("Full pipeline: via conflict resolution phase failed: %s", e)
                 all_warnings.append(f"Via conflict resolution exception: {e}")
 
         # Build the result before clearance repair
@@ -906,16 +918,12 @@ class RoutingOrchestrator:
                     total_repair_actions += repair_count
                     result.metrics.repair_actions = total_repair_actions
             except Exception as e:
-                logger.warning(
-                    "Full pipeline: clearance repair phase failed: %s", e
-                )
+                logger.warning("Full pipeline: clearance repair phase failed: %s", e)
                 result.warnings.append(f"Clearance repair exception: {e}")
 
         # Record which strategies were used
         if strategies_used:
-            result.warnings.insert(
-                0, f"Full pipeline phases: {', '.join(strategies_used)}"
-            )
+            result.warnings.insert(0, f"Full pipeline phases: {', '.join(strategies_used)}")
 
         logger.info(
             "Full pipeline complete: net=%s, success=%s, phases=%s",
@@ -944,9 +952,7 @@ class RoutingOrchestrator:
 
         pcb_path = getattr(self.pcb, "path", None)
         if pcb_path is None:
-            logger.warning(
-                "Clearance repair requested but no PCB file path available"
-            )
+            logger.warning("Clearance repair requested but no PCB file path available")
             return 0
 
         from ..core.types import Severity
@@ -961,9 +967,7 @@ class RoutingOrchestrator:
             drc_v = DrcViolation(
                 type=ViolationType.from_string(v.violation_type),
                 type_str=v.violation_type,
-                severity=(
-                    Severity.ERROR if v.severity == "error" else Severity.WARNING
-                ),
+                severity=(Severity.ERROR if v.severity == "error" else Severity.WARNING),
                 message=v.description,
                 locations=[
                     Location(x_mm=v.location[0], y_mm=v.location[1]),
@@ -1092,9 +1096,7 @@ class RoutingOrchestrator:
             if self._region_graph is None:
                 board_width = getattr(self.pcb, "width", 65.0)
                 board_height = getattr(self.pcb, "height", 56.0)
-                self._region_graph = RegionGraph(
-                    board_width=board_width, board_height=board_height
-                )
+                self._region_graph = RegionGraph(board_width=board_width, board_height=board_height)
             self._global_router = GlobalRouter(
                 region_graph=self._region_graph,
                 corridor_width=self.corridor_width,
