@@ -263,7 +263,8 @@ class TestFaultTolerance:
 
         assert result["congestion"] is None
         # Other sections should still be populated
-        assert result["signal_integrity"] is not None or result["thermal"] is not None or True
+        assert result["signal_integrity"] is not None
+        assert result["thermal"] is not None
 
     def test_si_failure_produces_null(self):
         """If SignalIntegrityAnalyzer.analyze_crosstalk raises, SI is None."""

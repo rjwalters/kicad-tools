@@ -18,7 +18,10 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kicad_tools.audit.auditor import AuditResult
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +204,7 @@ class ReportDataCollector:
             "board_height_mm": round(board_height, 2),
         }
 
-    def collect_drc(self, audit_result: Any | None) -> dict[str, Any] | None:
+    def collect_drc(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
         """Extract DRC sub-section from a pre-run AuditResult.
 
         Args:
@@ -236,7 +239,7 @@ class ReportDataCollector:
             "groups": [g.to_dict() for g in groups],
         }
 
-    def collect_audit(self, audit_result: Any | None) -> dict[str, Any] | None:
+    def collect_audit(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
         """Full manufacturing audit snapshot.
 
         Args:
