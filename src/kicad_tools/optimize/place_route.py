@@ -150,6 +150,7 @@ class PlaceRouteOptimizer:
         router_factory: Callable[[], Autorouter],
         drc_checker_factory: Callable[[PCB], DRCChecker] | None = None,
         verbose: bool = True,
+        escape_routing: bool | None = None,
     ) -> None:
         """Initialize the optimizer.
 
@@ -163,6 +164,10 @@ class PlaceRouteOptimizer:
                 Receives the PCB object and returns a DRCChecker.
                 If None, DRC checking is skipped.
             verbose: Print progress messages during optimization
+            escape_routing: Enable escape routing for dense packages.
+                True = always use escape routing before global routing.
+                False = never use escape routing.
+                None = auto-detect dense packages (default).
         """
         self.pcb_path = Path(pcb_path)
         self.analyzer = analyzer
@@ -170,6 +175,7 @@ class PlaceRouteOptimizer:
         self.router_factory = router_factory
         self.drc_checker_factory = drc_checker_factory
         self.verbose = verbose
+        self.escape_routing = escape_routing
 
         # Track state across iterations
         self._current_routes: list[Route] = []
@@ -501,6 +507,11 @@ class PlaceRouteOptimizer:
     def _run_routing_phase(self) -> tuple[list[Route], list[int]]:
         """Run autorouting phase.
 
+        Uses escape routing when dense packages are detected (or when
+        escape_routing is explicitly enabled). Escape routing runs as a
+        pre-phase that generates escape routes for dense package pins
+        before global routing begins.
+
         Returns:
             Tuple of (routes, failed_net_ids)
         """
@@ -513,8 +524,13 @@ class PlaceRouteOptimizer:
         # Get total nets to route
         total_nets = len([n for n in router.nets if n != 0])
 
-        # Route all nets
-        routes = router.route_all()
+        # Determine whether to use escape routing
+        use_escape = self._should_use_escape_routing(router)
+
+        if use_escape:
+            routes = router.route_with_escape()
+        else:
+            routes = router.route_all()
 
         # Determine which nets failed
         routed_nets = {r.net for r in routes if r.net != 0}
@@ -530,6 +546,37 @@ class PlaceRouteOptimizer:
                 print(f"    Failed nets: {failed_nets[:5]}{'...' if len(failed_nets) > 5 else ''}")
 
         return routes, failed_nets
+
+    def _should_use_escape_routing(self, router: Autorouter) -> bool:
+        """Determine whether escape routing should be used.
+
+        Checks the escape_routing flag: True forces it on, False forces
+        it off, and None (default) auto-detects by scanning for dense
+        packages.
+
+        Args:
+            router: The Autorouter instance to check for dense packages.
+
+        Returns:
+            True if escape routing should be used.
+        """
+        if self.escape_routing is True:
+            if self.verbose:
+                print("    Escape routing: enabled (explicit)")
+            return True
+        if self.escape_routing is False:
+            return False
+
+        # Auto-detect: check for dense packages
+        if not hasattr(router, "detect_dense_packages"):
+            return False
+        dense_packages = router.detect_dense_packages()
+        if isinstance(dense_packages, list) and len(dense_packages) > 0:
+            if self.verbose:
+                refs = [p.ref for p in dense_packages]
+                print(f"    Escape routing: auto-enabled (dense packages: {refs})")
+            return True
+        return False
 
     def _run_drc_phase(self) -> DRCResults:
         """Run DRC checking phase.

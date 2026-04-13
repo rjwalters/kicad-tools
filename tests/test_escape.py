@@ -282,6 +282,33 @@ class TestIsDensePackage:
         # With larger clearance, becomes dense: 2 * (0.25 + 0.3) = 1.1mm > 1.0mm
         assert is_dense_package(pads, trace_width=0.25, clearance=0.3) is True
 
+    def test_qfp64_lqfp_dense(self):
+        """LQFP-64 at 0.5mm pitch is dense due to pin count > 48."""
+        pads = create_qfp_pads(16, pitch=0.5)  # 4 * 16 = 64 pins
+        assert len(pads) == 64
+        assert is_dense_package(pads) is True
+
+    def test_through_hole_not_dense(self):
+        """Through-hole package with wide pitch should not be dense."""
+        pads = []
+        for i in range(8):
+            pads.append(
+                Pad(
+                    x=i * 2.54,
+                    y=0,
+                    width=1.6,
+                    height=1.6,
+                    net=i + 1,
+                    net_name=f"NET_{i + 1}",
+                    layer=Layer.F_CU,
+                    ref="U1",
+                    through_hole=True,
+                )
+            )
+        # 8 pins at 2.54mm pitch, not dense
+        assert is_dense_package(pads) is False
+        assert is_dense_package(pads, trace_width=0.2, clearance=0.2) is False
+
 
 class TestDetectPackageType:
     """Tests for detect_package_type function."""

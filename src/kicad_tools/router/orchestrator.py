@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 from .adaptive import AdaptiveAutorouter
 from .adaptive_grid import AdaptiveGridRouter, identify_fine_pitch_components
-from .escape import EscapeRouter
+from .escape import EscapeRouter, is_dense_package
 from .global_router import GlobalRouter
 from .region_graph import RegionGraph
 from .strategies import (
@@ -326,28 +326,41 @@ class RoutingOrchestrator:
     def _needs_escape_routing(self, pads: list[Pad]) -> bool:
         """Check if any pads require escape routing (fine-pitch components).
 
+        Evaluates density per component rather than across net endpoints.
+        A net connecting an MCU pin (fine-pitch QFP) to a peripheral pad
+        (far away) would have large inter-endpoint distance but the MCU
+        component itself is dense and needs escape routing.
+
         Args:
             pads: List of pads to analyze
 
         Returns:
-            True if escape routing is needed
+            True if any component owning these pads is dense
         """
-        # Check for fine-pitch packages (pitch < 0.8mm typical for escape routing)
         if len(pads) < 2:
             return False
 
-        # Calculate minimum pitch between adjacent pads
-        min_pitch = float("inf")
-        for i, pad1 in enumerate(pads):
-            for pad2 in pads[i + 1 :]:
-                dx = pad1.x - pad2.x
-                dy = pad1.y - pad2.y
-                distance = math.sqrt(dx * dx + dy * dy)
-                min_pitch = min(min_pitch, distance)
+        # Group pads by component reference
+        by_ref: dict[str, list[Pad]] = {}
+        for pad in pads:
+            ref = pad.ref or ""
+            if ref:
+                by_ref.setdefault(ref, []).append(pad)
 
-        # Fine pitch threshold from design rules or default 0.8mm
-        threshold = getattr(self.rules, "fine_pitch_threshold", 0.8)
-        return min_pitch < threshold
+        # Check each component for density using escape.is_dense_package()
+        # which accounts for pin count, pitch, and design rule thresholds
+        trace_width = getattr(self.rules, "trace_width", None)
+        clearance = getattr(self.rules, "trace_clearance", None)
+
+        return any(
+            is_dense_package(
+                ref_pads,
+                trace_width=trace_width,
+                clearance=clearance,
+            )
+            for ref_pads in by_ref.values()
+            if len(ref_pads) >= 2
+        )
 
     def _check_density(self, pads: list[Pad]) -> float:
         """Calculate routing density around pads (0.0 to 1.0).

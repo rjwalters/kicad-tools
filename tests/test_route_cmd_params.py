@@ -373,3 +373,93 @@ class TestRouteCommandGridClearanceValidation:
 
         assert "--force" in help_text, "Help text should document --force flag"
         assert "clearance" in help_text.lower(), "Help text should mention clearance"
+
+
+class TestEscapeRoutingFlag:
+    """Tests for --escape-routing / --no-escape-routing CLI flag handling."""
+
+    def test_resolve_escape_routing_default(self):
+        """Default: neither flag set returns None (auto-detect)."""
+        from kicad_tools.cli.route_cmd import _resolve_escape_routing_flag
+
+        args = SimpleNamespace(escape_routing=None, no_escape_routing=False)
+        assert _resolve_escape_routing_flag(args) is None
+
+    def test_resolve_escape_routing_enabled(self):
+        """--escape-routing returns True."""
+        from kicad_tools.cli.route_cmd import _resolve_escape_routing_flag
+
+        args = SimpleNamespace(escape_routing=True, no_escape_routing=False)
+        assert _resolve_escape_routing_flag(args) is True
+
+    def test_resolve_escape_routing_disabled(self):
+        """--no-escape-routing returns False."""
+        from kicad_tools.cli.route_cmd import _resolve_escape_routing_flag
+
+        args = SimpleNamespace(escape_routing=None, no_escape_routing=True)
+        assert _resolve_escape_routing_flag(args) is False
+
+    def test_no_escape_routing_overrides_escape(self):
+        """--no-escape-routing takes precedence over --escape-routing."""
+        from kicad_tools.cli.route_cmd import _resolve_escape_routing_flag
+
+        args = SimpleNamespace(escape_routing=True, no_escape_routing=True)
+        assert _resolve_escape_routing_flag(args) is False
+
+    def test_should_use_escape_routing_forced(self):
+        """escape_flag=True forces escape routing on."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _should_use_escape_routing
+
+        router = MagicMock()
+        assert _should_use_escape_routing(router, True, quiet=True) is True
+        router.detect_dense_packages.assert_not_called()
+
+    def test_should_use_escape_routing_disabled(self):
+        """escape_flag=False forces escape routing off."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _should_use_escape_routing
+
+        router = MagicMock()
+        assert _should_use_escape_routing(router, False, quiet=True) is False
+        router.detect_dense_packages.assert_not_called()
+
+    def test_should_use_escape_routing_auto_with_dense(self):
+        """Auto-detect finds dense packages and enables escape routing."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _should_use_escape_routing
+
+        router = MagicMock()
+        router.detect_dense_packages.return_value = [MagicMock(ref="U1")]
+        assert _should_use_escape_routing(router, None, quiet=True) is True
+
+    def test_should_use_escape_routing_auto_no_dense(self):
+        """Auto-detect finds no dense packages and skips escape routing."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.cli.route_cmd import _should_use_escape_routing
+
+        router = MagicMock()
+        router.detect_dense_packages.return_value = []
+        assert _should_use_escape_routing(router, None, quiet=True) is False
+
+    def test_escape_routing_in_help(self):
+        """Verify --escape-routing appears in help text."""
+        import contextlib
+        import sys
+        from io import StringIO
+        from unittest.mock import patch
+
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        help_output = StringIO()
+        with patch.object(sys, "stdout", help_output):
+            with contextlib.suppress(SystemExit):
+                route_main(["--help"])
+
+        help_text = help_output.getvalue()
+        assert "--escape-routing" in help_text
+        assert "--no-escape-routing" in help_text
