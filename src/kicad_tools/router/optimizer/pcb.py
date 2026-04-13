@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from ..layers import Layer
-from ..primitives import Segment
+from ..primitives import Segment, Via
 from .config import OptimizationConfig, OptimizationStats
 from .geometry import count_corners, total_length
 
@@ -89,6 +89,79 @@ def parse_segments(pcb_text: str) -> dict[str, list[Segment]]:
         segments_by_net[net_name].append(seg)
 
     return segments_by_net
+
+
+def parse_vias(pcb_text: str) -> dict[str, list[Via]]:
+    """Parse vias from PCB file text, grouped by net name.
+
+    Parses ``(via ...)`` S-expressions and returns ``Via`` objects keyed
+    by net name, mirroring the structure of ``parse_segments``.
+
+    Args:
+        pcb_text: Raw text content of a ``.kicad_pcb`` file.
+
+    Returns:
+        Dictionary mapping net names to lists of ``Via`` objects.
+    """
+    vias_by_net: dict[str, list[Via]] = {}
+
+    # Reuse existing net-name mapping
+    net_names = parse_net_names(pcb_text)
+
+    # Match via S-expressions (multiline format)
+    # (via
+    #     (at X Y)
+    #     (size S)
+    #     (drill D)
+    #     (layers "L1" "L2")
+    #     (net N)
+    #     ...
+    # )
+    pattern = re.compile(
+        r"\(via\s+"
+        r"\(at\s+([\d.-]+)\s+([\d.-]+)\)\s*"
+        r"\(size\s+([\d.]+)\)\s*"
+        r"\(drill\s+([\d.]+)\)\s*"
+        r'\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s*'
+        r"\(net\s+(\d+)\)",
+        re.DOTALL,
+    )
+
+    for match in pattern.finditer(pcb_text):
+        x = float(match.group(1))
+        y = float(match.group(2))
+        diameter = float(match.group(3))
+        drill = float(match.group(4))
+        layer_start_name = match.group(5)
+        layer_end_name = match.group(6)
+        net = int(match.group(7))
+        net_name = net_names.get(net, f"Net{net}")
+
+        # Convert layer names to Layer enum
+        try:
+            layer_start = Layer.from_kicad_name(layer_start_name)
+        except ValueError:
+            layer_start = Layer.F_CU
+        try:
+            layer_end = Layer.from_kicad_name(layer_end_name)
+        except ValueError:
+            layer_end = Layer.B_CU
+
+        via = Via(
+            x=x,
+            y=y,
+            drill=drill,
+            diameter=diameter,
+            layers=(layer_start, layer_end),
+            net=net,
+            net_name=net_name,
+        )
+
+        if net_name not in vias_by_net:
+            vias_by_net[net_name] = []
+        vias_by_net[net_name].append(via)
+
+    return vias_by_net
 
 
 def replace_segments(

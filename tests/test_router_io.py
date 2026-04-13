@@ -2438,3 +2438,274 @@ class TestValidateSexpParentheses:
   (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1))
 )"""
         assert _validate_sexp_parentheses(pcb)
+
+
+# ============================================================================
+# TWO-PASS MERGE / EXISTING ROUTE OBSTACLE LOADING TESTS (Issue #1256)
+# ============================================================================
+
+# PCB fixture with pre-existing routed geometry (segments + vias) for
+# multi-pass routing tests.  Board is 50x40mm at origin (100, 100).
+_PCB_WITH_EXISTING_ROUTES = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "NET_A")
+  (net 2 "NET_B")
+  (net 3 "NET_C")
+  (gr_rect (start 100 100) (end 150 140)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000100")
+    (at 115 115)
+    (fp_text reference "U1" (at 0 -3.5) (layer "F.SilkS"))
+    (pad "1" smd rect (at -2.7 -1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET_A"))
+    (pad "2" smd rect (at -2.7 -0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "NET_B"))
+    (pad "3" smd rect (at -2.7 0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "NET_C"))
+    (pad "4" smd rect (at -2.7 1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "5" smd rect (at 2.7 1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "6" smd rect (at 2.7 0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "NET_C"))
+    (pad "7" smd rect (at 2.7 -0.635) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "NET_B"))
+    (pad "8" smd rect (at 2.7 -1.905) (size 1.5 0.6) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "NET_A"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000200")
+    (at 135 115)
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET_A"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "NET_B"))
+  )
+  (segment (start 112.3000 113.0950) (end 120.0000 113.0950) (width 0.2500) (layer "F.Cu") (net 1) (uuid "seg-a1"))
+  (segment (start 120.0000 113.0950) (end 134.4900 115.0000) (width 0.2500) (layer "F.Cu") (net 1) (uuid "seg-a2"))
+  (via (at 125.0000 120.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-b1"))
+  (segment (start 112.3000 114.3650) (end 125.0000 120.0000) (width 0.2500) (layer "F.Cu") (net 2) (uuid "seg-b1"))
+)
+"""
+
+
+class TestParseVias:
+    """Tests for the parse_vias function in optimizer/pcb.py."""
+
+    def test_parse_vias_basic(self):
+        """parse_vias extracts via coordinates, drill, diameter, net and layers."""
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        vias_by_net = parse_vias(_PCB_WITH_EXISTING_ROUTES)
+        assert "NET_B" in vias_by_net
+        net_b_vias = vias_by_net["NET_B"]
+        assert len(net_b_vias) == 1
+
+        via = net_b_vias[0]
+        assert via.x == pytest.approx(125.0, abs=0.01)
+        assert via.y == pytest.approx(120.0, abs=0.01)
+        assert via.diameter == pytest.approx(0.6, abs=0.01)
+        assert via.drill == pytest.approx(0.3, abs=0.01)
+        assert via.net == 2
+        assert via.layers[0] == Layer.F_CU
+        assert via.layers[1] == Layer.B_CU
+
+    def test_parse_vias_empty(self):
+        """parse_vias returns empty dict when no vias exist."""
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        pcb_no_vias = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1))
+)"""
+        result = parse_vias(pcb_no_vias)
+        assert result == {}
+
+    def test_parse_vias_multiple_nets(self):
+        """parse_vias groups vias by net name correctly."""
+        from kicad_tools.router.optimizer.pcb import parse_vias
+
+        pcb = """(kicad_pcb
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (via (at 105.0000 110.0000) (size 0.8000) (drill 0.4000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+  (via (at 115.0000 120.0000) (size 0.8000) (drill 0.4000) (layers "F.Cu" "B.Cu") (net 2) (uuid "v2"))
+  (via (at 125.0000 120.0000) (size 0.8000) (drill 0.4000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v3"))
+)"""
+        result = parse_vias(pcb)
+        assert len(result["VCC"]) == 2
+        assert len(result["GND"]) == 1
+
+
+class TestLoadExistingRoutes:
+    """Tests for load_pcb_for_routing with load_existing_routes=True."""
+
+    def _write_pcb(self, tmp_path, content=_PCB_WITH_EXISTING_ROUTES):
+        pcb_file = tmp_path / "pass1_routed.kicad_pcb"
+        pcb_file.write_text(content)
+        return pcb_file
+
+    def test_default_no_existing_routes(self, tmp_path):
+        """Default load_existing_routes=False does not block route cells."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, net_map = load_pcb_for_routing(str(pcb_file), validate_drc=False)
+        # With default (False), the existing segment cells should NOT be
+        # marked as blocked (only pad cells are blocked).
+        # Verify at least that routing completed without error.
+        assert router is not None
+        assert "NET_A" in net_map
+
+    def test_existing_routes_mark_grid_cells(self, tmp_path):
+        """When load_existing_routes=True, existing segment cells are blocked."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), validate_drc=False, load_existing_routes=True
+        )
+        # The existing segment for NET_A goes from (112.3, 113.095)
+        # to (120.0, 113.095).  Pick a point along that segment and
+        # verify the grid cell is blocked.
+        mid_x, mid_y = 116.0, 113.095
+        gx, gy = router.grid.world_to_grid(mid_x, mid_y)
+        layer_idx = router.grid.layer_to_index(Layer.F_CU.value)
+
+        cell = router.grid.grid[layer_idx][gy][gx]
+        assert cell.blocked, (
+            "Grid cell along existing segment should be blocked when load_existing_routes=True"
+        )
+
+    def test_existing_via_marks_grid_cells(self, tmp_path):
+        """When load_existing_routes=True, existing via cells are blocked."""
+        pcb_file = self._write_pcb(tmp_path)
+        router, net_map = load_pcb_for_routing(
+            str(pcb_file), validate_drc=False, load_existing_routes=True
+        )
+        # The existing via for NET_B is at (125.0, 120.0)
+        gx, gy = router.grid.world_to_grid(125.0, 120.0)
+        # Via blocks all layers
+        for layer_idx in range(router.grid.num_layers):
+            cell = router.grid.grid[layer_idx][gy][gx]
+            assert cell.blocked, (
+                f"Grid cell at via position should be blocked on layer {layer_idx} "
+                "when load_existing_routes=True"
+            )
+
+    def test_single_pass_unchanged(self, routing_test_pcb):
+        """Regression: load_existing_routes=False behaves identically to before."""
+        # Load with default (False)
+        router1, net_map1 = load_pcb_for_routing(str(routing_test_pcb), validate_drc=False)
+        # Load again explicitly False
+        router2, net_map2 = load_pcb_for_routing(
+            str(routing_test_pcb), validate_drc=False, load_existing_routes=False
+        )
+        assert net_map1 == net_map2
+        assert len(router1.pads) == len(router2.pads)
+        assert len(router1.nets) == len(router2.nets)
+
+
+class TestMergeRoutesViaConflicts:
+    """Tests for merge_routes_into_pcb with co-located via detection."""
+
+    def test_merge_no_conflicts_default(self):
+        """Default merge (detect_via_conflicts=False) appends without scanning."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        new_routes = '(via (at 120.0000 120.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v2"))'
+        result = merge_routes_into_pcb(original, new_routes)
+        # Both vias should be present
+        assert result.count("(via") == 2
+
+    def test_merge_detects_colocated_vias(self):
+        """detect_via_conflicts=True removes co-located vias on different nets."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        # New route adds a via at the same location but on a different net
+        new_routes = '(via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 2) (uuid "v2"))'
+        result = merge_routes_into_pcb(
+            original, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        # The conflicting via (net 2) should have been removed; only net 1 remains
+        assert result.count("(via") == 1
+        assert "(net 1)" in result
+        assert _validate_sexp_parentheses(result), "Removal of conflicting via must not leave orphaned parentheses"
+
+    def test_merge_keeps_same_net_vias(self):
+        """Co-located vias on the same net are not removed."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        # Another via at same position, same net
+        new_routes = '(via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v2"))'
+        result = merge_routes_into_pcb(
+            original, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        # Both vias should remain (same net, no conflict)
+        assert result.count("(via") == 2
+
+    def test_merge_conflict_within_clearance(self):
+        """Vias within clearance distance on different nets are flagged."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        # Via 0.1mm away on a different net (within default 0.2mm clearance)
+        new_routes = '(via (at 110.0500 110.0500) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 2) (uuid "v2"))'
+        result = merge_routes_into_pcb(
+            original, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        assert result.count("(via") == 1
+        assert "(net 1)" in result
+        assert _validate_sexp_parentheses(result), "Removal of within-clearance via must not leave orphaned parentheses"
+
+    def test_merge_no_conflict_outside_clearance(self):
+        """Vias outside clearance distance on different nets are kept."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        # Via 5mm away on different net (well outside clearance)
+        new_routes = '(via (at 115.0000 115.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 2) (uuid "v2"))'
+        result = merge_routes_into_pcb(
+            original, new_routes, detect_via_conflicts=True, via_clearance=0.2
+        )
+        assert result.count("(via") == 2
+
+    def test_backward_compatible_default(self):
+        """Default detect_via_conflicts=False preserves exact existing behaviour."""
+        original = """(kicad_pcb
+  (net 0 "")
+  (net 1 "A")
+  (net 2 "B")
+  (via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 1) (uuid "v1"))
+)"""
+        new_routes = '(via (at 110.0000 110.0000) (size 0.6000) (drill 0.3000) (layers "F.Cu" "B.Cu") (net 2) (uuid "v2"))'
+        # Without flag, both vias stay (backward compat)
+        result = merge_routes_into_pcb(original, new_routes)
+        assert result.count("(via") == 2
