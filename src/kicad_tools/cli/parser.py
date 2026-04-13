@@ -39,6 +39,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools fix-footprints <pcb>   - Fix footprint pad spacing issues
     kicad-tools analyze <command>      - PCB analysis tools
     kicad-tools audit <project>        - Manufacturing readiness audit
+    kicad-tools pipeline <pcb>         - End-to-end repair pipeline for existing PCBs
     kicad-tools clean <project>        - Clean up old/orphaned files
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
@@ -171,6 +172,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
     _add_init_parser(subparsers)
+    _add_pipeline_parser(subparsers)
     _add_build_parser(subparsers)
     _add_build_native_parser(subparsers)
     _add_spec_parser(subparsers)
@@ -2848,6 +2850,68 @@ def _add_init_parser(subparsers) -> None:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+
+def _add_pipeline_parser(subparsers) -> None:
+    """Add pipeline subcommand parser for existing PCB repair workflow."""
+    pipeline_parser = subparsers.add_parser(
+        "pipeline",
+        help="End-to-end repair pipeline for existing PCBs",
+        description=(
+            "Orchestrate the full repair pipeline on an existing PCB: "
+            "fix-vias, route (if needed), fix-drc, optimize-traces, zone fill, audit. "
+            "Auto-detects board state to skip unnecessary steps."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "pipeline_input",
+        metavar="INPUT",
+        help="Path to .kicad_pcb or .kicad_pro file",
+    )
+    pipeline_parser.add_argument(
+        "--step",
+        "-s",
+        dest="pipeline_step",
+        choices=["route", "fix-vias", "fix-drc", "optimize", "zones", "audit"],
+        default=None,
+        help="Run only this step (default: run all steps in order)",
+    )
+    pipeline_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="pipeline_mfr",
+        choices=["jlcpcb", "pcbway", "oshpark", "seeed"],
+        default="jlcpcb",
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    pipeline_parser.add_argument(
+        "--layers",
+        "-l",
+        dest="pipeline_layers",
+        type=int,
+        default=2,
+        help="Number of PCB layers (default: 2)",
+    )
+    pipeline_parser.add_argument(
+        "--dry-run",
+        dest="pipeline_dry_run",
+        action="store_true",
+        help="Preview pipeline steps without modifying files",
+    )
+    pipeline_parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="pipeline_verbose",
+        action="store_true",
+        help="Show detailed output from each step",
+    )
+    pipeline_parser.add_argument(
+        "-f",
+        "--force",
+        dest="pipeline_force",
+        action="store_true",
+        help="Force all steps (e.g., re-route even if already routed)",
     )
 
 
