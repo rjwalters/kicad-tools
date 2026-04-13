@@ -2088,6 +2088,37 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
+    # Auto-classify pour nets and extend skip_nets
+    try:
+        import re as _re
+
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        pcb_text_for_nets = pcb_path.read_text()
+        net_names: dict[int, str] = {}
+        for m in _re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text_for_nets):
+            net_num, name = int(m.group(1)), m.group(2)
+            if net_num > 0:
+                net_names[net_num] = name
+        del pcb_text_for_nets  # free memory
+
+        if net_names:
+            net_class_map = classify_and_apply_rules(net_names)
+            auto_skip = [
+                name
+                for name, routing in net_class_map.items()
+                if routing.is_pour_net and name not in skip_nets
+            ]
+            if auto_skip:
+                skip_nets.extend(auto_skip)
+                if not args.quiet:
+                    print(
+                        f"Auto-skip: {', '.join(sorted(auto_skip))} "
+                        f"(pour nets — use zone fill)"
+                    )
+    except Exception:
+        pass  # Fall back to user-supplied skip_nets only
+
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating
     from kicad_tools.router import (

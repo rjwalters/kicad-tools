@@ -520,12 +520,23 @@ def route_net_auto(
         "multi_resolution": RoutingStrategy.MULTI_RESOLUTION,
     }
 
+    # Build net class map for pour-net detection
+    net_class_map = None
+    try:
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        net_names = {num: net.name for num, net in pcb.nets.items()}
+        net_class_map = classify_and_apply_rules(net_names)
+    except Exception:
+        logger.debug("Net classification unavailable, skipping pour-net detection")
+
     # Create orchestrator
     orchestrator = RoutingOrchestrator(
         pcb=pcb,  # type: ignore[arg-type]
         rules=design_rules,
         enable_repair=enable_repair,
         enable_via_conflict_resolution=enable_via_resolution,
+        net_class_map=net_class_map,
     )
 
     # If a strategy override is requested, patch the strategy selection
