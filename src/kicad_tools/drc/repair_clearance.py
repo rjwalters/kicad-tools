@@ -79,9 +79,7 @@ class RepairResult:
             f"Clearance Repair: {self.repaired}/{self.total_violations} violations fixed",
         ]
         if self.skipped_exceeds_max > 0:
-            lines.append(
-                f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}"
-            )
+            lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
             lines.append(f"  Skipped (infeasible): {self.skipped_infeasible}")
         if self.skipped_no_location > 0:
@@ -148,11 +146,20 @@ class ClearanceRepairer:
         result = RepairResult()
 
         clearances = report.by_type(ViolationType.CLEARANCE)
-        result.total_violations = len(clearances)
+        segment_via_clearances = report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+        all_clearances = clearances + segment_via_clearances
+        result.total_violations = len(all_clearances)
 
         for violation in clearances:
             self._repair_single_violation(
                 violation, result, max_displacement, margin, prefer, dry_run
+            )
+
+        # For segment-to-via violations, always prefer moving the trace
+        # (never the via, since it was just sized by fix-vias)
+        for violation in segment_via_clearances:
+            self._repair_single_violation(
+                violation, result, max_displacement, margin, "move-trace", dry_run
             )
 
         return result
@@ -179,8 +186,16 @@ class ClearanceRepairer:
                 result.skipped_no_delta += 1
                 return
             self._repair_from_single_location(
-                loc.x_mm, loc.y_mm, loc.layer, delta, margin,
-                violation, result, max_displacement, prefer, dry_run,
+                loc.x_mm,
+                loc.y_mm,
+                loc.layer,
+                delta,
+                margin,
+                violation,
+                result,
+                max_displacement,
+                prefer,
+                dry_run,
             )
             return
 
@@ -222,9 +237,7 @@ class ClearanceRepairer:
             other_x, other_y = loc1.x_mm, loc1.y_mm
 
         # Calculate displacement vector (away from the other object)
-        nudge = self._compute_nudge(
-            obj_x, obj_y, other_x, other_y, required_displacement
-        )
+        nudge = self._compute_nudge(obj_x, obj_y, other_x, other_y, required_displacement)
         if nudge is None:
             result.skipped_infeasible += 1
             return
@@ -311,9 +324,7 @@ class ClearanceRepairer:
         other = all_objects[1] if all_objects[0][0] is obj_node else all_objects[0]
         _, _, other_x, other_y, _, _ = other
 
-        nudge = self._compute_nudge(
-            obj_x, obj_y, other_x, other_y, required_displacement
-        )
+        nudge = self._compute_nudge(obj_x, obj_y, other_x, other_y, required_displacement)
         if nudge is None:
             result.skipped_infeasible += 1
             return
@@ -355,16 +366,20 @@ class ClearanceRepairer:
     ) -> tuple[SExp, str, float, float, str, str] | None:
         """Find the nearest PCB object at a location.
 
+        Uses a 1.5mm search radius to account for enlarged vias where the
+        violation location (copper edge) can be offset from the via center
+        by up to the via radius (~0.4mm for 0.8mm diameter vias).
+
         Returns: (node, type, x, y, layer, net_name) or None
         """
-        search_radius = 0.5  # mm
+        search_radius = 1.5  # mm - large enough for enlarged vias
 
         # Check segments
         segments = self._find_segments_near(x, y, search_radius, layer, nets)
         if segments:
             return segments[0]
 
-        # Check vias
+        # Check vias (use relaxed net matching for segment-via violations)
         vias = self._find_vias_near(x, y, search_radius, nets)
         if vias:
             return vias[0]
@@ -455,8 +470,12 @@ class ClearanceRepairer:
             net_num = int(net_node.get_first_atom()) if net_node else 0
             net_name = self.nets.get(net_num, "")
 
+            # Relax net filter: allow vias with no net (net 0 / empty name)
+            # or vias whose net is "<no net>", since these commonly appear
+            # in segment-to-via clearance violations after fix-vias.
             if nets and net_name not in nets:
-                continue
+                if net_name and net_name != "<no net>":
+                    continue
 
             # Vias span layers, use "F.Cu - B.Cu" as layer description
             layers_node = via_node.find("layers")

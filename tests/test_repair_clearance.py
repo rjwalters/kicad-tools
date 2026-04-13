@@ -198,6 +198,174 @@ class TestClearanceRepairer:
         assert empty.success_rate == 1.0
 
 
+# PCB with a segment too close to an enlarged via
+PCB_WITH_SEGMENT_VIA = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-sv-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-sv-1"))
+)
+"""
+
+# PCB with a segment near a <no net> via (net 0)
+PCB_WITH_NO_NET_VIA = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 100 100) (end 110 100.1) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nn-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 0) (uuid "via-nn-1"))
+)
+"""
+
+
+class TestSegmentViaClearanceRepair:
+    """Tests for segment-to-via clearance repair."""
+
+    def test_repair_segment_via_moves_segment(self, tmp_path: Path):
+        """Segment-to-via repair should move the segment, not the via."""
+        pcb_file = tmp_path / "seg_via.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SEGMENT_VIA)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                    ],
+                    nets=["+3.3V", "GND"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            prefer="move-via",  # Even with move-via preference, segment-via should move trace
+            dry_run=True,
+        )
+
+        assert result.total_violations == 1
+        assert result.repaired == 1
+        # Must have moved a segment, not the via
+        assert result.nudges[0].object_type == "segment"
+
+    def test_repair_segment_via_dry_run_no_modify(self, tmp_path: Path):
+        """Dry run of segment-to-via repair should not modify PCB."""
+        pcb_file = tmp_path / "seg_via.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SEGMENT_VIA)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                    ],
+                    nets=["+3.3V", "GND"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(report, max_displacement=0.5, dry_run=True)
+        assert result.repaired == 1
+        assert not repairer.modified
+
+    def test_no_net_via_found(self, tmp_path: Path):
+        """Via with net 0 (no net) should still be found by _find_vias_near."""
+        pcb_file = tmp_path / "no_net.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_NO_NET_VIA)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                    ],
+                    nets=["GND"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(report, max_displacement=0.5, dry_run=True)
+        # Via should be found despite having no net, and segment should be moved
+        assert result.repaired == 1
+        assert result.nudges[0].object_type == "segment"
+
+    def test_violation_type_from_string(self):
+        """ViolationType.from_string should correctly parse clearance_segment_via."""
+        assert (
+            ViolationType.from_string("clearance_segment_via")
+            == ViolationType.CLEARANCE_SEGMENT_VIA
+        )
+
+    def test_clearance_segment_via_is_clearance(self):
+        """CLEARANCE_SEGMENT_VIA violations should count as clearance violations."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+        )
+        assert v.is_clearance
+
+
 class TestRepairFromViolation:
     """Tests for handling different violation types."""
 
@@ -282,11 +450,14 @@ class TestCLI:
         """Dry run should show changes but not modify file."""
         original = pcb_file.read_text()
 
-        result = main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "--dry-run",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "--dry-run",
+            ]
+        )
 
         assert result == 0 or result == 1  # May be 1 if not all violations fixed
 
@@ -296,18 +467,20 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "clearance" in captured.out.lower() or "CLEARANCE" in captured.out
 
-    def test_output_to_different_file(
-        self, pcb_file: Path, drc_report_file: Path, tmp_path: Path
-    ):
+    def test_output_to_different_file(self, pcb_file: Path, drc_report_file: Path, tmp_path: Path):
         """Should write to output file when specified."""
         output_file = tmp_path / "fixed.kicad_pcb"
         original = pcb_file.read_text()
 
-        main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "-o", str(output_file),
-        ])
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "-o",
+                str(output_file),
+            ]
+        )
 
         # Original should be unchanged
         assert pcb_file.read_text() == original
@@ -317,12 +490,16 @@ class TestCLI:
 
     def test_json_output(self, pcb_file: Path, drc_report_file: Path, capsys):
         """JSON output should be valid."""
-        main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "--dry-run",
-            "--format", "json",
-        ])
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -334,24 +511,31 @@ class TestCLI:
 
     def test_summary_output(self, pcb_file: Path, drc_report_file: Path, capsys):
         """Summary output should show counts."""
-        main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "--dry-run",
-            "--format", "summary",
-        ])
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "--dry-run",
+                "--format",
+                "summary",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert "clearance" in captured.out.lower()
 
     def test_quiet_mode(self, pcb_file: Path, drc_report_file: Path, capsys):
         """Quiet mode should suppress output."""
-        main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "--dry-run",
-            "--quiet",
-        ])
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
 
         captured = capsys.readouterr()
         assert captured.out == ""
@@ -361,17 +545,20 @@ class TestCLI:
         result = main([str(tmp_path / "nonexistent.kicad_pcb")])
         assert result == 1
 
-    def test_max_displacement_option(
-        self, pcb_file: Path, drc_report_file: Path, capsys
-    ):
+    def test_max_displacement_option(self, pcb_file: Path, drc_report_file: Path, capsys):
         """Should respect max-displacement option."""
-        main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "--max-displacement", "0.001",
-            "--dry-run",
-            "--format", "json",
-        ])
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "--max-displacement",
+                "0.001",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
@@ -379,12 +566,16 @@ class TestCLI:
 
     def test_prefer_option(self, pcb_file: Path, drc_report_file: Path, capsys):
         """Should accept prefer option."""
-        result = main([
-            str(pcb_file),
-            "--drc-report", str(drc_report_file),
-            "--prefer", "move-via",
-            "--dry-run",
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(drc_report_file),
+                "--prefer",
+                "move-via",
+                "--dry-run",
+            ]
+        )
 
         # Should not crash
         assert result in (0, 1)
@@ -419,10 +610,13 @@ class TestCLI:
         report_file = tmp_path / "clean-drc.rpt"
         report_file.write_text(report_content)
 
-        result = main([
-            str(pcb_file),
-            "--drc-report", str(report_file),
-        ])
+        result = main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+            ]
+        )
 
         assert result == 0
 
