@@ -115,6 +115,10 @@ def run_route_auto_command(args) -> int:
         return 1
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        if getattr(args, "verbose", False):
+            import traceback
+
+            traceback.print_exc()
         return 1
 
     # Print result
