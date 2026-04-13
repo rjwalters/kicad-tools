@@ -41,6 +41,19 @@ class BOMItem:
         """Check if this is a virtual component (not placed on PCB)."""
         return not self.in_bom or self.is_power_symbol
 
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "reference": self.reference,
+            "value": self.value,
+            "footprint": self.footprint,
+            "description": self.description,
+            "manufacturer": self.manufacturer,
+            "mpn": self.mpn,
+            "lcsc": self.lcsc,
+            "dnp": self.dnp,
+        }
+
 
 @dataclass
 class BOMGroup:
@@ -89,6 +102,19 @@ class BOMGroup:
             if item.description:
                 return item.description
         return ""
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "value": self.value,
+            "footprint": self.footprint,
+            "quantity": self.quantity,
+            "references": self.references,
+            "description": self.description,
+            "mpn": self.mpn,
+            "lcsc": self.lcsc,
+            "items": [item.to_dict() for item in self.items],
+        }
 
 
 @dataclass
