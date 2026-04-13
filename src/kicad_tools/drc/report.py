@@ -325,16 +325,25 @@ def _extract_values(data: dict, message: str) -> None:
     """Extract numeric values from violation message."""
     # Pattern: "clearance X.XXXX mm; actual Y.YYYY mm"
     clearance_match = re.search(
-        r"clearance\s+([\d.]+)\s*mm.*?actual\s+([\d.]+)\s*mm", message, re.IGNORECASE
+        r"clearance\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
     )
     if clearance_match:
         data["required_value_mm"] = float(clearance_match.group(1))
         data["actual_value_mm"] = float(clearance_match.group(2))
         return
 
+    # Pattern: "minimum X.XXXX mm; actual Y.YYYY mm" (drill clearance format)
+    minimum_match = re.search(
+        r"minimum\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+    )
+    if minimum_match:
+        data["required_value_mm"] = float(minimum_match.group(1))
+        data["actual_value_mm"] = float(minimum_match.group(2))
+        return
+
     # Pattern: "width X.XXXX mm; actual Y.YYYY mm"
     width_match = re.search(
-        r"width\s+([\d.]+)\s*mm.*?actual\s+([\d.]+)\s*mm", message, re.IGNORECASE
+        r"width\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
     )
     if width_match:
         data["required_value_mm"] = float(width_match.group(1))

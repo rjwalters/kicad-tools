@@ -10,6 +10,7 @@ __all__ = [
     "run_fix_footprints_command",
     "run_fix_vias_command",
     "run_repair_clearance_command",
+    "run_fix_drc_command",
     "run_constraints_command",
     "run_audit_command",
 ]
@@ -110,6 +111,31 @@ def run_repair_clearance_command(args) -> int:
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return repair_clearance_main(sub_argv)
+
+
+def run_fix_drc_command(args) -> int:
+    """Handle fix-drc command."""
+    from ..fix_drc_cmd import main as fix_drc_main
+
+    sub_argv = [args.pcb]
+    if getattr(args, "drc_report", None):
+        sub_argv.extend(["--drc-report", args.drc_report])
+    if args.max_displacement != 0.25:
+        sub_argv.extend(["--max-displacement", str(args.max_displacement)])
+    if args.margin != 0.01:
+        sub_argv.extend(["--margin", str(args.margin)])
+    if getattr(args, "only", None):
+        sub_argv.extend(["--only", args.only])
+    if getattr(args, "output", None):
+        sub_argv.extend(["-o", args.output])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_drc_main(sub_argv)
 
 
 def run_check_command(args) -> int:

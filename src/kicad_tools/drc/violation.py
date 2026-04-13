@@ -34,6 +34,7 @@ class ViolationType(Enum):
 
     # Hole issues
     DRILL_HOLE_TOO_SMALL = "drill_hole_too_small"
+    DRILL_CLEARANCE = "drill_clearance"
     NPTH_HOLE_TOO_SMALL = "npth_hole_too_small"
     HOLE_NEAR_HOLE = "hole_near_hole"
 
@@ -65,6 +66,9 @@ class ViolationType(Enum):
                 return vtype
 
         # Try partial matches for common patterns
+        # Check drill_clearance before general clearance (both contain "clearance")
+        if "drill" in s_lower and "clearance" in s_lower:
+            return cls.DRILL_CLEARANCE
         if "clearance" in s_lower:
             if "edge" in s_lower:
                 return cls.COPPER_EDGE_CLEARANCE
