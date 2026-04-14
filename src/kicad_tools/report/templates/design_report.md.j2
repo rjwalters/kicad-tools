@@ -1,17 +1,12 @@
-# {{ project_name }} - Design Report
+<div class="cover-block">
 
-| Field | Value |
-|-------|-------|
-| **Project** | {{ project_name }} |
-| **Revision** | {{ revision }} |
-| **Date** | {{ date }} |
-| **Manufacturer** | {{ manufacturer }} |
-| **Tool Version** | {{ tool_version }} |
-{% if git_hash %}
-| **Git Hash** | {{ git_hash }} |
-{% endif %}
+# {{ project_name }}
 
----
+<p class="cover-meta">Design Report</p>
+<p class="cover-meta">Rev {{ revision }} | <span class="cover-meta-date">{{ date }}</span> | {{ manufacturer }}</p>
+<p class="cover-meta">kicad-tools {{ tool_version }}{% if git_hash %} ({{ git_hash }}){% endif %}</p>
+
+</div>
 
 {% if board_stats %}
 ## Board Summary
@@ -66,15 +61,22 @@
 {% if pcb_figures %}
 ## PCB Layout
 
-{% if pcb_figures.front is defined and pcb_figures.front %}
-### Front
+{% if pcb_figures.front is defined and pcb_figures.front and pcb_figures.back is defined and pcb_figures.back %}
+<div class="pcb-grid">
+<figure>
+<img src="{{ pcb_figures.front }}" alt="PCB Front">
+<figcaption>Front</figcaption>
+</figure>
+<figure>
+<img src="{{ pcb_figures.back }}" alt="PCB Back">
+<figcaption>Back</figcaption>
+</figure>
+</div>
 
+{% elif pcb_figures.front is defined and pcb_figures.front %}
 ![PCB Front]({{ pcb_figures.front }})
 
-{% endif %}
-{% if pcb_figures.back is defined and pcb_figures.back %}
-### Back
-
+{% elif pcb_figures.back is defined and pcb_figures.back %}
 ![PCB Back]({{ pcb_figures.back }})
 
 {% endif %}
@@ -97,7 +99,7 @@
 | Value | Footprint | Qty | References | MPN | LCSC |
 |-------|-----------|-----|------------|-----|------|
 {% for item in bom_groups %}
-| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) }} | {{ item.mpn | default("", true) }} | {{ item.lcsc | default("", true) }} |
+| {{ item.value | default("", true) }} | {{ item.footprint | default("", true) }} | {{ item.qty | default("", true) }} | {{ item.refs | default("", true) | truncate_refs(10) }} | {{ item.mpn | default("", true) }} | {{ item.lcsc | default("", true) }} |
 {% endfor %}
 
 {% endif %}

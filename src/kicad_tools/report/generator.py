@@ -19,6 +19,34 @@ __all__ = ["ReportGenerator"]
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def _truncate_refs(refs: str, max_count: int = 10) -> str:
+    """Truncate a comma-separated reference list to *max_count* items.
+
+    When the list is longer than *max_count*, the output is truncated and
+    a ``... (+N more)`` suffix is appended.
+
+    Parameters
+    ----------
+    refs:
+        Comma-separated reference designators, e.g. ``"C1, C2, C3, ..."``.
+    max_count:
+        Maximum number of items to show before truncating.
+
+    Returns
+    -------
+    str
+        The original string if it has *max_count* or fewer items, otherwise
+        a truncated version with a count of hidden items.
+    """
+    if not refs:
+        return refs
+    items = [r.strip() for r in refs.split(",")]
+    if len(items) <= max_count:
+        return refs
+    shown = ", ".join(items[:max_count])
+    return f"{shown} ... (+{len(items) - max_count} more)"
+
+
 class ReportGenerator:
     """Render a design report from a :class:`ReportData` instance.
 
@@ -43,6 +71,7 @@ class ReportGenerator:
             trim_blocks=True,
             lstrip_blocks=True,
         )
+        self._env.filters["truncate_refs"] = _truncate_refs
         self._template_name = template_name
 
     # ------------------------------------------------------------------

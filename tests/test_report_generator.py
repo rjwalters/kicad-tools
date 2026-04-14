@@ -119,6 +119,71 @@ def _full_data(**overrides) -> ReportData:
 
 
 # ---------------------------------------------------------------------------
+# TestTruncateRefs
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateRefs:
+    """Unit tests for the _truncate_refs filter function."""
+
+    def test_short_list_unchanged(self) -> None:
+        """A list with fewer than max_count items is returned unchanged."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        result = _truncate_refs("C1, C2, C3", 10)
+        assert result == "C1, C2, C3"
+
+    def test_exactly_max_count_unchanged(self) -> None:
+        """A list with exactly max_count items is returned unchanged."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = ", ".join([f"R{i}" for i in range(1, 11)])
+        result = _truncate_refs(refs, 10)
+        assert result == refs
+        assert "more" not in result
+
+    def test_over_max_count_truncated(self) -> None:
+        """A list exceeding max_count is truncated with a count suffix."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = ", ".join([f"C{i}" for i in range(1, 61)])
+        result = _truncate_refs(refs, 10)
+        assert "C1, C2" in result
+        assert "... (+50 more)" in result
+        assert "C11" not in result
+
+    def test_empty_string(self) -> None:
+        """Empty string returns empty string without crashing."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        result = _truncate_refs("", 10)
+        assert result == ""
+
+    def test_single_item(self) -> None:
+        """A single item is returned unchanged."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        result = _truncate_refs("U1", 10)
+        assert result == "U1"
+
+    def test_custom_max_count(self) -> None:
+        """Custom max_count is respected."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = "A, B, C, D, E"
+        result = _truncate_refs(refs, 3)
+        assert result == "A, B, C ... (+2 more)"
+
+    def test_default_max_count(self) -> None:
+        """Default max_count of 10 is used when not specified."""
+        from kicad_tools.report.generator import _truncate_refs
+
+        refs = ", ".join([f"D{i}" for i in range(1, 15)])
+        result = _truncate_refs(refs)
+        assert "... (+4 more)" in result
+
+
+# ---------------------------------------------------------------------------
 # TestReportData
 # ---------------------------------------------------------------------------
 
@@ -175,8 +240,9 @@ class TestReportGenerator:
         assert report_path.exists()
         content = report_path.read_text(encoding="utf-8")
 
-        # All 11 section headings must appear
-        assert "# TestBoard - Design Report" in content
+        # Cover block and section headings must appear
+        assert "# TestBoard" in content
+        assert "cover-block" in content
         assert "## Board Summary" in content
         assert "## ERC Status" in content
         assert "## Schematic Overview" in content
@@ -212,7 +278,8 @@ class TestReportGenerator:
         content = report_path.read_text(encoding="utf-8")
 
         # Header is always present
-        assert "# Sparse - Design Report" in content
+        assert "# Sparse" in content
+        assert "cover-block" in content
 
         # Optional sections must be absent
         assert "## Board Summary" not in content
@@ -297,6 +364,117 @@ class TestReportGenerator:
 
         content = report_path.read_text(encoding="utf-8")
         assert "# TestBoard custom report" in content
+
+    def test_cover_block_in_rendered_output(self, tmp_path: Path) -> None:
+        """Rendered output contains a cover block div with project name."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert '<div class="cover-block">' in content
+        assert "# TestBoard" in content
+        assert "Design Report" in content
+        assert "Rev A" in content
+        assert "jlcpcb" in content
+
+    def test_pcb_grid_in_rendered_output(self, tmp_path: Path) -> None:
+        """When both front and back PCB figures exist, they use a pcb-grid div."""
+        data = _full_data(
+            pcb_figures={
+                "front": "figures/pcb_front.png",
+                "back": "figures/pcb_back.png",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert '<div class="pcb-grid">' in content
+        assert "<figcaption>Front</figcaption>" in content
+        assert "<figcaption>Back</figcaption>" in content
+
+    def test_pcb_grid_not_used_with_front_only(self, tmp_path: Path) -> None:
+        """When only front PCB figure exists, no grid is used."""
+        data = _full_data(
+            pcb_figures={
+                "front": "figures/pcb_front.png",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "pcb-grid" not in content
+        assert "PCB Front" in content
+
+    def test_truncate_refs_many_items(self, tmp_path: Path) -> None:
+        """BOM refs with >10 items are truncated in rendered output."""
+        many_refs = ", ".join([f"C{i}" for i in range(1, 61)])
+        data = _full_data(
+            bom_groups=[
+                {
+                    "value": "100nF",
+                    "footprint": "0402",
+                    "qty": 60,
+                    "refs": many_refs,
+                    "mpn": "CL05B104KO5NNNC",
+                    "lcsc": "C1525",
+                },
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "... (+50 more)" in content
+        assert "C1, C2" in content
+        # The full 60-ref list should NOT appear
+        assert "C60" not in content
+
+    def test_truncate_refs_exact_threshold(self, tmp_path: Path) -> None:
+        """BOM refs with exactly 10 items are NOT truncated."""
+        exact_refs = ", ".join([f"R{i}" for i in range(1, 11)])
+        data = _full_data(
+            bom_groups=[
+                {
+                    "value": "10k",
+                    "footprint": "0402",
+                    "qty": 10,
+                    "refs": exact_refs,
+                    "mpn": "RC0402FR-0710KL",
+                    "lcsc": "C25744",
+                },
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "R10" in content
+        assert "more)" not in content
+
+    def test_truncate_refs_empty_string(self, tmp_path: Path) -> None:
+        """BOM refs with empty string do not crash."""
+        data = _full_data(
+            bom_groups=[
+                {
+                    "value": "DNP",
+                    "footprint": "0402",
+                    "qty": 1,
+                    "refs": "",
+                    "mpn": "",
+                    "lcsc": "",
+                },
+            ]
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Should render without crash
+        assert "## Bill of Materials" in content
+        assert "DNP" in content
 
     def test_figure_paths_not_validated(self, tmp_path: Path) -> None:
         """Figure paths are strings in the output, not validated on disk."""
@@ -884,7 +1062,8 @@ class TestReportCLI:
         assert report_path.exists()
 
         content = report_path.read_text(encoding="utf-8")
-        assert "# test - Design Report" in content
+        assert "# test" in content
+        assert "cover-block" in content
         assert "testmfr" in content
 
     def test_generate_with_data_dir(self, tmp_path: Path) -> None:
@@ -1306,7 +1485,8 @@ class TestReportCLI:
 
         content = report_path.read_text(encoding="utf-8")
         # Skeleton: header present, optional data sections absent
-        assert "# board - Design Report" in content
+        assert "# board" in content
+        assert "cover-block" in content
         assert "## Board Summary" not in content
 
     def test_version_dir_parameter_in_generator(self, tmp_path: Path) -> None:
@@ -1321,7 +1501,8 @@ class TestReportCLI:
         assert report_path.exists()
 
         content = report_path.read_text(encoding="utf-8")
-        assert "# TestBoard - Design Report" in content
+        assert "# TestBoard" in content
+        assert "cover-block" in content
 
     def test_version_dir_none_auto_increments(self, tmp_path: Path) -> None:
         """When version_dir is None, generate() auto-increments as before."""

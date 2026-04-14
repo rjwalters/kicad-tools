@@ -133,7 +133,7 @@ table {
 thead th {
     background: var(--color-bg-light);
     border: 1px solid var(--color-border);
-    padding: 8px 12px;
+    padding: 4px 8px;
     text-align: left;
     font-weight: 600;
     white-space: nowrap;
@@ -141,7 +141,7 @@ thead th {
 
 tbody td {
     border: 1px solid var(--color-border);
-    padding: 6px 12px;
+    padding: 3px 8px;
     vertical-align: top;
     word-wrap: break-word;
 }
@@ -272,8 +272,106 @@ hr {
 }
 
 /* ============================================================
+   Cover block - styled title area at top of report
+   ============================================================ */
+
+.cover-block {
+    text-align: center;
+    padding: 3rem 2rem;
+    border-bottom: 3px solid #2563EB;
+    margin-bottom: 2rem;
+}
+
+.cover-block h1 {
+    font-size: 2.4rem;
+    color: #2563EB;
+    border: none;
+    margin-bottom: 0.3rem;
+    margin-top: 0;
+}
+
+.cover-block .cover-meta {
+    color: #555;
+    font-size: 1rem;
+    margin-top: 0.5rem;
+}
+
+/* ============================================================
+   PCB grid - side-by-side front/back layout
+   ============================================================ */
+
+.pcb-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+
+.pcb-grid figure {
+    margin: 0;
+    text-align: center;
+}
+
+.pcb-grid figure img {
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto;
+}
+
+.pcb-grid figcaption {
+    font-size: 0.8em;
+    color: #666;
+    margin-top: 0.3em;
+    font-style: italic;
+}
+
+/* ============================================================
+   BOM references - overflow control for long ref lists
+   ============================================================ */
+
+.bom-refs {
+    max-height: 4em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.85em;
+}
+
+/* ============================================================
    Print / PDF layout
    ============================================================ */
+
+/* Page setup - works with WeasyPrint for PDF output */
+@page {
+    size: letter;
+    margin: 1in 0.85in 0.85in 0.85in;
+
+    @bottom-center {
+        content: counter(page) " / " counter(pages);
+        font-size: 9pt;
+        color: #666;
+    }
+
+    @top-left {
+        content: string(project-name);
+        font-size: 9pt;
+        color: #2563EB;
+    }
+
+    @top-right {
+        content: string(report-date);
+        font-size: 9pt;
+        color: #666;
+    }
+}
+
+/* Named strings for page headers (set via elements in body) */
+h1 {
+    string-set: project-name content();
+}
+
+.cover-meta-date {
+    string-set: report-date content();
+}
 
 @media print {
     body {
@@ -282,13 +380,14 @@ hr {
         font-size: 11pt;
     }
 
-    /* Page breaks before major sections (except the first) */
+    /* No forced page breaks on every h2 - let content flow naturally */
     h2 {
-        page-break-before: always;
+        page-break-before: auto;
     }
 
-    h2:first-of-type {
-        page-break-before: avoid;
+    /* Only break before explicitly marked sections */
+    .section-break {
+        page-break-before: always;
     }
 
     /* Avoid breaking inside these elements */
@@ -326,5 +425,11 @@ hr {
     /* Don't show URL for internal links */
     a[href^="#"]:after {
         content: "";
+    }
+
+    /* PCB grid maintained in print */
+    .pcb-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
     }
 }
