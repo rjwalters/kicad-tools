@@ -3,7 +3,7 @@ Pipeline command for end-to-end repair workflow on existing PCBs.
 
 Orchestrates the full repair pipeline:
 0. ERC check (schematic validation)
-1. Load board state (detect routing status)
+1. Fix ERC violations (auto-remediation when errors detected)
 2. Fix silkscreen (manufacturer line-width compliance)
 3. Fix vias (manufacturer compliance)
 4. [Optional] Route (if board is unrouted)
@@ -19,6 +19,7 @@ Usage:
     kct pipeline board.kicad_pcb --step fix-vias
     kct pipeline board.kicad_pcb --step fix-silkscreen
     kct pipeline board.kicad_pcb --step erc
+    kct pipeline board.kicad_pcb --step fix-erc
     kct pipeline project.kicad_pro --mfr jlcpcb --layers 4
 """
 
@@ -45,6 +46,7 @@ class PipelineStep(str, Enum):
     """Pipeline step identifiers."""
 
     ERC = "erc"
+    FIX_ERC = "fix-erc"
     FIX_SILKSCREEN = "fix-silkscreen"
     FIX_ERC = "fix-erc"
     ROUTE = "route"
@@ -59,6 +61,7 @@ class PipelineStep(str, Enum):
 # Ordered list of all pipeline steps
 ALL_STEPS = [
     PipelineStep.ERC,
+    PipelineStep.FIX_ERC,
     PipelineStep.FIX_SILKSCREEN,
     PipelineStep.FIX_ERC,
     PipelineStep.FIX_VIAS,
@@ -96,6 +99,7 @@ class PipelineContext:
     force: bool = False
     is_project: bool = False
     commit: bool = False
+    erc_error_count: int = 0
 
 
 def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
@@ -244,6 +248,9 @@ def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
     error_count = report.error_count
     warning_count = report.warning_count
 
+    # Store error count in context for downstream steps (e.g., FIX_ERC)
+    ctx.erc_error_count = error_count
+
     # Print per-violation details (unless --quiet)
     if not ctx.quiet and (error_count > 0 or warning_count > 0):
         from ..feedback.suggestions import generate_erc_suggestions
@@ -290,6 +297,60 @@ def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
         step=PipelineStep.ERC,
         success=False,
         message=f"erc: {error_count} error(s) found (use --force to continue)",
+    )
+
+
+def _run_step_fix_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run fix-erc step to auto-remediate ERC violations.
+
+    Invokes ``kct fix-erc <schematic>`` as a subprocess when the preceding
+    ERC step detected errors.  Skips gracefully when:
+    - No schematic file is available.
+    - The ERC step found zero errors (and ``--force`` is not set).
+    """
+    # Skip if no schematic file available
+    if ctx.schematic_file is None:
+        return PipelineResult(
+            step=PipelineStep.FIX_ERC,
+            success=True,
+            message="fix-erc: no .kicad_sch found — skipped",
+            skipped=True,
+        )
+
+    # Skip if ERC found no errors (unless --force)
+    if ctx.erc_error_count == 0 and not ctx.force:
+        return PipelineResult(
+            step=PipelineStep.FIX_ERC,
+            success=True,
+            message="fix-erc: no ERC errors to fix — skipped",
+            skipped=True,
+        )
+
+    # Dry-run mode
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.FIX_ERC,
+            success=True,
+            message=f"[dry-run] Would run: kct fix-erc {ctx.schematic_file.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running fix-erc on {ctx.schematic_file.name}...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "fix-erc",
+        str(ctx.schematic_file),
+    ]
+
+    success, message = _run_subprocess_step(cmd, ctx.schematic_file.parent, ctx.verbose)
+
+    return PipelineResult(
+        step=PipelineStep.FIX_ERC,
+        success=success,
+        message=f"fix-erc: {message}",
     )
 
 
@@ -877,6 +938,7 @@ def _git_commit_result(
 # Map of step name to runner function
 STEP_RUNNERS = {
     PipelineStep.ERC: _run_step_erc,
+    PipelineStep.FIX_ERC: _run_step_fix_erc,
     PipelineStep.FIX_SILKSCREEN: _run_step_fix_silkscreen,
     PipelineStep.FIX_ERC: _run_step_fix_erc,
     PipelineStep.ROUTE: _run_step_route,
@@ -925,7 +987,7 @@ def run_pipeline(
         console=console,
         disable=ctx.quiet,
     ) as progress:
-        for step in steps:
+        for i, step in enumerate(steps):
             runner = STEP_RUNNERS[step]
             task = progress.add_task(f"[cyan]{step.value}[/cyan]...", total=None)
 
@@ -944,9 +1006,13 @@ def run_pipeline(
                     status = "[red]FAIL[/red]"
                 console.print(f"  [{status}] {result.message}")
 
-            # Stop on failure (unless it's the audit or report step -- always run informational steps)
+            # Stop on failure unless:
+            # - it's the audit or report step (always run informational steps), or
+            # - ERC just failed and FIX_ERC is the next step (auto-remediation path)
             if not result.success and step not in (PipelineStep.AUDIT, PipelineStep.REPORT):
-                break
+                next_step = steps[i + 1] if i + 1 < len(steps) else None
+                if not (step == PipelineStep.ERC and next_step == PipelineStep.FIX_ERC):
+                    break
 
     # Print summary
     if not ctx.quiet:
