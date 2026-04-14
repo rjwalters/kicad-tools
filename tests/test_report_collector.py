@@ -330,7 +330,7 @@ class TestCollectNetStatus:
     """Tests for collect_net_status."""
 
     def test_returns_expected_keys(self):
-        """Net status returns total_nets, complete_count, completion_pct."""
+        """Net status returns total_nets, complete_count, completion_percent, etc."""
         pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("test_project.kicad_pcb fixture not found")
@@ -346,9 +346,12 @@ class TestCollectNetStatus:
         assert "incomplete_count" in status
         assert "unrouted_count" in status
         assert "total_unconnected_pads" in status
-        assert "completion_pct" in status
+        assert "completion_percent" in status
+        assert "incomplete_net_names" in status
+        # The old key must not appear
+        assert "completion_pct" not in status
 
-    def test_completion_pct_range(self):
+    def test_completion_percent_range(self):
         """Completion percentage is between 0 and 100."""
         pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
         if not pcb_path.exists():
@@ -360,7 +363,26 @@ class TestCollectNetStatus:
         collector = ReportDataCollector(pcb_path)
         status = collector.collect_net_status(pcb)
 
-        assert 0.0 <= status["completion_pct"] <= 100.0
+        assert 0.0 <= status["completion_percent"] <= 100.0
+
+    def test_incomplete_net_names_is_sorted_list(self):
+        """incomplete_net_names is a sorted list of strings."""
+        pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
+        if not pcb_path.exists():
+            pytest.skip("test_project.kicad_pcb fixture not found")
+
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_path)
+        collector = ReportDataCollector(pcb_path)
+        status = collector.collect_net_status(pcb)
+
+        names = status["incomplete_net_names"]
+        assert isinstance(names, list)
+        # All entries are strings
+        assert all(isinstance(n, str) for n in names)
+        # List is sorted
+        assert names == sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +634,134 @@ class TestEdgeCases:
         status = collector.collect_net_status(pcb)
 
         assert status["total_nets"] >= 0
-        assert status["completion_pct"] >= 0.0
+        assert status["completion_percent"] >= 0.0
+        assert status["incomplete_net_names"] == []
+
+
+# ---------------------------------------------------------------------------
+# Net status scenarios (mocked NetStatusAnalyzer)
+# ---------------------------------------------------------------------------
+
+
+def _make_net_status_result(complete_names, incomplete_names, unrouted_names):
+    """Build a mock NetStatusResult with the given net name lists."""
+    from kicad_tools.analysis.net_status import NetStatus, NetStatusResult
+
+    nets = []
+    for name in complete_names:
+        ns = NetStatus(net_number=len(nets) + 1, net_name=name, total_pads=2)
+        ns.connected_pads = [object(), object()]  # two connected pads
+        nets.append(ns)
+    for name in incomplete_names:
+        ns = NetStatus(net_number=len(nets) + 1, net_name=name, total_pads=3)
+        ns.connected_pads = [object()]  # one connected
+        ns.unconnected_pads = [object(), object()]  # two unconnected
+        nets.append(ns)
+    for name in unrouted_names:
+        ns = NetStatus(net_number=len(nets) + 1, net_name=name, total_pads=2)
+        # No connected pads, two unconnected
+        ns.unconnected_pads = [object(), object()]
+        nets.append(ns)
+
+    result = NetStatusResult(nets=nets, total_nets=len(nets))
+    return result
+
+
+class TestCollectNetStatusScenarios:
+    """Tests for collect_net_status with controlled scenarios."""
+
+    def test_incomplete_only_scenario(self, tmp_path):
+        """Board with incomplete nets and 0 unrouted shows correct counts."""
+        mock_result = _make_net_status_result(
+            complete_names=["GND", "VCC"],
+            incomplete_names=["SDA", "SCL", "MOSI"],
+            unrouted_names=[],
+        )
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["incomplete_count"] == 3
+        assert status["unrouted_count"] == 0
+        assert status["complete_count"] == 2
+        assert status["total_nets"] == 5
+        assert status["completion_percent"] == 40.0  # 2/5 = 40%
+        assert status["incomplete_net_names"] == ["MOSI", "SCL", "SDA"]
+
+    def test_mixed_incomplete_and_unrouted(self, tmp_path):
+        """Board with both incomplete and unrouted nets."""
+        mock_result = _make_net_status_result(
+            complete_names=["GND"],
+            incomplete_names=["SDA", "SCL"],
+            unrouted_names=["RESET"],
+        )
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["incomplete_count"] == 2
+        assert status["unrouted_count"] == 1
+        assert status["complete_count"] == 1
+        # incomplete_net_names includes both incomplete and unrouted
+        assert status["incomplete_net_names"] == ["RESET", "SCL", "SDA"]
+
+    def test_fully_routed_scenario(self, tmp_path):
+        """Board with all nets complete produces empty incomplete_net_names."""
+        mock_result = _make_net_status_result(
+            complete_names=["GND", "VCC", "+3V3"],
+            incomplete_names=[],
+            unrouted_names=[],
+        )
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert status["incomplete_count"] == 0
+        assert status["unrouted_count"] == 0
+        assert status["complete_count"] == 3
+        assert status["completion_percent"] == 100.0
+        assert status["incomplete_net_names"] == []
+
+    def test_incomplete_net_names_capped(self, tmp_path):
+        """incomplete_net_names is capped at _INCOMPLETE_NET_NAMES_CAP."""
+        # Create more incomplete nets than the cap
+        incomplete_names = [f"NET_{i:03d}" for i in range(70)]
+        mock_result = _make_net_status_result(
+            complete_names=[],
+            incomplete_names=incomplete_names,
+            unrouted_names=[],
+        )
+        pcb_path = tmp_path / "dummy.kicad_pcb"
+        pcb_path.touch()
+        collector = ReportDataCollector(pcb_path)
+
+        with patch(
+            "kicad_tools.analysis.net_status.NetStatusAnalyzer.analyze",
+            return_value=mock_result,
+        ):
+            status = collector.collect_net_status(None)
+
+        assert len(status["incomplete_net_names"]) == 50
+        # Should be the first 50 when sorted alphabetically
+        assert status["incomplete_net_names"] == sorted(incomplete_names)[:50]
 
 
 # ---------------------------------------------------------------------------

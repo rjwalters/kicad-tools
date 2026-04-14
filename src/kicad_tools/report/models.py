@@ -38,7 +38,9 @@ class ReportData:
     """Audit results: {verdict, action_items}."""
 
     net_status: dict | None = None
-    """Net completion: {completion_percent, unrouted_count, unrouted_nets}."""
+    """Net completion: {total_nets, complete_count, incomplete_count,
+    unrouted_count, total_unconnected_pads, completion_percent,
+    incomplete_net_names}."""
 
     cost: dict | None = None
     """Cost estimate: {per_unit, batch_qty, batch_total, currency}."""

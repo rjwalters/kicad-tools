@@ -317,6 +317,9 @@ class ReportDataCollector:
             "currency": ce.currency,
         }
 
+    # Maximum number of incomplete net names included in the snapshot.
+    _INCOMPLETE_NET_NAMES_CAP = 50
+
     def collect_net_status(self, pcb: Any) -> dict[str, Any]:
         """Routing completion summary.
 
@@ -324,17 +327,23 @@ class ReportDataCollector:
             pcb: Loaded PCB object.
 
         Returns:
-            Dictionary with net status data including totals and completion
-            percentage.
+            Dictionary with net status data including totals, completion
+            percentage, and names of incomplete/unrouted nets.
         """
         from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
         analyzer = NetStatusAnalyzer(pcb)
         result = analyzer.analyze()
 
-        completion_pct = 0.0
+        completion_percent = 0.0
         if result.total_nets > 0:
-            completion_pct = round(100.0 * result.complete_count / result.total_nets, 1)
+            completion_percent = round(100.0 * result.complete_count / result.total_nets, 1)
+
+        # Collect names of nets that are not fully routed (incomplete or unrouted),
+        # sorted alphabetically and capped to keep JSON snapshots manageable.
+        incomplete_net_names = sorted(n.net_name for n in result.nets if n.status != "complete")[
+            : self._INCOMPLETE_NET_NAMES_CAP
+        ]
 
         return {
             "total_nets": result.total_nets,
@@ -342,7 +351,8 @@ class ReportDataCollector:
             "incomplete_count": result.incomplete_count,
             "unrouted_count": result.unrouted_count,
             "total_unconnected_pads": result.total_unconnected_pads,
-            "completion_pct": completion_pct,
+            "completion_percent": completion_percent,
+            "incomplete_net_names": incomplete_net_names,
         }
 
     def collect_analysis(self, pcb: Any) -> dict[str, Any]:
