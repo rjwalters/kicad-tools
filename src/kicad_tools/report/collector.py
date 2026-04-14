@@ -1,6 +1,6 @@
 """Data snapshot collection for report generation.
 
-Gathers board summary, DRC, BOM, audit, net connectivity, and analysis
+Gathers board summary, DRC, BOM, audit, cost, net connectivity, and analysis
 results into JSON snapshots. Each sub-collector is fault-tolerant: failures
 produce a warning log and null result rather than propagating exceptions.
 
@@ -76,9 +76,9 @@ class ReportDataCollector:
     def collect_all(self, output_dir: Path) -> dict[str, Path]:
         """Run all collectors, write JSON files, return mapping of name to path.
 
-        Runs ManufacturingAudit once and reuses the result for both DRC and
-        audit snapshots. Each sub-collector is wrapped in try/except so a
-        failure in one does not prevent the others from running.
+        Runs ManufacturingAudit once and reuses the result for DRC, audit,
+        and cost snapshots. Each sub-collector is wrapped in try/except so
+        a failure in one does not prevent the others from running.
 
         Args:
             output_dir: Directory to write JSON snapshot files into.
@@ -109,7 +109,8 @@ class ReportDataCollector:
             audit_result = audit.run()
         except Exception:
             logger.warning(
-                "ManufacturingAudit failed; DRC and audit snapshots will be null", exc_info=True
+                "ManufacturingAudit failed; DRC, audit, and cost snapshots will be null",
+                exc_info=True,
             )
 
         # Board summary
@@ -158,6 +159,14 @@ class ReportDataCollector:
             output_dir,
             files,
             lambda: self.collect_audit(audit_result),
+        )
+
+        # Cost (from audit result, with field names normalised for template)
+        self._safe_collect(
+            "cost",
+            output_dir,
+            files,
+            lambda: self.collect_cost(audit_result),
         )
 
         # Net status
@@ -280,6 +289,33 @@ class ReportDataCollector:
         if audit_result is None:
             return None
         return audit_result.to_dict()
+
+    def collect_cost(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
+        """Extract and normalise cost data from a pre-run AuditResult.
+
+        The template expects keys ``per_unit``, ``batch_qty``,
+        ``batch_total``, and ``currency``.  ``CostEstimate.to_dict()``
+        produces ``pcb_cost``, ``quantity``, ``total_cost``, and
+        ``currency``, so this method maps between the two schemas.
+
+        Args:
+            audit_result: Result from ManufacturingAudit.run(), or None if
+                the audit failed.
+
+        Returns:
+            Normalised cost dictionary for the template, or None if
+            audit_result is None.
+        """
+        if audit_result is None:
+            return None
+        ce = audit_result.cost
+        per_unit = round(ce.total_cost / ce.quantity, 2) if ce.quantity else 0.0
+        return {
+            "per_unit": per_unit,
+            "batch_qty": ce.quantity,
+            "batch_total": round(ce.total_cost, 2),
+            "currency": ce.currency,
+        }
 
     def collect_net_status(self, pcb: Any) -> dict[str, Any]:
         """Routing completion summary.
