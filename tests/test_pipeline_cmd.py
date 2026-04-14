@@ -430,6 +430,105 @@ class TestPipelineStepOrder:
         assert expected == ALL_STEPS
 
 
+class TestPipelineLayerAutoDetection:
+    """Tests for automatic copper layer count detection in pipeline."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_auto_detect_4_layer_board(self, mock_run, four_layer_pcb: Path):
+        """4-layer PCB with no --layers flag passes --layers 4 to fix-vias subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        main(["--step", "fix-vias", str(four_layer_pcb), "--quiet"])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_auto_detect_2_layer_board_no_regression(self, mock_run, routed_pcb: Path):
+        """2-layer PCB with no --layers flag passes --layers 2 (unchanged behavior)."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        main(["--step", "fix-vias", str(routed_pcb), "--quiet"])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "2"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_explicit_layers_overrides_detection(self, mock_run, four_layer_pcb: Path):
+        """--layers 2 on a 4-layer PCB passes --layers 2 (explicit wins)."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        main(["--step", "fix-vias", "--layers", "2", str(four_layer_pcb), "--quiet"])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "2"
+
+    def test_dry_run_shows_correct_layer_count(self, four_layer_pcb: Path, capsys):
+        """Dry-run on 4-layer board displays 4 layers in output, not 2 layers."""
+        result = main(["--dry-run", str(four_layer_pcb)])
+        assert result == 0
+
+        # The dry-run fix-vias message includes --layers N
+        captured = capsys.readouterr()
+        assert "--layers 4" in captured.out
+
+    def test_help_text_mentions_auto_detection(self, capsys):
+        """kct pipeline --help text includes 'auto-detect'."""
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "auto-detect" in captured.out.lower()
+
+    def test_commands_shim_passes_none_sentinel(self):
+        """commands/pipeline.py passes --layers when pipeline_layers is not None,
+        does not pass it when None."""
+        from kicad_tools.cli.commands.pipeline import run_pipeline_command
+
+        # When pipeline_layers is None (default), --layers should NOT be forwarded
+        args_none = MagicMock()
+        args_none.pipeline_input = "test.kicad_pcb"
+        args_none.pipeline_step = None
+        args_none.pipeline_mfr = "jlcpcb"
+        args_none.pipeline_layers = None
+        args_none.pipeline_dry_run = False
+        args_none.pipeline_verbose = False
+        args_none.pipeline_force = False
+        args_none.global_quiet = False
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", return_value=0) as mock_main:
+            run_pipeline_command(args_none)
+
+        call_argv = mock_main.call_args[0][0]
+        assert "--layers" not in call_argv
+
+        # When pipeline_layers is set (e.g., 4), --layers should be forwarded
+        args_explicit = MagicMock()
+        args_explicit.pipeline_input = "test.kicad_pcb"
+        args_explicit.pipeline_step = None
+        args_explicit.pipeline_mfr = "jlcpcb"
+        args_explicit.pipeline_layers = 4
+        args_explicit.pipeline_dry_run = False
+        args_explicit.pipeline_verbose = False
+        args_explicit.pipeline_force = False
+        args_explicit.global_quiet = False
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", return_value=0) as mock_main:
+            run_pipeline_command(args_explicit)
+
+        call_argv = mock_main.call_args[0][0]
+        assert "--layers" in call_argv
+        layers_idx = call_argv.index("--layers")
+        assert call_argv[layers_idx + 1] == "4"
+
+
 class TestEdgeCases:
     """Tests for edge cases."""
 
