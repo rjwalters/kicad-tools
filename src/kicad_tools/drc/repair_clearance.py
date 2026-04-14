@@ -64,6 +64,8 @@ class RepairResult:
     skipped_no_delta: int = 0
     skipped_exceeds_max: int = 0
     skipped_infeasible: int = 0
+    relocated_vias: int = 0
+    endpoint_nudges: int = 0
     nudges: list[NudgeResult] = field(default_factory=list)
 
     @property
@@ -78,6 +80,10 @@ class RepairResult:
         lines = [
             f"Clearance Repair: {self.repaired}/{self.total_violations} violations fixed",
         ]
+        if self.endpoint_nudges > 0:
+            lines.append(f"  Endpoint nudges (via-preserving): {self.endpoint_nudges}")
+        if self.relocated_vias > 0:
+            lines.append(f"  Via relocations: {self.relocated_vias}")
         if self.skipped_exceeds_max > 0:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
@@ -268,7 +274,7 @@ class ClearanceRepairer:
         result.nudges.append(nudge_result)
 
         if not dry_run:
-            self._apply_nudge(obj_node, obj_type, dx, dy)
+            self._apply_nudge(obj_node, obj_type, dx, dy, result=result)
             self.modified = True
 
         result.repaired += 1
@@ -352,7 +358,7 @@ class ClearanceRepairer:
         result.nudges.append(nudge_result)
 
         if not dry_run:
-            self._apply_nudge(obj_node, obj_type, dx, dy)
+            self._apply_nudge(obj_node, obj_type, dx, dy, result=result)
             self.modified = True
 
         result.repaired += 1
@@ -567,17 +573,74 @@ class ClearanceRepairer:
 
         return (nudge_x, nudge_y, nudge_dist)
 
+    def _find_via_positions(self) -> list[tuple[float, float]]:
+        """Return a list of (x, y) positions for all vias in the PCB."""
+        positions: list[tuple[float, float]] = []
+        for via_node in self.doc.find_all("via"):
+            at_node = via_node.find("at")
+            if at_node:
+                at_atoms = at_node.get_atoms()
+                vx = float(at_atoms[0]) if at_atoms else 0
+                vy = float(at_atoms[1]) if len(at_atoms) > 1 else 0
+                positions.append((vx, vy))
+        return positions
+
+    def _find_connected_segments(
+        self,
+        x: float,
+        y: float,
+        tolerance: float = 0.001,
+    ) -> list[tuple[SExp, str]]:
+        """Find all segments with an endpoint coinciding with a position.
+
+        Returns a list of (segment_node, endpoint) tuples where endpoint is
+        "start" or "end" indicating which end of the segment sits at (x, y).
+
+        Args:
+            x: X coordinate to match
+            y: Y coordinate to match
+            tolerance: Maximum distance in mm for a match (default 0.001)
+        """
+        results: list[tuple[SExp, str]] = []
+
+        for seg_node in self.doc.find_all("segment"):
+            start_node = seg_node.find("start")
+            end_node = seg_node.find("end")
+            if not (start_node and end_node):
+                continue
+
+            start_atoms = start_node.get_atoms()
+            end_atoms = end_node.get_atoms()
+
+            sx = float(start_atoms[0]) if start_atoms else 0
+            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
+            ex = float(end_atoms[0]) if end_atoms else 0
+            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
+
+            if math.sqrt((sx - x) ** 2 + (sy - y) ** 2) <= tolerance:
+                results.append((seg_node, "start"))
+            if math.sqrt((ex - x) ** 2 + (ey - y) ** 2) <= tolerance:
+                results.append((seg_node, "end"))
+
+        return results
+
     def _apply_nudge(
         self,
         node: SExp,
         obj_type: str,
         dx: float,
         dy: float,
+        result: RepairResult | None = None,
     ) -> None:
         """Apply a displacement to a PCB object.
 
-        For segments: moves the closest endpoint.
-        For vias: moves the via position.
+        For segments: if an endpoint sits at a via position, only the non-via
+        endpoint is moved (endpoint-only nudge) to avoid disconnecting the net.
+        If both endpoints sit at vias, the segment is skipped as infeasible.
+        Otherwise both endpoints are moved (full-segment nudge).
+
+        For vias: moves the via position and also updates the endpoints of all
+        connected segments so that net connectivity is preserved.
         """
         if obj_type == "via":
             at_node = node.find("at")
@@ -585,26 +648,69 @@ class ClearanceRepairer:
                 at_atoms = at_node.get_atoms()
                 old_x = float(at_atoms[0]) if at_atoms else 0
                 old_y = float(at_atoms[1]) if len(at_atoms) > 1 else 0
-                at_node.set_value(0, round(old_x + dx, 4))
-                at_node.set_value(1, round(old_y + dy, 4))
+                new_x = round(old_x + dx, 4)
+                new_y = round(old_y + dy, 4)
+
+                # Move the via
+                at_node.set_value(0, new_x)
+                at_node.set_value(1, new_y)
+
+                # Update all segments connected to the old via position
+                connected = self._find_connected_segments(old_x, old_y)
+                for seg_node, endpoint in connected:
+                    ep_node = seg_node.find(endpoint)
+                    if ep_node:
+                        ep_node.set_value(0, new_x)
+                        ep_node.set_value(1, new_y)
+
+                if result is not None:
+                    result.relocated_vias += 1
 
         elif obj_type == "segment":
-            # For segments, move both endpoints by the same amount
-            # to preserve segment direction and length
             start_node = node.find("start")
             end_node = node.find("end")
 
-            if start_node:
-                start_atoms = start_node.get_atoms()
-                sx = float(start_atoms[0]) if start_atoms else 0
-                sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
+            if not (start_node and end_node):
+                return
+
+            start_atoms = start_node.get_atoms()
+            end_atoms = end_node.get_atoms()
+            sx = float(start_atoms[0]) if start_atoms else 0
+            sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
+            ex = float(end_atoms[0]) if end_atoms else 0
+            ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
+
+            # Check which endpoints sit at a via position
+            via_positions = self._find_via_positions()
+            tolerance = 0.001
+            start_at_via = any(
+                math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance for vx, vy in via_positions
+            )
+            end_at_via = any(
+                math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance for vx, vy in via_positions
+            )
+
+            if start_at_via and end_at_via:
+                # Both endpoints at vias -- moving either end disconnects a net.
+                # This is logged as infeasible by the caller; we do nothing here.
+                return
+
+            if start_at_via:
+                # Only move the end (free) endpoint, keep start pinned to via
+                end_node.set_value(0, round(ex + dx, 4))
+                end_node.set_value(1, round(ey + dy, 4))
+                if result is not None:
+                    result.endpoint_nudges += 1
+            elif end_at_via:
+                # Only move the start (free) endpoint, keep end pinned to via
                 start_node.set_value(0, round(sx + dx, 4))
                 start_node.set_value(1, round(sy + dy, 4))
-
-            if end_node:
-                end_atoms = end_node.get_atoms()
-                ex = float(end_atoms[0]) if end_atoms else 0
-                ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
+                if result is not None:
+                    result.endpoint_nudges += 1
+            else:
+                # Neither endpoint at a via -- full-segment nudge (original behavior)
+                start_node.set_value(0, round(sx + dx, 4))
+                start_node.set_value(1, round(sy + dy, 4))
                 end_node.set_value(0, round(ex + dx, 4))
                 end_node.set_value(1, round(ey + dy, 4))
 

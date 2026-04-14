@@ -454,6 +454,8 @@ def _print_json(
         "clearance": {
             "violations": clearance_result.total_violations,
             "repaired": clearance_result.repaired,
+            "relocated_vias": clearance_result.relocated_vias,
+            "endpoint_nudges": clearance_result.endpoint_nudges,
             "skipped": {
                 "no_location": clearance_result.skipped_no_location,
                 "no_delta": clearance_result.skipped_no_delta,
