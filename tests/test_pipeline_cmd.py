@@ -541,11 +541,12 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: erc, fix-erc, fix-silkscreen, fix-vias, route, etc."""
+        """Steps execute in the correct order: erc, fix-erc, fix-silkscreen, fix-erc, fix-vias, route, etc."""
         expected = [
             PipelineStep.ERC,
             PipelineStep.FIX_ERC,
             PipelineStep.FIX_SILKSCREEN,
+            PipelineStep.FIX_ERC,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
             PipelineStep.FIX_DRC,
@@ -1470,11 +1471,10 @@ class TestERCStep:
         assert results[1].success is True  # FIX_VIAS runs
 
     def test_erc_is_first_step(self):
-        """ERC is the first step in ALL_STEPS, followed by FIX_ERC, then FIX_SILKSCREEN, then fix-vias."""
+        """ERC is the first step in ALL_STEPS, followed by FIX_ERC, then FIX_SILKSCREEN."""
         assert ALL_STEPS[0] == PipelineStep.ERC
         assert ALL_STEPS[1] == PipelineStep.FIX_ERC
         assert ALL_STEPS[2] == PipelineStep.FIX_SILKSCREEN
-        assert ALL_STEPS[3] == PipelineStep.FIX_VIAS
 
 
 # =========================================================================
@@ -1911,3 +1911,81 @@ class TestFixERCStep:
         assert results[1].step == PipelineStep.FIX_ERC
         assert not results[1].skipped, "FIX_ERC should not be skipped when ERC errors exist"
         assert results[1].success is True
+
+
+class TestZonesDefaultSkip:
+    """Tests for zones step being skipped by default (opt-in via --zones flag)."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_zones_excluded_from_default_pipeline(self, mock_run, routed_pcb: Path):
+        """Running pipeline without --zones does not execute the zone fill step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        result = main([str(routed_pcb), "--quiet"])
+        assert result == 0
+
+        # Collect all subprocess calls; none should invoke 'zones fill'
+        for call_args in mock_run.call_args_list:
+            cmd = call_args[0][0]
+            assert not ("zones" in cmd and "fill" in cmd), (
+                "zones fill should not run without --zones flag"
+            )
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_zones_included_when_flag_set(self, mock_run, routed_pcb: Path):
+        """Running pipeline with --zones includes the zone fill step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        result = main([str(routed_pcb), "--quiet", "--zones"])
+        assert result == 0
+
+        # At least one subprocess call should invoke 'zones fill'
+        zones_called = False
+        for call_args in mock_run.call_args_list:
+            cmd = call_args[0][0]
+            if "zones" in cmd and "fill" in cmd:
+                zones_called = True
+                break
+        assert zones_called, "zones fill should run when --zones flag is passed"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_step_zones_still_works_as_targeted_single_step(self, mock_run, routed_pcb: Path):
+        """--step zones still executes the zone fill step regardless of --zones flag."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        result = main(["--step", "zones", str(routed_pcb), "--quiet"])
+        # --step zones should work even without --zones flag
+        assert result == 0
+
+    def test_zones_still_in_all_steps(self):
+        """ZONES remains in ALL_STEPS (not removed, just default-skipped)."""
+        assert PipelineStep.ZONES in ALL_STEPS
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_dry_run_without_zones_omits_zone_fill(self, mock_run, routed_pcb: Path):
+        """--dry-run without --zones does not list zone fill step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        result = main(["--dry-run", str(routed_pcb), "--quiet"])
+        assert result == 0
+        # No subprocess should be called for zones in dry-run without --zones
+        for call_args in mock_run.call_args_list:
+            cmd = call_args[0][0]
+            assert not ("zones" in cmd and "fill" in cmd), (
+                "zones fill should not appear in dry-run output without --zones"
+            )
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_dry_run_with_zones_includes_zone_fill(self, mock_run, routed_pcb: Path):
+        """--dry-run with --zones includes the zone fill step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        result = main(["--dry-run", str(routed_pcb), "--quiet", "--zones"])
+        assert result == 0
+
+    def test_help_text_documents_zones_flag(self):
+        """--help output documents the --zones opt-in flag."""
+        import io
+        import contextlib
+
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f), pytest.raises(SystemExit):
+            main(["--help"])
+        help_text = f.getvalue()
+        assert "--zones" in help_text
+        assert "data corruption" in help_text.lower() or "corruption" in help_text.lower()

@@ -48,7 +48,6 @@ class PipelineStep(str, Enum):
     ERC = "erc"
     FIX_ERC = "fix-erc"
     FIX_SILKSCREEN = "fix-silkscreen"
-    FIX_ERC = "fix-erc"
     ROUTE = "route"
     FIX_VIAS = "fix-vias"
     FIX_DRC = "fix-drc"
@@ -940,7 +939,6 @@ STEP_RUNNERS = {
     PipelineStep.ERC: _run_step_erc,
     PipelineStep.FIX_ERC: _run_step_fix_erc,
     PipelineStep.FIX_SILKSCREEN: _run_step_fix_silkscreen,
-    PipelineStep.FIX_ERC: _run_step_fix_erc,
     PipelineStep.ROUTE: _run_step_route,
     PipelineStep.FIX_VIAS: _run_step_fix_vias,
     PipelineStep.FIX_DRC: _run_step_fix_drc,
@@ -1108,6 +1106,15 @@ Examples:
         default=False,
         help="Create a git commit with the modified PCB file after a successful pipeline run",
     )
+    parser.add_argument(
+        "--zones",
+        action="store_true",
+        default=False,
+        help=(
+            "Include zone fill step. Disabled by default due to data corruption "
+            "risk (see issue #1392). Use --step zones to fill zones only."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -1184,7 +1191,14 @@ Examples:
     if args.step:
         steps = [PipelineStep(args.step)]
     else:
-        steps = None  # All steps
+        # Filter out ZONES unless --zones is explicitly passed
+        steps = [s for s in ALL_STEPS if s != PipelineStep.ZONES or args.zones]
+        if not args.zones and not ctx.quiet:
+            console = Console(quiet=False)
+            console.print(
+                "  [dim]zones: skipped by default (data corruption risk). "
+                "Use --zones to include.[/dim]"
+            )
 
     results = run_pipeline(ctx, steps)
 

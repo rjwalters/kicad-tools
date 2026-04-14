@@ -2993,6 +2993,16 @@ def _add_pipeline_parser(subparsers) -> None:
         default=False,
         help="Create a git commit with modified files after a successful pipeline run",
     )
+    pipeline_parser.add_argument(
+        "--zones",
+        dest="pipeline_zones",
+        action="store_true",
+        default=False,
+        help=(
+            "Include zone fill step. Disabled by default due to data corruption "
+            "risk (see issue #1392). Use --step zones to fill zones only."
+        ),
+    )
 
 
 def _add_build_parser(subparsers) -> None:
