@@ -338,6 +338,71 @@ class TestERCSuggestions:
         # Should suggest running annotation
         assert any("annotate" in s.lower() or "reference" in s.lower() for s in suggestions)
 
+    def test_lib_symbol_mismatch(self, generator: FixSuggestionGenerator) -> None:
+        """Test suggestions for lib_symbol_mismatch mention update-from-library."""
+        violation = ERCViolation(
+            type=ERCViolationType.LIB_SYMBOL_MISMATCH,
+            type_str="lib_symbol_mismatch",
+            severity=ERCSeverity.WARNING,
+            description="Symbol does not match library definition",
+        )
+        suggestions = generator.suggest(violation)
+
+        assert len(suggestions) > 0
+        assert any("update-from-library" in s for s in suggestions)
+
+    def test_footprint_link_issues(self, generator: FixSuggestionGenerator) -> None:
+        """Test suggestions for footprint_link_issues mention reassigning footprint."""
+        violation = ERCViolation(
+            type=ERCViolationType.FOOTPRINT_LINK_ISSUES,
+            type_str="footprint_link_issues",
+            severity=ERCSeverity.WARNING,
+            description="Assigned footprint does not match footprint filters",
+        )
+        suggestions = generator.suggest(violation)
+
+        assert len(suggestions) > 0
+        assert any("footprint" in s.lower() for s in suggestions)
+
+    def test_pin_to_pin(self, generator: FixSuggestionGenerator) -> None:
+        """Test suggestions for pin_to_pin mention conflicting pin types."""
+        violation = ERCViolation(
+            type=ERCViolationType.PIN_TO_PIN,
+            type_str="pin_to_pin",
+            severity=ERCSeverity.WARNING,
+            description="Conflicting pin types",
+        )
+        suggestions = generator.suggest(violation)
+
+        assert len(suggestions) > 0
+        assert any("output" in s.lower() or "pin" in s.lower() for s in suggestions)
+
+    def test_isolated_pin_label(self, generator: FixSuggestionGenerator) -> None:
+        """Test suggestions for isolated_pin_label."""
+        violation = ERCViolation(
+            type=ERCViolationType.ISOLATED_PIN_LABEL,
+            type_str="isolated_pin_label",
+            severity=ERCSeverity.WARNING,
+            description="Label connected to only one pin",
+        )
+        suggestions = generator.suggest(violation)
+
+        assert len(suggestions) > 0
+        assert any("label" in s.lower() for s in suggestions)
+
+    def test_single_global_label(self, generator: FixSuggestionGenerator) -> None:
+        """Test suggestions for single_global_label."""
+        violation = ERCViolation(
+            type=ERCViolationType.SINGLE_GLOBAL_LABEL,
+            type_str="single_global_label",
+            severity=ERCSeverity.WARNING,
+            description="Global label appears only once",
+        )
+        suggestions = generator.suggest(violation)
+
+        assert len(suggestions) > 0
+        assert any("global label" in s.lower() for s in suggestions)
+
     def test_unknown_erc_type(self, generator: FixSuggestionGenerator) -> None:
         """Test that unknown ERC types still get generic suggestions."""
         violation = ERCViolation(
