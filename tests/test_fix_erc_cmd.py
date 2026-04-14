@@ -568,3 +568,87 @@ class TestUnhandledTypes:
         assert result.total_fixed == 0
         # Not counted as unknown since it has a known type
         assert result.skipped_unknown == 0
+
+    def test_warning_types_not_skipped_as_unknown(self):
+        """pin_to_pin, isolated_pin_label, single_global_label should not count as unknown."""
+        violations = [
+            _make_violation(
+                ERCViolationType.PIN_TO_PIN,
+                "pin_to_pin",
+                "Conflicting pin types on net",
+                pos_x=50.0,
+                pos_y=50.0,
+            ),
+            _make_violation(
+                ERCViolationType.ISOLATED_PIN_LABEL,
+                "isolated_pin_label",
+                "Label connected to only one pin",
+                pos_x=60.0,
+                pos_y=60.0,
+            ),
+            _make_violation(
+                ERCViolationType.SINGLE_GLOBAL_LABEL,
+                "single_global_label",
+                "Global label appears only once",
+                pos_x=70.0,
+                pos_y=70.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.skipped_unknown == 0
+        assert result.total_fixed == 0
+        # These are known types, not auto-fixable, so not in targeted count
+        assert result.total_violations == 0
+
+    def test_lib_symbol_mismatch_not_skipped_as_unknown(self):
+        """lib_symbol_mismatch and footprint_link_issues should not count as unknown."""
+        violations = [
+            _make_violation(
+                ERCViolationType.LIB_SYMBOL_MISMATCH,
+                "lib_symbol_mismatch",
+                "Symbol does not match library",
+                pos_x=80.0,
+                pos_y=80.0,
+            ),
+            _make_violation(
+                ERCViolationType.FOOTPRINT_LINK_ISSUES,
+                "footprint_link_issues",
+                "Footprint does not match filters",
+                pos_x=90.0,
+                pos_y=90.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.skipped_unknown == 0
+
+    def test_mixed_new_types_with_fixable(self):
+        """New types mixed with fixable pin_not_connected; fixable processed normally."""
+        violations = [
+            _make_violation(
+                ERCViolationType.LIB_SYMBOL_MISMATCH,
+                "lib_symbol_mismatch",
+                "Symbol mismatch",
+                pos_x=50.0,
+                pos_y=50.0,
+            ),
+            _make_violation(
+                ERCViolationType.PIN_NOT_CONNECTED,
+                "pin_not_connected",
+                "Pin 1 unconnected",
+                pos_x=100.0,
+                pos_y=50.0,
+            ),
+        ]
+        report = _make_report(violations)
+
+        result = _apply_fixes(Path("dummy.kicad_sch"), report, dry_run=True, quiet=True)
+
+        assert result.skipped_unknown == 0
+        assert result.no_connect_inserted == 1
+        assert result.total_fixed == 1

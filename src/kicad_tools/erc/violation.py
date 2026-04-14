@@ -26,14 +26,18 @@ class ERCViolationType(Enum):
     DIFFERENT_UNIT_NET = "different_unit_net"
     DUPLICATE_PIN_ERROR = "duplicate_pin_error"
     DUPLICATE_REFERENCE = "duplicate_reference"
+    PIN_TO_PIN = "pin_to_pin"
 
     # Symbol/sheet errors
     ENDPOINT_OFF_GRID = "endpoint_off_grid"
     EXTRA_UNITS = "extra_units"
     GLOBAL_LABEL_DANGLING = "global_label_dangling"
     HIER_LABEL_MISMATCH = "hier_label_mismatch"
+    ISOLATED_PIN_LABEL = "isolated_pin_label"
     LABEL_DANGLING = "label_dangling"
     LIB_SYMBOL_ISSUES = "lib_symbol_issues"
+    LIB_SYMBOL_MISMATCH = "lib_symbol_mismatch"
+    FOOTPRINT_LINK_ISSUES = "footprint_link_issues"
     MISSING_BIDI_PIN = "missing_bidi_pin"
     MISSING_INPUT_PIN = "missing_input_pin"
     MISSING_POWER_PIN = "missing_power_pin"
@@ -47,6 +51,7 @@ class ERCViolationType(Enum):
     FOUR_WAY_JUNCTION = "four_way_junction"
     NET_NOT_BUS_MEMBER = "net_not_bus_member"
     SIMILAR_LABELS = "similar_labels"
+    SINGLE_GLOBAL_LABEL = "single_global_label"
     SIMULATION_MODEL = "simulation_model"
     UNRESOLVED_VARIABLE = "unresolved_variable"
     UNANNOTATED = "unannotated"
@@ -83,13 +88,17 @@ ERC_TYPE_DESCRIPTIONS = {
     "different_unit_net": "Different nets on same pin across units",
     "duplicate_pin_error": "Duplicate pin in symbol",
     "duplicate_reference": "Duplicate reference designator",
+    "pin_to_pin": "Conflicting pin types (output-to-output or similar)",
     # Symbol/sheet errors
     "endpoint_off_grid": "Wire endpoint off grid",
     "extra_units": "Extra units in multi-unit symbol",
     "global_label_dangling": "Global label not connected",
     "hier_label_mismatch": "Hierarchical label mismatch",
+    "isolated_pin_label": "Label connected to only one pin",
     "label_dangling": "Label not connected",
     "lib_symbol_issues": "Library symbol issues",
+    "lib_symbol_mismatch": "Symbol does not match library definition",
+    "footprint_link_issues": "Assigned footprint does not match footprint filters",
     "missing_bidi_pin": "Missing bidirectional pin",
     "missing_input_pin": "Missing input pin",
     "missing_power_pin": "Missing power pin",
@@ -102,6 +111,7 @@ ERC_TYPE_DESCRIPTIONS = {
     "four_way_junction": "Four-way wire junction",
     "net_not_bus_member": "Net label on bus wire",
     "similar_labels": "Similar labels (possible typo)",
+    "single_global_label": "Global label appears only once in design",
     "simulation_model": "Simulation model issue",
     "unresolved_variable": "Unresolved text variable",
     "unannotated": "Symbol not annotated",
@@ -126,13 +136,16 @@ ERC_CATEGORIES = {
         "different_unit_net",
         "duplicate_pin_error",
         "duplicate_reference",
+        "pin_to_pin",
     ],
     "Labels": [
         "global_label_dangling",
         "hier_label_mismatch",
+        "isolated_pin_label",
         "label_dangling",
         "multiple_net_names",
         "similar_labels",
+        "single_global_label",
     ],
     "Structure": [
         "bus_entry_needed",
@@ -145,7 +158,9 @@ ERC_CATEGORIES = {
     ],
     "Symbols": [
         "extra_units",
+        "footprint_link_issues",
         "lib_symbol_issues",
+        "lib_symbol_mismatch",
         "missing_bidi_pin",
         "missing_input_pin",
         "missing_power_pin",

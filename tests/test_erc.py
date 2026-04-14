@@ -178,6 +178,39 @@ class TestERCViolationType:
         """Test parsing unknown type."""
         assert ERCViolationType.from_string("some_random_type") == ERCViolationType.UNKNOWN
 
+    def test_new_types_parse_correctly(self):
+        """Test that new ERC types parse to their enum values, not UNKNOWN."""
+        assert (
+            ERCViolationType.from_string("lib_symbol_mismatch")
+            == ERCViolationType.LIB_SYMBOL_MISMATCH
+        )
+        assert (
+            ERCViolationType.from_string("footprint_link_issues")
+            == ERCViolationType.FOOTPRINT_LINK_ISSUES
+        )
+        assert ERCViolationType.from_string("pin_to_pin") == ERCViolationType.PIN_TO_PIN
+        assert (
+            ERCViolationType.from_string("isolated_pin_label")
+            == ERCViolationType.ISOLATED_PIN_LABEL
+        )
+        assert (
+            ERCViolationType.from_string("single_global_label")
+            == ERCViolationType.SINGLE_GLOBAL_LABEL
+        )
+
+    def test_new_types_not_unknown(self):
+        """Verify none of the five new types resolve to UNKNOWN."""
+        new_type_strings = [
+            "lib_symbol_mismatch",
+            "footprint_link_issues",
+            "pin_to_pin",
+            "isolated_pin_label",
+            "single_global_label",
+        ]
+        for type_str in new_type_strings:
+            parsed = ERCViolationType.from_string(type_str)
+            assert parsed != ERCViolationType.UNKNOWN, f"'{type_str}' should not parse as UNKNOWN"
+
 
 class TestSeverity:
     """Tests for Severity enum."""

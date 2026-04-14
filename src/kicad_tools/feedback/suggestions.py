@@ -100,6 +100,11 @@ class FixSuggestionGenerator:
             ERCViolationType.SIMILAR_LABELS: self._suggest_similar_labels,
             ERCViolationType.ENDPOINT_OFF_GRID: self._suggest_off_grid,
             ERCViolationType.MULTIPLE_NET_NAMES: self._suggest_multiple_nets,
+            ERCViolationType.LIB_SYMBOL_MISMATCH: self._suggest_lib_symbol_mismatch,
+            ERCViolationType.FOOTPRINT_LINK_ISSUES: self._suggest_footprint_link_issues,
+            ERCViolationType.PIN_TO_PIN: self._suggest_pin_to_pin,
+            ERCViolationType.ISOLATED_PIN_LABEL: self._suggest_isolated_pin_label,
+            ERCViolationType.SINGLE_GLOBAL_LABEL: self._suggest_single_global_label,
         }
 
         handler = handlers.get(violation.type)
@@ -602,6 +607,51 @@ class FixSuggestionGenerator:
             "Add a net tie symbol if nets should be connected",
             "Check for overlapping labels at the same position",
             "Verify hierarchical connections don't create conflicts",
+        ]
+
+    def _suggest_lib_symbol_mismatch(self, violation: ERCViolation) -> list[str]:
+        """Suggest fixes for lib_symbol_mismatch violations."""
+        return [
+            "Run 'kicad-cli sch update-from-library' to sync symbols with library definitions",
+            "Open symbol in schematic editor and use 'Update Symbol from Library'",
+            "Review symbol fields to check for intentional overrides before updating",
+            "If overrides are intentional, exclude this violation in ERC settings",
+        ]
+
+    def _suggest_footprint_link_issues(self, violation: ERCViolation) -> list[str]:
+        """Suggest fixes for footprint_link_issues violations."""
+        return [
+            "Reassign the footprint to one matching the symbol's footprint filters",
+            "Run 'kicad-cli sch update-from-library' to reset footprint assignments",
+            "Open symbol properties and verify the Footprint field matches an available footprint",
+            "Check footprint filters in the symbol library editor",
+        ]
+
+    def _suggest_pin_to_pin(self, violation: ERCViolation) -> list[str]:
+        """Suggest fixes for pin_to_pin violations (conflicting pin types)."""
+        return [
+            "Check for output pins driving the same net (output-to-output conflict)",
+            "Change one of the conflicting pin types if the connection is intentional",
+            "Add a buffer or bus driver between conflicting outputs",
+            "Review symbol pin electrical types in the symbol editor",
+        ]
+
+    def _suggest_isolated_pin_label(self, violation: ERCViolation) -> list[str]:
+        """Suggest fixes for isolated_pin_label violations."""
+        return [
+            "Connect additional pins or wires to the label",
+            "Remove the label if it is not needed",
+            "Check that the label is placed on a wire endpoint connected to a pin",
+            "This is informational -- a single-pin label may be intentional for test points",
+        ]
+
+    def _suggest_single_global_label(self, violation: ERCViolation) -> list[str]:
+        """Suggest fixes for single_global_label violations."""
+        return [
+            "Add a matching global label on another sheet to complete the connection",
+            "Remove the global label if inter-sheet connectivity is not needed",
+            "Convert to a local label if the net is only used on one sheet",
+            "This is informational -- a single global label may be intentional for future use",
         ]
 
     def _suggest_generic_erc(self, violation: ERCViolation) -> list[str]:
