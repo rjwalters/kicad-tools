@@ -17,7 +17,9 @@ from .report import (
     parse_text_report,
 )
 from .violation import (
+    ERC_BLOCKING_TYPES,
     ERC_CATEGORIES,
+    ERC_NON_BLOCKING_TYPES,
     ERC_TYPE_DESCRIPTIONS,
     ERCViolation,
     ERCViolationType,
@@ -31,6 +33,8 @@ __all__ = [
     "Severity",
     "ERC_TYPE_DESCRIPTIONS",
     "ERC_CATEGORIES",
+    "ERC_BLOCKING_TYPES",
+    "ERC_NON_BLOCKING_TYPES",
     # Report parsing
     "ERCReport",
     "parse_json_report",

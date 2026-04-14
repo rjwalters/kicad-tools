@@ -53,6 +53,13 @@ class ERCViolationType(Enum):
     UNSPECIFIED = "unspecified"
     WIRE_DANGLING = "wire_dangling"
 
+    # Library/footprint checks (non-electrical)
+    LIB_SYMBOL_MISMATCH = "lib_symbol_mismatch"
+    FOOTPRINT_LINK_ISSUES = "footprint_link_issues"
+    SINGLE_GLOBAL_LABEL = "single_global_label"
+    ISOLATED_PIN_LABEL = "isolated_pin_label"
+    PIN_TO_PIN = "pin_to_pin"
+
     # Unknown
     UNKNOWN = "unknown"
 
@@ -107,6 +114,12 @@ ERC_TYPE_DESCRIPTIONS = {
     "unannotated": "Symbol not annotated",
     "unspecified": "Unspecified error",
     "wire_dangling": "Wire not connected at both ends",
+    # Library/footprint checks (non-electrical)
+    "lib_symbol_mismatch": "Library symbol does not match schematic symbol",
+    "footprint_link_issues": "Footprint link issues",
+    "single_global_label": "Only one global label for a net",
+    "isolated_pin_label": "Pin connected only by label (no wire)",
+    "pin_to_pin": "Pin-to-pin connection issue",
     # Unknown
     "unknown": "Unknown violation type",
 }
@@ -146,6 +159,7 @@ ERC_CATEGORIES = {
     "Symbols": [
         "extra_units",
         "lib_symbol_issues",
+        "lib_symbol_mismatch",
         "missing_bidi_pin",
         "missing_input_pin",
         "missing_power_pin",
@@ -153,8 +167,47 @@ ERC_CATEGORIES = {
         "simulation_model",
         "unannotated",
     ],
-    "Other": ["unresolved_variable", "unspecified", "unknown"],
+    "Other": [
+        "footprint_link_issues",
+        "isolated_pin_label",
+        "pin_to_pin",
+        "single_global_label",
+        "unresolved_variable",
+        "unspecified",
+        "unknown",
+    ],
 }
+
+
+# Violation types that indicate genuine electrical problems.
+# These block manufacturing readiness (verdict = NOT_READY).
+ERC_BLOCKING_TYPES: frozenset[ERCViolationType] = frozenset(
+    {
+        ERCViolationType.POWER_PIN_NOT_DRIVEN,
+        ERCViolationType.PIN_NOT_CONNECTED,
+        ERCViolationType.PIN_NOT_DRIVEN,
+        ERCViolationType.DIFFERENT_UNIT_NET,
+        ERCViolationType.DUPLICATE_REFERENCE,
+        ERCViolationType.MISSING_POWER_PIN,
+        ERCViolationType.HIER_LABEL_MISMATCH,
+        ERCViolationType.BUS_TO_NET_CONFLICT,
+        ERCViolationType.BUS_TO_BUS_CONFLICT,
+    }
+)
+
+# Violation types that are non-electrical and should not block manufacturing
+# readiness.  These are demoted to warnings in the audit verdict.
+ERC_NON_BLOCKING_TYPES: frozenset[ERCViolationType] = frozenset(
+    {
+        ERCViolationType.LIB_SYMBOL_MISMATCH,
+        ERCViolationType.FOOTPRINT_LINK_ISSUES,
+        ERCViolationType.SINGLE_GLOBAL_LABEL,
+        ERCViolationType.ISOLATED_PIN_LABEL,
+        ERCViolationType.PIN_TO_PIN,
+        ERCViolationType.ENDPOINT_OFF_GRID,
+        ERCViolationType.SIMILAR_LABELS,
+    }
+)
 
 
 @dataclass
