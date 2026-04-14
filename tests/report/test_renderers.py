@@ -200,6 +200,28 @@ class TestRenderHtml:
         assert "<link " not in result
         assert 'rel="stylesheet"' not in result
 
+    def test_figures_dir_as_string(
+        self,
+        markdown_with_image: str,
+        figures_dir: Path,
+    ) -> None:
+        """render_html accepts figures_dir as a plain str without raising."""
+        from kicad_tools.report.renderers import render_html
+
+        result = render_html(markdown_with_image, figures_dir=str(figures_dir))
+        assert "data:image/png;base64," in result
+        assert 'src="front_copper.png"' not in result
+
+    def test_embeds_figures_with_prefixed_src(self, figures_dir: Path) -> None:
+        """Images with a 'figures/' prefix in src are embedded correctly."""
+        from kicad_tools.report.renderers import render_html
+
+        # This mirrors the real template output where src="figures/front.png"
+        md = "# Board\n\n![Front](figures/front.png)\n\nDescription.\n"
+        result = render_html(md, figures_dir=figures_dir)
+        assert "data:image/png;base64," in result
+        assert 'src="figures/front.png"' not in result
+
     def test_cover_block_in_html_output(self) -> None:
         """Cover block div passes through Markdown-to-HTML conversion."""
         from kicad_tools.report.renderers import render_html
@@ -451,6 +473,32 @@ class TestEmbedImages:
         from kicad_tools.report.renderers import _embed_images
 
         html = "<p>No images here</p>"
+        result = _embed_images(html, figures_dir)
+        assert result == html
+
+    def test_strips_figures_prefix_from_src(self, figures_dir: Path) -> None:
+        """src with a 'figures/' prefix does not double-nest the path."""
+        from kicad_tools.report.renderers import _embed_images
+
+        html = '<img alt="Front" src="figures/front.png" />'
+        result = _embed_images(html, figures_dir)
+        assert "data:image/png;base64," in result
+        assert 'src="figures/front.png"' not in result
+
+    def test_deeply_nested_prefix_left_unchanged(self, figures_dir: Path) -> None:
+        """A deeply nested prefix like 'assets/figures/file.png' uses only the filename."""
+        from kicad_tools.report.renderers import _embed_images
+
+        # front.png exists in figures_dir, so using .name extracts it correctly
+        html = '<img alt="Front" src="assets/figures/front.png" />'
+        result = _embed_images(html, figures_dir)
+        assert "data:image/png;base64," in result
+
+    def test_non_png_with_figures_prefix_not_embedded(self, figures_dir: Path) -> None:
+        """Non-PNG files with a figures/ prefix are left unchanged."""
+        from kicad_tools.report.renderers import _embed_images
+
+        html = '<img alt="Diagram" src="figures/diagram.svg" />'
         result = _embed_images(html, figures_dir)
         assert result == html
 

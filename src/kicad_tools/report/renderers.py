@@ -16,7 +16,7 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 def render_html(
     markdown_content: str,
-    figures_dir: Path | None = None,
+    figures_dir: Path | str | None = None,
 ) -> str:
     """Convert Markdown report to a self-contained HTML document.
 
@@ -27,6 +27,7 @@ def render_html(
     Args:
         markdown_content: Markdown source text (e.g. from ReportGenerator).
         figures_dir: Directory containing PNG figures referenced in the Markdown.
+            Accepts both :class:`~pathlib.Path` objects and plain strings.
             If None, image ``src`` attributes are left unchanged.
 
     Returns:
@@ -48,6 +49,7 @@ def render_html(
     css = _load_css()
 
     if figures_dir is not None:
+        figures_dir = Path(figures_dir)
         html_body = _embed_images(html_body, figures_dir)
 
     # Wrap tables in a scrollable div for responsive layout
@@ -116,8 +118,9 @@ def _embed_images(html: str, figures_dir: Path) -> str:
 
     def _replacer(match: re.Match) -> str:
         src = match.group(1)
-        # Handle both bare filenames and relative paths
-        img_path = figures_dir / src
+        # Use only the filename to avoid double-nesting when src already
+        # contains a directory prefix like "figures/" from template rendering.
+        img_path = figures_dir / Path(src).name
         if img_path.exists() and img_path.suffix.lower() == ".png":
             data = base64.b64encode(img_path.read_bytes()).decode("ascii")
             return match.group(0).replace(
