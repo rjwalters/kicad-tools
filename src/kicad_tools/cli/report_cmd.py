@@ -3,6 +3,8 @@
 Usage:
     kct report generate project.kicad_pro --mfr jlcpcb -o reports/
     kct report generate board.kicad_pcb --mfr jlcpcb --data-dir data/
+    kct report generate board.kicad_pcb --mfr jlcpcb --no-figures
+    kct report generate board.kicad_pcb --mfr jlcpcb --sch path/to/root.kicad_sch
 """
 
 from __future__ import annotations
@@ -11,6 +13,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.report.figures import FigureEntry
+    from kicad_tools.report.models import ReportData
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,6 +53,17 @@ def main(argv: list[str] | None = None) -> int:
         "--template",
         default=None,
         help="Path to a custom Jinja2 template file",
+    )
+    gen_parser.add_argument(
+        "--sch",
+        default=None,
+        help="Path to root .kicad_sch file (inferred from input if omitted)",
+    )
+    gen_parser.add_argument(
+        "--no-figures",
+        action="store_true",
+        default=False,
+        help="Skip figure generation (useful when kicad-cli/cairosvg are unavailable)",
     )
 
     args = parser.parse_args(argv)
@@ -88,8 +106,17 @@ def _run_generate(args: argparse.Namespace) -> int:
     template_path = Path(args.template) if args.template else None
     generator = ReportGenerator(template_path=template_path)
 
+    # --- Figure generation ---
+    # Only attempt when: no --data-dir (pre-collected data path), no --no-figures,
+    # and the input is a .kicad_pcb file.
+    version_dir: Path | None = None
+    if not args.no_figures and not args.data_dir and input_path.suffix == ".kicad_pcb":
+        version_dir = generator.next_version_dir(Path(args.output))
+        figures_dir = version_dir / "figures"
+        _generate_figures(args, input_path, figures_dir, data)
+
     try:
-        report_path = generator.generate(data, Path(args.output))
+        report_path = generator.generate(data, Path(args.output), version_dir=version_dir)
     except FileExistsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -110,6 +137,76 @@ def _unwrap_envelope(payload: dict) -> dict | None:
     if isinstance(payload, dict) and "schema_version" in payload and "data" in payload:
         return payload["data"]
     return payload
+
+
+def _generate_figures(
+    args: argparse.Namespace,
+    input_path: Path,
+    figures_dir: Path,
+    data: ReportData,
+) -> None:
+    """Attempt figure generation, populating *data* in place.
+
+    Handles graceful degradation: prints a warning to stderr and
+    continues without figures if dependencies (kicad-cli / cairosvg)
+    are absent.
+    """
+    try:
+        from kicad_tools.report import ReportFigureGenerator
+    except ImportError as exc:
+        print(
+            f"Warning: figure generation skipped — {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    sch_path = Path(args.sch) if args.sch else input_path.with_suffix(".kicad_sch")
+
+    try:
+        fig_gen = ReportFigureGenerator()
+        print("Generating figures...")
+        entries = fig_gen.generate_all(input_path, sch_path, figures_dir)
+        data.pcb_figures = _entries_to_pcb_figures(entries)
+        data.schematic_sheets = _entries_to_schematic_sheets(entries)
+    except RuntimeError as exc:
+        print(
+            f"Warning: figure generation skipped — {exc}",
+            file=sys.stderr,
+        )
+
+
+def _entries_to_pcb_figures(entries: list[FigureEntry]) -> dict | None:
+    """Convert a list of :class:`FigureEntry` to the dict shape expected by
+    :attr:`ReportData.pcb_figures`.
+
+    Returns ``None`` when no PCB figure entries are present.
+    """
+    type_to_key = {
+        "pcb_front": "front",
+        "pcb_back": "back",
+        "pcb_copper": "copper",
+        "assembly": "assembly",
+    }
+    result: dict[str, str] = {}
+    for entry in entries:
+        key = type_to_key.get(entry.figure_type)
+        if key is not None:
+            result[key] = f"figures/{entry.filename}"
+    return result or None
+
+
+def _entries_to_schematic_sheets(entries: list[FigureEntry]) -> list[dict] | None:
+    """Convert a list of :class:`FigureEntry` to the list shape expected by
+    :attr:`ReportData.schematic_sheets`.
+
+    Returns ``None`` when no schematic entries are present.
+    """
+    sheets = [
+        {"name": entry.caption, "figure_path": f"figures/{entry.filename}"}
+        for entry in entries
+        if entry.figure_type == "schematic"
+    ]
+    return sheets or None
 
 
 def _load_data_dir(data_dir_str: str) -> dict:

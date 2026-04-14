@@ -208,8 +208,8 @@ class TestReportGenerator:
         path1 = gen.generate(data, tmp_path)
         assert path1.exists()
 
-        # Monkey-patch _next_version_dir to always return v1 (already has report.md)
-        gen._next_version_dir = staticmethod(lambda output_dir: tmp_path / "v1")  # type: ignore[assignment]
+        # Monkey-patch next_version_dir to always return v1 (already has report.md)
+        gen.next_version_dir = staticmethod(lambda output_dir: tmp_path / "v1")  # type: ignore[assignment]
 
         with pytest.raises(FileExistsError, match="must not be overwritten"):
             gen.generate(data, tmp_path)
