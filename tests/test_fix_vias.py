@@ -746,3 +746,122 @@ class TestManufacturerClearance:
         # With JLCPCB 0.127mm clearance, no warnings expected
         assert len(data["warnings"]) == 0
         assert result == 0
+
+
+class TestExitCodeWarnings:
+    """Tests for exit code semantics: 0=success, 1=error, 2=success-with-warnings."""
+
+    def test_exit_code_0_no_fixes_needed(self, tmp_path: Path):
+        """Exit code 0 when all vias are already compliant (no fixes, no warnings)."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "compliant.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([str(pcb_file), "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+
+    def test_exit_code_0_fixes_no_warnings(self, tmp_path: Path):
+        """Exit code 0 when vias are resized but no clearance warnings are detected."""
+        # Via far from any other items -- no clearance issue after resize
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "isolated.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        output_file = tmp_path / "fixed.kicad_pcb"
+
+        result = main([str(pcb_file), "--mfr", "jlcpcb", "-o", str(output_file)])
+        assert result == 0
+
+    def test_exit_code_2_fixes_with_warnings(self, tmp_path: Path):
+        """Exit code 2 when vias are resized and clearance warnings are detected."""
+        # Via very close to a trace on a different net -- clearance warning expected
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "crowded.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        output_file = tmp_path / "fixed.kicad_pcb"
+
+        result = main([str(pcb_file), "--mfr", "jlcpcb", "-o", str(output_file)])
+        assert result == 2
+
+    def test_exit_code_1_file_not_found(self, tmp_path: Path):
+        """Exit code 1 for actual errors (file not found)."""
+        result = main([str(tmp_path / "nonexistent.kicad_pcb")])
+        assert result == 1
+
+    def test_exit_code_1_bad_extension(self, tmp_path: Path):
+        """Exit code 1 for unsupported file extension."""
+        bad_file = tmp_path / "board.txt"
+        bad_file.write_text("not a pcb")
+        result = main([str(bad_file)])
+        assert result == 1
+
+    def test_dry_run_exit_code_0_no_warnings(self, tmp_path: Path):
+        """Dry-run exit code is 0 when there are fixes but no clearance warnings."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 110 110) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "isolated_dry.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([str(pcb_file), "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 0
+
+    def test_dry_run_exit_code_2_with_warnings(self, tmp_path: Path):
+        """Dry-run still returns exit code 2 when clearance warnings exist."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "crowded_dry.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([str(pcb_file), "--mfr", "jlcpcb", "--dry-run"])
+        assert result == 2

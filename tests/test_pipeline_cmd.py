@@ -311,6 +311,37 @@ class TestExitCodes:
         result = main(["--step", "fix-vias", str(routed_pcb), "--quiet"])
         assert result == 0
 
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_vias_exit_code_2_treated_as_success(self, mock_run, routed_pcb: Path):
+        """Pipeline treats fix-vias exit code 2 (warnings) as success, not failure."""
+        mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+
+        result = main(["--step", "fix-vias", str(routed_pcb), "--quiet"])
+        assert result == 0
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_pipeline_continues_past_fix_vias_warnings(self, mock_run, routed_pcb: Path):
+        """Pipeline continues to subsequent steps when fix-vias returns exit code 2."""
+
+        def side_effect(cmd, **kwargs):
+            # fix-vias returns exit code 2 (success with warnings)
+            if "fix-vias" in cmd:
+                return MagicMock(returncode=2, stderr="", stdout="")
+            # All other steps succeed normally
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        # Run fix-vias and fix-drc steps together
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.FIX_VIAS, PipelineStep.FIX_DRC])
+
+        # Both steps should have run and succeeded
+        assert len(results) == 2
+        assert results[0].success is True
+        assert "warnings" in results[0].message
+        assert results[1].success is True
+
 
 class TestProjectInput:
     """Tests for .kicad_pro input support."""
