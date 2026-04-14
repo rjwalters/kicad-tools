@@ -567,8 +567,10 @@ Examples:
             print(f"Error saving PCB file: {e}", file=sys.stderr)
             return 1
 
-    # Return non-zero if there were warnings (like DRC might fail)
-    return 1 if warnings else 0
+    # Return exit code 2 for success-with-warnings (pipeline treats this as
+    # "completed with warnings" and continues).  Exit code 1 is reserved for
+    # actual errors (file not found, parse failure, save failure).
+    return 2 if warnings else 0
 
 
 if __name__ == "__main__":
