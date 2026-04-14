@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.report.utils import find_schematic
+
 if TYPE_CHECKING:
     from kicad_tools.audit.auditor import AuditResult
 
@@ -127,8 +129,8 @@ class ReportDataCollector:
         )
 
         # BOM
-        sch_path = self.pcb_path.with_suffix(".kicad_sch")
-        if sch_path.exists():
+        sch_path = find_schematic(self.pcb_path)
+        if sch_path is not None:
             self._safe_collect(
                 "bom",
                 output_dir,
@@ -136,7 +138,11 @@ class ReportDataCollector:
                 lambda: self.collect_bom(sch_path),
             )
         else:
-            logger.warning("No schematic found at %s; skipping BOM collection", sch_path)
+            logger.warning(
+                "No schematic found for %s; skipping BOM collection. "
+                "Use --sch to specify explicitly.",
+                self.pcb_path,
+            )
 
         # Audit
         self._safe_collect(

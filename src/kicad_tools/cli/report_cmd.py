@@ -190,7 +190,20 @@ def _generate_figures(
         )
         return
 
-    sch_path = Path(args.sch) if args.sch else input_path.with_suffix(".kicad_sch")
+    if args.sch:
+        sch_path: Path | None = Path(args.sch)
+    else:
+        from kicad_tools.report.utils import find_schematic
+
+        sch_path = find_schematic(input_path)
+
+    if sch_path is None:
+        print(
+            "Warning: figure generation skipped — no schematic found. "
+            "Use --sch to specify explicitly.",
+            file=sys.stderr,
+        )
+        return
 
     try:
         fig_gen = ReportFigureGenerator()
