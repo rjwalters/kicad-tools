@@ -56,17 +56,19 @@ def render_html(
     return _wrap_html(html_body, css)
 
 
-def render_pdf(html_content: str, output_path: Path) -> None:
+def render_pdf(html_content: str, output_path: Path | str) -> None:
     """Render an HTML document to PDF via weasyprint.
 
     Args:
         html_content: Complete HTML document string (from ``render_html``).
-        output_path: Destination path for the PDF file.
+        output_path: Destination path for the PDF file. Accepts both
+            :class:`~pathlib.Path` objects and plain strings.
 
     Raises:
         ImportError: If weasyprint is not installed, with an actionable
             message directing the user to install it.
     """
+    output_path = Path(output_path)
     if not _weasyprint_available():
         raise ImportError(
             "PDF output requires weasyprint. Install with: pip install 'kicad-tools[report]'"
