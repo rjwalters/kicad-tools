@@ -360,6 +360,151 @@ class TestReportImportError:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# TestUnwrapEnvelope
+# ---------------------------------------------------------------------------
+
+
+class TestUnwrapEnvelope:
+    """Test the _unwrap_envelope helper."""
+
+    def test_unwraps_standard_envelope(self) -> None:
+        from kicad_tools.cli.report_cmd import _unwrap_envelope
+
+        payload = {
+            "schema_version": 1,
+            "generated_at": "2026-04-12T00:00:00+00:00",
+            "pcb_path": "board.kicad_pcb",
+            "data": {"layer_count": 4},
+        }
+        assert _unwrap_envelope(payload) == {"layer_count": 4}
+
+    def test_returns_flat_dict_unchanged(self) -> None:
+        from kicad_tools.cli.report_cmd import _unwrap_envelope
+
+        flat = {"layer_count": 4, "net_count": 80}
+        assert _unwrap_envelope(flat) == flat
+
+    def test_returns_none_for_null_data(self) -> None:
+        from kicad_tools.cli.report_cmd import _unwrap_envelope
+
+        payload = {
+            "schema_version": 1,
+            "generated_at": "2026-04-12T00:00:00+00:00",
+            "data": None,
+        }
+        assert _unwrap_envelope(payload) is None
+
+
+# ---------------------------------------------------------------------------
+# TestLoadDataDir
+# ---------------------------------------------------------------------------
+
+
+class TestLoadDataDir:
+    """Test the _load_data_dir helper directly."""
+
+    def test_filename_mapping_board_summary(self, tmp_path: Path) -> None:
+        """board_summary.json maps to board_stats field."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "board_summary.json").write_text(
+            json.dumps({"layer_count": 2, "footprint_count": 5})
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert "board_stats" in result
+        # footprint_count should have been renamed to component_count
+        assert result["board_stats"]["component_count"] == 5
+        assert "footprint_count" not in result["board_stats"]
+
+    def test_filename_mapping_drc_summary(self, tmp_path: Path) -> None:
+        """drc_summary.json maps to drc field."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "drc_summary.json").write_text(json.dumps({"error_count": 0, "passed": True}))
+        result = _load_data_dir(str(tmp_path))
+        assert "drc" in result
+        assert result["drc"]["passed"] is True
+
+    def test_bom_groups_extraction(self, tmp_path: Path) -> None:
+        """BOM groups list is extracted from the groups key."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "bom.json").write_text(
+            json.dumps(
+                {
+                    "total_components": 3,
+                    "unique_parts": 1,
+                    "dnp_count": 0,
+                    "groups": [{"value": "10k", "qty": 3}],
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert isinstance(result["bom_groups"], list)
+        assert result["bom_groups"][0]["value"] == "10k"
+
+    def test_completion_pct_renamed(self, tmp_path: Path) -> None:
+        """completion_pct is renamed to completion_percent."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "net_status.json").write_text(
+            json.dumps({"completion_pct": 95.0, "unrouted_count": 2})
+        )
+        result = _load_data_dir(str(tmp_path))
+        ns = result["net_status"]
+        assert "completion_percent" in ns
+        assert ns["completion_percent"] == 95.0
+        assert "completion_pct" not in ns
+
+    def test_envelope_unwrapping(self, tmp_path: Path) -> None:
+        """Enveloped JSON files are unwrapped to their data payload."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "audit.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-12T00:00:00+00:00",
+                    "pcb_path": "board.kicad_pcb",
+                    "data": {"verdict": "ready"},
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert result["audit"]["verdict"] == "ready"
+        # Envelope keys must not leak through
+        assert "schema_version" not in result["audit"]
+
+    def test_missing_files_produce_empty_result(self, tmp_path: Path) -> None:
+        """A data directory with no recognized JSON files returns empty dict."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        result = _load_data_dir(str(tmp_path))
+        assert result == {}
+
+    def test_null_envelope_skips_section(self, tmp_path: Path) -> None:
+        """An envelope with data=null is skipped (section omitted)."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "board_summary.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-12T00:00:00+00:00",
+                    "data": None,
+                }
+            )
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert "board_stats" not in result
+
+
+# ---------------------------------------------------------------------------
+# TestReportCLI
+# ---------------------------------------------------------------------------
+
+
 class TestReportCLI:
     """Test the CLI entry point."""
 
@@ -400,17 +545,22 @@ class TestReportCLI:
         assert "testmfr" in content
 
     def test_generate_with_data_dir(self, tmp_path: Path) -> None:
-        """Calling generate with --data-dir loads JSON files."""
+        """Calling generate with --data-dir loads flat JSON files.
+
+        Uses the correct filenames that the collector writes
+        (``board_summary.json``, ``drc_summary.json``) and flat (no envelope)
+        data.  This verifies backward-compatibility with non-enveloped JSON.
+        """
         from kicad_tools.cli.report_cmd import main as report_main
 
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
-        # Write a board_stats JSON file
-        (data_dir / "board_stats.json").write_text(
+        # Filenames must match what the collector writes
+        (data_dir / "board_summary.json").write_text(
             json.dumps({"layer_count": 2, "component_count": 10})
         )
-        (data_dir / "drc.json").write_text(
+        (data_dir / "drc_summary.json").write_text(
             json.dumps({"error_count": 0, "warning_count": 0, "blocking_count": 0, "passed": True})
         )
 
@@ -433,3 +583,195 @@ class TestReportCLI:
         assert "## Design Summary" in content
         assert "## DRC Status" in content
         assert "PASS" in content
+
+    def test_generate_with_data_dir_envelope(self, tmp_path: Path) -> None:
+        """Envelope-wrapped JSON snapshots render all report sections.
+
+        Writes JSON files using the same envelope format the collector
+        produces (``{schema_version, generated_at, pcb_path, data: {...}}``),
+        verifies that every section renders with the correct values, and
+        exercises all five bug fixes from issue #1321:
+
+        1. Envelope unwrapping (all sections)
+        2. Filename mapping (board_summary.json -> board_stats,
+           drc_summary.json -> drc)
+        3. BOM groups extraction (data.groups -> bom_groups list)
+        4. completion_pct -> completion_percent rename
+        5. footprint_count -> component_count rename
+        """
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        def _envelope(data):
+            return {
+                "schema_version": 1,
+                "generated_at": "2026-04-12T00:00:00+00:00",
+                "pcb_path": "board.kicad_pcb",
+                "data": data,
+            }
+
+        # Bug 2 + Bug 5: board_summary.json with footprint_count
+        (data_dir / "board_summary.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "layer_count": 4,
+                        "footprint_count": 42,
+                        "net_count": 80,
+                        "segment_count": 200,
+                        "via_count": 15,
+                        "board_width_mm": 50.0,
+                        "board_height_mm": 30.0,
+                    }
+                )
+            )
+        )
+
+        # Bug 2: drc_summary.json (not drc.json)
+        (data_dir / "drc_summary.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "error_count": 1,
+                        "warning_count": 2,
+                        "blocking_count": 0,
+                        "passed": False,
+                    }
+                )
+            )
+        )
+
+        # Bug 3: BOM groups nested under "groups" key
+        (data_dir / "bom.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "total_components": 10,
+                        "unique_parts": 2,
+                        "dnp_count": 0,
+                        "groups": [
+                            {
+                                "value": "100nF",
+                                "footprint": "0402",
+                                "qty": 10,
+                                "refs": "C1-C10",
+                                "mpn": "CL05B104KO5NNNC",
+                                "lcsc": "C1525",
+                            },
+                        ],
+                    }
+                )
+            )
+        )
+
+        # Bug 1: audit with envelope
+        (data_dir / "audit.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "verdict": "ready",
+                        "action_items": ["Review silkscreen"],
+                    }
+                )
+            )
+        )
+
+        # Bug 4: net_status with completion_pct (not completion_percent)
+        (data_dir / "net_status.json").write_text(
+            json.dumps(
+                _envelope(
+                    {
+                        "total_nets": 80,
+                        "complete_count": 76,
+                        "incomplete_count": 4,
+                        "unrouted_count": 2,
+                        "total_unconnected_pads": 5,
+                        "completion_pct": 95.0,
+                    }
+                )
+            )
+        )
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert result == 0
+
+        content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
+
+        # Section headings present
+        assert "## Design Summary" in content
+        assert "## Bill of Materials" in content
+        assert "## DRC Status" in content
+        assert "## Manufacturing Readiness" in content
+        assert "## Routing Status" in content
+
+        # Bug 5: component_count (renamed from footprint_count) renders
+        assert "| Components | 42 |" in content
+
+        # Bug 1: board_stats values render (layer_count from envelope)
+        assert "| Layers | 4 |" in content
+
+        # Bug 2: DRC values render from drc_summary.json
+        assert "| Errors | 1 |" in content
+        assert "FAIL" in content
+
+        # Bug 3: BOM table rows populated
+        assert "100nF" in content
+        assert "C1525" in content
+
+        # Bug 1: audit renders
+        assert "READY" in content
+        assert "Review silkscreen" in content
+
+        # Bug 4: completion_percent renders (renamed from completion_pct)
+        assert "95.0%" in content
+
+    def test_generate_with_data_dir_null_envelope(self, tmp_path: Path) -> None:
+        """An envelope with ``data: null`` (collector failure) omits the section."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        (data_dir / "board_summary.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "generated_at": "2026-04-12T00:00:00+00:00",
+                    "pcb_path": "board.kicad_pcb",
+                    "data": None,
+                }
+            )
+        )
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        assert result == 0
+
+        content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
+        # Section should be omitted, not crash
+        assert "## Design Summary" not in content

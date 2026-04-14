@@ -98,16 +98,32 @@ def _run_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unwrap_envelope(payload: dict) -> dict | None:
+    """Extract the ``data`` value from a collector envelope.
+
+    The collector wraps every snapshot in
+    ``{"schema_version": ..., "generated_at": ..., "data": <actual>}``.
+    If *payload* looks like an envelope, return ``payload["data"]``;
+    otherwise return *payload* unchanged so flat (non-enveloped) JSON
+    files continue to work.
+    """
+    if isinstance(payload, dict) and "schema_version" in payload and "data" in payload:
+        return payload["data"]
+    return payload
+
+
 def _load_data_dir(data_dir_str: str) -> dict:
     """Load JSON files from a data directory into ReportData kwargs."""
     data_dir = Path(data_dir_str)
     result: dict = {}
 
-    # Map of JSON file names to ReportData field names
+    # Map of JSON file names to ReportData field names.
+    # The collector writes ``board_summary.json`` and ``drc_summary.json``,
+    # so the mapping must match those filenames.
     mappings = {
-        "board_stats.json": "board_stats",
+        "board_summary.json": "board_stats",
         "bom.json": "bom_groups",
-        "drc.json": "drc",
+        "drc_summary.json": "drc",
         "audit.json": "audit",
         "net_status.json": "net_status",
         "cost.json": "cost",
@@ -119,7 +135,31 @@ def _load_data_dir(data_dir_str: str) -> dict:
         json_path = data_dir / filename
         if json_path.exists():
             with open(json_path, encoding="utf-8") as f:
-                result[field_name] = json.load(f)
+                raw = json.load(f)
+            data = _unwrap_envelope(raw)
+            # Skip sections whose collector failed (data: null envelope).
+            if data is None:
+                continue
+            result[field_name] = data
+
+    # --- Post-load transformations ------------------------------------------
+
+    # BOM: the collector nests the group list under a ``groups`` key;
+    # ReportData.bom_groups expects a plain list[dict].
+    if "bom_groups" in result and isinstance(result["bom_groups"], dict):
+        result["bom_groups"] = result["bom_groups"].get("groups", [])
+
+    # net_status: collector writes ``completion_pct`` but the template
+    # reads ``completion_percent``.
+    ns = result.get("net_status")
+    if isinstance(ns, dict) and "completion_pct" in ns:
+        ns["completion_percent"] = ns.pop("completion_pct")
+
+    # board_stats: collector writes ``footprint_count`` but the template
+    # checks ``component_count``.
+    bs = result.get("board_stats")
+    if isinstance(bs, dict) and "footprint_count" in bs:
+        bs["component_count"] = bs.pop("footprint_count")
 
     # Load notes from text file
     notes_path = data_dir / "notes.txt"
