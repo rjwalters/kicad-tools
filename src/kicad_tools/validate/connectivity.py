@@ -252,9 +252,21 @@ class ConnectivityValidator:
         result.total_nets = len(nets)
         connected_count = 0
 
+        # Determine whether the board has footprints.  If it does but a
+        # named net has zero pads, the net assignments may have been
+        # corrupted (all pads zeroed to net 0).  In that case the net
+        # should NOT be counted as connected.
+        has_footprints = len(self.pcb.footprints) > 0
+
         for net_number, net in nets.items():
             # Get all pads on this net
             pads = self._get_net_pads(net_number)
+
+            if len(pads) == 0 and has_footprints:
+                # A named net with no pads on a board that has footprints
+                # is suspicious -- pad net assignments may have been
+                # stripped.  Do NOT count as connected.
+                continue
 
             if len(pads) < 2:
                 # Single-pad nets are always "connected"

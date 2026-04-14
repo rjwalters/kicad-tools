@@ -744,3 +744,111 @@ class TestAuditJsonSchema:
         # CI-friendly check: counts are integers
         assert isinstance(data["erc"]["error_count"], int)
         assert isinstance(data["drc"]["error_count"], int)
+
+
+# ---------------------------------------------------------------------------
+# Test: corruption guard in auditor
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptionGuard:
+    """Tests for the data corruption guard in ManufacturingAudit._check_connectivity."""
+
+    # A board with footprints where all pads have net 0 (corrupted)
+    CORRUPTED_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.15) (type default)) (fill none) (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 50 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+  )
+)
+"""
+
+    # A board with proper net assignments
+    NORMAL_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.15) (type default)) (fill none) (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 50 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+)
+"""
+
+    def test_all_pads_net_zero_triggers_not_ready(self, tmp_path):
+        """Board with footprints where all pads have net 0 should be NOT_READY."""
+        pcb_path = tmp_path / "corrupted.kicad_pcb"
+        pcb_path.write_text(self.CORRUPTED_PCB)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        assert result.connectivity.passed is False
+        assert "corruption" in result.connectivity.details.lower()
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_normal_board_does_not_trigger_guard(self, tmp_path):
+        """Board with proper pad net assignments should not trigger guard."""
+        pcb_path = tmp_path / "normal.kicad_pcb"
+        pcb_path.write_text(self.NORMAL_PCB)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Should NOT have corruption message
+        assert "corruption" not in result.connectivity.details.lower()
+
+    def test_no_footprints_does_not_trigger_guard(self, tmp_path):
+        """Board with no footprints should not trigger the corruption guard."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100)
+        pcb_path = tmp_path / "empty.kicad_pcb"
+        pcb.save(str(pcb_path))
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Should not have corruption details
+        assert "corruption" not in result.connectivity.details.lower()

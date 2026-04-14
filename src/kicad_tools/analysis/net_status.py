@@ -83,15 +83,27 @@ class NetStatus:
 
     @property
     def connection_percentage(self) -> float:
-        """Percentage of pads connected (0-100)."""
+        """Percentage of pads connected (0-100).
+
+        Returns 0.0 when total_pads is 0 to avoid masking data corruption
+        where all pad net assignments have been stripped.
+        """
         if self.total_pads == 0:
-            return 100.0
+            return 0.0
         return (self.connected_count / self.total_pads) * 100
 
     @property
     def status(self) -> str:
-        """Net status: 'complete', 'incomplete', or 'unrouted'."""
-        if self.total_pads <= 1:
+        """Net status: 'complete', 'incomplete', or 'unrouted'.
+
+        A net with 0 pads is reported as 'unrouted' rather than 'complete'
+        to avoid masking corruption where pad net assignments were stripped.
+        A net with exactly 1 pad is genuinely complete (single-pad nets are
+        valid in KiCad).
+        """
+        if self.total_pads == 0:
+            return "unrouted"
+        if self.total_pads == 1:
             return "complete"
         if self.unconnected_count == 0:
             return "complete"

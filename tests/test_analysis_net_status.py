@@ -274,7 +274,7 @@ class TestNetStatus:
     def test_connection_percentage_empty(self):
         """Test connection_percentage with no pads."""
         status = NetStatus(net_number=1, net_name="VCC", total_pads=0)
-        assert status.connection_percentage == 100.0
+        assert status.connection_percentage == 0.0
 
     def test_status_complete(self):
         """Test status is 'complete' when all pads connected."""
