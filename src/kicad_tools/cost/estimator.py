@@ -31,6 +31,7 @@ class ComponentCost:
     in_stock: bool  # Whether part is in stock
     lead_time_days: int | None  # Lead time if known
     is_basic: bool  # JLCPCB basic part (no setup fee)
+    pricing_source: str = "estimated"  # "lcsc" or "estimated"
 
     @property
     def total_for_quantity(self) -> float:
@@ -184,6 +185,7 @@ class CostEstimate:
                         "extended_cost": round(c.extended_cost, 2),
                         "in_stock": c.in_stock,
                         "is_basic": c.is_basic,
+                        "pricing_source": c.pricing_source,
                     }
                     for c in self.components
                 ],
@@ -238,14 +240,17 @@ _PRICING_DIR = Path(__file__).parent / "pricing"
 class ManufacturingCostEstimator:
     """Estimate PCB manufacturing costs for a given manufacturer."""
 
-    def __init__(self, manufacturer: str = "jlcpcb"):
+    def __init__(self, manufacturer: str = "jlcpcb", use_lcsc_pricing: bool = True):
         """
         Initialize cost estimator.
 
         Args:
             manufacturer: Manufacturer ID (jlcpcb, pcbway, etc.)
+            use_lcsc_pricing: If True, fetch real pricing from LCSC for parts
+                with LCSC part numbers. Set to False for offline use or testing.
         """
         self.manufacturer = manufacturer.lower()
+        self.use_lcsc_pricing = use_lcsc_pricing
         self.pricing = self._load_pricing()
 
     def _load_pricing(self) -> dict:
@@ -622,17 +627,54 @@ class ManufacturingCostEstimator:
         )
 
     def _estimate_component_costs(self, bom: BOM, quantity: int) -> list[ComponentCost]:
-        """Estimate component costs from BOM."""
+        """Estimate component costs from BOM.
+
+        When use_lcsc_pricing is enabled and BOM groups have LCSC part numbers,
+        fetches real pricing from LCSC via LCSCClient.lookup_many(). Falls back
+        to category-based estimates when LCSC lookup fails or parts lack LCSC numbers.
+        """
         costs: list[ComponentCost] = []
         pricing = self.pricing.get("components", {})
+
+        # Bulk-fetch real prices for groups that have LCSC numbers
+        lcsc_map: dict = {}
+        if self.use_lcsc_pricing:
+            lcsc_numbers = [
+                g.lcsc for g in bom.grouped() if g.lcsc and not (g.items and g.items[0].dnp)
+            ]
+            if lcsc_numbers:
+                try:
+                    from kicad_tools.parts import LCSCClient
+
+                    client = LCSCClient()
+                    lcsc_map = client.lookup_many(list(set(lcsc_numbers)))
+                except Exception:
+                    pass  # Fall through to category-based estimates
 
         for group in bom.grouped():
             # Skip DNP components
             if group.items and group.items[0].dnp:
                 continue
 
-            # Determine unit cost
-            unit_cost = self._get_component_price(group, pricing)
+            # Try LCSC pricing first
+            lcsc_key = (group.lcsc or "").upper()
+            part = lcsc_map.get(lcsc_key)
+
+            if part is not None:
+                real_price = part.price_at_quantity(group.quantity * quantity)
+                if real_price is not None:
+                    unit_cost = real_price
+                    pricing_source = "lcsc"
+                else:
+                    unit_cost = self._get_component_price(group, pricing)
+                    pricing_source = "estimated"
+                in_stock = part.stock > 0
+                is_basic = part.is_basic
+            else:
+                unit_cost = self._get_component_price(group, pricing)
+                in_stock = True  # Unknown, assume available
+                is_basic = self._is_basic_part(group.lcsc) if group.lcsc else False
+                pricing_source = "estimated"
 
             costs.append(
                 ComponentCost(
@@ -644,9 +686,10 @@ class ManufacturingCostEstimator:
                     quantity_per_board=group.quantity,
                     unit_cost=unit_cost,
                     extended_cost=unit_cost * group.quantity,
-                    in_stock=True,  # Would need API lookup for real data
+                    in_stock=in_stock,
                     lead_time_days=None,
-                    is_basic=self._is_basic_part(group.lcsc) if group.lcsc else False,
+                    is_basic=is_basic,
+                    pricing_source=pricing_source,
                 )
             )
 

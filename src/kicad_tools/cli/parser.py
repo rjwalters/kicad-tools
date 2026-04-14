@@ -2334,6 +2334,12 @@ def _add_estimate_parser(subparsers) -> None:
     estimate_cost.add_argument(
         "-v", "--verbose", action="store_true", help="Show detailed breakdown"
     )
+    estimate_cost.add_argument(
+        "--no-lcsc",
+        action="store_true",
+        default=False,
+        help="Disable LCSC pricing lookup (use category-based estimates only)",
+    )
 
 
 def _add_audit_parser(subparsers) -> None:
