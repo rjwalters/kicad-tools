@@ -24,9 +24,10 @@ class TestAuditResult:
         assert result.is_ready is True
 
     def test_verdict_not_ready_with_erc_errors(self):
-        """Test that verdict is NOT_READY with ERC errors."""
+        """Test that verdict is NOT_READY with blocking ERC errors."""
         result = AuditResult()
         result.erc.error_count = 1
+        result.erc.blocking_error_count = 1
         assert result.verdict == AuditVerdict.NOT_READY
         assert result.is_ready is False
 
@@ -156,9 +157,10 @@ class TestAuditResult:
         When only one gate fails and all others pass, verdict must be NOT_READY.
         This confirms no gate is redundant and all four are independently checked.
         """
-        # Gate 1: Only ERC errors block
+        # Gate 1: Only ERC blocking errors block
         result = AuditResult()
         result.erc.error_count = 3
+        result.erc.blocking_error_count = 3
         result.drc.blocking_count = 0
         result.connectivity.passed = True
         result.compatibility.passed = True
@@ -513,6 +515,7 @@ class TestAuditExitCodes:
         """Test that CLI returns exit code 1 when verdict is NOT_READY."""
         result = AuditResult()
         result.erc.error_count = 5
+        result.erc.blocking_error_count = 5
         assert result.verdict == AuditVerdict.NOT_READY
 
         # Verify the exit code mapping
@@ -561,11 +564,12 @@ class TestAuditOutputRendering:
         assert "[OK] READY FOR MANUFACTURING" in captured.out
 
     def test_output_table_shows_not_ready_when_erc_fails(self, capsys):
-        """Test that output_table prints NOT READY when ERC has errors."""
+        """Test that output_table prints NOT READY when ERC has blocking errors."""
         from kicad_tools.cli.audit_cmd import output_table
 
         result = AuditResult(project_name="test_failing_board")
         result.erc.error_count = 3
+        result.erc.blocking_error_count = 3
         assert result.verdict == AuditVerdict.NOT_READY
 
         output_table(result)

@@ -34,6 +34,7 @@ class ERCStatus:
 
     error_count: int = 0
     warning_count: int = 0
+    blocking_error_count: int = 0  # Only electrical errors that block readiness
     passed: bool = True
     details: str = ""
     report_path: Path | None = None
@@ -42,6 +43,7 @@ class ERCStatus:
         return {
             "error_count": self.error_count,
             "warning_count": self.warning_count,
+            "blocking_error_count": self.blocking_error_count,
             "passed": self.passed,
             "details": self.details,
         }
@@ -224,7 +226,7 @@ class AuditResult:
     def verdict(self) -> AuditVerdict:
         """Determine overall verdict based on check results."""
         # Critical failures
-        if self.erc.error_count > 0:
+        if self.erc.blocking_error_count > 0:
             return AuditVerdict.NOT_READY
         if self.drc.blocking_count > 0:
             return AuditVerdict.NOT_READY
@@ -484,16 +486,38 @@ class ManufacturingAudit:
 
                 if report_path.exists():
                     from kicad_tools.erc import ERCReport
+                    from kicad_tools.erc.violation import (
+                        ERC_BLOCKING_TYPES,
+                        ERC_NON_BLOCKING_TYPES,
+                    )
 
                     report = ERCReport.load(report_path)
-                    status.error_count = report.error_count
-                    status.warning_count = report.warning_count
-                    status.passed = report.error_count == 0
-                    if report.error_count > 0:
-                        # Get first few error types
+                    status.error_count = report.error_count  # raw total for reporting
+
+                    # Split errors by blocking vs non-blocking type
+                    blocking = [v for v in report.errors if v.type in ERC_BLOCKING_TYPES]
+                    non_blocking = [v for v in report.errors if v.type in ERC_NON_BLOCKING_TYPES]
+                    unknown_errors = [
+                        v
+                        for v in report.errors
+                        if v.type not in ERC_BLOCKING_TYPES and v.type not in ERC_NON_BLOCKING_TYPES
+                    ]
+
+                    # Unknown error types default to blocking (conservative)
+                    status.blocking_error_count = len(blocking) + len(unknown_errors)
+                    # Demote non-blocking errors to warnings
+                    status.warning_count = report.warning_count + len(non_blocking)
+                    status.passed = status.blocking_error_count == 0
+
+                    if status.blocking_error_count > 0:
+                        # Get first few blocking error types for the details string
                         by_type = report.violations_by_type()
-                        types = list(by_type.keys())[:3]
-                        status.details = ", ".join(t.value for t in types)
+                        blocking_types = [
+                            t
+                            for t in by_type
+                            if t in ERC_BLOCKING_TYPES or t not in ERC_NON_BLOCKING_TYPES
+                        ][:3]
+                        status.details = ", ".join(t.value for t in blocking_types)
                     status.report_path = report_path
             except FileNotFoundError:
                 # kicad-cli not installed
@@ -701,13 +725,24 @@ class ManufacturingAudit:
         """Generate prioritized action items from results."""
         items: list[ActionItem] = []
 
-        # ERC errors
-        if result.erc.error_count > 0:
+        # Blocking ERC errors (electrical issues)
+        if result.erc.blocking_error_count > 0:
             items.append(
                 ActionItem(
                     priority=1,
-                    description=f"Fix {result.erc.error_count} ERC errors in schematic"
+                    description=f"Fix {result.erc.blocking_error_count} blocking ERC errors in schematic"
                     + (f" ({result.erc.details})" if result.erc.details else ""),
+                    command=f"kicad-cli sch erc {self.schematic_path}",
+                )
+            )
+
+        # Non-blocking ERC errors (demoted to warnings)
+        non_blocking_count = result.erc.error_count - result.erc.blocking_error_count
+        if non_blocking_count > 0:
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=f"Review {non_blocking_count} non-blocking ERC warnings (library/footprint checks)",
                     command=f"kicad-cli sch erc {self.schematic_path}",
                 )
             )
