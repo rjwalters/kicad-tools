@@ -46,6 +46,7 @@ class PipelineStep(str, Enum):
 
     ERC = "erc"
     FIX_SILKSCREEN = "fix-silkscreen"
+    FIX_ERC = "fix-erc"
     ROUTE = "route"
     FIX_VIAS = "fix-vias"
     FIX_DRC = "fix-drc"
@@ -59,6 +60,7 @@ class PipelineStep(str, Enum):
 ALL_STEPS = [
     PipelineStep.ERC,
     PipelineStep.FIX_SILKSCREEN,
+    PipelineStep.FIX_ERC,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
     PipelineStep.FIX_DRC,
@@ -322,6 +324,48 @@ def _run_step_fix_silkscreen(ctx: PipelineContext, console: Console) -> Pipeline
         step=PipelineStep.FIX_SILKSCREEN,
         success=success,
         message=f"fix-silkscreen: {message}",
+    )
+
+
+def _run_step_fix_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run ERC auto-fix step on the schematic.
+
+    Inserts PWR_FLAG and no-connect markers to resolve common ERC violations.
+    Skips gracefully when no schematic is found.
+    """
+    # Skip if no schematic file available
+    if ctx.schematic_file is None:
+        return PipelineResult(
+            step=PipelineStep.FIX_ERC,
+            success=True,
+            message="fix-erc: no .kicad_sch found alongside PCB -- skipped",
+            skipped=True,
+        )
+
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.FIX_ERC,
+            success=True,
+            message=f"[dry-run] Would run: kct fix-erc {ctx.schematic_file.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running ERC auto-fix on {ctx.schematic_file.name}...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "fix-erc",
+        str(ctx.schematic_file),
+    ]
+
+    success, message = _run_subprocess_step(cmd, ctx.schematic_file.parent, ctx.verbose)
+
+    return PipelineResult(
+        step=PipelineStep.FIX_ERC,
+        success=success,
+        message=f"fix-erc: {message}",
     )
 
 
@@ -834,6 +878,7 @@ def _git_commit_result(
 STEP_RUNNERS = {
     PipelineStep.ERC: _run_step_erc,
     PipelineStep.FIX_SILKSCREEN: _run_step_fix_silkscreen,
+    PipelineStep.FIX_ERC: _run_step_fix_erc,
     PipelineStep.ROUTE: _run_step_route,
     PipelineStep.FIX_VIAS: _run_step_fix_vias,
     PipelineStep.FIX_DRC: _run_step_fix_drc,

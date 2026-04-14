@@ -166,6 +166,23 @@ def run_fix_drc_command(args) -> int:
     return fix_drc_main(sub_argv)
 
 
+def run_fix_erc_command(args) -> int:
+    """Handle fix-erc command."""
+    from ..fix_erc_cmd import main as fix_erc_main
+
+    sub_argv = [args.schematic]
+    if getattr(args, "erc_report", None):
+        sub_argv.extend(["--erc-report", args.erc_report])
+    if args.dry_run:
+        sub_argv.append("--dry-run")
+    if args.format != "text":
+        sub_argv.extend(["--format", args.format])
+    # Use global quiet flag
+    if getattr(args, "global_quiet", False):
+        sub_argv.append("--quiet")
+    return fix_erc_main(sub_argv)
+
+
 def run_check_command(args) -> int:
     """Handle check command (pure Python DRC)."""
     from ..check_cmd import main as check_main

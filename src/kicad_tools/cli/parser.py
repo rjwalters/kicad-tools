@@ -154,6 +154,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_silkscreen_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
     _add_fix_drc_parser(subparsers)
+    _add_fix_erc_parser(subparsers)
     _add_parts_parser(subparsers)
     _add_datasheet_parser(subparsers)
     _add_decisions_parser(subparsers)
@@ -1386,6 +1387,29 @@ def _add_fix_drc_parser(subparsers) -> None:
         ),
     )
     fix_drc_parser.add_argument(
+        "--format",
+        choices=["text", "json", "summary"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+
+def _add_fix_erc_parser(subparsers) -> None:
+    """Add fix-erc subcommand parser."""
+    fix_erc_parser = subparsers.add_parser(
+        "fix-erc", help="Automated ERC violation repair (PWR_FLAG + no-connect)"
+    )
+    fix_erc_parser.add_argument("schematic", help="Path to .kicad_sch file")
+    fix_erc_parser.add_argument(
+        "--erc-report",
+        help="Path to existing ERC report (.rpt or .json)",
+    )
+    fix_erc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying files",
+    )
+    fix_erc_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
@@ -2907,6 +2931,7 @@ def _add_pipeline_parser(subparsers) -> None:
         choices=[
             "erc",
             "fix-silkscreen",
+            "fix-erc",
             "route",
             "fix-vias",
             "fix-drc",
