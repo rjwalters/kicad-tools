@@ -312,11 +312,11 @@ class TestCollectBOM:
         assert "groups" in bom_data
         assert isinstance(bom_data["groups"], list)
 
-        # Each group should have quantity and lcsc fields
+        # Each group should have qty and lcsc fields
         for group in bom_data["groups"]:
-            assert "quantity" in group
+            assert "qty" in group
             assert "lcsc" in group
-            assert "references" in group
+            assert "refs" in group
             assert "value" in group
             assert "footprint" in group
 
@@ -667,8 +667,8 @@ class TestBOMSerialization:
         group = BOMGroup(value="10k", footprint="R_0402", items=items)
         d = group.to_dict()
 
-        assert d["quantity"] == 2
-        assert "R1" in d["references"]
-        assert "R2" in d["references"]
+        assert d["qty"] == 2
+        assert "R1" in d["refs"]
+        assert "R2" in d["refs"]
         assert d["lcsc"] == "C25744"
         assert len(d["items"]) == 2
