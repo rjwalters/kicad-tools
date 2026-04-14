@@ -187,12 +187,18 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
             return PipelineResult(
                 step=PipelineStep.ROUTE,
                 success=True,
-                message=f"[dry-run] Would re-route (--force): {ctx.pcb_file.name}",
+                message=(
+                    f"[dry-run] Would re-route (--force): {ctx.pcb_file.name} "
+                    f"--grid auto --manufacturer {ctx.mfr} --layers auto --auto-fix"
+                ),
             )
         return PipelineResult(
             step=PipelineStep.ROUTE,
             success=True,
-            message=f"[dry-run] Would run: kct route {ctx.pcb_file.name}",
+            message=(
+                f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
+                f"--grid auto --manufacturer {ctx.mfr} --layers auto --auto-fix"
+            ),
         )
 
     if not ctx.quiet:
@@ -206,6 +212,13 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
         str(ctx.pcb_file),
         "-o",
         str(ctx.pcb_file),  # Route in place for pipeline
+        "--grid",
+        "auto",
+        "--manufacturer",
+        ctx.mfr,
+        "--layers",
+        "auto",  # Let router auto-detect; avoids int-to-"4-sig" ambiguity
+        "--auto-fix",
     ]
 
     if ctx.quiet:
