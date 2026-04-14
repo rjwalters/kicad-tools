@@ -37,12 +37,23 @@ KICAD_INSTALL_URL = "https://www.kicad.org/download/"
 
 
 def _check_cairosvg() -> bool:
-    """Check if cairosvg is available."""
-    try:
-        import cairosvg  # noqa: F401
+    """Check if cairosvg is available and the native cairo library is loadable.
 
+    A bare ``import cairosvg`` succeeds even when the underlying C library
+    (``libcairo``) is missing from the dynamic linker's search path.  The
+    ``OSError`` only fires when ``cairosvg`` actually tries to call into the
+    native library.  We therefore do a lightweight probe render to surface
+    that failure early, before any real work begins.
+    """
+    try:
+        import cairosvg
+
+        # Probe: calling svg2png with a trivial SVG document exposes a
+        # missing native cairo library (raises OSError on macOS/Linux when
+        # libcairo is not on the dynamic linker path).
+        cairosvg.svg2png(bytestring=b"<svg xmlns='http://www.w3.org/2000/svg'/>")
         return True
-    except ImportError:
+    except (ImportError, OSError):
         return False
 
 
