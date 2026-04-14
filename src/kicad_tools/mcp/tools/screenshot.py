@@ -33,6 +33,12 @@ LAYER_PRESETS: dict[str, list[str]] = {
 # Maximum image dimension for Claude vision API
 MAX_VISION_API_PX = 1568
 
+# Fallback pixel width used for the first-pass render when the SVG has no
+# explicit width/height attributes.  Large enough to preserve aspect-ratio
+# accuracy when reading dimensions from the PNG header; the actual output is
+# discarded and re-rendered at the correct target size.
+_FALLBACK_RENDER_PX = 4096
+
 KICAD_INSTALL_URL = "https://www.kicad.org/download/"
 
 
@@ -51,9 +57,15 @@ def _check_cairosvg() -> bool:
         # Probe: calling svg2png with a trivial SVG document exposes a
         # missing native cairo library (raises OSError on macOS/Linux when
         # libcairo is not on the dynamic linker path).
-        cairosvg.svg2png(bytestring=b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+        #
+        # The probe SVG includes explicit width/height attributes so that
+        # newer cairosvg versions (>=1.0.2) do not raise ValueError for
+        # undefined SVG dimensions.
+        cairosvg.svg2png(
+            bytestring=b"<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>"
+        )
         return True
-    except (ImportError, OSError):
+    except (ImportError, OSError, ValueError):
         return False
 
 
@@ -179,10 +191,13 @@ def _svg_to_png(
         )
 
     try:
-        # First pass: render at native resolution to determine dimensions
-        # Use a reasonable default output width to get aspect ratio
+        # First pass: render with a fallback width to determine aspect ratio.
+        # Supplying output_width prevents ValueError on SVGs that carry only
+        # a viewBox attribute and no explicit width/height (common with
+        # kicad-cli exports using --page-size-mode 2).
         png_bytes = cairosvg.svg2png(
             url=str(svg_path),
+            output_width=_FALLBACK_RENDER_PX,
         )
 
         # Determine actual dimensions using the PNG header
