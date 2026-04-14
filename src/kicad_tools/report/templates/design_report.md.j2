@@ -69,6 +69,12 @@
 ![PCB Copper]({{ pcb_figures.copper }})
 
 {% endif %}
+{% if pcb_figures.assembly is defined and pcb_figures.assembly %}
+### Assembly
+
+![Assembly]({{ pcb_figures.assembly }})
+
+{% endif %}
 {% endif %}
 {% if bom_groups %}
 ## Bill of Materials

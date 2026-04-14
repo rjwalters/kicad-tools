@@ -628,6 +628,10 @@ def _run_report_command(args) -> int:
             sub_argv.extend(["--data-dir", args.report_data_dir])
         if hasattr(args, "report_template") and args.report_template:
             sub_argv.extend(["--template", args.report_template])
+        if hasattr(args, "report_sch") and args.report_sch:
+            sub_argv.extend(["--sch", args.report_sch])
+        if getattr(args, "report_no_figures", False):
+            sub_argv.append("--no-figures")
 
     return report_cmd(sub_argv)
 

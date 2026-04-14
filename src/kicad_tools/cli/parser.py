@@ -3641,3 +3641,16 @@ def _add_report_parser(subparsers) -> None:
         default=None,
         help="Path to a custom Jinja2 template file",
     )
+    gen_parser.add_argument(
+        "--sch",
+        dest="report_sch",
+        default=None,
+        help="Path to root .kicad_sch file (inferred from input if omitted)",
+    )
+    gen_parser.add_argument(
+        "--no-figures",
+        dest="report_no_figures",
+        action="store_true",
+        default=False,
+        help="Skip figure generation (useful when kicad-cli/cairosvg are unavailable)",
+    )

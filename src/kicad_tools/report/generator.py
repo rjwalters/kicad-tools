@@ -49,19 +49,27 @@ class ReportGenerator:
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(self, data: ReportData, output_dir: Path) -> Path:
+    def generate(
+        self,
+        data: ReportData,
+        output_dir: Path,
+        version_dir: Path | None = None,
+    ) -> Path:
         """Render the template and write ``report.md`` into a versioned sub-directory.
 
         Auto-versioning
         ~~~~~~~~~~~~~~~
-        * Scans *output_dir* for existing ``v<N>/`` directories.
-        * Creates the next version directory ``v<N+1>/``.
+        * When *version_dir* is ``None`` (default), scans *output_dir*
+          for existing ``v<N>/`` directories and creates the next one.
+        * When *version_dir* is provided, uses that directory directly
+          (useful when figures have already been written there).
         * If the chosen directory already contains ``report.md``,
           raises :class:`FileExistsError` (immutability guard).
 
         Returns the path to the written ``report.md``.
         """
-        version_dir = self._next_version_dir(output_dir)
+        if version_dir is None:
+            version_dir = self.next_version_dir(output_dir)
         version_dir.mkdir(parents=True, exist_ok=True)
 
         report_path = version_dir / "report.md"
@@ -109,7 +117,7 @@ class ReportGenerator:
         return template.render(**context)
 
     @staticmethod
-    def _next_version_dir(output_dir: Path) -> Path:
+    def next_version_dir(output_dir: Path) -> Path:
         """Determine the next ``vN`` sub-directory under *output_dir*."""
         output_dir = Path(output_dir)
         existing = []
