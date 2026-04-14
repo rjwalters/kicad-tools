@@ -118,8 +118,10 @@ Examples:
     if not args.quiet:
         _print_results(result, args.format, args.dry_run)
 
-    # Exit code: 0 when all targeted violations are fixed; non-zero when any remain
-    remaining = result.total_violations - result.total_fixed
+    # Exit code: 0 when all targeted violations are fixed; non-zero when any remain.
+    # skipped_duplicate violations count as resolved (dedup prevents inserting twice at the
+    # same position), so subtract them from the outstanding count.
+    remaining = result.total_violations - result.total_fixed - result.skipped_duplicate
     if result.total_violations == 0:
         return 0
     return 0 if remaining == 0 else 1

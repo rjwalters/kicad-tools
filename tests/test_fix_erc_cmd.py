@@ -341,6 +341,51 @@ class TestExitCode:
         exit_code = main([str(sch_file), "--erc-report", str(report_file), "--quiet"])
         assert exit_code == 0
 
+    def test_exit_code_zero_when_duplicates_all_resolved(self, tmp_path):
+        """Exit code 0 when all violations share a position and one fix covers them all.
+
+        Regression test for the skipped_duplicate accounting bug: when two violations
+        share the same coordinates, total_violations==2, total_fixed==1, and
+        skipped_duplicate==1.  The exit-code formula must subtract skipped_duplicate
+        so that remaining==0 and the command returns 0.
+        """
+        sch_file = tmp_path / "board.kicad_sch"
+        sch_file.write_text(MINIMAL_SCHEMATIC)
+
+        report_data = {
+            "source": "board.kicad_sch",
+            "kicad_version": "8.0.0",
+            "coordinate_units": "mm",
+            "sheets": [
+                {
+                    "path": "/",
+                    "violations": [
+                        {
+                            "type": "pin_not_connected",
+                            "severity": "error",
+                            "description": "Pin 1 not connected",
+                            "pos": {"x": 100, "y": 50},
+                            "items": [],
+                            "excluded": False,
+                        },
+                        {
+                            "type": "pin_not_connected",
+                            "severity": "error",
+                            "description": "Pin 2 not connected",
+                            "pos": {"x": 100, "y": 50},
+                            "items": [],
+                            "excluded": False,
+                        },
+                    ],
+                }
+            ],
+        }
+        report_file = tmp_path / "erc.json"
+        report_file.write_text(json.dumps(report_data))
+
+        exit_code = main([str(sch_file), "--erc-report", str(report_file), "--dry-run", "--quiet"])
+        assert exit_code == 0
+
 
 # ── Tests: duplicate position handling ───────────────────────────────
 
