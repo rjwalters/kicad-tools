@@ -75,7 +75,7 @@ class PipelineContext:
     pcb_file: Path
     project_file: Path | None = None
     mfr: str = "jlcpcb"
-    layers: int = 2
+    layers: int | None = None
     dry_run: bool = False
     verbose: bool = False
     quiet: bool = False
@@ -538,8 +538,8 @@ Examples:
         "--layers",
         "-l",
         type=int,
-        default=2,
-        help="Number of PCB layers (default: 2)",
+        default=None,
+        help="Number of copper layers (default: auto-detected from board)",
     )
     parser.add_argument(
         "--dry-run",
@@ -601,12 +601,29 @@ Examples:
         )
         return 1
 
+    # Resolve layer count from PCB when not explicitly specified
+    if args.layers is not None:
+        resolved_layers = args.layers
+    else:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(pcb_file)
+            detected = len(pcb.copper_layers)
+            resolved_layers = detected if detected > 0 else 2
+        except Exception:
+            logger.warning(
+                "Could not auto-detect layer count from %s; defaulting to 2",
+                pcb_file.name,
+            )
+            resolved_layers = 2
+
     # Build context
     ctx = PipelineContext(
         pcb_file=pcb_file,
         project_file=project_file,
         mfr=args.mfr,
-        layers=args.layers,
+        layers=resolved_layers,
         dry_run=args.dry_run,
         verbose=args.verbose,
         quiet=args.quiet,

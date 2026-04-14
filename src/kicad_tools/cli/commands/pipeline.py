@@ -22,7 +22,7 @@ def run_pipeline_command(args) -> int:
         sub_argv.extend(["--mfr", args.pipeline_mfr])
 
     # Layers
-    if getattr(args, "pipeline_layers", 2) != 2:
+    if getattr(args, "pipeline_layers", None) is not None:
         sub_argv.extend(["--layers", str(args.pipeline_layers)])
 
     # Flags
