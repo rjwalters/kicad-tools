@@ -21,7 +21,9 @@ class ReportData:
 
     # --- optional section data ---
     board_stats: dict | None = None
-    """Layer count, component count, board area, net count, etc."""
+    """Board summary from collector: {layer_count, layer_names, footprint_count,
+    footprint_smd, footprint_tht, footprint_other, net_count, segment_count,
+    via_count, board_width_mm, board_height_mm}."""
 
     bom_groups: list[dict] | None = None
     """List of dicts: {value, footprint, qty, refs, mpn, lcsc}."""

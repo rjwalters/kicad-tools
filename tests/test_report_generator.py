@@ -26,9 +26,16 @@ def _full_data(**overrides) -> ReportData:
         "manufacturer": "jlcpcb",
         "board_stats": {
             "layer_count": 4,
-            "component_count": 42,
+            "layer_names": ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+            "footprint_count": 134,
+            "footprint_smd": 60,
+            "footprint_tht": 70,
+            "footprint_other": 4,
             "net_count": 80,
-            "board_area": "50x30 mm",
+            "segment_count": 320,
+            "via_count": 45,
+            "board_width_mm": 200.0,
+            "board_height_mm": 120.0,
         },
         "bom_groups": [
             {
@@ -144,7 +151,7 @@ class TestReportGenerator:
 
         # All 10 section headings must appear
         assert "# TestBoard - Design Report" in content
-        assert "## Design Summary" in content
+        assert "## Board Summary" in content
         assert "## Schematic Overview" in content
         assert "## PCB Layout" in content
         assert "## Bill of Materials" in content
@@ -181,7 +188,7 @@ class TestReportGenerator:
         assert "# Sparse - Design Report" in content
 
         # Optional sections must be absent
-        assert "## Design Summary" not in content
+        assert "## Board Summary" not in content
         assert "## Schematic Overview" not in content
         assert "## PCB Layout" not in content
         assert "## Bill of Materials" not in content
@@ -314,6 +321,100 @@ class TestReportGenerator:
         content = report_path.read_text(encoding="utf-8")
         assert "FAIL" in content
 
+    def test_board_summary_full_render(self, tmp_path: Path) -> None:
+        """Board summary section renders all collector-produced fields."""
+        data = _full_data(
+            board_stats={
+                "layer_count": 2,
+                "layer_names": ["F.Cu", "B.Cu"],
+                "footprint_count": 134,
+                "footprint_smd": 60,
+                "footprint_tht": 70,
+                "footprint_other": 4,
+                "net_count": 62,
+                "segment_count": 0,
+                "via_count": 0,
+                "board_width_mm": 200.0,
+                "board_height_mm": 120.0,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" in content
+        # Layers row: count + comma-joined names
+        assert "2 copper (F.Cu, B.Cu)" in content
+        # Footprints row: total with breakdown
+        assert "134 (60 SMD, 70 THT, 4 other)" in content
+        # Nets row
+        assert "| Nets | 62 |" in content
+        # Traces row
+        assert "0 segments" in content
+        # Vias row
+        assert "| Vias | 0 |" in content
+        # Board Size row
+        assert "200.0 x 120.0 mm" in content
+        # No None literals
+        assert "None" not in content
+
+    def test_board_summary_partial_fields(self, tmp_path: Path) -> None:
+        """Omitting footprint breakdown fields renders only total count."""
+        data = _full_data(
+            board_stats={
+                "footprint_count": 42,
+                "net_count": 10,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" in content
+        # Footprint total appears without breakdown
+        assert "| Footprints | 42 |" in content
+        # No SMD/THT breakdown since those fields are absent
+        assert "SMD" not in content
+        assert "THT" not in content
+        # Layers row absent (no layer_count provided)
+        assert "| Layers" not in content
+        # Board Size row absent (no dimensions)
+        assert "Board Size" not in content
+        # No None literals
+        assert "None" not in content
+
+    def test_board_summary_only_layer_count(self, tmp_path: Path) -> None:
+        """board_stats with only layer_count renders just the Layers row."""
+        data = _full_data(
+            board_stats={
+                "layer_count": 6,
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" in content
+        assert "6 copper" in content
+        # No other Board Summary rows (use table-row prefix to avoid
+        # matching text from other sections like Routing Status)
+        assert "| Footprints" not in content
+        assert "| Nets |" not in content
+        assert "| Traces" not in content
+        assert "| Vias" not in content
+        assert "| Board Size" not in content
+        # No None literals
+        assert "None" not in content
+
+    def test_board_summary_none_omits_section(self, tmp_path: Path) -> None:
+        """board_stats=None means no Board Summary section."""
+        data = _full_data(board_stats=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Board Summary" not in content
+
 
 # ---------------------------------------------------------------------------
 # TestImportError
@@ -413,9 +514,8 @@ class TestLoadDataDir:
         )
         result = _load_data_dir(str(tmp_path))
         assert "board_stats" in result
-        # footprint_count should have been renamed to component_count
-        assert result["board_stats"]["component_count"] == 5
-        assert "footprint_count" not in result["board_stats"]
+        # footprint_count is preserved as-is (template uses footprint_count directly)
+        assert result["board_stats"]["footprint_count"] == 5
 
     def test_filename_mapping_drc_summary(self, tmp_path: Path) -> None:
         """drc_summary.json maps to drc field."""
@@ -556,9 +656,9 @@ class TestReportCLI:
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
-        # Filenames must match what the collector writes
+        # Filenames must match what the collector writes, with collector field names
         (data_dir / "board_summary.json").write_text(
-            json.dumps({"layer_count": 2, "component_count": 10})
+            json.dumps({"layer_count": 2, "layer_names": ["F.Cu", "B.Cu"], "net_count": 10})
         )
         (data_dir / "drc_summary.json").write_text(
             json.dumps({"error_count": 0, "warning_count": 0, "blocking_count": 0, "passed": True})
@@ -580,7 +680,7 @@ class TestReportCLI:
         assert result == 0
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
-        assert "## Design Summary" in content
+        assert "## Board Summary" in content
         assert "## DRC Status" in content
         assert "PASS" in content
 
@@ -597,7 +697,6 @@ class TestReportCLI:
            drc_summary.json -> drc)
         3. BOM groups extraction (data.groups -> bom_groups list)
         4. completion_pct -> completion_percent rename
-        5. footprint_count -> component_count rename
         """
         from kicad_tools.cli.report_cmd import main as report_main
 
@@ -612,7 +711,7 @@ class TestReportCLI:
                 "data": data,
             }
 
-        # Bug 2 + Bug 5: board_summary.json with footprint_count
+        # Bug 2: board_summary.json with collector field names
         (data_dir / "board_summary.json").write_text(
             json.dumps(
                 _envelope(
@@ -712,17 +811,17 @@ class TestReportCLI:
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
 
         # Section headings present
-        assert "## Design Summary" in content
+        assert "## Board Summary" in content
         assert "## Bill of Materials" in content
         assert "## DRC Status" in content
         assert "## Manufacturing Readiness" in content
         assert "## Routing Status" in content
 
-        # Bug 5: component_count (renamed from footprint_count) renders
-        assert "| Components | 42 |" in content
+        # Bug 2: footprint_count renders directly (template uses footprint_count)
+        assert "| Footprints | 42 |" in content
 
         # Bug 1: board_stats values render (layer_count from envelope)
-        assert "| Layers | 4 |" in content
+        assert "| Layers | 4 copper |" in content
 
         # Bug 2: DRC values render from drc_summary.json
         assert "| Errors | 1 |" in content
@@ -774,4 +873,4 @@ class TestReportCLI:
 
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
         # Section should be omitted, not crash
-        assert "## Design Summary" not in content
+        assert "## Board Summary" not in content

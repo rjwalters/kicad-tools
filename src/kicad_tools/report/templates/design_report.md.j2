@@ -14,27 +14,28 @@
 ---
 
 {% if board_stats %}
-## Design Summary
+## Board Summary
 
-| Metric | Value |
-|--------|-------|
+| Property | Value |
+|----------|-------|
 {% if board_stats.layer_count is defined and board_stats.layer_count is not none %}
-| Layers | {{ board_stats.layer_count }} |
+| Layers | {{ board_stats.layer_count }} copper{% if board_stats.layer_names is defined and board_stats.layer_names %} ({{ board_stats.layer_names | join(", ") }}){% endif %} |
 {% endif %}
-{% if board_stats.component_count is defined and board_stats.component_count is not none %}
-| Components | {{ board_stats.component_count }} |
+{% if board_stats.footprint_count is defined and board_stats.footprint_count is not none %}
+| Footprints | {{ board_stats.footprint_count }}{% if board_stats.footprint_smd is defined %} ({{ board_stats.footprint_smd }} SMD, {{ board_stats.footprint_tht | default(0) }} THT, {{ board_stats.footprint_other | default(0) }} other){% endif %} |
 {% endif %}
 {% if board_stats.net_count is defined and board_stats.net_count is not none %}
 | Nets | {{ board_stats.net_count }} |
 {% endif %}
-{% if board_stats.board_area is defined and board_stats.board_area is not none %}
-| Board Area | {{ board_stats.board_area }} |
+{% if board_stats.segment_count is defined and board_stats.segment_count is not none %}
+| Traces | {{ board_stats.segment_count }} segments |
 {% endif %}
-{% for key, value in board_stats.items() %}
-{% if key not in ("layer_count", "component_count", "net_count", "board_area") %}
-| {{ key | replace("_", " ") | title }} | {{ value }} |
+{% if board_stats.via_count is defined and board_stats.via_count is not none %}
+| Vias | {{ board_stats.via_count }} |
 {% endif %}
-{% endfor %}
+{% if board_stats.board_width_mm is defined and board_stats.board_width_mm is not none and board_stats.board_height_mm is defined and board_stats.board_height_mm is not none %}
+| Board Size | {{ board_stats.board_width_mm }} x {{ board_stats.board_height_mm }} mm |
+{% endif %}
 
 {% endif %}
 {% if schematic_sheets %}
