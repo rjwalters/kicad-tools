@@ -659,3 +659,389 @@ class TestPerformanceStats:
         assert perf.repair_ms == 0.0
         assert perf.gpu_utilized is False
         assert perf.backend_type == "cpu"
+
+
+class TestStrategyRetry:
+    """Test automatic strategy retry when primary strategy fails."""
+
+    def test_retry_succeeds_on_alternative_strategy(self, mock_pcb, design_rules):
+        """Verify orchestrator retries with alternative strategy on failure.
+
+        When the primary strategy (GLOBAL_WITH_REPAIR) fails with populated
+        alternative_strategies, the orchestrator should iterate through
+        alternatives until one succeeds.
+        """
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        # Track how many times _execute_strategy is called
+        call_count = 0
+
+        def mock_execute(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call (primary strategy) fails
+                return RoutingResult(
+                    success=False,
+                    net=net,
+                    strategy_used=strategy,
+                    error_message="Global router failed to find corridor assignment",
+                    alternative_strategies=[
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.MULTI_RESOLUTION,
+                            reason="Fine-grid retry may resolve",
+                            estimated_cost=1.5,
+                            success_probability=0.65,
+                        ),
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.FULL_PIPELINE,
+                            reason="Complete pipeline applies all techniques",
+                            estimated_cost=2.0,
+                            success_probability=0.7,
+                        ),
+                    ],
+                )
+            elif call_count == 2:
+                # Second call (first retry: MULTI_RESOLUTION) also fails
+                return RoutingResult(
+                    success=False,
+                    net=net,
+                    strategy_used=strategy,
+                    error_message="Multi-resolution also failed",
+                )
+            else:
+                # Third call (second retry: FULL_PIPELINE) succeeds
+                return RoutingResult(
+                    success=True,
+                    net=net,
+                    strategy_used=strategy,
+                    metrics=RoutingMetrics(total_length_mm=12.0, via_count=1),
+                )
+
+        orch._execute_strategy = mock_execute
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is True
+        assert call_count == 3
+        # Should note the retry path in warnings
+        assert any("retry" in w.lower() for w in result.warnings)
+        assert any("FULL_PIPELINE" in w for w in result.warnings)
+
+    def test_retry_all_alternatives_fail(self, mock_pcb, design_rules):
+        """Verify all-failed retries are noted in warnings."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        def always_fail(net, strategy, intent, pads_arg):
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message=f"{strategy.name} failed",
+                alternative_strategies=[
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.MULTI_RESOLUTION,
+                        reason="Try finer grid",
+                        estimated_cost=1.5,
+                        success_probability=0.65,
+                    ),
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.FULL_PIPELINE,
+                        reason="Try complete pipeline",
+                        estimated_cost=2.0,
+                        success_probability=0.7,
+                    ),
+                ],
+            )
+
+        orch._execute_strategy = always_fail
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        assert any("retries exhausted" in w.lower() for w in result.warnings)
+        assert any("GLOBAL_WITH_REPAIR" in w for w in result.warnings)
+
+    def test_retry_disabled_with_zero_max(self, mock_pcb, design_rules):
+        """Verify max_strategy_retries=0 disables automatic retry."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=0,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def fail_once(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message="Failed",
+                alternative_strategies=[
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.FULL_PIPELINE,
+                        reason="Try complete pipeline",
+                        estimated_cost=2.0,
+                        success_probability=0.7,
+                    ),
+                ],
+            )
+
+        orch._execute_strategy = fail_once
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        # Should only call once (no retry)
+        assert call_count == 1
+        # Should NOT have retry warnings
+        assert not any("retries exhausted" in w.lower() for w in result.warnings)
+
+    def test_retry_respects_budget_limit(self, mock_pcb, design_rules):
+        """Verify retry loop stops at max_strategy_retries even with more alternatives."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=1,  # Only try 1 alternative
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def fail_always(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message="Failed",
+                alternative_strategies=[
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.MULTI_RESOLUTION,
+                        reason="Try finer grid",
+                        estimated_cost=1.5,
+                        success_probability=0.65,
+                    ),
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.FULL_PIPELINE,
+                        reason="Try complete pipeline",
+                        estimated_cost=2.0,
+                        success_probability=0.7,
+                    ),
+                    AlternativeStrategy(
+                        strategy=RoutingStrategy.HIERARCHICAL_DIFF_PAIR,
+                        reason="Try hierarchical",
+                        estimated_cost=1.5,
+                        success_probability=0.6,
+                    ),
+                ],
+            )
+
+        orch._execute_strategy = fail_always
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        # Should call twice: original + 1 retry (budget=1)
+        assert call_count == 2
+
+    def test_retry_first_alternative_succeeds(self, mock_pcb, design_rules):
+        """Verify retry stops on first successful alternative."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def succeed_on_second(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return RoutingResult(
+                    success=False,
+                    net=net,
+                    strategy_used=strategy,
+                    error_message="Primary failed",
+                    alternative_strategies=[
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.MULTI_RESOLUTION,
+                            reason="Try finer grid",
+                            estimated_cost=1.5,
+                            success_probability=0.65,
+                        ),
+                        AlternativeStrategy(
+                            strategy=RoutingStrategy.FULL_PIPELINE,
+                            reason="Try complete pipeline",
+                            estimated_cost=2.0,
+                            success_probability=0.7,
+                        ),
+                    ],
+                )
+            else:
+                return RoutingResult(
+                    success=True,
+                    net=net,
+                    strategy_used=strategy,
+                    metrics=RoutingMetrics(total_length_mm=10.0),
+                )
+
+        orch._execute_strategy = succeed_on_second
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is True
+        # Should call twice: original + first retry succeeds
+        assert call_count == 2
+        # Should NOT try the second alternative
+        assert any("MULTI_RESOLUTION" in w for w in result.warnings)
+
+    def test_no_retry_when_no_alternatives(self, mock_pcb, design_rules):
+        """Verify no retry when result has empty alternative_strategies."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def fail_no_alternatives(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=False,
+                net=net,
+                strategy_used=strategy,
+                error_message="Failed with no alternatives",
+                alternative_strategies=[],
+            )
+
+        orch._execute_strategy = fail_no_alternatives
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is False
+        assert call_count == 1
+
+    def test_execute_strategy_populates_alternatives_on_failure(self, mock_pcb, design_rules):
+        """Verify _execute_strategy always populates alternatives on failure.
+
+        Strategies like _route_escape_then_global may not populate
+        alternative_strategies on their own. _execute_strategy should
+        fill them in so the retry loop has candidates.
+        """
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+        ]  # Only one pad -> will fail
+
+        result = orch._execute_strategy(
+            "NET1",
+            RoutingStrategy.ESCAPE_THEN_GLOBAL,
+            intent=None,
+            pads=pads,
+        )
+
+        assert result.success is False
+        # Should have alternatives populated even though
+        # _route_escape_then_global does not populate them itself
+        assert len(result.alternative_strategies) > 0
+        assert any(
+            alt.strategy == RoutingStrategy.FULL_PIPELINE for alt in result.alternative_strategies
+        )
+
+    def test_default_max_strategy_retries(self, mock_pcb, design_rules):
+        """Verify default max_strategy_retries is 2."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+        )
+        assert orch.max_strategy_retries == 2
+
+    def test_successful_primary_strategy_skips_retry(self, mock_pcb, design_rules):
+        """Verify no retry when primary strategy succeeds."""
+        orch = RoutingOrchestrator(
+            pcb=mock_pcb,
+            rules=design_rules,
+            backend="cpu",
+            max_strategy_retries=2,
+        )
+
+        pads = [
+            _pad(x=5.0, y=5.0, pin="1"),
+            _pad(x=15.0, y=5.0, pin="2"),
+        ]
+
+        call_count = 0
+
+        def counting_execute(net, strategy, intent, pads_arg):
+            nonlocal call_count
+            call_count += 1
+            return RoutingResult(
+                success=True,
+                net=net,
+                strategy_used=strategy,
+                metrics=RoutingMetrics(total_length_mm=10.0),
+            )
+
+        orch._execute_strategy = counting_execute
+
+        result = orch.route_net("NET1", pads=pads)
+
+        assert result.success is True
+        assert call_count == 1  # Only primary call, no retry
