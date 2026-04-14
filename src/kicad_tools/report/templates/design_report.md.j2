@@ -151,16 +151,25 @@
 {% if cost %}
 ## Cost Estimate
 
-| Metric | Value |
+| Metric | Per Board (estimated) |
 |--------|-------|
-{% if cost.per_unit is defined and cost.per_unit is not none %}
-| Per Unit | {{ cost.per_unit }} {{ cost.currency | default("USD") }} |
+{% if cost.pcb_cost is defined and cost.pcb_cost is not none %}
+| PCB Fabrication | ~{{ cost.pcb_cost }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.component_cost is defined and cost.component_cost is not none %}
+| Components (estimated) | ~{{ cost.component_cost }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.assembly_cost is defined and cost.assembly_cost is not none %}
+| Assembly (estimated) | ~{{ cost.assembly_cost }} {{ cost.currency | default("USD") }} |
+{% endif %}
+{% if cost.total is defined and cost.total is not none %}
+| **Total (estimated)** | **~{{ cost.total }} {{ cost.currency | default("USD") }}** |
 {% endif %}
 {% if cost.batch_qty is defined and cost.batch_qty is not none %}
 | Batch Quantity | {{ cost.batch_qty }} |
 {% endif %}
 {% if cost.batch_total is defined and cost.batch_total is not none %}
-| Batch Total | {{ cost.batch_total }} {{ cost.currency | default("USD") }} |
+| Batch Total (estimated) | ~{{ cost.batch_total }} {{ cost.currency | default("USD") }} |
 {% endif %}
 
 {% endif %}
