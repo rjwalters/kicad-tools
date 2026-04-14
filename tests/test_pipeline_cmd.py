@@ -17,6 +17,8 @@ from kicad_tools.cli.pipeline_cmd import (
     _detect_routing_status,
     _is_git_repo,
     _resolve_pcb_from_project,
+    _resolve_schematic,
+    _run_step_erc,
     main,
     run_pipeline,
 )
@@ -457,8 +459,9 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: fix-vias before route."""
+        """Steps execute in the correct order: erc first, then fix-vias before route."""
         expected = [
+            PipelineStep.ERC,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
             PipelineStep.FIX_DRC,
@@ -997,3 +1000,380 @@ class TestCommitFlag:
 
         call_argv = mock_main.call_args[0][0]
         assert "--commit" not in call_argv
+
+
+# =========================================================================
+# ERC STEP TESTS
+# =========================================================================
+
+# Sample ERC JSON report with errors
+ERC_JSON_WITH_ERRORS = """{
+    "source": "test.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "test-uuid",
+            "violations": [
+                {
+                    "type": "pin_not_connected",
+                    "severity": "error",
+                    "description": "Pin 4 of U5 is not connected",
+                    "pos": {"x": 100, "y": 50},
+                    "items": [{"description": "Pin 4 of U5"}],
+                    "excluded": false
+                },
+                {
+                    "type": "power_pin_not_driven",
+                    "severity": "error",
+                    "description": "+12V is not driven by any source",
+                    "pos": {"x": 120, "y": 60},
+                    "items": [{"description": "+12V power net"}],
+                    "excluded": false
+                }
+            ]
+        }
+    ]
+}"""
+
+# Sample ERC JSON report with no violations
+ERC_JSON_CLEAN = """{
+    "source": "test.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "test-uuid",
+            "violations": []
+        }
+    ]
+}"""
+
+# Sample ERC JSON report with warnings only
+ERC_JSON_WARNINGS_ONLY = """{
+    "source": "test.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "test-uuid",
+            "violations": [
+                {
+                    "type": "similar_labels",
+                    "severity": "warning",
+                    "description": "Labels VCC and Vcc look similar",
+                    "pos": {"x": 80, "y": 40},
+                    "items": [],
+                    "excluded": false
+                }
+            ]
+        }
+    ]
+}"""
+
+
+@pytest.fixture
+def pcb_with_schematic(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a PCB file alongside a schematic file."""
+    pcb_file = tmp_path / "board.kicad_pcb"
+    pcb_file.write_text(ROUTED_PCB)
+    sch_file = tmp_path / "board.kicad_sch"
+    sch_file.write_text("(kicad_sch (version 20230121))")
+    return pcb_file, sch_file
+
+
+@pytest.fixture
+def pcb_without_schematic(tmp_path: Path) -> Path:
+    """Create a PCB file without a sibling schematic."""
+    pcb_file = tmp_path / "standalone.kicad_pcb"
+    pcb_file.write_text(ROUTED_PCB)
+    return pcb_file
+
+
+class TestResolveSchematic:
+    """Tests for _resolve_schematic helper."""
+
+    def test_finds_schematic_from_pcb(self, pcb_with_schematic):
+        """Resolves .kicad_sch from .kicad_pcb with same stem."""
+        pcb_file, sch_file = pcb_with_schematic
+        result = _resolve_schematic(pcb_file)
+        assert result == sch_file
+
+    def test_finds_schematic_from_project(self, tmp_path: Path):
+        """Resolves .kicad_sch from .kicad_pro with same stem."""
+        pcb_file = tmp_path / "project.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        pro_file = tmp_path / "project.kicad_pro"
+        pro_file.write_text("{}")
+        sch_file = tmp_path / "project.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+        result = _resolve_schematic(pcb_file, pro_file)
+        assert result == sch_file
+
+    def test_returns_none_when_no_schematic(self, pcb_without_schematic):
+        """Returns None when no matching .kicad_sch exists."""
+        result = _resolve_schematic(pcb_without_schematic)
+        assert result is None
+
+
+class TestERCStep:
+    """Tests for ERC pipeline step."""
+
+    def test_erc_skip_when_no_schematic(self, pcb_without_schematic: Path):
+        """ERC step skips gracefully when no schematic file exists."""
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_without_schematic, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is True
+        assert "no .kicad_sch" in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli", return_value=None)
+    def test_erc_skip_when_no_kicad_cli(self, mock_find, pcb_with_schematic):
+        """ERC step skips when kicad-cli is not installed."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is True
+        assert "kicad-cli not found" in result.message
+
+    def test_erc_dry_run(self, pcb_with_schematic):
+        """ERC step in dry-run mode outputs the would-be command."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True, dry_run=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is False
+        assert "[dry-run]" in result.message
+        assert "kct erc" in result.message
+        assert sch_file.name in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_halts_pipeline_on_errors(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """Pipeline halts when ERC reports errors (no --force)."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        # Write ERC JSON report to a temp file
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is False
+        assert "2 error(s) found" in result.message
+        assert "--force" in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_force_continues(self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path):
+        """With --force, ERC errors are logged but pipeline continues."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True, force=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is False
+        assert "--force" in result.message
+        assert "2 error(s)" in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_clean_pass(self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path):
+        """ERC step passes cleanly when no violations are found."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_CLEAN)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is False
+        assert "no violations" in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_warnings_only_passes(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """ERC step passes (does not halt) when only warnings are found."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WARNINGS_ONLY)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert "1 warning(s)" in result.message
+        assert "no errors" in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_violations_include_suggestions(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path, capsys
+    ):
+        """ERC violation output includes fix suggestions from generate_erc_suggestions."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        # Use non-quiet mode so violation details are printed
+        console = Console()
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=False, force=True)
+        result = _run_step_erc(ctx, console)
+
+        # The result should still be success (force mode)
+        assert result.success is True
+
+        # Capture console output — rich writes to stdout
+        captured = capsys.readouterr()
+        # Suggestions contain words like "Connect", "Add", etc.
+        assert "Suggestion:" in captured.out
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_quiet_suppresses_per_violation_output(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path, capsys
+    ):
+        """With --quiet, per-violation output is suppressed."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True, force=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        captured = capsys.readouterr()
+        # Quiet mode should not print per-violation lines
+        assert "pin_not_connected" not in captured.out
+        assert "Suggestion:" not in captured.out
+
+    def test_erc_step_single_step_via_main(self, pcb_with_schematic):
+        """--step erc runs only the ERC step via main()."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        # Use dry-run to avoid needing kicad-cli
+        result = main(["--step", "erc", "--dry-run", str(pcb_file)])
+        assert result == 0
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_halts_pipeline_blocks_subsequent_steps(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """When ERC fails (errors, no --force), subsequent steps do not run."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        # Run ERC and FIX_VIAS together
+        results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_VIAS])
+
+        # Pipeline should stop after ERC failure
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "erc" in results[0].message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_erc_force_allows_subsequent_steps(
+        self, mock_subprocess, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """With --force, pipeline continues past ERC errors to next steps."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            force=True,
+            layers=2,
+        )
+        results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_VIAS])
+
+        # Both steps should have run
+        assert len(results) == 2
+        assert results[0].success is True  # ERC passes with --force
+        assert results[1].success is True  # FIX_VIAS runs
+
+    def test_erc_is_first_step(self):
+        """ERC is the first step in ALL_STEPS, before fix-vias."""
+        assert ALL_STEPS[0] == PipelineStep.ERC
+        assert ALL_STEPS[1] == PipelineStep.FIX_VIAS
