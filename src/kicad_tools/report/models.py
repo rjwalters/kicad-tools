@@ -31,6 +31,9 @@ class ReportData:
     drc: dict | None = None
     """DRC summary: {error_count, warning_count, blocking_count, passed}."""
 
+    erc: dict | None = None
+    """ERC summary: {error_count, warning_count, passed, details}."""
+
     audit: dict | None = None
     """Audit results: {verdict, action_items}."""
 

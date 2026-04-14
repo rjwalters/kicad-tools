@@ -126,6 +126,14 @@ class ReportDataCollector:
             lambda: self.collect_drc(audit_result),
         )
 
+        # ERC summary (from audit result)
+        self._safe_collect(
+            "erc_summary",
+            output_dir,
+            files,
+            lambda: self.collect_erc(audit_result),
+        )
+
         # BOM
         sch_path = self.pcb_path.with_suffix(".kicad_sch")
         if sch_path.exists():
@@ -217,6 +225,20 @@ class ReportDataCollector:
         if audit_result is None:
             return None
         return audit_result.drc.to_dict()
+
+    def collect_erc(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
+        """Extract ERC sub-section from a pre-run AuditResult.
+
+        Args:
+            audit_result: Result from ManufacturingAudit.run(), or None if
+                the audit failed.
+
+        Returns:
+            ERC data dictionary, or None if audit_result is None.
+        """
+        if audit_result is None:
+            return None
+        return audit_result.erc.to_dict()
 
     def collect_bom(self, sch_path: Path) -> dict[str, Any]:
         """Collect BOM grouped by value+footprint with LCSC numbers.

@@ -38,6 +38,21 @@
 {% endif %}
 
 {% endif %}
+{% if erc %}
+## ERC Status
+
+| Metric | Count |
+|--------|-------|
+| Errors | {{ erc.error_count | default(0) }} |
+| Warnings | {{ erc.warning_count | default(0) }} |
+
+**Status**: {% if erc.passed | default(true) %}PASS{% else %}FAIL{% endif %}
+
+{% if erc.details %}
+**Details**: {{ erc.details }}
+{% endif %}
+
+{% endif %}
 {% if schematic_sheets %}
 ## Schematic Overview
 
