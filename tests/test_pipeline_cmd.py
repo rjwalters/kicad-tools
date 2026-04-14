@@ -559,6 +559,87 @@ class TestPipelineLayerAutoDetection:
         layers_idx = call_argv.index("--layers")
         assert call_argv[layers_idx + 1] == "4"
 
+    def test_full_cli_parser_defaults_layers_to_none(self):
+        """Full CLI path: _add_pipeline_parser sets pipeline_layers=None by default.
+
+        This is the integration test for issue #1349. The root cause was that
+        parser.py had default=2 for --layers, which meant auto-detection in
+        pipeline_cmd.py was never reached when invoked via 'kct pipeline'.
+        """
+        import argparse
+
+        from kicad_tools.cli.parser import _add_pipeline_parser
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        _add_pipeline_parser(sub)
+
+        args = parser.parse_args(["pipeline", "board.kicad_pcb", "--dry-run"])
+
+        assert args.pipeline_layers is None, (
+            f"Expected pipeline_layers=None when --layers is omitted, "
+            f"got {args.pipeline_layers!r}. "
+            "parser.py must use default=None so auto-detection runs."
+        )
+
+    def test_full_cli_parser_explicit_layers_preserved(self):
+        """Full CLI path: explicit --layers value is preserved through parser."""
+        import argparse
+
+        from kicad_tools.cli.parser import _add_pipeline_parser
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        _add_pipeline_parser(sub)
+
+        args = parser.parse_args(["pipeline", "board.kicad_pcb", "--layers", "4"])
+
+        assert args.pipeline_layers == 4, (
+            f"Expected pipeline_layers=4 when --layers 4 is given, got {args.pipeline_layers!r}."
+        )
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_full_cli_path_auto_detects_4_layers(self, mock_run, four_layer_pcb: Path):
+        """Full CLI path: parser args through shim reach pipeline_cmd with auto-detection.
+
+        Exercises the complete chain: parser.parse_args -> run_pipeline_command -> main.
+        """
+        import argparse
+
+        from kicad_tools.cli.commands.pipeline import run_pipeline_command
+        from kicad_tools.cli.parser import _add_pipeline_parser
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        _add_pipeline_parser(sub)
+
+        args = parser.parse_args(
+            [
+                "pipeline",
+                str(four_layer_pcb),
+                "--step",
+                "fix-vias",
+            ]
+        )
+        # --quiet is a global flag on the main parser, not on the pipeline
+        # subparser. Set it directly so the shim passes it through.
+        args.global_quiet = True
+
+        # Verify the parser default is None (not 2)
+        assert args.pipeline_layers is None
+
+        # Run through the real shim
+        run_pipeline_command(args)
+
+        # The shim should NOT have passed --layers (since pipeline_layers is None),
+        # so pipeline_cmd.main auto-detects from the 4-layer PCB file.
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4"
+
 
 class TestEdgeCases:
     """Tests for edge cases."""
