@@ -62,7 +62,6 @@ ALL_STEPS = [
     PipelineStep.ERC,
     PipelineStep.FIX_ERC,
     PipelineStep.FIX_SILKSCREEN,
-    PipelineStep.FIX_ERC,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
     PipelineStep.FIX_DRC,

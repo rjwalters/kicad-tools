@@ -541,12 +541,11 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: erc, fix-erc, fix-silkscreen, fix-erc, fix-vias, route, etc."""
+        """Steps execute in the correct order: erc, fix-erc, fix-silkscreen, fix-vias, route, etc."""
         expected = [
             PipelineStep.ERC,
             PipelineStep.FIX_ERC,
             PipelineStep.FIX_SILKSCREEN,
-            PipelineStep.FIX_ERC,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
             PipelineStep.FIX_DRC,
@@ -1980,8 +1979,8 @@ class TestZonesDefaultSkip:
 
     def test_help_text_documents_zones_flag(self):
         """--help output documents the --zones opt-in flag."""
-        import io
         import contextlib
+        import io
 
         f = io.StringIO()
         with contextlib.redirect_stdout(f), pytest.raises(SystemExit):
