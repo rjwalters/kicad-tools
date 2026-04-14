@@ -98,6 +98,13 @@ class RoutingOrchestrator:
             When provided, the orchestrator uses this to auto-skip pour nets
             (nets with ``is_pour_net=True``) and return a success result with a
             warning directing users to zone fill instead of trace routing.
+        max_strategy_retries: Maximum number of alternative strategies to try
+            when the primary strategy fails.  When a strategy returns
+            ``success=False`` with a populated ``alternative_strategies`` list,
+            the orchestrator automatically iterates through alternatives (up to
+            this limit) before returning failure.  Set to ``0`` to disable
+            automatic retry and preserve the legacy behaviour of returning
+            immediately on failure.  Default is ``2``.
     """
 
     def __init__(
@@ -110,6 +117,7 @@ class RoutingOrchestrator:
         enable_repair: bool = True,
         enable_via_conflict_resolution: bool = True,
         net_class_map: dict[str, NetClassRouting] | None = None,
+        max_strategy_retries: int = 2,
     ):
         self.pcb = pcb
         self.rules = rules
@@ -119,6 +127,7 @@ class RoutingOrchestrator:
         self.enable_repair = enable_repair
         self.enable_via_conflict_resolution = enable_via_conflict_resolution
         self.net_class_map: dict[str, NetClassRouting] = net_class_map or {}
+        self.max_strategy_retries = max_strategy_retries
 
         # Lazy-initialized routers (created on first use)
         self._global_router: GlobalRouter | None = None
@@ -130,7 +139,8 @@ class RoutingOrchestrator:
 
         logger.info(
             f"RoutingOrchestrator initialized: backend={backend}, "
-            f"corridor_width={corridor_width}mm, density_threshold={density_threshold}"
+            f"corridor_width={corridor_width}mm, density_threshold={density_threshold}, "
+            f"max_strategy_retries={max_strategy_retries}"
         )
 
     def _get_net_class_routing(self, net: str | int) -> NetClassRouting | None:
@@ -196,6 +206,39 @@ class RoutingOrchestrator:
         # Phase 2: Execute routing with selected strategy
         routing_start = time.time()
         result = self._execute_strategy(net, strategy, intent, pads)
+
+        # Phase 2b: Automatic strategy retry on failure
+        if not result.success and result.alternative_strategies and self.max_strategy_retries > 0:
+            retries = result.alternative_strategies[: self.max_strategy_retries]
+            strategies_attempted = [strategy.name]
+
+            for alt in retries:
+                logger.info(
+                    "Retrying net %s with alternative strategy %s (reason: %s, p_success=%.2f)",
+                    net,
+                    alt.strategy.name,
+                    alt.reason,
+                    alt.success_probability,
+                )
+                retry_result = self._execute_strategy(net, alt.strategy, intent, pads)
+                strategies_attempted.append(alt.strategy.name)
+
+                if retry_result.success:
+                    retry_result.warnings.append(
+                        f"Succeeded on retry with {alt.strategy.name} "
+                        f"after {strategies_attempted[0]} failed "
+                        f"(strategies attempted: "
+                        f"{', '.join(strategies_attempted)})"
+                    )
+                    result = retry_result
+                    break
+            else:
+                # All retries exhausted without success — keep the last
+                # failure result but note what was tried
+                result.warnings.append(
+                    f"All strategy retries exhausted (attempted: {', '.join(strategies_attempted)})"
+                )
+
         perf.routing_ms = (time.time() - routing_start) * 1000
 
         # Phase 3: Post-route repair (if enabled and needed)
@@ -283,25 +326,25 @@ class RoutingOrchestrator:
         """
         try:
             if strategy == RoutingStrategy.GLOBAL_WITH_REPAIR:
-                return self._route_global(net, pads)
+                result = self._route_global(net, pads)
 
             elif strategy == RoutingStrategy.ESCAPE_THEN_GLOBAL:
-                return self._route_escape_then_global(net, pads)
+                result = self._route_escape_then_global(net, pads)
 
             elif strategy == RoutingStrategy.HIERARCHICAL_DIFF_PAIR:
-                return self._route_hierarchical(net, intent, pads)
+                result = self._route_hierarchical(net, intent, pads)
 
             elif strategy == RoutingStrategy.SUBGRID_ADAPTIVE:
-                return self._route_subgrid_adaptive(net, pads)
+                result = self._route_subgrid_adaptive(net, pads)
 
             elif strategy == RoutingStrategy.VIA_CONFLICT_RESOLUTION:
-                return self._route_with_via_resolution(net, pads)
+                result = self._route_with_via_resolution(net, pads)
 
             elif strategy == RoutingStrategy.FULL_PIPELINE:
-                return self._route_full_pipeline(net, intent, pads)
+                result = self._route_full_pipeline(net, intent, pads)
 
             elif strategy == RoutingStrategy.MULTI_RESOLUTION:
-                return self._route_multi_resolution(net, pads)
+                result = self._route_multi_resolution(net, pads)
 
             else:
                 error_msg = f"Unknown strategy: {strategy}"
@@ -312,6 +355,13 @@ class RoutingOrchestrator:
                     strategy_used=strategy,
                     error_message=error_msg,
                 )
+
+            # Ensure failed results always carry alternative suggestions so
+            # the retry loop in route_net() has candidates to try.
+            if not result.success and not result.alternative_strategies:
+                result.alternative_strategies = self._suggest_alternatives(strategy)
+
+            return result
 
         except Exception as e:
             logger.exception(f"Strategy execution failed: {e}")
