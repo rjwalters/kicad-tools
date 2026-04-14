@@ -200,6 +200,21 @@ class TestRenderHtml:
         assert "<link " not in result
         assert 'rel="stylesheet"' not in result
 
+    def test_cover_block_in_html_output(self) -> None:
+        """Cover block div passes through Markdown-to-HTML conversion."""
+        from kicad_tools.report.renderers import render_html
+
+        md = (
+            '<div class="cover-block">\n\n'
+            "# MyProject\n\n"
+            '<p class="cover-meta">Design Report</p>\n'
+            "</div>\n\n"
+            "## Section\n\nContent.\n"
+        )
+        result = render_html(md)
+        assert 'class="cover-block"' in result
+        assert "MyProject" in result
+
 
 # ---------------------------------------------------------------------------
 # render_pdf tests
@@ -345,6 +360,54 @@ class TestCss:
 
         css = _load_css()
         assert "max-width" in css
+
+    def test_css_has_page_rule(self) -> None:
+        """CSS contains @page rules with size, margins, and page numbers."""
+        from kicad_tools.report.renderers import _load_css
+
+        css = _load_css()
+        assert "@page" in css
+        assert "size: letter" in css
+        assert "counter(page)" in css
+        assert "@bottom-center" in css
+
+    def test_css_has_cover_block_class(self) -> None:
+        """CSS defines the .cover-block class with blue accent styling."""
+        from kicad_tools.report.renderers import _load_css
+
+        css = _load_css()
+        assert ".cover-block" in css
+        assert "#2563EB" in css
+
+    def test_css_has_pcb_grid_class(self) -> None:
+        """CSS defines the .pcb-grid class for side-by-side PCB layout."""
+        from kicad_tools.report.renderers import _load_css
+
+        css = _load_css()
+        assert ".pcb-grid" in css
+        assert "grid-template-columns" in css
+
+    def test_css_no_h2_page_break_always(self) -> None:
+        """CSS no longer forces page-break-before: always on every h2."""
+        from kicad_tools.report.renderers import _load_css
+
+        css = _load_css()
+        # The old rule was "h2 { page-break-before: always; }" inside @media print.
+        # Now h2 uses page-break-before: auto. Verify "always" is not applied to h2.
+        import re
+
+        # Find the h2 rule inside @media print and ensure it says "auto" not "always"
+        # A simple check: "page-break-before: always" should NOT appear in h2 context
+        h2_break_matches = re.findall(r"h2\s*\{[^}]*page-break-before:\s*always", css)
+        assert len(h2_break_matches) == 0, "h2 should not have page-break-before: always"
+
+    def test_css_has_bom_refs_class(self) -> None:
+        """CSS defines the .bom-refs class for overflow control."""
+        from kicad_tools.report.renderers import _load_css
+
+        css = _load_css()
+        assert ".bom-refs" in css
+        assert "max-height" in css
 
 
 # ---------------------------------------------------------------------------
