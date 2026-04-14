@@ -114,6 +114,7 @@ class ReportGenerator:
             "board_stats": data.board_stats,
             "bom_groups": data.bom_groups,
             "drc": data.drc,
+            "erc": data.erc,
             "audit": data.audit,
             "net_status": data.net_status,
             "cost": data.cost,

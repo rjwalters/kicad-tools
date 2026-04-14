@@ -61,6 +61,12 @@ def _full_data(**overrides) -> ReportData:
             "blocking_count": 0,
             "passed": True,
         },
+        "erc": {
+            "error_count": 0,
+            "warning_count": 1,
+            "passed": True,
+            "details": "",
+        },
         "audit": {
             "verdict": "ready",
             "action_items": [
@@ -121,6 +127,7 @@ class TestReportData:
         assert data.board_stats is not None
         assert data.bom_groups is not None
         assert data.drc is not None
+        assert data.erc is not None
         assert data.audit is not None
         assert data.net_status is not None
         assert data.cost is not None
@@ -160,9 +167,10 @@ class TestReportGenerator:
         assert report_path.exists()
         content = report_path.read_text(encoding="utf-8")
 
-        # All 10 section headings must appear
+        # All 11 section headings must appear
         assert "# TestBoard - Design Report" in content
         assert "## Board Summary" in content
+        assert "## ERC Status" in content
         assert "## Schematic Overview" in content
         assert "## PCB Layout" in content
         assert "## Bill of Materials" in content
@@ -200,6 +208,7 @@ class TestReportGenerator:
 
         # Optional sections must be absent
         assert "## Board Summary" not in content
+        assert "## ERC Status" not in content
         assert "## Schematic Overview" not in content
         assert "## PCB Layout" not in content
         assert "## Bill of Materials" not in content
@@ -331,6 +340,70 @@ class TestReportGenerator:
 
         content = report_path.read_text(encoding="utf-8")
         assert "FAIL" in content
+
+    def test_erc_pass_status(self, tmp_path: Path) -> None:
+        """ERC section renders PASS when passed is True."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "| Errors | 0 |" in content
+        assert "| Warnings | 0 |" in content
+
+    def test_erc_fail_status(self, tmp_path: Path) -> None:
+        """ERC section renders FAIL when passed is False."""
+        data = _full_data(
+            erc={
+                "error_count": 3,
+                "warning_count": 1,
+                "passed": False,
+                "details": "pin_not_connected (2x), power_pin_not_driven (1x)",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "| Errors | 3 |" in content
+        assert "| Warnings | 1 |" in content
+        assert "FAIL" in content
+        assert "pin_not_connected (2x), power_pin_not_driven (1x)" in content
+
+    def test_erc_omitted_when_none(self, tmp_path: Path) -> None:
+        """ERC section is absent when erc is None."""
+        data = _full_data(erc=None)
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" not in content
+
+    def test_erc_details_omitted_when_empty(self, tmp_path: Path) -> None:
+        """ERC details line is not rendered when details is empty."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "**Details**" not in content
 
     def test_board_summary_full_render(self, tmp_path: Path) -> None:
         """Board summary section renders all collector-produced fields."""
@@ -615,6 +688,18 @@ class TestLoadDataDir:
         result = _load_data_dir(str(tmp_path))
         assert "drc" in result
         assert result["drc"]["passed"] is True
+
+    def test_filename_mapping_erc_summary(self, tmp_path: Path) -> None:
+        """erc_summary.json maps to erc field."""
+        from kicad_tools.cli.report_cmd import _load_data_dir
+
+        (tmp_path / "erc_summary.json").write_text(
+            json.dumps({"error_count": 2, "warning_count": 1, "passed": False, "details": "test"})
+        )
+        result = _load_data_dir(str(tmp_path))
+        assert "erc" in result
+        assert result["erc"]["passed"] is False
+        assert result["erc"]["error_count"] == 2
 
     def test_bom_groups_extraction(self, tmp_path: Path) -> None:
         """BOM groups list is extracted from the groups key."""

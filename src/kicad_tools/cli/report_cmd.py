@@ -285,6 +285,7 @@ def _load_data_dir(data_dir_str: str) -> dict:
         "board_summary.json": "board_stats",
         "bom.json": "bom_groups",
         "drc_summary.json": "drc",
+        "erc_summary.json": "erc",
         "audit.json": "audit",
         "net_status.json": "net_status",
         "cost.json": "cost",

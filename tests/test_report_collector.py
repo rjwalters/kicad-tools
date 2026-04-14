@@ -163,6 +163,74 @@ class TestCollectDRC:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests - ERC collect
+# ---------------------------------------------------------------------------
+
+
+class TestCollectERC:
+    """Tests for collect_erc."""
+
+    def test_extracts_erc_from_audit_result(self):
+        """ERC data matches the AuditResult's ERC fields."""
+        audit_result = _make_mock_audit_result()
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        erc = collector.collect_erc(audit_result)
+
+        assert erc is not None
+        assert erc["error_count"] == 0
+        assert erc["warning_count"] == 1
+        assert erc["passed"] is True
+
+    def test_returns_none_when_no_audit(self):
+        """collect_erc returns None when audit_result is None."""
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        assert collector.collect_erc(None) is None
+
+    def test_erc_with_errors(self):
+        """ERC data reflects error counts from AuditResult."""
+        from kicad_tools.audit.auditor import (
+            AuditResult,
+            ConnectivityStatus,
+            CostEstimate,
+            DRCStatus,
+            ERCStatus,
+            LayerUtilization,
+            ManufacturerCompatibility,
+        )
+
+        audit_result = AuditResult(
+            project_name="test_erc",
+            drc=DRCStatus(error_count=0, warning_count=0, blocking_count=0, passed=True),
+            erc=ERCStatus(
+                error_count=3,
+                warning_count=1,
+                passed=False,
+                details="pin_not_connected (2x), power_pin_not_driven (1x)",
+            ),
+            connectivity=ConnectivityStatus(
+                total_nets=10,
+                connected_nets=10,
+                incomplete_nets=0,
+                completion_percent=100.0,
+                unconnected_pads=0,
+                passed=True,
+            ),
+            compatibility=ManufacturerCompatibility(manufacturer="JLCPCB", passed=True),
+            layers=LayerUtilization(layer_count=2),
+            cost=CostEstimate(pcb_cost=5.0, total_cost=5.0, quantity=5),
+            action_items=[],
+        )
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        erc = collector.collect_erc(audit_result)
+
+        assert erc is not None
+        assert erc["error_count"] == 3
+        assert erc["warning_count"] == 1
+        assert erc["passed"] is False
+        assert "pin_not_connected" in erc["details"]
+
+
+# ---------------------------------------------------------------------------
 # Unit tests - BOM collect
 # ---------------------------------------------------------------------------
 
@@ -370,7 +438,14 @@ class TestCollectAllIntegration:
         collector = ReportDataCollector(pcb_path, skip_erc=True)
         files = collector.collect_all(tmp_path)
 
-        expected_names = {"board_summary", "drc_summary", "audit", "net_status", "analysis"}
+        expected_names = {
+            "board_summary",
+            "drc_summary",
+            "erc_summary",
+            "audit",
+            "net_status",
+            "analysis",
+        }
         # BOM is optional (depends on schematic existing)
         for name in expected_names:
             assert name in files, f"Missing file: {name}"
