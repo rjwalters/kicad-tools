@@ -66,6 +66,18 @@ class ReportGenerator:
         * If the chosen directory already contains ``report.md``,
           raises :class:`FileExistsError` (immutability guard).
 
+        Parameters
+        ----------
+        data:
+            The report data to render.
+        output_dir:
+            Parent directory under which versioned sub-directories live.
+        version_dir:
+            When provided, use this directory instead of computing the next
+            version automatically.  This avoids a race when the caller has
+            already written data (e.g. collected snapshots) into a specific
+            version directory.
+
         Returns the path to the written ``report.md``.
         """
         if version_dir is None:

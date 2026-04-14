@@ -65,6 +65,22 @@ def main(argv: list[str] | None = None) -> int:
         default=False,
         help="Skip figure generation (useful when kicad-cli/cairosvg are unavailable)",
     )
+    gen_parser.add_argument(
+        "--quantity",
+        type=int,
+        default=5,
+        help="Quantity for cost estimation (default: 5)",
+    )
+    gen_parser.add_argument(
+        "--skip-erc",
+        action="store_true",
+        help="Skip ERC during auto-collection",
+    )
+    gen_parser.add_argument(
+        "--skip-collect",
+        action="store_true",
+        help="Skip auto-collection; generate skeleton report (legacy behavior)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -89,8 +105,22 @@ def _run_generate(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     project_name = input_path.stem
 
-    # Build ReportData from data-dir JSON files if available
-    data_kwargs = _load_data_dir(args.data_dir) if args.data_dir else {}
+    # Determine data source: explicit --data-dir, auto-collection, or skeleton
+    version_dir: Path | None = None
+    if args.data_dir:
+        data_kwargs = _load_data_dir(args.data_dir)
+    elif args.skip_collect:
+        data_kwargs = {}
+    else:
+        # Auto-collect: write snapshots into the versioned output directory.
+        # This pre-determines the version directory so figures land in the same vN/.
+        version_dir, data_kwargs = _auto_collect(
+            pcb_path=input_path,
+            output_dir=Path(args.output),
+            manufacturer=args.mfr,
+            quantity=getattr(args, "quantity", 5),
+            skip_erc=getattr(args, "skip_erc", False),
+        )
 
     data = ReportData(
         project_name=project_name,
@@ -109,9 +139,9 @@ def _run_generate(args: argparse.Namespace) -> int:
     # --- Figure generation ---
     # Only attempt when: no --data-dir (pre-collected data path), no --no-figures,
     # and the input is a .kicad_pcb file.
-    version_dir: Path | None = None
     if not args.no_figures and not args.data_dir and input_path.suffix == ".kicad_pcb":
-        version_dir = generator.next_version_dir(Path(args.output))
+        if version_dir is None:
+            version_dir = generator.next_version_dir(Path(args.output))
         figures_dir = version_dir / "figures"
         _generate_figures(args, input_path, figures_dir, data)
 
@@ -207,6 +237,40 @@ def _entries_to_schematic_sheets(entries: list[FigureEntry]) -> list[dict] | Non
         if entry.figure_type == "schematic"
     ]
     return sheets or None
+
+
+def _auto_collect(
+    pcb_path: Path,
+    output_dir: Path,
+    manufacturer: str,
+    quantity: int,
+    skip_erc: bool,
+) -> tuple[Path, dict]:
+    """Run ReportDataCollector and return (version_dir, data_kwargs).
+
+    The version directory is pre-determined so that collected data and the
+    generated report land in the same ``vN/`` directory, avoiding a race
+    where auto-versioning would bump to ``vN+1``.
+    """
+    from kicad_tools.report import ReportDataCollector
+    from kicad_tools.report.generator import ReportGenerator
+
+    # Pre-determine the version directory
+    version_dir = ReportGenerator.next_version_dir(output_dir)
+    data_dir = version_dir / "data"
+
+    collector = ReportDataCollector(
+        pcb_path=pcb_path,
+        manufacturer=manufacturer,
+        quantity=quantity,
+        skip_erc=skip_erc,
+    )
+    print(f"Collecting design data into {data_dir} ...")
+    collector.collect_all(data_dir)
+    print("Collection complete.")
+
+    data_kwargs = _load_data_dir(str(data_dir))
+    return version_dir, data_kwargs
 
 
 def _load_data_dir(data_dir_str: str) -> dict:
