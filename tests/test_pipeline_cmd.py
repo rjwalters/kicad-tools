@@ -1872,3 +1872,42 @@ class TestFixERCStep:
             _run_step_erc(ctx, console)
 
         assert ctx.erc_error_count == 0
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_pipeline_erc_errors_trigger_fix_erc_without_force(
+        self, mock_subprocess_step, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """When ERC finds errors and force=False, FIX_ERC still executes.
+
+        This is the integration test that verifies the pipeline loop does not
+        break after ERC failure when FIX_ERC is the next step in the sequence.
+        """
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess_step.return_value = (True, "completed")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            layers=2,
+            # force=False (default) -- the key assertion of this test
+        )
+        results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_ERC])
+
+        # Both steps must have executed
+        assert len(results) == 2, "Pipeline should not stop after ERC failure when FIX_ERC is next"
+        # ERC found errors without --force, so its result is a failure
+        assert results[0].success is False
+        assert results[0].step == PipelineStep.ERC
+        # FIX_ERC must have run (not skipped) because erc_error_count > 0
+        assert results[1].step == PipelineStep.FIX_ERC
+        assert not results[1].skipped, "FIX_ERC should not be skipped when ERC errors exist"
+        assert results[1].success is True
