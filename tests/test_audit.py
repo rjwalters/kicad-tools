@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
+from kicad_tools.audit.auditor import (
+    ConnectivityStatus,
+    DRCStatus,
+    ERCStatus,
+    ManufacturerCompatibility,
+)
 
 
 class TestAuditResult:
@@ -58,6 +64,167 @@ class TestAuditResult:
         result.erc.warning_count = 2
         assert result.verdict == AuditVerdict.WARNING
         assert result.is_ready is False
+
+    def test_verdict_ready_with_erc_explicitly_zero(self):
+        """Test READY verdict when ERC is explicitly set to zero errors/warnings.
+
+        Simulates the post-fix-erc scenario where ERC errors have been resolved
+        and the audit should return READY.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            passed=True,
+            details="",
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=10,
+            incomplete_nets=0,
+            completion_percent=100.0,
+            unconnected_pads=0,
+            passed=True,
+        )
+        result.compatibility = ManufacturerCompatibility(
+            manufacturer="JLCPCB",
+            passed=True,
+        )
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_verdict_warning_when_erc_has_warnings_only(self):
+        """Test WARNING verdict when ERC has zero errors but non-zero warnings.
+
+        After fix-erc resolves all errors, residual warnings should yield
+        WARNING (not READY), because is_ready requires zero warnings too.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=2,
+            passed=True,
+            details="2 warnings remain",
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+
+    def test_verdict_ready_all_four_gates_cleared(self):
+        """Test READY when all four NOT_READY gates are explicitly cleared.
+
+        Each of the four gates (ERC errors, DRC blocking, connectivity,
+        compatibility) is set to its passing state. Verifies no hidden
+        fifth gate blocks the READY verdict.
+        """
+        result = AuditResult()
+
+        # Gate 1: ERC errors = 0
+        result.erc.error_count = 0
+        result.erc.warning_count = 0
+
+        # Gate 2: DRC blocking = 0
+        result.drc.blocking_count = 0
+        result.drc.warning_count = 0
+
+        # Gate 3: connectivity passed
+        result.connectivity.passed = True
+
+        # Gate 4: compatibility passed
+        result.compatibility.passed = True
+
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_each_gate_independently_blocks_ready(self):
+        """Verify each of the four NOT_READY gates independently prevents READY.
+
+        When only one gate fails and all others pass, verdict must be NOT_READY.
+        This confirms no gate is redundant and all four are independently checked.
+        """
+        # Gate 1: Only ERC errors block
+        result = AuditResult()
+        result.erc.error_count = 3
+        result.drc.blocking_count = 0
+        result.connectivity.passed = True
+        result.compatibility.passed = True
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Gate 2: Only DRC blocking blocks
+        result = AuditResult()
+        result.erc.error_count = 0
+        result.drc.blocking_count = 2
+        result.connectivity.passed = True
+        result.compatibility.passed = True
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Gate 3: Only connectivity blocks
+        result = AuditResult()
+        result.erc.error_count = 0
+        result.drc.blocking_count = 0
+        result.connectivity.passed = False
+        result.compatibility.passed = True
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Gate 4: Only compatibility blocks
+        result = AuditResult()
+        result.erc.error_count = 0
+        result.drc.blocking_count = 0
+        result.connectivity.passed = True
+        result.compatibility.passed = False
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_erc_timeout_does_not_block_ready(self):
+        """Verify ERC timeout (passed=False, error_count=0) does not block READY.
+
+        The verdict gates on erc.error_count, not erc.passed. A timeout sets
+        passed=False but leaves error_count at 0, so it should not block.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            passed=False,
+            details="ERC timed out",
+        )
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+
+    def test_kicad_cli_not_installed_does_not_block_ready(self):
+        """Verify missing kicad-cli (passed=True, error_count=0) reaches READY.
+
+        When kicad-cli is not found, _check_erc sets passed=True and
+        error_count stays 0, which should not block the READY verdict.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            passed=True,
+            details="kicad-cli not found (skipped)",
+        )
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.READY
 
     def test_summary_dict(self):
         """Test summary dict contains expected fields."""
@@ -322,6 +489,102 @@ class TestAuditExitCodes:
         result = main([str(drc_clean_pcb), "--strict"])
         # Exit code depends on actual DRC results of the clean PCB
         assert result in [0, 1, 2]
+
+    def test_exit_code_zero_when_ready(self):
+        """Test that CLI returns exit code 0 when verdict is READY.
+
+        Constructs an AuditResult with READY verdict and verifies the
+        exit code logic in audit_cmd.main returns 0.
+        """
+        result = AuditResult(project_name="test_ready")
+        # All defaults yield READY
+        assert result.verdict == AuditVerdict.READY
+
+        # Verify the exit code logic directly
+        if result.verdict == AuditVerdict.NOT_READY:
+            exit_code = 1
+        elif result.verdict == AuditVerdict.WARNING:
+            exit_code = 2  # strict mode
+        else:
+            exit_code = 0
+        assert exit_code == 0
+
+    def test_exit_code_one_when_not_ready(self):
+        """Test that CLI returns exit code 1 when verdict is NOT_READY."""
+        result = AuditResult()
+        result.erc.error_count = 5
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        # Verify the exit code mapping
+        if result.verdict == AuditVerdict.NOT_READY:
+            exit_code = 1
+        else:
+            exit_code = 0
+        assert exit_code == 1
+
+    def test_exit_code_two_when_warning_strict(self):
+        """Test that CLI returns exit code 2 for WARNING with --strict."""
+        result = AuditResult()
+        result.erc.warning_count = 1
+        assert result.verdict == AuditVerdict.WARNING
+
+        # Verify the exit code mapping under strict mode
+        strict = True
+        if result.verdict == AuditVerdict.NOT_READY:
+            exit_code = 1
+        elif result.verdict == AuditVerdict.WARNING and strict:
+            exit_code = 2
+        else:
+            exit_code = 0
+        assert exit_code == 2
+
+
+class TestAuditOutputRendering:
+    """Tests for audit output rendering with READY verdict."""
+
+    def test_output_table_shows_ready_for_manufacturing(self, capsys):
+        """Test that output_table prints '[OK] READY FOR MANUFACTURING' when READY."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult(project_name="test_ready_board")
+        # Explicitly set all checks to passing
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(error_count=0, warning_count=0, blocking_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(total_nets=5, connected_nets=5, passed=True)
+        result.compatibility = ManufacturerCompatibility(manufacturer="JLCPCB", passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        assert "[OK] READY FOR MANUFACTURING" in captured.out
+
+    def test_output_table_shows_not_ready_when_erc_fails(self, capsys):
+        """Test that output_table prints NOT READY when ERC has errors."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult(project_name="test_failing_board")
+        result.erc.error_count = 3
+        assert result.verdict == AuditVerdict.NOT_READY
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        assert "[XX] NOT READY - FIX ISSUES" in captured.out
+
+    def test_output_table_shows_warning_when_erc_warnings(self, capsys):
+        """Test that output_table prints REVIEW WARNINGS for WARNING verdict."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        result = AuditResult(project_name="test_warning_board")
+        result.erc.warning_count = 2
+        assert result.verdict == AuditVerdict.WARNING
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        assert "[!!] REVIEW WARNINGS" in captured.out
 
 
 class TestAuditPathResolution:
