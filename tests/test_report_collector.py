@@ -3,6 +3,7 @@
 Tests cover:
 - Board summary collection (layers, footprints, nets, traces, vias, dimensions)
 - DRC collection from AuditResult
+- Cost collection from AuditResult (field normalisation for template)
 - BOM collection from schematic
 - Net status collection
 - Analysis collection (congestion, SI, thermal)
@@ -231,6 +232,64 @@ class TestCollectERC:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests - cost collect
+# ---------------------------------------------------------------------------
+
+
+class TestCollectCost:
+    """Tests for collect_cost."""
+
+    def test_collect_cost_from_audit_result(self):
+        """Cost data has all four template-expected keys with correct values."""
+        audit_result = _make_mock_audit_result()
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        cost = collector.collect_cost(audit_result)
+
+        assert cost is not None
+        assert set(cost.keys()) == {"per_unit", "batch_qty", "batch_total", "currency"}
+        # mock: total_cost=5.0, quantity=5 => per_unit=1.0
+        assert cost["per_unit"] == 1.0
+        assert cost["batch_qty"] == 5
+        assert cost["batch_total"] == 5.0
+        assert cost["currency"] == "USD"
+
+    def test_collect_cost_returns_none_when_no_audit(self):
+        """collect_cost returns None when audit_result is None."""
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        assert collector.collect_cost(None) is None
+
+    def test_collect_cost_quantity_zero_no_division_error(self):
+        """quantity=0 produces per_unit=0.0 instead of ZeroDivisionError."""
+        from kicad_tools.audit.auditor import AuditResult, CostEstimate
+
+        audit_result = AuditResult(
+            project_name="test",
+            cost=CostEstimate(pcb_cost=10.0, total_cost=10.0, quantity=0),
+        )
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        cost = collector.collect_cost(audit_result)
+
+        assert cost is not None
+        assert cost["per_unit"] == 0.0
+        assert cost["batch_qty"] == 0
+        assert cost["batch_total"] == 10.0
+
+    def test_collect_cost_rounds_per_unit(self):
+        """per_unit is rounded to 2 decimal places."""
+        from kicad_tools.audit.auditor import AuditResult, CostEstimate
+
+        audit_result = AuditResult(
+            project_name="test",
+            cost=CostEstimate(pcb_cost=10.0, total_cost=10.0, quantity=3),
+        )
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        cost = collector.collect_cost(audit_result)
+
+        # 10.0 / 3 = 3.333... -> rounded to 3.33
+        assert cost["per_unit"] == 3.33
+
+
+# ---------------------------------------------------------------------------
 # Unit tests - BOM collect
 # ---------------------------------------------------------------------------
 
@@ -443,6 +502,7 @@ class TestCollectAllIntegration:
             "drc_summary",
             "erc_summary",
             "audit",
+            "cost",
             "net_status",
             "analysis",
         }
@@ -450,6 +510,28 @@ class TestCollectAllIntegration:
         for name in expected_names:
             assert name in files, f"Missing file: {name}"
             assert files[name].exists(), f"File not on disk: {name}"
+
+    def test_cost_json_has_normalised_keys(self, tmp_path):
+        """cost.json contains per_unit, batch_qty, batch_total, currency."""
+        pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
+        if not pcb_path.exists():
+            pytest.skip("test_project.kicad_pcb fixture not found")
+
+        collector = ReportDataCollector(pcb_path, skip_erc=True)
+        files = collector.collect_all(tmp_path)
+
+        assert "cost" in files, "cost.json not written by collect_all"
+        with open(files["cost"]) as f:
+            envelope = json.load(f)
+
+        cost_data = envelope["data"]
+        # cost_data may be None if the cost estimator returned defaults,
+        # but the dict itself should be present and have the right shape.
+        assert cost_data is not None, "cost data should not be null for a valid audit"
+        assert "per_unit" in cost_data
+        assert "batch_qty" in cost_data
+        assert "batch_total" in cost_data
+        assert "currency" in cost_data
 
     def test_json_validity(self, tmp_path):
         """All written files are valid JSON."""
