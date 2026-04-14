@@ -2915,8 +2915,8 @@ def _add_pipeline_parser(subparsers) -> None:
         "-l",
         dest="pipeline_layers",
         type=int,
-        default=2,
-        help="Number of PCB layers (default: 2)",
+        default=None,
+        help="Number of copper layers (default: auto-detected from board)",
     )
     pipeline_parser.add_argument(
         "--dry-run",
