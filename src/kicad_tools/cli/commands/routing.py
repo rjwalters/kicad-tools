@@ -209,6 +209,12 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--manufacturer", args.manufacturer])
     if getattr(args, "high_performance", False):
         sub_argv.append("--high-performance")
+    if getattr(args, "skip_drc", False):
+        sub_argv.append("--skip-drc")
+    if getattr(args, "auto_fix", False):
+        sub_argv.append("--auto-fix")
+    if getattr(args, "auto_fix_passes", None) is not None:
+        sub_argv.extend(["--auto-fix-passes", str(args.auto_fix_passes)])
     return route_main(sub_argv)
 
 

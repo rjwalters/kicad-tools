@@ -957,6 +957,30 @@ def _add_route_parser(subparsers) -> None:
             "Uses calibrated settings if available (run 'kicad-tools calibrate' first)."
         ),
     )
+    route_parser.add_argument(
+        "--skip-drc",
+        action="store_true",
+        help=(
+            "Skip post-routing DRC validation. By default, the router runs "
+            "a DRC check after routing and warns about violations. Use this "
+            "flag for performance-critical use or when running separate validation."
+        ),
+    )
+    route_parser.add_argument(
+        "--auto-fix",
+        action="store_true",
+        help=(
+            "Automatically run 'kct fix-drc' after routing if DRC violations are "
+            "detected. Suppressed by --dry-run and --skip-drc."
+        ),
+    )
+    route_parser.add_argument(
+        "--auto-fix-passes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=("Number of repair passes for --auto-fix (default: 3). Implies --auto-fix."),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:

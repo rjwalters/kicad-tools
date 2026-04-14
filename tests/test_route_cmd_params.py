@@ -375,6 +375,212 @@ class TestRouteCommandGridClearanceValidation:
         assert "clearance" in help_text.lower(), "Help text should mention clearance"
 
 
+class TestRouteCommandAutoFixFlags:
+    """Tests for --skip-drc, --auto-fix, and --auto-fix-passes forwarding via centralized CLI."""
+
+    def _make_base_args(self, **overrides):
+        """Create a base args namespace with all required route fields."""
+        defaults = {
+            "pcb": "test.kicad_pcb",
+            "output": None,
+            "strategy": "negotiated",
+            "skip_nets": None,
+            "grid": "0.25",
+            "trace_width": 0.2,
+            "clearance": 0.15,
+            "via_drill": 0.3,
+            "via_diameter": 0.6,
+            "mc_trials": 10,
+            "iterations": 15,
+            "verbose": False,
+            "dry_run": True,
+            "quiet": True,
+            "power_nets": None,
+            "layers": "auto",
+            "force": False,
+            "no_optimize": False,
+            "auto_layers": False,
+            "max_layers": 6,
+            "min_completion": 0.95,
+            "adaptive_rules": False,
+            "min_trace": None,
+            "min_clearance_floor": None,
+            "manufacturer": "jlcpcb",
+            "high_performance": False,
+            "skip_drc": False,
+            "auto_fix": False,
+            "auto_fix_passes": None,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_skip_drc_forwarded(self):
+        """--skip-drc is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(skip_drc=True)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--skip-drc" in call_args
+
+    def test_skip_drc_not_forwarded_when_false(self):
+        """--skip-drc is not forwarded when not set."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(skip_drc=False)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--skip-drc" not in call_args
+
+    def test_auto_fix_forwarded(self):
+        """--auto-fix is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(auto_fix=True)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--auto-fix" in call_args
+
+    def test_auto_fix_not_forwarded_when_false(self):
+        """--auto-fix is not forwarded when not set."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(auto_fix=False)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--auto-fix" not in call_args
+
+    def test_auto_fix_passes_forwarded(self):
+        """--auto-fix-passes N is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(auto_fix_passes=5)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--auto-fix-passes" in call_args
+            passes_idx = call_args.index("--auto-fix-passes")
+            assert call_args[passes_idx + 1] == "5"
+
+    def test_auto_fix_passes_not_forwarded_when_none(self):
+        """--auto-fix-passes is not forwarded when None (default)."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(auto_fix_passes=None)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--auto-fix-passes" not in call_args
+
+    def test_all_three_flags_forwarded_together(self):
+        """All three flags forwarded when set simultaneously."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._make_base_args(skip_drc=True, auto_fix=True, auto_fix_passes=7)
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--skip-drc" in call_args
+            assert "--auto-fix" in call_args
+            assert "--auto-fix-passes" in call_args
+            passes_idx = call_args.index("--auto-fix-passes")
+            assert call_args[passes_idx + 1] == "7"
+
+
+class TestRouteParserAutoFixFlags:
+    """Tests for --skip-drc, --auto-fix, --auto-fix-passes in centralized parser."""
+
+    def test_parser_accepts_skip_drc(self):
+        """Centralized parser accepts --skip-drc without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--skip-drc"])
+        assert args.skip_drc is True
+
+    def test_parser_accepts_auto_fix(self):
+        """Centralized parser accepts --auto-fix without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--auto-fix"])
+        assert args.auto_fix is True
+
+    def test_parser_accepts_auto_fix_passes(self):
+        """Centralized parser accepts --auto-fix-passes N without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--auto-fix-passes", "5"])
+        assert args.auto_fix_passes == 5
+
+    def test_parser_auto_fix_passes_default_is_none(self):
+        """--auto-fix-passes defaults to None when not provided."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.auto_fix_passes is None
+
+    def test_parser_skip_drc_default_is_false(self):
+        """--skip-drc defaults to False when not provided."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.skip_drc is False
+
+    def test_parser_auto_fix_default_is_false(self):
+        """--auto-fix defaults to False when not provided."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.auto_fix is False
+
+    def test_route_help_shows_auto_fix_flags(self):
+        """kct route --help output includes the three new flags."""
+        import contextlib
+        from io import StringIO
+
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        help_output = StringIO()
+        with contextlib.redirect_stdout(help_output), contextlib.suppress(SystemExit):
+            parser.parse_args(["route", "--help"])
+
+        help_text = help_output.getvalue()
+        assert "--skip-drc" in help_text
+        assert "--auto-fix" in help_text
+        assert "--auto-fix-passes" in help_text
+
+
 class TestEscapeRoutingFlag:
     """Tests for --escape-routing / --no-escape-routing CLI flag handling."""
 
