@@ -43,7 +43,9 @@ class ReportData:
     incomplete_net_names}."""
 
     cost: dict | None = None
-    """Cost estimate: {per_unit, batch_qty, batch_total, currency}."""
+    """Cost estimate: {pcb_cost, component_cost (nullable),
+    assembly_cost (nullable), total, per_unit, batch_qty, batch_total,
+    currency}."""
 
     schematic_sheets: list[dict] | None = None
     """List of dicts: {name, figure_path}."""

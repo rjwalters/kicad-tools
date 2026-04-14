@@ -240,18 +240,31 @@ class TestCollectCost:
     """Tests for collect_cost."""
 
     def test_collect_cost_from_audit_result(self):
-        """Cost data has all four template-expected keys with correct values."""
+        """Cost data has all template-expected keys including pcb_cost."""
         audit_result = _make_mock_audit_result()
         collector = ReportDataCollector(Path("dummy.kicad_pcb"))
         cost = collector.collect_cost(audit_result)
 
         assert cost is not None
-        assert set(cost.keys()) == {"per_unit", "batch_qty", "batch_total", "currency"}
+        expected_keys = {
+            "pcb_cost",
+            "component_cost",
+            "assembly_cost",
+            "total",
+            "per_unit",
+            "batch_qty",
+            "batch_total",
+            "currency",
+        }
+        assert expected_keys == set(cost.keys())
         # mock: total_cost=5.0, quantity=5 => per_unit=1.0
         assert cost["per_unit"] == 1.0
         assert cost["batch_qty"] == 5
         assert cost["batch_total"] == 5.0
         assert cost["currency"] == "USD"
+        # pcb_cost and total should also be present
+        assert cost["pcb_cost"] == 1.0  # 5.0 / 5
+        assert cost["total"] == 1.0
 
     def test_collect_cost_returns_none_when_no_audit(self):
         """collect_cost returns None when audit_result is None."""
@@ -271,6 +284,7 @@ class TestCollectCost:
 
         assert cost is not None
         assert cost["per_unit"] == 0.0
+        assert cost["pcb_cost"] == 0.0
         assert cost["batch_qty"] == 0
         assert cost["batch_total"] == 10.0
 
@@ -287,6 +301,53 @@ class TestCollectCost:
 
         # 10.0 / 3 = 3.333... -> rounded to 3.33
         assert cost["per_unit"] == 3.33
+
+    def test_collect_cost_pcb_only_no_component_data(self):
+        """component_cost is None when CostEstimate.component_cost is None."""
+        from kicad_tools.audit.auditor import AuditResult, CostEstimate
+
+        audit_result = AuditResult(
+            project_name="test",
+            cost=CostEstimate(
+                pcb_cost=8.0,
+                component_cost=None,
+                assembly_cost=None,
+                total_cost=8.0,
+                quantity=4,
+            ),
+        )
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        cost = collector.collect_cost(audit_result)
+
+        assert cost is not None
+        assert cost["pcb_cost"] == 2.0  # 8.0 / 4
+        assert cost["component_cost"] is None
+        assert cost["assembly_cost"] is None
+        assert cost["total"] == 2.0  # 8.0 / 4
+
+    def test_collect_cost_with_component_and_assembly(self):
+        """All three cost sub-groups are populated when data is available."""
+        from kicad_tools.audit.auditor import AuditResult, CostEstimate
+
+        audit_result = AuditResult(
+            project_name="test",
+            cost=CostEstimate(
+                pcb_cost=10.0,
+                component_cost=6.0,
+                assembly_cost=4.0,
+                total_cost=20.0,
+                quantity=5,
+            ),
+        )
+        collector = ReportDataCollector(Path("dummy.kicad_pcb"))
+        cost = collector.collect_cost(audit_result)
+
+        assert cost is not None
+        assert cost["pcb_cost"] == 2.0  # 10.0 / 5
+        assert cost["component_cost"] == 1.2  # 6.0 / 5
+        assert cost["assembly_cost"] == 0.8  # 4.0 / 5
+        assert cost["total"] == 4.0  # 20.0 / 5
+        assert cost["batch_total"] == 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +595,7 @@ class TestCollectAllIntegration:
             assert files[name].exists(), f"File not on disk: {name}"
 
     def test_cost_json_has_normalised_keys(self, tmp_path):
-        """cost.json contains per_unit, batch_qty, batch_total, currency."""
+        """cost.json contains pcb_cost, component_cost, total, and legacy keys."""
         pcb_path = PROJECT_FIXTURES / "test_project.kicad_pcb"
         if not pcb_path.exists():
             pytest.skip("test_project.kicad_pcb fixture not found")
@@ -550,6 +611,12 @@ class TestCollectAllIntegration:
         # cost_data may be None if the cost estimator returned defaults,
         # but the dict itself should be present and have the right shape.
         assert cost_data is not None, "cost data should not be null for a valid audit"
+        # New breakdown keys
+        assert "pcb_cost" in cost_data
+        assert "component_cost" in cost_data  # may be None
+        assert "assembly_cost" in cost_data  # may be None
+        assert "total" in cost_data
+        # Legacy keys preserved
         assert "per_unit" in cost_data
         assert "batch_qty" in cost_data
         assert "batch_total" in cost_data

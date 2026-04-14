@@ -92,6 +92,10 @@ def _full_data(**overrides) -> ReportData:
             "incomplete_net_names": ["GND", "SDA", "VCC"],
         },
         "cost": {
+            "pcb_cost": 1.20,
+            "component_cost": 0.80,
+            "assembly_cost": 0.50,
+            "total": 2.50,
             "per_unit": 2.50,
             "batch_qty": 100,
             "batch_total": 250.00,
@@ -581,6 +585,59 @@ class TestReportGenerator:
 
         assert "## Manufacturing Readiness" in content
         assert "### Action Items" not in content
+
+    def test_cost_section_shows_pcb_fabrication_label(self, tmp_path: Path) -> None:
+        """Cost section renders 'PCB Fabrication' label when cost data present."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## Cost Estimate" in content
+        assert "PCB Fabrication" in content
+        assert "~1.2" in content
+
+    def test_cost_section_shows_components_label(self, tmp_path: Path) -> None:
+        """Cost section renders 'Components (estimated)' when component_cost present."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "Components (estimated)" in content
+        assert "~0.8" in content
+
+    def test_cost_section_shows_total_label(self, tmp_path: Path) -> None:
+        """Cost section renders 'Total (estimated)' with bold formatting."""
+        data = _full_data()
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "**Total (estimated)**" in content
+        assert "~2.5" in content
+
+    def test_cost_section_pcb_only_no_components(self, tmp_path: Path) -> None:
+        """When component_cost is None, only PCB Fabrication row appears."""
+        data = _full_data(
+            cost={
+                "pcb_cost": 1.50,
+                "component_cost": None,
+                "assembly_cost": None,
+                "total": 1.50,
+                "per_unit": 1.50,
+                "batch_qty": 10,
+                "batch_total": 15.0,
+                "currency": "USD",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "PCB Fabrication" in content
+        assert "Components (estimated)" not in content
+        assert "Assembly (estimated)" not in content
 
 
 # ---------------------------------------------------------------------------

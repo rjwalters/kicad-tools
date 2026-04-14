@@ -293,10 +293,11 @@ class ReportDataCollector:
     def collect_cost(self, audit_result: AuditResult | None) -> dict[str, Any] | None:
         """Extract and normalise cost data from a pre-run AuditResult.
 
-        The template expects keys ``per_unit``, ``batch_qty``,
-        ``batch_total``, and ``currency``.  ``CostEstimate.to_dict()``
-        produces ``pcb_cost``, ``quantity``, ``total_cost``, and
-        ``currency``, so this method maps between the two schemas.
+        Returns a dictionary with separate ``pcb_cost``,
+        ``component_cost`` (nullable), ``assembly_cost`` (nullable),
+        and ``total`` fields so the template can render labelled
+        sub-groups.  Legacy ``per_unit``, ``batch_qty``, and
+        ``batch_total`` keys are preserved for backward compatibility.
 
         Args:
             audit_result: Result from ManufacturingAudit.run(), or None if
@@ -310,12 +311,29 @@ class ReportDataCollector:
             return None
         ce = audit_result.cost
         per_unit = round(ce.total_cost / ce.quantity, 2) if ce.quantity else 0.0
-        return {
+        pcb_per_unit = round(ce.pcb_cost / ce.quantity, 2) if ce.quantity else 0.0
+
+        result: dict[str, Any] = {
+            # Per-board breakdown
+            "pcb_cost": pcb_per_unit,
+            "component_cost": (
+                round(ce.component_cost / ce.quantity, 2)
+                if ce.component_cost is not None and ce.quantity
+                else None
+            ),
+            "assembly_cost": (
+                round(ce.assembly_cost / ce.quantity, 2)
+                if ce.assembly_cost is not None and ce.quantity
+                else None
+            ),
+            "total": per_unit,
+            # Legacy / batch fields
             "per_unit": per_unit,
             "batch_qty": ce.quantity,
             "batch_total": round(ce.total_cost, 2),
             "currency": ce.currency,
         }
+        return result
 
     # Maximum number of incomplete net names included in the snapshot.
     _INCOMPLETE_NET_NAMES_CAP = 50

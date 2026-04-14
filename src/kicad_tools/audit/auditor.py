@@ -666,7 +666,13 @@ class ManufacturingAudit:
         return util
 
     def _estimate_cost(self, pcb: PCB) -> CostEstimate:
-        """Estimate manufacturing cost."""
+        """Estimate manufacturing cost including components and assembly.
+
+        Uses the full ``ManufacturingCostEstimator.estimate()`` method which
+        derives a synthetic BOM from PCB footprints when no schematic BOM is
+        available, providing component and assembly cost breakdowns alongside
+        PCB fabrication cost.
+        """
         estimate = CostEstimate(quantity=self.quantity)
 
         try:
@@ -674,19 +680,17 @@ class ManufacturingAudit:
 
             estimator = ManufacturingCostEstimator(manufacturer=self.manufacturer)
 
-            # Get board dimensions
-            width, height = self._get_board_size(pcb)
-
-            # Basic PCB cost
-            cost_result = estimator.estimate_pcb(
-                width_mm=width,
-                height_mm=height,
-                layers=self.layers or 2,
+            # Use the full estimator which handles PCB dimensions, component
+            # costs (from footprint-derived BOM), and assembly costs.
+            full_result = estimator.estimate(
+                pcb=pcb,
                 quantity=self.quantity,
             )
 
-            estimate.pcb_cost = cost_result.total
-            estimate.total_cost = cost_result.total
+            estimate.pcb_cost = full_result.pcb.total_cost
+            estimate.component_cost = full_result.component_cost_per_unit * full_result.quantity
+            estimate.assembly_cost = full_result.assembly.total_cost
+            estimate.total_cost = full_result.total_for_quantity
 
         except Exception as e:
             logger.warning(f"Cost estimation failed: {e}")
