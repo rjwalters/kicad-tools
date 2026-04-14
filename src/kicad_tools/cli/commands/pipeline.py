@@ -39,6 +39,10 @@ def run_pipeline_command(args) -> int:
     if getattr(args, "pipeline_commit", False):
         sub_argv.append("--commit")
 
+    # Zones opt-in
+    if getattr(args, "pipeline_zones", False):
+        sub_argv.append("--zones")
+
     # Use global quiet or command-level quiet
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
