@@ -417,59 +417,166 @@ def _snapshot_net_declarations(pcb_path: Path) -> list:
     return [child for child in sexp.children if child.name == "net"]
 
 
-def _restore_net_declarations(target_pcb: Path, net_nodes: list) -> None:
-    """Restore net declarations in *target_pcb* from a snapshot.
+def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
+    """Snapshot per-element inline ``(net N ...)`` assignments from a PCB.
 
-    kicad-cli may strip ``(net N "name")`` header declarations when
-    re-serializing a PCB that was not originally written by KiCad itself.
-    This function replaces the output file's net declarations with those
-    captured before the DRC run, preserving all other content (including
-    filled zone polygons).
+    Captures the ``(net ...)`` child S-expression for every pad, segment,
+    and via, keyed by a stable identifier:
 
-    The function is a no-op when the output already has at least as many
-    net declarations as the snapshot (i.e. kicad-cli kept them intact).
+    - **Pads**: keyed by ``"fp:<footprint_uuid>:pad:<pad_number>"`` since
+      pads in KiCad files do not have their own UUIDs.
+    - **Segments/Vias**: keyed by their UUID string.
+
+    Returns a dict mapping key strings to a list ``[net_sexp_node]``
+    containing the original ``(net ...)`` S-expression.  An empty dict
+    is returned if the file cannot be read.
+    """
+    from kicad_tools.core.sexp_file import load_pcb
+
+    try:
+        sexp = load_pcb(str(pcb_path))
+    except Exception:
+        return {}
+
+    snapshot: dict[str, list] = {}
+
+    # Snapshot pads inside footprints, keyed by footprint UUID + pad number
+    for fp_node in (c for c in sexp.children if c.name == "footprint"):
+        fp_uuid_node = fp_node.get("uuid")
+        if fp_uuid_node is None:
+            continue
+        fp_uuid = fp_uuid_node.get_string(0) or ""
+        if not fp_uuid:
+            continue
+
+        for pad_node in (c for c in fp_node.children if c.name == "pad"):
+            net_node = pad_node.get("net")
+            if net_node is None:
+                continue
+            net_num = net_node.get_int(0)
+            if net_num is None or net_num == 0:
+                continue
+            # Use the pad's first atom (its number) as sub-key
+            pad_number = pad_node.get_first_atom()
+            if pad_number is None:
+                continue
+            key = f"fp:{fp_uuid}:pad:{pad_number}"
+            snapshot[key] = [net_node]
+
+    # Snapshot segments and vias at the top level, keyed by UUID
+    for child in sexp.children:
+        if child.name in ("segment", "via"):
+            uuid_node = child.get("uuid")
+            net_node = child.get("net")
+            if uuid_node is not None and net_node is not None:
+                uuid_val = uuid_node.get_string(0)
+                net_num = net_node.get_int(0)
+                if uuid_val and net_num is not None and net_num != 0:
+                    snapshot[uuid_val] = [net_node]
+
+    return snapshot
+
+
+def _restore_net_declarations(
+    target_pcb: Path,
+    net_nodes: list,
+    element_nets: dict[str, list] | None = None,
+) -> None:
+    """Restore net declarations and per-element net assignments in *target_pcb*.
+
+    kicad-cli may strip ``(net N "name")`` header declarations and/or
+    inline ``(net N)`` assignments inside pads, segments, and vias when
+    re-serializing a PCB.  This function restores both from snapshots
+    captured before the DRC run.
+
+    The net table restoration is a no-op when the output already has at
+    least as many net declarations as the snapshot.
+
+    The per-element restoration is a no-op when no element_nets snapshot
+    was provided or when no elements had their nets zeroed out.
     """
     from kicad_tools.core.sexp_file import load_pcb, save_pcb
 
     output_sexp = load_pcb(str(target_pcb))
 
-    # Count existing nets in the output
+    modified = False
+
+    # --- Restore net table headers ---
     output_net_nodes = [child for child in output_sexp.children if child.name == "net"]
 
-    if len(output_net_nodes) >= len(net_nodes):
-        # Net table was not stripped — nothing to do.
-        return
+    if len(output_net_nodes) < len(net_nodes):
+        # Remove whatever net declarations remain in the output.
+        for node in output_net_nodes:
+            output_sexp.children.remove(node)
 
-    # Remove whatever net declarations remain in the output.
-    for node in output_net_nodes:
-        output_sexp.children.remove(node)
+        # Find insertion point: nets go after ``setup`` / ``title_block`` and
+        # before ``footprint`` / ``segment`` / ``via`` / ``zone`` / ``gr_*``.
+        insert_index = len(output_sexp.children)
+        content_tags = {
+            "footprint",
+            "segment",
+            "via",
+            "zone",
+            "gr_line",
+            "gr_arc",
+            "gr_text",
+            "gr_rect",
+            "gr_circle",
+            "gr_poly",
+        }
+        for i, child in enumerate(output_sexp.children):
+            if child.name in content_tags:
+                insert_index = i
+                break
 
-    # Find insertion point: nets go after ``setup`` / ``title_block`` and
-    # before ``footprint`` / ``segment`` / ``via`` / ``zone`` / ``gr_*``.
-    # Walk backward from the first content element to find the right spot.
-    insert_index = len(output_sexp.children)
-    content_tags = {
-        "footprint",
-        "segment",
-        "via",
-        "zone",
-        "gr_line",
-        "gr_arc",
-        "gr_text",
-        "gr_rect",
-        "gr_circle",
-        "gr_poly",
-    }
-    for i, child in enumerate(output_sexp.children):
-        if child.name in content_tags:
-            insert_index = i
-            break
+        for offset, net_node in enumerate(net_nodes):
+            output_sexp.children.insert(insert_index + offset, net_node)
+        modified = True
 
-    # Insert the snapshotted net declarations at the computed position.
-    for offset, net_node in enumerate(net_nodes):
-        output_sexp.children.insert(insert_index + offset, net_node)
+    # --- Restore per-element inline net assignments ---
+    if element_nets:
+        # Restore pad nets inside footprints (keyed by fp_uuid:pad_number)
+        for fp_node in (c for c in output_sexp.children if c.name == "footprint"):
+            fp_uuid_node = fp_node.get("uuid")
+            if fp_uuid_node is None:
+                continue
+            fp_uuid = fp_uuid_node.get_string(0) or ""
+            if not fp_uuid:
+                continue
 
-    save_pcb(output_sexp, target_pcb)
+            for pad_node in (c for c in fp_node.children if c.name == "pad"):
+                pad_number = pad_node.get_first_atom()
+                if pad_number is None:
+                    continue
+                key = f"fp:{fp_uuid}:pad:{pad_number}"
+                if key not in element_nets:
+                    continue
+                current_net = pad_node.get("net")
+                current_num = current_net.get_int(0) if current_net else None
+                if current_num == 0 or current_net is None:
+                    if current_net is not None:
+                        pad_node.remove(current_net)
+                    pad_node.append(element_nets[key][0])
+                    modified = True
+
+        # Restore segment and via nets at the top level (keyed by UUID)
+        for child in output_sexp.children:
+            if child.name in ("segment", "via"):
+                uuid_node = child.get("uuid")
+                if uuid_node is None:
+                    continue
+                uuid_val = uuid_node.get_string(0)
+                if uuid_val and uuid_val in element_nets:
+                    current_net = child.get("net")
+                    current_num = current_net.get_int(0) if current_net else None
+                    if current_num == 0 or current_net is None:
+                        if current_net is not None:
+                            child.remove(current_net)
+                        child.append(element_nets[uuid_val][0])
+                        modified = True
+
+    if modified:
+        save_pcb(output_sexp, target_pcb)
 
 
 def _run_fill_zones_via_drc(
@@ -494,9 +601,11 @@ def _run_fill_zones_via_drc(
     """
     import os
 
-    # Snapshot input net declarations *before* DRC runs — the DRC
-    # may modify the file in-place when no output_path is given.
+    # Snapshot input net declarations and per-element net assignments
+    # *before* DRC runs — the DRC may modify the file in-place when
+    # no output_path is given.
     input_net_nodes = _snapshot_net_declarations(pcb_path)
+    input_element_nets = _snapshot_element_nets(pcb_path)
 
     # DRC modifies the input file in-place.  If the caller requested a
     # separate output file, copy the source first and run DRC on the copy.
@@ -534,8 +643,9 @@ def _run_fill_zones_via_drc(
         # are still filled.  We treat it as success when the DRC report
         # was actually produced (meaning the command ran to completion).
         if drc_report.exists() and drc_report.stat().st_size > 0:
-            # Restore net declarations if kicad-cli stripped them.
-            _restore_net_declarations(target_pcb, input_net_nodes)
+            # Restore net declarations and per-element net assignments
+            # if kicad-cli stripped them.
+            _restore_net_declarations(target_pcb, input_net_nodes, input_element_nets)
 
             return KiCadCLIResult(
                 success=True,

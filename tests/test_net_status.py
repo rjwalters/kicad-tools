@@ -796,3 +796,104 @@ class TestNetStatusIntegration:
         parsed = json.loads(json_str)
         assert parsed["total_nets"] == result.total_nets
         assert len(parsed["nets"]) == len(result.nets)
+
+
+# ---------------------------------------------------------------------------
+# Tests for corruption defense in NetStatus
+# ---------------------------------------------------------------------------
+
+
+class TestNetStatusCorruptionDefense:
+    """Tests for NetStatus behavior when pad net assignments are corrupted."""
+
+    def test_zero_pads_returns_zero_percentage(self):
+        """connection_percentage returns 0.0 when total_pads is 0."""
+        ns = NetStatus(net_number=1, net_name="GND", total_pads=0)
+        assert ns.connection_percentage == 0.0
+
+    def test_zero_pads_status_is_unrouted(self):
+        """A net with 0 pads is reported as 'unrouted', not 'complete'."""
+        ns = NetStatus(net_number=1, net_name="GND", total_pads=0)
+        assert ns.status == "unrouted"
+
+    def test_single_pad_status_is_complete(self):
+        """A net with exactly 1 pad is genuinely complete."""
+        pad = PadInfo(
+            reference="U1",
+            pad_number="1",
+            position=(0.0, 0.0),
+            is_connected=True,
+        )
+        ns = NetStatus(
+            net_number=1,
+            net_name="VCC",
+            total_pads=1,
+            connected_pads=[pad],
+        )
+        assert ns.status == "complete"
+        assert ns.connection_percentage == 100.0
+
+    def test_two_pads_all_connected(self):
+        """A net with 2 pads all connected is complete."""
+        pad1 = PadInfo(
+            reference="R1",
+            pad_number="1",
+            position=(0.0, 0.0),
+            is_connected=True,
+        )
+        pad2 = PadInfo(
+            reference="R2",
+            pad_number="1",
+            position=(10.0, 0.0),
+            is_connected=True,
+        )
+        ns = NetStatus(
+            net_number=1,
+            net_name="GND",
+            total_pads=2,
+            connected_pads=[pad1, pad2],
+        )
+        assert ns.status == "complete"
+        assert ns.connection_percentage == 100.0
+
+    def test_corrupted_board_analyzer_reports_unrouted(self, tmp_path):
+        """NetStatusAnalyzer on a board where all pads are net 0 reports unrouted."""
+        # A board with nets declared but all pads at net 0
+        corrupted_pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.5 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.5 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+  )
+)
+"""
+        pcb_path = tmp_path / "corrupted.kicad_pcb"
+        pcb_path.write_text(corrupted_pcb_content)
+
+        analyzer = NetStatusAnalyzer(pcb_path)
+        result = analyzer.analyze()
+
+        # Both declared nets should have 0 pads and be unrouted
+        for net_status in result.nets:
+            assert net_status.total_pads == 0
+            assert net_status.status == "unrouted"
+            assert net_status.connection_percentage == 0.0

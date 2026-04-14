@@ -639,6 +639,181 @@ class TestRunFillZonesDRCFallback:
 
 
 # ---------------------------------------------------------------------------
+# Test: per-element net assignment preservation through zone fill
+# ---------------------------------------------------------------------------
+
+
+class TestPadNetPreservation:
+    """Tests for per-element (pad, segment, via) net assignment preservation."""
+
+    def test_drc_fallback_preserves_pad_nets(self, tmp_pcb, tmp_path):
+        """Pad net assignments are restored when kicad-cli zeroes them out."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        # Collect original pad net assignments
+        input_pad_nets = {}
+        for fp in input_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    input_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert len(input_pad_nets) > 0, "Fixture must have pads with net assignments"
+
+        def fake_run_strips_pad_nets(cmd, **kwargs):
+            """Simulate kicad-cli zeroing out inline (net N) on pads."""
+            import re
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            # Zero out inline (net N "name") inside pads to (net 0 "")
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_pad_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        # Verify pad net assignments were restored
+        output_pad_nets = {}
+        for fp in output_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    output_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert output_pad_nets == input_pad_nets
+
+    def test_drc_fallback_preserves_segment_nets(self, tmp_pcb, tmp_path):
+        """Segment net assignments are restored when kicad-cli zeroes them."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_seg_nets = {
+            seg.uuid: seg.net_number for seg in input_pcb.segments if seg.net_number != 0
+        }
+        assert len(input_seg_nets) > 0, "Fixture must have segments with nets"
+
+        def fake_run_strips_element_nets(cmd, **kwargs):
+            """Simulate kicad-cli zeroing out (net N) on segments."""
+            import re
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            # Zero out all inline net references: (net N) -> (net 0)
+            # and (net N "name") -> (net 0 "")
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_seg_nets = {
+            seg.uuid: seg.net_number for seg in output_pcb.segments if seg.net_number != 0
+        }
+        assert output_seg_nets == input_seg_nets
+
+    def test_drc_fallback_preserves_via_nets(self, tmp_pcb, tmp_path):
+        """Via net assignments are restored when kicad-cli zeroes them."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_via_nets = {via.uuid: via.net_number for via in input_pcb.vias if via.net_number != 0}
+        assert len(input_via_nets) > 0, "Fixture must have vias with nets"
+
+        def fake_run_strips_element_nets(cmd, **kwargs):
+            """Simulate kicad-cli zeroing out (net N) on vias."""
+            import re
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_strips_element_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_via_nets = {
+            via.uuid: via.net_number for via in output_pcb.vias if via.net_number != 0
+        }
+        assert output_via_nets == input_via_nets
+
+    def test_drc_fallback_noop_when_element_nets_intact(self, tmp_pcb, tmp_path):
+        """Element net restoration is a no-op when nets are not stripped."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_pad_nets = {}
+        for fp in input_pcb.footprints:
+            for pad in fp.pads:
+                input_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+
+        def fake_run_keeps_nets(cmd, **kwargs):
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_keeps_nets),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_pad_nets = {}
+        for fp in output_pcb.footprints:
+            for pad in fp.pads:
+                output_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert output_pad_nets == input_pad_nets
+
+
+# ---------------------------------------------------------------------------
 # Integration test: requires kicad-cli
 # ---------------------------------------------------------------------------
 

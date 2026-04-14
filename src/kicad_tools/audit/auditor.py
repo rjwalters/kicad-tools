@@ -572,10 +572,42 @@ class ManufacturingAudit:
         return status
 
     def _check_connectivity(self, pcb: PCB) -> ConnectivityStatus:
-        """Check net connectivity."""
+        """Check net connectivity.
+
+        Includes a corruption guard: if the board has footprints but every
+        pad is assigned to net 0 (unconnected), this indicates that inline
+        net assignments were stripped (e.g. by kicad-cli).  In that case
+        the check is marked as failed with a corruption diagnostic.
+        """
         status = ConnectivityStatus()
 
         try:
+            # Corruption guard: detect boards where all pad net assignments
+            # have been zeroed out.  A board with footprints must have at
+            # least some pads with non-zero net numbers.
+            if pcb.footprint_count > 0:
+                total_pads = 0
+                pads_with_net = 0
+                for fp in pcb.footprints:
+                    for pad in fp.pads:
+                        total_pads += 1
+                        if pad.net_number != 0:
+                            pads_with_net += 1
+
+                if total_pads > 0 and pads_with_net == 0:
+                    logger.warning(
+                        "Data corruption detected: %d pads on %d footprints "
+                        "but all pads assigned to net 0",
+                        total_pads,
+                        pcb.footprint_count,
+                    )
+                    status.passed = False
+                    status.details = (
+                        f"Possible data corruption: {total_pads} pads across "
+                        f"{pcb.footprint_count} footprints all assigned to net 0"
+                    )
+                    return status
+
             from kicad_tools.validate import ConnectivityValidator
 
             validator = ConnectivityValidator(pcb)
