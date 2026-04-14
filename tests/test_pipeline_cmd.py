@@ -19,6 +19,7 @@ from kicad_tools.cli.pipeline_cmd import (
     _resolve_pcb_from_project,
     _resolve_schematic,
     _run_step_erc,
+    _run_step_report,
     main,
     run_pipeline,
 )
@@ -549,6 +550,7 @@ class TestPipelineStepOrder:
             PipelineStep.OPTIMIZE,
             PipelineStep.ZONES,
             PipelineStep.AUDIT,
+            PipelineStep.REPORT,
         ]
         assert expected == ALL_STEPS
 
@@ -1470,3 +1472,200 @@ class TestERCStep:
         assert ALL_STEPS[0] == PipelineStep.ERC
         assert ALL_STEPS[1] == PipelineStep.FIX_SILKSCREEN
         assert ALL_STEPS[2] == PipelineStep.FIX_VIAS
+
+
+# =========================================================================
+# REPORT STEP TESTS
+# =========================================================================
+
+
+class TestReportStep:
+    """Tests for the REPORT pipeline step."""
+
+    def test_report_step_in_all_steps(self):
+        """PipelineStep.REPORT is in ALL_STEPS after AUDIT."""
+        assert PipelineStep.REPORT in ALL_STEPS
+        audit_idx = ALL_STEPS.index(PipelineStep.AUDIT)
+        report_idx = ALL_STEPS.index(PipelineStep.REPORT)
+        assert report_idx == audit_idx + 1
+
+    def test_report_step_is_last(self):
+        """PipelineStep.REPORT is the last entry in ALL_STEPS."""
+        assert ALL_STEPS[-1] == PipelineStep.REPORT
+
+    def test_report_enum_value(self):
+        """PipelineStep.REPORT has value 'report'."""
+        assert PipelineStep.REPORT.value == "report"
+
+    def test_report_dry_run(self, routed_pcb: Path):
+        """Report step in dry-run mode outputs the would-be command."""
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True, mfr="jlcpcb")
+        console = Console(quiet=True)
+        result = _run_step_report(ctx, console)
+
+        assert result.success is True
+        assert "[dry-run]" in result.message
+        assert "kct report generate" in result.message
+        assert routed_pcb.name in result.message
+        assert "--mfr jlcpcb" in result.message
+        assert "--no-figures" in result.message
+        assert "-o reports/" in result.message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_report_step_invokes_subprocess(self, mock_run, routed_pcb: Path):
+        """Report step calls subprocess with correct args."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
+        results = run_pipeline(ctx, [PipelineStep.REPORT])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "report" in cmd_args
+        assert "generate" in cmd_args
+        assert "--mfr" in cmd_args
+        assert "--no-figures" in cmd_args
+        assert "-o" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_report_step_forwards_mfr(self, mock_run, routed_pcb: Path):
+        """Report step passes --mfr with the correct manufacturer value."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="pcbway")
+        run_pipeline(ctx, [PipelineStep.REPORT])
+
+        cmd_args = mock_run.call_args[0][0]
+        mfr_idx = cmd_args.index("--mfr")
+        assert cmd_args[mfr_idx + 1] == "pcbway"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_report_step_output_dir(self, mock_run, routed_pcb: Path):
+        """Report step passes -o with reports/ directory path."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
+        run_pipeline(ctx, [PipelineStep.REPORT])
+
+        cmd_args = mock_run.call_args[0][0]
+        o_idx = cmd_args.index("-o")
+        assert cmd_args[o_idx + 1] == str(routed_pcb.parent / "reports")
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_step_report_accepted_by_argparse(self, mock_run, routed_pcb: Path):
+        """--step report is a valid argparse choice and runs only the report step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main(["--step", "report", str(routed_pcb), "--quiet"])
+
+        assert result == 0
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "report" in cmd_args
+        assert "generate" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_report_runs_after_audit_failure(self, mock_run, routed_pcb: Path):
+        """REPORT step still executes when AUDIT step fails."""
+
+        def side_effect(cmd, **kwargs):
+            if "check" in cmd or "audit" in cmd:
+                return MagicMock(returncode=1, stderr="DRC violations found", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers=2)
+        results = run_pipeline(ctx, [PipelineStep.AUDIT, PipelineStep.REPORT])
+
+        # Both steps should have run
+        assert len(results) == 2
+        assert results[0].success is False  # AUDIT failed
+        assert results[1].step == PipelineStep.REPORT  # REPORT still ran
+        assert results[1].success is True
+
+    def test_full_dry_run_includes_report_step(self, routed_pcb: Path, capsys):
+        """Full dry-run (all steps) includes the report step in output."""
+        result = main(["--dry-run", str(routed_pcb)])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "report" in captured.out.lower()
+
+    def test_report_quiet_suppresses_output(self, routed_pcb: Path, capsys):
+        """--quiet suppresses the 'Generating report for...' console line."""
+        with patch(
+            "kicad_tools.cli.pipeline_cmd.subprocess.run",
+            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+        ):
+            main(["--step", "report", "--quiet", str(routed_pcb)])
+
+        captured = capsys.readouterr()
+        assert "Generating report" not in captured.out
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_commit_stages_reports_dir(self, mock_step, tmp_path: Path):
+        """When --commit is used and reports/ exists, git add includes reports/."""
+        # Initialize a git repo
+        subprocess.run(
+            ["git", "init", str(tmp_path)],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.email", "test@test.com"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "Test"],
+            capture_output=True,
+            check=True,
+        )
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        # Create reports/ directory with a file
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        (reports_dir / "report.md").write_text("# Test report")
+        # Initial commit
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "initial"],
+            capture_output=True,
+            check=True,
+        )
+
+        # Modify the PCB and reports so there is something to commit
+        pcb_file.write_text(ROUTED_PCB + "\n; modified\n")
+        (reports_dir / "report.md").write_text("# Updated report")
+
+        mock_step.return_value = (True, "completed successfully")
+
+        result = main(["--step", "fix-vias", "--commit", "--quiet", str(pcb_file)])
+        assert result == 0
+
+        # Verify the commit included reports/ in the staged files
+        log = subprocess.run(
+            ["git", "-C", str(tmp_path), "log", "--oneline", "-1"],
+            capture_output=True,
+            text=True,
+        )
+        assert "fix: run kct pipeline" in log.stdout
+
+        # Verify both files are in the commit
+        show = subprocess.run(
+            ["git", "-C", str(tmp_path), "diff", "--name-only", "HEAD~1", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        assert "board.kicad_pcb" in show.stdout
+        assert "reports/report.md" in show.stdout
