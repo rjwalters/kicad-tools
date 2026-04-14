@@ -1112,3 +1112,351 @@ class TestAlternativePart:
             is_basic=False,
         )
         assert alt.price_diff is None
+
+
+# ============================================================================
+# LCSC Pricing Integration Tests
+# ============================================================================
+
+
+class TestComponentCostPricingSource:
+    """Tests for ComponentCost.pricing_source field."""
+
+    def test_default_pricing_source_is_estimated(self):
+        cost = ComponentCost(
+            reference="R1",
+            value="10k",
+            footprint="0402",
+            mpn=None,
+            lcsc=None,
+            quantity_per_board=1,
+            unit_cost=0.005,
+            extended_cost=0.005,
+            in_stock=True,
+            lead_time_days=None,
+            is_basic=False,
+        )
+        assert cost.pricing_source == "estimated"
+
+    def test_pricing_source_lcsc(self):
+        cost = ComponentCost(
+            reference="C1",
+            value="12F",
+            footprint="ultracap",
+            mpn=None,
+            lcsc="C123456",
+            quantity_per_board=60,
+            unit_cost=1.50,
+            extended_cost=90.0,
+            in_stock=True,
+            lead_time_days=None,
+            is_basic=True,
+            pricing_source="lcsc",
+        )
+        assert cost.pricing_source == "lcsc"
+
+
+class TestCostEstimateToDictPricingSource:
+    """Tests for pricing_source in CostEstimate.to_dict() output."""
+
+    def test_to_dict_includes_pricing_source(self):
+        pcb = PCBCost(
+            cost_per_unit=2.00,
+            total_cost=20.0,
+            quantity=10,
+            base_cost=2.0,
+            area_cost=0.5,
+            layer_cost=0.0,
+            finish_cost=0.0,
+            color_cost=0.0,
+            via_cost=0.0,
+            thickness_cost=0.0,
+            width_mm=50.0,
+            height_mm=40.0,
+            area_cm2=20.0,
+            layer_count=2,
+            surface_finish="hasl",
+            solder_mask_color="green",
+            board_thickness_mm=1.6,
+        )
+        components = [
+            ComponentCost(
+                reference="C1",
+                value="12F",
+                footprint="ultracap",
+                mpn=None,
+                lcsc="C123456",
+                quantity_per_board=60,
+                unit_cost=1.50,
+                extended_cost=90.0,
+                in_stock=True,
+                lead_time_days=None,
+                is_basic=True,
+                pricing_source="lcsc",
+            ),
+            ComponentCost(
+                reference="R1",
+                value="10k",
+                footprint="0402",
+                mpn=None,
+                lcsc=None,
+                quantity_per_board=10,
+                unit_cost=0.003,
+                extended_cost=0.03,
+                in_stock=True,
+                lead_time_days=None,
+                is_basic=False,
+                pricing_source="estimated",
+            ),
+        ]
+        assembly = AssemblyCost(
+            cost_per_unit=1.00,
+            total_cost=10.0,
+            quantity=10,
+            smt_cost=8.0,
+            through_hole_cost=0.0,
+            setup_cost=9.5,
+            bga_cost=0.0,
+            fine_pitch_cost=0.0,
+            smt_parts=70,
+            through_hole_parts=0,
+            unique_parts=2,
+            bga_parts=0,
+            double_sided=False,
+        )
+        estimate = CostEstimate(
+            pcb_cost_per_unit=2.00,
+            component_cost_per_unit=90.03,
+            assembly_cost_per_unit=1.00,
+            total_per_unit=93.03,
+            total_for_quantity=930.30,
+            quantity=10,
+            pcb=pcb,
+            components=components,
+            assembly=assembly,
+            cost_drivers=[],
+            optimization_suggestions=[],
+            manufacturer="jlcpcb",
+        )
+
+        data = estimate.to_dict()
+        items = data["components"]["items"]
+        assert items[0]["pricing_source"] == "lcsc"
+        assert items[1]["pricing_source"] == "estimated"
+
+
+class TestLCSCPricingIntegration:
+    """Tests for LCSC pricing in ManufacturingCostEstimator."""
+
+    def _make_bom_group(self, lcsc="", value="10k", footprint="0402", ref="R1", qty=1, dnp=False):
+        """Create a mock BOM group."""
+        mock_item = MagicMock()
+        mock_item.reference = ref
+        mock_item.dnp = dnp
+
+        group = MagicMock()
+        group.value = value
+        group.footprint = footprint
+        group.lcsc = lcsc
+        group.mpn = ""
+        group.quantity = qty
+        group.references = ref
+        group.items = [mock_item] * qty
+        return group
+
+    def _make_mock_part(self, price=1.50, stock=5000, is_basic=True):
+        """Create a mock LCSC Part."""
+        mock_part = MagicMock()
+        mock_part.price_at_quantity.return_value = price
+        mock_part.stock = stock
+        mock_part.is_basic = is_basic
+        return mock_part
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_component_costs_use_lcsc_pricing(self, mock_client_class):
+        """When LCSC lookup succeeds, unit_cost should use real LCSC price."""
+        mock_client = MagicMock()
+        mock_part = self._make_mock_part(price=1.50, stock=5000, is_basic=True)
+        mock_client.lookup_many.return_value = {"C123456": mock_part}
+        mock_client_class.return_value = mock_client
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C123456", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        assert costs[0].unit_cost == 1.50
+        assert costs[0].pricing_source == "lcsc"
+        assert costs[0].in_stock is True
+        assert costs[0].is_basic is True
+        # price_at_quantity should be called with group.quantity * boards quantity
+        mock_part.price_at_quantity.assert_called_with(60 * 10)
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_lcsc_lookup_failure_falls_back_to_estimate(self, mock_client_class):
+        """When LCSC lookup raises an exception, fall back to category-based pricing."""
+        mock_client_class.side_effect = Exception("Network error")
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C123456", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        # Should fall back to category-based price for "C" prefix
+        assert costs[0].unit_cost == 0.008  # Default C prefix price
+        assert costs[0].pricing_source == "estimated"
+
+    def test_parts_without_lcsc_use_category_estimate(self):
+        """Parts without LCSC numbers should use category-based pricing."""
+        mock_bom = MagicMock()
+        group = self._make_bom_group(lcsc="", value="10k", footprint="0402", ref="R1", qty=10)
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        assert costs[0].pricing_source == "estimated"
+        # 0402 passive pricing
+        assert costs[0].unit_cost == 0.003
+
+    def test_use_lcsc_pricing_false_skips_lookup(self):
+        """When use_lcsc_pricing=False, no LCSC lookup should occur."""
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C123456", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=False)
+
+        # This should NOT attempt any network call
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        assert costs[0].pricing_source == "estimated"
+        # Falls back to C prefix default
+        assert costs[0].unit_cost == 0.008
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_mixed_lcsc_and_non_lcsc_parts(self, mock_client_class):
+        """BOM with both LCSC-priced and category-estimated parts."""
+        mock_client = MagicMock()
+        mock_part = self._make_mock_part(price=1.50, stock=5000, is_basic=True)
+        mock_client.lookup_many.return_value = {"C123456": mock_part}
+        mock_client_class.return_value = mock_client
+
+        mock_bom = MagicMock()
+        group_lcsc = self._make_bom_group(
+            lcsc="C123456", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        group_no_lcsc = self._make_bom_group(
+            lcsc="", value="10k", footprint="0402", ref="R1", qty=10
+        )
+        mock_bom.grouped.return_value = [group_lcsc, group_no_lcsc]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 2
+        # First should use LCSC pricing
+        assert costs[0].pricing_source == "lcsc"
+        assert costs[0].unit_cost == 1.50
+        # Second should use category estimate
+        assert costs[1].pricing_source == "estimated"
+        assert costs[1].unit_cost == 0.003  # 0402 passive
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_lcsc_part_not_found_falls_back(self, mock_client_class):
+        """When LCSC part is not found in lookup results, fall back to estimate."""
+        mock_client = MagicMock()
+        mock_client.lookup_many.return_value = {}  # Part not found
+        mock_client_class.return_value = mock_client
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C999999", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        assert costs[0].pricing_source == "estimated"
+        assert costs[0].unit_cost == 0.008  # C prefix default
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_lcsc_price_at_quantity_none_falls_back(self, mock_client_class):
+        """When Part.price_at_quantity returns None, fall back to estimate."""
+        mock_client = MagicMock()
+        mock_part = self._make_mock_part(price=None, stock=5000, is_basic=True)
+        mock_part.price_at_quantity.return_value = None
+        mock_client.lookup_many.return_value = {"C123456": mock_part}
+        mock_client_class.return_value = mock_client
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C123456", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        assert costs[0].pricing_source == "estimated"
+        # Falls back to C prefix default
+        assert costs[0].unit_cost == 0.008
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_lcsc_stock_reflected_in_component_cost(self, mock_client_class):
+        """in_stock and is_basic should be set from real LCSC data."""
+        mock_client = MagicMock()
+        mock_part = self._make_mock_part(price=2.00, stock=0, is_basic=False)
+        mock_client.lookup_many.return_value = {"C123456": mock_part}
+        mock_client_class.return_value = mock_client
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C123456", value="chip", footprint="LQFP-48", ref="U1", qty=1
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        costs = estimator._estimate_component_costs(mock_bom, quantity=10)
+
+        assert len(costs) == 1
+        assert costs[0].in_stock is False
+        assert costs[0].is_basic is False
+        assert costs[0].pricing_source == "lcsc"
+
+    @patch("kicad_tools.parts.LCSCClient")
+    def test_correct_price_break_selected_for_quantity(self, mock_client_class):
+        """price_at_quantity should be called with group.quantity * boards."""
+        mock_client = MagicMock()
+        mock_part = self._make_mock_part(price=0.75, stock=10000, is_basic=True)
+        mock_client.lookup_many.return_value = {"C123456": mock_part}
+        mock_client_class.return_value = mock_client
+
+        mock_bom = MagicMock()
+        group = self._make_bom_group(
+            lcsc="C123456", value="12F", footprint="ultracap", ref="C1", qty=60
+        )
+        mock_bom.grouped.return_value = [group]
+
+        estimator = ManufacturingCostEstimator(use_lcsc_pricing=True)
+        estimator._estimate_component_costs(mock_bom, quantity=5)
+
+        # Should call price_at_quantity with 60 * 5 = 300
+        mock_part.price_at_quantity.assert_called_with(300)

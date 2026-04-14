@@ -58,7 +58,8 @@ def _run_cost_command(args) -> int:
             print("Warning: CSV BOM import not yet implemented, using PCB only")
 
     # Create estimator
-    estimator = ManufacturingCostEstimator(manufacturer=args.mfr)
+    use_lcsc = not getattr(args, "no_lcsc", False)
+    estimator = ManufacturingCostEstimator(manufacturer=args.mfr, use_lcsc_pricing=use_lcsc)
 
     # Estimate costs
     estimate = estimator.estimate(
@@ -112,8 +113,9 @@ def _print_text_estimate(estimate, verbose: bool = False) -> None:
             sorted_comps = sorted(estimate.components, key=lambda c: c.extended_cost, reverse=True)
             for comp in sorted_comps[:5]:
                 stock_str = "in stock" if comp.in_stock else "out of stock"
+                source_tag = "[LCSC]" if comp.pricing_source == "lcsc" else "[est.]"
                 print(
-                    f"    {comp.reference} ({comp.value}):  ${comp.extended_cost:.2f} ({stock_str})"
+                    f"    {comp.reference} ({comp.value}):  ${comp.extended_cost:.2f} ({stock_str}) {source_tag}"
                 )
             if len(sorted_comps) > 5:
                 other_cost = sum(c.extended_cost for c in sorted_comps[5:])
