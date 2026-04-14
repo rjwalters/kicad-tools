@@ -58,13 +58,6 @@ class ERCViolationType(Enum):
     UNSPECIFIED = "unspecified"
     WIRE_DANGLING = "wire_dangling"
 
-    # Library/footprint checks (non-electrical)
-    LIB_SYMBOL_MISMATCH = "lib_symbol_mismatch"
-    FOOTPRINT_LINK_ISSUES = "footprint_link_issues"
-    SINGLE_GLOBAL_LABEL = "single_global_label"
-    ISOLATED_PIN_LABEL = "isolated_pin_label"
-    PIN_TO_PIN = "pin_to_pin"
-
     # Unknown
     UNKNOWN = "unknown"
 
