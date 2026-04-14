@@ -359,3 +359,98 @@ class TestFixDrcSuggestionInMainOutput:
         # Check for the auto-fix suggestion in the DRC failure block
         assert "kct route" in source
         assert "--auto-fix" in source
+
+
+class TestAutoFixViaCentralizedCLI:
+    """Tests that --auto-fix, --auto-fix-passes, --skip-drc work via kct route (centralized CLI)."""
+
+    def test_centralized_cli_auto_fix_dry_run(self, tmp_path):
+        """kct route ... --auto-fix --dry-run executes without 'unrecognized arguments'."""
+        from kicad_tools.cli import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+
+        # Use --grid auto to avoid grid>clearance validation failure
+        result = main(
+            ["route", str(pcb_file), "--auto-fix", "--dry-run", "--quiet", "--grid", "auto"]
+        )
+        # Should not fail with unrecognized arguments; exit 0 on dry-run with minimal PCB
+        assert result == 0
+
+    def test_centralized_cli_auto_fix_passes_dry_run(self, tmp_path):
+        """kct route ... --auto-fix-passes 5 --dry-run executes without error."""
+        from kicad_tools.cli import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+
+        result = main(
+            [
+                "route",
+                str(pcb_file),
+                "--auto-fix-passes",
+                "5",
+                "--dry-run",
+                "--quiet",
+                "--grid",
+                "auto",
+            ]
+        )
+        assert result == 0
+
+    def test_centralized_cli_skip_drc_dry_run(self, tmp_path):
+        """kct route ... --skip-drc --dry-run executes without error."""
+        from kicad_tools.cli import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+
+        result = main(
+            ["route", str(pcb_file), "--skip-drc", "--dry-run", "--quiet", "--grid", "auto"]
+        )
+        assert result == 0
+
+    def test_centralized_cli_auto_fix_passes_zero_rejected(self, tmp_path):
+        """kct route ... --auto-fix-passes 0 is rejected by route_cmd validation."""
+        from kicad_tools.cli import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+
+        result = main(
+            [
+                "route",
+                str(pcb_file),
+                "--auto-fix-passes",
+                "0",
+                "--dry-run",
+                "--quiet",
+                "--grid",
+                "auto",
+            ]
+        )
+        # route_cmd.main() rejects --auto-fix-passes 0 with exit code 1
+        assert result == 1
+
+    def test_centralized_cli_skip_drc_suppresses_auto_fix(self, tmp_path):
+        """kct route ... --auto-fix --skip-drc: skip-drc suppresses auto-fix (no crash)."""
+        from kicad_tools.cli import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20240101) (generator test))")
+
+        result = main(
+            [
+                "route",
+                str(pcb_file),
+                "--auto-fix",
+                "--skip-drc",
+                "--dry-run",
+                "--quiet",
+                "--grid",
+                "auto",
+            ]
+        )
+        # Both flags should be accepted; --skip-drc suppresses auto-fix behavior
+        assert result == 0
