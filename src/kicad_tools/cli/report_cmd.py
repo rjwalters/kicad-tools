@@ -155,12 +155,6 @@ def _load_data_dir(data_dir_str: str) -> dict:
     if isinstance(ns, dict) and "completion_pct" in ns:
         ns["completion_percent"] = ns.pop("completion_pct")
 
-    # board_stats: collector writes ``footprint_count`` but the template
-    # checks ``component_count``.
-    bs = result.get("board_stats")
-    if isinstance(bs, dict) and "footprint_count" in bs:
-        bs["component_count"] = bs.pop("footprint_count")
-
     # Load notes from text file
     notes_path = data_dir / "notes.txt"
     if notes_path.exists():
