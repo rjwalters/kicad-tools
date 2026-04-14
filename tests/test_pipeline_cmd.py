@@ -19,6 +19,7 @@ from kicad_tools.cli.pipeline_cmd import (
     _resolve_pcb_from_project,
     _resolve_schematic,
     _run_step_erc,
+    _run_step_fix_erc,
     _run_step_report,
     main,
     run_pipeline,
@@ -540,9 +541,10 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: erc, fix-silkscreen, fix-vias, route, etc."""
+        """Steps execute in the correct order: erc, fix-erc, fix-silkscreen, fix-vias, route, etc."""
         expected = [
             PipelineStep.ERC,
+            PipelineStep.FIX_ERC,
             PipelineStep.FIX_SILKSCREEN,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
@@ -1468,10 +1470,11 @@ class TestERCStep:
         assert results[1].success is True  # FIX_VIAS runs
 
     def test_erc_is_first_step(self):
-        """ERC is the first step in ALL_STEPS, followed by fix-silkscreen, then fix-vias."""
+        """ERC is the first step in ALL_STEPS, followed by FIX_ERC, then FIX_SILKSCREEN, then fix-vias."""
         assert ALL_STEPS[0] == PipelineStep.ERC
-        assert ALL_STEPS[1] == PipelineStep.FIX_SILKSCREEN
-        assert ALL_STEPS[2] == PipelineStep.FIX_VIAS
+        assert ALL_STEPS[1] == PipelineStep.FIX_ERC
+        assert ALL_STEPS[2] == PipelineStep.FIX_SILKSCREEN
+        assert ALL_STEPS[3] == PipelineStep.FIX_VIAS
 
 
 # =========================================================================
@@ -1669,3 +1672,203 @@ class TestReportStep:
         )
         assert "board.kicad_pcb" in show.stdout
         assert "reports/report.md" in show.stdout
+
+
+# =========================================================================
+# FIX-ERC STEP TESTS
+# =========================================================================
+
+
+class TestFixERCStep:
+    """Tests for FIX_ERC pipeline step."""
+
+    def test_fix_erc_step_skipped_no_schematic(self, pcb_without_schematic: Path):
+        """FIX_ERC step skips when no schematic file exists."""
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_without_schematic, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_fix_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is True
+        assert "no .kicad_sch" in result.message
+
+    def test_fix_erc_step_skipped_no_errors(self, pcb_with_schematic):
+        """FIX_ERC step skips when ERC found zero errors."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            erc_error_count=0,
+        )
+        console = Console(quiet=True)
+        result = _run_step_fix_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is True
+        assert "no ERC errors" in result.message
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_fix_erc_step_runs_on_errors(self, mock_subprocess, pcb_with_schematic):
+        """FIX_ERC step invokes subprocess when ERC errors were detected."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        mock_subprocess.return_value = (True, "completed successfully")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            erc_error_count=3,
+        )
+        console = Console(quiet=True)
+        result = _run_step_fix_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is False
+        assert "fix-erc" in result.message
+        # Verify subprocess was called with fix-erc command
+        mock_subprocess.assert_called_once()
+        cmd = mock_subprocess.call_args[0][0]
+        assert "fix-erc" in cmd
+        assert str(sch_file) in cmd
+
+    def test_fix_erc_step_dry_run(self, pcb_with_schematic):
+        """FIX_ERC step in dry-run mode outputs the would-be command."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            dry_run=True,
+            erc_error_count=2,
+        )
+        console = Console(quiet=True)
+        result = _run_step_fix_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is False
+        assert "[dry-run]" in result.message
+        assert "kct fix-erc" in result.message
+        assert sch_file.name in result.message
+
+    def test_fix_erc_step_force_runs_with_zero_errors(self, pcb_with_schematic):
+        """FIX_ERC step runs when --force is set even with zero ERC errors."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            dry_run=True,
+            force=True,
+            erc_error_count=0,
+        )
+        console = Console(quiet=True)
+        result = _run_step_fix_erc(ctx, console)
+
+        # With --force, even zero errors should not skip
+        assert result.skipped is False
+        assert "[dry-run]" in result.message
+
+    def test_all_steps_order_fix_erc_at_index_1(self):
+        """FIX_ERC appears at index 1 in ALL_STEPS (after ERC, before FIX_VIAS)."""
+        assert ALL_STEPS.index(PipelineStep.FIX_ERC) == 1
+
+    def test_pipeline_step_fix_erc_in_choices(self):
+        """'fix-erc' is a valid --step choice in the arg parser."""
+        assert "fix-erc" in [s.value for s in PipelineStep]
+
+    def test_fix_erc_enum_value(self):
+        """PipelineStep.FIX_ERC has string value 'fix-erc'."""
+        assert PipelineStep.FIX_ERC.value == "fix-erc"
+
+    def test_fix_erc_step_single_step_via_main(self, pcb_with_schematic):
+        """--step fix-erc runs only the FIX_ERC step via main()."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        # Use dry-run; erc_error_count defaults to 0 so fix-erc will skip (no errors)
+        result = main(["--step", "fix-erc", "--dry-run", str(pcb_file)])
+        assert result == 0
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_fix_erc_subprocess_failure(self, mock_subprocess, pcb_with_schematic):
+        """FIX_ERC step reports failure when subprocess fails."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+        mock_subprocess.return_value = (False, "failed: exit code 1")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            erc_error_count=2,
+        )
+        console = Console(quiet=True)
+        result = _run_step_fix_erc(ctx, console)
+
+        assert result.success is False
+        assert "failed" in result.message
+
+    def test_erc_step_populates_erc_error_count(self, pcb_with_schematic, tmp_path):
+        """The ERC step sets ctx.erc_error_count for the FIX_ERC step to read."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        with (
+            patch("kicad_tools.cli.runner.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")),
+            patch(
+                "kicad_tools.cli.runner.run_erc",
+                return_value=MagicMock(success=True, output_path=erc_report_file, stderr=""),
+            ),
+        ):
+            ctx = PipelineContext(
+                pcb_file=pcb_file,
+                schematic_file=sch_file,
+                quiet=True,
+                force=True,
+            )
+            console = Console(quiet=True)
+            _run_step_erc(ctx, console)
+
+        # The ERC step should have set erc_error_count on the context
+        assert ctx.erc_error_count == 2
+
+    def test_erc_clean_pass_sets_zero_error_count(self, pcb_with_schematic, tmp_path):
+        """When ERC finds no errors, erc_error_count is set to 0."""
+        from rich.console import Console
+
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_CLEAN)
+
+        with (
+            patch("kicad_tools.cli.runner.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")),
+            patch(
+                "kicad_tools.cli.runner.run_erc",
+                return_value=MagicMock(success=True, output_path=erc_report_file, stderr=""),
+            ),
+        ):
+            ctx = PipelineContext(
+                pcb_file=pcb_file,
+                schematic_file=sch_file,
+                quiet=True,
+            )
+            console = Console(quiet=True)
+            _run_step_erc(ctx, console)
+
+        assert ctx.erc_error_count == 0
