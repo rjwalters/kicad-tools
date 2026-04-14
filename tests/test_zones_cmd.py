@@ -814,6 +814,316 @@ class TestPadNetPreservation:
 
 
 # ---------------------------------------------------------------------------
+# Test: KiCad 10 net format (net "name") without number
+# ---------------------------------------------------------------------------
+
+
+class TestKiCad10NetFormat:
+    """Tests for handling KiCad 10's (net "name") format without net numbers."""
+
+    def test_snapshot_handles_name_only_net_format(self, tmp_path):
+        """_snapshot_element_nets captures pads with (net "name") format."""
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        # Write a minimal PCB with KiCad 10 name-only net format
+        pcb_content = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net "GND")
+\t(net "+3V3")
+\t(footprint "Package:R_0402"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "+3V3"))
+\t)
+\t(segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+        pcb_path = tmp_path / "kicad10.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        snapshot = _snapshot_element_nets(pcb_path)
+
+        # Pads should be keyed by reference:pad_number
+        assert "R1:1" in snapshot
+        assert "R1:2" in snapshot
+        # Segment should be keyed by geometry
+        assert any(k.startswith("seg:") for k in snapshot)
+
+    def test_restore_handles_name_only_net_in_output(self, tmp_path):
+        """_restore_net_declarations restores nets when output has (net "name") format
+        that was zeroed out."""
+        from kicad_tools.cli.runner import _restore_net_declarations, _snapshot_element_nets
+
+        # Original PCB with name-only nets
+        original_content = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net "GND")
+\t(net "+3V3")
+\t(footprint "Package:R_0402"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "+3V3"))
+\t)
+)
+"""
+        original_path = tmp_path / "original.kicad_pcb"
+        original_path.write_text(original_content)
+
+        # Snapshot before "DRC"
+        from kicad_tools.cli.runner import _snapshot_net_declarations
+
+        net_nodes = _snapshot_net_declarations(original_path)
+        element_nets = _snapshot_element_nets(original_path)
+
+        assert len(element_nets) == 2  # Two pads with nonzero nets
+
+        # Simulate kicad-cli output that zeroed out pad nets
+        zeroed_content = """\
+(kicad_pcb
+\t(version 20240108)
+\t(generator "test")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net "GND")
+\t(net "+3V3")
+\t(footprint "Package:R_0402"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-new")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid-new"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t)
+)
+"""
+        target_path = tmp_path / "target.kicad_pcb"
+        target_path.write_text(zeroed_content)
+
+        # Restore should succeed despite UUID change (keys are reference-based)
+        _restore_net_declarations(target_path, net_nodes, element_nets)
+
+        # Verify restoration
+        result_content = target_path.read_text()
+        assert '(net "GND")' in result_content or '(net 1 "GND")' in result_content
+        assert '(net "+3V3")' in result_content or '(net 2 "+3V3")' in result_content
+
+    def test_pad_from_sexp_name_only_format(self):
+        """Pad.from_sexp handles (net "name") without a number."""
+        from kicad_tools.schema.pcb import Pad
+        from kicad_tools.sexp import parse_sexp
+
+        sexp_text = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))'
+        sexp = parse_sexp(sexp_text)
+        pad = Pad.from_sexp(sexp)
+        assert pad is not None
+        assert pad.net_name == "GND"
+        assert pad.net_number == 0  # No number in (net "name") format
+
+    def test_pad_from_sexp_traditional_format(self):
+        """Pad.from_sexp handles (net N "name") traditional format."""
+        from kicad_tools.schema.pcb import Pad
+        from kicad_tools.sexp import parse_sexp
+
+        sexp_text = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))'
+        sexp = parse_sexp(sexp_text)
+        pad = Pad.from_sexp(sexp)
+        assert pad is not None
+        assert pad.net_name == "GND"
+        assert pad.net_number == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: UUID regeneration resilience
+# ---------------------------------------------------------------------------
+
+
+class TestUUIDRegenerationResilience:
+    """Tests that net restoration works when kicad-cli regenerates UUIDs."""
+
+    def test_pad_restoration_survives_uuid_change(self, tmp_pcb, tmp_path):
+        """Pad nets are restored even when kicad-cli regenerates footprint UUIDs."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_pad_nets = {}
+        for fp in input_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    input_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert len(input_pad_nets) > 0
+
+        def fake_run_regen_uuids(cmd, **kwargs):
+            """Simulate kicad-cli zeroing nets AND regenerating all UUIDs."""
+            import re
+            import uuid
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            # Zero out all inline net references
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            # Regenerate all UUIDs
+            content = re.sub(
+                r'\(uuid "([^"]+)"\)',
+                lambda m: f'(uuid "{uuid.uuid4()}")',
+                content,
+            )
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_pad_nets = {}
+        for fp in output_pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_number != 0:
+                    output_pad_nets[f"{fp.reference}.{pad.number}"] = pad.net_number
+        assert output_pad_nets == input_pad_nets
+
+    def test_segment_restoration_survives_uuid_change(self, tmp_pcb, tmp_path):
+        """Segment nets are restored via geometry keys even when UUIDs change."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        # Key segments by their geometry (start, end, layer) for comparison
+        input_seg_nets = {}
+        for seg in input_pcb.segments:
+            if seg.net_number != 0:
+                geo_key = (seg.start, seg.end, seg.layer)
+                input_seg_nets[geo_key] = seg.net_number
+        assert len(input_seg_nets) > 0
+
+        def fake_run_regen_uuids(cmd, **kwargs):
+            """Simulate kicad-cli zeroing nets AND regenerating all UUIDs."""
+            import re
+            import uuid
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            content = re.sub(
+                r'\(uuid "([^"]+)"\)',
+                lambda m: f'(uuid "{uuid.uuid4()}")',
+                content,
+            )
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_seg_nets = {}
+        for seg in output_pcb.segments:
+            if seg.net_number != 0:
+                geo_key = (seg.start, seg.end, seg.layer)
+                output_seg_nets[geo_key] = seg.net_number
+        assert output_seg_nets == input_seg_nets
+
+    def test_via_restoration_survives_uuid_change(self, tmp_pcb, tmp_path):
+        """Via nets are restored via geometry keys even when UUIDs change."""
+        from kicad_tools.cli.runner import run_fill_zones
+        from kicad_tools.schema.pcb import PCB
+
+        input_pcb = PCB.load(str(tmp_pcb))
+        input_via_nets = {}
+        for via in input_pcb.vias:
+            if via.net_number != 0:
+                geo_key = (via.position, via.size, tuple(via.layers))
+                input_via_nets[geo_key] = via.net_number
+        assert len(input_via_nets) > 0
+
+        def fake_run_regen_uuids(cmd, **kwargs):
+            """Simulate kicad-cli zeroing nets AND regenerating all UUIDs."""
+            import re
+            import uuid
+
+            report_path = cmd[cmd.index("--output") + 1]
+            Path(report_path).write_text('{"violations": []}')
+
+            target = Path(cmd[-1])
+            content = target.read_text()
+            content = re.sub(r'\(net \d+ "[^"]*"\)', '(net 0 "")', content)
+            content = re.sub(r"\(net \d+\)", "(net 0)", content)
+            content = re.sub(
+                r'\(uuid "([^"]+)"\)',
+                lambda m: f'(uuid "{uuid.uuid4()}")',
+                content,
+            )
+            target.write_text(content)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        out = tmp_path / "filled.kicad_pcb"
+
+        with (
+            patch(_HAS_FILL_ZONES, return_value=False),
+            patch(_DRC_SUPPORTS_REFILL, return_value=False),
+            patch(_SUBPROCESS_RUN, side_effect=fake_run_regen_uuids),
+        ):
+            result = run_fill_zones(tmp_pcb, output_path=out, kicad_cli=Path("/usr/bin/kicad-cli"))
+
+        assert result.success is True
+        output_pcb = PCB.load(str(out))
+
+        output_via_nets = {}
+        for via in output_pcb.vias:
+            if via.net_number != 0:
+                geo_key = (via.position, via.size, tuple(via.layers))
+                output_via_nets[geo_key] = via.net_number
+        assert output_via_nets == input_via_nets
+
+
+# ---------------------------------------------------------------------------
 # Integration test: requires kicad-cli
 # ---------------------------------------------------------------------------
 
