@@ -349,6 +349,11 @@ def _dispatch_command(args) -> int:
 
         return run_fix_drc_command(args)
 
+    elif args.command == "fix-erc":
+        from .commands import run_fix_erc_command
+
+        return run_fix_erc_command(args)
+
     elif args.command == "config":
         return run_config_command(args)
 

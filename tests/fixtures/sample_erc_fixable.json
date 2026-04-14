@@ -1,0 +1,69 @@
+{
+  "source": "test_board.kicad_sch",
+  "kicad_version": "8.0.0",
+  "coordinate_units": "mm",
+  "sheets": [
+    {
+      "path": "/",
+      "uuid_path": "/00000000-0000-0000-0000-000000000001",
+      "violations": [
+        {
+          "type": "power_pin_not_driven",
+          "severity": "error",
+          "description": "Input Power pin not driven by any Output Power pins",
+          "pos": {"x": 100.0, "y": 50.0},
+          "items": [
+            {"description": "Pin VCC (power_in) of U1", "pos": {"x": 100.0, "y": 50.0}}
+          ],
+          "excluded": false
+        },
+        {
+          "type": "power_pin_not_driven",
+          "severity": "error",
+          "description": "Input Power pin not driven by any Output Power pins",
+          "pos": {"x": 150.0, "y": 75.0},
+          "items": [
+            {"description": "Pin GND (power_in) of U1", "pos": {"x": 150.0, "y": 75.0}}
+          ],
+          "excluded": false
+        },
+        {
+          "type": "pin_not_connected",
+          "severity": "error",
+          "description": "Pin not connected",
+          "pos": {"x": 120.0, "y": 60.0},
+          "items": [
+            {"description": "Pin 4 (input) of U1", "pos": {"x": 120.0, "y": 60.0}}
+          ],
+          "excluded": false
+        },
+        {
+          "type": "pin_not_connected",
+          "severity": "error",
+          "description": "Pin not connected",
+          "pos": {"x": 130.0, "y": 70.0},
+          "items": [
+            {"description": "Pin 5 (input) of U2", "pos": {"x": 130.0, "y": 70.0}}
+          ],
+          "excluded": false
+        }
+      ]
+    },
+    {
+      "path": "/subsheet",
+      "uuid_path": "/00000000-0000-0000-0000-000000000002",
+      "violations": [
+        {
+          "type": "pin_not_connected",
+          "severity": "error",
+          "description": "Pin not connected (subsheet)",
+          "pos": {"x": 200.0, "y": 100.0},
+          "items": [
+            {"description": "Pin 3 (input) of U3", "pos": {"x": 200.0, "y": 100.0}}
+          ],
+          "excluded": false
+        }
+      ]
+    }
+  ]
+}
