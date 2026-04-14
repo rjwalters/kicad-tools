@@ -2904,7 +2904,7 @@ def _add_pipeline_parser(subparsers) -> None:
         "--step",
         "-s",
         dest="pipeline_step",
-        choices=["route", "fix-vias", "fix-drc", "optimize", "zones", "audit"],
+        choices=["erc", "route", "fix-vias", "fix-drc", "optimize", "zones", "audit"],
         default=None,
         help="Run only this step (default: run all steps in order)",
     )

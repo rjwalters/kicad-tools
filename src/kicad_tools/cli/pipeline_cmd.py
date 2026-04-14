@@ -2,6 +2,7 @@
 Pipeline command for end-to-end repair workflow on existing PCBs.
 
 Orchestrates the full repair pipeline:
+0. ERC check (schematic validation)
 1. Load board state (detect routing status)
 2. Fix vias (manufacturer compliance)
 3. [Optional] Route (if board is unrouted)
@@ -14,6 +15,7 @@ Usage:
     kct pipeline board.kicad_pcb --mfr jlcpcb
     kct pipeline board.kicad_pcb --dry-run
     kct pipeline board.kicad_pcb --step fix-vias
+    kct pipeline board.kicad_pcb --step erc
     kct pipeline project.kicad_pro --mfr jlcpcb --layers 4
 """
 
@@ -39,6 +41,7 @@ __all__ = ["main"]
 class PipelineStep(str, Enum):
     """Pipeline step identifiers."""
 
+    ERC = "erc"
     ROUTE = "route"
     FIX_VIAS = "fix-vias"
     FIX_DRC = "fix-drc"
@@ -49,6 +52,7 @@ class PipelineStep(str, Enum):
 
 # Ordered list of all pipeline steps
 ALL_STEPS = [
+    PipelineStep.ERC,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
     PipelineStep.FIX_DRC,
@@ -74,6 +78,7 @@ class PipelineContext:
 
     pcb_file: Path
     project_file: Path | None = None
+    schematic_file: Path | None = None
     mfr: str = "jlcpcb"
     layers: int | None = None
     dry_run: bool = False
@@ -131,6 +136,152 @@ def _resolve_pcb_from_project(project_file: Path) -> Path | None:
     if pcb_path.exists():
         return pcb_path
     return None
+
+
+def _resolve_schematic(pcb_file: Path, project_file: Path | None = None) -> Path | None:
+    """Resolve .kicad_sch path from a project or PCB file.
+
+    Resolution chain:
+        .kicad_pro -> stem.kicad_sch
+        .kicad_pcb -> sibling stem.kicad_sch
+
+    Args:
+        pcb_file: Path to .kicad_pcb file
+        project_file: Optional path to .kicad_pro file
+
+    Returns:
+        Path to the corresponding .kicad_sch if it exists, None otherwise.
+    """
+    # Try from project file first
+    if project_file is not None:
+        sch_path = project_file.with_suffix(".kicad_sch")
+        if sch_path.exists():
+            return sch_path
+
+    # Try from PCB file (sibling with same stem)
+    sch_path = pcb_file.with_suffix(".kicad_sch")
+    if sch_path.exists():
+        return sch_path
+
+    return None
+
+
+def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run ERC (Electrical Rules Check) step on the schematic.
+
+    Checks the schematic for electrical rule violations before routing.
+    Skips gracefully when no schematic is found or kicad-cli is missing.
+    Halts the pipeline on errors unless --force is used.
+    """
+    from .runner import find_kicad_cli, run_erc
+
+    # Skip if no schematic file available
+    if ctx.schematic_file is None:
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message="erc: no .kicad_sch found alongside PCB — skipped",
+            skipped=True,
+        )
+
+    # Check for kicad-cli availability
+    kicad_cli = find_kicad_cli()
+    if kicad_cli is None:
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message="erc: kicad-cli not found — install KiCad 8 to enable ERC",
+            skipped=True,
+        )
+
+    # Dry-run mode
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message=f"[dry-run] Would run: kct erc {ctx.schematic_file.name} --errors-only",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running ERC on {ctx.schematic_file.name}...")
+
+    # Run ERC via kicad-cli
+    result = run_erc(ctx.schematic_file, kicad_cli=kicad_cli)
+
+    if not result.success:
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=False,
+            message=f"erc: failed to run — {result.stderr}",
+        )
+
+    # Parse the ERC report
+    try:
+        from ..erc import ERCReport
+
+        report = ERCReport.load(result.output_path)
+    except Exception as e:
+        logger.warning("Could not parse ERC report: %s", e)
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=False,
+            message=f"erc: failed to parse report — {e}",
+        )
+    finally:
+        # Clean up temporary report file
+        if result.output_path:
+            result.output_path.unlink(missing_ok=True)
+
+    error_count = report.error_count
+    warning_count = report.warning_count
+
+    # Print per-violation details (unless --quiet)
+    if not ctx.quiet and (error_count > 0 or warning_count > 0):
+        from ..feedback.suggestions import generate_erc_suggestions
+
+        for violation in report.violations:
+            if violation.excluded:
+                continue
+            severity_tag = "ERR" if violation.is_error else "WARN"
+            console.print(f"    [{severity_tag}] {violation.type_str}: {violation.description}")
+            suggestions = generate_erc_suggestions(violation)
+            if suggestions:
+                console.print(f"          Suggestion: {suggestions[0]}")
+
+    # No errors and no warnings -> clean pass
+    if error_count == 0 and warning_count == 0:
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message="erc: no violations found",
+        )
+
+    # Warnings only (no errors) -> pass
+    if error_count == 0:
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message=f"erc: {warning_count} warning(s), no errors",
+        )
+
+    # Errors found
+    if ctx.force:
+        if not ctx.quiet:
+            console.print(
+                f"  [yellow]erc: {error_count} error(s) found — continuing (--force)[/yellow]"
+            )
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message=f"erc: {error_count} error(s) found — continuing (--force)",
+        )
+
+    # Halt pipeline
+    return PipelineResult(
+        step=PipelineStep.ERC,
+        success=False,
+        message=f"erc: {error_count} error(s) found (use --force to continue)",
+    )
 
 
 def _run_subprocess_step(
@@ -596,6 +747,7 @@ def _git_commit_result(
 
 # Map of step name to runner function
 STEP_RUNNERS = {
+    PipelineStep.ERC: _run_step_erc,
     PipelineStep.ROUTE: _run_step_route,
     PipelineStep.FIX_VIAS: _run_step_fix_vias,
     PipelineStep.FIX_DRC: _run_step_fix_drc,
@@ -812,10 +964,14 @@ Examples:
             )
             resolved_layers = 2
 
+    # Resolve schematic file for ERC step
+    schematic_file = _resolve_schematic(pcb_file, project_file)
+
     # Build context
     ctx = PipelineContext(
         pcb_file=pcb_file,
         project_file=project_file,
+        schematic_file=schematic_file,
         mfr=args.mfr,
         layers=resolved_layers,
         dry_run=args.dry_run,
