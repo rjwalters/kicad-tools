@@ -210,6 +210,62 @@ class TestDryRun:
         assert result == 0
 
 
+class TestFixSilkscreenStep:
+    """Tests for the fix-silkscreen pipeline step."""
+
+    def test_dry_run_fix_silkscreen_message(self, routed_pcb: Path):
+        """Dry-run fix-silkscreen reports the command that would be executed."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_silkscreen
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True, mfr="pcbway")
+        console = Console(quiet=True)
+        result = _run_step_fix_silkscreen(ctx, console)
+
+        assert result.success is True
+        assert "fix-silkscreen" in result.message
+        assert "pcbway" in result.message
+        assert result.step == PipelineStep.FIX_SILKSCREEN
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_silkscreen_calls_subprocess(self, mock_run, routed_pcb: Path):
+        """fix-silkscreen step invokes the correct subprocess command."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_silkscreen
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
+        console = Console(quiet=True)
+        result = _run_step_fix_silkscreen(ctx, console)
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "fix-silkscreen" in cmd_args
+        assert "--mfr" in cmd_args
+        mfr_idx = cmd_args.index("--mfr")
+        assert cmd_args[mfr_idx + 1] == "jlcpcb"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_silkscreen_failure_propagates(self, mock_run, routed_pcb: Path):
+        """fix-silkscreen step reports failure when subprocess fails."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="parse error", stdout="")
+
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_silkscreen
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
+        console = Console(quiet=True)
+        result = _run_step_fix_silkscreen(ctx, console)
+
+        assert result.success is False
+        assert "fix-silkscreen" in result.message
+
+
 class TestRoutingSkip:
     """Tests for automatic routing detection and skip."""
 
@@ -258,6 +314,18 @@ class TestSingleStep:
         mock_run.assert_called_once()
         cmd_args = mock_run.call_args[0][0]
         assert "fix-vias" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_single_step_fix_silkscreen(self, mock_run, routed_pcb: Path):
+        """--step fix-silkscreen runs only that step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main(["--step", "fix-silkscreen", str(routed_pcb), "--quiet"])
+
+        assert result == 0
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "fix-silkscreen" in cmd_args
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_single_step_audit(self, mock_run, routed_pcb: Path):
@@ -403,6 +471,18 @@ class TestMfrAndLayersForwarding:
     """Tests that --mfr and --layers flags are forwarded correctly."""
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_mfr_forwarded_to_fix_silkscreen(self, mock_run, routed_pcb: Path):
+        """--mfr flag is forwarded to fix-silkscreen step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        main(["--step", "fix-silkscreen", "--mfr", "pcbway", str(routed_pcb), "--quiet"])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--mfr" in cmd_args
+        mfr_idx = cmd_args.index("--mfr")
+        assert cmd_args[mfr_idx + 1] == "pcbway"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_mfr_forwarded_to_fix_vias(self, mock_run, routed_pcb: Path):
         """--mfr flag is forwarded to fix-vias step."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
@@ -459,9 +539,10 @@ class TestPipelineStepOrder:
         assert set(ALL_STEPS) == set(PipelineStep)
 
     def test_step_order(self):
-        """Steps execute in the correct order: erc first, then fix-vias before route."""
+        """Steps execute in the correct order: erc, fix-silkscreen, fix-vias, route, etc."""
         expected = [
             PipelineStep.ERC,
+            PipelineStep.FIX_SILKSCREEN,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
             PipelineStep.FIX_DRC,
@@ -470,6 +551,17 @@ class TestPipelineStepOrder:
             PipelineStep.AUDIT,
         ]
         assert expected == ALL_STEPS
+
+    def test_fix_silkscreen_between_erc_and_fix_vias(self):
+        """FIX_SILKSCREEN is positioned after ERC and before FIX_VIAS in ALL_STEPS."""
+        erc_idx = ALL_STEPS.index(PipelineStep.ERC)
+        silkscreen_idx = ALL_STEPS.index(PipelineStep.FIX_SILKSCREEN)
+        vias_idx = ALL_STEPS.index(PipelineStep.FIX_VIAS)
+        assert erc_idx < silkscreen_idx < vias_idx
+
+    def test_fix_silkscreen_in_all_steps(self):
+        """PipelineStep.FIX_SILKSCREEN is present in ALL_STEPS."""
+        assert PipelineStep.FIX_SILKSCREEN in ALL_STEPS
 
 
 class TestPipelineLayerAutoDetection:
@@ -1374,6 +1466,7 @@ class TestERCStep:
         assert results[1].success is True  # FIX_VIAS runs
 
     def test_erc_is_first_step(self):
-        """ERC is the first step in ALL_STEPS, before fix-vias."""
+        """ERC is the first step in ALL_STEPS, followed by fix-silkscreen, then fix-vias."""
         assert ALL_STEPS[0] == PipelineStep.ERC
-        assert ALL_STEPS[1] == PipelineStep.FIX_VIAS
+        assert ALL_STEPS[1] == PipelineStep.FIX_SILKSCREEN
+        assert ALL_STEPS[2] == PipelineStep.FIX_VIAS

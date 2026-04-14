@@ -4,17 +4,19 @@ Pipeline command for end-to-end repair workflow on existing PCBs.
 Orchestrates the full repair pipeline:
 0. ERC check (schematic validation)
 1. Load board state (detect routing status)
-2. Fix vias (manufacturer compliance)
-3. [Optional] Route (if board is unrouted)
-4. Fix DRC violations
-5. Optimize traces
-6. Zone fill (requires kicad-cli)
-7. Audit / check
+2. Fix silkscreen (manufacturer line-width compliance)
+3. Fix vias (manufacturer compliance)
+4. [Optional] Route (if board is unrouted)
+5. Fix DRC violations
+6. Optimize traces
+7. Zone fill (requires kicad-cli)
+8. Audit / check
 
 Usage:
     kct pipeline board.kicad_pcb --mfr jlcpcb
     kct pipeline board.kicad_pcb --dry-run
     kct pipeline board.kicad_pcb --step fix-vias
+    kct pipeline board.kicad_pcb --step fix-silkscreen
     kct pipeline board.kicad_pcb --step erc
     kct pipeline project.kicad_pro --mfr jlcpcb --layers 4
 """
@@ -42,6 +44,7 @@ class PipelineStep(str, Enum):
     """Pipeline step identifiers."""
 
     ERC = "erc"
+    FIX_SILKSCREEN = "fix-silkscreen"
     ROUTE = "route"
     FIX_VIAS = "fix-vias"
     FIX_DRC = "fix-drc"
@@ -53,6 +56,7 @@ class PipelineStep(str, Enum):
 # Ordered list of all pipeline steps
 ALL_STEPS = [
     PipelineStep.ERC,
+    PipelineStep.FIX_SILKSCREEN,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
     PipelineStep.FIX_DRC,
@@ -281,6 +285,40 @@ def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
         step=PipelineStep.ERC,
         success=False,
         message=f"erc: {error_count} error(s) found (use --force to continue)",
+    )
+
+
+def _run_step_fix_silkscreen(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run silkscreen line-width repair step.
+
+    Fixes silkscreen line widths to meet manufacturer minimum specifications.
+    This is safe to run unconditionally and is idempotent.
+    """
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.FIX_SILKSCREEN,
+            success=True,
+            message=f"[dry-run] Would run: kct fix-silkscreen {ctx.pcb_file.name} --mfr {ctx.mfr}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Fixing silkscreen widths for {ctx.mfr}...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "fix-silkscreen",
+        str(ctx.pcb_file),
+        "--mfr",
+        ctx.mfr,
+    ]
+
+    success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+    return PipelineResult(
+        step=PipelineStep.FIX_SILKSCREEN,
+        success=success,
+        message=f"fix-silkscreen: {message}",
     )
 
 
@@ -748,6 +786,7 @@ def _git_commit_result(
 # Map of step name to runner function
 STEP_RUNNERS = {
     PipelineStep.ERC: _run_step_erc,
+    PipelineStep.FIX_SILKSCREEN: _run_step_fix_silkscreen,
     PipelineStep.ROUTE: _run_step_route,
     PipelineStep.FIX_VIAS: _run_step_fix_vias,
     PipelineStep.FIX_DRC: _run_step_fix_drc,
