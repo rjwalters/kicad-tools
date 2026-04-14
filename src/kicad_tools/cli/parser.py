@@ -2938,6 +2938,13 @@ def _add_pipeline_parser(subparsers) -> None:
         action="store_true",
         help="Force all steps (e.g., re-route even if already routed)",
     )
+    pipeline_parser.add_argument(
+        "--commit",
+        dest="pipeline_commit",
+        action="store_true",
+        default=False,
+        help="Create a git commit with modified files after a successful pipeline run",
+    )
 
 
 def _add_build_parser(subparsers) -> None:

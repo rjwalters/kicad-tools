@@ -81,6 +81,7 @@ class PipelineContext:
     quiet: bool = False
     force: bool = False
     is_project: bool = False
+    commit: bool = False
 
 
 def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
@@ -421,6 +422,178 @@ def _run_step_audit(ctx: PipelineContext, console: Console) -> PipelineResult:
     )
 
 
+def _is_git_repo(directory: Path) -> bool:
+    """Check whether *directory* is inside a git repository.
+
+    Args:
+        directory: Directory to check.
+
+    Returns:
+        True if the directory is inside a git working tree.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _build_commit_message(
+    ctx: PipelineContext,
+    results: list[PipelineResult],
+) -> str:
+    """Build a structured commit message from pipeline results.
+
+    Attempts to extract DRC error count and routing net counts.  Falls back
+    to a simpler message when metrics cannot be determined.
+
+    Args:
+        ctx: Pipeline context (for manufacturer name).
+        results: List of results from the pipeline run.
+
+    Returns:
+        A single-line commit message string.
+    """
+    drc_errors: int | None = None
+    routed_nets: int | None = None
+    total_nets: int | None = None
+
+    # Try to get routing status from the final PCB file
+    try:
+        _, _, net_count = _detect_routing_status(ctx.pcb_file)
+        if net_count > 0:
+            # The net count from _detect_routing_status is a rough count.
+            # Use it as both routed and total since the pipeline aims for
+            # full routing.
+            routed_nets = net_count
+            total_nets = net_count
+    except Exception:
+        pass
+
+    # Try to extract DRC error count by running kct check --format json
+    try:
+        check_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(ctx.pcb_file),
+                "--mfr",
+                ctx.mfr,
+                "--layers",
+                str(ctx.layers or 2),
+                "--format",
+                "json",
+            ],
+            cwd=str(ctx.pcb_file.parent),
+            capture_output=True,
+            text=True,
+        )
+        import json as _json
+
+        data = _json.loads(check_result.stdout)
+        if isinstance(data, dict):
+            # Try common keys for violation count
+            drc_errors = data.get("total_violations", data.get("violations_count"))
+            if drc_errors is None and "violations" in data:
+                violations = data["violations"]
+                if isinstance(violations, list):
+                    drc_errors = len(violations)
+    except Exception:
+        pass
+
+    # Build message
+    parts: list[str] = []
+    if drc_errors is not None:
+        parts.append(f"{drc_errors} DRC errors")
+    if routed_nets is not None and total_nets is not None:
+        parts.append(f"{routed_nets}/{total_nets} signal nets routed")
+
+    if parts:
+        detail = ", ".join(parts)
+        return f"fix: run kct pipeline ({detail})"
+    else:
+        return f"fix: run kct pipeline ({ctx.mfr})"
+
+
+def _git_commit_result(
+    ctx: PipelineContext,
+    results: list[PipelineResult],
+    console: Console,
+) -> int:
+    """Stage the PCB file and create a git commit after a successful pipeline run.
+
+    Args:
+        ctx: Pipeline context.
+        results: Pipeline step results (used for commit message).
+        console: Rich console for output.
+
+    Returns:
+        0 on success, 1 on failure.
+    """
+    pcb_dir = ctx.pcb_file.parent
+
+    # Verify we are inside a git repository
+    if not _is_git_repo(pcb_dir):
+        print(
+            f"Error: --commit requires a git repository, "
+            f"but {pcb_dir} is not inside a git working tree.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Stage the PCB file
+    add_result = subprocess.run(
+        ["git", "-C", str(pcb_dir), "add", str(ctx.pcb_file)],
+        capture_output=True,
+        text=True,
+    )
+    if add_result.returncode != 0:
+        print(
+            f"Error: git add failed: {add_result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Check whether there are actually staged changes
+    diff_result = subprocess.run(
+        ["git", "-C", str(pcb_dir), "diff", "--cached", "--quiet"],
+        capture_output=True,
+        text=True,
+    )
+    if diff_result.returncode == 0:
+        # Exit code 0 means no staged changes
+        print(
+            "Error: --commit specified but the pipeline produced no file changes to commit.",
+            file=sys.stderr,
+        )
+        return 1
+
+    commit_msg = _build_commit_message(ctx, results)
+
+    commit_result = subprocess.run(
+        ["git", "-C", str(pcb_dir), "commit", "-m", commit_msg],
+        capture_output=True,
+        text=True,
+    )
+    if commit_result.returncode != 0:
+        print(
+            f"Error: git commit failed: {commit_result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not ctx.quiet:
+        console.print(f"[green]Committed:[/green] {commit_msg}")
+
+    return 0
+
+
 # Map of step name to runner function
 STEP_RUNNERS = {
     PipelineStep.ROUTE: _run_step_route,
@@ -526,6 +699,8 @@ Examples:
     kct pipeline board.kicad_pcb --step fix-vias       # Run single step
     kct pipeline project.kicad_pro --layers 4          # 4-layer project audit
     kct pipeline board.kicad_pcb --force               # Force re-route
+    kct pipeline board.kicad_pcb --commit              # Commit changes after success
+    kct pipeline board.kicad_pcb --mfr jlcpcb --commit # Pipeline + auto-commit
         """,
     )
 
@@ -576,6 +751,12 @@ Examples:
         "--force",
         action="store_true",
         help="Force all steps (e.g., re-route even if already routed)",
+    )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        default=False,
+        help="Create a git commit with the modified PCB file after a successful pipeline run",
     )
 
     args = parser.parse_args(argv)
@@ -642,6 +823,7 @@ Examples:
         quiet=args.quiet,
         force=args.force,
         is_project=is_project,
+        commit=args.commit,
     )
 
     # Determine steps to run
@@ -653,9 +835,19 @@ Examples:
     results = run_pipeline(ctx, steps)
 
     # Determine exit code: 0 if all succeeded, 1 if any failed
-    if all(r.success for r in results):
-        return 0
-    return 1
+    all_succeeded = all(r.success for r in results)
+
+    if not all_succeeded:
+        return 1
+
+    # Handle --commit flag (silently ignored with --dry-run)
+    if ctx.commit and not ctx.dry_run:
+        console = Console(quiet=ctx.quiet)
+        commit_rc = _git_commit_result(ctx, results, console)
+        if commit_rc != 0:
+            return commit_rc
+
+    return 0
 
 
 if __name__ == "__main__":

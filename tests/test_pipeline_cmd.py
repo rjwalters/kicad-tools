@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,8 +11,11 @@ import pytest
 from kicad_tools.cli.pipeline_cmd import (
     ALL_STEPS,
     PipelineContext,
+    PipelineResult,
     PipelineStep,
+    _build_commit_message,
     _detect_routing_status,
+    _is_git_repo,
     _resolve_pcb_from_project,
     main,
     run_pipeline,
@@ -765,3 +769,231 @@ class TestEdgeCases:
         # The main() function handles project detection
         result = main(["--dry-run", str(pcb_file)])
         assert result == 0
+
+
+class TestCommitFlag:
+    """Tests for --commit flag."""
+
+    @pytest.fixture
+    def git_pcb(self, tmp_path: Path) -> Path:
+        """Create a routed PCB file inside a git repository."""
+        # Initialize a git repo in tmp_path
+        subprocess.run(
+            ["git", "init", str(tmp_path)],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.email", "test@test.com"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "Test"],
+            capture_output=True,
+            check=True,
+        )
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        # Initial commit so we have a baseline
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "initial"],
+            capture_output=True,
+            check=True,
+        )
+        return pcb_file
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_commit_calls_git_add_and_commit(self, mock_step, git_pcb: Path):
+        """When --commit is given and all steps succeed, git add + commit are called."""
+        mock_step.return_value = (True, "completed successfully")
+
+        # Modify the PCB file so there is something to commit
+        content = git_pcb.read_text()
+        git_pcb.write_text(content + "\n; modified by pipeline\n")
+
+        result = main(["--step", "fix-vias", "--commit", "--quiet", str(git_pcb)])
+        assert result == 0
+
+        # Verify a commit was created
+        log = subprocess.run(
+            ["git", "-C", str(git_pcb.parent), "log", "--oneline", "-1"],
+            capture_output=True,
+            text=True,
+        )
+        assert "fix: run kct pipeline" in log.stdout
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_commit_suppressed_on_dry_run(self, mock_step, git_pcb: Path):
+        """--commit is silently ignored when --dry-run is also given."""
+        mock_step.return_value = (True, "completed successfully")
+
+        result = main(["--dry-run", "--commit", "--quiet", str(git_pcb)])
+        assert result == 0
+
+        # Verify no new commit was created (only the initial one)
+        log = subprocess.run(
+            ["git", "-C", str(git_pcb.parent), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+        )
+        lines = log.stdout.strip().split("\n")
+        assert len(lines) == 1
+        assert "initial" in lines[0]
+
+    def test_commit_error_when_not_in_git_repo(self, tmp_path: Path):
+        """--commit exits with error when the PCB is not in a git repository."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+
+        # Use dry-run=False with --commit on a non-git directory.
+        # We need to mock the pipeline steps to succeed so we reach the commit logic.
+        with patch(
+            "kicad_tools.cli.pipeline_cmd._run_subprocess_step",
+            return_value=(True, "completed successfully"),
+        ):
+            result = main(["--step", "fix-vias", "--commit", "--quiet", str(pcb_file)])
+        assert result == 1
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_commit_skipped_when_pipeline_fails(self, mock_step, git_pcb: Path):
+        """When a pipeline step fails, git commit is never attempted."""
+        mock_step.return_value = (False, "failed: some error")
+
+        # Modify the PCB to create a diff
+        content = git_pcb.read_text()
+        git_pcb.write_text(content + "\n; modified\n")
+
+        result = main(["--step", "fix-vias", "--commit", "--quiet", str(git_pcb)])
+        assert result == 1
+
+        # Verify no new commit was created
+        log = subprocess.run(
+            ["git", "-C", str(git_pcb.parent), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+        )
+        lines = log.stdout.strip().split("\n")
+        assert len(lines) == 1
+        assert "initial" in lines[0]
+
+    def test_commit_message_format(self, routed_pcb: Path):
+        """The commit message follows the documented format."""
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        results = [
+            PipelineResult(step="fix-vias", success=True, message="completed"),
+        ]
+        msg = _build_commit_message(ctx, results)
+        assert msg.startswith("fix: run kct pipeline (")
+        assert msg.endswith(")")
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_commit_message_fallback(self, mock_run, tmp_path: Path):
+        """When metrics cannot be determined, fallback message uses mfr name."""
+        # Simulate a non-existent PCB (no routing info) and a failing kct check
+        pcb_file = tmp_path / "nonexistent.kicad_pcb"
+        # Mock subprocess.run to always fail so no DRC count is obtained
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+        ctx = PipelineContext(pcb_file=pcb_file, mfr="pcbway", layers=2, quiet=True)
+        results = []
+        msg = _build_commit_message(ctx, results)
+        assert msg == "fix: run kct pipeline (pcbway)"
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_commit_error_when_no_changes(self, mock_step, git_pcb: Path):
+        """--commit exits with error when pipeline produces no file changes."""
+        mock_step.return_value = (True, "completed successfully")
+
+        # Do NOT modify the PCB, so git diff --cached --quiet will return 0
+        result = main(["--step", "fix-vias", "--commit", "--quiet", str(git_pcb)])
+        assert result == 1
+
+    def test_is_git_repo_true(self, git_pcb: Path):
+        """_is_git_repo returns True for a git working tree."""
+        assert _is_git_repo(git_pcb.parent) is True
+
+    def test_is_git_repo_false(self, tmp_path: Path):
+        """_is_git_repo returns False outside a git repository."""
+        assert _is_git_repo(tmp_path) is False
+
+    def test_without_commit_no_git_operations(self, routed_pcb: Path):
+        """Without --commit, no git operations are performed."""
+        with patch(
+            "kicad_tools.cli.pipeline_cmd._run_subprocess_step",
+            return_value=(True, "completed successfully"),
+        ) as mock_step:
+            result = main(["--step", "fix-vias", "--quiet", str(routed_pcb)])
+        assert result == 0
+        # No git calls should have been made (only _run_subprocess_step for fix-vias)
+        assert mock_step.call_count == 1
+
+    def test_commit_flag_in_help(self, capsys):
+        """--commit appears in the help text."""
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--help"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--commit" in captured.out
+
+    def test_parser_commit_flag(self):
+        """Full CLI parser exposes pipeline_commit with default False."""
+        import argparse
+
+        from kicad_tools.cli.parser import _add_pipeline_parser
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        _add_pipeline_parser(sub)
+
+        args = parser.parse_args(["pipeline", "board.kicad_pcb"])
+        assert args.pipeline_commit is False
+
+        args_commit = parser.parse_args(["pipeline", "board.kicad_pcb", "--commit"])
+        assert args_commit.pipeline_commit is True
+
+    def test_commands_shim_forwards_commit(self):
+        """commands/pipeline.py forwards --commit when pipeline_commit is True."""
+        from kicad_tools.cli.commands.pipeline import run_pipeline_command
+
+        args = MagicMock()
+        args.pipeline_input = "test.kicad_pcb"
+        args.pipeline_step = None
+        args.pipeline_mfr = "jlcpcb"
+        args.pipeline_layers = None
+        args.pipeline_dry_run = False
+        args.pipeline_verbose = False
+        args.pipeline_force = False
+        args.pipeline_commit = True
+        args.global_quiet = False
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", return_value=0) as mock_main:
+            run_pipeline_command(args)
+
+        call_argv = mock_main.call_args[0][0]
+        assert "--commit" in call_argv
+
+    def test_commands_shim_omits_commit_when_false(self):
+        """commands/pipeline.py does NOT pass --commit when pipeline_commit is False."""
+        from kicad_tools.cli.commands.pipeline import run_pipeline_command
+
+        args = MagicMock()
+        args.pipeline_input = "test.kicad_pcb"
+        args.pipeline_step = None
+        args.pipeline_mfr = "jlcpcb"
+        args.pipeline_layers = None
+        args.pipeline_dry_run = False
+        args.pipeline_verbose = False
+        args.pipeline_force = False
+        args.pipeline_commit = False
+        args.global_quiet = False
+
+        with patch("kicad_tools.cli.pipeline_cmd.main", return_value=0) as mock_main:
+            run_pipeline_command(args)
+
+        call_argv = mock_main.call_args[0][0]
+        assert "--commit" not in call_argv
