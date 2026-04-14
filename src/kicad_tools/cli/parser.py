@@ -2891,8 +2891,8 @@ def _add_pipeline_parser(subparsers) -> None:
         help="End-to-end repair pipeline for existing PCBs",
         description=(
             "Orchestrate the full repair pipeline on an existing PCB: "
-            "fix-vias, route (if needed), fix-drc, optimize-traces, zone fill, audit. "
-            "Auto-detects board state to skip unnecessary steps."
+            "erc, fix-silkscreen, fix-vias, route (if needed), fix-drc, optimize-traces, "
+            "zone fill, audit. Auto-detects board state to skip unnecessary steps."
         ),
     )
     pipeline_parser.add_argument(
@@ -2904,7 +2904,16 @@ def _add_pipeline_parser(subparsers) -> None:
         "--step",
         "-s",
         dest="pipeline_step",
-        choices=["erc", "route", "fix-vias", "fix-drc", "optimize", "zones", "audit"],
+        choices=[
+            "erc",
+            "fix-silkscreen",
+            "route",
+            "fix-vias",
+            "fix-drc",
+            "optimize",
+            "zones",
+            "audit",
+        ],
         default=None,
         help="Run only this step (default: run all steps in order)",
     )
