@@ -7,17 +7,21 @@ conversion -> base64 encoding -> MCP response.
 from __future__ import annotations
 
 import base64
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from kicad_tools.mcp.tools.screenshot import (
+    _FALLBACK_RENDER_PX,
     DEFAULT_LAYERS,
     LAYER_PRESETS,
     _check_cairosvg,
     _png_dimensions,
     _resolve_layers,
+    _svg_to_png,
     screenshot_board,
     screenshot_schematic,
 )
@@ -174,6 +178,171 @@ class TestScreenshotSchematicErrors:
         assert result["success"] is False
         assert "kicad-cli not found" in result["error_message"]
         assert "kicad.org/download" in result["error_message"]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _svg_to_png dimensionless SVG handling
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_png(width: int, height: int) -> bytes:
+    """Build a minimal PNG byte string with the given dimensions in the IHDR."""
+    header = b"\x89PNG\r\n\x1a\n"  # 8-byte PNG signature
+    header += b"\x00\x00\x00\r"  # IHDR chunk length
+    header += b"IHDR"  # chunk type
+    header += width.to_bytes(4, byteorder="big")
+    header += height.to_bytes(4, byteorder="big")
+    header += b"\x00" * 5  # bit depth, color type, etc.
+    return header
+
+
+class TestSvgToPngDimensionlessSvg:
+    """Tests for _svg_to_png handling of SVGs without width/height attributes."""
+
+    def test_dimensionless_svg_uses_fallback_width(self, tmp_path):
+        """A viewBox-only SVG (no width/height) renders successfully via the
+        fallback output_width and produces correct dimensions."""
+        svg_file = tmp_path / "dimensionless.svg"
+        svg_file.write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"></svg>')
+        png_file = tmp_path / "output.png"
+
+        fake_png_first = _make_fake_png(4096, 2048)
+        fake_png_second = _make_fake_png(1568, 784)
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        call_log = []
+
+        def fake_svg2png(**kwargs):
+            call_log.append(kwargs)
+            if len(call_log) == 1:
+                return fake_png_first
+            return fake_png_second
+
+        fake_cairosvg.svg2png = fake_svg2png
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            ok, err, w, h = _svg_to_png(svg_file, png_file)
+
+        assert ok is True
+        assert err == ""
+        assert w > 0
+        assert h > 0
+
+        # First call should include output_width=_FALLBACK_RENDER_PX
+        assert call_log[0]["output_width"] == _FALLBACK_RENDER_PX
+
+        # Second call should include target dimensions
+        assert "output_width" in call_log[1]
+        assert "output_height" in call_log[1]
+
+    def test_dimensionless_svg_without_viewbox(self, tmp_path):
+        """An SVG with neither width/height nor viewBox still gets
+        output_width on the first call; if cairosvg returns 0x0 the function
+        returns a graceful failure (not a crash)."""
+        svg_file = tmp_path / "empty.svg"
+        svg_file.write_text('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+        png_file = tmp_path / "output.png"
+
+        # Simulate cairosvg returning a 0x0 PNG (too short to parse)
+        fake_cairosvg = types.ModuleType("cairosvg")
+        fake_cairosvg.svg2png = lambda **kwargs: b""
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            ok, err, w, h = _svg_to_png(svg_file, png_file)
+
+        assert ok is False
+        assert w == 0
+        assert h == 0
+
+    def test_svg_with_explicit_dimensions_still_works(self, tmp_path):
+        """An SVG with explicit width/height attributes still renders
+        correctly with the fallback width on the first pass."""
+        svg_file = tmp_path / "sized.svg"
+        svg_file.write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"></svg>'
+        )
+        png_file = tmp_path / "output.png"
+
+        fake_png_first = _make_fake_png(4096, 3072)
+        fake_png_second = _make_fake_png(1568, 1176)
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        calls = []
+
+        def fake_svg2png(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return fake_png_first
+            return fake_png_second
+
+        fake_cairosvg.svg2png = fake_svg2png
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            ok, err, w, h = _svg_to_png(svg_file, png_file)
+
+        assert ok is True
+        assert err == ""
+        assert w <= 1568
+        assert h <= 1568
+
+    def test_svg_to_png_catches_value_error(self, tmp_path):
+        """If cairosvg.svg2png raises ValueError, _svg_to_png returns a
+        graceful failure tuple instead of propagating the exception."""
+        svg_file = tmp_path / "bad.svg"
+        svg_file.write_text('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+        png_file = tmp_path / "output.png"
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+
+        def raise_value_error(**kwargs):
+            raise ValueError("The SVG size is undefined")
+
+        fake_cairosvg.svg2png = raise_value_error
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            ok, err, w, h = _svg_to_png(svg_file, png_file)
+
+        assert ok is False
+        assert "SVG size is undefined" in err
+        assert w == 0
+        assert h == 0
+
+
+class TestCheckCairosvgValueError:
+    """Tests for _check_cairosvg handling of ValueError."""
+
+    def test_returns_false_on_value_error(self):
+        """_check_cairosvg returns False when svg2png raises ValueError
+        (e.g. from newer cairosvg with dimensionless probe SVG)."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+
+        def raise_value_error(**kwargs):
+            raise ValueError("The SVG size is undefined")
+
+        fake_cairosvg.svg2png = raise_value_error
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            assert _check_cairosvg() is False
+
+    def test_probe_svg_has_dimensions(self):
+        """The probe SVG passed to svg2png includes width and height
+        attributes so it works with all cairosvg versions."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+        received_args = {}
+
+        def capture_svg2png(**kwargs):
+            received_args.update(kwargs)
+            return b"\x89PNG"
+
+        fake_cairosvg.svg2png = capture_svg2png
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            result = _check_cairosvg()
+
+        assert result is True
+        svg_bytes = received_args.get("bytestring", b"")
+        assert b"width=" in svg_bytes
+        assert b"height=" in svg_bytes
 
 
 # ---------------------------------------------------------------------------
