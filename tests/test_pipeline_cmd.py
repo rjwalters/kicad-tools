@@ -232,6 +232,10 @@ class TestRoutingSkip:
         mock_run.assert_called_once()
         cmd_args = mock_run.call_args[0][0]
         assert "route" in cmd_args
+        # Verify new flags are forwarded
+        assert "--grid" in cmd_args
+        assert "--manufacturer" in cmd_args
+        assert "--auto-fix" in cmd_args
 
 
 class TestSingleStep:
@@ -558,6 +562,111 @@ class TestPipelineLayerAutoDetection:
         assert "--layers" in call_argv
         layers_idx = call_argv.index("--layers")
         assert call_argv[layers_idx + 1] == "4"
+
+
+class TestRouteStepArgForwarding:
+    """Tests that route step forwards --grid auto, --manufacturer, --layers auto, --auto-fix."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_grid_auto(self, mock_run, unrouted_pcb: Path):
+        """Route step passes --grid auto to subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--grid" in cmd_args
+        grid_idx = cmd_args.index("--grid")
+        assert cmd_args[grid_idx + 1] == "auto"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_manufacturer(self, mock_run, unrouted_pcb: Path):
+        """Route step passes --manufacturer with the context mfr value."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="pcbway")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--manufacturer" in cmd_args
+        mfr_idx = cmd_args.index("--manufacturer")
+        assert cmd_args[mfr_idx + 1] == "pcbway"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_layers_auto(self, mock_run, unrouted_pcb: Path):
+        """Route step passes --layers auto (string, not integer)."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers=4)
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "auto"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_auto_fix(self, mock_run, unrouted_pcb: Path):
+        """Route step passes --auto-fix flag."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--auto-fix" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_all_new_flags_present(self, mock_run, unrouted_pcb: Path):
+        """Route step includes all four new flags in a single invocation."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="oshpark")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--grid" in cmd_args
+        assert "--manufacturer" in cmd_args
+        assert "--layers" in cmd_args
+        assert "--auto-fix" in cmd_args
+        # Verify values
+        assert cmd_args[cmd_args.index("--grid") + 1] == "auto"
+        assert cmd_args[cmd_args.index("--manufacturer") + 1] == "oshpark"
+        assert cmd_args[cmd_args.index("--layers") + 1] == "auto"
+
+    def test_dry_run_route_unrouted_shows_new_flags(self, unrouted_pcb: Path):
+        """Dry-run on unrouted board shows --grid auto, --manufacturer, --layers auto, --auto-fix."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, dry_run=True, mfr="pcbway")
+        console = Console(quiet=True)
+        result = _run_step_route(ctx, console)
+
+        assert "--grid auto" in result.message
+        assert "--manufacturer pcbway" in result.message
+        assert "--layers auto" in result.message
+        assert "--auto-fix" in result.message
+
+    def test_dry_run_route_force_reroute_shows_new_flags(self, routed_pcb: Path):
+        """Dry-run with --force on routed board shows new flags in re-route message."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route
+
+        ctx = PipelineContext(
+            pcb_file=routed_pcb, quiet=True, dry_run=True, force=True, mfr="jlcpcb"
+        )
+        console = Console(quiet=True)
+        result = _run_step_route(ctx, console)
+
+        assert "--grid auto" in result.message
+        assert "--manufacturer jlcpcb" in result.message
+        assert "--layers auto" in result.message
+        assert "--auto-fix" in result.message
+        assert "re-route" in result.message
 
 
 class TestEdgeCases:
