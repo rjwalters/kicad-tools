@@ -108,8 +108,8 @@ class BOMGroup:
         return {
             "value": self.value,
             "footprint": self.footprint,
-            "quantity": self.quantity,
-            "references": self.references,
+            "qty": self.quantity,
+            "refs": self.references,
             "description": self.description,
             "mpn": self.mpn,
             "lcsc": self.lcsc,
