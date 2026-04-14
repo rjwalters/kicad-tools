@@ -107,7 +107,9 @@
 ### Action Items
 
 {% for item in audit.action_items %}
-- {{ item }}
+- **[{{ {1: 'CRITICAL', 2: 'IMPORTANT', 3: 'OPTIONAL'}.get(item.priority, 'INFO') }}]** {{ item.description }}
+{% if item.command %}  `{{ item.command }}`
+{% endif %}
 {% endfor %}
 {% endif %}
 

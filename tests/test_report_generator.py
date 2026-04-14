@@ -63,7 +63,18 @@ def _full_data(**overrides) -> ReportData:
         },
         "audit": {
             "verdict": "ready",
-            "action_items": ["Review silkscreen placement"],
+            "action_items": [
+                {
+                    "priority": 1,
+                    "description": "Complete routing: 3 nets incomplete",
+                    "command": "kct validate connectivity board.kicad_pcb",
+                },
+                {
+                    "priority": 3,
+                    "description": "Review silkscreen placement",
+                    "command": None,
+                },
+            ],
         },
         "net_status": {
             "completion_percent": 95.5,
@@ -414,6 +425,85 @@ class TestReportGenerator:
         content = report_path.read_text(encoding="utf-8")
 
         assert "## Board Summary" not in content
+
+    def test_action_items_render_with_priority_labels(self, tmp_path: Path) -> None:
+        """Action items render with bold priority labels, not raw dict strings."""
+        data = _full_data(
+            audit={
+                "verdict": "not_ready",
+                "action_items": [
+                    {
+                        "priority": 1,
+                        "description": "Complete routing: 5 nets incomplete",
+                        "command": "kct validate connectivity board.kicad_pcb",
+                    },
+                    {
+                        "priority": 2,
+                        "description": "Fix DRC errors before manufacturing",
+                        "command": "kct drc board.kicad_pcb",
+                    },
+                    {
+                        "priority": 3,
+                        "description": "Review silkscreen placement",
+                        "command": None,
+                    },
+                ],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        # Priority labels must appear as bold Markdown tags
+        assert "**[CRITICAL]** Complete routing: 5 nets incomplete" in content
+        assert "**[IMPORTANT]** Fix DRC errors before manufacturing" in content
+        assert "**[OPTIONAL]** Review silkscreen placement" in content
+
+        # Command must appear as inline code for items that have one
+        assert "`kct validate connectivity board.kicad_pcb`" in content
+        assert "`kct drc board.kicad_pcb`" in content
+
+        # Raw dict syntax must NOT appear
+        assert "{'priority'" not in content
+        assert "'description'" not in content
+
+        # No None literals (command=None must not render)
+        assert "None" not in content
+
+    def test_action_items_unknown_priority_renders_info(self, tmp_path: Path) -> None:
+        """An action item with an unrecognized priority renders as INFO."""
+        data = _full_data(
+            audit={
+                "verdict": "ready",
+                "action_items": [
+                    {
+                        "priority": 99,
+                        "description": "Some informational note",
+                        "command": None,
+                    },
+                ],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "**[INFO]** Some informational note" in content
+
+    def test_empty_action_items_omits_subsection(self, tmp_path: Path) -> None:
+        """An empty action_items list means no Action Items subsection."""
+        data = _full_data(
+            audit={
+                "verdict": "ready",
+                "action_items": [],
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "## Manufacturing Readiness" in content
+        assert "### Action Items" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +869,13 @@ class TestReportCLI:
                 _envelope(
                     {
                         "verdict": "ready",
-                        "action_items": ["Review silkscreen"],
+                        "action_items": [
+                            {
+                                "priority": 3,
+                                "description": "Review silkscreen",
+                                "command": None,
+                            },
+                        ],
                     }
                 )
             )
