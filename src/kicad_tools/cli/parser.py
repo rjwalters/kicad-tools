@@ -982,6 +982,14 @@ def _add_route_parser(subparsers) -> None:
         metavar="N",
         help=("Number of repair passes for --auto-fix (default: 3). Implies --auto-fix."),
     )
+    route_parser.add_argument(
+        "--export-failed-nets",
+        metavar="PATH",
+        help=(
+            "Export failed (unrouted) net names to a file, one per line. "
+            "Useful for scripted workflows or manual completion in KiCad."
+        ),
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:

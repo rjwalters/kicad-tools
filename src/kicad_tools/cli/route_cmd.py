@@ -187,6 +187,48 @@ def _save_partial_results() -> bool:
     return False
 
 
+def _export_failed_nets(
+    router: "Autorouter",
+    net_map: dict[str, int],
+    export_path: str,
+    quiet: bool = False,
+) -> bool:
+    """Export the list of failed (unrouted) net names to a file.
+
+    Writes one net name per line to the specified path.
+
+    Args:
+        router: The Autorouter instance with completed routing.
+        net_map: Mapping of net names to net IDs.
+        export_path: File path to write the failed net names.
+        quiet: If True, suppress output messages.
+
+    Returns:
+        True if the file was written successfully, False otherwise.
+    """
+    reverse_net = {v: k for k, v in net_map.items() if v > 0}
+    routed_net_ids = {route.net for route in router.routes}
+    all_net_ids = {v for k, v in net_map.items() if v > 0}
+    unrouted_ids = all_net_ids - routed_net_ids
+
+    if not unrouted_ids:
+        if not quiet:
+            print("  No failed nets to export.")
+        return False
+
+    try:
+        failed_names = sorted(reverse_net.get(nid, f"Net_{nid}") for nid in unrouted_ids)
+        export_file = Path(export_path)
+        export_file.write_text("\n".join(failed_names) + "\n")
+        if not quiet:
+            print(f"  Failed nets exported to: {export_file} ({len(failed_names)} nets)")
+        return True
+    except Exception as e:
+        if not quiet:
+            print(f"  Error exporting failed nets: {e}")
+        return False
+
+
 def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> str:
     """Display routing preview with per-net breakdown.
 
@@ -859,6 +901,7 @@ def route_with_layer_escalation(
                 final_result.nets_to_route,
                 quiet=quiet,
                 current_strategy=args.strategy,
+                pcb_file=args.pcb,
             )
 
     return 0 if final_result.success else 1
@@ -1222,6 +1265,7 @@ def route_with_rule_relaxation(
                 final_result.nets_to_route,
                 quiet=quiet,
                 current_strategy=args.strategy,
+                pcb_file=args.pcb,
             )
 
     return 0 if final_result.success else 1
@@ -1617,6 +1661,7 @@ def route_with_combined_escalation(
                 final_result.nets_to_route,
                 quiet=quiet,
                 current_strategy=args.strategy,
+                pcb_file=args.pcb,
             )
 
     return 0 if final_result.success else 1
@@ -2103,6 +2148,16 @@ def main(argv: list[str] | None = None) -> int:
             "Automatically add stitching vias for power planes after routing. "
             "Connects surface-mount component pads to their power plane layers. "
             "Equivalent to running 'kicad-pcb-stitch' after routing."
+        ),
+    )
+
+    # Export failed nets
+    parser.add_argument(
+        "--export-failed-nets",
+        metavar="PATH",
+        help=(
+            "Export failed (unrouted) net names to a file, one per line. "
+            "Useful for scripted workflows or manual completion in KiCad."
         ),
     )
 
@@ -3158,7 +3213,18 @@ def main(argv: list[str] | None = None) -> int:
                     quiet=quiet,
                     verbose=verbose,
                     current_strategy=args.strategy,
+                    pcb_file=args.pcb,
                 )
+
+    # Save partial results on clean partial exit (not just SIGINT)
+    if not all_nets_routed and not args.dry_run and router.routes:
+        partial_saved = _save_partial_results()
+        if partial_saved and not quiet:
+            print("  Open in KiCad to complete remaining nets manually")
+
+    # Export failed nets to file if requested
+    if getattr(args, "export_failed_nets", None) and not all_nets_routed:
+        _export_failed_nets(router, net_map, args.export_failed_nets, quiet=quiet)
 
     # Exit codes:
     # 0 = All nets routed AND (DRC passed OR DRC not run)

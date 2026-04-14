@@ -23,6 +23,7 @@ def show_routing_summary(
     quiet: bool = False,
     verbose: bool = False,
     current_strategy: str = "basic",
+    pcb_file: str | None = None,
 ) -> None:
     """Show comprehensive routing summary with successes, failures, and suggestions.
 
@@ -40,6 +41,7 @@ def show_routing_summary(
         current_strategy: The routing strategy that was used (e.g. "basic",
             "negotiated", "monte-carlo"). Suggestions will exclude this strategy
             since the user already tried it.
+        pcb_file: Optional PCB file path for inclusion in suggestion commands.
     """
     if quiet:
         return
@@ -342,6 +344,18 @@ def show_routing_summary(
             if num_layers <= 2:
                 suggestion_num += 1
                 print(f"{suggestion_num}. Consider 4-layer routing: kct route --layers 4")
+
+        # Always suggest --auto-layers when routing on fewer than 4 layers with failures
+        num_layers = getattr(router.grid, "num_layers", 2)
+        if num_layers < 4:
+            failed_count = len(unrouted_ids)
+            failure_pct = failed_count / nets_to_route * 100 if nets_to_route > 0 else 0
+            pcb_arg = f" {pcb_file}" if pcb_file else ""
+            print(
+                f"\nTip: {failed_count}/{nets_to_route} nets failed on {num_layers} layers "
+                f"({failure_pct:.0f}% failure rate)."
+            )
+            print(f"Try automatic layer escalation: kct route{pcb_arg} --auto-layers")
 
     print(f"\n{'=' * 60}")
 

@@ -215,6 +215,8 @@ def run_route_command(args) -> int:
         sub_argv.append("--auto-fix")
     if getattr(args, "auto_fix_passes", None) is not None:
         sub_argv.extend(["--auto-fix-passes", str(args.auto_fix_passes)])
+    if getattr(args, "export_failed_nets", None):
+        sub_argv.extend(["--export-failed-nets", args.export_failed_nets])
     return route_main(sub_argv)
 
 
