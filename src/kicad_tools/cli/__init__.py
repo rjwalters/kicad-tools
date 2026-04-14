@@ -632,6 +632,12 @@ def _run_report_command(args) -> int:
             sub_argv.extend(["--sch", args.report_sch])
         if getattr(args, "report_no_figures", False):
             sub_argv.append("--no-figures")
+        if hasattr(args, "report_quantity") and args.report_quantity is not None:
+            sub_argv.extend(["--quantity", str(args.report_quantity)])
+        if getattr(args, "report_skip_erc", False):
+            sub_argv.append("--skip-erc")
+        if getattr(args, "report_skip_collect", False):
+            sub_argv.append("--skip-collect")
 
     return report_cmd(sub_argv)
 

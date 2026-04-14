@@ -3654,3 +3654,22 @@ def _add_report_parser(subparsers) -> None:
         default=False,
         help="Skip figure generation (useful when kicad-cli/cairosvg are unavailable)",
     )
+    gen_parser.add_argument(
+        "--quantity",
+        dest="report_quantity",
+        type=int,
+        default=5,
+        help="Quantity for cost estimation (default: 5)",
+    )
+    gen_parser.add_argument(
+        "--skip-erc",
+        dest="report_skip_erc",
+        action="store_true",
+        help="Skip ERC during auto-collection",
+    )
+    gen_parser.add_argument(
+        "--skip-collect",
+        dest="report_skip_collect",
+        action="store_true",
+        help="Skip auto-collection; generate skeleton report (legacy behavior)",
+    )

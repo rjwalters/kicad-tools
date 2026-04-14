@@ -628,12 +628,20 @@ class TestReportCLI:
         assert args.report_mfr == "jlcpcb"
 
     def test_generate_skeleton(self, tmp_path: Path) -> None:
-        """Calling generate without a data-dir should produce a skeleton report."""
+        """Calling generate with --skip-collect should produce a skeleton report."""
         from kicad_tools.cli.report_cmd import main as report_main
 
         output_dir = tmp_path / "reports"
         result = report_main(
-            ["generate", "test.kicad_pro", "--mfr", "testmfr", "-o", str(output_dir)]
+            [
+                "generate",
+                "test.kicad_pro",
+                "--mfr",
+                "testmfr",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
         )
         assert result == 0
 
@@ -874,3 +882,262 @@ class TestReportCLI:
         content = (output_dir / "v1" / "report.md").read_text(encoding="utf-8")
         # Section should be omitted, not crash
         assert "## Board Summary" not in content
+
+    def test_data_dir_bypasses_collector(self, tmp_path: Path) -> None:
+        """When --data-dir is provided, ReportDataCollector must not be instantiated."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "board_stats.json").write_text(
+            json.dumps({"layer_count": 2, "component_count": 10})
+        )
+
+        output_dir = tmp_path / "reports"
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=AssertionError("_auto_collect should not be called"),
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                    "--data-dir",
+                    str(data_dir),
+                ]
+            )
+        assert result == 0
+
+    def test_auto_collect_writes_data_and_report_same_version(self, tmp_path: Path) -> None:
+        """Auto-collect should write data into vN/data/ and the report into the same vN/."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+
+        # Mock _auto_collect to simulate writing data into the correct version dir
+        def fake_auto_collect(pcb_path, output_dir, manufacturer, quantity, skip_erc):
+            from kicad_tools.report.generator import ReportGenerator
+
+            version_dir = ReportGenerator.next_version_dir(output_dir)
+            data_dir = version_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "board_stats.json").write_text(
+                json.dumps({"layer_count": 4, "component_count": 42})
+            )
+            from kicad_tools.cli.report_cmd import _load_data_dir
+
+            data_kwargs = _load_data_dir(str(data_dir))
+            return version_dir, data_kwargs
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=fake_auto_collect,
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                ]
+            )
+
+        assert result == 0
+
+        # Data and report must both be under v1
+        assert (output_dir / "v1" / "data" / "board_stats.json").exists()
+        assert (output_dir / "v1" / "report.md").exists()
+
+        # No v2 directory should exist (no version-numbering race)
+        assert not (output_dir / "v2").exists()
+
+    def test_auto_collect_collector_failure_non_fatal(self, tmp_path: Path) -> None:
+        """If collect_all produces no data, the CLI should still return 0."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+
+        # Mock _auto_collect to simulate a collector that produces no data
+        def empty_auto_collect(pcb_path, output_dir, manufacturer, quantity, skip_erc):
+            from kicad_tools.report.generator import ReportGenerator
+
+            version_dir = ReportGenerator.next_version_dir(output_dir)
+            data_dir = version_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return version_dir, {}
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=empty_auto_collect,
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                ]
+            )
+
+        assert result == 0
+        assert (output_dir / "v1" / "report.md").exists()
+
+    def test_new_flags_forwarded_to_collector(self, tmp_path: Path) -> None:
+        """--quantity and --skip-erc must reach _auto_collect correctly."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+        captured = {}
+
+        def capturing_auto_collect(pcb_path, output_dir, manufacturer, quantity, skip_erc):
+            captured["quantity"] = quantity
+            captured["skip_erc"] = skip_erc
+            from kicad_tools.report.generator import ReportGenerator
+
+            version_dir = ReportGenerator.next_version_dir(output_dir)
+            data_dir = version_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return version_dir, {}
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=capturing_auto_collect,
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                    "--quantity",
+                    "50",
+                    "--skip-erc",
+                ]
+            )
+
+        assert result == 0
+        assert captured["quantity"] == 50
+        assert captured["skip_erc"] is True
+
+    def test_skip_collect_produces_skeleton(self, tmp_path: Path) -> None:
+        """--skip-collect must produce a skeleton report without invoking the collector."""
+        from kicad_tools.cli.report_cmd import main as report_main
+
+        output_dir = tmp_path / "reports"
+
+        with mock.patch(
+            "kicad_tools.cli.report_cmd._auto_collect",
+            side_effect=AssertionError("_auto_collect should not be called"),
+        ):
+            result = report_main(
+                [
+                    "generate",
+                    "board.kicad_pcb",
+                    "--mfr",
+                    "jlcpcb",
+                    "-o",
+                    str(output_dir),
+                    "--skip-collect",
+                ]
+            )
+
+        assert result == 0
+        report_path = output_dir / "v1" / "report.md"
+        assert report_path.exists()
+
+        content = report_path.read_text(encoding="utf-8")
+        # Skeleton: header present, optional data sections absent
+        assert "# board - Design Report" in content
+        assert "## Board Summary" not in content
+
+    def test_version_dir_parameter_in_generator(self, tmp_path: Path) -> None:
+        """ReportGenerator.generate() with version_dir writes to the specified directory."""
+        data = _full_data()
+        gen = ReportGenerator()
+
+        custom_dir = tmp_path / "v99"
+        report_path = gen.generate(data, tmp_path, version_dir=custom_dir)
+
+        assert report_path.parent.name == "v99"
+        assert report_path.exists()
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "# TestBoard - Design Report" in content
+
+    def test_version_dir_none_auto_increments(self, tmp_path: Path) -> None:
+        """When version_dir is None, generate() auto-increments as before."""
+        data = _full_data()
+        gen = ReportGenerator()
+
+        p1 = gen.generate(data, tmp_path, version_dir=None)
+        p2 = gen.generate(data, tmp_path, version_dir=None)
+
+        assert p1.parent.name == "v1"
+        assert p2.parent.name == "v2"
+
+
+# ---------------------------------------------------------------------------
+# TestReportAutoCollect
+# ---------------------------------------------------------------------------
+
+
+class TestReportAutoCollect:
+    """Tests for the _auto_collect helper function."""
+
+    def test_auto_collect_returns_version_dir_and_data(self, tmp_path: Path) -> None:
+        """_auto_collect should return a (version_dir, data_kwargs) tuple."""
+        from kicad_tools.cli.report_cmd import _auto_collect
+        from kicad_tools.report.collector import ReportDataCollector
+
+        def stub_collect_all(self_collector, data_dir):
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "board_summary.json").write_text(
+                json.dumps({"layer_count": 2, "footprint_count": 5})
+            )
+            return {"board_summary": data_dir / "board_summary.json"}
+
+        with mock.patch.object(ReportDataCollector, "collect_all", stub_collect_all):
+            version_dir, data_kwargs = _auto_collect(
+                pcb_path=Path("test.kicad_pcb"),
+                output_dir=tmp_path / "reports",
+                manufacturer="jlcpcb",
+                quantity=10,
+                skip_erc=True,
+            )
+
+        assert version_dir == tmp_path / "reports" / "v1"
+        assert "board_stats" in data_kwargs
+        assert data_kwargs["board_stats"]["layer_count"] == 2
+
+    def test_auto_collect_next_version_increments(self, tmp_path: Path) -> None:
+        """If v1 already exists, _auto_collect should use v2."""
+        from kicad_tools.cli.report_cmd import _auto_collect
+        from kicad_tools.report.collector import ReportDataCollector
+
+        output_dir = tmp_path / "reports"
+        (output_dir / "v1").mkdir(parents=True)
+
+        def stub_collect_all(self_collector, data_dir):
+            data_dir.mkdir(parents=True, exist_ok=True)
+            return {}
+
+        with mock.patch.object(ReportDataCollector, "collect_all", stub_collect_all):
+            version_dir, _ = _auto_collect(
+                pcb_path=Path("test.kicad_pcb"),
+                output_dir=output_dir,
+                manufacturer="jlcpcb",
+                quantity=5,
+                skip_erc=False,
+            )
+
+        assert version_dir == output_dir / "v2"
