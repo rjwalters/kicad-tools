@@ -264,6 +264,41 @@ class TestRenderPdf:
         finally:
             del sys.modules["weasyprint"]
 
+    def test_accepts_string_path(self, tmp_path: Path) -> None:
+        """render_pdf accepts a plain str path without raising AttributeError."""
+        import sys
+
+        from kicad_tools.report.renderers import render_pdf
+
+        output = tmp_path / "str_test" / "report.pdf"
+        # Pass the path as a plain string, not a Path object
+        output_str = str(output)
+
+        # Create a fake weasyprint module with a mock HTML class
+        mock_html_cls = type(
+            "MockHTML",
+            (),
+            {
+                "__init__": lambda self, string: None,
+                "write_pdf": lambda self, path: Path(path).write_bytes(b"%PDF-mock"),
+            },
+        )
+
+        fake_weasyprint = type(sys)("weasyprint")
+        fake_weasyprint.HTML = mock_html_cls
+        sys.modules["weasyprint"] = fake_weasyprint
+
+        try:
+            with patch(
+                "kicad_tools.report.renderers._weasyprint_available",
+                return_value=True,
+            ):
+                render_pdf("<html></html>", output_str)
+                assert output.parent.exists()
+                assert output.exists()
+        finally:
+            del sys.modules["weasyprint"]
+
 
 # ---------------------------------------------------------------------------
 # CSS tests
