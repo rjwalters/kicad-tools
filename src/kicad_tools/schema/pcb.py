@@ -95,10 +95,18 @@ class Pad:
                 if isinstance(layers.values[i], str)
             ]
 
-        # Net
+        # Net — handles both (net N "name") and (net "name") formats.
+        # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
-            pad.net_number = net.get_int(0) or 0
-            pad.net_name = net.get_string(1) or ""
+            first_int = net.get_int(0)
+            if first_int is not None:
+                # Traditional format: (net N "name")
+                pad.net_number = first_int
+                pad.net_name = net.get_string(1) or ""
+            else:
+                # KiCad 10 name-only format: (net "name")
+                pad.net_number = 0
+                pad.net_name = net.get_string(0) or ""
 
         # Drill
         if drill := sexp.find("drill"):

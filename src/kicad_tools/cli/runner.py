@@ -417,15 +417,99 @@ def _snapshot_net_declarations(pcb_path: Path) -> list:
     return [child for child in sexp.children if child.name == "net"]
 
 
+def _get_fp_reference(fp_node) -> str:
+    """Extract the reference designator from a footprint S-expression node.
+
+    Checks both KiCad 8+ ``(property "Reference" "U1" ...)`` format and
+    KiCad 7 ``(fp_text reference "U1" ...)`` format.
+
+    Returns an empty string if no reference is found.
+    """
+    # KiCad 8+ format: (property "Reference" "U1" ...)
+    for child in fp_node.children:
+        if child.name == "property":
+            prop_name = child.get_string(0)
+            if prop_name == "Reference":
+                return child.get_string(1) or ""
+    # KiCad 7 format: (fp_text reference "U1" ...)
+    for child in fp_node.children:
+        if child.name == "fp_text":
+            text_type = child.get_string(0)
+            if text_type == "reference":
+                return child.get_string(1) or ""
+    return ""
+
+
+def _has_nonzero_net(net_node) -> bool:
+    """Check whether a ``(net ...)`` S-expression carries a real net assignment.
+
+    Returns True for:
+    - ``(net 1 "GND")`` — KiCad 8/9 format with nonzero net number
+    - ``(net "GND")`` — KiCad 10 format (name-only, no number)
+
+    Returns False for:
+    - ``(net 0)`` or ``(net 0 "")`` — unconnected pad
+    - None
+    """
+    if net_node is None:
+        return False
+    net_num = net_node.get_int(0)
+    if net_num is not None:
+        # Traditional format: (net N "name") — nonzero means connected
+        return net_num != 0
+    # KiCad 10 name-only format: (net "name") — presence of a name means connected
+    net_name = net_node.get_string(0)
+    return bool(net_name)
+
+
+def _make_segment_via_key(child) -> str | None:
+    """Build a geometry-based key for a segment or via S-expression node.
+
+    Uses ``(start, end, layer)`` for segments and ``(position, size, layers)``
+    for vias, which are stable across kicad-cli UUID regeneration.
+
+    Returns None if required geometry fields are missing.
+    """
+    if child.name == "segment":
+        start_node = child.get("start")
+        end_node = child.get("end")
+        layer_node = child.get("layer")
+        if start_node is None or end_node is None or layer_node is None:
+            return None
+        sx = start_node.get_float(0) or 0.0
+        sy = start_node.get_float(1) or 0.0
+        ex = end_node.get_float(0) or 0.0
+        ey = end_node.get_float(1) or 0.0
+        layer = layer_node.get_string(0) or ""
+        return f"seg:{sx},{sy}:{ex},{ey}:{layer}"
+    elif child.name == "via":
+        at_node = child.get("at")
+        size_node = child.get("size")
+        layers_node = child.get("layers")
+        if at_node is None or size_node is None:
+            return None
+        ax = at_node.get_float(0) or 0.0
+        ay = at_node.get_float(1) or 0.0
+        sz = size_node.get_float(0) or 0.0
+        layer_strs = []
+        if layers_node is not None:
+            for c in layers_node.children:
+                if c.is_atom and isinstance(c.value, str):
+                    layer_strs.append(c.value)
+        return f"via:{ax},{ay}:{sz}:{','.join(layer_strs)}"
+    return None
+
+
 def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
-    """Snapshot per-element inline ``(net N ...)`` assignments from a PCB.
+    """Snapshot per-element inline ``(net ...)`` assignments from a PCB.
 
     Captures the ``(net ...)`` child S-expression for every pad, segment,
     and via, keyed by a stable identifier:
 
-    - **Pads**: keyed by ``"fp:<footprint_uuid>:pad:<pad_number>"`` since
-      pads in KiCad files do not have their own UUIDs.
-    - **Segments/Vias**: keyed by their UUID string.
+    - **Pads**: keyed by ``"<reference>:<pad_number>"`` using the footprint's
+      reference designator, which is stable across kicad-cli UUID regeneration.
+    - **Segments**: keyed by ``"seg:<sx>,<sy>:<ex>,<ey>:<layer>"`` (geometry).
+    - **Vias**: keyed by ``"via:<x>,<y>:<size>:<layers>"`` (geometry).
 
     Returns a dict mapping key strings to a list ``[net_sexp_node]``
     containing the original ``(net ...)`` S-expression.  An empty dict
@@ -440,39 +524,32 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
 
     snapshot: dict[str, list] = {}
 
-    # Snapshot pads inside footprints, keyed by footprint UUID + pad number
+    # Snapshot pads inside footprints, keyed by reference + pad number
     for fp_node in (c for c in sexp.children if c.name == "footprint"):
-        fp_uuid_node = fp_node.get("uuid")
-        if fp_uuid_node is None:
-            continue
-        fp_uuid = fp_uuid_node.get_string(0) or ""
-        if not fp_uuid:
+        fp_ref = _get_fp_reference(fp_node)
+        if not fp_ref:
             continue
 
         for pad_node in (c for c in fp_node.children if c.name == "pad"):
             net_node = pad_node.get("net")
-            if net_node is None:
-                continue
-            net_num = net_node.get_int(0)
-            if net_num is None or net_num == 0:
+            if not _has_nonzero_net(net_node):
                 continue
             # Use the pad's first atom (its number) as sub-key
             pad_number = pad_node.get_first_atom()
             if pad_number is None:
                 continue
-            key = f"fp:{fp_uuid}:pad:{pad_number}"
+            key = f"{fp_ref}:{pad_number}"
             snapshot[key] = [net_node]
 
-    # Snapshot segments and vias at the top level, keyed by UUID
+    # Snapshot segments and vias at the top level, keyed by geometry
     for child in sexp.children:
         if child.name in ("segment", "via"):
-            uuid_node = child.get("uuid")
             net_node = child.get("net")
-            if uuid_node is not None and net_node is not None:
-                uuid_val = uuid_node.get_string(0)
-                net_num = net_node.get_int(0)
-                if uuid_val and net_num is not None and net_num != 0:
-                    snapshot[uuid_val] = [net_node]
+            if not _has_nonzero_net(net_node):
+                continue
+            geo_key = _make_segment_via_key(child)
+            if geo_key:
+                snapshot[geo_key] = [net_node]
 
     return snapshot
 
@@ -535,44 +612,36 @@ def _restore_net_declarations(
 
     # --- Restore per-element inline net assignments ---
     if element_nets:
-        # Restore pad nets inside footprints (keyed by fp_uuid:pad_number)
+        # Restore pad nets inside footprints (keyed by reference:pad_number)
         for fp_node in (c for c in output_sexp.children if c.name == "footprint"):
-            fp_uuid_node = fp_node.get("uuid")
-            if fp_uuid_node is None:
-                continue
-            fp_uuid = fp_uuid_node.get_string(0) or ""
-            if not fp_uuid:
+            fp_ref = _get_fp_reference(fp_node)
+            if not fp_ref:
                 continue
 
             for pad_node in (c for c in fp_node.children if c.name == "pad"):
                 pad_number = pad_node.get_first_atom()
                 if pad_number is None:
                     continue
-                key = f"fp:{fp_uuid}:pad:{pad_number}"
+                key = f"{fp_ref}:{pad_number}"
                 if key not in element_nets:
                     continue
                 current_net = pad_node.get("net")
-                current_num = current_net.get_int(0) if current_net else None
-                if current_num == 0 or current_net is None:
+                if not _has_nonzero_net(current_net):
                     if current_net is not None:
                         pad_node.remove(current_net)
                     pad_node.append(element_nets[key][0])
                     modified = True
 
-        # Restore segment and via nets at the top level (keyed by UUID)
+        # Restore segment and via nets at the top level (keyed by geometry)
         for child in output_sexp.children:
             if child.name in ("segment", "via"):
-                uuid_node = child.get("uuid")
-                if uuid_node is None:
-                    continue
-                uuid_val = uuid_node.get_string(0)
-                if uuid_val and uuid_val in element_nets:
+                geo_key = _make_segment_via_key(child)
+                if geo_key and geo_key in element_nets:
                     current_net = child.get("net")
-                    current_num = current_net.get_int(0) if current_net else None
-                    if current_num == 0 or current_net is None:
+                    if not _has_nonzero_net(current_net):
                         if current_net is not None:
                             child.remove(current_net)
-                        child.append(element_nets[uuid_val][0])
+                        child.append(element_nets[geo_key][0])
                         modified = True
 
     if modified:
