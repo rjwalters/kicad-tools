@@ -11,6 +11,7 @@ Orchestrates the full repair pipeline:
 6. Optimize traces
 7. Zone fill (requires kicad-cli)
 8. Audit / check
+9. Report generation (manufacturing report)
 
 Usage:
     kct pipeline board.kicad_pcb --mfr jlcpcb
@@ -51,6 +52,7 @@ class PipelineStep(str, Enum):
     OPTIMIZE = "optimize"
     ZONES = "zones"
     AUDIT = "audit"
+    REPORT = "report"
 
 
 # Ordered list of all pipeline steps
@@ -63,6 +65,7 @@ ALL_STEPS = [
     PipelineStep.OPTIMIZE,
     PipelineStep.ZONES,
     PipelineStep.AUDIT,
+    PipelineStep.REPORT,
 ]
 
 
@@ -611,6 +614,46 @@ def _run_step_audit(ctx: PipelineContext, console: Console) -> PipelineResult:
     )
 
 
+def _run_step_report(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run report generation step (final step after AUDIT)."""
+    reports_dir = ctx.pcb_file.parent / "reports"
+
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.REPORT,
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct report generate {ctx.pcb_file.name} "
+                f"--mfr {ctx.mfr} --no-figures -o reports/"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Generating report for {ctx.pcb_file.name}...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "report",
+        "generate",
+        str(ctx.pcb_file),
+        "--mfr",
+        ctx.mfr,
+        "--no-figures",
+        "-o",
+        str(reports_dir),
+    ]
+
+    success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+
+    return PipelineResult(
+        step=PipelineStep.REPORT,
+        success=success,
+        message=f"report: {message}",
+    )
+
+
 def _is_git_repo(directory: Path) -> bool:
     """Check whether *directory* is inside a git repository.
 
@@ -736,9 +779,13 @@ def _git_commit_result(
         )
         return 1
 
-    # Stage the PCB file
+    # Stage the PCB file and reports/ directory (if present)
+    reports_dir = ctx.pcb_file.parent / "reports"
+    files_to_stage = [str(ctx.pcb_file)]
+    if reports_dir.exists():
+        files_to_stage.append(str(reports_dir))
     add_result = subprocess.run(
-        ["git", "-C", str(pcb_dir), "add", str(ctx.pcb_file)],
+        ["git", "-C", str(pcb_dir), "add"] + files_to_stage,
         capture_output=True,
         text=True,
     )
@@ -793,6 +840,7 @@ STEP_RUNNERS = {
     PipelineStep.OPTIMIZE: _run_step_optimize,
     PipelineStep.ZONES: _run_step_zones,
     PipelineStep.AUDIT: _run_step_audit,
+    PipelineStep.REPORT: _run_step_report,
 }
 
 
@@ -851,8 +899,8 @@ def run_pipeline(
                     status = "[red]FAIL[/red]"
                 console.print(f"  [{status}] {result.message}")
 
-            # Stop on failure (unless it's the audit step -- always report)
-            if not result.success and step != PipelineStep.AUDIT:
+            # Stop on failure (unless it's the audit or report step -- always run informational steps)
+            if not result.success and step not in (PipelineStep.AUDIT, PipelineStep.REPORT):
                 break
 
     # Print summary
