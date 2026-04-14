@@ -83,9 +83,13 @@ def _full_data(**overrides) -> ReportData:
             ],
         },
         "net_status": {
+            "total_nets": 61,
+            "complete_count": 58,
             "completion_percent": 95.5,
-            "unrouted_count": 3,
-            "unrouted_nets": ["GND", "VCC", "SDA"],
+            "incomplete_count": 3,
+            "unrouted_count": 0,
+            "total_unconnected_pads": 5,
+            "incomplete_net_names": ["GND", "SDA", "VCC"],
         },
         "cost": {
             "per_unit": 2.50,
@@ -719,18 +723,17 @@ class TestLoadDataDir:
         assert isinstance(result["bom_groups"], list)
         assert result["bom_groups"][0]["value"] == "10k"
 
-    def test_completion_pct_renamed(self, tmp_path: Path) -> None:
-        """completion_pct is renamed to completion_percent."""
+    def test_completion_percent_passed_through(self, tmp_path: Path) -> None:
+        """completion_percent emitted by the collector is passed through as-is."""
         from kicad_tools.cli.report_cmd import _load_data_dir
 
         (tmp_path / "net_status.json").write_text(
-            json.dumps({"completion_pct": 95.0, "unrouted_count": 2})
+            json.dumps({"completion_percent": 95.0, "incomplete_count": 2})
         )
         result = _load_data_dir(str(tmp_path))
         ns = result["net_status"]
         assert "completion_percent" in ns
         assert ns["completion_percent"] == 95.0
-        assert "completion_pct" not in ns
 
     def test_envelope_unwrapping(self, tmp_path: Path) -> None:
         """Enveloped JSON files are unwrapped to their data payload."""
@@ -873,13 +876,12 @@ class TestReportCLI:
         Writes JSON files using the same envelope format the collector
         produces (``{schema_version, generated_at, pcb_path, data: {...}}``),
         verifies that every section renders with the correct values, and
-        exercises all five bug fixes from issue #1321:
+        exercises the data-dir loading bug fixes from issue #1321:
 
         1. Envelope unwrapping (all sections)
         2. Filename mapping (board_summary.json -> board_stats,
            drc_summary.json -> drc)
         3. BOM groups extraction (data.groups -> bom_groups list)
-        4. completion_pct -> completion_percent rename
         """
         from kicad_tools.cli.report_cmd import main as report_main
 
@@ -966,7 +968,7 @@ class TestReportCLI:
             )
         )
 
-        # Bug 4: net_status with completion_pct (not completion_percent)
+        # net_status: collector now emits completion_percent directly
         (data_dir / "net_status.json").write_text(
             json.dumps(
                 _envelope(
@@ -976,7 +978,8 @@ class TestReportCLI:
                         "incomplete_count": 4,
                         "unrouted_count": 2,
                         "total_unconnected_pads": 5,
-                        "completion_pct": 95.0,
+                        "completion_percent": 95.0,
+                        "incomplete_net_names": ["CLK", "MISO", "MOSI", "RST"],
                     }
                 )
             )
@@ -1024,8 +1027,16 @@ class TestReportCLI:
         assert "READY" in content
         assert "Review silkscreen" in content
 
-        # Bug 4: completion_percent renders (renamed from completion_pct)
+        # Routing status: completion_percent renders directly from collector
         assert "95.0%" in content
+        # New rows in the routing status table
+        assert "| Complete Nets | 76 / 80 |" in content
+        assert "| Incomplete Nets | 4 |" in content
+        assert "| Unconnected Pads | 5 |" in content
+        # Incomplete net names list rendered
+        assert "### Incomplete Nets" in content
+        assert "- CLK" in content
+        assert "- MOSI" in content
 
     def test_generate_with_data_dir_null_envelope(self, tmp_path: Path) -> None:
         """An envelope with ``data: null`` (collector failure) omits the section."""

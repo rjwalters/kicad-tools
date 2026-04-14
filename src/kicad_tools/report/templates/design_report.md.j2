@@ -135,12 +135,14 @@
 | Metric | Value |
 |--------|-------|
 | Completion | {{ net_status.completion_percent | default(0) }}% |
-| Unrouted Nets | {{ net_status.unrouted_count | default(0) }} |
+| Complete Nets | {{ net_status.complete_count | default(0) }} / {{ net_status.total_nets | default(0) }} |
+| Incomplete Nets | {{ net_status.incomplete_count | default(0) }} |
+| Unconnected Pads | {{ net_status.total_unconnected_pads | default(0) }} |
 
-{% if net_status.unrouted_nets is defined and net_status.unrouted_nets %}
-### Unrouted Nets
+{% if net_status.incomplete_net_names is defined and net_status.incomplete_net_names %}
+### Incomplete Nets
 
-{% for net in net_status.unrouted_nets %}
+{% for net in net_status.incomplete_net_names %}
 - {{ net }}
 {% endfor %}
 {% endif %}

@@ -327,12 +327,6 @@ def _load_data_dir(data_dir_str: str) -> dict:
     if "bom_groups" in result and isinstance(result["bom_groups"], dict):
         result["bom_groups"] = result["bom_groups"].get("groups", [])
 
-    # net_status: collector writes ``completion_pct`` but the template
-    # reads ``completion_percent``.
-    ns = result.get("net_status")
-    if isinstance(ns, dict) and "completion_pct" in ns:
-        ns["completion_percent"] = ns.pop("completion_pct")
-
     # Load notes from text file
     notes_path = data_dir / "notes.txt"
     if notes_path.exists():
