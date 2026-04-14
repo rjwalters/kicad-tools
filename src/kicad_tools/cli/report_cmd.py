@@ -198,9 +198,12 @@ def _generate_figures(
         entries = fig_gen.generate_all(input_path, sch_path, figures_dir)
         data.pcb_figures = _entries_to_pcb_figures(entries)
         data.schematic_sheets = _entries_to_schematic_sheets(entries)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
+        hint = ""
+        if isinstance(exc, OSError) and "cairo" in str(exc).lower():
+            hint = " (hint: on macOS set DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib)"
         print(
-            f"Warning: figure generation skipped — {exc}",
+            f"Warning: figure generation skipped — {exc}{hint}",
             file=sys.stderr,
         )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -251,6 +252,46 @@ class TestMissingDependencies:
                 tmp_path / "main.kicad_sch",
                 tmp_path / "out",
             )
+
+
+class TestCheckCairosvgProbe:
+    """Tests for _check_cairosvg() native library probe."""
+
+    def test_returns_false_when_svg2png_raises_os_error(self):
+        """_check_cairosvg() returns False when cairosvg.svg2png raises OSError
+        (native cairo library missing)."""
+        import types
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+
+        def _raise_os_error(**kwargs):
+            raise OSError('no library called "cairo-2" was found')
+
+        fake_cairosvg.svg2png = _raise_os_error
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            from kicad_tools.mcp.tools.screenshot import _check_cairosvg
+
+            assert _check_cairosvg() is False
+
+    def test_returns_false_when_import_fails(self):
+        """_check_cairosvg() returns False when cairosvg cannot be imported."""
+        with patch.dict(sys.modules, {"cairosvg": None}):
+            from kicad_tools.mcp.tools.screenshot import _check_cairosvg
+
+            assert _check_cairosvg() is False
+
+    def test_returns_true_when_probe_succeeds(self):
+        """_check_cairosvg() returns True when cairosvg.svg2png succeeds."""
+        import types
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        fake_cairosvg.svg2png = lambda **kwargs: b"\x89PNG"
+
+        with patch.dict(sys.modules, {"cairosvg": fake_cairosvg}):
+            from kicad_tools.mcp.tools.screenshot import _check_cairosvg
+
+            assert _check_cairosvg() is True
 
 
 class TestMultiSheetSchematics:

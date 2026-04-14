@@ -316,6 +316,67 @@ class TestGracefulDegradation:
         assert "## PCB Layout" not in content
         assert "## Schematic Overview" not in content
 
+    @patch("kicad_tools.report.ReportFigureGenerator")
+    def test_os_error_cairo_missing_prints_warning_with_hint(self, mock_gen_cls, tmp_path, capsys):
+        """When native cairo library is missing (OSError), CLI prints warning
+        with macOS hint and continues without figures."""
+        mock_instance = mock_gen_cls.return_value
+        mock_instance.generate_all.side_effect = OSError('no library called "cairo-2" was found')
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
+        )
+
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Warning: figure generation skipped" in captured.err
+        assert 'no library called "cairo-2" was found' in captured.err
+        assert "DYLD_FALLBACK_LIBRARY_PATH" in captured.err
+
+        # Report should still be generated
+        report_path = output_dir / "v1" / "report.md"
+        assert report_path.exists()
+
+    @patch("kicad_tools.report.ReportFigureGenerator")
+    def test_os_error_non_cairo_prints_warning_without_hint(self, mock_gen_cls, tmp_path, capsys):
+        """When a non-cairo OSError occurs, CLI prints warning without macOS hint."""
+        mock_instance = mock_gen_cls.return_value
+        mock_instance.generate_all.side_effect = OSError("disk full")
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                "board.kicad_pcb",
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--skip-collect",
+            ]
+        )
+
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "Warning: figure generation skipped" in captured.err
+        assert "disk full" in captured.err
+        assert "DYLD_FALLBACK_LIBRARY_PATH" not in captured.err
+
+        # Report should still be generated
+        report_path = output_dir / "v1" / "report.md"
+        assert report_path.exists()
+
 
 class TestFiguresInVersionDir:
     """Tests verifying that figures land in the correct versioned directory."""
