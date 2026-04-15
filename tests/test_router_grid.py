@@ -585,8 +585,8 @@ class TestLayerStackPresets:
         """Test 4-layer SIG-GND-PWR-SIG stack."""
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         assert stack.num_layers == 4
-        assert len(stack.signal_layers) == 2  # F.Cu and B.Cu
-        assert len(stack.plane_layers) == 2  # In1.Cu and In2.Cu
+        assert len(stack.signal_layers) == 4  # All layers routable
+        assert len(stack.plane_layers) == 2  # Plane metadata preserved
 
     def test_four_layer_sig_sig_gnd_pwr(self):
         """Test 4-layer SIG-SIG-GND-PWR stack."""
@@ -597,8 +597,8 @@ class TestLayerStackPresets:
         """Test 6-layer stack creation."""
         stack = LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()
         assert stack.num_layers == 6
-        assert len(stack.signal_layers) == 4
-        assert len(stack.plane_layers) == 2
+        assert len(stack.signal_layers) == 6  # All layers routable
+        assert len(stack.plane_layers) == 2  # Plane metadata preserved
 
     def test_outer_layers(self):
         """Test outer layers property."""
