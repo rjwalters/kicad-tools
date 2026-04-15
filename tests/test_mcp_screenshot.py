@@ -19,9 +19,11 @@ from kicad_tools.mcp.tools.screenshot import (
     DEFAULT_LAYERS,
     LAYER_PRESETS,
     _check_cairosvg,
+    _macos_cairo_lib_dirs,
     _png_dimensions,
     _resolve_layers,
     _svg_to_png,
+    _try_preload_cairo_macos,
     screenshot_board,
     screenshot_schematic,
 )
@@ -701,3 +703,308 @@ class TestScreenshotSchematicIntegration:
         assert output.exists()
         assert output.stat().st_size > 0
         assert result["output_path"] == str(output)
+
+
+# ---------------------------------------------------------------------------
+# macOS cairo auto-detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestMacosCairoLibDirs:
+    """Tests for _macos_cairo_lib_dirs helper."""
+
+    def test_homebrew_prefix_respected(self, tmp_path):
+        """HOMEBREW_PREFIX env var is included first in candidates."""
+        fake_lib = tmp_path / "lib"
+        fake_lib.mkdir()
+
+        with patch.dict("os.environ", {"HOMEBREW_PREFIX": str(tmp_path)}, clear=False):
+            dirs = _macos_cairo_lib_dirs()
+
+        assert str(fake_lib) in dirs
+        # HOMEBREW_PREFIX entry should be first
+        assert dirs[0] == str(fake_lib)
+
+    def test_deduplicates_when_homebrew_prefix_matches_default(self, tmp_path):
+        """If HOMEBREW_PREFIX/lib matches a default path, no duplicates."""
+        # Use /opt/homebrew as HOMEBREW_PREFIX so its /lib overlaps
+        with patch.dict("os.environ", {"HOMEBREW_PREFIX": "/opt/homebrew"}, clear=False):
+            dirs = _macos_cairo_lib_dirs()
+
+        # /opt/homebrew/lib should appear at most once
+        assert dirs.count("/opt/homebrew/lib") <= 1
+
+    def test_only_existing_dirs_returned(self):
+        """Directories that do not exist on disk are excluded."""
+        with patch.dict("os.environ", {}, clear=False):
+            # Remove HOMEBREW_PREFIX to avoid interference
+            import os
+
+            env = os.environ.copy()
+            env.pop("HOMEBREW_PREFIX", None)
+            with patch.dict("os.environ", env, clear=True):
+                dirs = _macos_cairo_lib_dirs()
+                for d in dirs:
+                    assert Path(d).is_dir()
+
+    def test_returns_empty_when_no_dirs_exist(self):
+        """Returns empty list when none of the candidate dirs exist."""
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("kicad_tools.mcp.tools.screenshot.Path.is_dir", return_value=False):
+                dirs = _macos_cairo_lib_dirs()
+                assert dirs == []
+
+
+class TestTryPreloadCairoMacos:
+    """Tests for _try_preload_cairo_macos helper."""
+
+    def test_succeeds_when_lib_exists_and_probe_passes(self, tmp_path):
+        """Pre-loading from a valid path makes the probe succeed."""
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        dylib_path = lib_dir / "libcairo.dylib"
+        dylib_path.write_bytes(b"fake dylib")
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        # First call (in _check_cairosvg) raises OSError; after preload succeeds
+        call_count = [0]
+
+        def fake_svg2png(**kwargs):
+            call_count[0] += 1
+            return b"\x89PNG"
+
+        fake_cairosvg.svg2png = fake_svg2png
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+                return_value=[str(lib_dir)],
+            ),
+            patch("kicad_tools.mcp.tools.screenshot.ctypes.cdll") as mock_cdll,
+        ):
+            mock_cdll.LoadLibrary.return_value = None
+            result = _try_preload_cairo_macos()
+
+        assert result is True
+        mock_cdll.LoadLibrary.assert_called_once_with(str(dylib_path))
+
+    def test_returns_false_when_no_dylib_exists(self, tmp_path):
+        """Returns False when no libcairo.dylib is found in any candidate dir."""
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        # No libcairo.dylib created
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        fake_cairosvg.svg2png = lambda **kwargs: b"\x89PNG"
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+                return_value=[str(lib_dir)],
+            ),
+        ):
+            result = _try_preload_cairo_macos()
+
+        assert result is False
+
+    def test_returns_false_when_load_library_fails(self, tmp_path):
+        """Returns False when ctypes.cdll.LoadLibrary raises OSError."""
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        (lib_dir / "libcairo.dylib").write_bytes(b"fake")
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        fake_cairosvg.svg2png = lambda **kwargs: (_ for _ in ()).throw(OSError("cannot load"))
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+                return_value=[str(lib_dir)],
+            ),
+            patch("kicad_tools.mcp.tools.screenshot.ctypes.cdll") as mock_cdll,
+        ):
+            mock_cdll.LoadLibrary.side_effect = OSError("bad library")
+            result = _try_preload_cairo_macos()
+
+        assert result is False
+
+    def test_tries_multiple_dirs_on_failure(self, tmp_path):
+        """Tries next directory when first one fails."""
+        dir1 = tmp_path / "dir1"
+        dir1.mkdir()
+        (dir1 / "libcairo.dylib").write_bytes(b"fake")
+
+        dir2 = tmp_path / "dir2"
+        dir2.mkdir()
+        (dir2 / "libcairo.dylib").write_bytes(b"fake")
+
+        fake_cairosvg = types.ModuleType("cairosvg")
+        probe_calls = [0]
+
+        def fake_svg2png(**kwargs):
+            probe_calls[0] += 1
+            if probe_calls[0] == 1:
+                raise OSError("still broken")
+            return b"\x89PNG"
+
+        fake_cairosvg.svg2png = fake_svg2png
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+                return_value=[str(dir1), str(dir2)],
+            ),
+            patch("kicad_tools.mcp.tools.screenshot.ctypes.cdll") as mock_cdll,
+        ):
+            mock_cdll.LoadLibrary.return_value = None
+            result = _try_preload_cairo_macos()
+
+        assert result is True
+        assert mock_cdll.LoadLibrary.call_count == 2
+
+    def test_returns_false_when_no_candidates(self):
+        """Returns False when _macos_cairo_lib_dirs returns empty list."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+        fake_cairosvg.svg2png = lambda **kwargs: b"\x89PNG"
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._macos_cairo_lib_dirs",
+                return_value=[],
+            ),
+        ):
+            result = _try_preload_cairo_macos()
+
+        assert result is False
+
+
+class TestCheckCairosvgMacosAutoDetect:
+    """Tests for _check_cairosvg macOS auto-detection integration."""
+
+    def test_oserror_on_darwin_triggers_preload(self):
+        """On macOS, OSError from probe triggers _try_preload_cairo_macos."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+        call_count = [0]
+
+        def fake_svg2png(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise OSError("no library called 'cairo-2' was found")
+            return b"\x89PNG"
+
+        fake_cairosvg.svg2png = fake_svg2png
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch("kicad_tools.mcp.tools.screenshot.sys") as mock_sys,
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+                return_value=True,
+            ) as mock_preload,
+        ):
+            mock_sys.platform = "darwin"
+            result = _check_cairosvg()
+
+        assert result is True
+        mock_preload.assert_called_once()
+
+    def test_oserror_on_linux_does_not_trigger_preload(self):
+        """On Linux, OSError from probe returns False without attempting preload."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+
+        def raise_os_error(**kwargs):
+            raise OSError("no library called 'cairo-2' was found")
+
+        fake_cairosvg.svg2png = raise_os_error
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch("kicad_tools.mcp.tools.screenshot.sys") as mock_sys,
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+            ) as mock_preload,
+        ):
+            mock_sys.platform = "linux"
+            result = _check_cairosvg()
+
+        assert result is False
+        mock_preload.assert_not_called()
+
+    def test_import_error_returns_false_without_preload(self):
+        """ImportError returns False without any macOS preload attempt."""
+        with (
+            patch.dict(sys.modules, {"cairosvg": None}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+            ) as mock_preload,
+        ):
+            result = _check_cairosvg()
+
+        assert result is False
+        mock_preload.assert_not_called()
+
+    def test_successful_probe_does_not_trigger_preload(self):
+        """When probe succeeds initially, no preload is attempted."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+        fake_cairosvg.svg2png = lambda **kwargs: b"\x89PNG"
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+            ) as mock_preload,
+        ):
+            result = _check_cairosvg()
+
+        assert result is True
+        mock_preload.assert_not_called()
+
+    def test_value_error_on_darwin_triggers_preload(self):
+        """On macOS, ValueError from probe also triggers auto-detection."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+
+        def raise_value_error(**kwargs):
+            raise ValueError("The SVG size is undefined")
+
+        fake_cairosvg.svg2png = raise_value_error
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch("kicad_tools.mcp.tools.screenshot.sys") as mock_sys,
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+                return_value=False,
+            ) as mock_preload,
+        ):
+            mock_sys.platform = "darwin"
+            result = _check_cairosvg()
+
+        assert result is False
+        mock_preload.assert_called_once()
+
+    def test_preload_failure_returns_false(self):
+        """When preload attempt fails, _check_cairosvg returns False."""
+        fake_cairosvg = types.ModuleType("cairosvg")
+
+        def raise_os_error(**kwargs):
+            raise OSError("no library called 'cairo-2' was found")
+
+        fake_cairosvg.svg2png = raise_os_error
+
+        with (
+            patch.dict(sys.modules, {"cairosvg": fake_cairosvg}),
+            patch("kicad_tools.mcp.tools.screenshot.sys") as mock_sys,
+            patch(
+                "kicad_tools.mcp.tools.screenshot._try_preload_cairo_macos",
+                return_value=False,
+            ),
+        ):
+            mock_sys.platform = "darwin"
+            result = _check_cairosvg()
+
+        assert result is False
