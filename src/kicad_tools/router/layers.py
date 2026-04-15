@@ -21,9 +21,9 @@ from kicad_tools.exceptions import RoutingError
 class LayerType(Enum):
     """Layer function type."""
 
-    SIGNAL = "signal"  # Routable signal layer
-    PLANE = "plane"  # Power/ground plane (no routing, only antipads)
-    MIXED = "mixed"  # Plane with limited routing (split planes)
+    SIGNAL = "signal"  # Primary signal routing layer
+    PLANE = "plane"  # Power/ground plane (routable; zones flow around traces)
+    MIXED = "mixed"  # Plane with signal routing (split planes)
 
 
 @dataclass
@@ -55,8 +55,15 @@ class LayerDefinition:
 
     @property
     def is_routable(self) -> bool:
-        """Check if signals can be routed on this layer."""
-        return self.layer_type in (LayerType.SIGNAL, LayerType.MIXED)
+        """Check if signals can be routed on this layer.
+
+        All copper layers are routable -- even layers designated as PLANE.
+        In KiCad, zone fills on plane layers naturally flow around traces,
+        so routing on a ground/power plane layer produces correct copper
+        when zones are refilled.  The LayerType designation is metadata
+        describing the layer's *primary* function, not a routing constraint.
+        """
+        return True
 
 
 @dataclass

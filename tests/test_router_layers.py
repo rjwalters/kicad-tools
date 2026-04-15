@@ -310,13 +310,13 @@ class TestLayerDefinition:
         assert layer_def.layer_enum == Layer.F_CU
 
     def test_layer_definition_is_routable(self):
-        """Test routable check."""
+        """Test routable check -- all layer types are routable."""
         signal = LayerDefinition("F.Cu", 0, LayerType.SIGNAL)
         plane = LayerDefinition("In1.Cu", 1, LayerType.PLANE)
         mixed = LayerDefinition("B.Cu", 3, LayerType.MIXED)
 
         assert signal.is_routable is True
-        assert plane.is_routable is False
+        assert plane.is_routable is True
         assert mixed.is_routable is True
 
 
@@ -333,8 +333,8 @@ class TestLayerStack:
         """Test 4-layer stack preset."""
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         assert stack.num_layers == 4
-        assert len(stack.signal_layers) == 2
-        assert len(stack.plane_layers) == 2
+        assert len(stack.signal_layers) == 4  # All layers routable
+        assert len(stack.plane_layers) == 2  # Plane metadata preserved
 
     def test_four_layer_all_signal_stack(self):
         """Test 4-layer all-signal stack preset."""
@@ -348,7 +348,7 @@ class TestLayerStack:
         """Test 6-layer stack preset."""
         stack = LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()
         assert stack.num_layers == 6
-        assert len(stack.signal_layers) == 4
+        assert len(stack.signal_layers) == 6  # All layers routable
 
     def test_layer_stack_validation(self):
         """Test layer stack validation."""
@@ -390,12 +390,10 @@ class TestLayerStack:
         assert layer == Layer.F_CU
 
     def test_get_routable_indices(self):
-        """Test getting routable layer indices."""
+        """Test getting routable layer indices -- all layers are routable."""
         stack = LayerStack.four_layer_sig_gnd_pwr_sig()
         indices = stack.get_routable_indices()
-        assert 0 in indices  # F.Cu
-        assert 3 in indices  # B.Cu
-        assert 1 not in indices  # GND plane
+        assert indices == [0, 1, 2, 3]  # All layers routable including planes
 
     def test_is_plane_layer(self):
         """Test plane layer check."""
@@ -457,9 +455,9 @@ class TestDetectLayerStack:
         stack = detect_layer_stack(pcb_text)
         assert stack.num_layers == 4
         assert "4-Layer" in stack.name
-        # Inner layers should be planes
+        # Inner layers should be planes (metadata preserved)
         assert len(stack.plane_layers) == 2
-        assert len(stack.signal_layers) == 2
+        assert len(stack.signal_layers) == 4  # All layers routable
 
     def test_detect_4_layer_board_no_zones(self):
         """Test detecting a 4-layer board without zones."""
@@ -657,13 +655,20 @@ class TestFourLayerAllSignal:
         assert rules.through_via.spans_layer(3, stack.num_layers)
 
     def test_differs_from_sig_gnd_pwr_sig(self):
-        """4-all must have more routable layers than standard 4-layer."""
+        """4-all differs from standard 4-layer in layer types, not routability.
+
+        Both stacks have 4 routable layers since all copper layers are now
+        routable.  The difference is that 4-all has no PLANE designations,
+        while the standard stack preserves GND/PWR plane metadata.
+        """
         standard = LayerStack.four_layer_sig_gnd_pwr_sig()
         all_sig = LayerStack.four_layer_all_signal()
-        assert len(all_sig.get_routable_indices()) > len(standard.get_routable_indices())
-        # Standard has 2 routable layers, all-sig has 4
-        assert standard.get_routable_indices() == [0, 3]
+        # Both now have identical routable indices
+        assert standard.get_routable_indices() == [0, 1, 2, 3]
         assert all_sig.get_routable_indices() == [0, 1, 2, 3]
+        # But standard has plane metadata, all-sig does not
+        assert len(standard.plane_layers) == 2
+        assert len(all_sig.plane_layers) == 0
 
     def test_stack_name_and_description(self):
         """Verify name and description are set."""
