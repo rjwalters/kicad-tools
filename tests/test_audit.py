@@ -1680,3 +1680,277 @@ class TestZoneConnectedPourNets:
         d = status.to_dict()
         assert "pour_net_names" in d
         assert d["pour_net_names"] == ["+5V", "GNDA"]
+
+
+class TestOrphanedFootprints:
+    """Tests for orphaned footprint detection (_check_orphaned_footprints)."""
+
+    def test_orphaned_footprints_detected(self, tmp_path: Path):
+        """Orphaned footprints on PCB but not in BOM generate priority-2 ActionItem."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.audit.auditor import ActionItem
+
+        # Create a minimal PCB file
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create a schematic file (just needs to exist for the path check)
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+
+        # Create project file
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # Mock the PCB footprints: R1, R2, C1, U1 on PCB
+        mock_pcb = MagicMock()
+        mock_fp_r1 = MagicMock(reference="R1")
+        mock_fp_r2 = MagicMock(reference="R2")
+        mock_fp_c1 = MagicMock(reference="C1")
+        mock_fp_u1 = MagicMock(reference="U1")
+        mock_pcb.footprints = [mock_fp_r1, mock_fp_r2, mock_fp_c1, mock_fp_u1]
+        audit._pcb = mock_pcb
+
+        # Mock BOM: only R1, C1 in schematic (R2 and U1 are orphans)
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        assert len(items) == 1
+        item = items[0]
+        assert isinstance(item, ActionItem)
+        assert item.priority == 2
+        assert "2 orphaned footprint(s)" in item.description
+        assert "R2" in item.description
+        assert "U1" in item.description
+
+    def test_no_orphaned_footprints(self, tmp_path: Path):
+        """No orphan action item when all PCB refs match BOM."""
+        from unittest.mock import MagicMock, patch
+
+        # Create minimal files
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has R1, C1
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1"), MagicMock(reference="C1")]
+        audit._pcb = mock_pcb
+
+        # BOM also has R1, C1
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        assert len(items) == 0
+
+    def test_orphaned_footprints_no_schematic(self, tmp_path: Path):
+        """Check gracefully skipped when schematic is unavailable."""
+        # Create PCB file only (no schematic)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        audit = ManufacturingAudit(pcb_path)
+        # When initialized with .kicad_pcb, schematic_path is set
+        # but won't exist on disk. The run() method checks existence before calling.
+        # The method itself won't be called, so let's test run() integration.
+        result = audit.run()
+
+        # No orphan action items should appear since schematic doesn't exist
+        orphan_items = [a for a in result.action_items if "orphaned footprint" in a.description]
+        assert len(orphan_items) == 0
+
+    def test_orphaned_footprints_virtual_bom_items_excluded(self, tmp_path: Path):
+        """Virtual BOM items (power symbols) excluded from BOM ref set."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has R1 only
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1")]
+        audit._pcb = mock_pcb
+
+        # BOM has R1 (real) and VCC (virtual/power symbol)
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="#PWR01",
+                    value="VCC",
+                    footprint="",
+                    lib_id="power:VCC",
+                    in_bom=False,
+                ),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        # R1 matches BOM, #PWR01 is virtual so excluded. No orphans.
+        assert len(items) == 0
+
+    def test_orphaned_footprints_dnp_items_still_match(self, tmp_path: Path):
+        """DNP items in BOM should still match PCB footprints (not orphans)."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has R1, R2 where R2 is DNP in schematic
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1"), MagicMock(reference="R2")]
+        audit._pcb = mock_pcb
+
+        # BOM: R1 is normal, R2 is DNP (should still match PCB)
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        mock_bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="R2",
+                    value="10k",
+                    footprint="R_0402",
+                    lib_id="Device:R",
+                    dnp=True,
+                ),
+            ]
+        )
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        # R2 is DNP but still in BOM non-virtual, so no orphans
+        assert len(items) == 0
+
+    def test_orphaned_footprints_extract_bom_failure_graceful(self, tmp_path: Path):
+        """If extract_bom raises, check is skipped gracefully."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference="R1")]
+        audit._pcb = mock_pcb
+
+        with patch(
+            "kicad_tools.schema.bom.extract_bom",
+            side_effect=Exception("Cannot parse schematic"),
+        ):
+            items = audit._check_orphaned_footprints()
+
+        # Should return empty list, not raise
+        assert len(items) == 0
+
+    def test_orphaned_footprints_many_orphans_truncated(self, tmp_path: Path):
+        """When more than 10 orphans, description shows truncation notice."""
+        from unittest.mock import MagicMock, patch
+
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # PCB has 15 footprints, BOM has none of them
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [MagicMock(reference=f"R{i}") for i in range(1, 16)]
+        audit._pcb = mock_pcb
+
+        from kicad_tools.schema.bom import BOM
+
+        mock_bom = BOM(items=[])
+
+        with patch("kicad_tools.schema.bom.extract_bom", return_value=mock_bom):
+            items = audit._check_orphaned_footprints()
+
+        assert len(items) == 1
+        assert "15 orphaned footprint(s)" in items[0].description
+        assert "(and 5 more)" in items[0].description
