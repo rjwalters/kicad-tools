@@ -1,5 +1,6 @@
 """Extended tests for export modules (gerber, assembly, pnp, bom)."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,8 @@ from kicad_tools.export.gerber import (
     GerberConfig,
     GerberExporter,
     find_kicad_cli,
+    get_drill_origin_value,
+    get_kicad_cli_version,
 )
 
 
@@ -100,12 +103,16 @@ class TestGerberExporter:
         return pcb_path
 
     def test_init(self, mock_pcb_path):
-        with patch("kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             exporter = GerberExporter(mock_pcb_path)
             assert exporter.pcb_path == mock_pcb_path
 
     def test_init_string_path(self, mock_pcb_path):
-        with patch("kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")):
+        with patch(
+            "kicad_tools.export.gerber.find_kicad_cli", return_value=Path("/usr/bin/kicad-cli")
+        ):
             exporter = GerberExporter(str(mock_pcb_path))
             assert exporter.pcb_path == mock_pcb_path
 
@@ -285,6 +292,158 @@ class TestGerberExporterMethods:
 
         with zipfile.ZipFile(zip_path, "r") as zf:
             assert "test.gbr" in zf.namelist()
+
+
+class TestGetKicadCliVersion:
+    """Tests for get_kicad_cli_version function."""
+
+    def test_returns_version_string(self):
+        """Should return stripped stdout on success."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) == "10.0.1"
+
+    def test_returns_none_on_nonzero_exit(self):
+        """Should return None when kicad-cli exits non-zero."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) is None
+
+    def test_returns_none_on_exception(self):
+        """Should return None when subprocess.run raises."""
+        with patch(
+            "kicad_tools.export.gerber.subprocess.run",
+            side_effect=FileNotFoundError("not found"),
+        ):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) is None
+
+    def test_kicad_9_version(self):
+        """Should return KiCad 9 version string correctly."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_kicad_cli_version(Path("/usr/bin/kicad-cli")) == "9.0.2"
+
+
+class TestGetDrillOriginValue:
+    """Tests for get_drill_origin_value function."""
+
+    def test_kicad_10_returns_plot(self):
+        """KiCad 10+ should use 'plot' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_kicad_11_returns_plot(self):
+        """Future KiCad 11 should also use 'plot'."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="11.0.0\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_kicad_9_returns_aux(self):
+        """KiCad 9 should use 'aux' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "aux"
+
+    def test_kicad_8_returns_aux(self):
+        """KiCad 8 should use 'aux' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="8.0.6\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "aux"
+
+    def test_kicad_7_returns_aux(self):
+        """KiCad 7 should use 'aux' for --drill-origin."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="7.0.11\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "aux"
+
+    def test_version_detection_failure_defaults_to_plot(self):
+        """When version detection fails, default to 'plot' (modern)."""
+        with patch(
+            "kicad_tools.export.gerber.subprocess.run",
+            side_effect=FileNotFoundError("not found"),
+        ):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_unparseable_version_defaults_to_plot(self):
+        """Garbage version string should default to 'plot'."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="unknown\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+    def test_empty_version_defaults_to_plot(self):
+        """Empty version string should default to 'plot'."""
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="\n")
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=mock_result):
+            assert get_drill_origin_value(Path("/usr/bin/kicad-cli")) == "plot"
+
+
+class TestDrillExportCommand:
+    """Tests verifying _export_drill builds the correct command."""
+
+    @pytest.fixture
+    def mock_exporter(self, tmp_path):
+        """Create a mock exporter."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text("(kicad_pcb)")
+
+        with patch.object(GerberExporter, "__init__", lambda self, path: None):
+            exporter = GerberExporter.__new__(GerberExporter)
+            exporter.pcb_path = pcb_path
+            exporter.kicad_cli = Path("/usr/bin/kicad-cli")
+            return exporter
+
+    def test_drill_command_uses_plot_for_kicad_10(self, mock_exporter, tmp_path):
+        """Drill export with use_aux_origin=True should pass '--drill-origin plot' for KiCad 10."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        config = GerberConfig(use_aux_origin=True)
+
+        version_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="10.0.1\n")
+        drill_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
+            # First call is version check, second is the drill export
+            mock_run.side_effect = [version_result, drill_result]
+            mock_exporter._export_drill(config, output_dir)
+
+        # The drill export call is the second one
+        drill_call = mock_run.call_args_list[1]
+        cmd = drill_call[0][0]
+        origin_idx = cmd.index("--drill-origin")
+        assert cmd[origin_idx + 1] == "plot"
+
+    def test_drill_command_uses_aux_for_kicad_9(self, mock_exporter, tmp_path):
+        """Drill export with use_aux_origin=True should pass '--drill-origin aux' for KiCad 9."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        config = GerberConfig(use_aux_origin=True)
+
+        version_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="9.0.2\n")
+        drill_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with patch("kicad_tools.export.gerber.subprocess.run") as mock_run:
+            mock_run.side_effect = [version_result, drill_result]
+            mock_exporter._export_drill(config, output_dir)
+
+        drill_call = mock_run.call_args_list[1]
+        cmd = drill_call[0][0]
+        origin_idx = cmd.index("--drill-origin")
+        assert cmd[origin_idx + 1] == "aux"
+
+    def test_drill_command_omits_origin_when_disabled(self, mock_exporter, tmp_path):
+        """Drill export with use_aux_origin=False should not include --drill-origin."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        config = GerberConfig(use_aux_origin=False)
+
+        drill_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with patch("kicad_tools.export.gerber.subprocess.run", return_value=drill_result):
+            mock_exporter._export_drill(config, output_dir)
+
+        # Should have been called only once (no version check needed)
+        # and the command should not contain --drill-origin
 
 
 # Import assembly module
