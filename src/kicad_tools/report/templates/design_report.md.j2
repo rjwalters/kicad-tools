@@ -131,6 +131,18 @@
 {% endif %}
 
 {% endif %}
+{% if analog_components %}
+## Analog Components
+
+{{ analog_components | length }} analog-sensitive component{{ 's' if analog_components | length != 1 else '' }} detected — manual layout review recommended.
+
+| Reference | Value | Reason |
+|-----------|-------|--------|
+{% for comp in analog_components %}
+| {{ comp.reference | default("", true) }} | {{ comp.value | default("", true) }} | {{ comp.reason | default("", true) }} |
+{% endfor %}
+
+{% endif %}
 {% if net_status %}
 ## Routing Status
 

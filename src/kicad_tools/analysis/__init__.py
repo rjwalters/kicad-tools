@@ -8,8 +8,13 @@ This module provides analysis tools for PCB designs:
 - Trace length analysis for timing-critical nets
 - Signal integrity analysis (crosstalk and impedance discontinuities)
 - Thermal analysis and hotspot detection
+- Analog component detection for layout-sensitive parts
 """
 
+from .analog_detect import (
+    AnalogComponent,
+    detect_analog_components,
+)
 from .complexity import (
     Bottleneck,
     ComplexityAnalyzer,
@@ -44,6 +49,7 @@ from .trace_length import (
 )
 
 __all__ = [
+    "AnalogComponent",
     "Bottleneck",
     "ComplexityAnalyzer",
     "ComplexityRating",
@@ -68,4 +74,5 @@ __all__ = [
     "ThermalSource",
     "TraceLengthAnalyzer",
     "TraceLengthReport",
+    "detect_analog_components",
 ]

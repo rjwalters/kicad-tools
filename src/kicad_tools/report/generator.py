@@ -149,6 +149,7 @@ class ReportGenerator:
             "cost": data.cost,
             "schematic_sheets": data.schematic_sheets,
             "pcb_figures": data.pcb_figures,
+            "analog_components": data.analog_components,
             "notes": data.notes,
             "tool_version": data.tool_version or __version__,
             "git_hash": data.git_hash,

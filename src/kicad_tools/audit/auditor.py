@@ -1018,6 +1018,27 @@ class ManufacturingAudit:
                 )
             )
 
+        # Analog component advisory
+        try:
+            pcb = self._load_pcb()
+            from kicad_tools.analysis.analog_detect import detect_analog_components
+
+            analog = detect_analog_components(pcb)
+            if analog:
+                count = len(analog)
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=(
+                            f"{count} analog-sensitive component{'s' if count != 1 else ''}"
+                            " detected — manual layout review recommended"
+                        ),
+                        command=None,
+                    )
+                )
+        except Exception:
+            logger.debug("Analog component detection skipped", exc_info=True)
+
         return sorted(items, key=lambda x: x.priority)
 
     # Helper methods for extracting PCB metrics
