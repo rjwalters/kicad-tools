@@ -120,8 +120,9 @@ def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
         return False, 0, 0
 
     # Count segment and arc nodes (routing traces)
-    segment_count = content.count("(segment ")
-    arc_count = content.count("(arc ")
+    # Match both "(segment " and "(segment\n" (KiCad may use either format)
+    segment_count = content.count("(segment ") + content.count("(segment\n")
+    arc_count = content.count("(arc ") + content.count("(arc\n")
     total_traces = segment_count + arc_count
 
     # Count nets (excluding net 0 which is the unconnected net)
