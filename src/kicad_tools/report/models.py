@@ -53,6 +53,9 @@ class ReportData:
     pcb_figures: dict | None = None
     """PCB renders: {front: path, back: path, copper: path}."""
 
+    analog_components: list[dict] | None = None
+    """Analog-sensitive components: [{reference, value, footprint, reason}]."""
+
     notes: str = ""
     """Free-form notes section content."""
 

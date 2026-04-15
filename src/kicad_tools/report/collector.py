@@ -185,6 +185,14 @@ class ReportDataCollector:
             lambda: self.collect_analysis(pcb),
         )
 
+        # Analog components
+        self._safe_collect(
+            "analog_components",
+            output_dir,
+            files,
+            lambda: self.collect_analog_components(pcb),
+        )
+
         return files
 
     # ------------------------------------------------------------------
@@ -434,6 +442,28 @@ class ReportDataCollector:
             logger.warning("Thermal analysis failed", exc_info=True)
 
         return result
+
+    def collect_analog_components(self, pcb: Any) -> dict[str, Any] | None:
+        """Detect analog-sensitive components on the board.
+
+        Returns a dictionary with count and component details, or None
+        if no analog components are detected.
+
+        Args:
+            pcb: Loaded PCB object.
+
+        Returns:
+            Dictionary with analog component data, or None if none found.
+        """
+        from kicad_tools.analysis.analog_detect import detect_analog_components
+
+        components = detect_analog_components(pcb)
+        if not components:
+            return None
+        return {
+            "count": len(components),
+            "components": [c.to_dict() for c in components],
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers

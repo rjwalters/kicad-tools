@@ -311,6 +311,7 @@ def _load_data_dir(data_dir_str: str) -> dict:
         "cost.json": "cost",
         "schematic_sheets.json": "schematic_sheets",
         "pcb_figures.json": "pcb_figures",
+        "analog_components.json": "analog_components",
     }
 
     for filename, field_name in mappings.items():
@@ -330,6 +331,11 @@ def _load_data_dir(data_dir_str: str) -> dict:
     # ReportData.bom_groups expects a plain list[dict].
     if "bom_groups" in result and isinstance(result["bom_groups"], dict):
         result["bom_groups"] = result["bom_groups"].get("groups", [])
+
+    # Analog components: the collector nests the list under ``components``;
+    # ReportData.analog_components expects a plain list[dict].
+    if "analog_components" in result and isinstance(result["analog_components"], dict):
+        result["analog_components"] = result["analog_components"].get("components", [])
 
     # Load notes from text file
     notes_path = data_dir / "notes.txt"
