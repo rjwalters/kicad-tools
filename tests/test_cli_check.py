@@ -222,13 +222,24 @@ class TestCheckExitCodes:
         result = main([str(drc_clean_pcb), "--strict"])
         assert result == 0
 
-    def test_exit_code_1_with_violations(self, minimal_pcb: Path):
-        """Test exit code 1 when DRC violations are found."""
+    def test_exit_code_2_with_violations(self, minimal_pcb: Path):
+        """Test exit code 2 when DRC violations are found.
+
+        Exit code 2 means the check ran successfully but found errors.
+        Exit code 1 is reserved for tool-level failures (file not found, etc.).
+        """
         from kicad_tools.cli.check_cmd import main
 
         # minimal_pcb has a trace overlapping a pad, causing a clearance violation
         result = main([str(minimal_pcb)])
-        assert result == 1  # Errors found
+        assert result == 2  # Errors found (tool ran OK, board has issues)
+
+    def test_exit_code_1_for_tool_error(self, capsys):
+        """Test exit code 1 for tool-level errors (file not found)."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main(["nonexistent_board.kicad_pcb"])
+        assert result == 1  # Tool error
 
 
 class TestCheckJsonSchema:
