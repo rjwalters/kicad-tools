@@ -212,7 +212,7 @@ class ClearanceRepairer:
             # only local_rerouted += 1
             # Deduplicate: exclude any already queued via skipped_violations to avoid
             # processing the same violation twice.
-            skipped_set = set(id(v) for v in skipped_violations)
+            skipped_set = {id(v) for v in skipped_violations}
             for v in both_at_vias:
                 if id(v) not in skipped_set:
                     all_reroute_candidates.append((v, "phantom_repair"))
