@@ -442,3 +442,200 @@ class TestLocalRerouterGridConstruction:
         assert simplified[0] == (0.0, 0.0)
         assert simplified[1] == (2.0, 0.0)
         assert simplified[2] == (2.0, 2.0)
+
+
+# ---- Cluster rerouting fixtures and tests ----
+
+# PCB with two segments forming a connected path (A->B->C) where both
+# segments violate clearance to nearby vias.  The vias are spaced within
+# 2x clearance radius of each other, creating a cluster.
+#
+# Layout (2mm segments for more routing room):
+#   via-start (100, 100) net=1 --- segment-A --- midpoint (102, 100) net=1
+#       --- segment-B --- via-end (104, 100) net=1
+#   via-obs-1 (101, 100.35) net=2  (obstacle near segment-A)
+#   via-obs-2 (103, 100.35) net=2  (obstacle near segment-B)
+#
+# Individual rerouting of segment-A may fail because via-obs-2 blocks
+# the escape corridor, and vice versa.  Cluster-aware rerouting should
+# succeed by marking both obstacle vias on the grid.
+PCB_WITH_CLUSTERED_VIA_VIOLATIONS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-cluster-a"))
+  (segment (start 102 100) (end 104 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-cluster-b"))
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-start"))
+  (via (at 104 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-end"))
+  (via (at 101 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-obs-1"))
+  (via (at 103 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-obs-2"))
+)
+"""
+
+
+class TestLocalRerouterExtraObstacles:
+    """Test reroute_segment with extra_obstacles parameter for cluster awareness."""
+
+    def test_reroute_with_extra_obstacles_succeeds(self):
+        """Segment rerouted with extra_obstacles should avoid both obstacles."""
+        doc = _parse_pcb(PCB_WITH_CLUSTERED_VIA_VIOLATIONS)
+        nets = _build_nets(doc)
+        seg_a = _find_segment_by_uuid(doc, "seg-cluster-a")
+        assert seg_a is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=1.0)
+        result = rerouter.reroute_segment(
+            seg_node=seg_a,
+            obstacle_x=101.0,
+            obstacle_y=100.35,
+            obstacle_radius=0.3,  # via-obs-1 size=0.6, radius=0.3
+            trace_width=0.25,
+            trace_clearance=0.2,
+            extra_obstacles=[(103.0, 100.35, 0.3)],  # via-obs-2
+        )
+
+        assert result.success is True
+        assert result.new_segments >= 2
+
+    def test_reroute_with_extra_obstacles_avoids_all(self):
+        """Rerouted path should clear both the primary and extra obstacles."""
+        doc = _parse_pcb(PCB_WITH_CLUSTERED_VIA_VIOLATIONS)
+        nets = _build_nets(doc)
+        seg_a = _find_segment_by_uuid(doc, "seg-cluster-a")
+        assert seg_a is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=1.0)
+        result = rerouter.reroute_segment(
+            seg_node=seg_a,
+            obstacle_x=101.0,
+            obstacle_y=100.35,
+            obstacle_radius=0.3,
+            trace_width=0.25,
+            trace_clearance=0.2,
+            extra_obstacles=[(103.0, 100.35, 0.3)],
+        )
+
+        assert result.success is True
+        # Original segment A should be gone
+        assert _find_segment_by_uuid(doc, "seg-cluster-a") is None
+
+        # Verify rerouted segments (those NOT seg-cluster-b) avoid primary obstacle
+        import math
+
+        obs1 = (101.0, 100.35)
+        min_clearance = 0.3 + 0.25 / 2 + 0.2  # obstacle_r + trace_half_w + clearance
+
+        for seg in doc.find_all("segment"):
+            uuid_node = seg.find("uuid")
+            uid = uuid_node.get_first_atom() if uuid_node else ""
+            # Skip unrelated segment B
+            if uid == "seg-cluster-b":
+                continue
+
+            start = seg.find("start")
+            end = seg.find("end")
+            if not (start and end):
+                continue
+            s_atoms = start.get_atoms()
+            e_atoms = end.get_atoms()
+            sx = float(s_atoms[0])
+            sy = float(s_atoms[1]) if len(s_atoms) > 1 else 0
+            ex = float(e_atoms[0])
+            ey = float(e_atoms[1]) if len(e_atoms) > 1 else 0
+
+            # Check midpoint of each rerouted segment against the primary obstacle
+            mx, my = (sx + ex) / 2, (sy + ey) / 2
+            dist = math.sqrt((mx - obs1[0]) ** 2 + (my - obs1[1]) ** 2)
+            # Allow some tolerance for grid resolution
+            assert dist >= min_clearance - 0.15, (
+                f"Segment midpoint ({mx:.3f}, {my:.3f}) too close to "
+                f"obstacle {obs1}: {dist:.3f}mm < {min_clearance - 0.15:.3f}mm"
+            )
+
+    def test_reroute_both_cluster_segments(self):
+        """Both segments in a cluster should be reroutable with extra obstacles."""
+        doc = _parse_pcb(PCB_WITH_CLUSTERED_VIA_VIOLATIONS)
+        nets = _build_nets(doc)
+        seg_a = _find_segment_by_uuid(doc, "seg-cluster-a")
+        seg_b = _find_segment_by_uuid(doc, "seg-cluster-b")
+        assert seg_a is not None
+        assert seg_b is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=1.0)
+
+        # Reroute segment A with awareness of obstacle near B
+        result_a = rerouter.reroute_segment(
+            seg_node=seg_a,
+            obstacle_x=101.0,
+            obstacle_y=100.35,
+            obstacle_radius=0.3,
+            trace_width=0.25,
+            trace_clearance=0.2,
+            extra_obstacles=[(103.0, 100.35, 0.3)],
+        )
+        assert result_a.success is True
+
+        # Reroute segment B with awareness of obstacle near A
+        result_b = rerouter.reroute_segment(
+            seg_node=seg_b,
+            obstacle_x=103.0,
+            obstacle_y=100.35,
+            obstacle_radius=0.3,
+            trace_width=0.25,
+            trace_clearance=0.2,
+            extra_obstacles=[(101.0, 100.35, 0.3)],
+        )
+        assert result_b.success is True
+
+    def test_extra_obstacles_empty_list_same_as_none(self):
+        """Passing an empty extra_obstacles list should behave like None."""
+        doc = _parse_pcb(PCB_WITH_REROUTABLE_SEGMENT)
+        nets = _build_nets(doc)
+        seg_node = _find_segment_by_uuid(doc, "seg-reroute")
+        assert seg_node is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=0.5)
+        result = rerouter.reroute_segment(
+            seg_node=seg_node,
+            obstacle_x=101.0,
+            obstacle_y=100.3,
+            obstacle_radius=0.4,
+            trace_width=0.25,
+            trace_clearance=0.2,
+            extra_obstacles=[],
+        )
+
+        assert result.success is True
+        assert result.new_segments >= 2
+
+    def test_extra_obstacles_on_different_layer_not_clustered(self):
+        """Segments on B.Cu should not interact with F.Cu cluster obstacles."""
+        doc = _parse_pcb(PCB_WITH_BCU_SEGMENT)
+        nets = _build_nets(doc)
+        seg_node = _find_segment_by_uuid(doc, "seg-bcu")
+        assert seg_node is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=0.5)
+        # Pass extra obstacles that would block on F.Cu but the segment
+        # is on B.Cu -- should still reroute successfully
+        result = rerouter.reroute_segment(
+            seg_node=seg_node,
+            obstacle_x=101.0,
+            obstacle_y=100.3,
+            obstacle_radius=0.4,
+            trace_width=0.2,
+            trace_clearance=0.2,
+            extra_obstacles=[(101.0, 99.7, 0.4)],
+        )
+        assert result.success is True

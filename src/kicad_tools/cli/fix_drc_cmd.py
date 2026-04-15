@@ -472,6 +472,7 @@ def _print_json(
             "relocated_vias": clearance_result.relocated_vias,
             "endpoint_nudges": clearance_result.endpoint_nudges,
             "local_rerouted": clearance_result.local_rerouted,
+            "cluster_rerouted": clearance_result.cluster_rerouted,
             "skipped": {
                 "no_location": clearance_result.skipped_no_location,
                 "no_delta": clearance_result.skipped_no_delta,

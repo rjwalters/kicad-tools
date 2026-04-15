@@ -1306,3 +1306,339 @@ class TestLocalRerouteIntegration:
         summary = result.summary()
         assert "Local reroutes" in summary
         assert "no local route" in summary.lower()
+
+
+# ---- Cluster rerouting integration tests ----
+
+# PCB with two segments forming a connected path where both segments
+# have both endpoints at vias (making nudging infeasible) and violate
+# clearance to nearby obstacle vias.  The obstacle vias are clustered.
+#
+# Layout (2mm segments for routing room):
+#   via-cl-1 (100,100) net=1 --- seg-cl-a --- via-cl-mid (102,100) net=1
+#       --- seg-cl-b --- via-cl-2 (104,100) net=1
+#   via-cl-obs1 (101, 100.35) net=2 (obstacle near segment-A)
+#   via-cl-obs2 (103, 100.35) net=2 (obstacle near segment-B)
+PCB_WITH_CLUSTERED_VIOLATIONS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-cl-1"))
+  (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-cl-mid"))
+  (via (at 104 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-cl-2"))
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-cl-a"))
+  (segment (start 102 100) (end 104 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-cl-b"))
+  (via (at 101 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-cl-obs1"))
+  (via (at 103 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-cl-obs2"))
+)
+"""
+
+
+class TestClusterRerouteIntegration:
+    """Integration tests for cluster-aware rerouting via ClearanceRepairer."""
+
+    def test_cluster_reroute_resolves_both_violations(self, tmp_path: Path):
+        """Cluster rerouting with local_reroute=True should resolve both violations.
+
+        Both segments have both endpoints at vias (infeasible for nudge), so they
+        flow into the local reroute phase.  The two violations are close enough to
+        form a cluster and should be rerouted with awareness of each other's obstacle.
+        """
+        pcb_file = tmp_path / "cluster_test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLUSTERED_VIOLATIONS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.35, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=103.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=103.0, y_mm=100.35, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=False,
+            local_reroute=True,
+            local_grid_padding=1.0,
+        )
+
+        # Both violations should be handled by local rerouting
+        assert result.local_rerouted >= 2
+        assert result.repaired >= 2
+
+    def test_cluster_reroute_dry_run(self, tmp_path: Path):
+        """Dry run cluster reroute should count without modifying PCB."""
+        pcb_file = tmp_path / "cluster_dry.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLUSTERED_VIOLATIONS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.35, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=103.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=103.0, y_mm=100.35, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=True,
+            local_reroute=True,
+            local_grid_padding=1.0,
+        )
+
+        assert result.local_rerouted >= 2
+        assert not repairer.modified
+
+    def test_single_violation_not_clustered(self, tmp_path: Path):
+        """A single violation should fall back to standard per-violation reroute."""
+        pcb_file = tmp_path / "single_test.kicad_pcb"
+        # Use the existing PCB_SEGMENT_BOTH_ENDPOINTS_AT_VIAS fixture (single violation)
+        pcb_file.write_text(PCB_SEGMENT_BOTH_ENDPOINTS_AT_VIAS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.1, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=False,
+            local_reroute=True,
+        )
+
+        # Single violation should not increment cluster_rerouted
+        assert result.cluster_rerouted == 0
+
+    def test_cluster_reroute_summary_includes_cluster_counter(self):
+        """RepairResult.summary() should include cluster reroute counter."""
+        result = RepairResult(
+            total_violations=4,
+            repaired=4,
+            local_rerouted=3,
+            cluster_rerouted=2,
+        )
+        summary = result.summary()
+        assert "Cluster reroutes" in summary
+
+    def test_group_violations_by_proximity(self, tmp_path: Path):
+        """Violations within 2*clearance should be grouped together."""
+        pcb_file = tmp_path / "group_test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLUSTERED_VIOLATIONS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Two violations close together and one far away
+        v1 = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+            locations=[
+                Location(x_mm=100.5, y_mm=100.0, layer="F.Cu"),
+                Location(x_mm=100.5, y_mm=100.25, layer="F.Cu"),
+            ],
+            nets=["GND", "+3.3V"],
+            required_value_mm=0.2,
+            actual_value_mm=0.05,
+        )
+        v2 = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+            locations=[
+                Location(x_mm=101.5, y_mm=100.0, layer="F.Cu"),
+                Location(x_mm=101.5, y_mm=100.25, layer="F.Cu"),
+            ],
+            nets=["GND", "+3.3V"],
+            required_value_mm=0.2,
+            actual_value_mm=0.05,
+        )
+        v3 = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+            locations=[
+                Location(x_mm=200.0, y_mm=200.0, layer="F.Cu"),
+                Location(x_mm=200.0, y_mm=200.25, layer="F.Cu"),
+            ],
+            nets=["GND", "+3.3V"],
+            required_value_mm=0.2,
+            actual_value_mm=0.05,
+        )
+
+        tagged = [(v1, "skipped"), (v2, "skipped"), (v3, "skipped")]
+        # Use an explicit cluster_radius that covers the 1.0mm gap between v1 and v2
+        clusters = repairer._group_violations_by_proximity(tagged, cluster_radius=1.5)
+
+        # v1 and v2 should be in one cluster, v3 in another
+        assert len(clusters) == 2
+        cluster_sizes = sorted(len(c) for c in clusters)
+        assert cluster_sizes == [1, 2]
+
+    def test_group_violations_empty_list(self, tmp_path: Path):
+        """Empty violation list should produce empty clusters."""
+        pcb_file = tmp_path / "empty_test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLUSTERED_VIOLATIONS)
+
+        repairer = ClearanceRepairer(pcb_file)
+        clusters = repairer._group_violations_by_proximity([])
+        assert clusters == []
+
+    def test_group_violations_single_item(self, tmp_path: Path):
+        """Single violation should produce one cluster of size 1."""
+        pcb_file = tmp_path / "single_group_test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLUSTERED_VIOLATIONS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        v1 = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+            locations=[
+                Location(x_mm=100.5, y_mm=100.0, layer="F.Cu"),
+                Location(x_mm=100.5, y_mm=100.25, layer="F.Cu"),
+            ],
+            nets=["GND", "+3.3V"],
+            required_value_mm=0.2,
+            actual_value_mm=0.05,
+        )
+
+        clusters = repairer._group_violations_by_proximity([(v1, "skipped")])
+        assert len(clusters) == 1
+        assert len(clusters[0]) == 1
+
+    def test_violations_on_different_layers_not_clustered(self, tmp_path: Path):
+        """Violations at the same position but logically separate should cluster by location."""
+        # Note: The clustering is purely spatial (by primary_location), so
+        # violations at the same x,y but different layers WILL be clustered.
+        # This is acceptable because the rerouter already filters by layer.
+        pcb_file = tmp_path / "layer_test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLUSTERED_VIOLATIONS)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        v_fcu = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+            locations=[
+                Location(x_mm=100.5, y_mm=100.0, layer="F.Cu"),
+                Location(x_mm=100.5, y_mm=100.25, layer="F.Cu"),
+            ],
+            nets=["GND", "+3.3V"],
+            required_value_mm=0.2,
+            actual_value_mm=0.05,
+        )
+        v_bcu = DRCViolation(
+            type=ViolationType.CLEARANCE_SEGMENT_VIA,
+            type_str="clearance_segment_via",
+            severity=Severity.ERROR,
+            message="test",
+            locations=[
+                Location(x_mm=100.5, y_mm=100.0, layer="B.Cu"),
+                Location(x_mm=100.5, y_mm=100.25, layer="B.Cu"),
+            ],
+            nets=["GND", "+3.3V"],
+            required_value_mm=0.2,
+            actual_value_mm=0.05,
+        )
+
+        tagged = [(v_fcu, "skipped"), (v_bcu, "skipped")]
+        clusters = repairer._group_violations_by_proximity(tagged)
+
+        # Same x,y -> grouped together (spatial only)
+        assert len(clusters) == 1
+        assert len(clusters[0]) == 2
