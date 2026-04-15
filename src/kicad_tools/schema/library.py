@@ -31,6 +31,298 @@ VALID_PIN_TYPES = frozenset(
     }
 )
 
+# Valid fill types for graphical shapes
+VALID_FILL_TYPES = frozenset({"none", "outline", "background"})
+
+# Valid stroke types for graphical shapes
+VALID_STROKE_TYPES = frozenset({"default", "dash", "dot", "dash_dot", "dash_dot_dot", "solid"})
+
+# Union type for all graphical shape dataclasses
+SymbolGraphic = "SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle"
+
+
+def _validate_fill_type(fill_type: str) -> None:
+    """Validate that a fill type is a recognized KiCad value."""
+    if fill_type not in VALID_FILL_TYPES:
+        raise ValueError(
+            f"Invalid fill_type '{fill_type}'. Must be one of: {sorted(VALID_FILL_TYPES)}"
+        )
+
+
+def _validate_stroke_type(stroke_type: str) -> None:
+    """Validate that a stroke type is a recognized KiCad value."""
+    if stroke_type not in VALID_STROKE_TYPES:
+        raise ValueError(
+            f"Invalid stroke_type '{stroke_type}'. Must be one of: {sorted(VALID_STROKE_TYPES)}"
+        )
+
+
+def _stroke_sexp(width: float, stroke_type: str) -> SExp:
+    """Build a (stroke (width N) (type T)) S-expression node."""
+    return SExp.list(
+        "stroke",
+        SExp.list("width", width),
+        SExp.list("type", stroke_type),
+    )
+
+
+def _fill_sexp(fill_type: str) -> SExp:
+    """Build a (fill (type T)) S-expression node."""
+    return SExp.list("fill", SExp.list("type", fill_type))
+
+
+@dataclass
+class SymbolPolyline:
+    """A polyline graphical element in a symbol.
+
+    For closed polygons, repeat the first point as the last point.
+    """
+
+    points: list[tuple[float, float]]
+    stroke_width: float = 0.0
+    stroke_type: str = "default"
+    fill_type: str = "none"
+
+    def __post_init__(self) -> None:
+        if len(self.points) < 2:
+            raise ValueError("A polyline requires at least 2 points")
+        _validate_fill_type(self.fill_type)
+        _validate_stroke_type(self.stroke_type)
+
+    def to_sexp_node(self) -> SExp:
+        """Generate ``(polyline (pts ...) (stroke ...) (fill ...))``."""
+        pts_children: list[SExp] = []
+        for x, y in self.points:
+            pts_children.append(SExp.list("xy", x, y))
+        pts_node = SExp(name="pts", children=pts_children)
+
+        return SExp(
+            name="polyline",
+            children=[
+                pts_node,
+                _stroke_sexp(self.stroke_width, self.stroke_type),
+                _fill_sexp(self.fill_type),
+            ],
+        )
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> SymbolPolyline:
+        """Parse a ``(polyline ...)`` S-expression node."""
+        points: list[tuple[float, float]] = []
+        if pts_node := sexp.find("pts"):
+            for xy in pts_node.find_all("xy"):
+                x = xy.get_float(0) or 0.0
+                y = xy.get_float(1) or 0.0
+                points.append((x, y))
+
+        stroke_width = 0.0
+        stroke_type = "default"
+        if stroke := sexp.find("stroke"):
+            if w := stroke.find("width"):
+                stroke_width = w.get_float(0) or 0.0
+            if t := stroke.find("type"):
+                stroke_type = t.get_string(0) or "default"
+
+        fill_type = "none"
+        if fill := sexp.find("fill"):
+            if t := fill.find("type"):
+                fill_type = t.get_string(0) or "none"
+
+        return cls(
+            points=points,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+
+
+@dataclass
+class SymbolCircle:
+    """A circle graphical element in a symbol."""
+
+    center: tuple[float, float]
+    radius: float
+    stroke_width: float = 0.0
+    stroke_type: str = "default"
+    fill_type: str = "none"
+
+    def __post_init__(self) -> None:
+        if self.radius <= 0:
+            raise ValueError("Circle radius must be positive")
+        _validate_fill_type(self.fill_type)
+        _validate_stroke_type(self.stroke_type)
+
+    def to_sexp_node(self) -> SExp:
+        """Generate ``(circle (center ...) (radius ...) (stroke ...) (fill ...))``."""
+        return SExp(
+            name="circle",
+            children=[
+                SExp.list("center", self.center[0], self.center[1]),
+                SExp.list("radius", self.radius),
+                _stroke_sexp(self.stroke_width, self.stroke_type),
+                _fill_sexp(self.fill_type),
+            ],
+        )
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> SymbolCircle:
+        """Parse a ``(circle ...)`` S-expression node."""
+        center = (0.0, 0.0)
+        if c := sexp.find("center"):
+            center = (c.get_float(0) or 0.0, c.get_float(1) or 0.0)
+
+        radius = 0.0
+        if r := sexp.find("radius"):
+            radius = r.get_float(0) or 0.0
+
+        stroke_width = 0.0
+        stroke_type = "default"
+        if stroke := sexp.find("stroke"):
+            if w := stroke.find("width"):
+                stroke_width = w.get_float(0) or 0.0
+            if t := stroke.find("type"):
+                stroke_type = t.get_string(0) or "default"
+
+        fill_type = "none"
+        if fill := sexp.find("fill"):
+            if t := fill.find("type"):
+                fill_type = t.get_string(0) or "none"
+
+        return cls(
+            center=center,
+            radius=radius,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+
+
+@dataclass
+class SymbolArc:
+    """An arc graphical element in a symbol.
+
+    KiCad arcs are defined by start, mid (midpoint on the arc), and end points.
+    """
+
+    start: tuple[float, float]
+    mid: tuple[float, float]
+    end: tuple[float, float]
+    stroke_width: float = 0.0
+    stroke_type: str = "default"
+    fill_type: str = "none"
+
+    def __post_init__(self) -> None:
+        _validate_fill_type(self.fill_type)
+        _validate_stroke_type(self.stroke_type)
+
+    def to_sexp_node(self) -> SExp:
+        """Generate ``(arc (start ...) (mid ...) (end ...) (stroke ...) (fill ...))``."""
+        return SExp(
+            name="arc",
+            children=[
+                SExp.list("start", self.start[0], self.start[1]),
+                SExp.list("mid", self.mid[0], self.mid[1]),
+                SExp.list("end", self.end[0], self.end[1]),
+                _stroke_sexp(self.stroke_width, self.stroke_type),
+                _fill_sexp(self.fill_type),
+            ],
+        )
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> SymbolArc:
+        """Parse an ``(arc ...)`` S-expression node."""
+        start = (0.0, 0.0)
+        mid = (0.0, 0.0)
+        end = (0.0, 0.0)
+
+        if s := sexp.find("start"):
+            start = (s.get_float(0) or 0.0, s.get_float(1) or 0.0)
+        if m := sexp.find("mid"):
+            mid = (m.get_float(0) or 0.0, m.get_float(1) or 0.0)
+        if e := sexp.find("end"):
+            end = (e.get_float(0) or 0.0, e.get_float(1) or 0.0)
+
+        stroke_width = 0.0
+        stroke_type = "default"
+        if stroke := sexp.find("stroke"):
+            if w := stroke.find("width"):
+                stroke_width = w.get_float(0) or 0.0
+            if t := stroke.find("type"):
+                stroke_type = t.get_string(0) or "default"
+
+        fill_type = "none"
+        if fill := sexp.find("fill"):
+            if t := fill.find("type"):
+                fill_type = t.get_string(0) or "none"
+
+        return cls(
+            start=start,
+            mid=mid,
+            end=end,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+
+
+@dataclass
+class SymbolRectangle:
+    """A rectangle graphical element in a symbol."""
+
+    start: tuple[float, float]
+    end: tuple[float, float]
+    stroke_width: float = 0.0
+    stroke_type: str = "default"
+    fill_type: str = "none"
+
+    def __post_init__(self) -> None:
+        _validate_fill_type(self.fill_type)
+        _validate_stroke_type(self.stroke_type)
+
+    def to_sexp_node(self) -> SExp:
+        """Generate ``(rectangle (start ...) (end ...) (stroke ...) (fill ...))``."""
+        return SExp(
+            name="rectangle",
+            children=[
+                SExp.list("start", self.start[0], self.start[1]),
+                SExp.list("end", self.end[0], self.end[1]),
+                _stroke_sexp(self.stroke_width, self.stroke_type),
+                _fill_sexp(self.fill_type),
+            ],
+        )
+
+    @classmethod
+    def from_sexp(cls, sexp: SExp) -> SymbolRectangle:
+        """Parse a ``(rectangle ...)`` S-expression node."""
+        start = (0.0, 0.0)
+        end = (0.0, 0.0)
+
+        if s := sexp.find("start"):
+            start = (s.get_float(0) or 0.0, s.get_float(1) or 0.0)
+        if e := sexp.find("end"):
+            end = (e.get_float(0) or 0.0, e.get_float(1) or 0.0)
+
+        stroke_width = 0.0
+        stroke_type = "default"
+        if stroke := sexp.find("stroke"):
+            if w := stroke.find("width"):
+                stroke_width = w.get_float(0) or 0.0
+            if t := stroke.find("type"):
+                stroke_type = t.get_string(0) or "default"
+
+        fill_type = "none"
+        if fill := sexp.find("fill"):
+            if t := fill.find("type"):
+                fill_type = t.get_string(0) or "none"
+
+        return cls(
+            start=start,
+            end=end,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+
 
 @dataclass
 class LibraryPin:
@@ -138,6 +430,9 @@ class LibrarySymbol:
     name: str
     properties: dict[str, str] = field(default_factory=dict)
     pins: list[LibraryPin] = field(default_factory=list)
+    graphics: list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] = field(
+        default_factory=list
+    )
     units: int = 1
 
     @property
@@ -229,8 +524,9 @@ class LibrarySymbol:
             if prop_name:
                 properties[prop_name] = prop_value or ""
 
-        # Parse pins from unit symbols
-        pins = []
+        # Parse pins and graphics from unit symbols
+        pins: list[LibraryPin] = []
+        graphics: list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] = []
         for unit_sym in sexp.find_all("symbol"):
             _unit_name = unit_sym.get_string(0) or ""  # noqa: F841
             # Unit symbols have names like "TPA3116D2_1_1"
@@ -238,10 +534,21 @@ class LibrarySymbol:
             for pin_sexp in unit_sym.find_all("pin"):
                 pins.append(LibraryPin.from_sexp(pin_sexp))
 
+            # Parse graphical primitives
+            for polyline_sexp in unit_sym.find_all("polyline"):
+                graphics.append(SymbolPolyline.from_sexp(polyline_sexp))
+            for circle_sexp in unit_sym.find_all("circle"):
+                graphics.append(SymbolCircle.from_sexp(circle_sexp))
+            for arc_sexp in unit_sym.find_all("arc"):
+                graphics.append(SymbolArc.from_sexp(arc_sexp))
+            for rect_sexp in unit_sym.find_all("rectangle"):
+                graphics.append(SymbolRectangle.from_sexp(rect_sexp))
+
         return cls(
             name=name,
             properties=properties,
             pins=pins,
+            graphics=graphics,
         )
 
     def add_pin(
@@ -309,6 +616,166 @@ class LibrarySymbol:
         """
         self.properties[name] = value
 
+    # -- Graphical shape methods -----------------------------------------------
+
+    def add_polyline(
+        self,
+        points: list[tuple[float, float]],
+        *,
+        stroke_width: float = 0.0,
+        stroke_type: str = "default",
+        fill_type: str = "none",
+    ) -> SymbolPolyline:
+        """Add a polyline (open line strip) to the symbol body.
+
+        Args:
+            points: Ordered list of (x, y) vertices (minimum 2).
+            stroke_width: Line width in mm (0 = KiCad default).
+            stroke_type: Stroke style (``default``, ``dash``, ``dot``, ...).
+            fill_type: Fill mode (``none``, ``outline``, ``background``).
+
+        Returns:
+            The created ``SymbolPolyline``.
+        """
+        shape = SymbolPolyline(
+            points=list(points),
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+        self.graphics.append(shape)
+        return shape
+
+    def add_polygon(
+        self,
+        points: list[tuple[float, float]],
+        *,
+        stroke_width: float = 0.0,
+        stroke_type: str = "default",
+        fill_type: str = "outline",
+    ) -> SymbolPolyline:
+        """Add a closed polygon to the symbol body.
+
+        If the last point does not equal the first, it is automatically
+        appended to close the polygon.
+
+        Args:
+            points: Ordered list of (x, y) vertices (minimum 3 unique).
+            stroke_width: Line width in mm (0 = KiCad default).
+            stroke_type: Stroke style.
+            fill_type: Fill mode (defaults to ``outline`` for filled polygon).
+
+        Returns:
+            The created ``SymbolPolyline`` (closed).
+        """
+        if len(points) < 3:
+            raise ValueError("A polygon requires at least 3 points")
+        pts = list(points)
+        if pts[0] != pts[-1]:
+            pts.append(pts[0])
+        return self.add_polyline(
+            pts,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+
+    def add_circle(
+        self,
+        center: tuple[float, float],
+        radius: float,
+        *,
+        stroke_width: float = 0.0,
+        stroke_type: str = "default",
+        fill_type: str = "none",
+    ) -> SymbolCircle:
+        """Add a circle to the symbol body.
+
+        Args:
+            center: (x, y) center coordinate.
+            radius: Radius in mm (must be positive).
+            stroke_width: Line width in mm.
+            stroke_type: Stroke style.
+            fill_type: Fill mode.
+
+        Returns:
+            The created ``SymbolCircle``.
+        """
+        shape = SymbolCircle(
+            center=center,
+            radius=radius,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+        self.graphics.append(shape)
+        return shape
+
+    def add_arc(
+        self,
+        start: tuple[float, float],
+        mid: tuple[float, float],
+        end: tuple[float, float],
+        *,
+        stroke_width: float = 0.0,
+        stroke_type: str = "default",
+        fill_type: str = "none",
+    ) -> SymbolArc:
+        """Add an arc to the symbol body.
+
+        Args:
+            start: (x, y) start point.
+            mid: (x, y) midpoint on the arc.
+            end: (x, y) end point.
+            stroke_width: Line width in mm.
+            stroke_type: Stroke style.
+            fill_type: Fill mode.
+
+        Returns:
+            The created ``SymbolArc``.
+        """
+        shape = SymbolArc(
+            start=start,
+            mid=mid,
+            end=end,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+        self.graphics.append(shape)
+        return shape
+
+    def add_rectangle(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        *,
+        stroke_width: float = 0.0,
+        stroke_type: str = "default",
+        fill_type: str = "none",
+    ) -> SymbolRectangle:
+        """Add a rectangle to the symbol body.
+
+        Args:
+            start: (x, y) of one corner.
+            end: (x, y) of the opposite corner.
+            stroke_width: Line width in mm.
+            stroke_type: Stroke style.
+            fill_type: Fill mode.
+
+        Returns:
+            The created ``SymbolRectangle``.
+        """
+        shape = SymbolRectangle(
+            start=start,
+            end=end,
+            stroke_width=stroke_width,
+            stroke_type=stroke_type,
+            fill_type=fill_type,
+        )
+        self.graphics.append(shape)
+        return shape
+
     def get_pins_for_unit(self, unit: int) -> list[LibraryPin]:
         """Get all pins belonging to a specific unit.
 
@@ -328,11 +795,19 @@ class LibrarySymbol:
               (property "Reference" "U" (at 0 0 0) (effects ...))
               (property "Value" "<name>" (at 0 0 0) (effects ...))
               ...
+              (symbol "<name>_0_1"
+                (polyline ...)
+                (circle ...)
+                ...
+              )
               (symbol "<name>_1_1"
                 (pin ...)
                 (pin ...)
               )
             )
+
+        The ``_0_1`` sub-symbol holds graphical decoration (body shapes).
+        The ``_N_1`` sub-symbols hold pins for each unit.
         """
         children: list[SExp] = [SExp(value=self.name)]
 
@@ -354,6 +829,14 @@ class LibrarySymbol:
             )
             children.append(prop_node)
             prop_y_offset += 2.54
+
+        # Add _0_1 sub-symbol for graphical shapes (body decoration)
+        if self.graphics:
+            gfx_name = f"{self.name}_0_1"
+            gfx_children: list[SExp] = [SExp(value=gfx_name)]
+            for graphic in self.graphics:
+                gfx_children.append(graphic.to_sexp_node())
+            children.append(SExp(name="symbol", children=gfx_children))
 
         # Add unit symbols with their pins
         for unit_idx in range(1, self.units + 1):

@@ -2,6 +2,7 @@
 
 import pytest
 
+from kicad_tools.schema.library import SymbolPolyline, SymbolRectangle
 from kicad_tools.schematic.symbol_generator import (
     PACKAGE_TEMPLATES,
     PinDef,
@@ -751,3 +752,74 @@ class TestSymbolGeneratorIntegration:
         assert "(kicad_symbol_lib" in sexp
         assert 'symbol "Amplifier"' in sexp
         assert len(sym.pins) == 8
+
+
+# =============================================================================
+# Custom Graphics Tests
+# =============================================================================
+
+
+class TestGenerateSymbolSexpGraphics:
+    """Tests for custom graphics in generate_symbol_sexp()."""
+
+    def test_default_rectangle_when_no_graphics(self):
+        """Test that the default rectangle is emitted when no graphics are set."""
+        pins = [PinDef(number="1", name="IN", pin_type=PinType.INPUT, side=PinSide.LEFT)]
+        sym = SymbolDef(name="PlainIC", pins=pins)
+        sexp = generate_symbol_sexp(sym)
+
+        assert "(rectangle" in sexp
+        assert 'symbol "PlainIC_0_1"' in sexp
+
+    def test_custom_polygon_replaces_default_rect(self):
+        """Test that custom graphics replace the default rectangle."""
+        pins = [PinDef(number="1", name="IN", pin_type=PinType.INPUT, side=PinSide.LEFT)]
+        triangle = SymbolPolyline(
+            points=[(0, 0), (2.54, -1.27), (0, -2.54), (0, 0)],
+            fill_type="outline",
+        )
+        sym = SymbolDef(name="TriSym", pins=pins, graphics=[triangle])
+        sexp = generate_symbol_sexp(sym)
+
+        # Custom polygon should be present
+        assert "(polyline" in sexp
+        assert 'symbol "TriSym_0_1"' in sexp
+
+    def test_custom_graphics_multiple_shapes(self):
+        """Test emitting multiple custom shapes."""
+        pins = [PinDef(number="1", name="A", pin_type=PinType.PASSIVE, side=PinSide.LEFT)]
+        shapes = [
+            SymbolPolyline(points=[(0, 0), (5, 0), (5, 5)], fill_type="none"),
+            SymbolRectangle(start=(-2, 2), end=(2, -2), fill_type="background"),
+        ]
+        sym = SymbolDef(name="Multi", pins=pins, graphics=shapes)
+        sexp = generate_symbol_sexp(sym)
+
+        assert "(polyline" in sexp
+        assert "(rectangle" in sexp
+        assert 'symbol "Multi_0_1"' in sexp
+
+    def test_graphics_field_defaults_to_none(self):
+        """Test that SymbolDef.graphics defaults to None."""
+        sym = SymbolDef(name="Default", pins=[])
+        assert sym.graphics is None
+
+    def test_pins_still_emitted_with_custom_graphics(self):
+        """Test that pins are still present when custom graphics are used."""
+        pins = [
+            PinDef(number="1", name="IN", pin_type=PinType.INPUT, side=PinSide.LEFT),
+            PinDef(number="2", name="OUT", pin_type=PinType.OUTPUT, side=PinSide.RIGHT),
+        ]
+        triangle = SymbolPolyline(
+            points=[(0, 2.54), (5.08, 0), (0, -2.54), (0, 2.54)],
+            fill_type="outline",
+        )
+        sym = SymbolDef(name="WithPins", pins=pins, graphics=[triangle])
+        sexp = generate_symbol_sexp(sym)
+
+        # Both _0_1 (graphics) and _1_1 (pins) blocks should be present
+        assert 'symbol "WithPins_0_1"' in sexp
+        assert 'symbol "WithPins_1_1"' in sexp
+        assert "(polyline" in sexp
+        assert "(pin input" in sexp
+        assert "(pin output" in sexp

@@ -8,7 +8,16 @@ from kicad_tools.schema.bom import BOM, BOMGroup, BOMItem
 from kicad_tools.schema.hierarchy import HierarchyNode, SheetPin
 from kicad_tools.schema.hierarchy import SheetInstance as HierarchySheetInstance
 from kicad_tools.schema.label import GlobalLabel, HierarchicalLabel, Label, PowerSymbol
-from kicad_tools.schema.library import LibraryManager, LibraryPin, LibrarySymbol, SymbolLibrary
+from kicad_tools.schema.library import (
+    LibraryManager,
+    LibraryPin,
+    LibrarySymbol,
+    SymbolArc,
+    SymbolCircle,
+    SymbolLibrary,
+    SymbolPolyline,
+    SymbolRectangle,
+)
 from kicad_tools.schema.schematic import Schematic, SheetInstance, TitleBlock
 from kicad_tools.schema.wire import Bus, Junction, Wire
 from kicad_tools.sexp import parse_sexp
@@ -1530,3 +1539,353 @@ class TestSymbolLibraryLoad:
 
         with pytest.raises(ValueError, match="Not a KiCad symbol library"):
             SymbolLibrary.load(str(invalid_file))
+
+
+# =============================================================================
+# Symbol Graphics Tests
+# =============================================================================
+
+
+class TestLibrarySymbolGraphics:
+    """Tests for graphical shape support in LibrarySymbol."""
+
+    # -- SymbolPolyline -------------------------------------------------------
+
+    def test_add_polyline(self):
+        """Test adding a polyline to a symbol."""
+        sym = LibrarySymbol(name="Test")
+        pl = sym.add_polyline([(0, 0), (5.08, 0), (5.08, 5.08)])
+        assert len(sym.graphics) == 1
+        assert isinstance(pl, SymbolPolyline)
+        assert pl.points == [(0, 0), (5.08, 0), (5.08, 5.08)]
+        assert pl.stroke_width == 0.0
+        assert pl.stroke_type == "default"
+        assert pl.fill_type == "none"
+
+    def test_polyline_to_sexp(self):
+        """Test SymbolPolyline S-expression output."""
+        pl = SymbolPolyline(
+            points=[(0, 0), (2.54, -1.27)],
+            stroke_width=0.254,
+            stroke_type="dash",
+            fill_type="none",
+        )
+        sexp = pl.to_sexp_node()
+        assert sexp.name == "polyline"
+        s = sexp.to_string()
+        assert "(pts" in s
+        assert "(xy 0" in s
+        assert "(xy 2.54 -1.27)" in s
+        assert "(stroke" in s
+        assert "(width 0.254)" in s
+        assert '(type "dash")' in s or "(type dash)" in s
+        assert "(fill" in s
+
+    def test_polyline_from_sexp_round_trip(self):
+        """Test SymbolPolyline round-trips through S-expression."""
+        original = SymbolPolyline(
+            points=[(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)],
+            stroke_width=0.5,
+            stroke_type="default",
+            fill_type="outline",
+        )
+        sexp = original.to_sexp_node()
+        restored = SymbolPolyline.from_sexp(sexp)
+        assert restored.points == original.points
+        assert restored.stroke_width == original.stroke_width
+        assert restored.stroke_type == original.stroke_type
+        assert restored.fill_type == original.fill_type
+
+    def test_polyline_requires_at_least_2_points(self):
+        """Test that a polyline with fewer than 2 points raises ValueError."""
+        with pytest.raises(ValueError, match="at least 2 points"):
+            SymbolPolyline(points=[(0, 0)])
+
+    def test_polyline_empty_points_raises(self):
+        """Test that empty points list raises ValueError."""
+        with pytest.raises(ValueError, match="at least 2 points"):
+            SymbolPolyline(points=[])
+
+    # -- SymbolCircle ---------------------------------------------------------
+
+    def test_add_circle(self):
+        """Test adding a circle to a symbol."""
+        sym = LibrarySymbol(name="Test")
+        c = sym.add_circle((0, 0), 2.54)
+        assert len(sym.graphics) == 1
+        assert isinstance(c, SymbolCircle)
+        assert c.center == (0, 0)
+        assert c.radius == 2.54
+
+    def test_circle_to_sexp(self):
+        """Test SymbolCircle S-expression output."""
+        c = SymbolCircle(center=(1.27, -1.27), radius=5.08)
+        sexp = c.to_sexp_node()
+        assert sexp.name == "circle"
+        s = sexp.to_string()
+        assert "(center" in s
+        assert "(radius" in s
+
+    def test_circle_from_sexp_round_trip(self):
+        """Test SymbolCircle round-trips through S-expression."""
+        original = SymbolCircle(
+            center=(2.54, 3.81),
+            radius=5.08,
+            stroke_width=0.25,
+            fill_type="background",
+        )
+        sexp = original.to_sexp_node()
+        restored = SymbolCircle.from_sexp(sexp)
+        assert restored.center == original.center
+        assert restored.radius == original.radius
+        assert restored.stroke_width == original.stroke_width
+        assert restored.fill_type == original.fill_type
+
+    def test_circle_zero_radius_raises(self):
+        """Test that a circle with zero radius raises ValueError."""
+        with pytest.raises(ValueError, match="radius must be positive"):
+            SymbolCircle(center=(0, 0), radius=0)
+
+    def test_circle_negative_radius_raises(self):
+        """Test that a circle with negative radius raises ValueError."""
+        with pytest.raises(ValueError, match="radius must be positive"):
+            SymbolCircle(center=(0, 0), radius=-1)
+
+    # -- SymbolArc ------------------------------------------------------------
+
+    def test_add_arc(self):
+        """Test adding an arc to a symbol."""
+        sym = LibrarySymbol(name="Test")
+        a = sym.add_arc((0, 0), (1.27, 1.27), (2.54, 0))
+        assert len(sym.graphics) == 1
+        assert isinstance(a, SymbolArc)
+        assert a.start == (0, 0)
+        assert a.mid == (1.27, 1.27)
+        assert a.end == (2.54, 0)
+
+    def test_arc_to_sexp(self):
+        """Test SymbolArc S-expression output."""
+        a = SymbolArc(start=(0, 0), mid=(1.27, 1.27), end=(2.54, 0))
+        sexp = a.to_sexp_node()
+        assert sexp.name == "arc"
+        s = sexp.to_string()
+        assert "(start" in s
+        assert "(mid" in s
+        assert "(end" in s
+        assert "(stroke" in s
+        assert "(fill" in s
+
+    def test_arc_from_sexp_round_trip(self):
+        """Test SymbolArc round-trips through S-expression."""
+        original = SymbolArc(
+            start=(0, 0),
+            mid=(1.27, 2.54),
+            end=(2.54, 0),
+            stroke_width=0.1,
+            fill_type="outline",
+        )
+        sexp = original.to_sexp_node()
+        restored = SymbolArc.from_sexp(sexp)
+        assert restored.start == original.start
+        assert restored.mid == original.mid
+        assert restored.end == original.end
+        assert restored.stroke_width == original.stroke_width
+        assert restored.fill_type == original.fill_type
+
+    # -- SymbolRectangle ------------------------------------------------------
+
+    def test_add_rectangle(self):
+        """Test adding a rectangle to a symbol."""
+        sym = LibrarySymbol(name="Test")
+        r = sym.add_rectangle((-5.08, 5.08), (5.08, -5.08), fill_type="background")
+        assert len(sym.graphics) == 1
+        assert isinstance(r, SymbolRectangle)
+        assert r.start == (-5.08, 5.08)
+        assert r.end == (5.08, -5.08)
+        assert r.fill_type == "background"
+
+    def test_rectangle_to_sexp(self):
+        """Test SymbolRectangle S-expression output."""
+        r = SymbolRectangle(start=(-5.08, 5.08), end=(5.08, -5.08))
+        sexp = r.to_sexp_node()
+        assert sexp.name == "rectangle"
+        s = sexp.to_string()
+        assert "(start" in s
+        assert "(end" in s
+
+    def test_rectangle_from_sexp_round_trip(self):
+        """Test SymbolRectangle round-trips through S-expression."""
+        original = SymbolRectangle(
+            start=(-5.08, 5.08),
+            end=(5.08, -5.08),
+            stroke_width=0.254,
+            stroke_type="solid",
+            fill_type="background",
+        )
+        sexp = original.to_sexp_node()
+        restored = SymbolRectangle.from_sexp(sexp)
+        assert restored.start == original.start
+        assert restored.end == original.end
+        assert restored.stroke_width == original.stroke_width
+        assert restored.stroke_type == original.stroke_type
+        assert restored.fill_type == original.fill_type
+
+    # -- Polygon convenience method -------------------------------------------
+
+    def test_add_polygon(self):
+        """Test add_polygon auto-closes the shape."""
+        sym = LibrarySymbol(name="Test")
+        pl = sym.add_polygon([(0, 0), (2.54, -1.27), (0, -2.54)])
+        assert len(sym.graphics) == 1
+        assert isinstance(pl, SymbolPolyline)
+        # Should be auto-closed
+        assert pl.points[0] == pl.points[-1]
+        assert len(pl.points) == 4
+
+    def test_add_polygon_already_closed(self):
+        """Test add_polygon with an already-closed polygon."""
+        sym = LibrarySymbol(name="Test")
+        pl = sym.add_polygon([(0, 0), (2.54, -1.27), (0, -2.54), (0, 0)])
+        # Should NOT double-close
+        assert len(pl.points) == 4
+        assert pl.points[0] == pl.points[-1]
+
+    def test_add_polygon_fewer_than_3_raises(self):
+        """Test that add_polygon with fewer than 3 points raises ValueError."""
+        sym = LibrarySymbol(name="Test")
+        with pytest.raises(ValueError, match="at least 3 points"):
+            sym.add_polygon([(0, 0), (1, 1)])
+
+    def test_add_polygon_default_fill(self):
+        """Test that polygon defaults to outline fill."""
+        sym = LibrarySymbol(name="Test")
+        pl = sym.add_polygon([(0, 0), (2.54, 0), (1.27, 2.54)])
+        assert pl.fill_type == "outline"
+
+    # -- Validation -----------------------------------------------------------
+
+    def test_invalid_fill_type_raises(self):
+        """Test that invalid fill type raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid fill_type"):
+            SymbolPolyline(points=[(0, 0), (1, 1)], fill_type="invalid")
+
+    def test_invalid_stroke_type_raises(self):
+        """Test that invalid stroke type raises ValueError."""
+        with pytest.raises(ValueError, match="Invalid stroke_type"):
+            SymbolCircle(center=(0, 0), radius=1.0, stroke_type="zigzag")
+
+    # -- to_sexp_node integration (LibrarySymbol) -----------------------------
+
+    def test_to_sexp_node_emits_graphics_in_0_1(self):
+        """Test that to_sexp_node() emits graphics inside a _0_1 sub-symbol."""
+        sym = LibrarySymbol(name="TriBody")
+        sym.add_polygon([(0, 0), (2.54, -1.27), (0, -2.54)])
+        sym.add_pin("1", "B", "input", (-5.08, -1.27), rotation=0)
+
+        sexp = sym.to_sexp_node()
+        sexp_str = sexp.to_string()
+
+        # _0_1 block should exist and contain polyline
+        assert "TriBody_0_1" in sexp_str
+        assert "(polyline" in sexp_str
+
+        # _1_1 block should still contain pin
+        assert "TriBody_1_1" in sexp_str
+        assert "(pin" in sexp_str
+
+    def test_to_sexp_node_no_graphics_no_0_1(self):
+        """Test that _0_1 sub-symbol is omitted when there are no graphics."""
+        sym = LibrarySymbol(name="PinOnly")
+        sym.add_pin("1", "A", "input", (0, 0))
+
+        sexp = sym.to_sexp_node()
+        sexp_str = sexp.to_string()
+        assert "PinOnly_0_1" not in sexp_str
+        assert "PinOnly_1_1" in sexp_str
+
+    def test_to_sexp_node_multiple_shape_types(self):
+        """Test emitting several different shape types."""
+        sym = LibrarySymbol(name="Mixed")
+        sym.add_polyline([(0, 0), (5, 0)])
+        sym.add_circle((0, 0), 2.0)
+        sym.add_arc((0, 0), (1, 1), (2, 0))
+        sym.add_rectangle((-3, 3), (3, -3))
+
+        sexp = sym.to_sexp_node()
+        s = sexp.to_string()
+        assert "(polyline" in s
+        assert "(circle" in s
+        assert "(arc" in s
+        assert "(rectangle" in s
+
+    # -- from_sexp round-trip (full LibrarySymbol) ----------------------------
+
+    def test_from_sexp_parses_graphics(self):
+        """Test that from_sexp round-trips graphical shapes."""
+        sym = LibrarySymbol(name="RoundTrip")
+        sym.add_polygon([(0, 0), (2.54, -1.27), (0, -2.54)])
+        sym.add_circle((0, 0), 1.27, fill_type="background")
+        sym.add_rectangle((-5, 5), (5, -5), stroke_width=0.254)
+        sym.add_pin("1", "A", "input", (-5.08, 0))
+
+        sexp = sym.to_sexp_node()
+        restored = LibrarySymbol.from_sexp(sexp)
+
+        # Pins preserved
+        assert len(restored.pins) == 1
+
+        # Graphics preserved
+        assert len(restored.graphics) == 3
+        types = {type(g).__name__ for g in restored.graphics}
+        assert "SymbolPolyline" in types
+        assert "SymbolCircle" in types
+        assert "SymbolRectangle" in types
+
+    def test_save_and_load_with_graphics(self, tmp_path: Path):
+        """Test that a library with graphics survives save/load."""
+        lib = SymbolLibrary(path=str(tmp_path / "gfx.kicad_sym"), symbols={})
+        sym = lib.create_symbol("GfxPart")
+        sym.add_property("Reference", "U")
+        sym.add_property("Value", "GfxPart")
+        sym.add_polygon([(0, 0), (5.08, -2.54), (0, -5.08)])
+        sym.add_pin("1", "IN", "input", (-5.08, 0))
+
+        lib.save()
+
+        lib2 = SymbolLibrary.load(str(tmp_path / "gfx.kicad_sym"))
+        sym2 = lib2.symbols["GfxPart"]
+        assert len(sym2.pins) == 1
+        assert len(sym2.graphics) == 1
+        assert isinstance(sym2.graphics[0], SymbolPolyline)
+        assert sym2.graphics[0].fill_type == "outline"
+
+    def test_triangular_body_api(self):
+        """Test that a user can build a triangular body entirely through the API."""
+        lib = SymbolLibrary(path="triangle.kicad_sym", symbols={})
+        sym = lib.create_symbol("OpAmpBody")
+        sym.add_property("Reference", "U")
+        sym.add_property("Value", "OpAmpBody")
+
+        # Draw a triangle body
+        sym.add_polygon(
+            [(0, 2.54), (5.08, 0), (0, -2.54)],
+            stroke_width=0.254,
+            fill_type="background",
+        )
+
+        # Add pins
+        sym.add_pin("1", "+", "input", (-2.54, 1.27), rotation=0)
+        sym.add_pin("2", "-", "input", (-2.54, -1.27), rotation=0)
+        sym.add_pin("3", "OUT", "output", (7.62, 0), rotation=180)
+
+        sexp = sym.to_sexp_node()
+        s = sexp.to_string()
+
+        # Verify the polyline is present with closed triangle
+        assert "(polyline" in s
+        # Verify all three pins are present
+        assert s.count("(pin") == 3
+        # Verify no raw S-expression strings were needed
+        assert len(sym.graphics) == 1
+        assert isinstance(sym.graphics[0], SymbolPolyline)
+        assert sym.graphics[0].points[0] == sym.graphics[0].points[-1]

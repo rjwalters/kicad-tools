@@ -52,6 +52,12 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from kicad_tools.schema.library import (
+    SymbolArc,
+    SymbolCircle,
+    SymbolPolyline,
+    SymbolRectangle,
+)
 from kicad_tools.utils import ensure_parent_dir
 
 
@@ -149,6 +155,9 @@ class SymbolDef:
     pin_length: float = 2.54  # mm
     pin_spacing: float = 2.54  # mm (100 mil)
     min_width: float = 10.16  # mm (400 mil)
+
+    # Custom graphical shapes for the symbol body (emitted inside _0_1 block)
+    graphics: list[SymbolPolyline | SymbolCircle | SymbolArc | SymbolRectangle] | None = None
 
     def __post_init__(self):
         if not self.value:
@@ -486,6 +495,29 @@ def generate_symbol_sexp(sym: SymbolDef) -> str:
 
     pins_sexp = "\n".join(pin_lines)
 
+    # Build the _0_1 graphical body block
+    if sym.graphics:
+        # Use custom graphics supplied by the caller
+        from kicad_tools.sexp import serialize_sexp as _ser
+
+        gfx_lines = []
+        for g in sym.graphics:
+            gfx_lines.append("\t\t\t" + _ser(g.to_sexp_node()))
+        gfx_block = "\n".join(gfx_lines)
+    else:
+        # Default: a background-filled rectangle around the pins
+        gfx_block = f"""\t\t\t(rectangle
+\t\t\t\t(start {-half_w:.2f} {half_h:.2f})
+\t\t\t\t(end {half_w:.2f} {-half_h:.2f})
+\t\t\t\t(stroke
+\t\t\t\t\t(width 0.254)
+\t\t\t\t\t(type default)
+\t\t\t\t)
+\t\t\t\t(fill
+\t\t\t\t\t(type background)
+\t\t\t\t)
+\t\t\t)"""
+
     # Build complete symbol
     sexp = f'''(kicad_symbol_lib
 \t(version 20231120)
@@ -548,17 +580,7 @@ def generate_symbol_sexp(sym: SymbolDef) -> str:
 \t\t\t)
 \t\t)
 \t\t(symbol "{sym.name}_0_1"
-\t\t\t(rectangle
-\t\t\t\t(start {-half_w:.2f} {half_h:.2f})
-\t\t\t\t(end {half_w:.2f} {-half_h:.2f})
-\t\t\t\t(stroke
-\t\t\t\t\t(width 0.254)
-\t\t\t\t\t(type default)
-\t\t\t\t)
-\t\t\t\t(fill
-\t\t\t\t\t(type background)
-\t\t\t\t)
-\t\t\t)
+{gfx_block}
 \t\t)
 \t\t(symbol "{sym.name}_1_1"
 {pins_sexp}
