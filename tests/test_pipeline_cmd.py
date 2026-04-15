@@ -2006,3 +2006,32 @@ class TestZonesDefaultSkip:
         help_text = f.getvalue()
         assert "--zones" in help_text
         assert "data corruption" in help_text.lower() or "corruption" in help_text.lower()
+
+
+class TestFixDrcLocalReroute:
+    """Tests that fix-drc step includes --local-reroute flag."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_drc_subprocess_includes_local_reroute(self, mock_run, routed_pcb: Path):
+        """fix-drc subprocess command includes --local-reroute flag."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        main(["--step", "fix-drc", str(routed_pcb), "--quiet"])
+
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "fix-drc" in cmd_args
+        assert "--local-reroute" in cmd_args
+
+    def test_fix_drc_dry_run_mentions_local_reroute(self, routed_pcb: Path):
+        """Dry-run message for fix-drc includes --local-reroute."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        assert "--local-reroute" in result.message
