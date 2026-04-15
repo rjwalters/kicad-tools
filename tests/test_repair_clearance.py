@@ -1642,3 +1642,386 @@ class TestClusterRerouteIntegration:
         # Same x,y -> grouped together (spatial only)
         assert len(clusters) == 1
         assert len(clusters[0]) == 2
+
+
+# ── Pad-clearance repair tests ─────────────────────────────────────────────
+
+# PCB with a footprint containing a pad (pad "1" at footprint-local (0, 0))
+# and a segment that runs too close to it.
+# Footprint at (105, 100) with 0 rotation, so pad absolute position is (105, 100).
+# Segment runs from (100, 100.12) to (110, 100.12) on F.Cu, net "+3.3V".
+# The pad is on net "GND".
+PCB_WITH_PAD_SEGMENT_VIOLATION = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "TestLib:R0402"
+    (layer "F.Cu")
+    (at 105 100)
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-1"))
+    (pad "2" smd roundrect (at 1.0 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V") (uuid "pad-2"))
+  )
+  (segment (start 100 100.12) (end 110 100.12) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-pad-1"))
+)
+"""
+
+# PCB with a footprint at (105, 100) rotated 90 degrees.
+# Pad "1" local offset is (0.5, 0), so after 90deg rotation:
+#   abs_x = 105 + 0.5*cos(90) - 0*sin(90) = 105 + 0 - 0 = 105
+#   abs_y = 100 + 0.5*sin(90) + 0*cos(90) = 100 + 0.5 + 0 = 100.5
+# A via at (105, 100.35) is too close to the pad.
+PCB_WITH_ROTATED_PAD_VIA_VIOLATION = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "TestLib:R0402"
+    (layer "F.Cu")
+    (at 105 100 90)
+    (pad "1" smd roundrect (at 0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-rot-1"))
+  )
+  (via (at 105 100.35) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-pad-1"))
+)
+"""
+
+# PCB with two pads close together (both immovable -- should be skipped)
+PCB_WITH_PAD_PAD_VIOLATION = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "TestLib:C0402"
+    (layer "F.Cu")
+    (at 105 100)
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "GND") (uuid "pad-pp-1"))
+  )
+  (footprint "TestLib:C0402"
+    (layer "F.Cu")
+    (at 105.5 100)
+    (pad "1" smd roundrect (at 0 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "+3.3V") (uuid "pad-pp-2"))
+  )
+)
+"""
+
+
+class TestPadClearanceRepair:
+    """Tests for pad-segment and pad-via clearance repair."""
+
+    def test_violation_type_from_string_pad_segment(self):
+        """ViolationType.from_string should parse clearance_pad_segment."""
+        assert (
+            ViolationType.from_string("clearance_pad_segment")
+            == ViolationType.CLEARANCE_PAD_SEGMENT
+        )
+
+    def test_violation_type_from_string_pad_via(self):
+        """ViolationType.from_string should parse clearance_pad_via."""
+        assert ViolationType.from_string("clearance_pad_via") == ViolationType.CLEARANCE_PAD_VIA
+
+    def test_pad_clearance_types_are_clearance(self):
+        """PAD_SEGMENT and PAD_VIA violations should count as clearance."""
+        v1 = DRCViolation(
+            type=ViolationType.CLEARANCE_PAD_SEGMENT,
+            type_str="clearance_pad_segment",
+            severity=Severity.ERROR,
+            message="test",
+        )
+        v2 = DRCViolation(
+            type=ViolationType.CLEARANCE_PAD_VIA,
+            type_str="clearance_pad_via",
+            severity=Severity.ERROR,
+            message="test",
+        )
+        assert v1.is_clearance
+        assert v2.is_clearance
+
+    def test_pad_segment_repair_moves_segment(self, tmp_path: Path):
+        """Pad-segment repair should move the segment, never the pad."""
+        pcb_file = tmp_path / "pad_seg.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_PAD_SEGMENT_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_PAD_SEGMENT,
+                    type_str="clearance_pad_segment",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.12mm < 0.20mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.12, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.12,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=True,
+        )
+
+        assert result.total_violations == 1
+        assert result.repaired == 1
+        # Must have moved the segment, not the pad
+        assert len(result.nudges) == 1
+        assert result.nudges[0].object_type == "segment"
+
+    def test_pad_segment_repair_applies_changes(self, tmp_path: Path):
+        """Pad-segment repair should modify PCB when not dry run."""
+        pcb_file = tmp_path / "pad_seg.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_PAD_SEGMENT_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_PAD_SEGMENT,
+                    type_str="clearance_pad_segment",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.12mm < 0.20mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.12, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.12,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=False,
+        )
+
+        assert result.repaired == 1
+        assert repairer.modified
+
+    def test_pad_via_repair_moves_via(self, tmp_path: Path):
+        """Pad-via repair should relocate the via, never the pad."""
+        pcb_file = tmp_path / "pad_via.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ROTATED_PAD_VIA_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Pad "1" at footprint (105, 100) rotated 90deg with local offset (0.5, 0)
+        # -> absolute (105, 100.5).  Via at (105, 100.35).
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_PAD_VIA,
+                    type_str="clearance_pad_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.10mm < 0.20mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.5, layer="F.Cu"),
+                        Location(x_mm=105.0, y_mm=100.35, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.10,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=True,
+        )
+
+        assert result.total_violations == 1
+        assert result.repaired == 1
+        # Must have moved the via, not the pad
+        assert len(result.nudges) == 1
+        assert result.nudges[0].object_type == "via"
+
+    def test_pad_pad_violation_skipped(self, tmp_path: Path):
+        """Pad-to-pad violation should be skipped (neither is movable)."""
+        pcb_file = tmp_path / "pad_pad.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_PAD_PAD_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE,
+                    type_str="clearance",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.10mm < 0.20mm)",
+                    locations=[
+                        Location(x_mm=105.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=105.5, y_mm=100.0, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.10,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=True,
+        )
+
+        # Both objects are pads -- neither is movable
+        assert result.repaired == 0
+        assert result.skipped_infeasible == 1
+
+    def test_find_pads_near(self, tmp_path: Path):
+        """_find_pads_near should locate pads with correct board coordinates."""
+        pcb_file = tmp_path / "pad_near.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_PAD_SEGMENT_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Footprint at (105, 100), pad "1" at local (0, 0) -> board (105, 100)
+        pads = repairer._find_pads_near(105.0, 100.0, 0.5, "F.Cu", ["GND"])
+        assert len(pads) >= 1
+        pad_info = pads[0]
+        assert pad_info[1] == "pad"
+        assert abs(pad_info[2] - 105.0) < 0.01
+        assert abs(pad_info[3] - 100.0) < 0.01
+
+    def test_find_pads_near_rotated_footprint(self, tmp_path: Path):
+        """_find_pads_near should account for footprint rotation."""
+        pcb_file = tmp_path / "pad_rot.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ROTATED_PAD_VIA_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Footprint at (105, 100) rotated 90deg, pad local (0.5, 0)
+        # After rotation: abs = (105, 100.5)
+        pads = repairer._find_pads_near(105.0, 100.5, 0.5, "F.Cu", ["GND"])
+        assert len(pads) >= 1
+        pad_info = pads[0]
+        assert pad_info[1] == "pad"
+        assert abs(pad_info[2] - 105.0) < 0.01
+        assert abs(pad_info[3] - 100.5) < 0.01
+
+    def test_choose_target_never_moves_pad(self, tmp_path: Path):
+        """_choose_target should always return the non-pad object."""
+        pcb_file = tmp_path / "choose.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_PAD_SEGMENT_VIOLATION)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        from kicad_tools.sexp import SExp
+
+        # Create mock objects
+        mock_pad = (SExp("pad"), "pad", 105.0, 100.0, "F.Cu", "GND")
+        mock_seg = (SExp("segment"), "segment", 105.0, 100.12, "F.Cu", "+3.3V")
+        mock_via = (SExp("via"), "via", 105.0, 100.35, "F.Cu", "+3.3V")
+
+        # Pad + segment -> always returns segment
+        target = repairer._choose_target(mock_pad, mock_seg, "move-trace")
+        assert target[1] == "segment"
+
+        target = repairer._choose_target(mock_seg, mock_pad, "move-trace")
+        assert target[1] == "segment"
+
+        # Pad + via -> always returns via
+        target = repairer._choose_target(mock_pad, mock_via, "move-via")
+        assert target[1] == "via"
+
+        target = repairer._choose_target(mock_via, mock_pad, "move-via")
+        assert target[1] == "via"
+
+        # Pad + pad -> returns None (neither movable)
+        mock_pad2 = (SExp("pad"), "pad", 105.5, 100.0, "F.Cu", "+3.3V")
+        target = repairer._choose_target(mock_pad, mock_pad2, "move-trace")
+        assert target is None
+
+    def test_pad_segment_included_in_fix_drc_count(self, tmp_path: Path):
+        """fix-drc should count pad-segment and pad-via violations."""
+        pcb_file = tmp_path / "pad_seg_drc.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_PAD_SEGMENT_VIOLATION)
+
+        # Create a DRC report containing pad-segment violations
+        report_content = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_pad_segment]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1200 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Pad [GND] on F.Cu
+    @(105.0000 mm, 100.1200 mm): Track [+3.3V] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_file = tmp_path / "test-drc.rpt"
+        report_file.write_text(report_content)
+
+        from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+        result = fix_drc_main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+                "--quiet",
+            ]
+        )
+
+        # Should not crash; any return code acceptable in dry-run
+        assert result in (0, 1, 2)

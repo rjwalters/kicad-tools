@@ -17,6 +17,8 @@ class ViolationType(Enum):
     # Clearance violations
     CLEARANCE = "clearance"
     CLEARANCE_SEGMENT_VIA = "clearance_segment_via"
+    CLEARANCE_PAD_SEGMENT = "clearance_pad_segment"
+    CLEARANCE_PAD_VIA = "clearance_pad_via"
     COPPER_EDGE_CLEARANCE = "copper_edge_clearance"
     COURTYARD_OVERLAP = "courtyard_overlap"
 
@@ -75,6 +77,10 @@ class ViolationType(Enum):
                 return cls.COPPER_EDGE_CLEARANCE
             if "segment" in s_lower and "via" in s_lower:
                 return cls.CLEARANCE_SEGMENT_VIA
+            if "pad" in s_lower and "segment" in s_lower:
+                return cls.CLEARANCE_PAD_SEGMENT
+            if "pad" in s_lower and "via" in s_lower:
+                return cls.CLEARANCE_PAD_VIA
             return cls.CLEARANCE
         if "unconnected" in s_lower:
             return cls.UNCONNECTED_ITEMS
@@ -187,6 +193,8 @@ class DRCViolation:
         return self.type in (
             ViolationType.CLEARANCE,
             ViolationType.CLEARANCE_SEGMENT_VIA,
+            ViolationType.CLEARANCE_PAD_SEGMENT,
+            ViolationType.CLEARANCE_PAD_VIA,
             ViolationType.COPPER_EDGE_CLEARANCE,
         )
 

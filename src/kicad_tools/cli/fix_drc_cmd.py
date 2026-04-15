@@ -188,6 +188,8 @@ Examples:
             (
                 report.by_type(ViolationType.CLEARANCE)
                 + report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
+                + report.by_type(ViolationType.CLEARANCE_PAD_SEGMENT)
+                + report.by_type(ViolationType.CLEARANCE_PAD_VIA)
             )
             if do_clearance
             else []

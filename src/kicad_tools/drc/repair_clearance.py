@@ -172,7 +172,11 @@ class ClearanceRepairer:
 
         clearances = report.by_type(ViolationType.CLEARANCE)
         segment_via_clearances = report.by_type(ViolationType.CLEARANCE_SEGMENT_VIA)
-        all_clearances = clearances + segment_via_clearances
+        pad_segment_clearances = report.by_type(ViolationType.CLEARANCE_PAD_SEGMENT)
+        pad_via_clearances = report.by_type(ViolationType.CLEARANCE_PAD_VIA)
+        all_clearances = (
+            clearances + segment_via_clearances + pad_segment_clearances + pad_via_clearances
+        )
         result.total_violations = len(all_clearances)
 
         # Track violations where nudge was explicitly skipped as infeasible
@@ -192,6 +196,24 @@ class ClearanceRepairer:
             before_infeasible = result.skipped_infeasible
             self._repair_single_violation(
                 violation, result, max_displacement, margin, "move-trace", dry_run
+            )
+            if result.skipped_infeasible > before_infeasible:
+                skipped_violations.append(violation)
+
+        # For pad-segment violations, move the segment (pads are immovable)
+        for violation in pad_segment_clearances:
+            before_infeasible = result.skipped_infeasible
+            self._repair_single_violation(
+                violation, result, max_displacement, margin, "move-trace", dry_run
+            )
+            if result.skipped_infeasible > before_infeasible:
+                skipped_violations.append(violation)
+
+        # For pad-via violations, move the via (pads are immovable)
+        for violation in pad_via_clearances:
+            before_infeasible = result.skipped_infeasible
+            self._repair_single_violation(
+                violation, result, max_displacement, margin, "move-via", dry_run
             )
             if result.skipped_infeasible > before_infeasible:
                 skipped_violations.append(violation)
@@ -498,8 +520,24 @@ class ClearanceRepairer:
             other_seg = obs_obj[0]
             width_node = other_seg.find("width")
             obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
+        elif obs_obj is not None and obs_obj[1] == "pad":
+            obstacle_radius = self._pad_obstacle_radius(obs_obj[0])
 
         return (obs_x, obs_y, obstacle_radius)
+
+    def _pad_obstacle_radius(self, pad_node: SExp) -> float:
+        """Estimate the effective radius of a pad for obstacle avoidance.
+
+        Uses the larger of the pad's width and height divided by 2.
+        Falls back to 0.5 mm if the size cannot be determined.
+        """
+        size_node = pad_node.find("size")
+        if size_node:
+            atoms = size_node.get_atoms()
+            w = float(atoms[0]) if atoms else 1.0
+            h = float(atoms[1]) if len(atoms) > 1 else w
+            return max(w, h) / 2
+        return 0.5
 
     def _attempt_local_reroute_with_extras(
         self,
@@ -554,6 +592,8 @@ class ClearanceRepairer:
             other_seg = obs_obj[0]
             width_node = other_seg.find("width")
             obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
+        elif obs_obj is not None and obs_obj[1] == "pad":
+            obstacle_radius = self._pad_obstacle_radius(obs_obj[0])
 
         width_node = seg_node.find("width")
         trace_width = float(width_node.get_first_atom()) if width_node else 0.25
@@ -640,6 +680,8 @@ class ClearanceRepairer:
             other_seg = obs_obj[0]
             width_node = other_seg.find("width")
             obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
+        elif obs_obj is not None and obs_obj[1] == "pad":
+            obstacle_radius = self._pad_obstacle_radius(obs_obj[0])
 
         # Get trace parameters
         width_node = seg_node.find("width")
@@ -898,7 +940,12 @@ class ClearanceRepairer:
         if vias:
             return vias[0]
 
-        # Check pads (pads are not movable, so return None to skip)
+        # Check pads (pads are immovable, but we return them so
+        # _choose_target() can select the *other* object to move)
+        pads = self._find_pads_near(x, y, search_radius, layer, nets)
+        if pads:
+            return pads[0]
+
         return None
 
     def _find_segments_near(
@@ -1002,6 +1049,86 @@ class ClearanceRepairer:
 
         return results
 
+    def _find_pads_near(
+        self,
+        x: float,
+        y: float,
+        radius: float,
+        layer: str | None,
+        nets: list[str] | None,
+    ) -> list[tuple[SExp, str, float, float, str, str]]:
+        """Find pads near a point.
+
+        Pads are nested inside footprint nodes in the s-expression tree.
+        Their positions are in footprint-local coordinates and must be
+        transformed to board coordinates using the footprint's position
+        and rotation.
+
+        Returns list of (pad_node, "pad", abs_x, abs_y, pad_layer, net_name).
+        """
+        results = []
+
+        for fp_node in self.doc.find_all("footprint"):
+            # Get footprint position and rotation
+            fp_at = fp_node.find("at")
+            if not fp_at:
+                continue
+            fp_atoms = fp_at.get_atoms()
+            fp_x = float(fp_atoms[0]) if fp_atoms else 0.0
+            fp_y = float(fp_atoms[1]) if len(fp_atoms) > 1 else 0.0
+            fp_rot = float(fp_atoms[2]) if len(fp_atoms) > 2 else 0.0
+
+            angle_rad = math.radians(fp_rot)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+
+            for pad_node in fp_node.find_all("pad"):
+                pad_at = pad_node.find("at")
+                if not pad_at:
+                    continue
+                pad_atoms = pad_at.get_atoms()
+                local_x = float(pad_atoms[0]) if pad_atoms else 0.0
+                local_y = float(pad_atoms[1]) if len(pad_atoms) > 1 else 0.0
+
+                # Transform from footprint-local to board coordinates
+                abs_x = fp_x + local_x * cos_a - local_y * sin_a
+                abs_y = fp_y + local_x * sin_a + local_y * cos_a
+
+                dist = math.sqrt((abs_x - x) ** 2 + (abs_y - y) ** 2)
+                if dist > radius:
+                    continue
+
+                # Check layer match
+                pad_layers_node = pad_node.find("layers")
+                pad_layers: list[str] = []
+                if pad_layers_node:
+                    pad_layers = [str(a) for a in pad_layers_node.get_atoms()]
+
+                if layer:
+                    # Pad matches if it's on the specified layer or on all copper layers
+                    if layer not in pad_layers and "*.Cu" not in pad_layers:
+                        continue
+
+                # Check net match
+                pad_net_node = pad_node.find("net")
+                pad_net_num = 0
+                if pad_net_node:
+                    first_atom = pad_net_node.get_first_atom()
+                    if first_atom is not None:
+                        try:
+                            pad_net_num = int(first_atom)
+                        except (ValueError, TypeError):
+                            pad_net_num = 0
+                pad_net_name = self.nets.get(pad_net_num, "")
+
+                if nets and pad_net_name not in nets:
+                    continue
+
+                pad_layer = pad_layers[0] if pad_layers else ""
+                results.append((pad_node, "pad", abs_x, abs_y, pad_layer, pad_net_name))
+
+        return results
+
     def _choose_target(
         self,
         obj1: tuple[SExp, str, float, float, str, str] | None,
@@ -1027,6 +1154,15 @@ class ClearanceRepairer:
 
         _, type1, _, _, _, _ = obj1
         _, type2, _, _, _, _ = obj2
+
+        # Pads are immovable -- always move the other object.
+        # If both are pads, neither can be moved.
+        if type1 == "pad" and type2 == "pad":
+            return None
+        if type1 == "pad":
+            return obj2
+        if type2 == "pad":
+            return obj1
 
         if prefer == "move-trace":
             if type1 == "segment":
