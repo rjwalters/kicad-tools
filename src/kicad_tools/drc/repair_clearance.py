@@ -210,8 +210,12 @@ class ClearanceRepairer:
             # Violations where nudge was counted as repaired but segment didn't move:
             # counter adjustments on success are: repaired stays the same (already counted),
             # only local_rerouted += 1
+            # Deduplicate: exclude any already queued via skipped_violations to avoid
+            # processing the same violation twice.
+            skipped_set = set(id(v) for v in skipped_violations)
             for v in both_at_vias:
-                all_reroute_candidates.append((v, "phantom_repair"))
+                if id(v) not in skipped_set:
+                    all_reroute_candidates.append((v, "phantom_repair"))
 
             if all_reroute_candidates:
                 self._run_local_reroute_phase(
@@ -348,12 +352,6 @@ class ClearanceRepairer:
         elif obj2 is not None and obj2[1] == "segment":
             seg_info = obj2
             obstacle_info = (loc1.x_mm, loc1.y_mm, obj1)
-        elif obj1 is not None:
-            seg_info = obj1
-            obstacle_info = (loc2.x_mm, loc2.y_mm, obj2)
-        elif obj2 is not None:
-            seg_info = obj2
-            obstacle_info = (loc1.x_mm, loc1.y_mm, obj1)
 
         if seg_info is None:
             result.skipped_no_local_route += 1
@@ -406,6 +404,11 @@ class ClearanceRepairer:
                 self.modified = True
         else:
             result.skipped_no_local_route += 1
+            if source == "phantom_repair":
+                # The nudge phase already incremented repaired, but the segment
+                # didn't actually move and local reroute also failed.  Undo the
+                # phantom repaired count to avoid double-counting.
+                result.repaired -= 1
 
     def _repair_single_violation(
         self,

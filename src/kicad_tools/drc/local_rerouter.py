@@ -51,7 +51,7 @@ class LocalRerouter:
     """Reroutes individual segments around obstacles using A* on a local grid.
 
     Builds a small scratch grid around the segment being rerouted, marks
-    obstacles (vias, other segments, pads) as blocked, and runs A* to find
+    obstacles (vias, other segments) as blocked, and runs A* to find
     an alternate path from one endpoint to the other.
 
     The grid uses a dict[tuple[int,int], bool] representation where True
@@ -334,7 +334,7 @@ class LocalRerouter:
     ) -> None:
         """Mark all PCB objects in the local area as obstacles.
 
-        Marks vias, segments (on the same layer, different net), and pads.
+        Marks vias and segments (on the same layer, different net).
         The segment being rerouted (exclude_seg) is excluded.
         """
         layer_str = str(layer)
@@ -406,9 +406,9 @@ class LocalRerouter:
             oey = float(oe_atoms[1]) if len(oe_atoms) > 1 else 0.0
 
             # Skip segments fully outside local area
-            if max(osx, oex) < min_x and min(osx, oex) > max_x:
+            if max(osx, oex) < min_x or min(osx, oex) > max_x:
                 continue
-            if max(osy, oey) < min_y and min(osy, oey) > max_y:
+            if max(osy, oey) < min_y or min(osy, oey) > max_y:
                 continue
 
             other_width_node = other_seg.find("width")

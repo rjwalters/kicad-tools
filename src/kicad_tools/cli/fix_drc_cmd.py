@@ -253,14 +253,15 @@ Examples:
             args.max_passes,
         )
 
-    # Exit code: 0 only when final state has zero remaining violations
+    # Exit code: 0 = all repaired, 1 = no violations found/no progress, 2 = partial repair
     final_pass = pass_results[-1] if pass_results else None
     if final_pass is None:
         return 0
     remaining = final_pass.violations_before - final_pass.repaired
     if remaining == 0:
         return 0
-    # Some violations repaired but not all — exit 2 (warnings, not failure)
+    if final_pass.repaired == 0:
+        return 1
     return 2
 
 
