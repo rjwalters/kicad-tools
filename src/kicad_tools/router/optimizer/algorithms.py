@@ -357,22 +357,36 @@ def convert_corners_45(
     segments: list[Segment],
     config: OptimizationConfig,
     path_is_clear: Callable[[Segment], bool] | None = None,
+    pad_positions: set[tuple[float, float]] | None = None,
 ) -> list[Segment]:
     """Convert 90-degree corners to 45-degree chamfers.
 
     Replaces sharp 90-degree turns with smoother 45-degree entry/exit,
     but only if the chamfer path is clear of obstacles.
 
+    After chamfering, the original terminal endpoints (start of first segment,
+    end of last segment) are restored if they were displaced.  This prevents
+    chamfering from moving trace endpoints away from pad positions, which
+    would break electrical connectivity.
+
     Args:
         segments: List of segments to process.
         config: Optimization configuration.
         path_is_clear: Optional function to check if a path is clear.
+        pad_positions: Optional set of (x, y) pad positions.  When provided,
+            terminal endpoint restoration only fires for endpoints that are
+            within tolerance of a pad position.  When ``None``, terminal
+            endpoints are always restored (safe default).
 
     Returns:
         List with corners converted to 45 degrees.
     """
     if len(segments) < 2:
         return list(segments)
+
+    # Record original terminal endpoints before any modification.
+    orig_start = (segments[0].x1, segments[0].y1)
+    orig_end = (segments[-1].x2, segments[-1].y2)
 
     result: list[Segment] = []
     chamfer = config.corner_chamfer_size
@@ -468,4 +482,90 @@ def convert_corners_45(
 
             result.append(modified_seg)
 
+    # --- Post-chamfer terminal endpoint restoration ---
+    # Chamfering may have displaced the start of the first segment or the
+    # end of the last segment (the chain's "pad endpoints").  Restore them
+    # so the trace still terminates exactly at the pad centre.
+    result = _restore_terminal_endpoints(
+        result, orig_start, orig_end, pad_positions, config.tolerance
+    )
+
     return result
+
+
+def _point_near_any_pad(
+    point: tuple[float, float],
+    pad_positions: set[tuple[float, float]],
+    tolerance: float,
+) -> bool:
+    """Return True if *point* is within *tolerance* of any pad position."""
+    tol_sq = tolerance * tolerance
+    for pad in pad_positions:
+        dx = point[0] - pad[0]
+        dy = point[1] - pad[1]
+        if dx * dx + dy * dy < tol_sq:
+            return True
+    return False
+
+
+def _restore_terminal_endpoints(
+    segments: list[Segment],
+    orig_start: tuple[float, float],
+    orig_end: tuple[float, float],
+    pad_positions: set[tuple[float, float]] | None,
+    tolerance: float,
+) -> list[Segment]:
+    """Restore chain terminal endpoints that were displaced by chamfering.
+
+    If *pad_positions* is provided, restoration only fires when the original
+    endpoint is near a pad.  Otherwise it fires unconditionally (safe
+    default -- terminal endpoints should always be preserved).
+    """
+    if not segments:
+        return segments
+
+    # Use a generous tolerance for pad matching (0.05 mm) to catch pads
+    # that are close but not exact due to coordinate rounding.
+    pad_match_tolerance = 0.05
+
+    # --- Restore start of first segment ---
+    first = segments[0]
+    start_displaced = (
+        abs(first.x1 - orig_start[0]) > tolerance or abs(first.y1 - orig_start[1]) > tolerance
+    )
+    if start_displaced:
+        should_restore_start = pad_positions is None or _point_near_any_pad(
+            orig_start, pad_positions, pad_match_tolerance
+        )
+        if should_restore_start:
+            segments[0] = Segment(
+                x1=orig_start[0],
+                y1=orig_start[1],
+                x2=first.x2,
+                y2=first.y2,
+                width=first.width,
+                layer=first.layer,
+                net=first.net,
+                net_name=first.net_name,
+            )
+
+    # --- Restore end of last segment ---
+    last = segments[-1]
+    end_displaced = abs(last.x2 - orig_end[0]) > tolerance or abs(last.y2 - orig_end[1]) > tolerance
+    if end_displaced:
+        should_restore_end = pad_positions is None or _point_near_any_pad(
+            orig_end, pad_positions, pad_match_tolerance
+        )
+        if should_restore_end:
+            segments[-1] = Segment(
+                x1=last.x1,
+                y1=last.y1,
+                x2=orig_end[0],
+                y2=orig_end[1],
+                width=last.width,
+                layer=last.layer,
+                net=last.net,
+                net_name=last.net_name,
+            )
+
+    return segments
