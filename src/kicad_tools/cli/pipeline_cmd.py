@@ -100,6 +100,7 @@ class PipelineContext:
     commit: bool = False
     max_displacement: float = 0.5
     erc_error_count: int = 0
+    _check_data: dict | None = None  # cached kct check --format json result
 
 
 def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
@@ -814,9 +815,132 @@ def _is_git_repo(directory: Path) -> bool:
         return False
 
 
+def _fetch_check_results(ctx: PipelineContext) -> dict | None:
+    """Run ``kct check --format json`` and return parsed result dict.
+
+    This helper is shared between :func:`_build_commit_message` and
+    :func:`_print_final_summary` so that the check subprocess is only
+    invoked once per pipeline run.
+
+    Args:
+        ctx: Pipeline context (PCB path, manufacturer, layers).
+
+    Returns:
+        Parsed JSON dict on success, ``None`` on any failure.
+    """
+    import json as _json
+
+    try:
+        check_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kicad_tools.cli",
+                "check",
+                str(ctx.pcb_file),
+                "--mfr",
+                ctx.mfr,
+                "--layers",
+                str(ctx.layers or 2),
+                "--format",
+                "json",
+            ],
+            cwd=str(ctx.pcb_file.parent),
+            capture_output=True,
+            text=True,
+        )
+        data = _json.loads(check_result.stdout)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _print_final_summary(
+    ctx: PipelineContext,
+    results: list[PipelineResult],
+    console: Console,
+    check_data: dict | None = None,
+) -> None:
+    """Print a DRC/ERC/verdict summary block after pipeline completion.
+
+    Called from :func:`run_pipeline` when the run is a full pipeline
+    (not single-step) and neither ``--quiet`` nor ``--dry-run`` is set.
+
+    Args:
+        ctx: Pipeline context.
+        results: List of step results from the pipeline run.
+        console: Rich console for output.
+        check_data: Pre-fetched ``kct check --format json`` result, or
+            ``None`` to skip the subprocess (used for dry-run placeholder).
+    """
+    # --- DRC ---
+    if check_data is not None:
+        summary = check_data.get("summary", {})
+        error_count = summary.get("errors", 0)
+        violations = check_data.get("violations", [])
+
+        # Per-rule-type breakdown of errors
+        by_type: dict[str, int] = {}
+        for v in violations:
+            if v.get("severity") == "error":
+                vtype = v.get("type", v.get("type_str", "unknown"))
+                by_type[vtype] = by_type.get(vtype, 0) + 1
+
+        if by_type:
+            breakdown = ", ".join(
+                f"{count} {rule}" for rule, count in sorted(by_type.items(), key=lambda x: -x[1])
+            )
+            drc_line = f"{error_count} errors ({breakdown})"
+        elif error_count > 0:
+            drc_line = f"{error_count} errors"
+        else:
+            drc_line = "0 errors"
+
+        # Silkscreen warnings: violations whose type contains "silk"
+        silk_count = sum(1 for v in violations if "silk" in v.get("type", "").lower())
+    else:
+        error_count = -1  # sentinel: unknown
+        drc_line = "unknown (check failed)"
+        silk_count = 0
+
+    # --- ERC ---
+    erc_result = next(
+        (r for r in results if r.step == PipelineStep.ERC or r.step == PipelineStep.ERC.value),
+        None,
+    )
+    if erc_result is None or erc_result.skipped:
+        erc_line = "skipped"
+    elif "no violations" in erc_result.message.lower():
+        erc_line = "PASS"
+    elif "non-blocking" in erc_result.message.lower():
+        erc_line = f"PASS with warnings -- {erc_result.message}"
+    elif not erc_result.success or "blocking" in erc_result.message.lower():
+        erc_line = f"FAIL -- {erc_result.message}"
+    else:
+        erc_line = erc_result.message
+
+    # --- Verdict ---
+    if error_count == 0:
+        verdict = "[green]READY[/green] -- board passes DRC"
+    elif error_count > 0:
+        verdict = f"[red]NOT READY[/red] -- {error_count} DRC error(s) to resolve"
+    else:
+        verdict = "unknown -- could not determine DRC status"
+
+    console.print()
+    console.print("[bold]Summary:[/bold]")
+    console.print(f"  DRC:        {drc_line}")
+    console.print(f"  ERC:        {erc_line}")
+    console.print(f"  Silkscreen: {silk_count} warnings")
+    console.print(f"  Verdict:    {verdict}")
+
+
 def _build_commit_message(
     ctx: PipelineContext,
     results: list[PipelineResult],
+    check_data: dict | None = None,
 ) -> str:
     """Build a structured commit message from pipeline results.
 
@@ -826,6 +950,8 @@ def _build_commit_message(
     Args:
         ctx: Pipeline context (for manufacturer name).
         results: List of results from the pipeline run.
+        check_data: Pre-fetched ``kct check --format json`` result. When
+            ``None``, the helper calls :func:`_fetch_check_results` itself.
 
     Returns:
         A single-line commit message string.
@@ -846,38 +972,15 @@ def _build_commit_message(
     except Exception:
         pass
 
-    # Try to extract DRC error count by running kct check --format json
-    try:
-        check_result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "kicad_tools.cli",
-                "check",
-                str(ctx.pcb_file),
-                "--mfr",
-                ctx.mfr,
-                "--layers",
-                str(ctx.layers or 2),
-                "--format",
-                "json",
-            ],
-            cwd=str(ctx.pcb_file.parent),
-            capture_output=True,
-            text=True,
-        )
-        import json as _json
-
-        data = _json.loads(check_result.stdout)
-        if isinstance(data, dict):
-            # Try common keys for violation count
-            drc_errors = data.get("total_violations", data.get("violations_count"))
-            if drc_errors is None and "violations" in data:
-                violations = data["violations"]
-                if isinstance(violations, list):
-                    drc_errors = len(violations)
-    except Exception:
-        pass
+    # Reuse pre-fetched check data or fetch now
+    data = check_data if check_data is not None else _fetch_check_results(ctx)
+    if data is not None:
+        # Try common keys for violation count
+        drc_errors = data.get("total_violations", data.get("violations_count"))
+        if drc_errors is None and "violations" in data:
+            violations = data["violations"]
+            if isinstance(violations, list):
+                drc_errors = len(violations)
 
     # Build message
     parts: list[str] = []
@@ -950,7 +1053,7 @@ def _git_commit_result(
         )
         return 1
 
-    commit_msg = _build_commit_message(ctx, results)
+    commit_msg = _build_commit_message(ctx, results, check_data=ctx._check_data)
 
     commit_result = subprocess.run(
         ["git", "-C", str(pcb_dir), "commit", "-m", commit_msg],
@@ -1050,7 +1153,7 @@ def run_pipeline(
                 if not (step == PipelineStep.ERC and next_step == PipelineStep.FIX_ERC):
                     break
 
-    # Print summary
+    # Print step-completion banner
     if not ctx.quiet:
         console.print()
         success_count = sum(1 for r in results if r.success)
@@ -1067,6 +1170,22 @@ def run_pipeline(
             console.print(
                 f"[red]Pipeline failed[/red] ({success_count}/{total_count} steps succeeded)"
             )
+
+    # Print final DRC/ERC/verdict summary (full pipeline only)
+    is_single_step = len(steps) == 1
+    if not ctx.quiet and not is_single_step:
+        if ctx.dry_run:
+            # Dry-run: show placeholder summary without running kct check
+            console.print()
+            console.print("[bold]Summary:[/bold]")
+            console.print("  DRC:        N/A (dry run)")
+            console.print("  ERC:        N/A (dry run)")
+            console.print("  Silkscreen: N/A (dry run)")
+            console.print("  Verdict:    N/A (dry run)")
+        else:
+            check_data = _fetch_check_results(ctx)
+            ctx._check_data = check_data  # cache for _build_commit_message
+            _print_final_summary(ctx, results, console, check_data=check_data)
 
     return results
 

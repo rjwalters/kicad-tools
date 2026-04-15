@@ -15,7 +15,9 @@ from kicad_tools.cli.pipeline_cmd import (
     PipelineStep,
     _build_commit_message,
     _detect_routing_status,
+    _fetch_check_results,
     _is_git_repo,
+    _print_final_summary,
     _resolve_pcb_from_project,
     _resolve_schematic,
     _run_step_erc,
@@ -2420,3 +2422,403 @@ class TestMaxDisplacementPassThrough:
         assert "--max-displacement" in cmd_args
         disp_idx = cmd_args.index("--max-displacement")
         assert cmd_args[disp_idx + 1] == "0.75"
+
+
+class TestFetchCheckResults:
+    """Tests for _fetch_check_results helper."""
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_returns_parsed_json(self, mock_run, routed_pcb: Path):
+        """Returns parsed dict when kct check produces valid JSON."""
+        import json
+
+        check_data = {
+            "summary": {"errors": 3, "warnings": 1, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "too close"},
+                {"type": "clearance", "severity": "error", "message": "too close 2"},
+                {"type": "silk_overlap", "severity": "error", "message": "silk issue"},
+            ],
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(check_data), stderr="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        result = _fetch_check_results(ctx)
+
+        assert result is not None
+        assert result["summary"]["errors"] == 3
+        assert len(result["violations"]) == 3
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_returns_none_on_invalid_json(self, mock_run, routed_pcb: Path):
+        """Returns None when subprocess output is not valid JSON."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="not json", stderr="error")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        result = _fetch_check_results(ctx)
+        assert result is None
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_returns_none_on_exception(self, mock_run, routed_pcb: Path):
+        """Returns None when subprocess raises an exception."""
+        mock_run.side_effect = FileNotFoundError("python not found")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        result = _fetch_check_results(ctx)
+        assert result is None
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_returns_none_when_stdout_is_list(self, mock_run, routed_pcb: Path):
+        """Returns None when JSON output is a list, not a dict."""
+        import json
+
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps([1, 2, 3]), stderr="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        result = _fetch_check_results(ctx)
+        assert result is None
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_uses_context_layers_default(self, mock_run, routed_pcb: Path):
+        """Falls back to 2 layers when ctx.layers is None."""
+        import json
+
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=json.dumps({"summary": {}, "violations": []}), stderr=""
+        )
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=None, quiet=True)
+        _fetch_check_results(ctx)
+
+        cmd_args = mock_run.call_args[0][0]
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "2"
+
+
+class TestPrintFinalSummary:
+    """Tests for _print_final_summary helper."""
+
+    def _make_console(self):
+        """Create a Rich Console that captures output to a string."""
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=False, no_color=True)
+        return console, buf
+
+    def test_ready_verdict_when_zero_errors(self, routed_pcb: Path):
+        """Verdict shows READY when DRC error count is 0."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 2, "rules_checked": 5, "passed": True},
+            "violations": [
+                {"type": "silk_overlap", "severity": "warning", "message": "silk issue"},
+                {"type": "clearance", "severity": "warning", "message": "minor"},
+            ],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "Summary:" in output
+        assert "DRC:" in output
+        assert "0 errors" in output
+        assert "READY" in output
+        assert "board passes DRC" in output
+
+    def test_not_ready_verdict_when_errors_exist(self, routed_pcb: Path):
+        """Verdict shows NOT READY when DRC errors exist."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 5, "warnings": 0, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "too close"},
+                {"type": "clearance", "severity": "error", "message": "too close 2"},
+                {"type": "clearance", "severity": "error", "message": "too close 3"},
+                {"type": "via_diameter", "severity": "error", "message": "too small"},
+                {"type": "via_diameter", "severity": "error", "message": "too small 2"},
+            ],
+        }
+        results = []
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "5" in output
+        assert "DRC error(s) to resolve" in output
+
+    def test_drc_breakdown_by_type(self, routed_pcb: Path):
+        """DRC line shows per-rule breakdown."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 3, "warnings": 0, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+                {"type": "clearance", "severity": "error", "message": "v2"},
+                {"type": "via_diameter", "severity": "error", "message": "v3"},
+            ],
+        }
+        results = []
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "3 errors" in output
+        assert "2 clearance" in output
+        assert "1 via_diameter" in output
+
+    def test_silkscreen_warning_count(self, routed_pcb: Path):
+        """Silkscreen count reflects silk-type violations."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 3, "rules_checked": 5, "passed": True},
+            "violations": [
+                {"type": "silk_overlap", "severity": "warning", "message": "s1"},
+                {"type": "silk_over_copper", "severity": "warning", "message": "s2"},
+                {"type": "clearance", "severity": "warning", "message": "c1"},
+            ],
+        }
+        results = []
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "Silkscreen: 2 warnings" in output
+
+    def test_erc_pass(self, routed_pcb: Path):
+        """ERC line shows PASS when no violations found."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 1, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "ERC:        PASS" in output
+
+    def test_erc_skipped(self, routed_pcb: Path):
+        """ERC line shows skipped when ERC step was skipped."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 1, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=True,
+                message="erc: no .kicad_sch found alongside PCB -- skipped",
+                skipped=True,
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "ERC:        skipped" in output
+
+    def test_erc_fail(self, routed_pcb: Path):
+        """ERC line shows FAIL when blocking errors were found."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 1, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=False,
+                message="erc: 3 blocking error(s) found (use --force to continue)",
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "FAIL" in output
+        assert "blocking" in output
+
+    def test_erc_pass_with_non_blocking(self, routed_pcb: Path):
+        """ERC line shows PASS with warnings for non-blocking errors."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 1, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=True,
+                message="erc: 2 non-blocking error(s) as warning(s)",
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "PASS with warnings" in output
+
+    def test_erc_not_in_results(self, routed_pcb: Path):
+        """ERC line shows skipped when no ERC result is present."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 1, "passed": True},
+            "violations": [],
+        }
+        results = []
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "ERC:        skipped" in output
+
+    def test_graceful_fallback_when_check_data_is_none(self, routed_pcb: Path):
+        """All fields fall back to 'unknown' when check_data is None."""
+        console, buf = self._make_console()
+        results = []
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=None)
+        output = buf.getvalue()
+
+        assert "unknown (check failed)" in output
+        assert "unknown -- could not determine DRC status" in output
+        assert "Silkscreen: 0 warnings" in output
+
+
+class TestFinalSummaryIntegration:
+    """Integration tests for final summary in run_pipeline."""
+
+    @patch("kicad_tools.cli.pipeline_cmd._fetch_check_results")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_summary_appears_in_full_pipeline(self, mock_run, mock_fetch, routed_pcb: Path, capsys):
+        """Summary block appears after full pipeline run."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        mock_fetch.return_value = {
+            "summary": {"errors": 2, "warnings": 0, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+                {"type": "clearance", "severity": "error", "message": "v2"},
+            ],
+        }
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False)
+        run_pipeline(ctx)
+
+        mock_fetch.assert_called_once_with(ctx)
+
+    @patch("kicad_tools.cli.pipeline_cmd._fetch_check_results")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_summary_suppressed_in_quiet_mode(self, mock_run, mock_fetch, routed_pcb: Path):
+        """Summary block is not shown in --quiet mode."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        run_pipeline(ctx)
+
+        mock_fetch.assert_not_called()
+
+    @patch("kicad_tools.cli.pipeline_cmd._fetch_check_results")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_summary_suppressed_in_single_step_mode(self, mock_run, mock_fetch, routed_pcb: Path):
+        """Summary block is not shown when running a single step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False)
+        run_pipeline(ctx, steps=[PipelineStep.FIX_SILKSCREEN])
+
+        mock_fetch.assert_not_called()
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_dry_run_shows_placeholder_summary(self, mock_run, routed_pcb: Path, capsys):
+        """Dry-run shows placeholder summary with N/A values."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(
+            pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False, dry_run=True
+        )
+        run_pipeline(ctx)
+
+        # Cannot easily capture Rich Console output through capsys,
+        # but we verify no crash and the function completes
+        # The dry-run path does not call _fetch_check_results
+
+    @patch("kicad_tools.cli.pipeline_cmd._fetch_check_results")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_check_data_cached_on_context(self, mock_run, mock_fetch, routed_pcb: Path):
+        """_fetch_check_results result is cached on ctx._check_data."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        expected_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 1, "passed": True},
+            "violations": [],
+        }
+        mock_fetch.return_value = expected_data
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False)
+        run_pipeline(ctx)
+
+        assert ctx._check_data is expected_data
+
+    @patch("kicad_tools.cli.pipeline_cmd._fetch_check_results")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_build_commit_message_reuses_cached_check_data(
+        self, mock_run, mock_fetch, routed_pcb: Path
+    ):
+        """_build_commit_message uses cached check_data instead of spawning subprocess."""
+        check_data = {
+            "summary": {"errors": 2, "warnings": 1, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+                {"type": "clearance", "severity": "error", "message": "v2"},
+                {"type": "silk_overlap", "severity": "warning", "message": "w1"},
+            ],
+        }
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        results = [
+            PipelineResult(step="fix-vias", success=True, message="completed"),
+        ]
+        msg = _build_commit_message(ctx, results, check_data=check_data)
+
+        # Should use the pre-fetched data instead of calling _fetch_check_results
+        mock_fetch.assert_not_called()
+        assert "3 DRC errors" in msg
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_build_commit_message_calls_fetch_when_no_cache(self, mock_run, routed_pcb: Path):
+        """_build_commit_message calls _fetch_check_results when no cache provided."""
+        import json
+
+        check_data = {
+            "summary": {"errors": 1, "warnings": 0, "rules_checked": 3, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+            ],
+        }
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(check_data), stderr="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        results = []
+        msg = _build_commit_message(ctx, results)  # no check_data param
+
+        assert "1 DRC errors" in msg
