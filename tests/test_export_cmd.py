@@ -187,6 +187,8 @@ class TestExportCmdFromMainParser:
         assert args.export_output is None
         assert args.export_dry_run is False
         assert args.export_no_report is False
+        assert args.export_auto_lcsc is True
+        assert args.export_no_auto_lcsc is False
 
     def test_parser_export_all_flags(self):
         from kicad_tools.cli.parser import create_parser
@@ -219,6 +221,50 @@ class TestExportCmdFromMainParser:
         assert args.export_no_bom is True
         assert args.export_no_cpl is True
         assert args.export_no_project_zip is True
+
+    def test_parser_export_no_auto_lcsc_flag(self):
+        """--no-auto-lcsc should set export_no_auto_lcsc to True."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb", "--no-auto-lcsc"])
+        assert args.export_no_auto_lcsc is True
+        # --auto-lcsc default is still True (separate dest)
+        assert args.export_auto_lcsc is True
+
+    def test_parser_export_auto_lcsc_flag(self):
+        """--auto-lcsc should be explicitly recognized."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb", "--auto-lcsc"])
+        assert args.export_auto_lcsc is True
+        assert args.export_no_auto_lcsc is False
+
+    def test_dispatch_forwards_no_auto_lcsc(self, tmp_path, monkeypatch):
+        """--no-auto-lcsc should be forwarded through dispatch to export_cmd."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        captured_argv = {}
+
+        import kicad_tools.cli.export_cmd as export_mod
+
+        original_main = export_mod.main
+
+        def spy_main(argv=None):
+            captured_argv["value"] = argv
+            return original_main(argv)
+
+        monkeypatch.setattr("kicad_tools.cli.export_cmd.main", spy_main)
+
+        from kicad_tools.cli import main as cli_main
+
+        rc = cli_main(
+            ["export", str(pcb), "--no-auto-lcsc", "--dry-run", "-o", str(tmp_path / "out")]
+        )
+        assert rc == 0
+        assert "--no-auto-lcsc" in captured_argv["value"]
 
     def test_dispatch_wiring(self, tmp_path, monkeypatch):
         """Verify that 'kct export ...' dispatches to export_cmd.main."""

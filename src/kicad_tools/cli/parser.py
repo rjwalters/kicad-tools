@@ -3858,6 +3858,19 @@ def _add_export_parser(subparsers) -> None:
         help="Skip KiCad project ZIP creation",
     )
     export_parser.add_argument(
+        "--auto-lcsc",
+        dest="export_auto_lcsc",
+        action="store_true",
+        default=True,
+        help="Auto-match LCSC part numbers for JLCPCB BOMs (default: enabled)",
+    )
+    export_parser.add_argument(
+        "--no-auto-lcsc",
+        dest="export_no_auto_lcsc",
+        action="store_true",
+        help="Disable LCSC auto-matching",
+    )
+    export_parser.add_argument(
         "--skip-preflight",
         dest="export_skip_preflight",
         action="store_true",

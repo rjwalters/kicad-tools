@@ -674,6 +674,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-cpl")
     if getattr(args, "export_no_project_zip", False):
         sub_argv.append("--no-project-zip")
+    if getattr(args, "export_no_auto_lcsc", False):
+        sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_skip_preflight", False):
         sub_argv.append("--skip-preflight")
     if getattr(args, "export_skip_drc", False):
