@@ -116,6 +116,14 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--local-reroute",
+        action="store_true",
+        help=(
+            "Attempt local A* rerouting for infeasible violations "
+            "(segments with both endpoints at vias). Off by default."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
@@ -210,6 +218,7 @@ Examples:
             margin=args.margin,
             dry_run=args.dry_run,
             pass_number=pass_num,
+            local_reroute=args.local_reroute,
         )
 
         repaired_this_pass = clearance_result.repaired + drill_result.repaired
@@ -244,14 +253,15 @@ Examples:
             args.max_passes,
         )
 
-    # Exit code: 0 only when final state has zero remaining violations
+    # Exit code: 0 = all repaired, 1 = no violations found/no progress, 2 = partial repair
     final_pass = pass_results[-1] if pass_results else None
     if final_pass is None:
         return 0
     remaining = final_pass.violations_before - final_pass.repaired
     if remaining == 0:
         return 0
-    # Some violations repaired but not all — exit 2 (warnings, not failure)
+    if final_pass.repaired == 0:
+        return 1
     return 2
 
 
@@ -266,6 +276,7 @@ def _run_single_pass(
     margin: float,
     dry_run: bool,
     pass_number: int = 1,
+    local_reroute: bool = False,
 ) -> tuple[RepairResult, DrillRepairResult]:
     """Execute a single repair pass (clearance + drill) and return results."""
     clearance_result = RepairResult()
@@ -282,6 +293,7 @@ def _run_single_pass(
                 max_displacement=max_displacement,
                 margin=margin,
                 dry_run=dry_run,
+                local_reroute=local_reroute,
             )
             if clearance_result.repaired > 0 and not dry_run:
                 repairer.save(output_path)
@@ -459,11 +471,13 @@ def _print_json(
             "repaired": clearance_result.repaired,
             "relocated_vias": clearance_result.relocated_vias,
             "endpoint_nudges": clearance_result.endpoint_nudges,
+            "local_rerouted": clearance_result.local_rerouted,
             "skipped": {
                 "no_location": clearance_result.skipped_no_location,
                 "no_delta": clearance_result.skipped_no_delta,
                 "exceeds_max": clearance_result.skipped_exceeds_max,
                 "infeasible": clearance_result.skipped_infeasible,
+                "no_local_route": clearance_result.skipped_no_local_route,
             },
             "nudges": [
                 {

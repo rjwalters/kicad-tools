@@ -23,10 +23,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..sexp import SExp, parse_file
 from .report import DRCReport
 from .violation import DRCViolation, ViolationType
+
+if TYPE_CHECKING:
+    from .local_rerouter import LocalRerouter
 
 
 @dataclass
@@ -66,6 +70,8 @@ class RepairResult:
     skipped_infeasible: int = 0
     relocated_vias: int = 0
     endpoint_nudges: int = 0
+    local_rerouted: int = 0
+    skipped_no_local_route: int = 0
     nudges: list[NudgeResult] = field(default_factory=list)
 
     @property
@@ -84,10 +90,14 @@ class RepairResult:
             lines.append(f"  Endpoint nudges (via-preserving): {self.endpoint_nudges}")
         if self.relocated_vias > 0:
             lines.append(f"  Via relocations: {self.relocated_vias}")
+        if self.local_rerouted > 0:
+            lines.append(f"  Local reroutes: {self.local_rerouted}")
         if self.skipped_exceeds_max > 0:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
             lines.append(f"  Skipped (infeasible): {self.skipped_infeasible}")
+        if self.skipped_no_local_route > 0:
+            lines.append(f"  Skipped (no local route): {self.skipped_no_local_route}")
         if self.skipped_no_location > 0:
             lines.append(f"  Skipped (no location): {self.skipped_no_location}")
         if self.skipped_no_delta > 0:
@@ -135,6 +145,8 @@ class ClearanceRepairer:
         margin: float = 0.01,
         prefer: str = "move-trace",
         dry_run: bool = False,
+        local_reroute: bool = False,
+        local_grid_padding: float = 0.5,
     ) -> RepairResult:
         """Repair clearance violations using a DRC report.
 
@@ -145,6 +157,10 @@ class ClearanceRepairer:
             prefer: Which object to move when both are movable
                     ("move-trace" or "move-via")
             dry_run: If True, compute repairs but don't modify PCB
+            local_reroute: If True, attempt local A* rerouting for
+                          infeasible violations after nudge phase
+            local_grid_padding: Padding around segment bounding box for
+                               local reroute grid (mm, default: 0.5)
 
         Returns:
             RepairResult with details of all repairs
@@ -156,19 +172,243 @@ class ClearanceRepairer:
         all_clearances = clearances + segment_via_clearances
         result.total_violations = len(all_clearances)
 
+        # Track violations where nudge was explicitly skipped as infeasible
+        skipped_violations: list[DRCViolation] = []
+
         for violation in clearances:
+            before_infeasible = result.skipped_infeasible
             self._repair_single_violation(
                 violation, result, max_displacement, margin, prefer, dry_run
             )
+            if result.skipped_infeasible > before_infeasible:
+                skipped_violations.append(violation)
 
         # For segment-to-via violations, always prefer moving the trace
         # (never the via, since it was just sized by fix-vias)
         for violation in segment_via_clearances:
+            before_infeasible = result.skipped_infeasible
             self._repair_single_violation(
                 violation, result, max_displacement, margin, "move-trace", dry_run
             )
+            if result.skipped_infeasible > before_infeasible:
+                skipped_violations.append(violation)
+
+        # Phase 2: Local rerouting for infeasible violations
+        if local_reroute:
+            # Also find violations where nudge "succeeded" but _apply_nudge
+            # silently did nothing because both endpoints sit at vias.
+            # These are counted as "repaired" by the nudge phase but need rerouting.
+            both_at_vias = self._find_both_endpoints_at_vias_violations(
+                all_clearances, result, max_displacement, margin
+            )
+
+            all_reroute_candidates = []
+            # Violations explicitly skipped as infeasible: counter adjustments
+            # on success are: skipped_infeasible -= 1, repaired += 1
+            for v in skipped_violations:
+                all_reroute_candidates.append((v, "skipped"))
+            # Violations where nudge was counted as repaired but segment didn't move:
+            # counter adjustments on success are: repaired stays the same (already counted),
+            # only local_rerouted += 1
+            # Deduplicate: exclude any already queued via skipped_violations to avoid
+            # processing the same violation twice.
+            skipped_set = {id(v) for v in skipped_violations}
+            for v in both_at_vias:
+                if id(v) not in skipped_set:
+                    all_reroute_candidates.append((v, "phantom_repair"))
+
+            if all_reroute_candidates:
+                self._run_local_reroute_phase(
+                    all_reroute_candidates, result, margin, dry_run, local_grid_padding
+                )
 
         return result
+
+    def _find_both_endpoints_at_vias_violations(
+        self,
+        violations: list[DRCViolation],
+        result: RepairResult,
+        max_displacement: float,
+        margin: float,
+    ) -> list[DRCViolation]:
+        """Identify violations where the nudge "repaired" a segment but
+        _apply_nudge silently did nothing because both endpoints are at vias.
+
+        These violations were counted as repaired but the segment wasn't
+        actually moved. We need to reroute them instead.
+        """
+        via_positions = self._find_via_positions()
+        tolerance = 0.001
+        both_at_vias: list[DRCViolation] = []
+
+        for violation in violations:
+            if len(violation.locations) < 2:
+                continue
+            delta = violation.delta_mm
+            if delta is None:
+                continue
+            if delta + margin > max_displacement:
+                continue
+
+            # Find the segment object for this violation
+            loc1 = violation.locations[0]
+            loc2 = violation.locations[1]
+            obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
+            obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
+
+            # Check if either object is a segment with both endpoints at vias
+            for obj in (obj1, obj2):
+                if obj is None or obj[1] != "segment":
+                    continue
+                seg_node = obj[0]
+                start_node = seg_node.find("start")
+                end_node = seg_node.find("end")
+                if not (start_node and end_node):
+                    continue
+                start_atoms = start_node.get_atoms()
+                end_atoms = end_node.get_atoms()
+                sx = float(start_atoms[0]) if start_atoms else 0
+                sy = float(start_atoms[1]) if len(start_atoms) > 1 else 0
+                ex = float(end_atoms[0]) if end_atoms else 0
+                ey = float(end_atoms[1]) if len(end_atoms) > 1 else 0
+
+                start_at_via = any(
+                    math.sqrt((sx - vx) ** 2 + (sy - vy) ** 2) <= tolerance
+                    for vx, vy in via_positions
+                )
+                end_at_via = any(
+                    math.sqrt((ex - vx) ** 2 + (ey - vy) ** 2) <= tolerance
+                    for vx, vy in via_positions
+                )
+
+                if start_at_via and end_at_via:
+                    both_at_vias.append(violation)
+                    break
+
+        return both_at_vias
+
+    def _run_local_reroute_phase(
+        self,
+        tagged_violations: list[tuple[DRCViolation, str]],
+        result: RepairResult,
+        margin: float,
+        dry_run: bool,
+        local_grid_padding: float,
+    ) -> None:
+        """Attempt local A* rerouting for violations that nudging could not fix.
+
+        Each violation is tagged with its source:
+        - "skipped": explicitly counted as skipped_infeasible by nudge phase
+        - "phantom_repair": counted as repaired but _apply_nudge did nothing
+
+        For each violation, identifies the segment and tries to reroute it
+        around the obstacle using a local A* grid.
+        """
+        from .local_rerouter import LocalRerouter
+
+        rerouter = LocalRerouter(
+            doc=self.doc,
+            nets=self.nets,
+            resolution=0.05,
+            padding=local_grid_padding,
+        )
+
+        for violation, source in tagged_violations:
+            self._attempt_local_reroute(violation, result, rerouter, margin, dry_run, source)
+
+    def _attempt_local_reroute(
+        self,
+        violation: DRCViolation,
+        result: RepairResult,
+        rerouter: LocalRerouter,
+        margin: float,
+        dry_run: bool,
+        source: str = "skipped",
+    ) -> None:
+        """Attempt to locally reroute a single infeasible violation.
+
+        Args:
+            source: "skipped" if the violation was counted as skipped_infeasible,
+                    "phantom_repair" if it was counted as repaired but the nudge
+                    silently did nothing (both endpoints at vias).
+        """
+        if len(violation.locations) < 2:
+            result.skipped_no_local_route += 1
+            return
+
+        loc1 = violation.locations[0]
+        loc2 = violation.locations[1]
+
+        # Find segment and obstacle objects at the two violation locations
+        seg_info = None
+        obstacle_info = None
+
+        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
+        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
+
+        if obj1 is not None and obj1[1] == "segment":
+            seg_info = obj1
+            obstacle_info = (loc2.x_mm, loc2.y_mm, obj2)
+        elif obj2 is not None and obj2[1] == "segment":
+            seg_info = obj2
+            obstacle_info = (loc1.x_mm, loc1.y_mm, obj1)
+
+        if seg_info is None:
+            result.skipped_no_local_route += 1
+            return
+
+        seg_node = seg_info[0]
+        obs_x, obs_y, obs_obj = obstacle_info
+
+        # Determine obstacle radius
+        obstacle_radius = 0.3  # Default fallback
+        if obs_obj is not None and obs_obj[1] == "via":
+            via_node = obs_obj[0]
+            size_node = via_node.find("size")
+            if size_node:
+                obstacle_radius = float(size_node.get_first_atom()) / 2
+        elif obs_obj is not None and obs_obj[1] == "segment":
+            # Segment-to-segment: use the segment's width as obstacle radius
+            other_seg = obs_obj[0]
+            width_node = other_seg.find("width")
+            obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
+
+        # Get trace parameters
+        width_node = seg_node.find("width")
+        trace_width = float(width_node.get_first_atom()) if width_node else 0.25
+
+        # Required clearance from violation info
+        required_clearance = violation.required_value_mm or 0.2
+        trace_clearance = required_clearance + margin
+
+        reroute_result = rerouter.reroute_segment(
+            seg_node=seg_node,
+            obstacle_x=obs_x,
+            obstacle_y=obs_y,
+            obstacle_radius=obstacle_radius,
+            trace_width=trace_width,
+            trace_clearance=trace_clearance,
+            dry_run=dry_run,
+        )
+
+        if reroute_result.success:
+            result.local_rerouted += 1
+            if source == "skipped":
+                # Violation was counted as skipped_infeasible in nudge phase;
+                # undo that and count as repaired instead.
+                result.repaired += 1
+                result.skipped_infeasible -= 1
+            # For "phantom_repair" source: repaired was already incremented
+            # in the nudge phase, so we only need local_rerouted.
+            if not dry_run:
+                self.modified = True
+        else:
+            result.skipped_no_local_route += 1
+            if source == "phantom_repair":
+                # The nudge phase already incremented repaired, but the segment
+                # didn't actually move and local reroute also failed.  Undo the
+                # phantom repaired count to avoid double-counting.
+                result.repaired -= 1
 
     def _repair_single_violation(
         self,

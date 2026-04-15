@@ -1063,3 +1063,246 @@ class TestFixDrcJsonCounters:
         assert "endpoint_nudges" in data["clearance"]
         assert isinstance(data["clearance"]["relocated_vias"], int)
         assert isinstance(data["clearance"]["endpoint_nudges"], int)
+
+    def test_json_output_has_local_reroute_counters(self, tmp_path: Path, capsys):
+        """JSON output should include local_rerouted and skipped.no_local_route."""
+        from kicad_tools.cli.fix_drc_cmd import main as fix_drc_main
+
+        pcb_file = tmp_path / "json_lr_test.kicad_pcb"
+        pcb_file.write_text(PCB_SEGMENT_BOTH_ENDPOINTS_AT_VIAS)
+
+        # Write a minimal DRC report for the both-endpoints-at-vias case
+        report_content = """\
+** Drc report for json_lr_test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.0500 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0000 mm): Track [GND] on F.Cu
+    @(105.0000 mm, 100.1000 mm): Via [+3.3V] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+        report_file = tmp_path / "json_lr_test-drc.rpt"
+        report_file.write_text(report_content)
+
+        fix_drc_main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--format",
+                "json",
+                "--max-displacement",
+                "0.5",
+                "--local-reroute",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "clearance" in data
+        assert "local_rerouted" in data["clearance"]
+        assert "no_local_route" in data["clearance"]["skipped"]
+        assert isinstance(data["clearance"]["local_rerouted"], int)
+        assert isinstance(data["clearance"]["skipped"]["no_local_route"], int)
+
+
+class TestLocalRerouteIntegration:
+    """Integration tests for local reroute via ClearanceRepairer."""
+
+    def test_local_reroute_of_both_endpoints_at_vias(self, tmp_path: Path):
+        """local_reroute=True should reroute a segment with both endpoints at vias."""
+        # PCB with segment (100,100)->(102,100) net=1 and obstacle via at (101,100.3) net=2
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-lr1"))
+  (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-lr2"))
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-lr"))
+  (via (at 101 100.3) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-lr-obs"))
+)
+"""
+        pcb_file = tmp_path / "lr_test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.3, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=False,
+            local_reroute=True,
+        )
+
+        assert result.local_rerouted >= 1
+        assert result.repaired >= 1
+
+    def test_local_reroute_dry_run_counts_without_modifying(self, tmp_path: Path):
+        """Dry run with local_reroute=True should count reroutes without modifying PCB."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-dr1"))
+  (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-dr2"))
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-dr"))
+  (via (at 101 100.3) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-dr-obs"))
+)
+"""
+        pcb_file = tmp_path / "lr_dry_test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.3, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=True,
+            local_reroute=True,
+        )
+
+        # Should find a reroute even in dry-run
+        assert result.local_rerouted >= 1
+        # PCB should not be modified
+        assert not repairer.modified
+
+    def test_local_reroute_off_by_default(self, tmp_path: Path):
+        """Without local_reroute=True, infeasible violations stay infeasible."""
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-nolr1"))
+  (via (at 102 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-nolr2"))
+  (segment (start 100 100) (end 102 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-nolr"))
+  (via (at 101 100.3) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 2) (uuid "via-nolr-obs"))
+)
+"""
+        pcb_file = tmp_path / "lr_off_test.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                DRCViolation(
+                    type=ViolationType.CLEARANCE_SEGMENT_VIA,
+                    type_str="clearance_segment_via",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=101.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=101.0, y_mm=100.3, layer="F.Cu"),
+                    ],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(
+            report,
+            max_displacement=0.5,
+            dry_run=False,
+            # local_reroute defaults to False
+        )
+
+        assert result.local_rerouted == 0
+        assert result.skipped_no_local_route == 0
+
+    def test_repair_result_summary_includes_local_reroute_counters(self):
+        """RepairResult.summary() should include local reroute counters."""
+        result = RepairResult(
+            total_violations=5,
+            repaired=4,
+            local_rerouted=2,
+            skipped_no_local_route=1,
+            skipped_infeasible=0,
+        )
+        summary = result.summary()
+        assert "Local reroutes" in summary
+        assert "no local route" in summary.lower()
