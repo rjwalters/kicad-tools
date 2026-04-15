@@ -2739,6 +2739,290 @@ class TestPrintFinalSummary:
         assert "Silkscreen: 0 warnings" in output
 
 
+class TestVerdictMatchesAudit:
+    """Tests that the pipeline verdict uses the audit step result when available.
+
+    Issue #1443: The verdict was derived solely from DRC error count, ignoring
+    ERC, connectivity, and manufacturer compatibility.  When the AUDIT step ran
+    its success/failure should drive the verdict instead.
+    """
+
+    def _make_console(self):
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=False, no_color=True)
+        return console, buf
+
+    # -- Audit-driven verdicts --
+
+    def test_audit_passed_shows_ready(self, routed_pcb: Path):
+        """When audit step succeeds with no warnings, verdict is READY."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=True, message="audit: completed successfully"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "READY" in output
+        assert "audit passed" in output
+        assert "NOT READY" not in output
+
+    def test_audit_failed_shows_not_ready(self, routed_pcb: Path):
+        """When audit step fails, verdict is NOT READY."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=False, message="audit: failed: exit code 1"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+
+    def test_audit_failed_with_drc_errors_shows_drc_reason(self, routed_pcb: Path):
+        """When audit fails and DRC has errors, verdict mentions DRC errors."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 3, "warnings": 0, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+                {"type": "clearance", "severity": "error", "message": "v2"},
+                {"type": "clearance", "severity": "error", "message": "v3"},
+            ],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=False, message="audit: failed: exit code 1"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "3 DRC error(s)" in output
+
+    def test_audit_failed_with_drc_and_erc_errors(self, routed_pcb: Path):
+        """When audit fails with both DRC and ERC errors, both are listed."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 2, "warnings": 0, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+                {"type": "clearance", "severity": "error", "message": "v2"},
+            ],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=False,
+                message="erc: 3 blocking error(s) found",
+            ),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=False, message="audit: failed: exit code 1"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "2 DRC error(s)" in output
+        assert "ERC errors" in output
+
+    def test_audit_failed_no_drc_or_erc_errors_shows_see_above(self, routed_pcb: Path):
+        """When audit fails but DRC/ERC are fine, verdict says see audit output."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=False, message="audit: failed: exit code 1"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "see audit output above" in output
+
+    def test_audit_passed_with_drc_warnings_shows_warning(self, routed_pcb: Path):
+        """When audit passes but DRC has warnings, verdict is WARNING."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 2, "rules_checked": 5, "passed": True},
+            "violations": [
+                {"type": "silk_overlap", "severity": "warning", "message": "s1"},
+                {"type": "clearance", "severity": "warning", "message": "c1"},
+            ],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=True, message="audit: completed successfully"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "WARNING" in output
+        assert "audit passed with warnings" in output
+        assert "NOT READY" not in output
+
+    def test_audit_passed_with_erc_warnings_shows_warning(self, routed_pcb: Path):
+        """When audit passes but ERC has non-blocking warnings, verdict is WARNING."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=True,
+                message="erc: 2 non-blocking error(s) as warning(s)",
+            ),
+            PipelineResult(
+                step=PipelineStep.AUDIT, success=True, message="audit: completed successfully"
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "WARNING" in output
+        assert "audit passed with warnings" in output
+        assert "NOT READY" not in output
+
+    def test_audit_skipped_falls_back_to_drc_only(self, routed_pcb: Path):
+        """When audit step was skipped, verdict falls back to DRC heuristic."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
+            PipelineResult(
+                step=PipelineStep.AUDIT,
+                success=True,
+                message="audit: skipped",
+                skipped=True,
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "READY" in output
+        assert "board passes DRC" in output
+
+    # -- Fallback verdicts (no audit step) --
+
+    def test_no_audit_erc_fail_drc_pass_shows_not_ready(self, routed_pcb: Path):
+        """Without audit, ERC failure alone yields NOT READY (previously READY bug)."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=False,
+                message="erc: 3 blocking error(s) found",
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "ERC errors to resolve" in output
+
+    def test_no_audit_both_drc_and_erc_fail(self, routed_pcb: Path):
+        """Without audit, both DRC and ERC failures are mentioned."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 2, "warnings": 0, "rules_checked": 5, "passed": False},
+            "violations": [
+                {"type": "clearance", "severity": "error", "message": "v1"},
+                {"type": "clearance", "severity": "error", "message": "v2"},
+            ],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=False,
+                message="erc: 3 blocking error(s) found",
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "NOT READY" in output
+        assert "2 DRC error(s) and ERC errors to resolve" in output
+
+    def test_no_audit_drc_pass_erc_skipped_shows_ready(self, routed_pcb: Path):
+        """Without audit, DRC pass and ERC skipped yields READY."""
+        console, buf = self._make_console()
+        check_data = {
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 5, "passed": True},
+            "violations": [],
+        }
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC,
+                success=True,
+                message="erc: skipped",
+                skipped=True,
+            ),
+        ]
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+
+        _print_final_summary(ctx, results, console, check_data=check_data)
+        output = buf.getvalue()
+
+        assert "READY" in output
+        assert "board passes DRC" in output
+
+
 class TestFinalSummaryIntegration:
     """Integration tests for final summary in run_pipeline."""
 
