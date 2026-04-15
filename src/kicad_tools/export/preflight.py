@@ -128,6 +128,8 @@ class PreflightChecker:
         if self.schematic_path and self.schematic_path.exists():
             results.append(self._check_bom_fields())
             results.append(self._check_bom_footprint_match())
+            if self._pcb is not None:
+                results.append(self._check_bom_cpl_match())
 
         # DRC check
         if not self.config.skip_drc:
@@ -501,6 +503,68 @@ class PreflightChecker:
             name="bom_pcb_match",
             status="OK",
             message=f"BOM and PCB references match ({len(bom_refs)} components)",
+        )
+
+    def _check_bom_cpl_match(self) -> PreflightResult:
+        """Check that BOM references match CPL-eligible PCB footprints.
+
+        The CPL (pick-and-place) file is generated from PCB footprints with
+        filtering applied: DNP components and footprints excluded from position
+        files are omitted.  This check compares the set of active BOM
+        references against the CPL-eligible footprint references so that
+        assembly mismatches are caught before export.
+        """
+        if self._pcb is None:
+            return PreflightResult(
+                name="bom_cpl_match",
+                status="WARN",
+                message="Cannot check BOM/CPL match: PCB not loaded",
+            )
+
+        try:
+            bom = self._load_bom()
+        except Exception as e:
+            return PreflightResult(
+                name="bom_cpl_match",
+                status="WARN",
+                message=f"Cannot check BOM/CPL match: {e}",
+            )
+
+        # BOM references (non-virtual, non-DNP) -- same filter as _check_bom_footprint_match
+        bom_refs = {item.reference for item in bom.items if not item.is_virtual and not item.dnp}
+
+        # CPL-eligible footprint references -- mirrors extract_placements() in pnp.py
+        cpl_refs = {
+            fp.reference
+            for fp in self._pcb.footprints
+            if not getattr(fp, "exclude_from_pos_files", False)
+        }
+
+        in_bom_not_cpl = bom_refs - cpl_refs
+        in_cpl_not_bom = cpl_refs - bom_refs
+
+        issues: list[str] = []
+        if in_bom_not_cpl:
+            refs = ", ".join(sorted(in_bom_not_cpl)[:10])
+            suffix = f" (and {len(in_bom_not_cpl) - 10} more)" if len(in_bom_not_cpl) > 10 else ""
+            issues.append(f"{len(in_bom_not_cpl)} in BOM but not in CPL: {refs}{suffix}")
+        if in_cpl_not_bom:
+            refs = ", ".join(sorted(in_cpl_not_bom)[:10])
+            suffix = f" (and {len(in_cpl_not_bom) - 10} more)" if len(in_cpl_not_bom) > 10 else ""
+            issues.append(f"{len(in_cpl_not_bom)} in CPL but not in BOM: {refs}{suffix}")
+
+        if issues:
+            return PreflightResult(
+                name="bom_cpl_match",
+                status="FAIL",
+                message="BOM/CPL reference mismatch",
+                details="; ".join(issues),
+            )
+
+        return PreflightResult(
+            name="bom_cpl_match",
+            status="OK",
+            message=f"BOM and CPL references match ({len(bom_refs)} components)",
         )
 
     def _check_drc(self) -> PreflightResult:
