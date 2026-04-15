@@ -602,7 +602,7 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
             success=True,
             message=(
                 f"[dry-run] Would run: kct fix-drc {ctx.pcb_file.name} "
-                f"--max-passes 3 --local-reroute --max-displacement {ctx.max_displacement}"
+                f"--max-passes 20 --local-reroute --max-displacement {ctx.max_displacement}"
             ),
         )
 
@@ -616,7 +616,7 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
         "fix-drc",
         str(ctx.pcb_file),
         "--max-passes",
-        "3",
+        "20",
         "--local-reroute",
         "--max-displacement",
         str(ctx.max_displacement),

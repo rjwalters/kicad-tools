@@ -2330,6 +2330,39 @@ class TestFixDrcLocalReroute:
         assert result.success is True
         assert "--local-reroute" in result.message
 
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_drc_subprocess_includes_max_passes_20(self, mock_run, routed_pcb: Path):
+        """fix-drc subprocess command passes --max-passes 20."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--max-passes" in cmd_args
+        passes_idx = cmd_args.index("--max-passes")
+        assert cmd_args[passes_idx + 1] == "20"
+
+    def test_fix_drc_dry_run_shows_max_passes_20(self, routed_pcb: Path):
+        """Dry-run message for fix-drc includes --max-passes 20."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        assert "--max-passes 20" in result.message
+
 
 class TestMaxDisplacementPassThrough:
     """Tests for --max-displacement pipeline option forwarded to fix-drc step."""
