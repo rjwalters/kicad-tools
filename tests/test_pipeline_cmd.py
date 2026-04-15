@@ -2345,7 +2345,7 @@ class TestMaxDisplacementPassThrough:
         result = _run_step_fix_drc(ctx, console)
 
         assert result.success is True
-        assert "--max-displacement 0.5" in result.message
+        assert "--max-displacement 2.0" in result.message
 
     def test_fix_drc_dry_run_shows_custom_max_displacement(self, routed_pcb: Path):
         """Dry-run message reflects a user-specified max-displacement value."""
@@ -2400,12 +2400,12 @@ class TestMaxDisplacementPassThrough:
         disp_idx = cmd_args.index("--max-displacement")
         assert cmd_args[disp_idx + 1] == "1.0"
 
-    def test_pipeline_default_max_displacement_is_0_5(self):
-        """PipelineContext defaults to 0.5 mm max-displacement."""
+    def test_pipeline_default_max_displacement_is_2_0(self):
+        """PipelineContext defaults to 2.0 mm max-displacement."""
         from pathlib import Path
 
         ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"))
-        assert ctx.max_displacement == 0.5
+        assert ctx.max_displacement == 2.0
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_cli_max_displacement_forwarded_to_pipeline(self, mock_run, routed_pcb: Path):

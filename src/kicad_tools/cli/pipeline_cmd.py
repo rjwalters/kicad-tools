@@ -98,7 +98,7 @@ class PipelineContext:
     force: bool = False
     is_project: bool = False
     commit: bool = False
-    max_displacement: float = 0.5
+    max_displacement: float = 2.0
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
 
