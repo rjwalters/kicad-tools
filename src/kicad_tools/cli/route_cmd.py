@@ -3201,7 +3201,7 @@ def main(argv: list[str] | None = None) -> int:
             print("This board cannot be manufactured without fixing DRC errors.")
             print()
             print("Suggestions:")
-            print(f"  - Auto-repair DRC violations: kct fix-drc {output_path} --max-passes 3")
+            print(f"  - Auto-repair DRC violations: kct fix-drc {output_path} --max-passes 20")
             print("  - Try Monte Carlo routing: kct route --trials 10")
             print("  - Increase board area")
             print("  - Reduce component density")
