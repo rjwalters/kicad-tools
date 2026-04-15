@@ -1202,19 +1202,44 @@ def run_pipeline(
                 if not (step == PipelineStep.ERC and next_step == PipelineStep.FIX_ERC):
                     break
 
+    # Post-loop reclassification: when ERC failed but FIX_ERC resolved the errors,
+    # reclassify ERC as a warning so the banner and exit code reflect success.
+    erc_result = next((r for r in results if r.step == PipelineStep.ERC), None)
+    fix_erc_result = next((r for r in results if r.step == PipelineStep.FIX_ERC), None)
+    if (
+        erc_result
+        and not erc_result.success
+        and fix_erc_result
+        and fix_erc_result.success
+        and not fix_erc_result.skipped
+    ):
+        erc_result.success = True
+        erc_result.warning = True
+        erc_result.message = erc_result.message.replace(
+            "blocking error(s) found",
+            "blocking error(s) found -> fixed by fix-erc",
+        )
+
     # Print step-completion banner
     if not ctx.quiet:
         console.print()
         success_count = sum(1 for r in results if r.success)
         total_count = len(results)
         skipped_count = sum(1 for r in results if r.skipped)
+        warning_count = sum(1 for r in results if r.warning)
 
         if success_count == total_count:
             skip_note = f", {skipped_count} skipped" if skipped_count else ""
-            console.print(
-                f"[green]Pipeline completed successfully[/green] "
-                f"({success_count}/{total_count} steps{skip_note})"
-            )
+            if warning_count > 0:
+                console.print(
+                    f"[yellow]Pipeline completed with warnings[/yellow] "
+                    f"({success_count}/{total_count} steps{skip_note})"
+                )
+            else:
+                console.print(
+                    f"[green]Pipeline completed successfully[/green] "
+                    f"({success_count}/{total_count} steps{skip_note})"
+                )
         else:
             console.print(
                 f"[red]Pipeline failed[/red] ({success_count}/{total_count} steps succeeded)"
