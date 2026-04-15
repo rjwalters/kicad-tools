@@ -45,7 +45,7 @@ design_rules:
     min_clearance_mm: 0.1016        # 4 mil
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45
-    min_annular_ring_mm: 0.15       # 6 mil (per JLCPCB specs)
+    min_annular_ring_mm: 0.10       # 4 mil (JLCPCB advanced PCB capability for 4+ layers)
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
@@ -62,7 +62,7 @@ design_rules:
     min_clearance_mm: 0.1016        # 4 mil
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45
-    min_annular_ring_mm: 0.15       # 6 mil (per JLCPCB specs)
+    min_annular_ring_mm: 0.10       # 4 mil (JLCPCB advanced PCB capability for 4+ layers)
     min_hole_diameter_mm: 0.2
     max_hole_diameter_mm: 6.3
     min_copper_to_edge_mm: 0.3
