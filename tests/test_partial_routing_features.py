@@ -59,7 +59,8 @@ class TestAutoLayersSuggestion:
         text = output.getvalue()
         assert "--auto-layers" in text
         assert "board.kicad_pcb" in text
-        assert "2/4 nets failed" in text
+        assert "2/4 nets" in text
+        assert "failed on 2 layers" in text
 
     def test_auto_layers_suggestion_not_shown_on_4_layer_board(self):
         """Suggestion does NOT appear when already using 4+ layers."""
@@ -118,8 +119,9 @@ class TestAutoLayersSuggestion:
             )
 
         text = output.getvalue()
-        assert "3/10 nets failed" in text
-        assert "30% failure rate" in text
+        assert "3/10 nets" in text
+        assert "30%" in text
+        assert "failed on 2 layers" in text
 
     def test_auto_layers_suggestion_without_pcb_file(self):
         """Suggestion works without pcb_file (no filename in command)."""
