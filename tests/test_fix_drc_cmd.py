@@ -1641,3 +1641,63 @@ class TestEnlargedViaDisplacement:
             assert data["clearance"]["repaired"] == 0, (
                 f"Expected skip at max_displacement={max_disp}"
             )
+
+
+# ── Centralized CLI forwarding tests ────────────────────────────────
+
+
+class TestLocalRerouteViaCentralizedCLI:
+    """Tests that --local-reroute and --quiet work via kct fix-drc (centralized CLI)."""
+
+    def test_centralized_cli_local_reroute_dry_run(self, tmp_path):
+        """kct fix-drc ... --local-reroute --dry-run parses without 'unrecognized arguments'."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--local-reroute", "--dry-run", "--quiet"])
+        # Should not fail with unrecognized arguments (exit code 2 = argparse error)
+        assert result != 2
+
+    def test_centralized_cli_quiet_dry_run(self, tmp_path):
+        """kct fix-drc ... --quiet --dry-run parses without 'unrecognized arguments'."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--quiet", "--dry-run"])
+        assert result != 2
+
+    def test_centralized_cli_quiet_short_flag_dry_run(self, tmp_path):
+        """kct fix-drc ... -q --dry-run parses the short -q flag."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "-q", "--dry-run"])
+        assert result != 2
+
+    def test_centralized_cli_local_reroute_quiet_combined(self, tmp_path):
+        """kct fix-drc ... --local-reroute --quiet --dry-run combines without conflict."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(["fix-drc", str(pcb_file), "--local-reroute", "--quiet", "--dry-run"])
+        assert result != 2
+
+    def test_centralized_cli_max_displacement_still_works(self, tmp_path):
+        """kct fix-drc ... --max-displacement 0.5 --dry-run still works (regression check)."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(
+            ["fix-drc", str(pcb_file), "--max-displacement", "0.5", "--dry-run", "--quiet"]
+        )
+        assert result != 2

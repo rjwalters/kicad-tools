@@ -160,10 +160,12 @@ def run_fix_drc_command(args) -> int:
         sub_argv.append("--dry-run")
     if getattr(args, "max_passes", 1) != 1:
         sub_argv.extend(["--max-passes", str(args.max_passes)])
+    if getattr(args, "local_reroute", False):
+        sub_argv.append("--local-reroute")
     if args.format != "text":
         sub_argv.extend(["--format", args.format])
-    # Use global quiet flag
-    if getattr(args, "global_quiet", False):
+    # Use command-level quiet or global quiet
+    if getattr(args, "quiet", False) or getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
     return fix_drc_main(sub_argv)
 
