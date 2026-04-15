@@ -75,12 +75,18 @@ class TestGetDesignRules:
         assert clearance == 0.127  # JLCPCB 2-layer min_clearance_mm
 
     def test_jlcpcb_4layer_annular_ring_crosscheck(self):
-        """JLCPCB 4-layer: annular ring requires larger diameter than min_via_diameter."""
+        """JLCPCB 4-layer: annular ring (0.10mm) does not enlarge min_via_diameter (0.45mm).
+
+        With advanced PCB capability annular ring of 0.10mm:
+        annular_ring_min_diameter = 0.2 + 2*0.10 = 0.40mm < 0.45mm min_via_diameter
+        So effective_min_diameter = max(0.45, 0.40) = 0.45mm.
+        """
         drill, diameter, annular, clearance = get_design_rules("jlcpcb", 4, 1.0, None, None)
         assert drill == 0.2
-        # min_via_diameter is 0.45, but annular ring requires 0.2 + 2*0.15 = 0.50
-        assert diameter == 0.5
-        assert annular == 0.15
+        # min_via_diameter is 0.45, annular ring requires 0.2 + 2*0.10 = 0.40
+        # effective = max(0.45, 0.40) = 0.45
+        assert diameter == 0.45
+        assert annular == 0.10
         assert clearance == 0.1016  # JLCPCB 4-layer min_clearance_mm
 
     def test_annular_ring_returns_zero_for_no_mfr(self):
@@ -93,6 +99,21 @@ class TestGetDesignRules:
         """JLCPCB 2-layer 2oz uses 8mil (0.2032mm) clearance."""
         drill, diameter, annular, clearance = get_design_rules("jlcpcb", 2, 2.0, None, None)
         assert clearance == 0.2032
+
+    def test_jlcpcb_2layer_annular_ring_unchanged(self):
+        """2-layer profiles still use 0.15mm annular ring (unchanged)."""
+        _, _, annular_1oz, _ = get_design_rules("jlcpcb", 2, 1.0, None, None)
+        _, _, annular_2oz, _ = get_design_rules("jlcpcb", 2, 2.0, None, None)
+        assert annular_1oz == 0.15
+        assert annular_2oz == 0.15
+
+    def test_jlcpcb_4layer_2oz_annular_ring(self):
+        """JLCPCB 4-layer 2oz also uses 0.10mm annular ring."""
+        drill, diameter, annular, clearance = get_design_rules("jlcpcb", 4, 2.0, None, None)
+        assert drill == 0.2
+        assert annular == 0.10
+        # 0.2 + 2*0.10 = 0.40 < 0.45, so effective_min_diameter = 0.45
+        assert diameter == 0.45
 
 
 class TestFindAllVias:
@@ -388,13 +409,13 @@ class TestCLI:
         captured = capsys.readouterr()
         assert captured.out == ""
 
-    def test_annular_ring_violation_4layer_jlcpcb(self, tmp_path: Path, capsys):
-        """Reproduce issue #1107: 4-layer JLCPCB vias with insufficient annular ring.
+    def test_4layer_jlcpcb_compliant_via_not_enlarged(self, tmp_path: Path, capsys):
+        """4-layer JLCPCB: 0.45mm via with 0.20mm drill is already compliant.
 
-        Via: 0.45mm diameter, 0.20mm drill
-        Annular ring: (0.45 - 0.20) / 2 = 0.125mm < 0.15mm required
-        Expected: resize to 0.50mm diameter
-        Before fix: "No vias needed resizing"
+        With the corrected 0.10mm annular ring for 4-layer advanced PCB:
+        - Annular ring: (0.45 - 0.20) / 2 = 0.125mm >= 0.10mm required
+        - min_via_diameter: 0.45mm
+        - The via is already at 0.45mm, so no enlargement should occur.
         """
         pcb_content = """(kicad_pcb
           (version 20240108)
@@ -415,6 +436,47 @@ class TestCLI:
         pcb_file = tmp_path / "4layer.kicad_pcb"
         pcb_file.write_text(pcb_content)
 
+        result = main(
+            [
+                str(pcb_file),
+                "--mfr",
+                "jlcpcb",
+                "--layers",
+                "4",
+                "--dry-run",
+            ]
+        )
+
+        assert result == 0
+
+        # Verify output says "No vias needed resizing" — the via is compliant
+        captured = capsys.readouterr()
+        assert "No vias needed resizing" in captured.out
+
+    def test_4layer_jlcpcb_undersized_via_enlarged(self, tmp_path: Path, capsys):
+        """4-layer JLCPCB: 0.44mm via with 0.20mm drill should be enlarged to 0.45mm.
+
+        The via is below min_via_diameter (0.45mm) so it must be enlarged.
+        """
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (2 "In2.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 133.75 95.0) (size 0.44) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "4layer_under.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
         output_file = tmp_path / "fixed.kicad_pcb"
         result = main(
             [
@@ -430,17 +492,13 @@ class TestCLI:
 
         assert result == 0
 
-        # Verify the via was resized
+        # Verify the via was resized to minimum
         output_doc = parse_file(output_file)
         vias = find_all_vias(output_doc)
         _, _, _, drill, diameter, _, _ = vias[0]
 
         assert drill == 0.2  # Drill meets min (0.2mm for 4-layer)
-        assert diameter == 0.5  # 0.2 + 2*0.15 = 0.50mm
-
-        # Verify output doesn't say "No vias needed resizing"
-        captured = capsys.readouterr()
-        assert "No vias needed resizing" not in captured.out
+        assert diameter == 0.45  # Enlarged to min_via_diameter
 
 
 class TestClosestPointOnSegment:
