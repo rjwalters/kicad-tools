@@ -77,6 +77,7 @@ class ConnectivityStatus:
     total_nets: int = 0
     connected_nets: int = 0
     incomplete_nets: int = 0
+    zone_connected_nets: int = 0
     completion_percent: float = 100.0
     unconnected_pads: int = 0
     passed: bool = True
@@ -87,6 +88,7 @@ class ConnectivityStatus:
             "total_nets": self.total_nets,
             "connected_nets": self.connected_nets,
             "incomplete_nets": self.incomplete_nets,
+            "zone_connected_nets": self.zone_connected_nets,
             "completion_percent": self.completion_percent,
             "unconnected_pads": self.unconnected_pads,
             "passed": self.passed,
@@ -625,12 +627,35 @@ class ManufacturingAudit:
             else:
                 status.completion_percent = 100.0
 
-            status.passed = result.is_fully_routed
+            # Post-process: identify zone-connected nets among incomplete nets.
+            # Nets that have a zone definition but appear incomplete (because
+            # zone fill data is absent) are reclassified as zone-connected and
+            # excluded from the pass/fail evaluation.
+            if not result.is_fully_routed:
+                zone_net_names = {z.net_name for z in pcb.zones if z.net_number > 0}
+                error_net_names = {issue.net_name for issue in result.errors}
+                zone_connected = error_net_names & zone_net_names
+                truly_incomplete = error_net_names - zone_connected
 
-            if not status.passed:
-                status.details = (
-                    f"{status.incomplete_nets} incomplete ({status.completion_percent:.0f}%)"
-                )
+                status.zone_connected_nets = len(zone_connected)
+                status.incomplete_nets = len(truly_incomplete)
+                status.passed = len(truly_incomplete) == 0
+
+                if truly_incomplete:
+                    status.details = (
+                        f"{len(truly_incomplete)} incomplete"
+                        f" ({status.completion_percent:.0f}% routed)"
+                    )
+                    if zone_connected:
+                        status.details += (
+                            f", {len(zone_connected)} connected via zone fill (unverified)"
+                        )
+                elif zone_connected:
+                    status.details = (
+                        f"{len(zone_connected)} nets connected via zone fill (verify in KiCad)"
+                    )
+            else:
+                status.passed = True
 
         except Exception as e:
             logger.warning(f"Connectivity check failed: {e}")
@@ -810,6 +835,19 @@ class ManufacturingAudit:
                     priority=2,
                     description="Add stitching vias for GND/power planes",
                     command=f"kct stitch {self.pcb_path} --net GND",
+                )
+            )
+
+        # Zone-connected nets advisory (even when connectivity passes)
+        if result.connectivity.zone_connected_nets > 0:
+            items.append(
+                ActionItem(
+                    priority=3,
+                    description=(
+                        f"Verify zone fill in KiCad for"
+                        f" {result.connectivity.zone_connected_nets} zone-connected nets"
+                    ),
+                    command=None,
                 )
             )
 
