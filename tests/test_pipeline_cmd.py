@@ -506,7 +506,7 @@ class TestRouteExitCode2Pipeline:
 
     Issue #1413: When route exits with code 2 (partial routing), the pipeline
     should treat it as success-with-warnings and continue to downstream steps
-    (fix-drc, optimize-traces, audit, report).
+    (optimize-traces, fix-drc, audit, report).
 
     Uses unrouted_pcb fixture so the route step does not skip due to
     detecting existing traces in the board.
@@ -709,8 +709,8 @@ class TestPipelineStepOrder:
             PipelineStep.FIX_SILKSCREEN,
             PipelineStep.FIX_VIAS,
             PipelineStep.ROUTE,
-            PipelineStep.FIX_DRC,
             PipelineStep.OPTIMIZE,
+            PipelineStep.FIX_DRC,
             PipelineStep.ZONES,
             PipelineStep.AUDIT,
             PipelineStep.REPORT,

@@ -7,8 +7,8 @@ Orchestrates the full repair pipeline:
 2. Fix silkscreen (manufacturer line-width compliance)
 3. Fix vias (manufacturer compliance)
 4. [Optional] Route (if board is unrouted)
-5. Fix DRC violations
-6. Optimize traces
+5. Optimize traces
+6. Fix DRC violations
 7. Zone fill (requires kicad-cli)
 8. Audit / check
 9. Report generation (manufacturing report)
@@ -64,8 +64,8 @@ ALL_STEPS = [
     PipelineStep.FIX_SILKSCREEN,
     PipelineStep.FIX_VIAS,
     PipelineStep.ROUTE,
-    PipelineStep.FIX_DRC,
     PipelineStep.OPTIMIZE,
+    PipelineStep.FIX_DRC,
     PipelineStep.ZONES,
     PipelineStep.AUDIT,
     PipelineStep.REPORT,
