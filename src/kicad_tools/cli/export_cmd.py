@@ -72,6 +72,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip KiCad project ZIP creation",
     )
+    parser.add_argument(
+        "--auto-lcsc",
+        action="store_true",
+        default=True,
+        help="Auto-match LCSC part numbers for JLCPCB BOMs (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-auto-lcsc",
+        action="store_true",
+        help="Disable LCSC auto-matching",
+    )
 
     args = parser.parse_args(argv)
     return run_export(args)
@@ -93,6 +104,7 @@ def run_export(args: argparse.Namespace) -> int:
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
 
     # Build configuration
+    auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc
     config = ManufacturingConfig(
         output_dir=output_dir,
         include_bom=not args.no_bom,
@@ -100,6 +112,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_gerbers=not args.no_gerbers,
         include_report=not args.no_report,
         include_project_zip=not args.no_project_zip,
+        auto_lcsc=auto_lcsc,
     )
 
     pkg = ManufacturingPackage(
@@ -137,6 +150,12 @@ def run_export(args: argparse.Namespace) -> int:
                 print(f"  [ok] CPL: {result.assembly_result.pnp_path.name}")
             if result.assembly_result.gerber_path:
                 print(f"  [ok] Gerbers: {result.assembly_result.gerber_path.name}")
+            # Report LCSC enrichment results
+            if result.assembly_result.lcsc_enrichment:
+                enrichment = result.assembly_result.lcsc_enrichment
+                print()
+                for line in enrichment.summary_lines():
+                    print(f"  {line}")
         if result.report_path:
             print(f"  [ok] Report: {result.report_path.name}")
         if result.project_zip_path:

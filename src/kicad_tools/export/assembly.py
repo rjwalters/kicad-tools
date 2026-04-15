@@ -13,6 +13,7 @@ from pathlib import Path
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ValidationError
 
+from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
 from .bom_formats import BOMExportConfig, export_bom
 from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import PnPExportConfig, export_pnp
@@ -42,6 +43,11 @@ class AssemblyConfig:
     gerbers_subdir: str = "gerbers"
     gerber_config: GerberConfig | None = None
 
+    # LCSC auto-matching
+    auto_lcsc: bool = True
+    auto_lcsc_prefer_basic: bool = True
+    auto_lcsc_min_stock: int = 100
+
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
 
@@ -54,6 +60,7 @@ class AssemblyPackageResult:
     bom_path: Path | None = None
     pnp_path: Path | None = None
     gerber_path: Path | None = None
+    lcsc_enrichment: EnrichmentReport | None = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -191,7 +198,7 @@ class AssemblyPackage:
         # Generate BOM
         if self.config.include_bom:
             try:
-                result.bom_path = self._generate_bom(out_dir)
+                result.bom_path = self._generate_bom(out_dir, result)
             except Exception as e:
                 result.errors.append(f"BOM generation failed: {e}")
                 logger.error(f"BOM generation failed: {e}")
@@ -214,8 +221,21 @@ class AssemblyPackage:
 
         return result
 
-    def _generate_bom(self, output_dir: Path) -> Path:
-        """Generate BOM file."""
+    def _generate_bom(self, output_dir: Path, result: AssemblyPackageResult | None = None) -> Path:
+        """Generate BOM file.
+
+        When ``auto_lcsc`` is enabled (the default) and the target
+        manufacturer is ``jlcpcb``, missing LCSC part numbers are
+        populated automatically via :func:`enrich_bom_lcsc` before
+        the BOM CSV is written.
+
+        Args:
+            output_dir: Directory to write the BOM CSV into.
+            result: Optional result object to attach enrichment report.
+
+        Returns:
+            Path to the written BOM CSV.
+        """
         if not self.schematic_path:
             raise ValidationError(
                 ["Schematic path required for BOM generation"],
@@ -232,6 +252,21 @@ class AssemblyPackage:
         # Filter excluded references
         if self.config.exclude_references:
             items = self._filter_references(items)
+
+        # LCSC auto-matching for JLCPCB exports
+        if self.config.auto_lcsc and self.manufacturer == "jlcpcb":
+            try:
+                enrichment = enrich_bom_lcsc(
+                    items,
+                    prefer_basic=self.config.auto_lcsc_prefer_basic,
+                    min_stock=self.config.auto_lcsc_min_stock,
+                )
+                if result is not None:
+                    result.lcsc_enrichment = enrichment
+                for line in enrichment.summary_lines():
+                    logger.info(line)
+            except Exception as e:
+                logger.warning(f"LCSC auto-matching failed (continuing without): {e}")
 
         # Generate BOM
         bom_config = self.config.bom_config or BOMExportConfig()
