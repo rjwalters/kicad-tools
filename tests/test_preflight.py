@@ -774,6 +774,222 @@ class TestPreflightCLI:
 
 
 # ---------------------------------------------------------------------------
+# PreflightChecker -- BOM/CPL match check
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightBomCplMatch:
+    """Tests for the BOM/CPL cross-reference check."""
+
+    def test_bom_cpl_match_ok(self, tmp_path, monkeypatch):
+        """When BOM refs and CPL-eligible PCB refs match, result is OK."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1", "R2", "C1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        # Parse PCB first
+        checker.run_all()
+
+        # Monkeypatch _load_bom to return matching refs
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.name == "bom_cpl_match"
+        assert result.status == "OK"
+        assert "3 components" in result.message
+
+    def test_bom_cpl_match_bom_only(self, tmp_path, monkeypatch):
+        """Items in BOM but not in CPL should cause FAIL."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1", "C1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="R2", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "FAIL"
+        assert "R2" in result.details
+        assert "in BOM but not in CPL" in result.details
+
+    def test_bom_cpl_match_cpl_only(self, tmp_path, monkeypatch):
+        """Items in CPL but not in BOM should cause FAIL."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1", "R2", "C1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "FAIL"
+        assert "in CPL but not in BOM" in result.details
+
+    def test_bom_cpl_match_dnp_excluded(self, tmp_path, monkeypatch):
+        """DNP items in BOM should be excluded from comparison."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1", "C1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(
+                    reference="R2", value="10k", footprint="R_0402", lib_id="Device:R", dnp=True
+                ),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "OK"
+        assert "2 components" in result.message
+
+    def test_bom_cpl_match_virtual_excluded(self, tmp_path, monkeypatch):
+        """Virtual (power symbol) items in BOM should be excluded."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="#PWR01", value="GND", footprint="", lib_id="power:GND"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "OK"
+
+    def test_bom_cpl_match_no_pcb(self, tmp_path):
+        """Without a loaded PCB, check should return WARN."""
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=tmp_path / "nonexistent.kicad_pcb",
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        # PCB won't be loaded since file doesn't exist
+        result = checker._check_bom_cpl_match()
+        assert result.status == "WARN"
+        assert "PCB not loaded" in result.message
+
+    def test_bom_cpl_match_bom_load_fails(self, tmp_path, monkeypatch):
+        """If BOM cannot be loaded, check should return WARN."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        monkeypatch.setattr(
+            checker, "_load_bom", lambda: (_ for _ in ()).throw(RuntimeError("parse error"))
+        )
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "WARN"
+        assert "parse error" in result.message
+
+    def test_bom_cpl_match_in_run_all(self, tmp_path, monkeypatch):
+        """The bom_cpl_match check should appear in run_all() results."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+            ]
+        )
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        monkeypatch.setattr(
+            "kicad_tools.export.preflight.PreflightChecker._load_bom",
+            lambda self: bom,
+        )
+
+        results = checker.run_all()
+        cpl_result = _find_result(results, "bom_cpl_match")
+        assert cpl_result is not None
+        assert cpl_result.status == "OK"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -845,5 +1061,55 @@ def _create_pcb_with_via(directory: Path) -> Path:
 )
 """
     pcb_path = directory / "board.kicad_pcb"
+    pcb_path.write_text(content)
+    return pcb_path
+
+
+def _create_pcb_with_footprints(
+    directory: Path,
+    references: list[str],
+    filename: str = "board.kicad_pcb",
+) -> Path:
+    """Create a PCB with footprints for BOM/CPL testing.
+
+    Each reference in *references* becomes a simple SMD footprint on F.Cu.
+    A closed board outline is included so that other checks pass.
+    """
+    footprints = []
+    for i, ref in enumerate(references):
+        x = 10.0 + i * 5.0
+        footprints.append(
+            f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (at {x} 25)
+    (attr smd)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (fp_text value "10k" (at 0 1.5) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )"""
+        )
+
+    fp_block = "\n".join(footprints)
+    content = f"""(kicad_pcb (version 20231014) (generator "pcbnew")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 0) (end 50 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+{fp_block}
+)
+"""
+    pcb_path = directory / filename
     pcb_path.write_text(content)
     return pcb_path
