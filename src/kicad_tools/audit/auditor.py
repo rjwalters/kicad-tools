@@ -78,6 +78,7 @@ class ConnectivityStatus:
     connected_nets: int = 0
     incomplete_nets: int = 0
     zone_connected_nets: int = 0
+    pour_net_names: list[str] = field(default_factory=list)
     completion_percent: float = 100.0
     unconnected_pads: int = 0
     passed: bool = True
@@ -89,6 +90,7 @@ class ConnectivityStatus:
             "connected_nets": self.connected_nets,
             "incomplete_nets": self.incomplete_nets,
             "zone_connected_nets": self.zone_connected_nets,
+            "pour_net_names": self.pour_net_names,
             "completion_percent": self.completion_percent,
             "unconnected_pads": self.unconnected_pads,
             "passed": self.passed,
@@ -637,6 +639,37 @@ class ManufacturingAudit:
                 zone_connected = error_net_names & zone_net_names
                 truly_incomplete = error_net_names - zone_connected
 
+                # Second pass: classify remaining incomplete nets as pour nets.
+                # Nets with is_pour_net=True (power/ground) are expected to be
+                # zone-filled even if no zone definition exists yet.
+                classified_pour: set[str] = set()
+                try:
+                    from kicad_tools.router.net_class import classify_and_apply_rules
+
+                    net_id_by_name = {
+                        net.name: net_id
+                        for net_id, net in pcb.nets.items()
+                        if net_id > 0
+                    }
+                    pending_ids = {
+                        net_id_by_name[n]: n
+                        for n in truly_incomplete
+                        if n in net_id_by_name
+                    }
+                    if pending_ids:
+                        rules = classify_and_apply_rules(pending_ids)
+                        classified_pour = {
+                            n for n in truly_incomplete
+                            if rules.get(n) and rules[n].is_pour_net
+                        }
+                except Exception:
+                    pass  # conservative: leave truly_incomplete unchanged
+
+                if classified_pour:
+                    truly_incomplete = truly_incomplete - classified_pour
+                    zone_connected = zone_connected | classified_pour
+                    status.pour_net_names = sorted(classified_pour)
+
                 status.zone_connected_nets = len(zone_connected)
                 status.incomplete_nets = len(truly_incomplete)
                 status.passed = len(truly_incomplete) == 0
@@ -850,6 +883,19 @@ class ManufacturingAudit:
                     command=None,
                 )
             )
+
+        # Pour nets without zone definitions advisory
+        if result.connectivity.pour_net_names:
+            for net_name in result.connectivity.pour_net_names:
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=(
+                            f"Add zone for {net_name} on appropriate copper layer"
+                        ),
+                        command=None,
+                    )
+                )
 
         # Manufacturer compatibility
         if not result.compatibility.passed:
