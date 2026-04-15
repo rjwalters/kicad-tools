@@ -184,6 +184,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_calibrate_parser(subparsers)
     _add_screenshot_parser(subparsers)
     _add_report_parser(subparsers)
+    _add_export_parser(subparsers)
 
     return parser
 
@@ -3780,4 +3781,73 @@ def _add_report_parser(subparsers) -> None:
         dest="report_skip_collect",
         action="store_true",
         help="Skip auto-collection; generate skeleton report (legacy behavior)",
+    )
+
+
+def _add_export_parser(subparsers) -> None:
+    """Add export subcommand parser for manufacturing packages."""
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Generate a complete manufacturing package (BOM, CPL, Gerbers, project ZIP, manifest)",
+    )
+    export_parser.add_argument(
+        "export_pcb",
+        help="Path to .kicad_pcb file",
+    )
+    export_parser.add_argument(
+        "--mfr",
+        "-m",
+        dest="export_mfr",
+        default="jlcpcb",
+        choices=["jlcpcb", "pcbway", "oshpark", "generic"],
+        help="Target manufacturer (default: jlcpcb)",
+    )
+    export_parser.add_argument(
+        "-o",
+        "--output",
+        dest="export_output",
+        default=None,
+        help="Output directory (default: <pcb-dir>/manufacturing/)",
+    )
+    export_parser.add_argument(
+        "--sch",
+        dest="export_sch",
+        default=None,
+        help="Path to .kicad_sch file (auto-detected by default)",
+    )
+    export_parser.add_argument(
+        "--dry-run",
+        dest="export_dry_run",
+        action="store_true",
+        help="Show what would be generated without writing files",
+    )
+    export_parser.add_argument(
+        "--no-report",
+        dest="export_no_report",
+        action="store_true",
+        help="Skip report generation",
+    )
+    export_parser.add_argument(
+        "--no-gerbers",
+        dest="export_no_gerbers",
+        action="store_true",
+        help="Skip Gerber export",
+    )
+    export_parser.add_argument(
+        "--no-bom",
+        dest="export_no_bom",
+        action="store_true",
+        help="Skip BOM generation",
+    )
+    export_parser.add_argument(
+        "--no-cpl",
+        dest="export_no_cpl",
+        action="store_true",
+        help="Skip CPL/pick-and-place generation",
+    )
+    export_parser.add_argument(
+        "--no-project-zip",
+        dest="export_no_project_zip",
+        action="store_true",
+        help="Skip KiCad project ZIP creation",
     )

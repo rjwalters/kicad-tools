@@ -39,6 +39,11 @@ from .assembly import (
     AssemblyPackageResult,
     create_assembly_package,
 )
+from .manufacturing import (
+    ManufacturingConfig,
+    ManufacturingPackage,
+    ManufacturingResult,
+)
 from .bom_formats import (
     BOM_FORMATTERS,
     BOMExportConfig,
@@ -78,6 +83,10 @@ __all__ = [
     "AssemblyConfig",
     "AssemblyPackageResult",
     "create_assembly_package",
+    # Manufacturing package
+    "ManufacturingPackage",
+    "ManufacturingConfig",
+    "ManufacturingResult",
     # BOM
     "BOMFormatter",
     "BOMExportConfig",
