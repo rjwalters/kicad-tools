@@ -464,8 +464,14 @@ class ManufacturingAudit:
             result.layers = self._check_layer_utilization(pcb)
             result.cost = self._estimate_cost(pcb)
 
-        # Generate action items
+        # Generate action items from check results
         result.action_items = self._generate_action_items(result)
+
+        # Check for orphaned footprints (PCB refs not in schematic BOM)
+        if self.pcb_path.exists() and self.schematic_path.exists():
+            result.action_items.extend(self._check_orphaned_footprints())
+            # Re-sort after adding orphan items
+            result.action_items.sort(key=lambda x: x.priority)
 
         return result
 
@@ -820,6 +826,51 @@ class ManufacturingAudit:
             logger.warning(f"Cost estimation failed: {e}")
 
         return estimate
+
+    def _check_orphaned_footprints(self) -> list[ActionItem]:
+        """Check for PCB footprints that are not in the schematic BOM.
+
+        Compares PCB footprint references against schematic BOM references
+        to detect orphaned footprints (on PCB but not in schematic). DNP
+        items are included in the BOM reference set since they should still
+        have footprints.
+
+        Returns:
+            List of ActionItems for any orphaned footprints found.
+        """
+        items: list[ActionItem] = []
+
+        try:
+            from kicad_tools.schema.bom import extract_bom
+
+            pcb = self._load_pcb()
+            bom = extract_bom(str(self.schematic_path))
+
+            # BOM references: non-virtual items (includes DNP since they
+            # should still have footprints on the PCB)
+            bom_refs = {item.reference for item in bom.items if not item.is_virtual}
+
+            # PCB footprint references
+            pcb_refs = {fp.reference for fp in pcb.footprints}
+
+            orphaned = pcb_refs - bom_refs
+            if orphaned:
+                refs = ", ".join(sorted(orphaned)[:10])
+                suffix = f" (and {len(orphaned) - 10} more)" if len(orphaned) > 10 else ""
+                items.append(
+                    ActionItem(
+                        priority=2,
+                        description=(
+                            f"{len(orphaned)} orphaned footprint(s) on PCB "
+                            f"but not in schematic: {refs}{suffix}"
+                        ),
+                    )
+                )
+
+        except Exception as e:
+            logger.debug(f"Orphaned footprint check skipped: {e}")
+
+        return items
 
     def _generate_action_items(self, result: AuditResult) -> list[ActionItem]:
         """Generate prioritized action items from results."""
