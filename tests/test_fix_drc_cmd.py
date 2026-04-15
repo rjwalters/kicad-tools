@@ -253,6 +253,48 @@ DRC_REPORT_EMPTY = """\
 ** End of Report **
 """
 
+# PCB with a segment overlapping an enlarged via (post fix-vias enlargement).
+# Via enlarged from 0.6 to 0.8 mm; the trace that formerly had 0.1 mm clearance
+# now has negative clearance (overlap).  The required nudge exceeds the old
+# 0.25 mm default but is well within the new 0.5 mm pipeline default.
+PCB_ENLARGED_VIA = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100.05) (end 110 100.05) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-ev-1"))
+  (via (at 105 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ev-1"))
+)
+"""
+
+# DRC report for the enlarged-via scenario: required 0.2 mm, actual -0.07 mm.
+# delta = 0.27 mm; with 0.01 mm margin the required displacement is 0.28 mm.
+# This exceeds the old 0.25 mm cap but is within the new 0.5 mm pipeline default.
+DRC_REPORT_ENLARGED_VIA = """\
+** Drc report for test.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance_segment_via]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual -0.0700 mm)
+    Rule: netclass 'Default'; error
+    @(105.0000 mm, 100.0500 mm): Track [+3.3V] on F.Cu
+    @(105.0000 mm, 100.0000 mm): Via [GND] on F.Cu - B.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
 
 # ── Fixtures ────────────────────────────────────────────────────────
 
@@ -345,6 +387,20 @@ def report_no_net_via(tmp_path: Path) -> Path:
 def report_empty(tmp_path: Path) -> Path:
     f = tmp_path / "empty-drc.rpt"
     f.write_text(DRC_REPORT_EMPTY)
+    return f
+
+
+@pytest.fixture
+def pcb_enlarged_via(tmp_path: Path) -> Path:
+    f = tmp_path / "enlarged_via.kicad_pcb"
+    f.write_text(PCB_ENLARGED_VIA)
+    return f
+
+
+@pytest.fixture
+def report_enlarged_via(tmp_path: Path) -> Path:
+    f = tmp_path / "enlarged-via-drc.rpt"
+    f.write_text(DRC_REPORT_ENLARGED_VIA)
     return f
 
 
@@ -1485,3 +1541,103 @@ class TestMultiPassIteration:
         data = json.loads(captured.out)
         assert data["total_repaired"] >= 1
         assert result == 0
+
+
+# ── Enlarged-via displacement threshold tests ──────────────────────
+
+
+class TestEnlargedViaDisplacement:
+    """Verify that segment-to-via violations near enlarged vias are
+    skipped at the old 0.25 mm cap but repaired at 0.5 mm.
+
+    This exercises the core scenario from issue #1401: after fix-vias
+    enlarges a via, the induced clearance violation requires a nudge
+    larger than the old default but within the new pipeline default.
+    """
+
+    def test_skipped_at_old_default(
+        self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys
+    ):
+        """Violation is skipped when max-displacement is the old 0.25 mm default."""
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--max-displacement",
+                "0.25",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["clearance"]["repaired"] == 0
+        assert data["clearance"]["skipped"]["exceeds_max"] >= 1
+
+    def test_repaired_at_new_default(
+        self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys
+    ):
+        """Violation is repaired when max-displacement is raised to 0.5 mm."""
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--max-displacement",
+                "0.5",
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["clearance"]["repaired"] >= 1
+        assert data["clearance"]["skipped"]["exceeds_max"] == 0
+
+    @pytest.mark.parametrize(
+        "max_disp,expect_repaired",
+        [
+            (0.25, False),
+            (0.27, False),  # 0.27 + 0.01 margin = 0.28, still exceeds 0.27
+            (0.30, True),  # 0.28 < 0.30
+            (0.50, True),
+            (1.00, True),
+        ],
+    )
+    def test_displacement_threshold_boundary(
+        self,
+        pcb_enlarged_via: Path,
+        report_enlarged_via: Path,
+        capsys,
+        max_disp: float,
+        expect_repaired: bool,
+    ):
+        """Parametrized boundary test across displacement thresholds."""
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--max-displacement",
+                str(max_disp),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        if expect_repaired:
+            assert data["clearance"]["repaired"] >= 1, (
+                f"Expected repair at max_displacement={max_disp}"
+            )
+        else:
+            assert data["clearance"]["repaired"] == 0, (
+                f"Expected skip at max_displacement={max_disp}"
+            )

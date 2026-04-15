@@ -2994,6 +2994,17 @@ def _add_pipeline_parser(subparsers) -> None:
         help="Create a git commit with modified files after a successful pipeline run",
     )
     pipeline_parser.add_argument(
+        "--max-displacement",
+        dest="pipeline_max_displacement",
+        type=float,
+        default=0.5,
+        help=(
+            "Maximum nudge/slide distance in mm for fix-drc step (default: 0.5). "
+            "Increase when enlarged vias cause segment-to-via violations that "
+            "exceed the displacement budget."
+        ),
+    )
+    pipeline_parser.add_argument(
         "--zones",
         dest="pipeline_zones",
         action="store_true",
