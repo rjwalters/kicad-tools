@@ -8,8 +8,11 @@ images suitable for vision API consumption.
 from __future__ import annotations
 
 import base64
+import ctypes
 import logging
+import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -42,6 +45,71 @@ _FALLBACK_RENDER_PX = 4096
 KICAD_INSTALL_URL = "https://www.kicad.org/download/"
 
 
+def _macos_cairo_lib_dirs() -> list[str]:
+    """Return candidate directories for ``libcairo.dylib`` on macOS.
+
+    Checks ``HOMEBREW_PREFIX`` first, then the well-known Homebrew
+    library paths for Apple Silicon and Intel Macs.  Only directories
+    that actually exist on disk are returned.
+    """
+    candidates: list[str] = []
+    homebrew_prefix = os.environ.get("HOMEBREW_PREFIX")
+    if homebrew_prefix:
+        candidates.append(f"{homebrew_prefix}/lib")
+    candidates.extend(
+        [
+            "/opt/homebrew/lib",  # Apple Silicon
+            "/usr/local/lib",  # Intel
+        ]
+    )
+    # De-duplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in candidates:
+        if c not in seen and Path(c).is_dir():
+            seen.add(c)
+            unique.append(c)
+    return unique
+
+
+def _try_preload_cairo_macos() -> bool:
+    """Attempt to pre-load ``libcairo`` from Homebrew paths on macOS.
+
+    Uses :func:`ctypes.cdll.LoadLibrary` to explicitly load the shared
+    library before ``cairosvg`` tries to find it via the default dynamic
+    linker search.  This is more reliable than setting
+    ``DYLD_FALLBACK_LIBRARY_PATH`` because the env var may not take
+    effect for already-initialised ``dlopen`` state.
+
+    Returns ``True`` if a subsequent cairosvg probe render succeeds
+    after pre-loading the library; ``False`` otherwise.
+    """
+    import cairosvg  # already known importable at this point
+
+    probe_svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>"
+
+    for lib_dir in _macos_cairo_lib_dirs():
+        cairo_path = Path(lib_dir) / "libcairo.dylib"
+        if not cairo_path.exists():
+            continue
+        try:
+            ctypes.cdll.LoadLibrary(str(cairo_path))
+            logger.debug("Pre-loaded libcairo from %s", cairo_path)
+        except OSError:
+            logger.debug("Failed to load libcairo from %s", cairo_path)
+            continue
+
+        # Re-attempt the probe render now that the library is loaded.
+        try:
+            cairosvg.svg2png(bytestring=probe_svg)
+            logger.info("Auto-detected cairo library at %s", lib_dir)
+            return True
+        except (OSError, ValueError):
+            continue
+
+    return False
+
+
 def _check_cairosvg() -> bool:
     """Check if cairosvg is available and the native cairo library is loadable.
 
@@ -50,6 +118,11 @@ def _check_cairosvg() -> bool:
     ``OSError`` only fires when ``cairosvg`` actually tries to call into the
     native library.  We therefore do a lightweight probe render to surface
     that failure early, before any real work begins.
+
+    On macOS, if the initial probe fails with ``OSError``, this function
+    attempts to pre-load ``libcairo.dylib`` from common Homebrew
+    installation paths (``/opt/homebrew/lib`` for Apple Silicon,
+    ``/usr/local/lib`` for Intel) before retrying.
     """
     try:
         import cairosvg
@@ -65,7 +138,12 @@ def _check_cairosvg() -> bool:
             bytestring=b"<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>"
         )
         return True
-    except (ImportError, OSError, ValueError):
+    except ImportError:
+        return False
+    except (OSError, ValueError):
+        # On macOS, try pre-loading libcairo from Homebrew paths.
+        if sys.platform == "darwin":
+            return _try_preload_cairo_macos()
         return False
 
 

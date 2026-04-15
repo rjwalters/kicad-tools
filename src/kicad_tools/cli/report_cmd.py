@@ -214,7 +214,11 @@ def _generate_figures(
     except (RuntimeError, OSError) as exc:
         hint = ""
         if isinstance(exc, OSError) and "cairo" in str(exc).lower():
-            hint = " (hint: on macOS set DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib)"
+            hint = (
+                " (hint: auto-detection of Homebrew libcairo was attempted"
+                " but failed — try: DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib"
+                " kct report generate ...)"
+            )
         print(
             f"Warning: figure generation skipped — {exc}{hint}",
             file=sys.stderr,
