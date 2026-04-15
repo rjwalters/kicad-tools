@@ -88,6 +88,7 @@ class LocalRerouter:
         trace_width: float = 0.25,
         trace_clearance: float = 0.2,
         dry_run: bool = False,
+        extra_obstacles: list[tuple[float, float, float]] | None = None,
     ) -> RerouteResult:
         """Attempt to reroute a segment around an obstacle.
 
@@ -102,6 +103,10 @@ class LocalRerouter:
             trace_width: Width of the trace being rerouted (mm)
             trace_clearance: Required clearance from trace edge to obstacle (mm)
             dry_run: If True, find path but don't modify the PCB
+            extra_obstacles: Optional list of (x, y, radius) tuples for
+                additional obstacles to mark on the grid. Used by cluster
+                rerouting to ensure the path avoids all obstacles in a
+                spatial cluster, not just the primary one.
 
         Returns:
             RerouteResult indicating success/failure and statistics
@@ -141,6 +146,14 @@ class LocalRerouter:
         max_x = max(max_x, obstacle_x + obstacle_radius + self.padding)
         max_y = max(max_y, obstacle_y + obstacle_radius + self.padding)
 
+        # Expand bounding box to include extra obstacles (cluster rerouting)
+        if extra_obstacles:
+            for eox, eoy, eor in extra_obstacles:
+                min_x = min(min_x, eox - eor - self.padding)
+                min_y = min(min_y, eoy - eor - self.padding)
+                max_x = max(max_x, eox + eor + self.padding)
+                max_y = max(max_y, eoy + eor + self.padding)
+
         cols = int((max_x - min_x) / self.resolution) + 1
         rows = int((max_y - min_y) / self.resolution) + 1
 
@@ -154,6 +167,14 @@ class LocalRerouter:
         self._mark_circle_blocked(
             blocked, obstacle_x, obstacle_y, block_radius, min_x, min_y, cols, rows
         )
+
+        # Mark extra obstacles from the cluster
+        if extra_obstacles:
+            for eox, eoy, eor in extra_obstacles:
+                extra_block_radius = eor + seg_width / 2 + trace_clearance
+                self._mark_circle_blocked(
+                    blocked, eox, eoy, extra_block_radius, min_x, min_y, cols, rows
+                )
 
         # Mark other obstacles in the local area
         self._mark_local_obstacles(

@@ -71,6 +71,7 @@ class RepairResult:
     relocated_vias: int = 0
     endpoint_nudges: int = 0
     local_rerouted: int = 0
+    cluster_rerouted: int = 0
     skipped_no_local_route: int = 0
     nudges: list[NudgeResult] = field(default_factory=list)
 
@@ -92,6 +93,8 @@ class RepairResult:
             lines.append(f"  Via relocations: {self.relocated_vias}")
         if self.local_rerouted > 0:
             lines.append(f"  Local reroutes: {self.local_rerouted}")
+        if self.cluster_rerouted > 0:
+            lines.append(f"  Cluster reroutes: {self.cluster_rerouted}")
         if self.skipped_exceeds_max > 0:
             lines.append(f"  Skipped (exceeds max displacement): {self.skipped_exceeds_max}")
         if self.skipped_infeasible > 0:
@@ -303,6 +306,10 @@ class ClearanceRepairer:
 
         For each violation, identifies the segment and tries to reroute it
         around the obstacle using a local A* grid.
+
+        Violations are first grouped by spatial proximity so that clustered
+        violations (e.g. multiple vias near connected segments) can be
+        rerouted with awareness of all obstacles in the cluster.
         """
         from .local_rerouter import LocalRerouter
 
@@ -313,8 +320,269 @@ class ClearanceRepairer:
             padding=local_grid_padding,
         )
 
-        for violation, source in tagged_violations:
-            self._attempt_local_reroute(violation, result, rerouter, margin, dry_run, source)
+        # Group violations by spatial proximity for cluster-aware rerouting
+        clusters = self._group_violations_by_proximity(tagged_violations)
+
+        for cluster in clusters:
+            if len(cluster) == 1:
+                # Single violation -- use existing per-violation reroute
+                violation, source = cluster[0]
+                self._attempt_local_reroute(violation, result, rerouter, margin, dry_run, source)
+            else:
+                # Multi-violation cluster -- attempt cluster-aware reroute
+                self._attempt_cluster_reroute(cluster, result, rerouter, margin, dry_run)
+
+    def _group_violations_by_proximity(
+        self,
+        tagged_violations: list[tuple[DRCViolation, str]],
+        cluster_radius: float | None = None,
+    ) -> list[list[tuple[DRCViolation, str]]]:
+        """Group violations by spatial proximity using greedy distance clustering.
+
+        Violations whose primary locations are within ``cluster_radius`` of any
+        existing member of the cluster are merged into the same group.  The
+        default radius is ``2 * max_clearance_radius`` where the clearance
+        radius is estimated from the violations' required_value_mm (falling
+        back to 0.2 mm).
+
+        Uses a simple greedy clustering algorithm similar to
+        ``ThermalAnalyzer._cluster_sources()`` in ``analysis/thermal.py``.
+
+        Args:
+            tagged_violations: List of (violation, source_tag) tuples.
+            cluster_radius: Maximum distance (mm) between two violation
+                locations for them to be in the same cluster.  If *None*,
+                a default of ``2 * max(required_value_mm)`` is used.
+
+        Returns:
+            List of clusters, each cluster being a list of (violation, tag)
+            tuples.
+        """
+        if not tagged_violations:
+            return []
+
+        # Determine cluster radius from violations if not specified
+        if cluster_radius is None:
+            max_clearance = max(
+                (v.required_value_mm or 0.2 for v, _ in tagged_violations),
+                default=0.2,
+            )
+            cluster_radius = 2.0 * max_clearance
+
+        # Extract primary locations for distance computation
+        positions: list[tuple[float, float] | None] = []
+        for violation, _ in tagged_violations:
+            loc = violation.primary_location
+            if loc is not None:
+                positions.append((loc.x_mm, loc.y_mm))
+            else:
+                positions.append(None)
+
+        clusters: list[list[tuple[DRCViolation, str]]] = []
+        assigned: set[int] = set()
+
+        for i, (violation_i, source_i) in enumerate(tagged_violations):
+            if i in assigned:
+                continue
+
+            pos_i = positions[i]
+            cluster: list[tuple[DRCViolation, str]] = [(violation_i, source_i)]
+            assigned.add(i)
+
+            if pos_i is None:
+                clusters.append(cluster)
+                continue
+
+            # Greedy expansion: check unassigned violations for proximity
+            # to any member already in the cluster.
+            cluster_positions = [pos_i]
+            changed = True
+            while changed:
+                changed = False
+                for j in range(len(tagged_violations)):
+                    if j in assigned:
+                        continue
+                    pos_j = positions[j]
+                    if pos_j is None:
+                        continue
+
+                    # Check distance to every existing cluster member
+                    for cp in cluster_positions:
+                        dx = pos_j[0] - cp[0]
+                        dy = pos_j[1] - cp[1]
+                        dist = math.sqrt(dx * dx + dy * dy)
+                        if dist <= cluster_radius:
+                            cluster.append(tagged_violations[j])
+                            assigned.add(j)
+                            cluster_positions.append(pos_j)
+                            changed = True
+                            break
+
+            clusters.append(cluster)
+
+        return clusters
+
+    def _attempt_cluster_reroute(
+        self,
+        cluster: list[tuple[DRCViolation, str]],
+        result: RepairResult,
+        rerouter: LocalRerouter,
+        margin: float,
+        dry_run: bool,
+    ) -> None:
+        """Attempt to reroute violations in a cluster with shared obstacle awareness.
+
+        For each violation in the cluster, the obstacles from the *other*
+        violations in the same cluster are passed as ``extra_obstacles`` to
+        ``reroute_segment()``.  This ensures the A* search avoids all nearby
+        obstacles in one pass rather than treating each violation in isolation.
+
+        If cluster-aware rerouting fails for a violation, it falls back to
+        the standard per-violation ``_attempt_local_reroute()``.
+        """
+        # Pre-extract obstacle info for every violation in the cluster
+        cluster_obstacles: list[tuple[float, float, float] | None] = []
+        for violation, _ in cluster:
+            obs_info = self._extract_obstacle_info(violation, margin)
+            cluster_obstacles.append(obs_info)
+
+        for idx, (violation, source) in enumerate(cluster):
+            # Build extra_obstacles from all *other* cluster members
+            extra: list[tuple[float, float, float]] = []
+            for other_idx, obs in enumerate(cluster_obstacles):
+                if other_idx != idx and obs is not None:
+                    extra.append(obs)
+
+            success = self._attempt_local_reroute_with_extras(
+                violation, result, rerouter, margin, dry_run, source, extra
+            )
+            if not success:
+                # Fall back to standard per-violation reroute (without extras)
+                self._attempt_local_reroute(violation, result, rerouter, margin, dry_run, source)
+
+    def _extract_obstacle_info(
+        self,
+        violation: DRCViolation,
+        margin: float,
+    ) -> tuple[float, float, float] | None:
+        """Extract (x, y, radius) obstacle tuple from a violation.
+
+        Returns the position and radius of the non-segment object in the
+        violation, or None if the obstacle cannot be determined.
+        """
+        if len(violation.locations) < 2:
+            return None
+
+        loc1 = violation.locations[0]
+        loc2 = violation.locations[1]
+
+        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
+        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
+
+        # Identify which is the obstacle (non-segment) and its location
+        if obj1 is not None and obj1[1] == "segment":
+            obs_x, obs_y, obs_obj = loc2.x_mm, loc2.y_mm, obj2
+        elif obj2 is not None and obj2[1] == "segment":
+            obs_x, obs_y, obs_obj = loc1.x_mm, loc1.y_mm, obj1
+        else:
+            # Neither is a segment -- use first location as obstacle
+            obs_x, obs_y, obs_obj = loc1.x_mm, loc1.y_mm, obj1
+
+        obstacle_radius = 0.3  # Default fallback
+        if obs_obj is not None and obs_obj[1] == "via":
+            via_node = obs_obj[0]
+            size_node = via_node.find("size")
+            if size_node:
+                obstacle_radius = float(size_node.get_first_atom()) / 2
+        elif obs_obj is not None and obs_obj[1] == "segment":
+            other_seg = obs_obj[0]
+            width_node = other_seg.find("width")
+            obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
+
+        return (obs_x, obs_y, obstacle_radius)
+
+    def _attempt_local_reroute_with_extras(
+        self,
+        violation: DRCViolation,
+        result: RepairResult,
+        rerouter: LocalRerouter,
+        margin: float,
+        dry_run: bool,
+        source: str,
+        extra_obstacles: list[tuple[float, float, float]],
+    ) -> bool:
+        """Attempt local reroute with extra obstacle awareness.
+
+        Same as ``_attempt_local_reroute`` but passes ``extra_obstacles``
+        to ``rerouter.reroute_segment()``.
+
+        Returns True if rerouting succeeded, False otherwise.  Does **not**
+        update ``result`` counters on failure (the caller handles fallback).
+        """
+        if len(violation.locations) < 2:
+            return False
+
+        loc1 = violation.locations[0]
+        loc2 = violation.locations[1]
+
+        seg_info = None
+        obstacle_info = None
+
+        obj1 = self._find_object_at(loc1.x_mm, loc1.y_mm, loc1.layer, violation.nets)
+        obj2 = self._find_object_at(loc2.x_mm, loc2.y_mm, loc2.layer, violation.nets)
+
+        if obj1 is not None and obj1[1] == "segment":
+            seg_info = obj1
+            obstacle_info = (loc2.x_mm, loc2.y_mm, obj2)
+        elif obj2 is not None and obj2[1] == "segment":
+            seg_info = obj2
+            obstacle_info = (loc1.x_mm, loc1.y_mm, obj1)
+
+        if seg_info is None:
+            return False
+
+        seg_node = seg_info[0]
+        obs_x, obs_y, obs_obj = obstacle_info
+
+        obstacle_radius = 0.3
+        if obs_obj is not None and obs_obj[1] == "via":
+            via_node = obs_obj[0]
+            size_node = via_node.find("size")
+            if size_node:
+                obstacle_radius = float(size_node.get_first_atom()) / 2
+        elif obs_obj is not None and obs_obj[1] == "segment":
+            other_seg = obs_obj[0]
+            width_node = other_seg.find("width")
+            obstacle_radius = float(width_node.get_first_atom()) / 2 if width_node else 0.125
+
+        width_node = seg_node.find("width")
+        trace_width = float(width_node.get_first_atom()) if width_node else 0.25
+
+        required_clearance = violation.required_value_mm or 0.2
+        trace_clearance = required_clearance + margin
+
+        reroute_result = rerouter.reroute_segment(
+            seg_node=seg_node,
+            obstacle_x=obs_x,
+            obstacle_y=obs_y,
+            obstacle_radius=obstacle_radius,
+            trace_width=trace_width,
+            trace_clearance=trace_clearance,
+            dry_run=dry_run,
+            extra_obstacles=extra_obstacles,
+        )
+
+        if reroute_result.success:
+            result.local_rerouted += 1
+            result.cluster_rerouted += 1
+            if source == "skipped":
+                result.repaired += 1
+                result.skipped_infeasible -= 1
+            if not dry_run:
+                self.modified = True
+            return True
+
+        return False
 
     def _attempt_local_reroute(
         self,
