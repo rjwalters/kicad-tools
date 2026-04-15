@@ -286,6 +286,148 @@ class TestPreflightERC:
 
 
 # ---------------------------------------------------------------------------
+# PreflightChecker -- BOM/PCB match severity
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightBomPcbMatchSeverity:
+    """Tests for bom_pcb_match FAIL vs WARN based on mismatch direction."""
+
+    def _make_checker_with_mocks(self, monkeypatch, bom_items, pcb_refs):
+        """Create a PreflightChecker with mocked BOM and PCB data.
+
+        Args:
+            monkeypatch: pytest monkeypatch fixture.
+            bom_items: list of BOMItem instances for the BOM.
+            pcb_refs: list of reference strings for PCB footprints.
+        """
+        from unittest.mock import MagicMock
+
+        from kicad_tools.schema.bom import BOM
+
+        checker = PreflightChecker.__new__(PreflightChecker)
+        checker.config = PreflightConfig()
+
+        # Mock _pcb with footprints that have .reference attributes
+        mock_pcb = MagicMock()
+        fps = []
+        for ref in pcb_refs:
+            fp = MagicMock()
+            fp.reference = ref
+            fps.append(fp)
+        mock_pcb.footprints = fps
+        checker._pcb = mock_pcb
+
+        # Mock _load_bom to return our BOM
+        bom = BOM(items=bom_items)
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        return checker
+
+    def _make_bom_item(self, reference, **kwargs):
+        from kicad_tools.schema.bom import BOMItem
+
+        defaults = {
+            "value": "100nF",
+            "footprint": "C_0402",
+            "lib_id": "Device:C",
+        }
+        defaults.update(kwargs)
+        return BOMItem(reference=reference, **defaults)
+
+    def test_all_match_ok(self, monkeypatch):
+        """When BOM and PCB refs match exactly, status is OK."""
+        items = [self._make_bom_item("C1"), self._make_bom_item("R1")]
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1", "R1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "OK"
+        assert "2 components" in result.message
+
+    def test_unplaced_components_fail(self, monkeypatch):
+        """BOM refs not on PCB (unplaced) should produce FAIL."""
+        items = [
+            self._make_bom_item("C1"),
+            self._make_bom_item("R1"),
+            self._make_bom_item("U1"),
+        ]
+        # PCB only has C1 -- R1 and U1 are unplaced
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "FAIL"
+        assert "in BOM but not on PCB" in result.details
+
+    def test_orphaned_footprints_warn(self, monkeypatch):
+        """PCB refs not in BOM (orphaned) should produce WARN, not FAIL."""
+        items = [self._make_bom_item("C1")]
+        # PCB has C1 plus extra MH1 (mounting hole)
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1", "MH1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "WARN"
+        assert "on PCB but not in BOM" in result.details
+
+    def test_both_directions_fail_takes_precedence(self, monkeypatch):
+        """When both unplaced and orphaned exist, FAIL takes precedence."""
+        items = [self._make_bom_item("C1"), self._make_bom_item("R1")]
+        # PCB has C1 and MH1 -- R1 is unplaced, MH1 is orphaned
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1", "MH1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "FAIL"
+        assert "in BOM but not on PCB" in result.details
+        assert "on PCB but not in BOM" in result.details
+
+    def test_virtual_and_dnp_excluded(self, monkeypatch):
+        """Virtual and DNP items should not cause mismatches."""
+        items = [
+            self._make_bom_item("C1"),
+            # Power symbol (virtual -- lib_id starts with "power:")
+            self._make_bom_item("PWR1", lib_id="power:VCC"),
+            # DNP component
+            self._make_bom_item("R99", dnp=True),
+        ]
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "OK"
+
+    def test_empty_bom_with_pcb_warns(self, monkeypatch):
+        """Empty BOM with PCB footprints should WARN (orphaned footprints)."""
+        checker = self._make_checker_with_mocks(monkeypatch, [], ["C1", "R1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "WARN"
+
+    def test_bom_with_empty_pcb_fails(self, monkeypatch):
+        """BOM items with no PCB footprints should FAIL (unplaced)."""
+        items = [self._make_bom_item("C1"), self._make_bom_item("R1")]
+        checker = self._make_checker_with_mocks(monkeypatch, items, [])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "FAIL"
+
+    def test_has_failures_blocks_export(self, monkeypatch):
+        """Verify that FAIL from bom_pcb_match is detected by has_failures."""
+        items = [self._make_bom_item("C1"), self._make_bom_item("R1")]
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "FAIL"
+        assert PreflightChecker.has_failures([result]) is True
+
+    def test_orphaned_only_does_not_block_export(self, monkeypatch):
+        """Verify that WARN from orphaned footprints does NOT block export."""
+        items = [self._make_bom_item("C1")]
+        checker = self._make_checker_with_mocks(monkeypatch, items, ["C1", "MH1"])
+
+        result = checker._check_bom_footprint_match()
+        assert result.status == "WARN"
+        assert PreflightChecker.has_failures([result]) is False
+
+
+# ---------------------------------------------------------------------------
 # PreflightChecker -- skip all
 # ---------------------------------------------------------------------------
 
