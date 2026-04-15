@@ -1838,6 +1838,7 @@ dev = [
     { name = "responses" },
     { name = "rtree" },
     { name = "ruff" },
+    { name = "weasyprint" },
 ]
 drc = [
     { name = "rtree" },
@@ -1939,6 +1940,7 @@ requires-dist = [
     { name = "scikit-build-core", marker = "extra == 'native'", specifier = ">=0.8" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "weasyprint", marker = "extra == 'all'", specifier = ">=60.0" },
+    { name = "weasyprint", marker = "extra == 'dev'", specifier = ">=60.0" },
     { name = "weasyprint", marker = "extra == 'report'", specifier = ">=60.0" },
 ]
 provides-extras = ["drc", "parts", "datasheet", "constraints", "mcp", "native", "cuda", "metal", "visualization", "bayesian", "screenshot", "report", "all", "dev"]
