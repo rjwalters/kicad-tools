@@ -12,6 +12,7 @@ Orchestrates the full repair pipeline:
 7. Zone fill (requires kicad-cli)
 8. Audit / check
 9. Report generation (manufacturing report)
+10. Export manufacturing package (gerbers, BOM, CPL, project ZIP)
 
 Usage:
     kct pipeline board.kicad_pcb --mfr jlcpcb
@@ -56,6 +57,7 @@ class PipelineStep(str, Enum):
     ZONES = "zones"
     AUDIT = "audit"
     REPORT = "report"
+    EXPORT = "export"
 
 
 # Ordered list of all pipeline steps
@@ -70,6 +72,7 @@ ALL_STEPS = [
     PipelineStep.ZONES,
     PipelineStep.AUDIT,
     PipelineStep.REPORT,
+    PipelineStep.EXPORT,
 ]
 
 
@@ -816,6 +819,48 @@ def _run_step_report(ctx: PipelineContext, console: Console) -> PipelineResult:
     )
 
 
+def _run_step_export(ctx: PipelineContext, console: Console) -> PipelineResult:
+    """Run manufacturing export step (final step after REPORT).
+
+    Invokes ``kct export`` to generate gerbers, BOM, CPL, project ZIP
+    and manifest in a ``manufacturing/`` directory alongside the PCB.
+    """
+    mfr_dir = ctx.pcb_file.parent / "manufacturing"
+
+    if ctx.dry_run:
+        return PipelineResult(
+            step=PipelineStep.EXPORT,
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct export {ctx.pcb_file.name} "
+                f"--mfr {ctx.mfr} -o manufacturing/"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Exporting manufacturing package for {ctx.pcb_file.name}...")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "export",
+        str(ctx.pcb_file),
+        "--mfr",
+        ctx.mfr,
+        "-o",
+        str(mfr_dir),
+    ]
+
+    success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
+
+    return PipelineResult(
+        step=PipelineStep.EXPORT,
+        success=success,
+        message=f"export: {message}",
+    )
+
+
 def _is_git_repo(directory: Path) -> bool:
     """Check whether *directory* is inside a git repository.
 
@@ -1092,11 +1137,14 @@ def _git_commit_result(
         )
         return 1
 
-    # Stage the PCB file and reports/ directory (if present)
+    # Stage the PCB file, reports/ and manufacturing/ directories (if present)
     reports_dir = ctx.pcb_file.parent / "reports"
+    manufacturing_dir = ctx.pcb_file.parent / "manufacturing"
     files_to_stage = [str(ctx.pcb_file)]
     if reports_dir.exists():
         files_to_stage.append(str(reports_dir))
+    if manufacturing_dir.exists():
+        files_to_stage.append(str(manufacturing_dir))
     add_result = subprocess.run(
         ["git", "-C", str(pcb_dir), "add"] + files_to_stage,
         capture_output=True,
@@ -1155,6 +1203,7 @@ STEP_RUNNERS = {
     PipelineStep.ZONES: _run_step_zones,
     PipelineStep.AUDIT: _run_step_audit,
     PipelineStep.REPORT: _run_step_report,
+    PipelineStep.EXPORT: _run_step_export,
 }
 
 
@@ -1216,9 +1265,13 @@ def run_pipeline(
                 console.print(f"  [{status}] {result.message}")
 
             # Stop on failure unless:
-            # - it's the audit or report step (always run informational steps), or
+            # - it's the audit, report, or export step (always run informational steps), or
             # - ERC just failed and FIX_ERC is the next step (auto-remediation path)
-            if not result.success and step not in (PipelineStep.AUDIT, PipelineStep.REPORT):
+            if not result.success and step not in (
+                PipelineStep.AUDIT,
+                PipelineStep.REPORT,
+                PipelineStep.EXPORT,
+            ):
                 next_step = steps[i + 1] if i + 1 < len(steps) else None
                 if not (step == PipelineStep.ERC and next_step == PipelineStep.FIX_ERC):
                     break
