@@ -222,8 +222,12 @@ class ConnectivityValidator:
         pcb: Loaded PCB object
     """
 
-    # Tolerance for matching point positions (in mm)
-    POSITION_TOLERANCE = 0.001
+    # Tolerance for matching point positions (in mm).
+    # A tolerance of 0.01 mm (10 um) absorbs floating-point coordinate
+    # drift that accumulates during trace optimisation (ratio-based
+    # shortening, chamfer insertion, etc.) while remaining well below
+    # the smallest real-world pad-to-pad distances (~0.1 mm for 01005).
+    POSITION_TOLERANCE = 0.01
 
     def __init__(self, pcb: str | Path | PCB) -> None:
         """Initialize the validator.

@@ -441,6 +441,116 @@ class TestConnectivityValidator:
         assert "nets=" in repr_str
 
 
+class TestPositionTolerance:
+    """Tests for ConnectivityValidator position tolerance.
+
+    Verifies that the widened POSITION_TOLERANCE (0.01 mm) correctly
+    absorbs floating-point coordinate drift from trace optimisation.
+    See issue #1434.
+    """
+
+    def test_tolerance_value(self):
+        """POSITION_TOLERANCE must be at least 0.01 mm."""
+        assert ConnectivityValidator.POSITION_TOLERANCE >= 0.01
+
+    def test_endpoint_within_new_tolerance_detected_as_connected(self, tmp_path: Path):
+        """A segment endpoint displaced 0.009 mm from pad centre
+        (within new 0.01 mm tolerance, outside old 0.001 mm tolerance)
+        should register as connected.
+        """
+        # Pad at (99.5, 100), segment endpoint displaced by 0.009 mm
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (segment (start 99.509 100) (end 109.5 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-1"))
+)
+"""
+        pcb_file = tmp_path / "tolerance_test.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # NET1 should be fully connected despite the 0.009mm displacement
+        net1_errors = [i for i in result.errors if i.net_name == "NET1"]
+        assert len(net1_errors) == 0, (
+            f"NET1 reported as disconnected with 0.009mm displacement: {net1_errors}"
+        )
+
+    def test_endpoint_outside_tolerance_detected_as_disconnected(self, tmp_path: Path):
+        """A segment endpoint displaced 0.02 mm (outside 0.01 mm tolerance)
+        should be detected as disconnected.
+        """
+        pcb_text = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "NET1")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "1" smd rect (at -0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "NET1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 0 ""))
+  )
+  (segment (start 99.52 100) (end 109.5 100) (width 0.2) (layer "F.Cu") (net 1) (uuid "seg-1"))
+)
+"""
+        pcb_file = tmp_path / "tolerance_test_outside.kicad_pcb"
+        pcb_file.write_text(pcb_text)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # NET1 should be reported as disconnected -- the 0.02mm displacement
+        # exceeds the 0.01mm tolerance.
+        net1_errors = [i for i in result.errors if i.net_name == "NET1"]
+        assert len(net1_errors) > 0, "NET1 should be disconnected with 0.02mm displacement"
+
+
 class TestConnectivityCLI:
     """Tests for connectivity validation CLI."""
 

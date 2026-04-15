@@ -1346,3 +1346,131 @@ class TestCollisionAwareOptimization:
         assert len(result) <= len(segments)
         # Verify collision checker was used
         assert len(checker.calls) > 0
+
+
+class TestPadEndpointPreservation:
+    """Regression tests for pad endpoint preservation during optimisation.
+
+    These tests verify that convert_corners_45 (and the full optimise
+    pipeline) do not move trace endpoints away from pad positions.
+    See issue #1434.
+    """
+
+    def make_segment(self, x1, y1, x2, y2):
+        return Segment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            width=0.2,
+            layer=Layer.F_CU,
+            net=1,
+            net_name="TEST",
+        )
+
+    @pytest.fixture
+    def optimizer(self):
+        return TraceOptimizer()
+
+    def test_l_shaped_trace_pad_endpoints_preserved(self, optimizer):
+        """A 2-segment L-shaped trace (pad->corner->pad) must keep its
+        terminal endpoints after convert_corners_45.
+
+        This is the primary regression case from issue #1434.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (5.0, 5.0)
+        corner = (5.0, 0.0)
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], corner[0], corner[1]),
+            self.make_segment(corner[0], corner[1], pad_b[0], pad_b[1]),
+        ]
+
+        result = optimizer.convert_corners_45(segments)
+
+        # Terminal endpoints must be preserved exactly.
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4, (
+            f"First segment start X moved: {result[0].x1} != {pad_a[0]}"
+        )
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4, (
+            f"First segment start Y moved: {result[0].y1} != {pad_a[1]}"
+        )
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4, (
+            f"Last segment end X moved: {result[-1].x2} != {pad_b[0]}"
+        )
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4, (
+            f"Last segment end Y moved: {result[-1].y2} != {pad_b[1]}"
+        )
+
+    def test_three_segment_chain_interior_chamfer_fires(self, optimizer):
+        """A 3-segment chain with a 90-degree interior corner should
+        chamfer at the interior but preserve terminal endpoints.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (10.0, 5.0)
+        corner1 = (5.0, 0.0)
+        corner2 = (5.0, 5.0)
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], corner1[0], corner1[1]),
+            self.make_segment(corner1[0], corner1[1], corner2[0], corner2[1]),
+            self.make_segment(corner2[0], corner2[1], pad_b[0], pad_b[1]),
+        ]
+
+        result = optimizer.convert_corners_45(segments)
+
+        # Terminal endpoints must be unchanged.
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4
+
+        # Interior should have been chamfered -- more segments than the
+        # original 3 (chamfer diagonals are inserted).
+        assert len(result) >= 3
+
+    def test_full_pipeline_preserves_pad_endpoints(self, optimizer):
+        """Running optimize_segments (all passes) on an L-shaped trace
+        must not displace the terminal endpoints.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (5.0, 5.0)
+        corner = (5.0, 0.0)
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], corner[0], corner[1]),
+            self.make_segment(corner[0], corner[1], pad_b[0], pad_b[1]),
+        ]
+
+        result = optimizer.optimize_segments(segments)
+
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4
+
+    def test_short_segment_at_pad_not_shortened_below_zero(self, optimizer):
+        """A segment shorter than corner_chamfer_size terminating at a pad
+        must not be shortened below zero length or move the pad endpoint.
+        """
+        pad_a = (0.0, 0.0)
+        pad_b = (5.0, 0.3)  # Very short final approach
+
+        segments = [
+            self.make_segment(pad_a[0], pad_a[1], 5.0, 0.0),
+            self.make_segment(5.0, 0.0, pad_b[0], pad_b[1]),  # 0.3mm, shorter than chamfer
+        ]
+
+        result = optimizer.convert_corners_45(segments)
+
+        # Pad endpoints must still be preserved.
+        assert abs(result[0].x1 - pad_a[0]) < 1e-4
+        assert abs(result[0].y1 - pad_a[1]) < 1e-4
+        assert abs(result[-1].x2 - pad_b[0]) < 1e-4
+        assert abs(result[-1].y2 - pad_b[1]) < 1e-4
+
+        # No zero-length segments should be produced.
+        for seg in result:
+            length = ((seg.x2 - seg.x1) ** 2 + (seg.y2 - seg.y1) ** 2) ** 0.5
+            assert length > 0, "Zero-length segment produced"
