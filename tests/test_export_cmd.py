@@ -80,6 +80,7 @@ class TestExportCmdIntegration:
                 "-o",
                 str(out_dir),
                 "--no-report",
+                "--skip-preflight",
             ]
         )
 
@@ -117,6 +118,7 @@ class TestExportCmdIntegration:
                 "--no-bom",
                 "--no-report",
                 "--no-project-zip",
+                "--skip-preflight",
                 "-o",
                 str(tmp_path / "out"),
             ]
@@ -155,6 +157,7 @@ class TestExportCmdIntegration:
                 "pcbway",
                 "--no-report",
                 "--no-project-zip",
+                "--skip-preflight",
                 "-o",
                 str(tmp_path / "out"),
             ]

@@ -14,6 +14,7 @@ from kicad_tools.export.manufacturing import (
     _create_project_zip,
     _sha256_file,
 )
+from kicad_tools.export.preflight import PreflightConfig
 
 
 class TestSha256File:
@@ -315,6 +316,7 @@ class TestManufacturingPackageExport:
 
         config = ManufacturingConfig(
             include_report=False,  # skip report to avoid needing kicad-cli
+            preflight=PreflightConfig(skip_all=True),
         )
         pkg = ManufacturingPackage(
             pcb_path=pcb,
@@ -371,7 +373,10 @@ class TestManufacturingPackageExport:
 
         monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
 
-        config = ManufacturingConfig(include_report=False)
+        config = ManufacturingConfig(
+            include_report=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
         pkg = ManufacturingPackage(
             pcb_path=pcb,
             manufacturer="jlcpcb",

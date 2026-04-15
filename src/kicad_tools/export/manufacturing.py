@@ -18,6 +18,7 @@ from pathlib import Path
 import kicad_tools
 
 from .assembly import AssemblyConfig, AssemblyPackage, AssemblyPackageResult
+from .preflight import PreflightChecker, PreflightConfig, PreflightResult
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class ManufacturingConfig(AssemblyConfig):
     include_manifest: bool = True
     manifest_name: str = "manifest.json"
 
+    # Pre-flight validation settings
+    preflight: PreflightConfig | None = None
+
 
 @dataclass
 class ManufacturingResult:
@@ -47,6 +51,7 @@ class ManufacturingResult:
     report_path: Path | None = None
     project_zip_path: Path | None = None
     manifest_path: Path | None = None
+    preflight_results: list[PreflightResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -156,6 +161,11 @@ def _build_manifest(
             "pcb_file": pcb_path.name,
         },
     }
+
+    # Include preflight results if available
+    if result.preflight_results:
+        manifest["preflight"] = [pr.to_dict() for pr in result.preflight_results]
+
     return manifest
 
 
@@ -210,6 +220,22 @@ class ManufacturingPackage:
         if dry_run:
             return self._dry_run(out_dir, result)
 
+        # Step 0: Pre-flight validation
+        preflight_cfg = self.config.preflight
+        if preflight_cfg is None or not preflight_cfg.skip_all:
+            preflight_results = self._run_preflight()
+            result.preflight_results = preflight_results
+
+            if PreflightChecker.has_failures(preflight_results):
+                # Collect failure messages into errors
+                for pr in preflight_results:
+                    if pr.status == "FAIL":
+                        msg = f"Preflight FAIL [{pr.name}]: {pr.message}"
+                        if pr.details:
+                            msg += f" ({pr.details})"
+                        result.errors.append(msg)
+                return result
+
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Step 1: BOM + CPL + Gerbers via AssemblyPackage
@@ -232,6 +258,18 @@ class ManufacturingPackage:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _run_preflight(self) -> list[PreflightResult]:
+        """Run pre-flight validation checks."""
+        preflight_cfg = self.config.preflight or PreflightConfig()
+        checker = PreflightChecker(
+            pcb_path=self.pcb_path,
+            schematic_path=self.schematic_path,
+            manufacturer=self.manufacturer,
+            output_dir=self.config.output_dir,
+            config=preflight_cfg,
+        )
+        return checker.run_all()
 
     def _dry_run(self, out_dir: Path, result: ManufacturingResult) -> ManufacturingResult:
         """Populate result with what *would* be generated."""

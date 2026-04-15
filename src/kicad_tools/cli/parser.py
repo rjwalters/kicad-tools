@@ -3857,3 +3857,40 @@ def _add_export_parser(subparsers) -> None:
         action="store_true",
         help="Skip KiCad project ZIP creation",
     )
+    export_parser.add_argument(
+        "--skip-preflight",
+        dest="export_skip_preflight",
+        action="store_true",
+        help="Skip all pre-flight validation checks",
+    )
+    export_parser.add_argument(
+        "--skip-drc",
+        dest="export_skip_drc",
+        action="store_true",
+        help="Skip DRC check in pre-flight validation",
+    )
+    export_parser.add_argument(
+        "--skip-erc",
+        dest="export_skip_erc",
+        action="store_true",
+        help="Skip ERC check in pre-flight validation",
+    )
+    export_parser.add_argument(
+        "--drc-report",
+        dest="export_drc_report",
+        default=None,
+        help="Path to pre-existing DRC report file",
+    )
+    export_parser.add_argument(
+        "--erc-report",
+        dest="export_erc_report",
+        default=None,
+        help="Path to pre-existing ERC report file",
+    )
+    export_parser.add_argument(
+        "--format",
+        dest="export_format",
+        default="text",
+        choices=["text", "json"],
+        help="Output format for preflight results (default: text)",
+    )
