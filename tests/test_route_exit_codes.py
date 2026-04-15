@@ -1,4 +1,4 @@
-"""Tests for route command exit codes (issue #1301, #1413).
+"""Tests for route command exit codes (issue #1301, #1413, #1454).
 
 Exit code semantics:
   0 = All nets routed AND (DRC passed OR DRC not run)
@@ -7,6 +7,10 @@ Exit code semantics:
       (also used for SIGINT partial save)
   3 = All nets routed but DRC violations detected
 """
+
+from io import StringIO
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -245,3 +249,236 @@ class TestRouteExitCodeDocumentation:
                             f"DRC-only failure should return 3, found: {lines[j].strip()}"
                         )
                         break
+
+
+# ---------------------------------------------------------------------------
+# Partial routing output suggestions (issue #1454)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_route(net_id: int):
+    """Create a minimal mock Route object for output tests."""
+    route = MagicMock()
+    route.net = net_id
+    route.segments = []
+    route.vias = []
+    return route
+
+
+def _make_mock_router(routed_nets, num_layers=2, routing_failures=None):
+    """Create a mock Autorouter for output tests."""
+    router = MagicMock()
+    router.routes = [_make_mock_route(nid) for nid in routed_nets]
+    router.routing_failures = routing_failures or []
+    router.grid = SimpleNamespace(num_layers=num_layers, resolution=0.25)
+    return router
+
+
+class TestPartialRoutingSuggestions:
+    """Tests that partial routing output surfaces existing capabilities (issue #1454).
+
+    When routing completes partially (exit code 2), the output should include:
+    - Percentage-based layer escalation recommendation with exact commands
+    - Mention of --export-failed-nets option
+    - Suggestion of --strategy monte-carlo when current strategy is negotiated
+    - --auto-layers suggestion when on 2 layers with >20% failure rate
+    - Copy-pasteable commands with the current PCB file path
+    """
+
+    def test_auto_layers_recommendation_above_20_pct_failure(self):
+        """When >20% of nets fail on 2 layers, output includes RECOMMENDATION block."""
+        from kicad_tools.router.output import show_routing_summary
+
+        # 16/58 nets failed = 28% failure rate (mirrors the softstart scenario)
+        net_map = {f"Net{i}": i for i in range(1, 59)}
+        router = _make_mock_router(routed_nets=list(range(1, 43)), num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=58,
+                quiet=False,
+                pcb_file="softstart.kicad_pcb",
+            )
+
+        text = output.getvalue()
+        assert "RECOMMENDATION" in text
+        assert "16/58" in text
+        assert "28%" in text
+        assert "kct route softstart.kicad_pcb --auto-layers" in text
+        assert "kct route softstart.kicad_pcb --layers 4" in text
+
+    def test_auto_layers_tip_below_20_pct_failure(self):
+        """When <=20% of nets fail on 2 layers, output shows Tip instead of RECOMMENDATION."""
+        from kicad_tools.router.output import show_routing_summary
+
+        # 1/10 nets failed = 10% failure rate
+        net_map = {f"Net{i}": i for i in range(1, 11)}
+        router = _make_mock_router(routed_nets=list(range(1, 10)), num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=10,
+                quiet=False,
+                pcb_file="board.kicad_pcb",
+            )
+
+        text = output.getvalue()
+        assert "RECOMMENDATION" not in text
+        assert "Tip:" in text
+        assert "--auto-layers" in text
+
+    def test_export_failed_nets_mentioned_in_partial_output(self):
+        """Partial routing output mentions --export-failed-nets option."""
+        from kicad_tools.router.output import show_routing_summary
+
+        net_map = {"A": 1, "B": 2, "C": 3}
+        router = _make_mock_router(routed_nets=[1], num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=3,
+                quiet=False,
+                pcb_file="board.kicad_pcb",
+            )
+
+        text = output.getvalue()
+        assert "--export-failed-nets" in text
+        assert "kct route board.kicad_pcb --export-failed-nets" in text
+
+    def test_monte_carlo_suggested_when_negotiated(self):
+        """When current strategy is negotiated, output suggests monte-carlo."""
+        from kicad_tools.router.output import show_routing_summary
+
+        net_map = {"A": 1, "B": 2, "C": 3}
+        router = _make_mock_router(routed_nets=[1], num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=3,
+                quiet=False,
+                current_strategy="negotiated",
+                pcb_file="board.kicad_pcb",
+            )
+
+        text = output.getvalue()
+        assert "--strategy monte-carlo --mc-trials 20" in text
+        assert "kct route board.kicad_pcb --strategy monte-carlo" in text
+
+    def test_no_escalation_recommendation_when_all_routed(self):
+        """Full routing success (exit code 0) does NOT show escalation recommendations."""
+        from kicad_tools.router.output import show_routing_summary
+
+        net_map = {"A": 1, "B": 2}
+        router = _make_mock_router(routed_nets=[1, 2], num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=2,
+                quiet=False,
+            )
+
+        text = output.getvalue()
+        assert "RECOMMENDATION" not in text
+        assert "--auto-layers" not in text
+        assert "--export-failed-nets" not in text
+
+    def test_suggestions_include_pcb_file_path(self):
+        """All copy-pasteable commands include the PCB file path."""
+        from kicad_tools.router.output import show_routing_summary
+
+        net_map = {"A": 1, "B": 2, "C": 3, "D": 4}
+        router = _make_mock_router(routed_nets=[1], num_layers=2)
+
+        output = StringIO()
+        with patch("sys.stdout", output):
+            show_routing_summary(
+                router,
+                net_map,
+                nets_to_route=4,
+                quiet=False,
+                pcb_file="my_board.kicad_pcb",
+            )
+
+        text = output.getvalue()
+        # Check that command suggestions include the PCB file path
+        assert "kct route my_board.kicad_pcb --auto-layers" in text
+        assert "kct route my_board.kicad_pcb --export-failed-nets" in text
+
+    def test_json_diagnostics_includes_layer_escalation(self):
+        """JSON diagnostics includes LAYER_ESCALATION when >20% failure on 2 layers."""
+        from kicad_tools.router.output import get_routing_diagnostics_json
+
+        # 3/4 nets failed = 75% failure rate
+        net_map = {"A": 1, "B": 2, "C": 3, "D": 4}
+        router = _make_mock_router(routed_nets=[1], num_layers=2)
+
+        result = get_routing_diagnostics_json(
+            router, net_map, nets_to_route=4, current_strategy="basic"
+        )
+
+        suggestions = result.get("suggestions", [])
+        escalation = [s for s in suggestions if s.get("category") == "LAYER_ESCALATION"]
+        assert len(escalation) == 1
+        assert "--auto-layers" in escalation[0]["fix"]
+        assert "75%" in escalation[0]["description"]
+
+    def test_json_diagnostics_includes_export_suggestion(self):
+        """JSON diagnostics includes EXPORT suggestion when nets fail."""
+        from kicad_tools.router.output import get_routing_diagnostics_json
+
+        net_map = {"A": 1, "B": 2}
+        router = _make_mock_router(routed_nets=[1], num_layers=2)
+
+        result = get_routing_diagnostics_json(
+            router, net_map, nets_to_route=2, current_strategy="basic"
+        )
+
+        suggestions = result.get("suggestions", [])
+        export_suggestions = [s for s in suggestions if s.get("category") == "EXPORT"]
+        assert len(export_suggestions) == 1
+        assert "--export-failed-nets" in export_suggestions[0]["fix"]
+
+    def test_json_diagnostics_no_export_when_all_routed(self):
+        """JSON diagnostics does NOT include EXPORT suggestion when all nets routed."""
+        from kicad_tools.router.output import get_routing_diagnostics_json
+
+        net_map = {"A": 1, "B": 2}
+        router = _make_mock_router(routed_nets=[1, 2], num_layers=2)
+
+        result = get_routing_diagnostics_json(
+            router, net_map, nets_to_route=2, current_strategy="basic"
+        )
+
+        suggestions = result.get("suggestions", [])
+        export_suggestions = [s for s in suggestions if s.get("category") == "EXPORT"]
+        assert len(export_suggestions) == 0
+
+    def test_json_monte_carlo_surfaced_when_negotiated(self):
+        """JSON diagnostics surfaces monte-carlo when current strategy is negotiated."""
+        from kicad_tools.router.output import get_routing_diagnostics_json
+
+        net_map = {"A": 1, "B": 2}
+        router = _make_mock_router(routed_nets=[1], num_layers=2)
+
+        result = get_routing_diagnostics_json(
+            router, net_map, nets_to_route=2, current_strategy="negotiated"
+        )
+
+        suggestions = result.get("suggestions", [])
+        mc_suggestions = [s for s in suggestions if "monte-carlo" in s.get("fix", "")]
+        assert len(mc_suggestions) >= 1

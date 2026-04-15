@@ -333,9 +333,10 @@ def show_routing_summary(
         if suggestions_shown == 0:
             num_layers = getattr(router.grid, "num_layers", 2)
             suggestion_num = 0
+            pcb_arg = f" {pcb_file}" if pcb_file else ""
             all_strategies = {
-                "negotiated": "Try negotiated routing: kct route --strategy negotiated",
-                "monte-carlo": "Try Monte Carlo routing: kct route --strategy monte-carlo --mc-trials 20",
+                "negotiated": f"Try negotiated routing: kct route{pcb_arg} --strategy negotiated",
+                "monte-carlo": f"Try Monte Carlo routing: kct route{pcb_arg} --strategy monte-carlo --mc-trials 20",
             }
             for strategy_name, suggestion_text in all_strategies.items():
                 if strategy_name != current_strategy:
@@ -343,19 +344,37 @@ def show_routing_summary(
                     print(f"{suggestion_num}. {suggestion_text}")
             if num_layers <= 2:
                 suggestion_num += 1
-                print(f"{suggestion_num}. Consider 4-layer routing: kct route --layers 4-all")
+                print(f"{suggestion_num}. Consider 4-layer routing: kct route{pcb_arg} --layers 4-all")
 
-        # Always suggest --auto-layers when routing on fewer than 4 layers with failures
+        # Layer escalation recommendation with percentage-based threshold
         num_layers = getattr(router.grid, "num_layers", 2)
-        if num_layers < 4:
-            failed_count = len(unrouted_ids)
-            failure_pct = failed_count / nets_to_route * 100 if nets_to_route > 0 else 0
-            pcb_arg = f" {pcb_file}" if pcb_file else ""
+        failed_count = len(unrouted_ids)
+        failure_pct = failed_count / nets_to_route * 100 if nets_to_route > 0 else 0
+        pcb_arg = f" {pcb_file}" if pcb_file else ""
+
+        if num_layers < 4 and failure_pct > 20:
+            print(f"\n{'=' * 60}")
+            print(
+                f"RECOMMENDATION: {failed_count}/{nets_to_route} nets "
+                f"({failure_pct:.0f}%) failed on {num_layers} layers."
+            )
+            print(f"  Try: kct route{pcb_arg} --auto-layers")
+            print(f"  Or:  kct route{pcb_arg} --layers 4")
+        elif num_layers < 4:
             print(
                 f"\nTip: {failed_count}/{nets_to_route} nets failed on {num_layers} layers "
                 f"({failure_pct:.0f}% failure rate)."
             )
             print(f"Try automatic layer escalation: kct route{pcb_arg} --auto-layers")
+
+        # Strategy suggestion: surface monte-carlo when using negotiated
+        if current_strategy == "negotiated":
+            print("\nTip: Try randomized net ordering for better results:")
+            print(f"  kct route{pcb_arg} --strategy monte-carlo --mc-trials 20")
+
+        # Export failed nets suggestion
+        print("\nTip: Export failed net names for manual routing in KiCad:")
+        print(f"  kct route{pcb_arg} --export-failed-nets failed_nets.txt")
 
     print(f"\n{'=' * 60}")
 
@@ -538,6 +557,43 @@ def get_routing_diagnostics_json(
         for strategy_name, suggestion in all_strategy_suggestions.items():
             if strategy_name != current_strategy:
                 suggestions.append(suggestion)
+
+    # Layer escalation recommendation when >20% failure on < 4 layers
+    failure_pct = len(unrouted_ids) / nets_to_route * 100 if nets_to_route > 0 else 0
+    if num_layers < 4 and failure_pct > 20:
+        suggestions.append(
+            {
+                "category": "LAYER_ESCALATION",
+                "description": (
+                    f"{len(unrouted_ids)}/{nets_to_route} nets ({failure_pct:.0f}%) "
+                    f"failed on {num_layers} layers"
+                ),
+                "fix": "--auto-layers",
+            }
+        )
+
+    # Surface monte-carlo suggestion when using negotiated strategy
+    if current_strategy == "negotiated":
+        # Only add if not already suggested via cause-specific logic
+        mc_already_suggested = any("monte-carlo" in s.get("fix", "") for s in suggestions)
+        if not mc_already_suggested:
+            suggestions.append(
+                {
+                    "category": "STRATEGY",
+                    "description": "Try randomized net ordering for better results",
+                    "fix": "--strategy monte-carlo --mc-trials 20",
+                }
+            )
+
+    # Always suggest --export-failed-nets when there are unrouted nets
+    if unrouted_ids:
+        suggestions.append(
+            {
+                "category": "EXPORT",
+                "description": "Export failed net names for manual routing in KiCad",
+                "fix": "--export-failed-nets failed_nets.txt",
+            }
+        )
 
     return {
         "summary": {
