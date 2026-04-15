@@ -41,7 +41,7 @@ def run_pipeline_command(args) -> int:
 
     # Max displacement for fix-drc step
     max_disp = getattr(args, "pipeline_max_displacement", None)
-    if max_disp is not None and max_disp != 0.5:
+    if max_disp is not None and max_disp != 2.0:
         sub_argv.extend(["--max-displacement", str(max_disp)])
 
     # Zones opt-in

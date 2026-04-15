@@ -3020,9 +3020,9 @@ def _add_pipeline_parser(subparsers) -> None:
         "--max-displacement",
         dest="pipeline_max_displacement",
         type=float,
-        default=0.5,
+        default=2.0,
         help=(
-            "Maximum nudge/slide distance in mm for fix-drc step (default: 0.5). "
+            "Maximum nudge/slide distance in mm for fix-drc step (default: 2.0). "
             "Increase when enlarged vias cause segment-to-via violations that "
             "exceed the displacement budget."
         ),
