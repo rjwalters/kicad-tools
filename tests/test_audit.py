@@ -1143,11 +1143,11 @@ class TestZoneConnectedNets:
         assert result.verdict == AuditVerdict.NOT_READY
 
     def test_no_zones_regression(self, tmp_path):
-        """PCB with no zones and incomplete nets still yields NOT_READY.
+        """PCB with no zones and incomplete signal nets still yields NOT_READY.
 
-        This is a regression test ensuring that zone-connected logic
-        does not accidentally pass boards that have genuinely incomplete
-        signal nets with no zone definitions.
+        GND is reclassified as zone-connected via pour-net detection,
+        but +3V3 remains truly incomplete because it does not match
+        power-net patterns in classify_and_apply_rules.
         """
         pcb_path = tmp_path / "no_zone_board.kicad_pcb"
         pcb_path.write_text(self.PCB_NO_ZONES)
@@ -1155,11 +1155,11 @@ class TestZoneConnectedNets:
         audit = ManufacturingAudit(pcb_path)
         result = audit.run()
 
-        # No zones means no zone-connected nets
-        assert result.connectivity.zone_connected_nets == 0
-        # Should have incomplete nets (both GND and +3V3 are unrouted)
-        assert result.connectivity.incomplete_nets > 0
-        # Connectivity should fail
+        # GND is reclassified as zone-connected via pour-net detection
+        assert result.connectivity.zone_connected_nets >= 1
+        # +3V3 has no zone and is not a pour net — truly incomplete
+        assert result.connectivity.incomplete_nets >= 1
+        # Connectivity should fail due to +3V3
         assert result.connectivity.passed is False
         # Verdict should be NOT_READY
         assert result.verdict == AuditVerdict.NOT_READY
@@ -1243,3 +1243,281 @@ class TestZoneConnectedNets:
         data = result.to_dict()
         assert "zone_connected_nets" in data["connectivity"]
         assert data["connectivity"]["zone_connected_nets"] >= 1
+
+
+class TestZoneConnectedPourNets:
+    """Tests for pour-net classification in _check_connectivity.
+
+    Verifies that nets classified as pour nets (is_pour_net=True) by
+    classify_and_apply_rules are reclassified as zone-connected even
+    when no explicit zone definition exists in the PCB.
+    """
+
+    # PCB with +5V and GNDA nets but NO zone definitions.
+    # Both are pour nets per classify_and_apply_rules.
+    PCB_POUR_NO_ZONES = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GNDA")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+)
+"""
+
+    # PCB with pour nets AND a signal net, no zones.
+    # Each pour net has 2 pads (on different footprints) so they need routing.
+    # SPI_CLK also has 2 pads needing routing.
+    PCB_POUR_AND_SIGNAL_NO_ZONES = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GNDA")
+  (net 3 "SPI_CLK")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SPI_CLK"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 50 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SPI_CLK"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp3")
+    (at 70 50)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref3"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val3"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+)
+"""
+
+    # PCB with +5V that already has a zone definition.
+    PCB_POUR_WITH_ZONE = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "+5V")
+  (net 2 "GNDA")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "+5V"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GNDA"))
+  )
+  (zone (net 1) (net_name "+5V") (layer "F.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts
+      (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+  )
+)
+"""
+
+    def test_pour_nets_without_zone_excluded_from_incomplete(self, tmp_path):
+        """Pour nets (+5V, GNDA) without zone definitions are zone-connected.
+
+        When classify_and_apply_rules returns is_pour_net=True, those nets
+        are excluded from incomplete_nets and included in zone_connected_nets.
+        """
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Both +5V and GNDA should be reclassified as zone-connected
+        assert result.connectivity.zone_connected_nets == 2
+        assert result.connectivity.incomplete_nets == 0
+        assert result.connectivity.passed is True
+
+    def test_pour_net_names_tracked(self, tmp_path):
+        """Pour net names are stored in ConnectivityStatus.pour_net_names."""
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        assert sorted(result.connectivity.pour_net_names) == ["+5V", "GNDA"]
+
+    def test_signal_net_still_incomplete(self, tmp_path):
+        """Signal net (SPI_CLK) stays incomplete even with pour nets present."""
+        pcb_path = tmp_path / "mixed_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_AND_SIGNAL_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Pour nets reclassified, signal net stays incomplete
+        assert result.connectivity.zone_connected_nets >= 2
+        assert result.connectivity.incomplete_nets >= 1
+        assert result.connectivity.passed is False
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_pour_net_with_existing_zone_not_duplicated(self, tmp_path):
+        """A pour net that already has a zone definition is handled by
+        the first pass (zone-name intersection), not duplicated."""
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Both +5V (zone) and GNDA (pour classification) should be zone-connected
+        assert result.connectivity.zone_connected_nets == 2
+        assert result.connectivity.incomplete_nets == 0
+        assert result.connectivity.passed is True
+        # Only GNDA should be in pour_net_names (+5V was handled by zone path)
+        assert result.connectivity.pour_net_names == ["GNDA"]
+
+    def test_classification_failure_leaves_truly_incomplete_unchanged(self, tmp_path):
+        """If classify_and_apply_rules raises, incomplete nets stay unchanged."""
+        from unittest.mock import patch
+
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        with patch(
+            "kicad_tools.router.net_class.classify_and_apply_rules",
+            side_effect=RuntimeError("classification failure"),
+        ):
+            audit = ManufacturingAudit(pcb_path)
+            result = audit.run()
+
+        # Without classification, both nets remain incomplete
+        assert result.connectivity.incomplete_nets >= 2
+        assert result.connectivity.passed is False
+        assert result.connectivity.pour_net_names == []
+
+    def test_pour_net_action_items_emitted(self, tmp_path):
+        """Advisory ActionItems are emitted for pour nets without zones."""
+        pcb_path = tmp_path / "pour_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_POUR_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        add_zone_items = [
+            item for item in result.action_items
+            if "Add zone for" in item.description
+        ]
+        assert len(add_zone_items) == 2
+        descriptions = sorted(item.description for item in add_zone_items)
+        assert "Add zone for +5V on appropriate copper layer" in descriptions
+        assert "Add zone for GNDA on appropriate copper layer" in descriptions
+        # These should be advisory (priority 3), not blocking
+        for item in add_zone_items:
+            assert item.priority == 3
+
+    def test_pour_net_names_in_to_dict(self):
+        """ConnectivityStatus.to_dict() includes pour_net_names field."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=0,
+            zone_connected_nets=5,
+            pour_net_names=["+5V", "GNDA"],
+            passed=True,
+        )
+        d = status.to_dict()
+        assert "pour_net_names" in d
+        assert d["pour_net_names"] == ["+5V", "GNDA"]
