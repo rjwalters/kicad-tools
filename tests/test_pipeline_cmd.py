@@ -2194,6 +2194,7 @@ class TestFixERCStep:
 
         This is the integration test that verifies the pipeline loop does not
         break after ERC failure when FIX_ERC is the next step in the sequence.
+        After FIX_ERC succeeds, the ERC result is reclassified as a warning.
         """
         pcb_file, sch_file = pcb_with_schematic
 
@@ -2215,13 +2216,212 @@ class TestFixERCStep:
 
         # Both steps must have executed
         assert len(results) == 2, "Pipeline should not stop after ERC failure when FIX_ERC is next"
-        # ERC found errors without --force, so its result is a failure
-        assert results[0].success is False
+        # ERC result is reclassified as a warning after FIX_ERC succeeds
+        assert results[0].success is True, "ERC should be reclassified as success after FIX_ERC"
+        assert results[0].warning is True, "ERC should be marked as warning after reclassification"
         assert results[0].step == PipelineStep.ERC
         # FIX_ERC must have run (not skipped) because erc_error_count > 0
         assert results[1].step == PipelineStep.FIX_ERC
         assert not results[1].skipped, "FIX_ERC should not be skipped when ERC errors exist"
         assert results[1].success is True
+
+
+class TestErcReclassificationAfterFixErc:
+    """Tests for post-loop reclassification of ERC result when FIX_ERC succeeds."""
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_erc_reclassified_as_warning_when_fix_erc_succeeds(
+        self, mock_subprocess_step, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """ERC result is reclassified to success+warning after FIX_ERC succeeds."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess_step.return_value = (True, "completed")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            layers=2,
+        )
+        results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_ERC])
+
+        erc_result = results[0]
+        assert erc_result.success is True, "ERC should be reclassified as success"
+        assert erc_result.warning is True, "ERC should be marked as warning"
+        assert "fixed by fix-erc" in erc_result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_erc_remains_failed_when_fix_erc_fails(
+        self, mock_subprocess_step, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """ERC result stays failed when FIX_ERC also fails."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess_step.return_value = (False, "fix-erc failed")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=True,
+            layers=2,
+        )
+        results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_ERC])
+
+        erc_result = results[0]
+        assert erc_result.success is False, "ERC should remain failed when FIX_ERC fails"
+        assert erc_result.warning is False, "ERC should not be marked as warning"
+        assert "fixed by fix-erc" not in erc_result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_exit_code_zero_when_erc_remediated(
+        self, mock_subprocess_step, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """main() returns exit code 0 when ERC is remediated by FIX_ERC."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess_step.return_value = (True, "completed")
+
+        result = main(
+            [
+                str(pcb_file),
+                "--step",
+                "erc",  # We cannot pass two steps via --step,
+            ]
+        )
+        # Single-step ERC with errors returns 1 (no FIX_ERC to remediate)
+        assert result == 1
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_exit_code_zero_full_pipeline_erc_remediated(
+        self, mock_subprocess_run, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """Full pipeline returns exit code 0 when ERC errors are remediated by FIX_ERC."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        # All subprocess steps succeed (fix-erc, fix-silkscreen, fix-vias, etc.)
+        mock_subprocess_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main([str(pcb_file), "--quiet"])
+        assert result == 0, "Pipeline should return 0 when ERC errors are remediated by FIX_ERC"
+
+    @patch("kicad_tools.cli.pipeline_cmd._fetch_check_results", return_value=None)
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_banner_shows_completed_with_warnings(
+        self,
+        mock_subprocess_step,
+        mock_run_erc,
+        mock_find_cli,
+        mock_fetch,
+        pcb_with_schematic,
+        tmp_path,
+        capsys,
+    ):
+        """Banner shows 'completed with warnings' when ERC is remediated."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess_step.return_value = (True, "completed")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=False,
+            layers=2,
+        )
+        run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_ERC])
+
+        captured = capsys.readouterr()
+        output = captured.out
+        assert "completed with warnings" in output, (
+            f"Banner should show 'completed with warnings', got: {output!r}"
+        )
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_banner_shows_failed_when_fix_erc_fails(
+        self,
+        mock_subprocess_step,
+        mock_run_erc,
+        mock_find_cli,
+        pcb_with_schematic,
+        tmp_path,
+        capsys,
+    ):
+        """Banner shows 'Pipeline failed' when FIX_ERC also fails."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+        mock_subprocess_step.return_value = (False, "fix-erc failed")
+
+        ctx = PipelineContext(
+            pcb_file=pcb_file,
+            schematic_file=sch_file,
+            quiet=False,
+            layers=2,
+        )
+        run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_ERC])
+
+        captured = capsys.readouterr()
+        output = captured.out
+        assert "failed" in output.lower(), (
+            f"Banner should show 'Pipeline failed' when FIX_ERC fails, got: {output!r}"
+        )
+
+    def test_no_reclassification_for_single_step_erc(self):
+        """Reclassification does not apply when running --step erc alone."""
+        # When only ERC runs and fails, there is no FIX_ERC result to trigger
+        # reclassification, so ERC remains failed.
+        results = [
+            PipelineResult(
+                step=PipelineStep.ERC, success=False, message="erc: 2 blocking error(s) found"
+            ),
+        ]
+        # Verify the result stays as-is (no reclassification applies)
+        erc_result = next((r for r in results if r.step == PipelineStep.ERC), None)
+        fix_erc_result = next((r for r in results if r.step == PipelineStep.FIX_ERC), None)
+        assert erc_result is not None
+        assert fix_erc_result is None
+        assert erc_result.success is False
 
 
 class TestZonesDefaultSkip:
