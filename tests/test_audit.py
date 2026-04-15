@@ -228,6 +228,162 @@ class TestAuditResult:
 
         assert result.verdict == AuditVerdict.READY
 
+    def test_verdict_warning_connectivity_fails_with_zones(self):
+        """Test WARNING when connectivity fails but board has zone definitions.
+
+        When DRC=0, ERC=PASS, manufacturer=PASS, and the board has zones,
+        incomplete nets are treated as advisory because zone fills may
+        resolve the gaps once refilled in KiCad.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_error_count=0,
+            passed=True,
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(
+            manufacturer="JLCPCB",
+            passed=True,
+        )
+
+        assert result.verdict == AuditVerdict.WARNING
+        assert result.is_ready is False
+
+    def test_verdict_not_ready_connectivity_fails_no_zones(self):
+        """Test NOT_READY when connectivity fails and board has no zones.
+
+        Without zone definitions, incomplete nets cannot be zone-filled
+        and must be treated as a hard failure.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_error_count=0,
+            passed=True,
+        )
+        result.drc = DRCStatus(
+            error_count=0,
+            warning_count=0,
+            blocking_count=0,
+            passed=True,
+        )
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=False,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(
+            manufacturer="JLCPCB",
+            passed=True,
+        )
+
+        assert result.verdict == AuditVerdict.NOT_READY
+        assert result.is_ready is False
+
+    def test_verdict_ready_all_connected_with_zones(self):
+        """Test READY when all nets connected and board has zones.
+
+        When connectivity passes, has_zones should not affect the verdict.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=10,
+            incomplete_nets=0,
+            has_zones=True,
+            passed=True,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+        assert result.is_ready is True
+
+    def test_verdict_not_ready_drc_blocks_even_with_zones(self):
+        """Test NOT_READY when DRC fails even if connectivity+zones is advisory.
+
+        DRC blocking errors always override the zone connectivity advisory.
+        """
+        result = AuditResult()
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(blocking_count=5, warning_count=0, passed=False)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_verdict_not_ready_erc_blocks_even_with_zones(self):
+        """Test NOT_READY when ERC has blocking errors even with zones."""
+        result = AuditResult()
+        result.erc = ERCStatus(
+            error_count=2,
+            blocking_error_count=2,
+            warning_count=0,
+            passed=False,
+        )
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_verdict_not_ready_compatibility_blocks_even_with_zones(self):
+        """Test NOT_READY when compatibility fails even with zones."""
+        result = AuditResult()
+        result.erc = ERCStatus(error_count=0, warning_count=0, passed=True)
+        result.drc = DRCStatus(blocking_count=0, warning_count=0, passed=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=3,
+            has_zones=True,
+            passed=False,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=False)
+
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_connectivity_has_zones_in_to_dict(self):
+        """Test that has_zones field is included in to_dict serialization."""
+        status = ConnectivityStatus(has_zones=True)
+        data = status.to_dict()
+        assert "has_zones" in data
+        assert data["has_zones"] is True
+
+        status2 = ConnectivityStatus(has_zones=False)
+        data2 = status2.to_dict()
+        assert data2["has_zones"] is False
+
     def test_summary_dict(self):
         """Test summary dict contains expected fields."""
         result = AuditResult(project_name="test_project")
@@ -1121,11 +1277,13 @@ class TestZoneConnectedNets:
         # Connectivity should pass
         assert result.connectivity.passed is True
 
-    def test_mixed_nets_only_truly_incomplete_block(self, tmp_path):
-        """Mixed nets: zone-connected pass, truly incomplete still block.
+    def test_mixed_nets_truly_incomplete_advisory_with_zones(self, tmp_path):
+        """Mixed nets: board has zones so incomplete connectivity is advisory.
 
-        When some incomplete nets have zones and others do not,
-        only the truly-incomplete nets should prevent READY.
+        When some incomplete nets have zones and others do not, the board
+        still has zone definitions.  Per the zone-connectivity advisory
+        rule, incomplete nets on a board with zones yield WARNING (not
+        NOT_READY) because zone fills may resolve the gaps.
         """
         pcb_path = tmp_path / "mixed_board.kicad_pcb"
         pcb_path.write_text(self.PCB_MIXED_NETS)
@@ -1139,8 +1297,10 @@ class TestZoneConnectedNets:
         assert result.connectivity.incomplete_nets >= 1
         # Connectivity should fail due to SIG
         assert result.connectivity.passed is False
-        # Verdict should be NOT_READY
-        assert result.verdict == AuditVerdict.NOT_READY
+        # Board has zone definitions so connectivity is advisory
+        assert result.connectivity.has_zones is True
+        # Verdict should be WARNING (not NOT_READY) per zone advisory rule
+        assert result.verdict == AuditVerdict.WARNING
 
     def test_no_zones_regression(self, tmp_path):
         """PCB with no zones and incomplete signal nets still yields NOT_READY.
@@ -1497,8 +1657,7 @@ class TestZoneConnectedPourNets:
         result = audit.run()
 
         add_zone_items = [
-            item for item in result.action_items
-            if "Add zone for" in item.description
+            item for item in result.action_items if "Add zone for" in item.description
         ]
         assert len(add_zone_items) == 2
         descriptions = sorted(item.description for item in add_zone_items)
