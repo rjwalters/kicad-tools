@@ -500,6 +500,28 @@ def _make_segment_via_key(child) -> str | None:
     return None
 
 
+def _canonicalize_net_node(net_node, name_to_number: dict[str, int]):
+    """Canonicalize a ``(net ...)`` S-expression to ``(net N "name")`` format.
+
+    KiCad 10 may emit inline net references as ``(net "name")`` without a
+    numeric ID.  If the node is in name-only format and the name appears in
+    *name_to_number*, return a new ``(net N "name")`` node.  Otherwise
+    return the original node unchanged.
+    """
+    from kicad_tools.sexp import SExp
+
+    if net_node is None:
+        return net_node
+    # Already has a numeric first value — nothing to fix
+    if net_node.get_int(0) is not None:
+        return net_node
+    # Name-only format: (net "name")
+    net_name = net_node.get_string(0) or ""
+    if net_name and net_name in name_to_number:
+        return SExp.list("net", name_to_number[net_name], net_name)
+    return net_node
+
+
 def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
     """Snapshot per-element inline ``(net ...)`` assignments from a PCB.
 
@@ -511,9 +533,13 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
     - **Segments**: keyed by ``"seg:<sx>,<sy>:<ex>,<ey>:<layer>"`` (geometry).
     - **Vias**: keyed by ``"via:<x>,<y>:<size>:<layers>"`` (geometry).
 
+    Net nodes are canonicalized to ``(net N "name")`` format using the PCB
+    header net declarations, so that restoring always writes the full format
+    even when the original used KiCad 10 name-only ``(net "name")`` syntax.
+
     Returns a dict mapping key strings to a list ``[net_sexp_node]``
-    containing the original ``(net ...)`` S-expression.  An empty dict
-    is returned if the file cannot be read.
+    containing the (potentially canonicalized) ``(net ...)`` S-expression.
+    An empty dict is returned if the file cannot be read.
     """
     from kicad_tools.core.sexp_file import load_pcb
 
@@ -521,6 +547,15 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
         sexp = load_pcb(str(pcb_path))
     except Exception:
         return {}
+
+    # Build name -> number lookup from header (net N "name") declarations
+    name_to_number: dict[str, int] = {}
+    for child in sexp.children:
+        if child.name == "net":
+            net_num = child.get_int(0)
+            net_name = child.get_string(1) or ""
+            if net_num is not None and net_num != 0 and net_name:
+                name_to_number[net_name] = net_num
 
     snapshot: dict[str, list] = {}
 
@@ -539,7 +574,7 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
             if pad_number is None:
                 continue
             key = f"{fp_ref}:{pad_number}"
-            snapshot[key] = [net_node]
+            snapshot[key] = [_canonicalize_net_node(net_node, name_to_number)]
 
     # Snapshot segments and vias at the top level, keyed by geometry
     for child in sexp.children:
@@ -549,7 +584,7 @@ def _snapshot_element_nets(pcb_path: Path) -> dict[str, list]:
                 continue
             geo_key = _make_segment_via_key(child)
             if geo_key:
-                snapshot[geo_key] = [net_node]
+                snapshot[geo_key] = [_canonicalize_net_node(net_node, name_to_number)]
 
     return snapshot
 

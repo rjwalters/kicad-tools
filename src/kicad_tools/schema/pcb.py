@@ -508,6 +508,7 @@ class Segment:
     width: float
     layer: str
     net_number: int
+    net_name: str = ""
     uuid: str = ""
 
     @classmethod
@@ -529,8 +530,18 @@ class Segment:
             seg.width = width.get_float(0) or 0.0
         if layer := sexp.find("layer"):
             seg.layer = layer.get_string(0) or ""
+        # Net — handles both (net N "name") and (net "name") formats.
+        # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
-            seg.net_number = net.get_int(0) or 0
+            first_int = net.get_int(0)
+            if first_int is not None:
+                # Traditional format: (net N "name") or (net N)
+                seg.net_number = first_int
+                seg.net_name = net.get_string(1) or ""
+            else:
+                # KiCad 10 name-only format: (net "name")
+                seg.net_number = 0
+                seg.net_name = net.get_string(0) or ""
         if uuid := sexp.find("uuid"):
             seg.uuid = uuid.get_string(0) or ""
 
@@ -559,6 +570,7 @@ class Via:
     drill: float
     layers: list[str]
     net_number: int
+    net_name: str = ""
     uuid: str = ""
 
     @classmethod
@@ -584,8 +596,18 @@ class Via:
                 for i in range(len(layers.values))
                 if isinstance(layers.values[i], str)
             ]
+        # Net — handles both (net N "name") and (net "name") formats.
+        # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
-            via.net_number = net.get_int(0) or 0
+            first_int = net.get_int(0)
+            if first_int is not None:
+                # Traditional format: (net N "name") or (net N)
+                via.net_number = first_int
+                via.net_name = net.get_string(1) or ""
+            else:
+                # KiCad 10 name-only format: (net "name")
+                via.net_number = 0
+                via.net_name = net.get_string(0) or ""
         if uuid := sexp.find("uuid"):
             via.uuid = uuid.get_string(0) or ""
 
@@ -1221,6 +1243,12 @@ class PCB:
                 graphic = BoardGraphic.from_sexp(child, graphic_type)
                 self._graphics.append(graphic)
 
+        # Post-parse fixup: recover net_number from name for KiCad 10 name-only
+        # format.  KiCad 10 may emit inline (net "name") without a numeric ID,
+        # but the header declarations (net N "name") are always present, so we
+        # can rebuild the number from the name.
+        self._fixup_net_numbers()
+
     def _parse_layers(self, sexp: SExp):
         """Parse layer definitions."""
         for child in sexp.iter_children():
@@ -1240,6 +1268,40 @@ class PCB:
         net_num = sexp.get_int(0) or 0
         net_name = sexp.get_string(1) or ""
         self._nets[net_num] = Net(net_num, net_name)
+
+    def _fixup_net_numbers(self) -> None:
+        """Recover net_number from net_name for KiCad 10 name-only format.
+
+        KiCad 10 may serialize inline net references as ``(net "name")``
+        without a numeric ID, while the PCB header still has ``(net N "name")``
+        declarations.  This method builds a name-to-number lookup from the
+        header and patches any pads, segments, or vias that have
+        ``net_number == 0`` but a non-empty ``net_name``.
+        """
+        # Build inverse lookup: name -> number
+        name_to_number: dict[str, int] = {}
+        for net in self._nets.values():
+            if net.name and net.number != 0:
+                name_to_number[net.name] = net.number
+
+        if not name_to_number:
+            return
+
+        # Fix pads
+        for fp in self._footprints:
+            for pad in fp.pads:
+                if pad.net_number == 0 and pad.net_name:
+                    pad.net_number = name_to_number.get(pad.net_name, 0)
+
+        # Fix segments
+        for seg in self._segments:
+            if seg.net_number == 0 and seg.net_name:
+                seg.net_number = name_to_number.get(seg.net_name, 0)
+
+        # Fix vias
+        for via in self._vias:
+            if via.net_number == 0 and via.net_name:
+                via.net_number = name_to_number.get(via.net_name, 0)
 
     def _parse_setup(self, sexp: SExp):
         """Parse setup/design rules."""
@@ -3122,17 +3184,12 @@ class PCB:
                 self._zones = []
         else:
             self._segments = [
-                seg for seg in self._segments
-                if seg.net_number not in net_numbers_to_strip
+                seg for seg in self._segments if seg.net_number not in net_numbers_to_strip
             ]
-            self._vias = [
-                via for via in self._vias
-                if via.net_number not in net_numbers_to_strip
-            ]
+            self._vias = [via for via in self._vias if via.net_number not in net_numbers_to_strip]
             if not keep_zones:
                 self._zones = [
-                    zone for zone in self._zones
-                    if zone.net_number not in net_numbers_to_strip
+                    zone for zone in self._zones if zone.net_number not in net_numbers_to_strip
                 ]
 
         return {

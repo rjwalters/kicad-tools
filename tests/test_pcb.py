@@ -2235,3 +2235,206 @@ class TestStripTraces:
         assert stats["segments"] == 0
         assert stats["vias"] == 0
         assert len(pcb.segments) == 0
+
+
+# ---------------------------------------------------------------------------
+# KiCad 10 name-only net format: net_number recovery from PCB headers
+# ---------------------------------------------------------------------------
+
+
+KICAD10_NAMEONLY_PCB = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (footprint "TestFP"
+    (layer "F.Cu")
+    (uuid "fp-uuid-1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net "GND"))
+    (pad "2" smd rect (at 1 0) (size 1 1) (layers "F.Cu") (net "VCC"))
+  )
+  (segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+
+
+class TestKiCad10NetNumberRecovery:
+    """Test that net_number is recovered from PCB header when KiCad 10 uses name-only format."""
+
+    def test_pad_recovers_net_number_from_header(self, tmp_path):
+        """Pad.from_sexp with (net "GND") gets net_number=1 from header (net 1 "GND")."""
+        pcb_path = tmp_path / "kicad10.kicad_pcb"
+        pcb_path.write_text(KICAD10_NAMEONLY_PCB)
+        pcb = PCB.load(pcb_path)
+
+        # R1 pad 1 has (net "GND") -> should recover net_number=1
+        fp = pcb.footprints[0]
+        pad1 = next(p for p in fp.pads if p.number == "1")
+        pad2 = next(p for p in fp.pads if p.number == "2")
+
+        assert pad1.net_name == "GND"
+        assert pad1.net_number == 1
+
+        assert pad2.net_name == "VCC"
+        assert pad2.net_number == 2
+
+    def test_segment_recovers_net_number_from_header(self, tmp_path):
+        """Segment with (net "GND") gets net_number=1 from header."""
+        pcb_path = tmp_path / "kicad10.kicad_pcb"
+        pcb_path.write_text(KICAD10_NAMEONLY_PCB)
+        pcb = PCB.load(pcb_path)
+
+        assert len(pcb.segments) == 1
+        seg = pcb.segments[0]
+        assert seg.net_name == "GND"
+        assert seg.net_number == 1
+
+    def test_via_recovers_net_number_from_header(self, tmp_path):
+        """Via with (net "VCC") gets net_number=2 from header."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (via (at 100 100) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net "VCC") (uuid "via-1"))
+)
+"""
+        pcb_path = tmp_path / "kicad10_via.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        pcb = PCB.load(pcb_path)
+
+        assert len(pcb.vias) == 1
+        via = pcb.vias[0]
+        assert via.net_name == "VCC"
+        assert via.net_number == 2
+
+    def test_empty_net_stays_zero(self, tmp_path):
+        """Pad with (net "") or (net 0 "") stays at net_number=0."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "TestFP"
+    (layer "F.Cu")
+    (uuid "fp-uuid")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 0 ""))
+  )
+)
+"""
+        pcb_path = tmp_path / "empty_net.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        pcb = PCB.load(pcb_path)
+
+        pad = pcb.footprints[0].pads[0]
+        assert pad.net_number == 0
+        assert pad.net_name == ""
+
+    def test_pad_without_net_child_stays_zero(self, tmp_path):
+        """Pad with no (net ...) child at all stays at net_number=0."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20260206)
+  (generator "pcbnew")
+  (generator_version "10.0")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "TestFP"
+    (layer "F.Cu")
+    (uuid "fp-uuid")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+  )
+)
+"""
+        pcb_path = tmp_path / "no_net.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        pcb = PCB.load(pcb_path)
+
+        pad = pcb.footprints[0].pads[0]
+        assert pad.net_number == 0
+        assert pad.net_name == ""
+
+    def test_fixture_zone_fill_pcb_recovers_nets(self):
+        """The test_zone_fill.kicad_pcb fixture (KiCad 10) recovers net numbers."""
+        fixture_path = Path(__file__).parent / "fixtures" / "test_zone_fill.kicad_pcb"
+        if not fixture_path.exists():
+            pytest.skip("test_zone_fill.kicad_pcb fixture not available")
+
+        pcb = PCB.load(fixture_path)
+
+        # Header should have net 1 "GND" and net 2 "VCC"
+        assert 1 in pcb.nets
+        assert pcb.nets[1].name == "GND"
+        assert 2 in pcb.nets
+        assert pcb.nets[2].name == "VCC"
+
+        # All pads with net_name "GND" should have net_number=1
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.net_name == "GND":
+                    assert pad.net_number == 1, (
+                        f"{fp.reference} pad {pad.number}: "
+                        f"expected net_number=1, got {pad.net_number}"
+                    )
+                elif pad.net_name == "VCC":
+                    assert pad.net_number == 2, (
+                        f"{fp.reference} pad {pad.number}: "
+                        f"expected net_number=2, got {pad.net_number}"
+                    )
+
+        # Segments should also recover
+        for seg in pcb.segments:
+            if seg.net_name == "GND":
+                assert seg.net_number == 1
+            elif seg.net_name == "VCC":
+                assert seg.net_number == 2
+
+    def test_traditional_format_still_works(self, minimal_pcb):
+        """Traditional (net N "name") format still parses correctly."""
+        pcb = PCB.load(minimal_pcb)
+
+        # minimal_pcb uses traditional format: (net 1 "GND"), (net 2 "+3.3V")
+        fp = pcb.footprints[0]
+        pad1 = next(p for p in fp.pads if p.number == "1")
+        pad2 = next(p for p in fp.pads if p.number == "2")
+
+        assert pad1.net_number == 1
+        assert pad1.net_name == "GND"
+        assert pad2.net_number == 2
+        assert pad2.net_name == "+3.3V"

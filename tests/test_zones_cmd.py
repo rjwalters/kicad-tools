@@ -930,6 +930,162 @@ class TestKiCad10NetFormat:
         assert '(net "GND")' in result_content or '(net 1 "GND")' in result_content
         assert '(net "+3V3")' in result_content or '(net 2 "+3V3")' in result_content
 
+    def test_snapshot_canonicalizes_name_only_to_number_format(self, tmp_path):
+        """_snapshot_element_nets canonicalizes (net "name") to (net N "name") format.
+
+        When the PCB header has (net 1 "GND") and an element has (net "GND"),
+        the snapshot should store the canonicalized (net 1 "GND") node so that
+        restore writes back the full format.
+        """
+        from kicad_tools.cli.runner import _snapshot_element_nets
+
+        # PCB with number-format headers but name-only inline refs (KiCad 10)
+        pcb_content = """\
+(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(footprint "TestFP"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "VCC"))
+\t)
+\t(segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+        pcb_path = tmp_path / "kicad10_canonical.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+
+        snapshot = _snapshot_element_nets(pcb_path)
+
+        # Verify pad snapshots are canonicalized to (net N "name")
+        assert "R1:1" in snapshot
+        pad1_net = snapshot["R1:1"][0]
+        assert pad1_net.get_int(0) == 1
+        assert pad1_net.get_string(1) == "GND"
+
+        assert "R1:2" in snapshot
+        pad2_net = snapshot["R1:2"][0]
+        assert pad2_net.get_int(0) == 2
+        assert pad2_net.get_string(1) == "VCC"
+
+        # Verify segment snapshot is canonicalized
+        seg_keys = [k for k in snapshot if k.startswith("seg:")]
+        assert len(seg_keys) == 1
+        seg_net = snapshot[seg_keys[0]][0]
+        assert seg_net.get_int(0) == 1
+        assert seg_net.get_string(1) == "GND"
+
+    def test_restore_writes_number_format_for_kicad10_input(self, tmp_path):
+        """After snapshot+restore cycle, pad net nodes use (net N "name") format.
+
+        Even when the input PCB uses KiCad 10 name-only (net "GND") format,
+        the restored output should have (net 1 "GND") so downstream parsers
+        can read the net number directly.
+        """
+        from kicad_tools.cli.runner import (
+            _restore_net_declarations,
+            _snapshot_element_nets,
+            _snapshot_net_declarations,
+        )
+
+        # KiCad 10 PCB with number headers but name-only inline refs
+        original_content = """\
+(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(footprint "TestFP"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-1")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net "VCC"))
+\t)
+\t(segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net "GND") (uuid "seg-1"))
+)
+"""
+        original_path = tmp_path / "original.kicad_pcb"
+        original_path.write_text(original_content)
+
+        net_nodes = _snapshot_net_declarations(original_path)
+        element_nets = _snapshot_element_nets(original_path)
+
+        # Simulate kicad-cli zeroing out nets
+        zeroed_content = """\
+(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers (0 "F.Cu" signal))
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(footprint "TestFP"
+\t\t(layer "F.Cu")
+\t\t(uuid "fp-uuid-new")
+\t\t(at 100 100)
+\t\t(property "Reference" "R1" (at 0 0) (layer "F.SilkS") (uuid "ref-uuid-new"))
+\t\t(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t\t(pad "2" smd rect (at 1 0) (size 0.5 0.5) (layers "F.Cu") (net 0))
+\t)
+\t(segment (start 99 100) (end 101 100) (width 0.25) (layer "F.Cu") (net 0) (uuid "seg-new"))
+)
+"""
+        target_path = tmp_path / "target.kicad_pcb"
+        target_path.write_text(zeroed_content)
+
+        _restore_net_declarations(target_path, net_nodes, element_nets)
+
+        # Verify the restored file uses (net N "name") format, not (net "name")
+        from kicad_tools.core.sexp_file import load_pcb as load_pcb_sexp
+
+        output_sexp = load_pcb_sexp(str(target_path))
+
+        # Check pads
+        for fp_node in (c for c in output_sexp.children if c.name == "footprint"):
+            for pad_node in (c for c in fp_node.children if c.name == "pad"):
+                net_node = pad_node.get("net")
+                if net_node is not None:
+                    net_num = net_node.get_int(0)
+                    if net_num and net_num != 0:
+                        # Should have both number and name
+                        net_name = net_node.get_string(1)
+                        assert net_name is not None, (
+                            f'Restored net node should have (net N "name") format, '
+                            f"got number={net_num} but no name"
+                        )
+
+        # Check segments
+        for child in output_sexp.children:
+            if child.name == "segment":
+                net_node = child.get("net")
+                if net_node is not None:
+                    net_num = net_node.get_int(0)
+                    if net_num and net_num != 0:
+                        net_name = net_node.get_string(1)
+                        assert net_name is not None, (
+                            f'Restored segment net should have (net N "name") format'
+                        )
+
     def test_pad_from_sexp_name_only_format(self):
         """Pad.from_sexp handles (net "name") without a number."""
         from kicad_tools.schema.pcb import Pad
