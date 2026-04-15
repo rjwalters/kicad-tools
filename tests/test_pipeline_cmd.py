@@ -21,6 +21,7 @@ from kicad_tools.cli.pipeline_cmd import (
     _resolve_pcb_from_project,
     _resolve_schematic,
     _run_step_erc,
+    _run_step_export,
     _run_step_fix_erc,
     _run_step_report,
     main,
@@ -714,6 +715,7 @@ class TestPipelineStepOrder:
             PipelineStep.ZONES,
             PipelineStep.AUDIT,
             PipelineStep.REPORT,
+            PipelineStep.EXPORT,
         ]
         assert expected == ALL_STEPS
 
@@ -1803,9 +1805,9 @@ class TestReportStep:
         report_idx = ALL_STEPS.index(PipelineStep.REPORT)
         assert report_idx == audit_idx + 1
 
-    def test_report_step_is_last(self):
-        """PipelineStep.REPORT is the last entry in ALL_STEPS."""
-        assert ALL_STEPS[-1] == PipelineStep.REPORT
+    def test_report_step_is_second_to_last(self):
+        """PipelineStep.REPORT is second-to-last in ALL_STEPS (before EXPORT)."""
+        assert ALL_STEPS[-2] == PipelineStep.REPORT
 
     def test_report_enum_value(self):
         """PipelineStep.REPORT has value 'report'."""
@@ -1983,6 +1985,219 @@ class TestReportStep:
         )
         assert "board.kicad_pcb" in show.stdout
         assert "reports/report.md" in show.stdout
+
+
+# =========================================================================
+# EXPORT STEP TESTS
+# =========================================================================
+
+
+class TestExportStep:
+    """Tests for the EXPORT pipeline step."""
+
+    def test_export_step_in_all_steps(self):
+        """PipelineStep.EXPORT is in ALL_STEPS after REPORT."""
+        assert PipelineStep.EXPORT in ALL_STEPS
+        report_idx = ALL_STEPS.index(PipelineStep.REPORT)
+        export_idx = ALL_STEPS.index(PipelineStep.EXPORT)
+        assert export_idx == report_idx + 1
+
+    def test_export_step_is_last(self):
+        """PipelineStep.EXPORT is the last entry in ALL_STEPS."""
+        assert ALL_STEPS[-1] == PipelineStep.EXPORT
+
+    def test_export_enum_value(self):
+        """PipelineStep.EXPORT has value 'export'."""
+        assert PipelineStep.EXPORT.value == "export"
+
+    def test_export_dry_run(self, routed_pcb: Path):
+        """Export step in dry-run mode outputs the would-be command."""
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True, mfr="jlcpcb")
+        console = Console(quiet=True)
+        result = _run_step_export(ctx, console)
+
+        assert result.success is True
+        assert "[dry-run]" in result.message
+        assert "kct export" in result.message
+        assert routed_pcb.name in result.message
+        assert "--mfr jlcpcb" in result.message
+        assert "-o manufacturing/" in result.message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_export_step_invokes_subprocess(self, mock_run, routed_pcb: Path):
+        """Export step calls subprocess with correct args."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
+        results = run_pipeline(ctx, [PipelineStep.EXPORT])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "export" in cmd_args
+        assert "--mfr" in cmd_args
+        assert "-o" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_export_step_forwards_mfr(self, mock_run, routed_pcb: Path):
+        """Export step passes --mfr with the correct manufacturer value."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="pcbway")
+        run_pipeline(ctx, [PipelineStep.EXPORT])
+
+        cmd_args = mock_run.call_args[0][0]
+        mfr_idx = cmd_args.index("--mfr")
+        assert cmd_args[mfr_idx + 1] == "pcbway"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_export_step_output_dir(self, mock_run, routed_pcb: Path):
+        """Export step passes -o with manufacturing/ directory path."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb")
+        run_pipeline(ctx, [PipelineStep.EXPORT])
+
+        cmd_args = mock_run.call_args[0][0]
+        o_idx = cmd_args.index("-o")
+        assert cmd_args[o_idx + 1] == str(routed_pcb.parent / "manufacturing")
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_step_export_accepted_by_argparse(self, mock_run, routed_pcb: Path):
+        """--step export is a valid argparse choice and runs only the export step."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main(["--step", "export", str(routed_pcb), "--quiet"])
+
+        assert result == 0
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "export" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_export_runs_after_audit_failure(self, mock_run, routed_pcb: Path):
+        """EXPORT step still executes when AUDIT step fails (non-blocking)."""
+
+        def side_effect(cmd, **kwargs):
+            if "check" in cmd or "audit" in cmd:
+                return MagicMock(returncode=1, stderr="DRC violations found", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers=2)
+        results = run_pipeline(ctx, [PipelineStep.AUDIT, PipelineStep.REPORT, PipelineStep.EXPORT])
+
+        # All three steps should have run
+        assert len(results) == 3
+        assert results[0].success is False  # AUDIT failed
+        assert results[1].step == PipelineStep.REPORT  # REPORT still ran
+        assert results[2].step == PipelineStep.EXPORT  # EXPORT still ran
+        assert results[2].success is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_export_runs_after_report_failure(self, mock_run, routed_pcb: Path):
+        """EXPORT step still executes when REPORT step fails (non-blocking)."""
+
+        def side_effect(cmd, **kwargs):
+            if "report" in cmd:
+                return MagicMock(returncode=1, stderr="report generation failed", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers=2)
+        results = run_pipeline(ctx, [PipelineStep.REPORT, PipelineStep.EXPORT])
+
+        assert len(results) == 2
+        assert results[0].success is False  # REPORT failed
+        assert results[1].step == PipelineStep.EXPORT  # EXPORT still ran
+        assert results[1].success is True
+
+    def test_full_dry_run_includes_export_step(self, routed_pcb: Path, capsys):
+        """Full dry-run (all steps) includes the export step in output."""
+        result = main(["--dry-run", str(routed_pcb)])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "export" in captured.out.lower()
+
+    def test_export_quiet_suppresses_output(self, routed_pcb: Path, capsys):
+        """--quiet suppresses the 'Exporting manufacturing package...' console line."""
+        with patch(
+            "kicad_tools.cli.pipeline_cmd.subprocess.run",
+            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+        ):
+            main(["--step", "export", "--quiet", str(routed_pcb)])
+
+        captured = capsys.readouterr()
+        assert "Exporting manufacturing package" not in captured.out
+
+    @patch("kicad_tools.cli.pipeline_cmd._run_subprocess_step")
+    def test_commit_stages_manufacturing_dir(self, mock_step, tmp_path: Path):
+        """When --commit is used and manufacturing/ exists, git add includes manufacturing/."""
+        # Initialize a git repo
+        subprocess.run(
+            ["git", "init", str(tmp_path)],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.email", "test@test.com"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "Test"],
+            capture_output=True,
+            check=True,
+        )
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        # Create manufacturing/ directory with a file
+        manufacturing_dir = tmp_path / "manufacturing"
+        manufacturing_dir.mkdir()
+        (manufacturing_dir / "gerbers.zip").write_bytes(b"fake zip")
+        # Initial commit
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "initial"],
+            capture_output=True,
+            check=True,
+        )
+
+        # Modify the PCB and manufacturing file so there is something to commit
+        pcb_file.write_text(ROUTED_PCB + "\n; modified\n")
+        (manufacturing_dir / "gerbers.zip").write_bytes(b"updated fake zip")
+
+        mock_step.return_value = (True, "completed successfully")
+
+        result = main(["--step", "fix-vias", "--commit", "--quiet", str(pcb_file)])
+        assert result == 0
+
+        # Verify the commit included manufacturing/ in the staged files
+        log = subprocess.run(
+            ["git", "-C", str(tmp_path), "log", "--oneline", "-1"],
+            capture_output=True,
+            text=True,
+        )
+        assert "fix: run kct pipeline" in log.stdout
+
+        # Verify both files are in the commit
+        show = subprocess.run(
+            ["git", "-C", str(tmp_path), "diff", "--name-only", "HEAD~1", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        assert "board.kicad_pcb" in show.stdout
+        assert "manufacturing/gerbers.zip" in show.stdout
 
 
 # =========================================================================
