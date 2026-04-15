@@ -83,6 +83,38 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable LCSC auto-matching",
     )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip all pre-flight validation checks",
+    )
+    parser.add_argument(
+        "--skip-drc",
+        action="store_true",
+        help="Skip DRC check in pre-flight validation",
+    )
+    parser.add_argument(
+        "--skip-erc",
+        action="store_true",
+        help="Skip ERC check in pre-flight validation",
+    )
+    parser.add_argument(
+        "--drc-report",
+        default=None,
+        help="Path to pre-existing DRC report file",
+    )
+    parser.add_argument(
+        "--erc-report",
+        default=None,
+        help="Path to pre-existing ERC report file",
+    )
+    parser.add_argument(
+        "--format",
+        dest="output_format",
+        default="text",
+        choices=["text", "json"],
+        help="Output format (default: text)",
+    )
 
     args = parser.parse_args(argv)
     return run_export(args)
@@ -90,10 +122,13 @@ def main(argv: list[str] | None = None) -> int:
 
 def run_export(args: argparse.Namespace) -> int:
     """Execute the export command with parsed arguments."""
+    import json
+
     from kicad_tools.export.manufacturing import (
         ManufacturingConfig,
         ManufacturingPackage,
     )
+    from kicad_tools.export.preflight import PreflightConfig
 
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
@@ -102,6 +137,15 @@ def run_export(args: argparse.Namespace) -> int:
 
     # Determine output directory
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
+
+    # Build preflight configuration
+    preflight_cfg = PreflightConfig(
+        skip_all=getattr(args, "skip_preflight", False),
+        skip_drc=getattr(args, "skip_drc", False),
+        skip_erc=getattr(args, "skip_erc", False),
+        drc_report_path=getattr(args, "drc_report", None),
+        erc_report_path=getattr(args, "erc_report", None),
+    )
 
     # Build configuration
     auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc
@@ -113,6 +157,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_report=not args.no_report,
         include_project_zip=not args.no_project_zip,
         auto_lcsc=auto_lcsc,
+        preflight=preflight_cfg,
     )
 
     pkg = ManufacturingPackage(
@@ -122,25 +167,53 @@ def run_export(args: argparse.Namespace) -> int:
         config=config,
     )
 
+    output_format = getattr(args, "output_format", "text")
+
     # Dry run
     if args.dry_run:
         result = pkg.export(output_dir, dry_run=True)
-        print("Dry run -- the following files would be generated:")
-        print(f"  Output directory: {result.output_dir}")
-        for f in result.all_files:
-            print(f"  - {f.name}")
+        if output_format == "json":
+            print(json.dumps({"dry_run": True, "files": [f.name for f in result.all_files]}))
+        else:
+            print("Dry run -- the following files would be generated:")
+            print(f"  Output directory: {result.output_dir}")
+            for f in result.all_files:
+                print(f"  - {f.name}")
         return 0
 
     # Normal run with progress output
     quiet = getattr(args, "global_quiet", False)
 
-    if not quiet:
+    if not quiet and output_format == "text":
         print(f"Generating manufacturing package for {args.mfr}...")
         print(f"  PCB: {pcb_path}")
         print(f"  Output: {output_dir}")
         print()
 
     result = pkg.export(output_dir)
+
+    # Display preflight results
+    if result.preflight_results and output_format == "text" and not quiet:
+        print("Pre-flight checks:")
+        for pr in result.preflight_results:
+            status_tag = f"[{pr.status}]"
+            print(f"  {status_tag:6s} {pr.name}: {pr.message}")
+            if pr.details and pr.status != "OK":
+                print(f"         {pr.details}")
+        print()
+
+    # JSON output mode
+    if output_format == "json":
+        json_result: dict = {
+            "success": result.success,
+            "output_dir": str(result.output_dir),
+            "files": [str(f) for f in result.all_files],
+            "errors": result.errors,
+        }
+        if result.preflight_results:
+            json_result["preflight"] = [pr.to_dict() for pr in result.preflight_results]
+        print(json.dumps(json_result, indent=2))
+        return 0 if result.success else 1
 
     if not quiet:
         if result.assembly_result:

@@ -81,6 +81,11 @@ from .pnp import (
     get_aux_origin,
     get_pnp_formatter,
 )
+from .preflight import (
+    PreflightChecker,
+    PreflightConfig,
+    PreflightResult,
+)
 
 __all__ = [
     # Assembly package
@@ -96,6 +101,10 @@ __all__ = [
     "ManufacturingPackage",
     "ManufacturingConfig",
     "ManufacturingResult",
+    # Pre-flight validation
+    "PreflightChecker",
+    "PreflightConfig",
+    "PreflightResult",
     # BOM
     "BOMFormatter",
     "BOMExportConfig",

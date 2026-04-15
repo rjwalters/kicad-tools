@@ -674,6 +674,18 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-cpl")
     if getattr(args, "export_no_project_zip", False):
         sub_argv.append("--no-project-zip")
+    if getattr(args, "export_skip_preflight", False):
+        sub_argv.append("--skip-preflight")
+    if getattr(args, "export_skip_drc", False):
+        sub_argv.append("--skip-drc")
+    if getattr(args, "export_skip_erc", False):
+        sub_argv.append("--skip-erc")
+    if hasattr(args, "export_drc_report") and args.export_drc_report:
+        sub_argv.extend(["--drc-report", args.export_drc_report])
+    if hasattr(args, "export_erc_report") and args.export_erc_report:
+        sub_argv.extend(["--erc-report", args.export_erc_report])
+    if hasattr(args, "export_format") and args.export_format != "text":
+        sub_argv.extend(["--format", args.export_format])
 
     return export_cmd(sub_argv)
 
