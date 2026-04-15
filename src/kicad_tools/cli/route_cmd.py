@@ -34,6 +34,9 @@ Layer Stack Configuration:
     # 4-layer with 2 signal layers (for high-density routing)
     kicad-tools route board.kicad_pcb --layers 4-sig
 
+    # 4-layer with all 4 signal layers (no planes, maximum routing resources)
+    kicad-tools route board.kicad_pcb --layers 4-all
+
     # 6-layer with 4 signal layers
     kicad-tools route board.kicad_pcb --layers 6
 
@@ -41,6 +44,7 @@ Layer Stack Configuration:
     - '2': F.Cu (signal), B.Cu (signal)
     - '4': F.Cu (signal), In1.Cu (GND plane), In2.Cu (PWR plane), B.Cu (signal)
     - '4-sig': F.Cu (signal), In1.Cu (signal), In2.Cu (GND plane), B.Cu (mixed)
+    - '4-all': F.Cu (signal), In1.Cu (signal), In2.Cu (signal), B.Cu (signal)
     - '6': F.Cu, In1.Cu (GND), In2.Cu (signal), In3.Cu (signal), In4.Cu (PWR), B.Cu
 
     For 4-layer boards with inner planes (--layers 4), signals are routed on
@@ -641,6 +645,7 @@ def route_with_layer_escalation(
     layer_configs = [
         (2, LayerStack.two_layer()),
         (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
+        (4, LayerStack.four_layer_all_signal()),
         (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
     ]
 
@@ -984,6 +989,7 @@ def route_with_rule_relaxation(
             "2": LayerStack.two_layer(),
             "4": LayerStack.four_layer_sig_gnd_pwr_sig(),
             "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr(),
+            "4-all": LayerStack.four_layer_all_signal(),
             "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
         }
         layer_stack = layer_stack_map[args.layers]
@@ -1348,6 +1354,7 @@ def route_with_combined_escalation(
     layer_configs = [
         (2, LayerStack.two_layer()),
         (4, LayerStack.four_layer_sig_gnd_pwr_sig()),
+        (4, LayerStack.four_layer_all_signal()),
         (6, LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()),
     ]
 
@@ -1886,7 +1893,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--layers",
-        choices=["auto", "2", "4", "4-sig", "6"],
+        choices=["auto", "2", "4", "4-sig", "4-all", "6"],
         default="auto",
         help=(
             "Layer stack configuration for routing: "
@@ -1894,6 +1901,7 @@ def main(argv: list[str] | None = None) -> int:
             "'2' = 2-layer (F.Cu, B.Cu); "
             "'4' = 4-layer with GND/PWR planes (F.Cu, In1=GND, In2=PWR, B.Cu); "
             "'4-sig' = 4-layer with 2 signal layers (F.Cu, In1=signal, In2=GND, B.Cu); "
+            "'4-all' = 4-layer with all 4 signal layers (no planes); "
             "'6' = 6-layer with 4 signal layers. "
             "Auto-detection parses the PCB's layer definitions and zones to "
             "determine the appropriate layer stack."
@@ -2461,6 +2469,7 @@ def main(argv: list[str] | None = None) -> int:
             "2": LayerStack.two_layer(),
             "4": LayerStack.four_layer_sig_gnd_pwr_sig(),
             "4-sig": LayerStack.four_layer_sig_sig_gnd_pwr(),
+            "4-all": LayerStack.four_layer_all_signal(),
             "6": LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig(),
         }
         layer_stack = layer_stack_map[args.layers]
