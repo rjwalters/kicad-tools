@@ -1404,6 +1404,20 @@ def _add_fix_drc_parser(subparsers) -> None:
         ),
     )
     fix_drc_parser.add_argument(
+        "--local-reroute",
+        action="store_true",
+        help=(
+            "Attempt local A* rerouting for infeasible violations "
+            "(segments with both endpoints at vias). Off by default."
+        ),
+    )
+    fix_drc_parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output (for scripting)",
+    )
+    fix_drc_parser.add_argument(
         "--format",
         choices=["text", "json", "summary"],
         default="text",
