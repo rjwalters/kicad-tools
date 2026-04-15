@@ -2345,7 +2345,7 @@ class TestMaxDisplacementPassThrough:
         result = _run_step_fix_drc(ctx, console)
 
         assert result.success is True
-        assert "--max-displacement 0.5" in result.message
+        assert "--max-displacement 2.0" in result.message
 
     def test_fix_drc_dry_run_shows_custom_max_displacement(self, routed_pcb: Path):
         """Dry-run message reflects a user-specified max-displacement value."""
@@ -2400,12 +2400,12 @@ class TestMaxDisplacementPassThrough:
         disp_idx = cmd_args.index("--max-displacement")
         assert cmd_args[disp_idx + 1] == "1.0"
 
-    def test_pipeline_default_max_displacement_is_0_5(self):
-        """PipelineContext defaults to 0.5 mm max-displacement."""
+    def test_pipeline_default_max_displacement_is_2_0(self):
+        """PipelineContext defaults to 2.0 mm max-displacement."""
         from pathlib import Path
 
         ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"))
-        assert ctx.max_displacement == 0.5
+        assert ctx.max_displacement == 2.0
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_cli_max_displacement_forwarded_to_pipeline(self, mock_run, routed_pcb: Path):
@@ -2422,6 +2422,76 @@ class TestMaxDisplacementPassThrough:
         assert "--max-displacement" in cmd_args
         disp_idx = cmd_args.index("--max-displacement")
         assert cmd_args[disp_idx + 1] == "0.75"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_default_pipeline_uses_2_0mm_displacement(self, mock_run, routed_pcb: Path):
+        """Pipeline with no --max-displacement flag passes 2.0 to the fix-drc subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main([str(routed_pcb), "--step", "fix-drc", "--quiet"])
+        assert result == 0
+
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--max-displacement" in cmd_args
+        disp_idx = cmd_args.index("--max-displacement")
+        assert cmd_args[disp_idx + 1] == "2.0"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_higher_displacement_produces_clean_exit(self, mock_run, routed_pcb: Path):
+        """Higher displacement budget (2.0mm) achieves full repair (exit 0) where
+        lower budget (0.5mm) only achieves partial repair (exit 2).
+
+        This verifies the motivation for raising the default: at 0.5mm the
+        fix-drc solver cannot reach solutions for violations where the offending
+        segment must move more than 0.5mm, resulting in partial repair (exit
+        code 2 / warning). At 2.0mm, all violations are resolved cleanly.
+        """
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        console = Console(quiet=True)
+
+        def side_effect_by_displacement(cmd, **kwargs):
+            disp_idx = cmd.index("--max-displacement")
+            disp_val = float(cmd[disp_idx + 1])
+            if disp_val < 1.0:
+                # Low budget: partial repair (exit code 2 = completed with warnings)
+                return MagicMock(returncode=2, stderr="", stdout="12 violations remaining")
+            else:
+                # High budget: full repair
+                return MagicMock(returncode=0, stderr="", stdout="0 violations remaining")
+
+        mock_run.side_effect = side_effect_by_displacement
+
+        # Low displacement: partial repair (exit code 2 -> "completed with warnings")
+        ctx_low = PipelineContext(pcb_file=routed_pcb, quiet=True, max_displacement=0.5)
+        result_low = _run_step_fix_drc(ctx_low, console)
+        assert result_low.success is True  # exit 2 is treated as success
+        assert "completed with warnings" in result_low.message
+
+        # High displacement (new default): clean repair (exit code 0)
+        ctx_high = PipelineContext(pcb_file=routed_pcb, quiet=True, max_displacement=2.0)
+        result_high = _run_step_fix_drc(ctx_high, console)
+        assert result_high.success is True
+        assert "completed successfully" in result_high.message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_old_default_still_accepted_as_override(self, mock_run, routed_pcb: Path):
+        """The old 0.5mm default can still be specified explicitly as an override."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main(
+            [str(routed_pcb), "--step", "fix-drc", "--max-displacement", "0.5", "--quiet"]
+        )
+        assert result == 0
+
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--max-displacement" in cmd_args
+        disp_idx = cmd_args.index("--max-displacement")
+        assert cmd_args[disp_idx + 1] == "0.5"
 
 
 class TestFetchCheckResults:
