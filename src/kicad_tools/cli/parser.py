@@ -1412,6 +1412,14 @@ def _add_fix_drc_parser(subparsers) -> None:
         ),
     )
     fix_drc_parser.add_argument(
+        "--no-connectivity-check",
+        action="store_true",
+        help=(
+            "Skip post-pass connectivity check and rollback. "
+            "Use for boards with no footprints where connectivity is meaningless."
+        ),
+    )
+    fix_drc_parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",

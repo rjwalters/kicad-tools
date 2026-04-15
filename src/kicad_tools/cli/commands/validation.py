@@ -162,6 +162,8 @@ def run_fix_drc_command(args) -> int:
         sub_argv.extend(["--max-passes", str(args.max_passes)])
     if getattr(args, "local_reroute", False):
         sub_argv.append("--local-reroute")
+    if getattr(args, "no_connectivity_check", False):
+        sub_argv.append("--no-connectivity-check")
     if args.format != "text":
         sub_argv.extend(["--format", args.format])
     # Use command-level quiet or global quiet
