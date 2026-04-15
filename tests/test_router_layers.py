@@ -182,6 +182,23 @@ class TestLayerStackLayerEnums:
         assert b_cu.layer_enum == Layer.B_CU
         assert b_cu.layer_enum.value == 5
 
+    def test_four_layer_all_signal_enums(self):
+        """Test 4-layer ALL-SIG stack returns correct Layer enums."""
+        stack = LayerStack.four_layer_all_signal()
+        assert len(stack.layers) == 4
+
+        expected = [
+            ("F.Cu", 0, Layer.F_CU),
+            ("In1.Cu", 1, Layer.IN1_CU),
+            ("In2.Cu", 2, Layer.IN2_CU),
+            ("B.Cu", 3, Layer.B_CU),
+        ]
+
+        for layer_def, (name, index, expected_enum) in zip(stack.layers, expected, strict=True):
+            assert layer_def.name == name
+            assert layer_def.index == index
+            assert layer_def.layer_enum == expected_enum
+
     def test_six_layer_stack_enums(self):
         """Test 6-layer stack returns correct Layer enums."""
         stack = LayerStack.six_layer_sig_gnd_sig_sig_pwr_sig()
@@ -318,6 +335,14 @@ class TestLayerStack:
         assert stack.num_layers == 4
         assert len(stack.signal_layers) == 2
         assert len(stack.plane_layers) == 2
+
+    def test_four_layer_all_signal_stack(self):
+        """Test 4-layer all-signal stack preset."""
+        stack = LayerStack.four_layer_all_signal()
+        assert stack.num_layers == 4
+        assert stack.name == "4-Layer ALL-SIG"
+        assert len(stack.signal_layers) == 4
+        assert len(stack.plane_layers) == 0
 
     def test_six_layer_stack(self):
         """Test 6-layer stack preset."""
@@ -566,3 +591,89 @@ class TestViaRules:
         rules.through_via = ViaDefinition(ViaType.THROUGH, 0.3, 0.15, start_layer=0, end_layer=1)
         best = rules.get_best_via(0, 5, 6)  # Request 0->5 but via only goes 0->1
         assert best is None
+
+
+class TestFourLayerAllSignal:
+    """Tests for the four_layer_all_signal() preset.
+
+    Verifies that the 4-all stack makes all 4 copper layers routable
+    signal layers, unlike the standard 4-layer (SIG-GND-PWR-SIG) which
+    only provides 2 routable layers.
+    """
+
+    def test_all_layers_are_signal(self):
+        """All 4 layers should have LayerType.SIGNAL."""
+        stack = LayerStack.four_layer_all_signal()
+        for layer in stack.layers:
+            assert layer.layer_type == LayerType.SIGNAL, (
+                f"{layer.name} should be SIGNAL, got {layer.layer_type}"
+            )
+
+    def test_no_plane_layers(self):
+        """No layers should be PLANE or MIXED."""
+        stack = LayerStack.four_layer_all_signal()
+        assert len(stack.plane_layers) == 0
+
+    def test_four_routable_layers(self):
+        """All 4 layers should be routable."""
+        stack = LayerStack.four_layer_all_signal()
+        assert len(stack.signal_layers) == 4
+
+    def test_routable_indices_returns_all_four(self):
+        """get_routable_indices() must return [0, 1, 2, 3]."""
+        stack = LayerStack.four_layer_all_signal()
+        assert stack.get_routable_indices() == [0, 1, 2, 3]
+
+    def test_outer_layers_correct(self):
+        """F.Cu and B.Cu should be marked as outer layers."""
+        stack = LayerStack.four_layer_all_signal()
+        outer = stack.outer_layers
+        assert len(outer) == 2
+        assert outer[0].name == "F.Cu"
+        assert outer[1].name == "B.Cu"
+
+    def test_inner_layers_are_routable(self):
+        """In1.Cu and In2.Cu should be inner routable layers."""
+        stack = LayerStack.four_layer_all_signal()
+        inner = stack.get_inner_layer_indices()
+        assert inner == [1, 2]
+
+    def test_no_plane_net_defined(self):
+        """No layer should have a plane_net defined."""
+        stack = LayerStack.four_layer_all_signal()
+        for layer in stack.layers:
+            assert layer.plane_net == "", (
+                f"{layer.name} should have no plane_net, got '{layer.plane_net}'"
+            )
+
+    def test_standard_4layer_via_rules_work(self):
+        """Standard 4-layer via rules should span all layers."""
+        stack = LayerStack.four_layer_all_signal()
+        rules = ViaRules.standard_4layer()
+        # Through via should span 0 to 3
+        assert rules.through_via.spans_layer(0, stack.num_layers)
+        assert rules.through_via.spans_layer(1, stack.num_layers)
+        assert rules.through_via.spans_layer(2, stack.num_layers)
+        assert rules.through_via.spans_layer(3, stack.num_layers)
+
+    def test_differs_from_sig_gnd_pwr_sig(self):
+        """4-all must have more routable layers than standard 4-layer."""
+        standard = LayerStack.four_layer_sig_gnd_pwr_sig()
+        all_sig = LayerStack.four_layer_all_signal()
+        assert len(all_sig.get_routable_indices()) > len(standard.get_routable_indices())
+        # Standard has 2 routable layers, all-sig has 4
+        assert standard.get_routable_indices() == [0, 3]
+        assert all_sig.get_routable_indices() == [0, 1, 2, 3]
+
+    def test_stack_name_and_description(self):
+        """Verify name and description are set."""
+        stack = LayerStack.four_layer_all_signal()
+        assert stack.name == "4-Layer ALL-SIG"
+        assert "signal" in stack.description.lower()
+
+    def test_layer_names_match_kicad(self):
+        """Layer names should match standard KiCad copper layer names."""
+        stack = LayerStack.four_layer_all_signal()
+        expected_names = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+        actual_names = [layer.name for layer in stack.layers]
+        assert actual_names == expected_names

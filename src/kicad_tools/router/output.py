@@ -268,7 +268,7 @@ def show_routing_summary(
                 f"   Routing channels are saturated on {num_layers} layer{'s' if num_layers != 1 else ''}."
             )
             if num_layers < 4:
-                print("   Try: --layers 4 or --layers 6 for more routing resources\n")
+                print("   Try: --layers 4-all or --layers 6 for more routing resources\n")
             else:
                 print("   Try: Increase board area or reduce component density\n")
 
@@ -343,7 +343,7 @@ def show_routing_summary(
                     print(f"{suggestion_num}. {suggestion_text}")
             if num_layers <= 2:
                 suggestion_num += 1
-                print(f"{suggestion_num}. Consider 4-layer routing: kct route --layers 4")
+                print(f"{suggestion_num}. Consider 4-layer routing: kct route --layers 4-all")
 
         # Always suggest --auto-layers when routing on fewer than 4 layers with failures
         num_layers = getattr(router.grid, "num_layers", 2)
@@ -480,7 +480,7 @@ def get_routing_diagnostics_json(
                 "category": "LAYER_COUNT",
                 "affected_nets": failures_by_cause["congestion"],
                 "description": f"Routing channels saturated on {num_layers} layers",
-                "fix": "--layers 4" if num_layers < 4 else "Increase board area",
+                "fix": "--layers 4-all" if num_layers < 4 else "Increase board area",
             }
         )
 

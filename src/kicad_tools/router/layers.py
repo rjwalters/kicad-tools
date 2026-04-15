@@ -255,6 +255,20 @@ class LayerStack:
         )
 
     @classmethod
+    def four_layer_all_signal(cls) -> "LayerStack":
+        """4-layer with all layers as signal (no dedicated planes)."""
+        return cls(
+            name="4-Layer ALL-SIG",
+            description="4-layer with all copper layers for signal routing",
+            layers=[
+                LayerDefinition("F.Cu", 0, LayerType.SIGNAL, is_outer=True),
+                LayerDefinition("In1.Cu", 1, LayerType.SIGNAL),
+                LayerDefinition("In2.Cu", 2, LayerType.SIGNAL),
+                LayerDefinition("B.Cu", 3, LayerType.SIGNAL, is_outer=True),
+            ],
+        )
+
+    @classmethod
     def six_layer_sig_gnd_sig_sig_pwr_sig(cls) -> "LayerStack":
         """6-layer high-density: Signal-GND-Signal-Signal-PWR-Signal."""
         return cls(
