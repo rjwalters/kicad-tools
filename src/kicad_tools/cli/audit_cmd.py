@@ -16,8 +16,8 @@ Usage:
 
 Exit Codes:
     0 - Ready for manufacturing (no errors)
-    1 - Not ready (errors found) or command failure
-    2 - Warnings found (only with --strict)
+    1 - Command failure (file not found, parse error, etc.)
+    2 - Not ready (errors found) or warnings found with --strict
 """
 
 import argparse
@@ -133,9 +133,12 @@ def main(argv: list[str] | None = None) -> int:
         output_table(result, args.verbose)
 
     # Determine exit code
-    if result.verdict == AuditVerdict.NOT_READY:
-        return 1
-    elif result.verdict == AuditVerdict.WARNING and args.strict:
+    # Exit 2 = audit ran successfully but found issues (NOT_READY or WARNING+strict)
+    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
+    # Exit 0 = board is ready for manufacturing
+    if result.verdict == AuditVerdict.NOT_READY or (
+        result.verdict == AuditVerdict.WARNING and args.strict
+    ):
         return 2
     return 0
 

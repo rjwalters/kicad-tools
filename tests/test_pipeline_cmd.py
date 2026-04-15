@@ -394,12 +394,26 @@ class TestExitCodes:
     """Tests for pipeline exit codes."""
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
-    def test_exit_code_on_drc_failure(self, mock_run, routed_pcb: Path):
-        """Pipeline returns exit code 1 when final audit fails."""
-        mock_run.return_value = MagicMock(returncode=1, stderr="DRC violations found", stdout="")
+    def test_exit_code_on_audit_tool_error(self, mock_run, routed_pcb: Path):
+        """Pipeline returns exit code 1 when audit subprocess has a tool error (exit 1)."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="file not found", stdout="")
 
         result = main(["--step", "audit", str(routed_pcb), "--quiet"])
         assert result == 1
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_audit_exit_code_2_treated_as_success(self, mock_run, routed_pcb: Path):
+        """Pipeline treats audit exit code 2 (DRC violations found) as success with warnings.
+
+        This is the core behavioral change: audit now exits 2 (not 1) when DRC
+        violations are found. The pipeline already treats exit code 2 as
+        'completed with warnings', so the pipeline now reports success instead
+        of failure for boards with DRC violations.
+        """
+        mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+
+        result = main(["--step", "audit", str(routed_pcb), "--quiet"])
+        assert result == 0
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_exit_code_zero_on_success(self, mock_run, routed_pcb: Path):
@@ -439,6 +453,50 @@ class TestExitCodes:
         assert results[0].success is True
         assert "warnings" in results[0].message
         assert results[1].success is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_pipeline_audit_exit_2_reports_success_with_warnings(self, mock_run, routed_pcb: Path):
+        """Pipeline reports audit step as 'completed with warnings' when exit code is 2.
+
+        Audit now exits 2 for NOT_READY (DRC violations found). The pipeline
+        already treats exit code 2 as a soft warning, so multi-step pipelines
+        that include audit should report all steps succeeded.
+        """
+
+        def side_effect(cmd, **kwargs):
+            # Detect audit/check subcommands by looking at the argv list
+            if "audit" in cmd or "check" in cmd:
+                return MagicMock(returncode=2, stderr="", stdout="")
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.FIX_VIAS, PipelineStep.AUDIT])
+
+        assert len(results) == 2
+        assert results[0].success is True
+        assert results[1].success is True
+        assert "warnings" in results[1].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_pipeline_audit_exit_1_is_tool_failure(self, mock_run, routed_pcb: Path):
+        """Pipeline reports audit step as failed when exit code is 1 (tool error).
+
+        Exit code 1 from audit now means a tool-level error (file not found,
+        parse failure), not DRC violations. The pipeline should still treat
+        this as a failure.
+        """
+        mock_run.return_value = MagicMock(returncode=1, stderr="Error: parse failed", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.AUDIT])
+
+        assert len(results) == 1
+        # Audit step failures don't stop the pipeline (informational), but
+        # the step itself is marked as failed
+        assert results[0].success is False
+        assert "failed" in results[0].message
 
 
 class TestProjectInput:

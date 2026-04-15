@@ -511,8 +511,12 @@ class TestAuditExitCodes:
             exit_code = 0
         assert exit_code == 0
 
-    def test_exit_code_one_when_not_ready(self):
-        """Test that CLI returns exit code 1 when verdict is NOT_READY."""
+    def test_exit_code_two_when_not_ready(self):
+        """Test that CLI returns exit code 2 when verdict is NOT_READY.
+
+        Exit code 2 means the audit ran successfully but found issues.
+        Exit code 1 is reserved for tool-level failures (file not found, etc.).
+        """
         result = AuditResult()
         result.erc.error_count = 5
         result.erc.blocking_error_count = 5
@@ -520,10 +524,10 @@ class TestAuditExitCodes:
 
         # Verify the exit code mapping
         if result.verdict == AuditVerdict.NOT_READY:
-            exit_code = 1
+            exit_code = 2
         else:
             exit_code = 0
-        assert exit_code == 1
+        assert exit_code == 2
 
     def test_exit_code_two_when_warning_strict(self):
         """Test that CLI returns exit code 2 for WARNING with --strict."""
@@ -540,6 +544,75 @@ class TestAuditExitCodes:
         else:
             exit_code = 0
         assert exit_code == 2
+
+    def test_exit_code_one_for_file_not_found(self, capsys):
+        """Test that CLI returns exit code 1 for tool-level errors (file not found)."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main(["nonexistent_board.kicad_pcb"])
+        assert result == 1
+
+    def test_exit_code_one_for_wrong_extension(self, tmp_path, capsys):
+        """Test that CLI returns exit code 1 for tool-level errors (wrong extension)."""
+        from kicad_tools.cli.audit_cmd import main
+
+        bad_file = tmp_path / "test.txt"
+        bad_file.write_text("not a pcb")
+        result = main([str(bad_file)])
+        assert result == 1
+
+    def test_exit_code_two_when_not_ready_via_main(self, tmp_path, monkeypatch, capsys):
+        """Test that audit main() returns 2 (not 1) when verdict is NOT_READY.
+
+        This confirms the pipeline will see exit code 2 and treat it as
+        'completed with warnings' instead of 'failed'.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.audit_cmd import main
+
+        # Create a dummy PCB file so path validation passes
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        # Mock ManufacturingAudit to return NOT_READY
+        mock_result = AuditResult()
+        mock_result.drc.blocking_count = 3
+        assert mock_result.verdict == AuditVerdict.NOT_READY
+
+        mock_audit_instance = MagicMock()
+        mock_audit_instance.run.return_value = mock_result
+
+        with patch(
+            "kicad_tools.cli.audit_cmd.ManufacturingAudit",
+            return_value=mock_audit_instance,
+        ):
+            exit_code = main([str(pcb_file)])
+
+        assert exit_code == 2
+
+    def test_exit_code_zero_when_ready_via_main(self, tmp_path, monkeypatch, capsys):
+        """Test that audit main() returns 0 when verdict is READY."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.cli.audit_cmd import main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        mock_result = AuditResult()
+        assert mock_result.verdict == AuditVerdict.READY
+
+        mock_audit_instance = MagicMock()
+        mock_audit_instance.run.return_value = mock_result
+
+        with patch(
+            "kicad_tools.cli.audit_cmd.ManufacturingAudit",
+            return_value=mock_audit_instance,
+        ):
+            exit_code = main([str(pcb_file)])
+
+        assert exit_code == 0
 
 
 class TestAuditOutputRendering:

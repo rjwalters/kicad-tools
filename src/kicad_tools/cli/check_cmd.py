@@ -12,9 +12,9 @@ Usage:
     kct check board.kicad_pcb --skip silkscreen    # Exclude checks
 
 Exit Codes:
-    0 - No errors (warnings may be present)
-    1 - Errors found or command failure
-    2 - Warnings found (only with --strict)
+    0 - No errors (warnings may be present without --strict)
+    1 - Command failure (file not found, parse error, etc.)
+    2 - Errors found, or warnings found with --strict
 
 Difference from `kct drc`:
     - kct drc: Uses kicad-cli to run DRC (requires KiCad)
@@ -218,12 +218,13 @@ def main(argv: list[str] | None = None) -> int:
         output_table(violations, results, pcb_path, args.mfr, layers, args.verbose)
 
     # Determine exit code
+    # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
+    # Exit 1 = reserved for tool-level failures (file not found, parse error) above
+    # Exit 0 = no errors (warnings may be present without --strict)
     error_count = sum(1 for v in violations if v.is_error)
     warning_count = len(violations) - error_count
 
-    if error_count > 0:
-        return 1
-    elif warning_count > 0 and args.strict:
+    if error_count > 0 or (warning_count > 0 and args.strict):
         return 2
     return 0
 
