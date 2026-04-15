@@ -482,17 +482,24 @@ class PreflightChecker:
         in_pcb_not_bom = pcb_refs - bom_refs
 
         issues: list[str] = []
+        status: Literal["OK", "WARN", "FAIL"] = "OK"
+
         if in_bom_not_pcb:
+            # Unplaced components cannot be assembled -- this is a hard failure
+            status = "FAIL"
             refs = ", ".join(sorted(in_bom_not_pcb)[:10])
             issues.append(f"{len(in_bom_not_pcb)} in BOM but not on PCB: {refs}")
         if in_pcb_not_bom:
+            # Orphaned footprints may be intentional (mounting holes, test points)
+            if status != "FAIL":
+                status = "WARN"
             refs = ", ".join(sorted(in_pcb_not_bom)[:10])
             issues.append(f"{len(in_pcb_not_bom)} on PCB but not in BOM: {refs}")
 
         if issues:
             return PreflightResult(
                 name="bom_pcb_match",
-                status="WARN",
+                status=status,
                 message="BOM/PCB reference mismatch",
                 details="; ".join(issues),
             )
