@@ -25,6 +25,7 @@ from kicad_tools.export.pnp import (
     PnPExportConfig,
     export_pnp,
     extract_placements,
+    get_aux_origin,
     get_pnp_formatter,
 )
 
@@ -260,13 +261,22 @@ class TestJLCPCBPnPFormatter:
         assert "U1" in output
         assert "C1" in output
 
-    def test_layer_top_bottom(self, placements):
+    def test_layer_capitalized_top_bottom(self, placements):
         formatter = JLCPCBPnPFormatter()
         output = formatter.format(placements)
 
-        # Should have "top" and "bottom" in output
-        assert "top" in output.lower()
-        assert "bottom" in output.lower()
+        reader = csv.reader(io.StringIO(output))
+        rows = list(reader)
+
+        # JLCPCB expects capitalized "Top" and "Bottom" layer values
+        layer_values = [row[-1] for row in rows[1:]]  # skip header
+        assert "Top" in layer_values
+        assert "Bottom" in layer_values
+
+        # Ensure we do NOT have lowercase-only "top"/"bottom"
+        # (The values must be exactly "Top" and "Bottom", not "top" and "bottom")
+        for val in layer_values:
+            assert val in ("Top", "Bottom"), f"Unexpected layer value: {val!r}"
 
     def test_filter_top_only(self, placements):
         config = PnPExportConfig(top_only=True)
@@ -392,6 +402,85 @@ class TestExportPnP:
 
         assert "R1" in output
         assert "10k" in output
+
+
+class TestSetupAuxAxisOrigin:
+    """Tests for aux_axis_origin parsing in PCB Setup."""
+
+    def test_aux_axis_origin_default(self):
+        """Setup dataclass should default aux_axis_origin to (0, 0)."""
+        from kicad_tools.schema.pcb import Setup
+
+        setup = Setup()
+        assert setup.aux_axis_origin == (0.0, 0.0)
+
+    def test_aux_axis_origin_parsed_from_pcb(self):
+        """Verify aux_axis_origin is parsed from the multilayer_zones fixture."""
+        from kicad_tools.schema.pcb import PCB
+
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        pcb = PCB.load(fixture)
+        assert pcb.setup is not None
+        # The fixture has (aux_axis_origin 0 0)
+        assert pcb.setup.aux_axis_origin == (0.0, 0.0)
+
+
+class TestGetAuxOrigin:
+    """Tests for get_aux_origin helper function."""
+
+    def test_get_aux_origin_from_fixture(self):
+        """get_aux_origin should return the aux_axis_origin from the PCB file."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        origin = get_aux_origin(fixture)
+        assert origin == (0.0, 0.0)
+
+
+class TestExportPnPWithAuxOrigin:
+    """Tests for export_pnp with auxiliary origin auto-detection."""
+
+    def test_export_pnp_without_pcb_path(self):
+        """export_pnp without pcb_path should work as before."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb")
+        assert "R1" in output
+        assert "10.0000mm" in output
+        assert "20.0000mm" in output
+
+    def test_export_pnp_with_pcb_path_zero_origin(self):
+        """export_pnp with pcb_path but (0,0) aux origin should not change coords."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb", pcb_path=fixture)
+        assert "10.0000mm" in output
+        assert "20.0000mm" in output
+
+    def test_export_pnp_use_aux_origin_disabled(self):
+        """export_pnp with use_aux_origin=False should skip origin auto-detection."""
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        config = PnPExportConfig(use_aux_origin=False)
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
+        assert "10.0000mm" in output
+        assert "20.0000mm" in output
+
+    def test_export_pnp_manual_offset_combined(self):
+        """Manual x_offset/y_offset should combine with aux origin offset."""
+        # Even with zero aux origin, manual offsets should still be applied
+        fixture = Path(__file__).parent / "fixtures" / "projects" / "multilayer_zones.kicad_pcb"
+        config = PnPExportConfig(x_offset=5.0, y_offset=-3.0)
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu"),
+        ]
+        output = export_pnp(footprints, "jlcpcb", config=config, pcb_path=fixture)
+        # 10 + 5 = 15, 20 + (-3) = 17
+        assert "15.0000mm" in output
+        assert "17.0000mm" in output
 
 
 class TestGerberExporter:

@@ -68,6 +68,7 @@ from .pnp import (
     PnPFormatter,
     export_pnp,
     extract_placements,
+    get_aux_origin,
     get_pnp_formatter,
 )
 
@@ -104,5 +105,6 @@ __all__ = [
     "PNP_FORMATTERS",
     "export_pnp",
     "extract_placements",
+    "get_aux_origin",
     "get_pnp_formatter",
 ]
