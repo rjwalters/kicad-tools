@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.cli.fix_drc_cmd import main
+from kicad_tools.cli.fix_drc_cmd import PassResult, main
+from kicad_tools.drc.repair_clearance import RepairResult
 from kicad_tools.drc.repair_drill_clearance import (
     DrillClearanceRepairer,
     DrillRepairResult,
@@ -1701,3 +1702,388 @@ class TestLocalRerouteViaCentralizedCLI:
             ["fix-drc", str(pcb_file), "--max-displacement", "0.5", "--dry-run", "--quiet"]
         )
         assert result != 2
+
+    def test_centralized_cli_no_connectivity_check(self, tmp_path):
+        """kct fix-drc ... --no-connectivity-check parses without error."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(
+            ["fix-drc", str(pcb_file), "--no-connectivity-check", "--dry-run", "--quiet"]
+        )
+        assert result != 2
+
+
+# ── Connectivity check and rollback tests ────────────────────────────
+
+
+class TestConnectivityCheckRollback:
+    """Tests for the post-pass connectivity check and rollback logic."""
+
+    def test_connectivity_decrease_triggers_rollback(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When connected_nets decreases after a pass, the file is rolled back."""
+        output_file = tmp_path / "output.kicad_pcb"
+        original_content = pcb_same_net_vias.read_bytes()
+
+        # Simulate connectivity decrease: baseline=10, after=8
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10  # baseline
+            return 8  # after pass -- decreased
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Exit code 3 = connectivity rollback
+        assert result == 3
+
+        # The output file should be restored to the original content
+        assert output_file.read_bytes() == original_content
+
+        # Warning should be printed to stderr
+        captured = capsys.readouterr()
+        assert "decreased connectivity" in captured.err
+        assert "rolled back" in captured.err
+
+        # JSON output should include connectivity_check section
+        data = json.loads(captured.out)
+        assert "connectivity_check" in data
+        passes = data["connectivity_check"]["passes"]
+        assert len(passes) >= 1
+        assert passes[0]["connected_nets_before"] == 10
+        assert passes[0]["connected_nets_after"] == 8
+        assert passes[0]["rolled_back"] is True
+
+    def test_connectivity_stable_allows_pass(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When connected_nets stays the same or increases, no rollback occurs."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 10  # baseline
+            return 10  # after pass -- same
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        # Should succeed (exit code 0 since all violations repaired)
+        assert result == 0
+
+        # No rollback warning
+        captured = capsys.readouterr()
+        assert "rolled back" not in captured.err
+
+        # JSON should have connectivity_check with no rollback
+        data = json.loads(captured.out)
+        assert "connectivity_check" in data
+        passes = data["connectivity_check"]["passes"]
+        assert passes[0]["rolled_back"] is False
+
+    def test_connectivity_increase_allowed(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, monkeypatch
+    ):
+        """When connected_nets increases after a pass, no rollback occurs."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return 5  # baseline
+            return 7  # after pass -- increased
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+            ]
+        )
+
+        # Not a rollback exit code
+        assert result != 3
+
+    def test_no_connectivity_check_flag_skips_check(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """--no-connectivity-check skips the connectivity check entirely."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        # This mock would trigger rollback, but the flag should prevent it
+        def mock_count_connected_nets(pcb_path):
+            raise AssertionError("Should not be called when --no-connectivity-check is set")
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--no-connectivity-check",
+                "--format",
+                "json",
+            ]
+        )
+
+        # Should succeed without calling the mock
+        assert result == 0
+
+        # No connectivity_check in JSON output
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "connectivity_check" not in data
+
+    def test_dry_run_skips_connectivity_check(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, capsys, monkeypatch
+    ):
+        """--dry-run should not perform connectivity checks."""
+
+        def mock_count_connected_nets(pcb_path):
+            raise AssertionError("Should not be called during --dry-run")
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        # Should succeed without calling the mock
+        assert result in (0, 1, 2)
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "connectivity_check" not in data
+
+    def test_connectivity_error_returns_minus_one_skips_rollback(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """When _count_connected_nets returns -1, rollback is skipped."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        def mock_count_connected_nets(pcb_path):
+            return -1  # Error / unknown
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        result = main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+            ]
+        )
+
+        # Should not rollback -- exit code should NOT be 3
+        assert result != 3
+
+    def test_json_connectivity_check_per_pass(
+        self, pcb_same_net_vias: Path, report_same_net_drill: Path, tmp_path, capsys, monkeypatch
+    ):
+        """JSON output should show connectivity data per pass when enabled."""
+        output_file = tmp_path / "output.kicad_pcb"
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            return 15  # stable connectivity
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        main(
+            [
+                str(pcb_same_net_vias),
+                "--drc-report",
+                str(report_same_net_drill),
+                "-o",
+                str(output_file),
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "connectivity_check" in data
+        passes = data["connectivity_check"]["passes"]
+        assert len(passes) >= 1
+        for p in passes:
+            assert "pass" in p
+            assert "connected_nets_before" in p
+            assert "connected_nets_after" in p
+            assert "rolled_back" in p
+
+    def test_no_repairs_skips_connectivity_check(
+        self, pcb_clearance: Path, report_clearance: Path, capsys, monkeypatch
+    ):
+        """When max-displacement is 0 (no repairs made), connectivity check is skipped."""
+
+        call_count = 0
+
+        def mock_count_connected_nets(pcb_path):
+            nonlocal call_count
+            call_count += 1
+            return 10
+
+        monkeypatch.setattr(
+            "kicad_tools.cli.fix_drc_cmd._count_connected_nets",
+            mock_count_connected_nets,
+        )
+
+        main(
+            [
+                str(pcb_clearance),
+                "--drc-report",
+                str(report_clearance),
+                "--max-displacement",
+                "0",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # The baseline is taken but after_conn is never measured since
+        # repaired_this_pass == 0, so no after value
+        if "connectivity_check" in data:
+            # If present, no rollback should have occurred
+            for p in data["connectivity_check"]["passes"]:
+                assert p["rolled_back"] is False
+
+    def test_pass_result_dataclass_fields(self):
+        """PassResult should have connectivity fields."""
+        pr = PassResult(
+            pass_number=1,
+            violations_before=5,
+            repaired=3,
+            clearance_result=RepairResult(),
+            drill_result=DrillRepairResult(),
+            connectivity_before=10,
+            connectivity_after=8,
+            connectivity_rolled_back=True,
+        )
+        assert pr.connectivity_before == 10
+        assert pr.connectivity_after == 8
+        assert pr.connectivity_rolled_back is True
+
+    def test_pass_result_connectivity_defaults(self):
+        """PassResult connectivity fields default to None/False."""
+        pr = PassResult(
+            pass_number=1,
+            violations_before=5,
+            repaired=3,
+            clearance_result=RepairResult(),
+            drill_result=DrillRepairResult(),
+        )
+        assert pr.connectivity_before is None
+        assert pr.connectivity_after is None
+        assert pr.connectivity_rolled_back is False
+
+
+class TestCountConnectedNets:
+    """Tests for the _count_connected_nets helper."""
+
+    def test_returns_count_for_valid_pcb(self, tmp_path):
+        """Should return a non-negative count for a valid PCB."""
+        from kicad_tools.cli.fix_drc_cmd import _count_connected_nets
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_SAME_NET_VIAS)
+
+        result = _count_connected_nets(pcb_file)
+        assert result >= 0
+
+    def test_returns_minus_one_for_invalid_file(self, tmp_path):
+        """Should return -1 for an invalid/unparseable file."""
+        from kicad_tools.cli.fix_drc_cmd import _count_connected_nets
+
+        bad_file = tmp_path / "bad.kicad_pcb"
+        bad_file.write_text("this is not a valid pcb file")
+
+        result = _count_connected_nets(bad_file)
+        assert result == -1
+
+    def test_returns_minus_one_for_nonexistent_file(self, tmp_path):
+        """Should return -1 for a file that does not exist."""
+        from kicad_tools.cli.fix_drc_cmd import _count_connected_nets
+
+        result = _count_connected_nets(tmp_path / "nonexistent.kicad_pcb")
+        assert result == -1

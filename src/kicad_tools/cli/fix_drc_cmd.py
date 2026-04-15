@@ -37,6 +37,9 @@ class PassResult:
     repaired: int
     clearance_result: RepairResult
     drill_result: DrillRepairResult
+    connectivity_before: int | None = None
+    connectivity_after: int | None = None
+    connectivity_rolled_back: bool = False
 
     @property
     def violations_after(self) -> int:
@@ -130,6 +133,14 @@ Examples:
         help="Output format (default: text)",
     )
     parser.add_argument(
+        "--no-connectivity-check",
+        action="store_true",
+        help=(
+            "Skip post-pass connectivity check and rollback. "
+            "Use for boards with no footprints where connectivity is meaningless."
+        ),
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -165,6 +176,8 @@ Examples:
     output_path = Path(args.output) if args.output else pcb_path
 
     pass_results: list[PassResult] = []
+    do_connectivity_check = not args.dry_run and not args.no_connectivity_check
+    connectivity_rollback_occurred = False
 
     for pass_num in range(1, effective_max_passes + 1):
         # Classify violations from current report
@@ -207,6 +220,15 @@ Examples:
             if drill_violations:
                 print(f"  Drill clearance: {len(drill_violations)}")
 
+        # Snapshot and baseline connectivity before the repair pass
+        snapshot: bytes | None = None
+        baseline_conn: int | None = None
+        if do_connectivity_check:
+            load_for_snapshot = output_path if pass_num > 1 else pcb_path
+            if load_for_snapshot.exists():
+                snapshot = load_for_snapshot.read_bytes()
+                baseline_conn = _count_connected_nets(load_for_snapshot)
+
         # Run single-pass repairs
         clearance_result, drill_result = _run_single_pass(
             report=report,
@@ -223,6 +245,30 @@ Examples:
 
         repaired_this_pass = clearance_result.repaired + drill_result.repaired
 
+        # Post-pass connectivity check and rollback
+        after_conn: int | None = None
+        rolled_back = False
+        if (
+            snapshot is not None
+            and baseline_conn is not None
+            and baseline_conn >= 0
+            and not args.dry_run
+            and repaired_this_pass > 0
+            and output_path.exists()
+        ):
+            after_conn = _count_connected_nets(output_path)
+            if after_conn >= 0 and after_conn < baseline_conn:
+                # Connectivity decreased -- rollback
+                output_path.write_bytes(snapshot)
+                rolled_back = True
+                connectivity_rollback_occurred = True
+                repaired_this_pass = 0
+                print(
+                    f"Warning: pass {pass_num} decreased connectivity "
+                    f"({baseline_conn} -> {after_conn} nets); rolled back.",
+                    file=sys.stderr,
+                )
+
         pass_results.append(
             PassResult(
                 pass_number=pass_num,
@@ -230,8 +276,15 @@ Examples:
                 repaired=repaired_this_pass,
                 clearance_result=clearance_result,
                 drill_result=drill_result,
+                connectivity_before=baseline_conn,
+                connectivity_after=after_conn,
+                connectivity_rolled_back=rolled_back,
             )
         )
+
+        # Stop if rolled back -- no point continuing
+        if rolled_back:
+            break
 
         # Stop if no progress
         if repaired_this_pass == 0:
@@ -253,7 +306,10 @@ Examples:
             args.max_passes,
         )
 
-    # Exit code: 0 = all repaired, 1 = no violations found/no progress, 2 = partial repair
+    # Exit code: 0 = all repaired, 1 = no violations found/no progress,
+    #            2 = partial repair, 3 = connectivity rollback
+    if connectivity_rollback_occurred:
+        return 3
     final_pass = pass_results[-1] if pass_results else None
     if final_pass is None:
         return 0
@@ -320,6 +376,24 @@ def _run_single_pass(
             print(f"Error during drill clearance repair: {e}", file=sys.stderr)
 
     return clearance_result, drill_result
+
+
+def _count_connected_nets(pcb_path: Path) -> int:
+    """Return the number of fully connected nets, or -1 on error.
+
+    Uses :class:`~kicad_tools.validate.connectivity.ConnectivityValidator`
+    to perform the check.  Returns ``-1`` when the validator cannot be
+    imported or raises an exception so that callers can treat the result
+    as "unknown" and skip rollback logic.
+    """
+    try:
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        validator = ConnectivityValidator(pcb_path)
+        result = validator.validate()
+        return result.connected_nets
+    except Exception:
+        return -1
 
 
 def _get_drc_report(drc_report_path: str | None, pcb_path: Path) -> DRCReport | None:
@@ -516,6 +590,24 @@ def _print_json(
         },
     }
 
+    # Add connectivity_check section when any pass has connectivity data
+    has_connectivity_data = any(
+        p.connectivity_before is not None or p.connectivity_after is not None for p in pass_results
+    )
+    if has_connectivity_data:
+        data["connectivity_check"] = {
+            "passes": [
+                {
+                    "pass": p.pass_number,
+                    "connected_nets_before": p.connectivity_before,
+                    "connected_nets_after": p.connectivity_after,
+                    "rolled_back": p.connectivity_rolled_back,
+                }
+                for p in pass_results
+                if p.connectivity_before is not None or p.connectivity_after is not None
+            ],
+        }
+
     # Add passes array only when the user requested multi-pass mode
     if max_passes > 1:
         data["passes"] = [
@@ -524,6 +616,11 @@ def _print_json(
                 "violations_before": p.violations_before,
                 "repaired": p.repaired,
                 "violations_after": p.violations_after,
+                **(
+                    {"connectivity_rolled_back": p.connectivity_rolled_back}
+                    if p.connectivity_before is not None
+                    else {}
+                ),
             }
             for p in pass_results
         ]
