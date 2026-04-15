@@ -808,12 +808,12 @@ class TestPipelineLayerAutoDetection:
         call_argv = mock_main.call_args[0][0]
         assert "--layers" not in call_argv
 
-        # When pipeline_layers is set (e.g., 4), --layers should be forwarded
+        # When pipeline_layers is set (e.g., "4"), --layers should be forwarded
         args_explicit = MagicMock()
         args_explicit.pipeline_input = "test.kicad_pcb"
         args_explicit.pipeline_step = None
         args_explicit.pipeline_mfr = "jlcpcb"
-        args_explicit.pipeline_layers = 4
+        args_explicit.pipeline_layers = "4"
         args_explicit.pipeline_dry_run = False
         args_explicit.pipeline_verbose = False
         args_explicit.pipeline_force = False
@@ -862,8 +862,8 @@ class TestPipelineLayerAutoDetection:
 
         args = parser.parse_args(["pipeline", "board.kicad_pcb", "--layers", "4"])
 
-        assert args.pipeline_layers == 4, (
-            f"Expected pipeline_layers=4 when --layers 4 is given, got {args.pipeline_layers!r}."
+        assert args.pipeline_layers == "4", (
+            f"Expected pipeline_layers='4' when --layers 4 is given, got {args.pipeline_layers!r}."
         )
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
@@ -939,17 +939,43 @@ class TestRouteStepArgForwarding:
         assert cmd_args[mfr_idx + 1] == "pcbway"
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
-    def test_route_passes_layers_auto(self, mock_run, unrouted_pcb: Path):
-        """Route step passes --layers auto (string, not integer)."""
+    def test_route_passes_layers_from_context(self, mock_run, unrouted_pcb: Path):
+        """Route step passes ctx.layers through to the subprocess."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers=4)
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers="4")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_auto_when_layers_none(self, mock_run, unrouted_pcb: Path):
+        """Route step defaults to --layers auto when ctx.layers is None."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers=None)
         run_pipeline(ctx, [PipelineStep.ROUTE])
 
         cmd_args = mock_run.call_args[0][0]
         assert "--layers" in cmd_args
         layers_idx = cmd_args.index("--layers")
         assert cmd_args[layers_idx + 1] == "auto"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_qualified_layers(self, mock_run, unrouted_pcb: Path):
+        """Route step passes qualified layer strings like '4-sig' through."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers="4-sig")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        assert "--layers" in cmd_args
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4-sig"
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_route_passes_auto_fix(self, mock_run, unrouted_pcb: Path):
@@ -1012,6 +1038,185 @@ class TestRouteStepArgForwarding:
         assert "--layers auto" in result.message
         assert "--auto-fix" in result.message
         assert "re-route" in result.message
+
+
+class TestLayerStringPassthrough:
+    """Tests for string-based --layers pass-through to route subprocess."""
+
+    def test_layer_count_property_numeric(self):
+        """PipelineContext.layer_count extracts numeric value from string layers."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"), layers="4")
+        assert ctx.layer_count == 4
+
+    def test_layer_count_property_qualified(self):
+        """PipelineContext.layer_count strips qualifier from '4-sig'."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"), layers="4-sig")
+        assert ctx.layer_count == 4
+
+    def test_layer_count_property_4_all(self):
+        """PipelineContext.layer_count strips qualifier from '4-all'."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"), layers="4-all")
+        assert ctx.layer_count == 4
+
+    def test_layer_count_property_auto(self):
+        """PipelineContext.layer_count returns 2 for 'auto'."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"), layers="auto")
+        assert ctx.layer_count == 2
+
+    def test_layer_count_property_none(self):
+        """PipelineContext.layer_count returns 2 for None."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"), layers=None)
+        assert ctx.layer_count == 2
+
+    def test_layer_count_property_six(self):
+        """PipelineContext.layer_count handles 6-layer boards."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"), layers="6")
+        assert ctx.layer_count == 6
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_4_sig(self, mock_run, unrouted_pcb: Path):
+        """Route step forwards '4-sig' to the route subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers="4-sig")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4-sig"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_passes_4_all(self, mock_run, unrouted_pcb: Path):
+        """Route step forwards '4-all' to the route subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True, mfr="jlcpcb", layers="4-all")
+        run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        cmd_args = mock_run.call_args[0][0]
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4-all"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_vias_receives_numeric_from_qualified(self, mock_run, routed_pcb: Path):
+        """Fix-vias step receives numeric '4' even when layers is '4-sig'."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers="4-sig")
+        run_pipeline(ctx, [PipelineStep.FIX_VIAS])
+
+        cmd_args = mock_run.call_args[0][0]
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_optimize_receives_numeric_from_qualified(self, mock_run, routed_pcb: Path):
+        """Optimize step receives numeric '4' even when layers is '4-all'."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers="4-all")
+        run_pipeline(ctx, [PipelineStep.OPTIMIZE])
+
+        cmd_args = mock_run.call_args[0][0]
+        layers_idx = cmd_args.index("--layers")
+        assert cmd_args[layers_idx + 1] == "4"
+
+    def test_dry_run_route_shows_layers_4(self, unrouted_pcb: Path):
+        """Dry-run route shows --layers 4 when layers='4' instead of --layers auto."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route
+
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb, quiet=True, dry_run=True, mfr="jlcpcb", layers="4"
+        )
+        console = Console(quiet=True)
+        result = _run_step_route(ctx, console)
+
+        assert "--layers 4" in result.message
+
+    def test_dry_run_route_shows_layers_auto_when_none(self, unrouted_pcb: Path):
+        """Dry-run route shows --layers auto when layers is not specified."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_route
+
+        ctx = PipelineContext(
+            pcb_file=unrouted_pcb, quiet=True, dry_run=True, mfr="jlcpcb", layers=None
+        )
+        console = Console(quiet=True)
+        result = _run_step_route(ctx, console)
+
+        assert "--layers auto" in result.message
+
+    def test_pipeline_argparse_accepts_4_sig(self):
+        """Pipeline argparse accepts --layers 4-sig."""
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            "--layers",
+            "-l",
+            choices=["auto", "2", "4", "4-sig", "4-all", "6"],
+            default=None,
+        )
+        args = parser.parse_args(["--layers", "4-sig"])
+        assert args.layers == "4-sig"
+
+    def test_pipeline_argparse_accepts_4_all(self):
+        """Pipeline argparse accepts --layers 4-all."""
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            "--layers",
+            "-l",
+            choices=["auto", "2", "4", "4-sig", "4-all", "6"],
+            default=None,
+        )
+        args = parser.parse_args(["--layers", "4-all"])
+        assert args.layers == "4-all"
+
+    def test_pipeline_argparse_rejects_invalid(self):
+        """Pipeline argparse rejects invalid --layers values like '3'."""
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            "--layers",
+            "-l",
+            choices=["auto", "2", "4", "4-sig", "4-all", "6"],
+            default=None,
+        )
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--layers", "3"])
+
+    def test_full_cli_pipeline_parser_string_choices(self):
+        """Full CLI path: _add_pipeline_parser accepts string layer choices."""
+        import argparse
+
+        from kicad_tools.cli.parser import _add_pipeline_parser
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        _add_pipeline_parser(sub)
+
+        # Test each valid choice
+        for choice in ["auto", "2", "4", "4-sig", "4-all", "6"]:
+            args = parser.parse_args(["pipeline", "board.kicad_pcb", "--layers", choice])
+            assert args.pipeline_layers == choice
 
 
 class TestEdgeCases:
@@ -1144,7 +1349,7 @@ class TestCommitFlag:
 
     def test_commit_message_format(self, routed_pcb: Path):
         """The commit message follows the documented format."""
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         results = [
             PipelineResult(step="fix-vias", success=True, message="completed"),
         ]
@@ -1159,7 +1364,7 @@ class TestCommitFlag:
         pcb_file = tmp_path / "nonexistent.kicad_pcb"
         # Mock subprocess.run to always fail so no DRC count is obtained
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
-        ctx = PipelineContext(pcb_file=pcb_file, mfr="pcbway", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=pcb_file, mfr="pcbway", layers="2", quiet=True)
         results = []
         msg = _build_commit_message(ctx, results)
         assert msg == "fix: run kct pipeline (pcbway)"
@@ -1675,7 +1880,7 @@ class TestERCStep:
             schematic_file=sch_file,
             quiet=True,
             force=True,
-            layers=2,
+            layers="2",
         )
         results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_VIAS])
 
@@ -1893,7 +2098,7 @@ class TestReportStep:
 
         mock_run.side_effect = side_effect
 
-        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, mfr="jlcpcb", layers="2")
         results = run_pipeline(ctx, [PipelineStep.AUDIT, PipelineStep.REPORT])
 
         # Both steps should have run
@@ -2208,7 +2413,7 @@ class TestFixERCStep:
             pcb_file=pcb_file,
             schematic_file=sch_file,
             quiet=True,
-            layers=2,
+            layers="2",
             # force=False (default) -- the key assertion of this test
         )
         results = run_pipeline(ctx, [PipelineStep.ERC, PipelineStep.FIX_ERC])
@@ -2475,7 +2680,7 @@ class TestFetchCheckResults:
         }
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(check_data), stderr="")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         result = _fetch_check_results(ctx)
 
         assert result is not None
@@ -2487,7 +2692,7 @@ class TestFetchCheckResults:
         """Returns None when subprocess output is not valid JSON."""
         mock_run.return_value = MagicMock(returncode=1, stdout="not json", stderr="error")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         result = _fetch_check_results(ctx)
         assert result is None
 
@@ -2496,7 +2701,7 @@ class TestFetchCheckResults:
         """Returns None when subprocess raises an exception."""
         mock_run.side_effect = FileNotFoundError("python not found")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         result = _fetch_check_results(ctx)
         assert result is None
 
@@ -2507,7 +2712,7 @@ class TestFetchCheckResults:
 
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps([1, 2, 3]), stderr="")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         result = _fetch_check_results(ctx)
         assert result is None
 
@@ -2554,7 +2759,7 @@ class TestPrintFinalSummary:
         results = [
             PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
         ]
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2579,7 +2784,7 @@ class TestPrintFinalSummary:
             ],
         }
         results = []
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2600,7 +2805,7 @@ class TestPrintFinalSummary:
             ],
         }
         results = []
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2621,7 +2826,7 @@ class TestPrintFinalSummary:
             ],
         }
         results = []
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2638,7 +2843,7 @@ class TestPrintFinalSummary:
         results = [
             PipelineResult(step=PipelineStep.ERC, success=True, message="erc: no violations found"),
         ]
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2660,7 +2865,7 @@ class TestPrintFinalSummary:
                 skipped=True,
             ),
         ]
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2681,7 +2886,7 @@ class TestPrintFinalSummary:
                 message="erc: 3 blocking error(s) found (use --force to continue)",
             ),
         ]
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2703,7 +2908,7 @@ class TestPrintFinalSummary:
                 message="erc: 2 non-blocking error(s) as warning(s)",
             ),
         ]
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2718,7 +2923,7 @@ class TestPrintFinalSummary:
             "violations": [],
         }
         results = []
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=check_data)
         output = buf.getvalue()
@@ -2729,7 +2934,7 @@ class TestPrintFinalSummary:
         """All fields fall back to 'unknown' when check_data is None."""
         console, buf = self._make_console()
         results = []
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2")
 
         _print_final_summary(ctx, results, console, check_data=None)
         output = buf.getvalue()
@@ -2755,7 +2960,7 @@ class TestFinalSummaryIntegration:
             ],
         }
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=False)
         run_pipeline(ctx)
 
         mock_fetch.assert_called_once_with(ctx)
@@ -2766,7 +2971,7 @@ class TestFinalSummaryIntegration:
         """Summary block is not shown in --quiet mode."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         run_pipeline(ctx)
 
         mock_fetch.assert_not_called()
@@ -2777,7 +2982,7 @@ class TestFinalSummaryIntegration:
         """Summary block is not shown when running a single step."""
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=False)
         run_pipeline(ctx, steps=[PipelineStep.FIX_SILKSCREEN])
 
         mock_fetch.assert_not_called()
@@ -2788,7 +2993,7 @@ class TestFinalSummaryIntegration:
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
         ctx = PipelineContext(
-            pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False, dry_run=True
+            pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=False, dry_run=True
         )
         run_pipeline(ctx)
 
@@ -2807,7 +3012,7 @@ class TestFinalSummaryIntegration:
         }
         mock_fetch.return_value = expected_data
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=False)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=False)
         run_pipeline(ctx)
 
         assert ctx._check_data is expected_data
@@ -2827,7 +3032,7 @@ class TestFinalSummaryIntegration:
             ],
         }
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         results = [
             PipelineResult(step="fix-vias", success=True, message="completed"),
         ]
@@ -2850,7 +3055,7 @@ class TestFinalSummaryIntegration:
         }
         mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(check_data), stderr="")
 
-        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers=2, quiet=True)
+        ctx = PipelineContext(pcb_file=routed_pcb, mfr="jlcpcb", layers="2", quiet=True)
         results = []
         msg = _build_commit_message(ctx, results)  # no check_data param
 

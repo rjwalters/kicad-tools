@@ -2993,9 +2993,15 @@ def _add_pipeline_parser(subparsers) -> None:
         "--layers",
         "-l",
         dest="pipeline_layers",
-        type=int,
+        choices=["auto", "2", "4", "4-sig", "4-all", "6"],
         default=None,
-        help="Number of copper layers (default: auto-detected from board)",
+        help=(
+            "Layer stack configuration: "
+            "'auto' = auto-detect from PCB (default when omitted); "
+            "'2' = 2-layer; '4' = 4-layer with GND/PWR planes; "
+            "'4-sig' = 4-layer with 2 signal + 1 ground plane; "
+            "'4-all' = 4-layer all-signal; '6' = 6-layer"
+        ),
     )
     pipeline_parser.add_argument(
         "--dry-run",
