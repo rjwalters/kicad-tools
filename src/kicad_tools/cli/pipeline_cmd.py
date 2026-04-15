@@ -97,6 +97,7 @@ class PipelineContext:
     force: bool = False
     is_project: bool = False
     commit: bool = False
+    max_displacement: float = 0.5
     erc_error_count: int = 0
 
 
@@ -593,7 +594,10 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
         return PipelineResult(
             step=PipelineStep.FIX_DRC,
             success=True,
-            message=f"[dry-run] Would run: kct fix-drc {ctx.pcb_file.name} --max-passes 3 --local-reroute",
+            message=(
+                f"[dry-run] Would run: kct fix-drc {ctx.pcb_file.name} "
+                f"--max-passes 3 --local-reroute --max-displacement {ctx.max_displacement}"
+            ),
         )
 
     if not ctx.quiet:
@@ -608,6 +612,8 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
         "--max-passes",
         "3",
         "--local-reroute",
+        "--max-displacement",
+        str(ctx.max_displacement),
     ]
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
@@ -1132,6 +1138,16 @@ Examples:
         help="Create a git commit with the modified PCB file after a successful pipeline run",
     )
     parser.add_argument(
+        "--max-displacement",
+        type=float,
+        default=0.5,
+        help=(
+            "Maximum nudge/slide distance in mm for fix-drc step (default: 0.5). "
+            "Increase when enlarged vias cause segment-to-via violations that "
+            "exceed the displacement budget."
+        ),
+    )
+    parser.add_argument(
         "--zones",
         action="store_true",
         default=False,
@@ -1210,6 +1226,7 @@ Examples:
         force=args.force,
         is_project=is_project,
         commit=args.commit,
+        max_displacement=args.max_displacement,
     )
 
     # Determine steps to run

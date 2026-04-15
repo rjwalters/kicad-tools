@@ -2244,3 +2244,96 @@ class TestFixDrcLocalReroute:
 
         assert result.success is True
         assert "--local-reroute" in result.message
+
+
+class TestMaxDisplacementPassThrough:
+    """Tests for --max-displacement pipeline option forwarded to fix-drc step."""
+
+    def test_fix_drc_dry_run_shows_max_displacement(self, routed_pcb: Path):
+        """Dry-run message for fix-drc reflects the configured max-displacement."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        assert "--max-displacement 0.5" in result.message
+
+    def test_fix_drc_dry_run_shows_custom_max_displacement(self, routed_pcb: Path):
+        """Dry-run message reflects a user-specified max-displacement value."""
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, dry_run=True, max_displacement=0.75)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        assert "--max-displacement 0.75" in result.message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_drc_subprocess_receives_max_displacement(self, mock_run, routed_pcb: Path):
+        """fix-drc subprocess command includes --max-displacement from context."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, max_displacement=0.5)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--max-displacement" in cmd_args
+        disp_idx = cmd_args.index("--max-displacement")
+        assert cmd_args[disp_idx + 1] == "0.5"
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_fix_drc_subprocess_receives_custom_max_displacement(self, mock_run, routed_pcb: Path):
+        """fix-drc subprocess command uses a non-default max-displacement."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        from rich.console import Console
+
+        from kicad_tools.cli.pipeline_cmd import _run_step_fix_drc
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, max_displacement=1.0)
+        console = Console(quiet=True)
+        result = _run_step_fix_drc(ctx, console)
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--max-displacement" in cmd_args
+        disp_idx = cmd_args.index("--max-displacement")
+        assert cmd_args[disp_idx + 1] == "1.0"
+
+    def test_pipeline_default_max_displacement_is_0_5(self):
+        """PipelineContext defaults to 0.5 mm max-displacement."""
+        from pathlib import Path
+
+        ctx = PipelineContext(pcb_file=Path("dummy.kicad_pcb"))
+        assert ctx.max_displacement == 0.5
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_cli_max_displacement_forwarded_to_pipeline(self, mock_run, routed_pcb: Path):
+        """CLI --max-displacement argument is forwarded to the fix-drc subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        result = main(
+            [str(routed_pcb), "--step", "fix-drc", "--max-displacement", "0.75", "--quiet"]
+        )
+        assert result == 0
+
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "--max-displacement" in cmd_args
+        disp_idx = cmd_args.index("--max-displacement")
+        assert cmd_args[disp_idx + 1] == "0.75"
