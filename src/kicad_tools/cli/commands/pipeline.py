@@ -21,9 +21,9 @@ def run_pipeline_command(args) -> int:
     if getattr(args, "pipeline_mfr", "jlcpcb") != "jlcpcb":
         sub_argv.extend(["--mfr", args.pipeline_mfr])
 
-    # Layers
+    # Layers (string value, e.g. "4", "4-sig", "4-all")
     if getattr(args, "pipeline_layers", None) is not None:
-        sub_argv.extend(["--layers", str(args.pipeline_layers)])
+        sub_argv.extend(["--layers", args.pipeline_layers])
 
     # Flags
     if getattr(args, "pipeline_dry_run", False):

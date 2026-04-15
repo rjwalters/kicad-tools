@@ -21,6 +21,7 @@ Usage:
     kct pipeline board.kicad_pcb --step erc
     kct pipeline board.kicad_pcb --step fix-erc
     kct pipeline project.kicad_pro --mfr jlcpcb --layers 4
+    kct pipeline board.kicad_pcb --layers 4-sig
 """
 
 from __future__ import annotations
@@ -91,7 +92,7 @@ class PipelineContext:
     project_file: Path | None = None
     schematic_file: Path | None = None
     mfr: str = "jlcpcb"
-    layers: int | None = None
+    layers: str | None = None
     dry_run: bool = False
     verbose: bool = False
     quiet: bool = False
@@ -101,6 +102,22 @@ class PipelineContext:
     max_displacement: float = 2.0
     erc_error_count: int = 0
     _check_data: dict | None = None  # cached kct check --format json result
+
+    @property
+    def layer_count(self) -> int:
+        """Extract numeric layer count from the layers string.
+
+        Qualified layer strings like '4-sig', '4-all' return 4.
+        'auto' or None falls back to 2.
+        """
+        if self.layers is None or self.layers == "auto":
+            return 2
+        # Strip qualifier suffix (e.g. '4-sig' -> '4', '4-all' -> '4')
+        base = self.layers.split("-")[0]
+        try:
+            return int(base)
+        except ValueError:
+            return 2
 
 
 def _detect_routing_status(pcb_file: Path) -> tuple[bool, int, int]:
@@ -506,6 +523,8 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
             skipped=True,
         )
 
+    route_layers = ctx.layers or "auto"
+
     if ctx.dry_run:
         if is_routed:
             return PipelineResult(
@@ -513,7 +532,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
                 success=True,
                 message=(
                     f"[dry-run] Would re-route (--force): {ctx.pcb_file.name} "
-                    f"--grid auto --manufacturer {ctx.mfr} --layers auto --auto-fix"
+                    f"--grid auto --manufacturer {ctx.mfr} --layers {route_layers} --auto-fix"
                 ),
             )
         return PipelineResult(
@@ -521,7 +540,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
             success=True,
             message=(
                 f"[dry-run] Would run: kct route {ctx.pcb_file.name} "
-                f"--grid auto --manufacturer {ctx.mfr} --layers auto --auto-fix"
+                f"--grid auto --manufacturer {ctx.mfr} --layers {route_layers} --auto-fix"
             ),
         )
 
@@ -541,7 +560,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
         "--manufacturer",
         ctx.mfr,
         "--layers",
-        "auto",  # Let router auto-detect; avoids int-to-"4-sig" ambiguity
+        route_layers,
         "--auto-fix",
     ]
 
@@ -563,15 +582,16 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
 
 def _run_step_fix_vias(ctx: PipelineContext, console: Console) -> PipelineResult:
     """Run via repair step."""
+    numeric_layers = ctx.layer_count
     if ctx.dry_run:
         return PipelineResult(
             step=PipelineStep.FIX_VIAS,
             success=True,
-            message=f"[dry-run] Would run: kct fix-vias {ctx.pcb_file.name} --mfr {ctx.mfr} --layers {ctx.layers}",
+            message=f"[dry-run] Would run: kct fix-vias {ctx.pcb_file.name} --mfr {ctx.mfr} --layers {numeric_layers}",
         )
 
     if not ctx.quiet:
-        console.print(f"  Fixing vias for {ctx.mfr} ({ctx.layers} layers)...")
+        console.print(f"  Fixing vias for {ctx.mfr} ({numeric_layers} layers)...")
 
     cmd = [
         sys.executable,
@@ -582,7 +602,7 @@ def _run_step_fix_vias(ctx: PipelineContext, console: Console) -> PipelineResult
         "--mfr",
         ctx.mfr,
         "--layers",
-        str(ctx.layers),
+        str(numeric_layers),
     ]
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
@@ -633,13 +653,14 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
 
 def _run_step_optimize(ctx: PipelineContext, console: Console) -> PipelineResult:
     """Run trace optimization step."""
+    numeric_layers = ctx.layer_count
     if ctx.dry_run:
         return PipelineResult(
             step=PipelineStep.OPTIMIZE,
             success=True,
             message=(
                 f"[dry-run] Would run: kct optimize-traces {ctx.pcb_file.name} "
-                f"--drc-aware --mfr {ctx.mfr} --layers {ctx.layers}"
+                f"--drc-aware --mfr {ctx.mfr} --layers {numeric_layers}"
             ),
         )
 
@@ -656,7 +677,7 @@ def _run_step_optimize(ctx: PipelineContext, console: Console) -> PipelineResult
         "--mfr",
         ctx.mfr,
         "--layers",
-        str(ctx.layers),
+        str(numeric_layers),
     ]
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
@@ -744,7 +765,7 @@ def _run_step_audit(ctx: PipelineContext, console: Console) -> PipelineResult:
     ]
 
     if cmd_name == "check":
-        cmd.extend(["--layers", str(ctx.layers)])
+        cmd.extend(["--layers", str(ctx.layer_count)])
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
 
@@ -841,7 +862,7 @@ def _fetch_check_results(ctx: PipelineContext) -> dict | None:
                 "--mfr",
                 ctx.mfr,
                 "--layers",
-                str(ctx.layers or 2),
+                str(ctx.layer_count),
                 "--format",
                 "json",
             ],
@@ -1304,9 +1325,15 @@ Examples:
     parser.add_argument(
         "--layers",
         "-l",
-        type=int,
+        choices=["auto", "2", "4", "4-sig", "4-all", "6"],
         default=None,
-        help="Number of copper layers (default: auto-detected from board)",
+        help=(
+            "Layer stack configuration: "
+            "'auto' = auto-detect from PCB (default when omitted); "
+            "'2' = 2-layer; '4' = 4-layer with GND/PWR planes; "
+            "'4-sig' = 4-layer with 2 signal + 1 ground plane; "
+            "'4-all' = 4-layer all-signal; '6' = 6-layer"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -1393,22 +1420,25 @@ Examples:
         )
         return 1
 
-    # Resolve layer count from PCB when not explicitly specified
+    # Resolve layer configuration from PCB when not explicitly specified.
+    # When --layers is given (e.g. "4", "4-sig"), use the string as-is so it
+    # passes through to the route subprocess.  When omitted, auto-detect the
+    # numeric layer count from the PCB file and store it as a string.
     if args.layers is not None:
-        resolved_layers = args.layers
+        resolved_layers: str = args.layers
     else:
         try:
             from kicad_tools.schema.pcb import PCB
 
             pcb = PCB.load(pcb_file)
             detected = len(pcb.copper_layers)
-            resolved_layers = detected if detected > 0 else 2
+            resolved_layers = str(detected) if detected > 0 else "2"
         except Exception:
             logger.warning(
                 "Could not auto-detect layer count from %s; defaulting to 2",
                 pcb_file.name,
             )
-            resolved_layers = 2
+            resolved_layers = "2"
 
     # Resolve schematic file for ERC step
     schematic_file = _resolve_schematic(pcb_file, project_file)
