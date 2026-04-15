@@ -56,6 +56,20 @@ class ViaClearanceWarning:
     clearance_mm: float
 
 
+@dataclass
+class ViaSkip:
+    """Record of a via that was skipped because resizing would violate clearance."""
+
+    x: float
+    y: float
+    net: int
+    current_drill: float
+    current_diameter: float
+    would_be_diameter: float
+    reason: str
+    uuid: str
+
+
 def get_design_rules(
     mfr: str | None, layers: int, copper: float, drill: float | None, diameter: float | None
 ) -> tuple[float, float, float, float]:
@@ -252,7 +266,8 @@ def fix_vias(
     min_clearance: float = 0.2,
     dry_run: bool = False,
     min_annular_ring: float = 0.0,
-) -> tuple[list[ViaFix], list[ViaClearanceWarning]]:
+    skip_on_clearance: bool = False,
+) -> tuple[list[ViaFix], list[ViaClearanceWarning], list[ViaSkip]]:
     """Fix undersized vias in the PCB.
 
     Args:
@@ -265,12 +280,17 @@ def fix_vias(
             When set, each via's diameter is also checked against
             its own drill size to ensure the annular ring is met:
             required_diameter = drill + 2 * min_annular_ring.
+        skip_on_clearance: If True, skip resizing vias that would
+            cause clearance violations after enlargement.  The skipped
+            vias are returned in the third element of the tuple.
 
     Returns:
-        Tuple of (fixes, warnings)
+        Tuple of (fixes, warnings, skips).  ``skips`` is empty when
+        *skip_on_clearance* is False.
     """
     fixes = []
     warnings = []
+    skips: list[ViaSkip] = []
 
     vias = find_all_vias(doc)
 
@@ -291,6 +311,50 @@ def fix_vias(
 
         new_diameter = max(current_diameter, target_diameter, annular_ring_diameter)
 
+        # Check for potential clearance issues
+        size_increase = new_diameter - current_diameter
+        via_warnings: list[ViaClearanceWarning] = []
+        if size_increase > 0:
+            check_radius = new_diameter / 2 + min_clearance * 2
+            nearby = find_nearby_items(doc, x, y, check_radius)
+            for item_type, ix, iy, item_width in nearby:
+                dist = ((ix - x) ** 2 + (iy - y) ** 2) ** 0.5
+                # Edge-to-edge clearance: subtract both the via radius and
+                # half the width/size of the nearby item
+                clearance = dist - new_diameter / 2 - item_width / 2
+                if clearance < min_clearance:
+                    via_warnings.append(
+                        ViaClearanceWarning(
+                            x=x,
+                            y=y,
+                            new_diameter=new_diameter,
+                            nearby_item=f"{item_type} at ({ix:.2f}, {iy:.2f})",
+                            clearance_mm=clearance,
+                        )
+                    )
+
+        # When skip_on_clearance is enabled, do not resize vias that would
+        # cause clearance violations -- keep the original size instead.
+        if skip_on_clearance and via_warnings:
+            reasons = [
+                f"{w.clearance_mm:.3f}mm to {w.nearby_item}" for w in via_warnings
+            ]
+            skips.append(
+                ViaSkip(
+                    x=x,
+                    y=y,
+                    net=net,
+                    current_drill=current_drill,
+                    current_diameter=current_diameter,
+                    would_be_diameter=new_diameter,
+                    reason="; ".join(reasons),
+                    uuid=uuid,
+                )
+            )
+            continue
+
+        warnings.extend(via_warnings)
+
         # Record the fix
         fixes.append(
             ViaFix(
@@ -305,27 +369,6 @@ def fix_vias(
             )
         )
 
-        # Check for potential clearance issues
-        size_increase = new_diameter - current_diameter
-        if size_increase > 0:
-            check_radius = new_diameter / 2 + min_clearance * 2
-            nearby = find_nearby_items(doc, x, y, check_radius)
-            for item_type, ix, iy, item_width in nearby:
-                dist = ((ix - x) ** 2 + (iy - y) ** 2) ** 0.5
-                # Edge-to-edge clearance: subtract both the via radius and
-                # half the width/size of the nearby item
-                clearance = dist - new_diameter / 2 - item_width / 2
-                if clearance < min_clearance:
-                    warnings.append(
-                        ViaClearanceWarning(
-                            x=x,
-                            y=y,
-                            new_diameter=new_diameter,
-                            nearby_item=f"{item_type} at ({ix:.2f}, {iy:.2f})",
-                            clearance_mm=clearance,
-                        )
-                    )
-
         # Apply the fix if not dry run
         if not dry_run:
             drill_node = via_node.find("drill")
@@ -337,7 +380,7 @@ def fix_vias(
             if size_node and need_diameter_fix:
                 size_node.set_value(0, new_diameter)
 
-    return fixes, warnings
+    return fixes, warnings, skips
 
 
 def print_fix_results(
@@ -348,6 +391,7 @@ def print_fix_results(
     target_drill: float = 0,
     target_diameter: float = 0,
     mfr: str | None = None,
+    skips: list[ViaSkip] | None = None,
 ) -> None:
     """Print the results of via fixes.
 
@@ -359,7 +403,10 @@ def print_fix_results(
         target_drill: Target drill size used
         target_diameter: Target diameter used
         mfr: Manufacturer name (for display)
+        skips: List of vias skipped due to clearance violations
     """
+    skips = skips or []
+
     if output_format == "json":
         data = {
             "target_drill_mm": target_drill,
@@ -389,6 +436,19 @@ def print_fix_results(
                 }
                 for w in warnings
             ],
+            "skipped": [
+                {
+                    "x": s.x,
+                    "y": s.y,
+                    "net": s.net,
+                    "current_drill_mm": s.current_drill,
+                    "current_diameter_mm": s.current_diameter,
+                    "would_be_diameter_mm": s.would_be_diameter,
+                    "reason": s.reason,
+                    "uuid": s.uuid,
+                }
+                for s in skips
+            ],
         }
         print(json.dumps(data, indent=2))
         return
@@ -398,12 +458,14 @@ def print_fix_results(
         source = f" to {mfr.upper()} minimums" if mfr else ""
         print(f"{action} vias{source} (drill: {target_drill}mm, diameter: {target_diameter}mm):")
         print(f"  {len(fixes)} vias {'would be ' if dry_run else ''}updated")
+        if skips:
+            print(f"  {len(skips)} vias skipped (clearance violation)")
         if warnings:
             print(f"  {len(warnings)} potential clearance violations")
         return
 
     # Text output
-    if not fixes:
+    if not fixes and not skips:
         print("No vias needed resizing.")
         return
 
@@ -430,6 +492,17 @@ def print_fix_results(
                 f"diameter {f.old_diameter:.3f}→{f.new_diameter:.3f}mm"
             )
         print(f"    ... and {len(fixes) - 3} more")
+
+    if skips:
+        print(f"\n  Skipped {len(skips)} via(s) (would violate clearance):")
+        for s in skips[:5]:
+            print(
+                f"    Via at ({s.x:.2f}, {s.y:.2f}): "
+                f"kept at {s.current_diameter:.3f}mm "
+                f"(enlarging to {s.would_be_diameter:.3f}mm would violate clearance: {s.reason})"
+            )
+        if len(skips) > 5:
+            print(f"    ... and {len(skips) - 5} more")
 
     if warnings:
         print(f"\nWarning: {len(warnings)} via(s) may cause DRC violations after resize:")
@@ -468,8 +541,8 @@ Examples:
     parser.add_argument(
         "--layers",
         type=int,
-        default=2,
-        help="Number of PCB layers (default: 2)",
+        default=None,
+        help="Number of PCB layers (auto-detected from board if not specified)",
     )
     parser.add_argument(
         "--copper",
@@ -509,6 +582,15 @@ Examples:
         action="store_true",
         help="Suppress progress output (for scripting)",
     )
+    parser.add_argument(
+        "--skip-if-clearance-violation",
+        action="store_true",
+        help=(
+            "Skip resizing vias that would cause clearance violations. "
+            "Keeps the original via size when enlargement would violate "
+            "minimum clearance to nearby tracks, pads, or other vias."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -522,9 +604,22 @@ Examples:
         print(f"Error: Expected .kicad_pcb file, got: {pcb_path.suffix}", file=sys.stderr)
         return 1
 
+    # Auto-detect layer count from PCB if not explicitly provided
+    if args.layers is not None:
+        resolved_layers = args.layers
+    else:
+        try:
+            from kicad_tools.schema.pcb import PCB
+
+            pcb = PCB.load(pcb_path)
+            detected = len(pcb.copper_layers)
+            resolved_layers = detected if detected > 0 else 2
+        except Exception:
+            resolved_layers = 2
+
     # Get target dimensions
     target_drill, target_diameter, min_annular_ring, min_clearance = get_design_rules(
-        args.mfr, args.layers, args.copper, args.drill, args.diameter
+        args.mfr, resolved_layers, args.copper, args.drill, args.diameter
     )
 
     # Parse PCB
@@ -535,13 +630,14 @@ Examples:
         return 1
 
     # Fix vias
-    fixes, warnings = fix_vias(
+    fixes, warnings, skips = fix_vias(
         doc,
         target_drill,
         target_diameter,
         min_clearance=min_clearance,
         dry_run=args.dry_run,
         min_annular_ring=min_annular_ring,
+        skip_on_clearance=args.skip_if_clearance_violation,
     )
 
     # Print results
@@ -554,6 +650,7 @@ Examples:
             target_drill=target_drill,
             target_diameter=target_diameter,
             mfr=args.mfr,
+            skips=skips,
         )
 
     # Save if not dry run and there were fixes

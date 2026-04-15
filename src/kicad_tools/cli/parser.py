@@ -1212,8 +1212,8 @@ def _add_fix_vias_parser(subparsers) -> None:
     fix_vias_parser.add_argument(
         "--layers",
         type=int,
-        default=2,
-        help="Number of PCB layers (default: 2)",
+        default=None,
+        help="Number of PCB layers (auto-detected from board if not specified)",
     )
     fix_vias_parser.add_argument(
         "--copper",
@@ -1246,6 +1246,15 @@ def _add_fix_vias_parser(subparsers) -> None:
         choices=["text", "json", "summary"],
         default="text",
         help="Output format (default: text)",
+    )
+    fix_vias_parser.add_argument(
+        "--skip-if-clearance-violation",
+        action="store_true",
+        help=(
+            "Skip resizing vias that would cause clearance violations. "
+            "Keeps the original via size when enlargement would violate "
+            "minimum clearance to nearby tracks, pads, or other vias."
+        ),
     )
 
 

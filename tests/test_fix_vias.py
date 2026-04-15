@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from kicad_tools.cli.fix_vias_cmd import (
+    ViaSkip,
     _closest_point_on_segment,
     find_all_vias,
     find_nearby_items,
@@ -143,7 +144,7 @@ class TestFixVias:
         """Should fix only undersized vias."""
         doc = parse_file(pcb_with_undersized_vias)
 
-        fixes, warnings = fix_vias(doc, target_drill=0.3, target_diameter=0.6, dry_run=True)
+        fixes, warnings, _skips = fix_vias(doc, target_drill=0.3, target_diameter=0.6, dry_run=True)
 
         # Should fix 2 vias (via-1 and via-2), not via-3 which is already compliant
         assert len(fixes) == 2
@@ -203,7 +204,7 @@ class TestFixVias:
         pcb_file.write_text(pcb_content)
 
         doc = parse_file(pcb_file)
-        fixes, warnings = fix_vias(doc, target_drill=0.3, target_diameter=0.6)
+        fixes, warnings, _skips = fix_vias(doc, target_drill=0.3, target_diameter=0.6)
 
         assert len(fixes) == 0
 
@@ -232,7 +233,7 @@ class TestFixVias:
 
         doc = parse_file(pcb_file)
         # target_diameter=0.45 (JLCPCB 4-layer min), but with annular ring check
-        fixes, warnings = fix_vias(
+        fixes, warnings, _skips = fix_vias(
             doc,
             target_drill=0.2,
             target_diameter=0.45,
@@ -262,7 +263,7 @@ class TestFixVias:
         pcb_file.write_text(pcb_content)
 
         doc = parse_file(pcb_file)
-        fixes, warnings = fix_vias(
+        fixes, warnings, _skips = fix_vias(
             doc,
             target_drill=0.2,
             target_diameter=0.45,
@@ -291,7 +292,7 @@ class TestFixVias:
         doc = parse_file(pcb_file)
         # Drill will be resized from 0.15 to 0.2, so annular ring needs
         # 0.2 + 2*0.15 = 0.50mm diameter
-        fixes, warnings = fix_vias(
+        fixes, warnings, _skips = fix_vias(
             doc,
             target_drill=0.2,
             target_diameter=0.45,
@@ -677,7 +678,7 @@ class TestClearanceWithTraceWidth:
         pcb_file.write_text(pcb_content)
         doc = parse_file(pcb_file)
 
-        fixes, warnings = fix_vias(
+        fixes, warnings, _skips = fix_vias(
             doc, target_drill=0.3, target_diameter=0.6, min_clearance=0.127, dry_run=True
         )
 
@@ -710,7 +711,7 @@ class TestClearanceWithTraceWidth:
         pcb_file.write_text(pcb_content)
         doc = parse_file(pcb_file)
 
-        fixes, warnings = fix_vias(
+        fixes, warnings, _skips = fix_vias(
             doc, target_drill=0.3, target_diameter=0.6, min_clearance=0.127, dry_run=True
         )
 
@@ -751,7 +752,7 @@ class TestManufacturerClearance:
 
         # With JLCPCB clearance (0.127mm), the trace at 0.6mm distance should NOT warn
         # gap = 0.6 - 0.3 - 0.125 = 0.175 > 0.127 => no warning
-        fixes, warnings = fix_vias(
+        fixes, warnings, _skips = fix_vias(
             doc, target_drill=0.3, target_diameter=0.6, min_clearance=0.127, dry_run=True
         )
         assert len(fixes) == 1
@@ -760,7 +761,7 @@ class TestManufacturerClearance:
         # With old hardcoded clearance (0.2mm), the same trace would warn
         # gap = 0.175 < 0.2 => warning
         doc2 = parse_file(pcb_file)
-        fixes2, warnings2 = fix_vias(
+        fixes2, warnings2, _skips2 = fix_vias(
             doc2, target_drill=0.3, target_diameter=0.6, min_clearance=0.2, dry_run=True
         )
         assert len(fixes2) == 1
@@ -923,3 +924,374 @@ class TestExitCodeWarnings:
 
         result = main([str(pcb_file), "--mfr", "jlcpcb", "--dry-run"])
         assert result == 2
+
+
+class TestSelectiveViaSkip:
+    """Tests for --skip-if-clearance-violation feature (Option B)."""
+
+    def test_skip_via_with_clearance_violation(self, tmp_path: Path):
+        """Via near a trace should be skipped when skip_on_clearance is True."""
+        # Via at (100, 100) would be resized from 0.45mm to 0.6mm.
+        # Trace at y=100.5, width=0.25 => clearance after resize:
+        # dist=0.5, gap = 0.5 - 0.3 - 0.125 = 0.075 < 0.127 => violation
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "skip_via.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings, skips = fix_vias(
+            doc,
+            target_drill=0.3,
+            target_diameter=0.6,
+            min_clearance=0.127,
+            dry_run=True,
+            skip_on_clearance=True,
+        )
+
+        assert len(fixes) == 0
+        assert len(warnings) == 0
+        assert len(skips) == 1
+        assert skips[0].uuid == "via-1"
+        assert skips[0].current_diameter == 0.45
+        assert skips[0].would_be_diameter == 0.6
+        assert "track" in skips[0].reason
+
+    def test_skip_does_not_affect_uncrowded_vias(self, tmp_path: Path):
+        """Isolated via should still be resized even with skip_on_clearance=True."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "isolated_skip.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings, skips = fix_vias(
+            doc,
+            target_drill=0.3,
+            target_diameter=0.6,
+            min_clearance=0.127,
+            dry_run=True,
+            skip_on_clearance=True,
+        )
+
+        assert len(fixes) == 1
+        assert len(skips) == 0
+        assert fixes[0].new_diameter == 0.6
+
+    def test_mixed_skip_and_resize(self, tmp_path: Path):
+        """Board with two vias: one crowded (skip), one isolated (resize)."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-crowded"))
+          (via (at 200 200) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-isolated"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "mixed.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings, skips = fix_vias(
+            doc,
+            target_drill=0.3,
+            target_diameter=0.6,
+            min_clearance=0.127,
+            dry_run=True,
+            skip_on_clearance=True,
+        )
+
+        assert len(fixes) == 1
+        assert len(skips) == 1
+        assert fixes[0].uuid == "via-isolated"
+        assert skips[0].uuid == "via-crowded"
+
+    def test_skip_keeps_original_size_on_disk(self, tmp_path: Path):
+        """When skip_on_clearance skips a via, the file should retain original size."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "skip_disk.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings, skips = fix_vias(
+            doc,
+            target_drill=0.3,
+            target_diameter=0.6,
+            min_clearance=0.127,
+            dry_run=False,
+            skip_on_clearance=True,
+        )
+
+        # No fixes applied (the only via was skipped)
+        assert len(fixes) == 0
+        assert len(skips) == 1
+
+        # Verify the via retains its original size in the document
+        vias = find_all_vias(doc)
+        _, _, _, drill, diameter, _, _ = vias[0]
+        assert drill == 0.2
+        assert diameter == 0.45
+
+    def test_skip_without_flag_still_warns(self, tmp_path: Path):
+        """Without skip_on_clearance, crowded vias produce warnings, not skips."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "no_skip.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        doc = parse_file(pcb_file)
+
+        fixes, warnings, skips = fix_vias(
+            doc,
+            target_drill=0.3,
+            target_diameter=0.6,
+            min_clearance=0.127,
+            dry_run=True,
+            skip_on_clearance=False,
+        )
+
+        assert len(fixes) == 1
+        assert len(warnings) == 1
+        assert len(skips) == 0
+
+    def test_cli_skip_flag(self, tmp_path: Path, capsys):
+        """CLI --skip-if-clearance-violation flag works correctly."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (net 2 "+3.3V")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+          (segment (start 95 100.5) (end 105 100.5) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-1"))
+        )
+        """
+        pcb_file = tmp_path / "cli_skip.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([
+            str(pcb_file),
+            "--mfr", "jlcpcb",
+            "--dry-run",
+            "--format", "json",
+            "--skip-if-clearance-violation",
+        ])
+
+        assert result == 0  # No warnings (via was skipped, not warned)
+
+        import json
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["fixes"]) == 0
+        assert len(data["warnings"]) == 0
+        assert len(data["skipped"]) == 1
+        assert data["skipped"][0]["uuid"] == "via-1"
+
+    def test_cli_skip_json_output_includes_skipped_key(self, tmp_path: Path, capsys):
+        """JSON output includes the 'skipped' key even when empty."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "json_skipped.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        main([str(pcb_file), "--dry-run", "--format", "json"])
+
+        import json
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert "skipped" in data
+        assert len(data["skipped"]) == 0
+
+
+class TestLayerAutoDetection:
+    """Tests for auto-detecting layer count from PCB file."""
+
+    def test_4layer_pcb_auto_detects(self, tmp_path: Path, capsys):
+        """A 4-layer PCB file should auto-detect 4 layers and use 4-layer rules."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (2 "In2.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "4layer_auto.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        # Without --layers, should auto-detect 4 layers from PCB.
+        # For 4-layer JLCPCB: min_via_drill=0.2, min_via_diameter=0.45,
+        # annular ring requires 0.2 + 2*0.15 = 0.50.
+        # The via at 0.45mm diameter should be flagged for resize to 0.50.
+        result = main([
+            str(pcb_file),
+            "--mfr", "jlcpcb",
+            "--dry-run",
+            "--format", "json",
+        ])
+
+        assert result == 0
+        import json
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert len(data["fixes"]) == 1
+        # 4-layer rules: target_diameter should be 0.5 (annular ring constrained)
+        assert data["target_diameter_mm"] == 0.5
+        assert data["target_drill_mm"] == 0.2
+        assert data["fixes"][0]["new_diameter_mm"] == 0.5
+
+    def test_2layer_pcb_auto_detects(self, tmp_path: Path, capsys):
+        """A 2-layer PCB file should auto-detect 2 layers and use 2-layer rules."""
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "2layer_auto.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([
+            str(pcb_file),
+            "--mfr", "jlcpcb",
+            "--dry-run",
+            "--format", "json",
+        ])
+
+        assert result == 0
+        import json
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # 2-layer rules: min_via_drill=0.3, min_via_diameter=0.6
+        assert data["target_diameter_mm"] == 0.6
+        assert data["target_drill_mm"] == 0.3
+
+    def test_explicit_layers_overrides_auto(self, tmp_path: Path, capsys):
+        """Explicit --layers flag should override auto-detection."""
+        # 4-layer PCB file, but we force --layers 2
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (general (thickness 1.6))
+          (layers
+            (0 "F.Cu" signal)
+            (1 "In1.Cu" signal)
+            (2 "In2.Cu" signal)
+            (31 "B.Cu" signal)
+          )
+          (setup (pad_to_mask_clearance 0))
+          (net 0 "")
+          (net 1 "GND")
+          (via (at 100 100) (size 0.45) (drill 0.2) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-1"))
+        )
+        """
+        pcb_file = tmp_path / "override.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        result = main([
+            str(pcb_file),
+            "--mfr", "jlcpcb",
+            "--layers", "2",
+            "--dry-run",
+            "--format", "json",
+        ])
+
+        assert result == 0
+        import json
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # 2-layer rules forced despite 4-layer PCB
+        assert data["target_diameter_mm"] == 0.6
+        assert data["target_drill_mm"] == 0.3
+
+    def test_layers_4_selects_4layer_1oz_rules(self):
+        """--layers 4 should select 4layer_1oz rules from JLCPCB."""
+        drill, diameter, annular, clearance = get_design_rules("jlcpcb", 4, 1.0, None, None)
+        assert drill == 0.2
+        # min_via_diameter is 0.45, but annular ring requires 0.2 + 2*0.15 = 0.50
+        assert diameter == 0.5
+        assert annular == 0.15
+        assert clearance == 0.1016
+
+    def test_layers_2_still_enlarges_to_0_6mm(self):
+        """--layers 2 should still require 0.6mm diameter for 2-layer JLCPCB."""
+        drill, diameter, annular, clearance = get_design_rules("jlcpcb", 2, 1.0, None, None)
+        assert drill == 0.3
+        assert diameter == 0.6
+        assert clearance == 0.127

@@ -67,7 +67,7 @@ def run_fix_vias_command(args) -> int:
     sub_argv = [args.pcb]
     if args.mfr != "jlcpcb":
         sub_argv.extend(["--mfr", args.mfr])
-    if args.layers != 2:
+    if args.layers is not None:
         sub_argv.extend(["--layers", str(args.layers)])
     if args.copper != 1.0:
         sub_argv.extend(["--copper", str(args.copper)])
@@ -84,6 +84,8 @@ def run_fix_vias_command(args) -> int:
     # Use global quiet flag
     if getattr(args, "global_quiet", False):
         sub_argv.append("--quiet")
+    if getattr(args, "skip_if_clearance_violation", False):
+        sub_argv.append("--skip-if-clearance-violation")
     return fix_vias_main(sub_argv)
 
 
