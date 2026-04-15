@@ -39,10 +39,10 @@ from .assembly import (
     AssemblyPackageResult,
     create_assembly_package,
 )
-from .manufacturing import (
-    ManufacturingConfig,
-    ManufacturingPackage,
-    ManufacturingResult,
+from .bom_enrich import (
+    EnrichmentEntry,
+    EnrichmentReport,
+    enrich_bom_lcsc,
 )
 from .bom_formats import (
     BOM_FORMATTERS,
@@ -62,6 +62,11 @@ from .gerber import (
     ManufacturerPreset,
     export_gerbers,
     find_kicad_cli,
+)
+from .manufacturing import (
+    ManufacturingConfig,
+    ManufacturingPackage,
+    ManufacturingResult,
 )
 from .pnp import (
     PNP_FORMATTERS,
@@ -83,6 +88,10 @@ __all__ = [
     "AssemblyConfig",
     "AssemblyPackageResult",
     "create_assembly_package",
+    # BOM enrichment
+    "enrich_bom_lcsc",
+    "EnrichmentReport",
+    "EnrichmentEntry",
     # Manufacturing package
     "ManufacturingPackage",
     "ManufacturingConfig",
