@@ -569,7 +569,7 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
         return PipelineResult(
             step=PipelineStep.FIX_DRC,
             success=True,
-            message=f"[dry-run] Would run: kct fix-drc {ctx.pcb_file.name} --max-passes 3",
+            message=f"[dry-run] Would run: kct fix-drc {ctx.pcb_file.name} --max-passes 3 --local-reroute",
         )
 
     if not ctx.quiet:
@@ -583,6 +583,7 @@ def _run_step_fix_drc(ctx: PipelineContext, console: Console) -> PipelineResult:
         str(ctx.pcb_file),
         "--max-passes",
         "3",
+        "--local-reroute",
     ]
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
