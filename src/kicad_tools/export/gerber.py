@@ -142,6 +142,53 @@ def find_kicad_cli() -> Path | None:
     return None
 
 
+def get_kicad_cli_version(kicad_cli: Path) -> str | None:
+    """Get the version string from kicad-cli.
+
+    Args:
+        kicad_cli: Path to the kicad-cli executable.
+
+    Returns:
+        Version string like ``"10.0.1"`` or ``None`` if the version
+        could not be determined.
+    """
+    try:
+        result = subprocess.run(
+            [str(kicad_cli), "version"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def get_drill_origin_value(kicad_cli: Path) -> str:
+    """Return the correct ``--drill-origin`` value for the installed kicad-cli.
+
+    KiCad 10 renamed the auxiliary-axis origin flag value from ``aux``
+    to ``plot``.  Passing the wrong value causes kicad-cli to exit with
+    *"Invalid origin mode specified"*.
+
+    Returns:
+        ``"plot"`` for KiCad 10+ or when the version cannot be
+        determined (safe default), ``"aux"`` for KiCad 9 and earlier.
+    """
+    version_str = get_kicad_cli_version(kicad_cli)
+    if version_str is None:
+        # Cannot determine version; default to the modern value.
+        return "plot"
+
+    try:
+        major = int(version_str.split(".")[0])
+    except (ValueError, IndexError):
+        return "plot"
+
+    return "plot" if major >= 10 else "aux"
+
+
 class GerberExporter:
     """
     Export Gerbers using kicad-cli.
@@ -366,8 +413,9 @@ class GerberExporter:
             cmd.append("--minimal-header")
 
         if config.use_aux_origin:
+            origin_value = get_drill_origin_value(self.kicad_cli)
             cmd.append("--drill-origin")
-            cmd.append("aux")
+            cmd.append(origin_value)
 
         logger.debug(f"Running: {' '.join(cmd)}")
 
