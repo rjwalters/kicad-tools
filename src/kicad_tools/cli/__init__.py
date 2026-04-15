@@ -439,6 +439,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "report":
         return _run_report_command(args)
 
+    elif args.command == "export":
+        return _run_export_command(args)
+
     return 0
 
 
@@ -645,6 +648,34 @@ def _run_report_command(args) -> int:
             sub_argv.append("--skip-collect")
 
     return report_cmd(sub_argv)
+
+
+def _run_export_command(args) -> int:
+    """Run the export command."""
+    from .export_cmd import main as export_cmd
+
+    sub_argv = [args.export_pcb]
+
+    if hasattr(args, "export_mfr") and args.export_mfr:
+        sub_argv.extend(["--mfr", args.export_mfr])
+    if hasattr(args, "export_output") and args.export_output:
+        sub_argv.extend(["-o", args.export_output])
+    if hasattr(args, "export_sch") and args.export_sch:
+        sub_argv.extend(["--sch", args.export_sch])
+    if getattr(args, "export_dry_run", False):
+        sub_argv.append("--dry-run")
+    if getattr(args, "export_no_report", False):
+        sub_argv.append("--no-report")
+    if getattr(args, "export_no_gerbers", False):
+        sub_argv.append("--no-gerbers")
+    if getattr(args, "export_no_bom", False):
+        sub_argv.append("--no-bom")
+    if getattr(args, "export_no_cpl", False):
+        sub_argv.append("--no-cpl")
+    if getattr(args, "export_no_project_zip", False):
+        sub_argv.append("--no-project-zip")
+
+    return export_cmd(sub_argv)
 
 
 if __name__ == "__main__":
