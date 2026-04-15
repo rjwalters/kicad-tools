@@ -244,14 +244,26 @@ def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
         if result.output_path:
             result.output_path.unlink(missing_ok=True)
 
-    error_count = report.error_count
+    from ..erc import ERC_BLOCKING_TYPES, ERC_NON_BLOCKING_TYPES
+
+    # Partition error-level violations into blocking / non-blocking / unknown.
+    # Unknown types default to blocking (conservative, consistent with auditor).
+    blocking = [v for v in report.errors if v.type in ERC_BLOCKING_TYPES]
+    non_blocking = [v for v in report.errors if v.type in ERC_NON_BLOCKING_TYPES]
+    unknown_errors = [
+        v
+        for v in report.errors
+        if v.type not in ERC_BLOCKING_TYPES and v.type not in ERC_NON_BLOCKING_TYPES
+    ]
+    blocking_error_count = len(blocking) + len(unknown_errors)
+    non_blocking_count = len(non_blocking)
     warning_count = report.warning_count
 
-    # Store error count in context for downstream steps (e.g., FIX_ERC)
-    ctx.erc_error_count = error_count
+    # Store *blocking* error count so FIX_ERC only runs when there are real errors.
+    ctx.erc_error_count = blocking_error_count
 
     # Print per-violation details (unless --quiet)
-    if not ctx.quiet and (error_count > 0 or warning_count > 0):
+    if not ctx.quiet and (blocking_error_count > 0 or non_blocking_count > 0 or warning_count > 0):
         from ..feedback.suggestions import generate_erc_suggestions
 
         for violation in report.violations:
@@ -264,38 +276,50 @@ def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
                 console.print(f"          Suggestion: {suggestions[0]}")
 
     # No errors and no warnings -> clean pass
-    if error_count == 0 and warning_count == 0:
+    if blocking_error_count == 0 and non_blocking_count == 0 and warning_count == 0:
         return PipelineResult(
             step=PipelineStep.ERC,
             success=True,
             message="erc: no violations found",
         )
 
-    # Warnings only (no errors) -> pass
-    if error_count == 0:
+    # No blocking errors but non-blocking errors present -> WARN, success=True
+    if blocking_error_count == 0 and non_blocking_count > 0:
+        msg_parts = [f"erc: {non_blocking_count} non-blocking error(s) as warning(s)"]
+        if warning_count > 0:
+            msg_parts.append(f"{warning_count} warning(s)")
+        return PipelineResult(
+            step=PipelineStep.ERC,
+            success=True,
+            message=", ".join(msg_parts),
+        )
+
+    # Warnings only (no errors of any kind) -> pass
+    if blocking_error_count == 0 and non_blocking_count == 0:
         return PipelineResult(
             step=PipelineStep.ERC,
             success=True,
             message=f"erc: {warning_count} warning(s), no errors",
         )
 
-    # Errors found
+    # Blocking errors found
     if ctx.force:
         if not ctx.quiet:
             console.print(
-                f"  [yellow]erc: {error_count} error(s) found — continuing (--force)[/yellow]"
+                f"  [yellow]erc: {blocking_error_count} blocking error(s) found"
+                " — continuing (--force)[/yellow]"
             )
         return PipelineResult(
             step=PipelineStep.ERC,
             success=True,
-            message=f"erc: {error_count} error(s) found — continuing (--force)",
+            message=f"erc: {blocking_error_count} blocking error(s) found — continuing (--force)",
         )
 
     # Halt pipeline
     return PipelineResult(
         step=PipelineStep.ERC,
         success=False,
-        message=f"erc: {error_count} error(s) found (use --force to continue)",
+        message=f"erc: {blocking_error_count} blocking error(s) found (use --force to continue)",
     )
 
 

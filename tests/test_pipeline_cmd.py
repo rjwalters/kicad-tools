@@ -1188,6 +1188,60 @@ ERC_JSON_WARNINGS_ONLY = """{
     ]
 }"""
 
+# Sample ERC JSON report with only non-blocking errors (pin_to_pin)
+ERC_JSON_WITH_NON_BLOCKING_ERRORS = """{
+    "source": "test.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "test-uuid",
+            "violations": [
+                {
+                    "type": "pin_to_pin",
+                    "severity": "error",
+                    "description": "Pin-to-pin connection between U1/OUT and U2/OUT",
+                    "pos": {"x": 110, "y": 55},
+                    "items": [{"description": "U1 pin OUT"}, {"description": "U2 pin OUT"}],
+                    "excluded": false
+                }
+            ]
+        }
+    ]
+}"""
+
+# Sample ERC JSON report with mixed blocking + non-blocking errors
+ERC_JSON_WITH_MIXED_ERRORS = """{
+    "source": "test.kicad_sch",
+    "kicad_version": "8.0.0",
+    "coordinate_units": "mm",
+    "sheets": [
+        {
+            "path": "/",
+            "uuid_path": "test-uuid",
+            "violations": [
+                {
+                    "type": "pin_to_pin",
+                    "severity": "error",
+                    "description": "Pin-to-pin connection between U1/OUT and U2/OUT",
+                    "pos": {"x": 110, "y": 55},
+                    "items": [{"description": "U1 pin OUT"}, {"description": "U2 pin OUT"}],
+                    "excluded": false
+                },
+                {
+                    "type": "pin_not_connected",
+                    "severity": "error",
+                    "description": "Pin 3 of U3 is not connected",
+                    "pos": {"x": 130, "y": 70},
+                    "items": [{"description": "Pin 3 of U3"}],
+                    "excluded": false
+                }
+            ]
+        }
+    ]
+}"""
+
 
 @pytest.fixture
 def pcb_with_schematic(tmp_path: Path) -> tuple[Path, Path]:
@@ -1299,7 +1353,7 @@ class TestERCStep:
         result = _run_step_erc(ctx, console)
 
         assert result.success is False
-        assert "2 error(s) found" in result.message
+        assert "2 blocking error(s) found" in result.message
         assert "--force" in result.message
 
     @patch("kicad_tools.cli.runner.find_kicad_cli")
@@ -1323,7 +1377,7 @@ class TestERCStep:
         assert result.success is True
         assert result.skipped is False
         assert "--force" in result.message
-        assert "2 error(s)" in result.message
+        assert "2 blocking error(s)" in result.message
 
     @patch("kicad_tools.cli.runner.find_kicad_cli")
     @patch("kicad_tools.cli.runner.run_erc")
@@ -1492,6 +1546,103 @@ class TestERCStep:
         assert ALL_STEPS[0] == PipelineStep.ERC
         assert ALL_STEPS[1] == PipelineStep.FIX_ERC
         assert ALL_STEPS[2] == PipelineStep.FIX_SILKSCREEN
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_non_blocking_errors_pass(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """Non-blocking errors (e.g. pin_to_pin) pass the pipeline with WARN."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_NON_BLOCKING_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        assert result.success is True
+        assert result.skipped is False
+        assert "non-blocking" in result.message
+        assert "1 non-blocking error(s)" in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_non_blocking_sets_zero_error_count(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """ctx.erc_error_count is 0 when only non-blocking errors are present."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_NON_BLOCKING_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        _run_step_erc(ctx, console)
+
+        # Only blocking errors count — non-blocking should not trigger fix-erc
+        assert ctx.erc_error_count == 0
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_mixed_blocking_and_non_blocking_halts(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """Mixed blocking + non-blocking errors halts with blocking count only."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_MIXED_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True)
+        console = Console(quiet=True)
+        result = _run_step_erc(ctx, console)
+
+        # Should fail because of the 1 blocking error (pin_not_connected)
+        assert result.success is False
+        assert "1 blocking error(s) found" in result.message
+        # Should NOT report total count (2), only blocking count (1)
+        assert "2 blocking" not in result.message
+
+    @patch("kicad_tools.cli.runner.find_kicad_cli")
+    @patch("kicad_tools.cli.runner.run_erc")
+    def test_erc_mixed_errors_sets_blocking_count(
+        self, mock_run_erc, mock_find_cli, pcb_with_schematic, tmp_path
+    ):
+        """ctx.erc_error_count reflects only blocking errors in mixed scenario."""
+        pcb_file, sch_file = pcb_with_schematic
+
+        erc_report_file = tmp_path / "erc_report.json"
+        erc_report_file.write_text(ERC_JSON_WITH_MIXED_ERRORS)
+
+        mock_find_cli.return_value = Path("/usr/bin/kicad-cli")
+        mock_run_erc.return_value = MagicMock(success=True, output_path=erc_report_file, stderr="")
+
+        from rich.console import Console
+
+        ctx = PipelineContext(pcb_file=pcb_file, schematic_file=sch_file, quiet=True, force=True)
+        console = Console(quiet=True)
+        _run_step_erc(ctx, console)
+
+        # pin_not_connected is blocking, pin_to_pin is non-blocking
+        assert ctx.erc_error_count == 1
 
 
 # =========================================================================
