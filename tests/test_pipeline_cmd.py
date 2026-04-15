@@ -499,6 +499,89 @@ class TestExitCodes:
         assert "failed" in results[0].message
 
 
+class TestRouteExitCode2Pipeline:
+    """Tests for route exit code 2 (partial routing) pipeline behavior.
+
+    Issue #1413: When route exits with code 2 (partial routing), the pipeline
+    should treat it as success-with-warnings and continue to downstream steps
+    (fix-drc, optimize-traces, audit, report).
+
+    Uses unrouted_pcb fixture so the route step does not skip due to
+    detecting existing traces in the board.
+    """
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exit_code_2_treated_as_success(self, mock_run, unrouted_pcb: Path):
+        """Pipeline treats route exit code 2 (partial routing) as success, not failure."""
+        mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert "warnings" in results[0].message
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exit_code_2_sets_warning_flag(self, mock_run, unrouted_pcb: Path):
+        """Pipeline sets warning=True on result when route returns exit code 2."""
+        mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].warning is True
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_route_exit_code_0_no_warning_flag(self, mock_run, unrouted_pcb: Path):
+        """Pipeline does not set warning flag when route succeeds fully (exit 0)."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].warning is False
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_pipeline_continues_past_partial_route(self, mock_run, unrouted_pcb: Path):
+        """Pipeline continues to subsequent steps when route returns exit code 2."""
+
+        def side_effect(cmd, **kwargs):
+            # route returns exit code 2 (partial routing)
+            if "route" in cmd:
+                return MagicMock(returncode=2, stderr="", stdout="")
+            # All other steps succeed normally
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_run.side_effect = side_effect
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC, PipelineStep.AUDIT])
+
+        # All three steps should have run
+        assert len(results) == 3
+        assert results[0].success is True  # route: partial success
+        assert results[0].warning is True
+        assert results[1].success is True  # fix-drc: ran
+        assert results[2].success is True  # audit: ran
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_pipeline_aborts_on_route_fatal_failure(self, mock_run, unrouted_pcb: Path):
+        """Pipeline aborts when route returns exit code 1 (fatal failure, no output)."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="Error: no nets routed", stdout="")
+
+        ctx = PipelineContext(pcb_file=unrouted_pcb, quiet=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE, PipelineStep.FIX_DRC, PipelineStep.AUDIT])
+
+        # Pipeline should stop at route step (exit 1 = failure)
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "failed" in results[0].message
+
+
 class TestProjectInput:
     """Tests for .kicad_pro input support."""
 

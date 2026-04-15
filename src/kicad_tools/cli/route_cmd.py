@@ -134,7 +134,8 @@ def _handle_interrupt(signum, frame):
         print("\n\n⚠ Interrupt received! Saving partial results...")
     # Save partial results immediately
     saved = _save_partial_results()
-    # Exit with code 2 to indicate interruption
+    # Exit with code 2 to indicate partial results (interruption with saved output)
+    # Code 2 is shared with partial routing completion — both mean "some useful output exists"
     sys.exit(2 if saved else 130)  # 130 = 128 + SIGINT (2)
 
 
@@ -904,7 +905,13 @@ def route_with_layer_escalation(
                 pcb_file=args.pcb,
             )
 
-    return 0 if final_result.success else 1
+    if final_result.success:
+        return 0
+    # Partial routing: some nets were routed but not all — pipeline should continue
+    if final_result.nets_routed > 0:
+        return 2
+    # Nothing was routed — treat as fatal failure
+    return 1
 
 
 def route_with_rule_relaxation(
@@ -1268,7 +1275,13 @@ def route_with_rule_relaxation(
                 pcb_file=args.pcb,
             )
 
-    return 0 if final_result.success else 1
+    if final_result.success:
+        return 0
+    # Partial routing: some nets were routed but not all — pipeline should continue
+    if final_result.nets_routed > 0:
+        return 2
+    # Nothing was routed — treat as fatal failure
+    return 1
 
 
 def route_with_combined_escalation(
@@ -1664,7 +1677,13 @@ def route_with_combined_escalation(
                 pcb_file=args.pcb,
             )
 
-    return 0 if final_result.success else 1
+    if final_result.success:
+        return 0
+    # Partial routing: some nets were routed but not all — pipeline should continue
+    if final_result.nets_routed > 0:
+        return 2
+    # Nothing was routed — treat as fatal failure
+    return 1
 
 
 def _resolve_escape_routing_flag(args) -> bool | None:
@@ -3228,12 +3247,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Exit codes:
     # 0 = All nets routed AND (DRC passed OR DRC not run)
-    # 1 = Not all nets routed (routing failure)
-    # 2 = Interrupted by SIGINT (handled earlier in the function)
+    # 1 = Fatal failure — no nets routed, no useful output
+    # 2 = Partial routing — some nets routed, output file exists with traces
+    #     (also used for SIGINT partial save, handled earlier in the function)
     # 3 = All nets routed but DRC violations detected
     if all_nets_routed and drc_passed:
         return 0
     elif not all_nets_routed:
+        # Partial routing: some nets were routed — pipeline should continue
+        if stats["nets_routed"] > 0:
+            return 2
+        # Nothing was routed — treat as fatal failure
         return 1
     else:
         # All nets routed but DRC failed
