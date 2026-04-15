@@ -280,6 +280,8 @@ class TestRoutingSkip:
         assert results[0].success is True
         assert results[0].skipped is True
         assert "already routed" in results[0].message
+        # Verify message uses "route: " prefix convention
+        assert results[0].message.startswith("route: ")
 
     @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
     def test_routing_invoked_when_unrouted(self, mock_run, unrouted_pcb: Path):
@@ -300,6 +302,22 @@ class TestRoutingSkip:
         assert "--grid" in cmd_args
         assert "--manufacturer" in cmd_args
         assert "--auto-fix" in cmd_args
+
+    @patch("kicad_tools.cli.pipeline_cmd.subprocess.run")
+    def test_force_bypasses_routing_skip(self, mock_run, routed_pcb: Path):
+        """--force on a routed board invokes the router instead of skipping."""
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        ctx = PipelineContext(pcb_file=routed_pcb, quiet=True, force=True)
+        results = run_pipeline(ctx, [PipelineStep.ROUTE])
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is False
+        # Verify subprocess was actually called (not skipped)
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "route" in cmd_args
 
 
 class TestSingleStep:

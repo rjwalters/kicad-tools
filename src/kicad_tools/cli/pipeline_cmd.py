@@ -475,7 +475,7 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
         return PipelineResult(
             step=PipelineStep.ROUTE,
             success=True,
-            message=f"Board already routed ({trace_count} traces, {net_count} nets) - skipped",
+            message=f"route: Board already routed ({trace_count} traces, {net_count} nets) - skipped",
             skipped=True,
         )
 
