@@ -80,6 +80,7 @@ class PipelineResult:
     success: bool
     message: str
     skipped: bool = False
+    warning: bool = False
 
 
 @dataclass
@@ -548,10 +549,14 @@ def _run_step_route(ctx: PipelineContext, console: Console) -> PipelineResult:
 
     success, message = _run_subprocess_step(cmd, ctx.pcb_file.parent, ctx.verbose)
 
+    # Detect partial routing (exit code 2 -> "completed with warnings")
+    is_partial = success and "warnings" in message
+
     return PipelineResult(
         step=PipelineStep.ROUTE,
         success=success,
         message=f"route: {message}",
+        warning=is_partial,
     )
 
 
@@ -1029,6 +1034,8 @@ def run_pipeline(
             if not ctx.quiet:
                 if result.skipped:
                     status = "[yellow]SKIP[/yellow]"
+                elif result.warning:
+                    status = "[yellow]WARN[/yellow]"
                 elif result.success:
                     status = "[green]OK[/green]"
                 else:
