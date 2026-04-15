@@ -925,3 +925,321 @@ class TestCorruptionGuard:
 
         # Should not have corruption details
         assert "corruption" not in result.connectivity.details.lower()
+
+
+class TestZoneConnectedNets:
+    """Tests for zone-connected net reclassification in connectivity check."""
+
+    # PCB where GND net has a zone definition but no filled_polygons.
+    # Two footprints with pads on GND (net 1) and +3V3 (net 2).
+    # GND has a zone, +3V3 has a trace connecting its pads.
+    # With no filled_polygons and no trace on GND, the connectivity
+    # validator would normally flag GND as incomplete.
+    PCB_WITH_ZONE = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (segment (start 30.5 50) (end 70.5 50) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts
+      (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+  )
+)
+"""
+
+    # PCB with both zone-connected and truly-incomplete nets.
+    # GND (net 1) has a zone, SIG (net 3) has no zone and no trace.
+    PCB_MIXED_NETS = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (net 3 "SIG")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SIG"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp3")
+    (at 50 30)
+    (property "Reference" "R3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref3"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val3"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "SIG"))
+  )
+  (segment (start 30.5 50) (end 49.5 30) (width 0.25) (layer "F.Cu") (net 2)
+    (uuid "seg1"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone1")
+    (connect_pads (clearance 0.5))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts
+      (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
+    ))
+  )
+)
+"""
+
+    # PCB with no zones — incomplete nets should still be flagged normally.
+    PCB_NO_ZONES = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3V3")
+  (gr_rect (start 0 0) (end 100 100)
+    (stroke (width 0.15) (type default)) (fill none)
+    (layer "Edge.Cuts") (uuid "edge"))
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp1")
+    (at 30 50)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref1"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val1"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+  (footprint "R_0402"
+    (layer "F.Cu")
+    (uuid "fp2")
+    (at 70 50)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS") (uuid "ref2"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "val2"))
+    (pad "1" smd roundrect (at -0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.5 0) (size 0.6 0.6)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3V3"))
+  )
+)
+"""
+
+    def test_zone_connected_nets_pass_connectivity(self, tmp_path):
+        """Zone-connected net with zone definition should not block READY verdict.
+
+        When a net is incomplete only because zone fill data is absent,
+        the audit should reclassify it as zone-connected and pass.
+        """
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # GND should be reclassified as zone-connected
+        assert result.connectivity.zone_connected_nets >= 1
+        # Truly incomplete nets should be 0 (only GND is incomplete,
+        # and it has a zone)
+        assert result.connectivity.incomplete_nets == 0
+        # Connectivity should pass
+        assert result.connectivity.passed is True
+
+    def test_mixed_nets_only_truly_incomplete_block(self, tmp_path):
+        """Mixed nets: zone-connected pass, truly incomplete still block.
+
+        When some incomplete nets have zones and others do not,
+        only the truly-incomplete nets should prevent READY.
+        """
+        pcb_path = tmp_path / "mixed_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_MIXED_NETS)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # GND is zone-connected
+        assert result.connectivity.zone_connected_nets >= 1
+        # SIG has no zone and no trace — truly incomplete
+        assert result.connectivity.incomplete_nets >= 1
+        # Connectivity should fail due to SIG
+        assert result.connectivity.passed is False
+        # Verdict should be NOT_READY
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_no_zones_regression(self, tmp_path):
+        """PCB with no zones and incomplete nets still yields NOT_READY.
+
+        This is a regression test ensuring that zone-connected logic
+        does not accidentally pass boards that have genuinely incomplete
+        signal nets with no zone definitions.
+        """
+        pcb_path = tmp_path / "no_zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_NO_ZONES)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # No zones means no zone-connected nets
+        assert result.connectivity.zone_connected_nets == 0
+        # Should have incomplete nets (both GND and +3V3 are unrouted)
+        assert result.connectivity.incomplete_nets > 0
+        # Connectivity should fail
+        assert result.connectivity.passed is False
+        # Verdict should be NOT_READY
+        assert result.verdict == AuditVerdict.NOT_READY
+
+    def test_connectivity_status_to_dict_includes_zone_connected(self):
+        """ConnectivityStatus.to_dict() includes zone_connected_nets field."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=2,
+            zone_connected_nets=3,
+            completion_percent=50.0,
+            passed=True,
+        )
+        d = status.to_dict()
+        assert "zone_connected_nets" in d
+        assert d["zone_connected_nets"] == 3
+
+    def test_zone_connected_verdict_ready(self):
+        """Synthetic AuditResult with only zone-connected incomplete nets yields READY."""
+        result = AuditResult()
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=0,
+            zone_connected_nets=5,
+            passed=True,
+        )
+        result.erc = ERCStatus(passed=True)
+        result.drc = DRCStatus(passed=True)
+        result.compatibility = ManufacturerCompatibility(passed=True)
+
+        assert result.verdict == AuditVerdict.READY
+
+    def test_zone_connected_action_items(self, tmp_path):
+        """Zone-connected nets produce advisory action item, not critical."""
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        # Should have a zone-fill verification advisory
+        zone_items = [item for item in result.action_items if "zone" in item.description.lower()]
+        assert len(zone_items) >= 1
+        # Advisory should be low priority (3)
+        assert all(item.priority == 3 for item in zone_items)
+        # Should NOT have a critical connectivity action item
+        critical_conn_items = [
+            item
+            for item in result.action_items
+            if item.priority == 1 and "routing" in item.description.lower()
+        ]
+        assert len(critical_conn_items) == 0
+
+    def test_zone_connected_cli_display(self, tmp_path, capsys):
+        """CLI table output shows zone-connected nets count."""
+        from kicad_tools.cli.audit_cmd import output_table
+
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        output_table(result)
+        captured = capsys.readouterr()
+
+        # Should display zone-connected count
+        if result.connectivity.zone_connected_nets > 0:
+            assert "zone fill" in captured.out.lower()
+
+    def test_zone_connected_json_output(self, tmp_path, capsys):
+        """JSON output includes zone_connected_nets field."""
+        pcb_path = tmp_path / "zone_board.kicad_pcb"
+        pcb_path.write_text(self.PCB_WITH_ZONE)
+
+        audit = ManufacturingAudit(pcb_path)
+        result = audit.run()
+
+        data = result.to_dict()
+        assert "zone_connected_nets" in data["connectivity"]
+        assert data["connectivity"]["zone_connected_nets"] >= 1

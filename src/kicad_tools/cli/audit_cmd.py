@@ -203,6 +203,8 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
     print(
         f"    {conn.connected_nets}/{conn.total_nets} nets fully routed ({conn.completion_percent:.0f}%)"
     )
+    if conn.zone_connected_nets > 0:
+        print(f"    {conn.zone_connected_nets} nets connected via zone fill (unverified)")
     if conn.unconnected_pads > 0:
         print(f"    Unconnected pads: {conn.unconnected_pads}")
     if conn.details:
