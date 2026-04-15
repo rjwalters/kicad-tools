@@ -921,13 +921,62 @@ def _print_final_summary(
     else:
         erc_line = erc_result.message
 
+    # --- Audit ---
+    audit_result = next(
+        (r for r in results if r.step == PipelineStep.AUDIT or r.step == PipelineStep.AUDIT.value),
+        None,
+    )
+
     # --- Verdict ---
-    if error_count == 0:
-        verdict = "[green]READY[/green] -- board passes DRC"
-    elif error_count > 0:
-        verdict = f"[red]NOT READY[/red] -- {error_count} DRC error(s) to resolve"
+    # When the AUDIT step ran, its success/failure reflects the full audit
+    # verdict (ERC, DRC, connectivity, manufacturer compatibility).  Use it
+    # as the authoritative source so the pipeline summary matches the audit.
+    if audit_result is not None and not audit_result.skipped:
+        if audit_result.success:
+            # Audit passed -- distinguish READY from WARNING.
+            # Check for DRC/ERC warnings to surface a WARNING verdict.
+            has_drc_warnings = (
+                check_data is not None and check_data.get("summary", {}).get("warnings", 0) > 0
+            )
+            erc_has_warnings = (
+                erc_result is not None
+                and not erc_result.skipped
+                and (
+                    "non-blocking" in erc_result.message.lower()
+                    or (erc_result.warning and erc_result.success)
+                )
+            )
+            if has_drc_warnings or erc_has_warnings:
+                verdict = (
+                    "[yellow]WARNING[/yellow] -- audit passed with warnings (review recommended)"
+                )
+            else:
+                verdict = "[green]READY[/green] -- audit passed"
+        else:
+            # Audit failed -- collect failure reasons from individual steps.
+            reasons: list[str] = []
+            if error_count > 0:
+                reasons.append(f"{error_count} DRC error(s)")
+            if erc_result is not None and not erc_result.skipped and not erc_result.success:
+                reasons.append("ERC errors")
+            if not reasons:
+                reasons.append("see audit output above")
+            verdict = f"[red]NOT READY[/red] -- {', '.join(reasons)}"
     else:
-        verdict = "unknown -- could not determine DRC status"
+        # Audit step did not run -- fall back to DRC + ERC heuristics.
+        erc_failed = erc_result is not None and not erc_result.skipped and not erc_result.success
+        if error_count == 0 and not erc_failed:
+            verdict = "[green]READY[/green] -- board passes DRC"
+        elif error_count > 0 and erc_failed:
+            verdict = (
+                f"[red]NOT READY[/red] -- {error_count} DRC error(s) and ERC errors to resolve"
+            )
+        elif error_count > 0:
+            verdict = f"[red]NOT READY[/red] -- {error_count} DRC error(s) to resolve"
+        elif erc_failed:
+            verdict = "[red]NOT READY[/red] -- ERC errors to resolve"
+        else:
+            verdict = "unknown -- could not determine DRC status"
 
     console.print()
     console.print("[bold]Summary:[/bold]")
