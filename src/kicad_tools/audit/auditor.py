@@ -81,6 +81,7 @@ class ConnectivityStatus:
     pour_net_names: list[str] = field(default_factory=list)
     completion_percent: float = 100.0
     unconnected_pads: int = 0
+    has_zones: bool = False
     passed: bool = True
     details: str = ""
 
@@ -93,6 +94,7 @@ class ConnectivityStatus:
             "pour_net_names": self.pour_net_names,
             "completion_percent": self.completion_percent,
             "unconnected_pads": self.unconnected_pads,
+            "has_zones": self.has_zones,
             "passed": self.passed,
             "details": self.details,
         }
@@ -229,14 +231,21 @@ class AuditResult:
     @property
     def verdict(self) -> AuditVerdict:
         """Determine overall verdict based on check results."""
-        # Critical failures
+        # Critical failures — these always block READY
         if self.erc.blocking_error_count > 0:
             return AuditVerdict.NOT_READY
         if self.drc.blocking_count > 0:
             return AuditVerdict.NOT_READY
-        if not self.connectivity.passed:
-            return AuditVerdict.NOT_READY
         if not self.compatibility.passed:
+            return AuditVerdict.NOT_READY
+
+        # Connectivity: advisory when core checks pass and board has zones.
+        # Zone fills cannot be verified without running KiCad's zone filler,
+        # so incomplete nets on a board with zone definitions are treated as
+        # a warning rather than a hard block.
+        if not self.connectivity.passed:
+            if self.connectivity.has_zones:
+                return AuditVerdict.WARNING
             return AuditVerdict.NOT_READY
 
         # Warnings
@@ -629,6 +638,12 @@ class ManufacturingAudit:
             else:
                 status.completion_percent = 100.0
 
+            # Record whether the board has zone definitions.  This is used
+            # by the verdict logic to decide whether incomplete connectivity
+            # should block the READY verdict (no zones) or be advisory (has
+            # zones -- fills may resolve the gaps).
+            status.has_zones = any(z.net_number > 0 for z in pcb.zones)
+
             # Post-process: identify zone-connected nets among incomplete nets.
             # Nets that have a zone definition but appear incomplete (because
             # zone fill data is absent) are reclassified as zone-connected and
@@ -647,20 +662,15 @@ class ManufacturingAudit:
                     from kicad_tools.router.net_class import classify_and_apply_rules
 
                     net_id_by_name = {
-                        net.name: net_id
-                        for net_id, net in pcb.nets.items()
-                        if net_id > 0
+                        net.name: net_id for net_id, net in pcb.nets.items() if net_id > 0
                     }
                     pending_ids = {
-                        net_id_by_name[n]: n
-                        for n in truly_incomplete
-                        if n in net_id_by_name
+                        net_id_by_name[n]: n for n in truly_incomplete if n in net_id_by_name
                     }
                     if pending_ids:
                         rules = classify_and_apply_rules(pending_ids)
                         classified_pour = {
-                            n for n in truly_incomplete
-                            if rules.get(n) and rules[n].is_pour_net
+                            n for n in truly_incomplete if rules.get(n) and rules[n].is_pour_net
                         }
                 except Exception:
                     pass  # conservative: leave truly_incomplete unchanged
@@ -850,26 +860,42 @@ class ManufacturingAudit:
 
         # Connectivity issues
         if not result.connectivity.passed:
-            items.append(
-                ActionItem(
-                    priority=1,
-                    description=f"Complete routing: {result.connectivity.incomplete_nets} nets incomplete"
-                    + (
-                        f" ({result.connectivity.completion_percent:.0f}% complete)"
-                        if result.connectivity.completion_percent < 100
-                        else ""
-                    ),
-                    command=f"kct validate connectivity {self.pcb_path}",
+            if result.connectivity.has_zones:
+                # Board has zone definitions — connectivity is advisory.
+                # Zone fills may resolve the incomplete nets once refilled
+                # in KiCad.
+                items.append(
+                    ActionItem(
+                        priority=3,
+                        description=(
+                            f"Verify zone fill in KiCad: {result.connectivity.incomplete_nets}"
+                            " nets appear incomplete but may be connected via zone fills"
+                        ),
+                        command=None,
+                    )
                 )
-            )
-            # Suggest stitching vias if GND net is incomplete
-            items.append(
-                ActionItem(
-                    priority=2,
-                    description="Add stitching vias for GND/power planes",
-                    command=f"kct stitch {self.pcb_path} --net GND",
+            else:
+                # No zones — incomplete nets are a hard failure.
+                items.append(
+                    ActionItem(
+                        priority=1,
+                        description=f"Complete routing: {result.connectivity.incomplete_nets} nets incomplete"
+                        + (
+                            f" ({result.connectivity.completion_percent:.0f}% complete)"
+                            if result.connectivity.completion_percent < 100
+                            else ""
+                        ),
+                        command=f"kct validate connectivity {self.pcb_path}",
+                    )
                 )
-            )
+                # Suggest stitching vias if GND net is incomplete
+                items.append(
+                    ActionItem(
+                        priority=2,
+                        description="Add stitching vias for GND/power planes",
+                        command=f"kct stitch {self.pcb_path} --net GND",
+                    )
+                )
 
         # Zone-connected nets advisory (even when connectivity passes)
         if result.connectivity.zone_connected_nets > 0:
@@ -890,9 +916,7 @@ class ManufacturingAudit:
                 items.append(
                     ActionItem(
                         priority=3,
-                        description=(
-                            f"Add zone for {net_name} on appropriate copper layer"
-                        ),
+                        description=(f"Add zone for {net_name} on appropriate copper layer"),
                         command=None,
                     )
                 )
