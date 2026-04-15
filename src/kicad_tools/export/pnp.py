@@ -10,6 +10,7 @@ import csv
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import ConfigurationError
@@ -127,7 +128,7 @@ class JLCPCBPnPFormatter(PnPFormatter):
         - Mid X: X coordinate in mm
         - Mid Y: Y coordinate in mm
         - Rotation: Rotation in degrees
-        - Layer: top or bottom
+        - Layer: Top or Bottom
         """
         filtered = self.filter_placements(placements)
 
@@ -137,7 +138,7 @@ class JLCPCBPnPFormatter(PnPFormatter):
 
         for placement in sorted(filtered, key=lambda p: p.reference):
             transformed = self.apply_transforms(placement)
-            layer = "top" if transformed.layer == "F.Cu" else "bottom"
+            layer = "Top" if transformed.layer == "F.Cu" else "Bottom"
             writer.writerow(
                 [
                     transformed.reference,
@@ -310,10 +311,33 @@ def extract_placements(footprints: list[Footprint]) -> list[PlacementData]:
     return placements
 
 
+def get_aux_origin(pcb_path: str | Path) -> tuple[float, float]:
+    """Read auxiliary axis origin from PCB setup section.
+
+    The auxiliary axis origin is set by the user in KiCad (Place -> Drill/Place
+    File Origin) and is used as the coordinate reference for manufacturing
+    output files (Gerbers, drill files, pick-and-place).
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file
+
+    Returns:
+        Tuple (x, y) of the auxiliary origin in mm, or (0.0, 0.0) if not set.
+    """
+    from ..schema.pcb import PCB
+
+    pcb = PCB.load(pcb_path)
+    setup = pcb.setup
+    if setup is None:
+        return (0.0, 0.0)
+    return setup.aux_axis_origin
+
+
 def export_pnp(
     footprints: list[Footprint],
     manufacturer: str = "generic",
     config: PnPExportConfig | None = None,
+    pcb_path: str | Path | None = None,
 ) -> str:
     """
     Export pick-and-place file.
@@ -322,10 +346,33 @@ def export_pnp(
         footprints: List of Footprint objects from PCB
         manufacturer: Manufacturer ID
         config: Export configuration
+        pcb_path: Optional path to the .kicad_pcb file. When provided and
+            config.use_aux_origin is True (the default), the auxiliary axis
+            origin is read from the PCB and subtracted from all component
+            coordinates so that output positions are relative to the
+            board's manufacturing origin.
 
     Returns:
         Formatted CPL as CSV string
     """
+    config = config or PnPExportConfig()
+
+    # Auto-apply auxiliary origin offset when a PCB path is provided
+    if pcb_path is not None and config.use_aux_origin:
+        aux_x, aux_y = get_aux_origin(pcb_path)
+        if aux_x != 0.0 or aux_y != 0.0:
+            config = PnPExportConfig(
+                x_offset=config.x_offset - aux_x,
+                y_offset=config.y_offset - aux_y,
+                mirror_x=config.mirror_x,
+                mirror_y=config.mirror_y,
+                use_aux_origin=config.use_aux_origin,
+                include_dnp=config.include_dnp,
+                top_only=config.top_only,
+                bottom_only=config.bottom_only,
+                rotation_offset=config.rotation_offset,
+            )
+
     placements = extract_placements(footprints)
     formatter = get_pnp_formatter(manufacturer, config)
     return formatter.format(placements)

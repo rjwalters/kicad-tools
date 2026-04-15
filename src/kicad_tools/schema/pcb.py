@@ -863,6 +863,7 @@ class Setup:
     stackup: list[StackupLayer] = field(default_factory=list)
     pad_to_mask_clearance: float = 0.0
     copper_finish: str = ""
+    aux_axis_origin: tuple[float, float] = (0.0, 0.0)
 
 
 # Paper sizes in mm (width, height) - KiCad uses landscape orientation
@@ -1312,6 +1313,11 @@ class PCB:
 
         if clearance := sexp.find("pad_to_mask_clearance"):
             setup.pad_to_mask_clearance = clearance.get_float(0) or 0.0
+
+        if aux_origin := sexp.find("aux_axis_origin"):
+            x = aux_origin.get_float(0) or 0.0
+            y = aux_origin.get_float(1) or 0.0
+            setup.aux_axis_origin = (x, y)
 
         self._setup = setup
 
