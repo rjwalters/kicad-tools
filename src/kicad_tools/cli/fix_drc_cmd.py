@@ -249,7 +249,10 @@ Examples:
     if final_pass is None:
         return 0
     remaining = final_pass.violations_before - final_pass.repaired
-    return 0 if remaining == 0 else 1
+    if remaining == 0:
+        return 0
+    # Some violations repaired but not all — exit 2 (warnings, not failure)
+    return 2
 
 
 def _run_single_pass(
