@@ -39,6 +39,7 @@ class BuildStep(str, Enum):
 
     SCHEMATIC = "schematic"
     PCB = "pcb"
+    OUTLINE = "outline"
     ROUTE = "route"
     VERIFY = "verify"
     ALL = "all"
@@ -490,6 +491,118 @@ def _get_routing_params(
     return grid, clearance, trace_width, via_drill, via_diameter
 
 
+def _run_step_outline(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run board outline generation step.
+
+    Reads mechanical dimensions from the project spec and writes a closed
+    polygon on Edge.Cuts to the PCB file.  Skips if:
+    - No PCB file exists yet
+    - No mechanical dimensions in the spec
+    - An outline already exists on Edge.Cuts
+    """
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="outline",
+            success=True,
+            message="No PCB file found, skipping outline generation",
+        )
+
+    # Extract mechanical dimensions from spec
+    width_mm = None
+    height_mm = None
+
+    if ctx.spec and ctx.spec.requirements and ctx.spec.requirements.mechanical:
+        mech = ctx.spec.requirements.mechanical
+        if mech.dimensions:
+            width_mm = _parse_dimension_mm(mech.dimensions.get("width"))
+            height_mm = _parse_dimension_mm(mech.dimensions.get("height"))
+
+    if width_mm is None or height_mm is None:
+        return BuildResult(
+            step="outline",
+            success=True,
+            message="No mechanical dimensions in spec, skipping outline generation",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="outline",
+            success=True,
+            message=f"[dry-run] Would add {width_mm}x{height_mm}mm outline on Edge.Cuts",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Adding board outline: {width_mm}x{height_mm}mm")
+
+    try:
+        from kicad_tools.pcb.editor import PCBEditor
+
+        editor = PCBEditor(str(ctx.pcb_file))
+
+        if editor.has_board_outline():
+            if not ctx.quiet:
+                console.print("  Outline already exists on Edge.Cuts, skipping")
+            return BuildResult(
+                step="outline",
+                success=True,
+                message="Board outline already exists, skipping",
+                output_file=ctx.pcb_file,
+            )
+
+        nodes = editor.add_board_outline(width_mm, height_mm)
+
+        if not nodes:
+            return BuildResult(
+                step="outline",
+                success=True,
+                message="Board outline already exists, skipping",
+                output_file=ctx.pcb_file,
+            )
+
+        # Place mounting holes if specified
+        mounting_msg = ""
+        if (
+            ctx.spec
+            and ctx.spec.requirements
+            and ctx.spec.requirements.mechanical
+            and ctx.spec.requirements.mechanical.mounting_holes
+        ):
+            holes = ctx.spec.requirements.mechanical.mounting_holes
+            hole_count = 0
+            for hole in holes:
+                hx = _parse_dimension_mm(hole.x)
+                hy = _parse_dimension_mm(hole.y)
+                diameter = _parse_dimension_mm(hole.diameter)
+                if hx is not None and hy is not None and diameter is not None:
+                    # Offset mounting hole positions relative to the board origin
+                    abs_x = 100.0 + hx
+                    abs_y = 100.0 + hy
+                    editor.place_component(
+                        f"H{hole_count + 1}",
+                        abs_x,
+                        abs_y,
+                    )
+                    hole_count += 1
+            if hole_count > 0:
+                mounting_msg = f" with {hole_count} mounting hole(s)"
+
+        editor.save()
+
+        return BuildResult(
+            step="outline",
+            success=True,
+            message=f"Added {width_mm}x{height_mm}mm outline on Edge.Cuts{mounting_msg}",
+            output_file=ctx.pcb_file,
+        )
+
+    except Exception as e:
+        return BuildResult(
+            step="outline",
+            success=False,
+            message=f"Outline generation failed: {e}",
+        )
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
@@ -788,7 +901,7 @@ Examples:
     parser.add_argument(
         "--step",
         "-s",
-        choices=["schematic", "pcb", "route", "verify", "all"],
+        choices=["schematic", "pcb", "outline", "route", "verify", "all"],
         default="all",
         help="Run specific step or all (default: all)",
     )
@@ -889,7 +1002,7 @@ Examples:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.ROUTE, BuildStep.VERIFY]
+        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.ROUTE, BuildStep.VERIFY]
     else:
         steps = [BuildStep(args.step)]
 
@@ -914,6 +1027,9 @@ Examples:
                 result = _run_step_pcb(ctx, console)
                 if result.output_file:
                     ctx.pcb_file = result.output_file
+
+            elif step == BuildStep.OUTLINE:
+                result = _run_step_outline(ctx, console)
 
             elif step == BuildStep.ROUTE:
                 result = _run_step_route(ctx, console)
