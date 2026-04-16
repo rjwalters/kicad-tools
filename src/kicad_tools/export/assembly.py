@@ -326,9 +326,9 @@ class AssemblyPackage:
         if self.config.exclude_references:
             footprints = [fp for fp in footprints if not self._is_excluded(fp.reference)]
 
-        # Generate CPL
-        pnp_config = self.config.pnp_config or PnPExportConfig()
-        pnp_csv = export_pnp(footprints, self.manufacturer, pnp_config)
+        # Generate CPL – pass None when no explicit config so that the
+        # formatter can apply its own defaults (e.g. JLCPCB exclude_tht=True).
+        pnp_csv = export_pnp(footprints, self.manufacturer, self.config.pnp_config)
 
         # Write to file
         filename = self.config.pnp_filename.format(manufacturer=self.manufacturer)

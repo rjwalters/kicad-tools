@@ -119,6 +119,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to pre-existing ERC report file",
     )
     parser.add_argument(
+        "--include-tht",
+        action="store_true",
+        help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
+    )
+    parser.add_argument(
         "--format",
         dest="output_format",
         default="text",
@@ -157,6 +162,13 @@ def run_export(args: argparse.Namespace) -> int:
         erc_report_path=getattr(args, "erc_report", None),
     )
 
+    # Build PnP configuration when --include-tht is specified
+    pnp_config = None
+    if getattr(args, "include_tht", False):
+        from kicad_tools.export.pnp import PnPExportConfig
+
+        pnp_config = PnPExportConfig(exclude_tht=False)
+
     # Build configuration
     auto_lcsc = args.auto_lcsc and not args.no_auto_lcsc
     config = ManufacturingConfig(
@@ -169,7 +181,8 @@ def run_export(args: argparse.Namespace) -> int:
         auto_lcsc=auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
         preflight=preflight_cfg,
-        strict_preflight=getattr(args, "strict_preflight", False),
+strict_preflight=getattr(args, "strict_preflight", False),
+        pnp_config=pnp_config,
     )
 
     pkg = ManufacturingPackage(

@@ -82,6 +82,9 @@ class PreflightChecker:
             print("Cannot proceed with export")
     """
 
+    # Manufacturers whose standard assembly service is SMT-only
+    _SMT_ONLY_MANUFACTURERS = {"jlcpcb"}
+
     def __init__(
         self,
         pcb_path: str | Path,
@@ -89,12 +92,19 @@ class PreflightChecker:
         manufacturer: str = "jlcpcb",
         output_dir: str | Path | None = None,
         config: PreflightConfig | None = None,
+        exclude_tht: bool | None = None,
     ):
         self.pcb_path = Path(pcb_path)
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.output_dir = Path(output_dir) if output_dir else None
         self.config = config or PreflightConfig()
+
+        # Determine THT exclusion: explicit override, or default per manufacturer
+        if exclude_tht is not None:
+            self._exclude_tht = exclude_tht
+        else:
+            self._exclude_tht = self.manufacturer in self._SMT_ONLY_MANUFACTURERS
 
         # Lazy-loaded objects
         self._pcb = None
@@ -123,6 +133,10 @@ class PreflightChecker:
             results.append(self._check_footprints_present())
             results.append(self._check_board_dimensions())
             results.append(self._check_drill_holes())
+
+        # THT-in-CPL warning
+        if self._pcb is not None:
+            results.append(self._check_tht_in_cpl())
 
         # BOM checks (only if schematic is available)
         if self.schematic_path and self.schematic_path.exists():
@@ -406,6 +420,58 @@ class PreflightChecker:
             message=f"Drill holes present ({via_count} vias, {th_pad_count} TH pads)",
         )
 
+    def _check_tht_in_cpl(self) -> PreflightResult:
+        """Warn when THT components are present on a board targeting an SMT-only assembler."""
+        if self._pcb is None:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="WARN",
+                message="Cannot check THT components: PCB not loaded",
+            )
+
+        tht_refs = [
+            fp.reference
+            for fp in self._pcb.footprints
+            if getattr(fp, "attr", "") == "through_hole"
+            and not getattr(fp, "exclude_from_pos_files", False)
+        ]
+
+        if not tht_refs:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="OK",
+                message="No through-hole components in CPL-eligible footprints",
+            )
+
+        refs = ", ".join(sorted(tht_refs)[:10])
+        suffix = f" (and {len(tht_refs) - 10} more)" if len(tht_refs) > 10 else ""
+
+        if self._exclude_tht:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="OK",
+                message=f"{len(tht_refs)} through-hole component(s) excluded from CPL",
+                details=f"THT references: {refs}{suffix}",
+            )
+
+        if self.manufacturer in self._SMT_ONLY_MANUFACTURERS:
+            return PreflightResult(
+                name="tht_in_cpl",
+                status="WARN",
+                message=(
+                    f"{len(tht_refs)} through-hole component(s) in CPL "
+                    f"for SMT-only assembler ({self.manufacturer})"
+                ),
+                details=f"THT references: {refs}{suffix}; use --include-tht to keep them or they will be auto-excluded",
+            )
+
+        return PreflightResult(
+            name="tht_in_cpl",
+            status="OK",
+            message=f"{len(tht_refs)} through-hole component(s) included in CPL",
+            details=f"THT references: {refs}{suffix}",
+        )
+
     def _check_bom_fields(self) -> PreflightResult:
         """Check that BOM items have required fields for manufacturing."""
         try:
@@ -529,8 +595,9 @@ class PreflightChecker:
         """Check that BOM references match CPL-eligible PCB footprints.
 
         The CPL (pick-and-place) file is generated from PCB footprints with
-        filtering applied: DNP components and footprints excluded from position
-        files are omitted.  This check compares the set of active BOM
+        filtering applied: DNP components, footprints excluded from position
+        files, and (when targeting SMT-only assemblers) through-hole
+        components are omitted.  This check compares the set of active BOM
         references against the CPL-eligible footprint references so that
         assembly mismatches are caught before export.
         """
@@ -554,13 +621,22 @@ class PreflightChecker:
         bom_refs = {item.reference for item in bom.items if not item.is_virtual and not item.dnp}
 
         # CPL-eligible footprint references -- mirrors extract_placements() in pnp.py
-        cpl_refs = {
-            fp.reference
-            for fp in self._pcb.footprints
-            if not getattr(fp, "exclude_from_pos_files", False)
-        }
+        cpl_refs = set()
+        tht_excluded_refs = set()
+        dnp_excluded_refs = set()
+        for fp in self._pcb.footprints:
+            if getattr(fp, "exclude_from_pos_files", False):
+                continue
+            if getattr(fp, "dnp", False):
+                dnp_excluded_refs.add(fp.reference)
+                continue
+            if self._exclude_tht and getattr(fp, "attr", "") == "through_hole":
+                tht_excluded_refs.add(fp.reference)
+                continue
+            cpl_refs.add(fp.reference)
 
-        in_bom_not_cpl = bom_refs - cpl_refs
+        # THT-excluded and DNP-excluded components are expected mismatches
+        in_bom_not_cpl = bom_refs - cpl_refs - tht_excluded_refs - dnp_excluded_refs
         in_cpl_not_bom = cpl_refs - bom_refs
 
         issues: list[str] = []
@@ -581,10 +657,16 @@ class PreflightChecker:
                 details="; ".join(issues),
             )
 
+        info_parts = [f"{len(cpl_refs)} components"]
+        if tht_excluded_refs:
+            info_parts.append(f"{len(tht_excluded_refs)} THT excluded")
+        if dnp_excluded_refs:
+            info_parts.append(f"{len(dnp_excluded_refs)} DNP excluded")
+
         return PreflightResult(
             name="bom_cpl_match",
             status="OK",
-            message=f"BOM and CPL references match ({len(bom_refs)} components)",
+            message=f"BOM and CPL references match ({', '.join(info_parts)})",
         )
 
     def _check_drc(self) -> PreflightResult:

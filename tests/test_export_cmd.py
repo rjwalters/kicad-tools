@@ -210,6 +210,7 @@ class TestExportCmdFromMainParser:
                 "--no-bom",
                 "--no-cpl",
                 "--no-project-zip",
+                "--include-tht",
             ]
         )
         assert args.export_mfr == "pcbway"
@@ -221,6 +222,7 @@ class TestExportCmdFromMainParser:
         assert args.export_no_bom is True
         assert args.export_no_cpl is True
         assert args.export_no_project_zip is True
+        assert args.export_include_tht is True
 
     def test_parser_export_no_auto_lcsc_flag(self):
         """--no-auto-lcsc should set export_no_auto_lcsc to True."""
@@ -330,3 +332,94 @@ class TestExportCmdStrictPreflight:
         # dry-run to avoid needing kicad-cli
         rc = export_main([str(pcb), "--strict-preflight", "--dry-run", "-o", str(tmp_path / "out")])
         assert rc == 0
+
+
+class TestExportCmdIncludeTHT:
+    """Tests for the --include-tht CLI flag."""
+
+    def test_include_tht_flag_accepted(self, tmp_path):
+        """--include-tht should be a recognized flag."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        rc = export_main([str(pcb), "--include-tht", "--dry-run", "-o", str(tmp_path / "out")])
+        assert rc == 0
+
+    def test_include_tht_sets_pnp_config(self, tmp_path, monkeypatch):
+        """--include-tht should set exclude_tht=False on PnPExportConfig."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        captured_config = {}
+
+        original_init = assembly.AssemblyPackage.__init__
+
+        def spy_init(self, pcb_path, schematic_path=None, manufacturer="jlcpcb", config=None):
+            captured_config["pnp_config"] = config.pnp_config if config else None
+            original_init(self, pcb_path, schematic_path, manufacturer, config)
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "__init__", spy_init)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        rc = export_main(
+            [
+                str(pcb),
+                "--include-tht",
+                "--no-report",
+                "--no-project-zip",
+                "--skip-preflight",
+                "-o",
+                str(tmp_path / "out"),
+            ]
+        )
+        assert rc == 0
+        assert captured_config["pnp_config"] is not None
+        assert captured_config["pnp_config"].exclude_tht is False
+
+    def test_without_include_tht_no_pnp_config(self, tmp_path, monkeypatch):
+        """Without --include-tht, pnp_config should be None (formatter default applies)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        captured_config = {}
+
+        original_init = assembly.AssemblyPackage.__init__
+
+        def spy_init(self, pcb_path, schematic_path=None, manufacturer="jlcpcb", config=None):
+            captured_config["pnp_config"] = config.pnp_config if config else None
+            original_init(self, pcb_path, schematic_path, manufacturer, config)
+
+        def fake_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "__init__", spy_init)
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_export)
+
+        rc = export_main(
+            [
+                str(pcb),
+                "--no-report",
+                "--no-project-zip",
+                "--skip-preflight",
+                "-o",
+                str(tmp_path / "out"),
+            ]
+        )
+        assert rc == 0
+        assert captured_config["pnp_config"] is None
+

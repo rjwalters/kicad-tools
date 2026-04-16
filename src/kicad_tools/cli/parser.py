@@ -3907,6 +3907,12 @@ def _add_export_parser(subparsers) -> None:
         help="Path to pre-existing ERC report file",
     )
     export_parser.add_argument(
+        "--include-tht",
+        dest="export_include_tht",
+        action="store_true",
+        help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
+    )
+    export_parser.add_argument(
         "--format",
         dest="export_format",
         default="text",
