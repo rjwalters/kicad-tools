@@ -560,6 +560,13 @@ class PartSuggester:
                 suggestion.best_suggestion = suggestion.suggestions[0]
 
         except Exception as e:
+            # Re-raise LCSCForbiddenError so callers can detect API-wide
+            # unavailability and short-circuit remaining lookups.
+            from ..parts.lcsc import LCSCForbiddenError
+
+            if isinstance(e, LCSCForbiddenError):
+                raise
+
             logger.warning(f"Search failed for {reference}: {e}")
             suggestion.error = str(e)
 

@@ -274,6 +274,114 @@ class TestEnrichBomLcsc:
         assert report.unmatched_entries[0].error == "API timeout"
 
 
+class TestEnrichBomLcscCircuitBreaker:
+    """Tests for enrichment loop short-circuit on 403 Forbidden."""
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_403_stops_remaining_lookups(self, MockSuggester):
+        """After a 403, remaining groups are marked unmatched without API calls."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        mock_instance = MagicMock()
+        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+        mock_instance.__exit__ = MagicMock(return_value=False)
+
+        # First call raises LCSCForbiddenError
+        mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+            "403 Forbidden"
+        )
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric"),
+            _make_item("L1", "4.7uH", "Inductor_SMD:L_0603_1608Metric"),
+        ]
+
+        report = enrich_bom_lcsc(items)
+
+        # suggest_for_component should only be called once (for the first group)
+        assert mock_instance.suggest_for_component.call_count == 1
+
+        # All three groups should be unmatched with the 403 error
+        assert report.unmatched == 3
+        for entry in report.entries:
+            assert entry.source == "unmatched"
+            assert "403" in entry.error
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_403_preserves_existing_lcsc_in_remaining_groups(self, MockSuggester):
+        """Groups with existing LCSC are still handled after 403."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        mock_instance = MagicMock()
+        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+        mock_instance.__exit__ = MagicMock(return_value=False)
+
+        # The first group that needs a lookup will get 403
+        mock_instance.suggest_for_component.side_effect = LCSCForbiddenError(
+            "403 Forbidden"
+        )
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            # Group 1: has existing LCSC -- processed before any API call
+            _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric", lcsc="C1525"),
+            # Group 2: needs lookup -- will trigger 403
+            _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            # Group 3: needs lookup -- should be skipped
+            _make_item("L1", "4.7uH", "Inductor_SMD:L_0603_1608Metric"),
+        ]
+
+        report = enrich_bom_lcsc(items)
+
+        # Group 1 should still be from schematic
+        assert report.already_populated == 1
+        assert items[0].lcsc == "C1525"
+
+        # Groups 2 and 3 should be unmatched with 403
+        assert report.unmatched == 2
+        assert mock_instance.suggest_for_component.call_count == 1
+
+    @patch("kicad_tools.export.bom_enrich.PartSuggester")
+    def test_successful_before_403(self, MockSuggester):
+        """Groups matched before the 403 keep their results."""
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        mock_instance = MagicMock()
+        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+        mock_instance.__exit__ = MagicMock(return_value=False)
+
+        call_count = [0]
+
+        def side_effect(*, reference, value, footprint, existing_lcsc):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _mock_suggestion("C25744")
+            raise LCSCForbiddenError("403 Forbidden")
+
+        mock_instance.suggest_for_component.side_effect = side_effect
+        MockSuggester.return_value = mock_instance
+
+        items = [
+            _make_item("R1", "10k", "Resistor_SMD:R_0402_1005Metric"),
+            _make_item("C1", "100nF", "Capacitor_SMD:C_0402_1005Metric"),
+            _make_item("L1", "4.7uH", "Inductor_SMD:L_0603_1608Metric"),
+        ]
+
+        report = enrich_bom_lcsc(items)
+
+        # First group was successfully matched
+        assert items[0].lcsc == "C25744"
+        assert report.auto_matched == 1
+
+        # Remaining groups unmatched with 403
+        assert report.unmatched == 2
+
+        # Only 2 API calls made (first success, second 403, third skipped)
+        assert mock_instance.suggest_for_component.call_count == 2
+
+
 class TestEnrichmentReport:
     """Tests for the EnrichmentReport dataclass."""
 

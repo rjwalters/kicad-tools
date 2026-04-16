@@ -1379,3 +1379,122 @@ class TestCategorizationEdgeCases:
         # Note: "Light Emitting Diode" matches "diode" first in the check order
         result = _categorize_part("Light Emitting Diode", "0603")
         assert result in (PartCategory.DIODE, PartCategory.LED)
+
+
+@pytest.mark.skipif(not HAS_REQUESTS, reason="requests not installed")
+class TestLCSCClientCircuitBreaker:
+    """Tests for LCSCClient circuit-breaker on 403 Forbidden."""
+
+    def test_403_raises_forbidden_error_no_retry(self, tmp_path):
+        """A 403 response raises LCSCForbiddenError immediately with no retry."""
+        import requests
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache, rate_limit=0)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_response.raise_for_status.side_effect = requests.HTTPError(
+            response=mock_response
+        )
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_session.return_value.post.return_value = mock_response
+
+            with pytest.raises(LCSCForbiddenError):
+                client._make_request("https://example.com/api", {"key": "val"})
+
+            # Should have been called exactly once (no retries)
+            assert mock_session.return_value.post.call_count == 1
+
+    def test_circuit_breaker_flag_set_after_403(self, tmp_path):
+        """After a 403, the _api_forbidden flag is set."""
+        import requests
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache, rate_limit=0)
+
+        assert client._api_forbidden is False
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_response.raise_for_status.side_effect = requests.HTTPError(
+            response=mock_response
+        )
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            mock_session.return_value.post.return_value = mock_response
+
+            with pytest.raises(LCSCForbiddenError):
+                client._make_request("https://example.com/api", {})
+
+        assert client._api_forbidden is True
+
+    def test_circuit_breaker_prevents_subsequent_requests(self, tmp_path):
+        """Once circuit breaker is tripped, subsequent calls raise without HTTP."""
+        from kicad_tools.parts import LCSCClient, PartsCache
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache, rate_limit=0)
+        client._api_forbidden = True  # Pre-trip the breaker
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            with pytest.raises(LCSCForbiddenError):
+                client._make_request("https://example.com/api", {})
+
+            # No HTTP request should have been made
+            mock_session.return_value.post.assert_not_called()
+
+    def test_429_still_retries(self, tmp_path):
+        """429 responses still trigger retries (not affected by 403 change)."""
+        import requests
+
+        from kicad_tools.parts import LCSCClient, PartsCache
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(
+            cache=cache, rate_limit=0, max_retries=2, base_retry_delay=0.01
+        )
+
+        mock_response_429 = MagicMock()
+        mock_response_429.status_code = 429
+        mock_response_429.raise_for_status.side_effect = requests.HTTPError(
+            response=mock_response_429
+        )
+
+        mock_response_ok = MagicMock()
+        mock_response_ok.raise_for_status = MagicMock()
+        mock_response_ok.json.return_value = {"code": 200, "data": {}}
+
+        with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
+            # First call: 429, second call: success
+            mock_session.return_value.post.side_effect = [
+                mock_response_429,
+                mock_response_ok,
+            ]
+
+            result = client._make_request("https://example.com/api", {})
+
+            assert result == {"code": 200, "data": {}}
+            assert mock_session.return_value.post.call_count == 2
+            assert client._api_forbidden is False
+
+    def test_search_raises_forbidden_on_403(self, tmp_path):
+        """LCSCClient.search propagates LCSCForbiddenError from _make_request."""
+        from kicad_tools.parts import LCSCClient, PartsCache
+        from kicad_tools.parts.lcsc import LCSCForbiddenError
+
+        cache = PartsCache(db_path=tmp_path / "cache.db")
+        client = LCSCClient(cache=cache, rate_limit=0)
+        client._api_forbidden = True  # Pre-trip
+
+        # search() catches requests.RequestException but not LCSCForbiddenError
+        with pytest.raises(LCSCForbiddenError):
+            client.search("100nF 0402")
