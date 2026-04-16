@@ -102,6 +102,17 @@ suggestions:
     - "Monte Carlo routing strategy recommended"
     - "Some nets may require manual routing on 2-layer"
 
+bom_entries:
+  - ref: U1
+    part: B-8100S08P-A110
+    lcsc: C57215
+  - ref: R1-R4
+    part: 0805W8F3300T5E
+    lcsc: C17630
+  - ref: D1-D9
+    part: 17-21SURC/S530-A2/TR8
+    lcsc: C72038
+
 decisions:
   - date: 2025-01-08
     phase: concept

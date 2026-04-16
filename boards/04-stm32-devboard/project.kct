@@ -110,6 +110,38 @@ suggestions:
     - "This is an educational example - MCU not included in generated schematic"
     - "User must add STM32F103C8T6 and connect to generated blocks"
 
+bom_entries:
+  - ref: U1
+    part: AMS1117-3.3
+    lcsc: C6186
+  - ref: C1
+    part: CL21A106KAYNNNE
+    lcsc: C15850
+  - ref: C2
+    part: CL21A106KAYNNNE
+    lcsc: C15850
+  - ref: C3
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: Y1
+    part: X49SM8MSD2SC
+    lcsc: C12674
+  - ref: C10
+    part: CL21C200JBANNNC
+    lcsc: C1554
+  - ref: C11
+    part: CL21C200JBANNNC
+    lcsc: C1554
+  - ref: R1
+    part: 0805W8F3300T5E
+    lcsc: C17630
+  - ref: D1
+    part: 17-21SURC/S530-A2/TR8
+    lcsc: C72038
+  - ref: J1
+    part: B-6100S06P-A110
+    lcsc: C40877
+
 decisions:
   - date: 2025-01-08
     phase: concept

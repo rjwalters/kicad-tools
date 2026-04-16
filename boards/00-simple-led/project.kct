@@ -46,6 +46,17 @@ requirements:
       purpose: Visual indicator
       footprint: LED_D5.0mm
 
+bom_entries:
+  - ref: J1
+    part: B-2100S02P-A110
+    lcsc: C49257
+  - ref: R1
+    part: 0805W8F3300T5E
+    lcsc: C17630
+  - ref: D1
+    part: C503B-RCN-CW0Z0AA1
+    lcsc: C84256
+
 decisions:
   - topic: Resistor value
     choice: 330 ohm
