@@ -417,6 +417,9 @@ class Footprint:
     description: str = ""
     tags: str = ""
     attr: str = ""  # smd, through_hole
+    exclude_from_pos_files: bool = False
+    exclude_from_bom: bool = False
+    dnp: bool = False
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Footprint:
@@ -458,6 +461,15 @@ class Footprint:
             fp.tags = tags.get_string(0) or ""
         if attr := sexp.find("attr"):
             fp.attr = attr.get_string(0) or ""
+            # Parse additional attribute flags (e.g., exclude_from_pos_files, dnp)
+            for i in range(len(attr.children)):
+                token = attr.get_string(i)
+                if token == "exclude_from_pos_files":
+                    fp.exclude_from_pos_files = True
+                elif token == "exclude_from_bom":
+                    fp.exclude_from_bom = True
+                elif token == "dnp":
+                    fp.dnp = True
 
         # Reference and value from fp_text (KiCad 7 format)
         for fp_text_sexp in sexp.find_all("fp_text"):

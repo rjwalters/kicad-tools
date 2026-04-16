@@ -1157,3 +1157,209 @@ def _create_pcb_with_footprints(
     pcb_path = directory / filename
     pcb_path.write_text(content)
     return pcb_path
+
+
+def _create_pcb_with_mixed_footprints(
+    directory: Path,
+    smd_refs: list[str],
+    tht_refs: list[str],
+    dnp_refs: list[str] | None = None,
+    filename: str = "board.kicad_pcb",
+) -> Path:
+    """Create a PCB with SMD and THT footprints for testing.
+
+    Args:
+        directory: Directory to write the PCB file.
+        smd_refs: References for SMD footprints.
+        tht_refs: References for through-hole footprints.
+        dnp_refs: References for DNP footprints (added as SMD with dnp flag).
+        filename: Output filename.
+    """
+    footprints = []
+    x = 10.0
+    for ref in smd_refs:
+        footprints.append(
+            f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (at {x} 25)
+    (attr smd)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (fp_text value "10k" (at 0 1.5) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )"""
+        )
+        x += 5.0
+
+    for ref in tht_refs:
+        footprints.append(
+            f"""  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
+    (layer "F.Cu")
+    (at {x} 25)
+    (attr through_hole)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (fp_text value "Conn_01x04" (at 0 1.5) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" thru_hole rect (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 0 ""))
+  )"""
+        )
+        x += 5.0
+
+    for ref in (dnp_refs or []):
+        footprints.append(
+            f"""  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (at {x} 25)
+    (attr smd dnp)
+    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+    (fp_text value "DNP" (at 0 1.5) (layer "F.Fab") (effects (font (size 1 1) (thickness 0.15))))
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 0 ""))
+  )"""
+        )
+        x += 5.0
+
+    fp_block = "\n".join(footprints)
+    content = f"""(kicad_pcb (version 20231014) (generator "pcbnew")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 0) (end 50 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 50 50) (end 0 50) (layer "Edge.Cuts") (width 0.1))
+  (gr_line (start 0 50) (end 0 0) (layer "Edge.Cuts") (width 0.1))
+{fp_block}
+)
+"""
+    pcb_path = directory / filename
+    pcb_path.write_text(content)
+    return pcb_path
+
+
+# ---------------------------------------------------------------------------
+# THT-in-CPL preflight check tests
+# ---------------------------------------------------------------------------
+
+
+class TestPreflightTHTInCPL:
+    """Tests for the THT-in-CPL preflight check."""
+
+    def test_no_tht_components(self, tmp_path):
+        """All-SMD board should produce OK result."""
+        pcb = _create_pcb_with_footprints(tmp_path, ["R1", "R2"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+        result = checker._check_tht_in_cpl()
+        assert result.status == "OK"
+        assert "No through-hole" in result.message
+
+    def test_tht_present_jlcpcb_excluded(self, tmp_path):
+        """JLCPCB (SMT-only default) with THT should show excluded message."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+        result = checker._check_tht_in_cpl()
+        assert result.status == "OK"
+        assert "excluded from CPL" in result.message
+        assert "J1" in result.details
+
+    def test_tht_present_jlcpcb_include_override(self, tmp_path):
+        """JLCPCB with explicit exclude_tht=False should warn about THT."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            exclude_tht=False,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+        result = checker._check_tht_in_cpl()
+        assert result.status == "WARN"
+        assert "SMT-only" in result.message
+
+    def test_tht_present_generic_ok(self, tmp_path):
+        """Generic manufacturer with THT should show included message."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], ["J1"])
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            manufacturer="generic",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+        result = checker._check_tht_in_cpl()
+        assert result.status == "OK"
+        assert "included" in result.message
+
+
+class TestPreflightBomCplMatchTHT:
+    """Tests for BOM/CPL match check accounting for THT exclusions."""
+
+    def test_tht_excluded_not_false_positive(self, tmp_path, monkeypatch):
+        """THT components excluded from CPL should not cause BOM/CPL mismatch."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1", "C1"], ["J1"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            manufacturer="jlcpcb",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+                BOMItem(reference="C1", value="100nF", footprint="C_0402", lib_id="Device:C"),
+                BOMItem(reference="J1", value="Conn", footprint="PinHeader", lib_id="Connector:Conn"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "OK"
+        assert "THT excluded" in result.message
+
+    def test_dnp_excluded_not_false_positive(self, tmp_path, monkeypatch):
+        """DNP components on PCB should not cause BOM/CPL mismatch."""
+        pcb = _create_pcb_with_mixed_footprints(tmp_path, ["R1"], [], dnp_refs=["R2"])
+        sch = tmp_path / "board.kicad_sch"
+        sch.write_text('(kicad_sch (version 20231120) (generator "eeschema"))')
+
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            schematic_path=sch,
+            manufacturer="jlcpcb",
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        checker.run_all()
+
+        from kicad_tools.schema.bom import BOM, BOMItem
+
+        bom = BOM(
+            items=[
+                BOMItem(reference="R1", value="10k", footprint="R_0402", lib_id="Device:R"),
+            ]
+        )
+        monkeypatch.setattr(checker, "_load_bom", lambda: bom)
+
+        result = checker._check_bom_cpl_match()
+        assert result.status == "OK"
+        assert "DNP excluded" in result.message

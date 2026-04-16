@@ -274,12 +274,19 @@ class ManufacturingPackage:
     def _run_preflight(self) -> list[PreflightResult]:
         """Run pre-flight validation checks."""
         preflight_cfg = self.config.preflight or PreflightConfig()
+
+        # Pass explicit THT exclusion setting when the user provided a PnP config
+        exclude_tht = None
+        if self.config.pnp_config is not None:
+            exclude_tht = self.config.pnp_config.exclude_tht
+
         checker = PreflightChecker(
             pcb_path=self.pcb_path,
             schematic_path=self.schematic_path,
             manufacturer=self.manufacturer,
             output_dir=self.config.output_dir,
             config=preflight_cfg,
+            exclude_tht=exclude_tht,
         )
         return checker.run_all()
 

@@ -47,6 +47,7 @@ class PnPExportConfig:
 
     # Filtering
     include_dnp: bool = False
+    exclude_tht: bool = False  # Exclude through-hole components from CPL
     top_only: bool = False
     bottom_only: bool = False
 
@@ -108,10 +109,20 @@ class PnPFormatter(ABC):
 
 
 class JLCPCBPnPFormatter(PnPFormatter):
-    """Pick-and-place formatter for JLCPCB assembly service."""
+    """Pick-and-place formatter for JLCPCB assembly service.
+
+    JLCPCB's standard assembly service is SMT-only, so through-hole
+    components are excluded from the CPL by default.  Pass
+    ``PnPExportConfig(exclude_tht=False)`` to include them.
+    """
 
     manufacturer_id = "jlcpcb"
     manufacturer_name = "JLCPCB"
+
+    def __init__(self, config: PnPExportConfig | None = None):
+        if config is None:
+            config = PnPExportConfig(exclude_tht=True)
+        super().__init__(config)
 
     def get_headers(self) -> list[str]:
         """JLCPCB CPL column headers."""
@@ -279,20 +290,33 @@ def get_pnp_formatter(manufacturer: str, config: PnPExportConfig | None = None) 
     return formatter_class(config)
 
 
-def extract_placements(footprints: list[Footprint]) -> list[PlacementData]:
+def extract_placements(
+    footprints: list[Footprint],
+    config: PnPExportConfig | None = None,
+) -> list[PlacementData]:
     """
     Extract placement data from PCB footprints.
 
     Args:
         footprints: List of Footprint objects from PCB
+        config: Optional export config for filtering (exclude_tht, include_dnp)
 
     Returns:
         List of PlacementData for assembly
     """
+    config = config or PnPExportConfig()
     placements = []
     for fp in footprints:
-        # Skip virtual or excluded footprints
+        # Skip footprints excluded from position files
         if getattr(fp, "exclude_from_pos_files", False):
+            continue
+
+        # Skip DNP (Do Not Place) footprints unless explicitly included
+        if not config.include_dnp and getattr(fp, "dnp", False):
+            continue
+
+        # Skip through-hole footprints when exclude_tht is enabled
+        if config.exclude_tht and getattr(fp, "attr", "") == "through_hole":
             continue
 
         x, y = fp.position
@@ -355,10 +379,8 @@ def export_pnp(
     Returns:
         Formatted CPL as CSV string
     """
-    config = config or PnPExportConfig()
-
     # Auto-apply auxiliary origin offset when a PCB path is provided
-    if pcb_path is not None and config.use_aux_origin:
+    if config is not None and pcb_path is not None and config.use_aux_origin:
         aux_x, aux_y = get_aux_origin(pcb_path)
         if aux_x != 0.0 or aux_y != 0.0:
             config = PnPExportConfig(
@@ -368,11 +390,22 @@ def export_pnp(
                 mirror_y=config.mirror_y,
                 use_aux_origin=config.use_aux_origin,
                 include_dnp=config.include_dnp,
+                exclude_tht=config.exclude_tht,
                 top_only=config.top_only,
                 bottom_only=config.bottom_only,
                 rotation_offset=config.rotation_offset,
             )
+    elif config is None and pcb_path is not None:
+        # Check aux origin with default config settings
+        aux_x, aux_y = get_aux_origin(pcb_path)
+        if aux_x != 0.0 or aux_y != 0.0:
+            config = PnPExportConfig(
+                x_offset=-aux_x,
+                y_offset=-aux_y,
+            )
 
-    placements = extract_placements(footprints)
+    # Let the formatter provide its own default config (e.g., JLCPCB
+    # defaults to exclude_tht=True) when the caller did not supply one.
     formatter = get_pnp_formatter(manufacturer, config)
+    placements = extract_placements(footprints, formatter.config)
     return formatter.format(placements)

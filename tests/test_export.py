@@ -53,6 +53,8 @@ class MockFootprint:
     rotation: float
     layer: str
     exclude_from_pos_files: bool = False
+    attr: str = "smd"
+    dnp: bool = False
 
 
 class TestBOMExportConfig:
@@ -553,3 +555,134 @@ class TestAssemblyPackageResult:
         output = str(result)
         assert "Assembly Package" in output
         assert "BOM" in output
+
+
+class TestExtractPlacementsTHTFiltering:
+    """Tests for THT filtering in extract_placements."""
+
+    @pytest.fixture
+    def mixed_footprints(self) -> list[MockFootprint]:
+        """Board with SMD and THT components."""
+        return [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint("U1", "STM32", "LQFP48", (30.0, 30.0), 45.0, "F.Cu", attr="smd"),
+        ]
+
+    def test_default_config_includes_tht(self, mixed_footprints):
+        """Default PnPExportConfig does not exclude THT."""
+        config = PnPExportConfig()
+        placements = extract_placements(mixed_footprints, config)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1", "C1", "J1", "U1"}
+
+    def test_exclude_tht_filters_through_hole(self, mixed_footprints):
+        """exclude_tht=True should remove through_hole footprints."""
+        config = PnPExportConfig(exclude_tht=True)
+        placements = extract_placements(mixed_footprints, config)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1", "C1", "U1"}
+        assert "J1" not in refs
+
+    def test_exclude_tht_keeps_smd(self, mixed_footprints):
+        """exclude_tht should not affect SMD components."""
+        config = PnPExportConfig(exclude_tht=True)
+        placements = extract_placements(mixed_footprints, config)
+        assert len(placements) == 3
+
+    def test_all_tht_board_produces_empty_cpl(self):
+        """Board with only THT components + exclude_tht should produce empty list."""
+        footprints = [
+            MockFootprint("J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint("J2", "Conn", "PinHeader", (20.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+        ]
+        config = PnPExportConfig(exclude_tht=True)
+        placements = extract_placements(footprints, config)
+        assert len(placements) == 0
+
+
+class TestExtractPlacementsDNPFiltering:
+    """Tests for DNP filtering in extract_placements."""
+
+    def test_dnp_excluded_by_default(self):
+        """DNP footprints should be excluded by default."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("R2", "1k", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd", dnp=True),
+        ]
+        placements = extract_placements(footprints)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1"}
+
+    def test_dnp_included_when_configured(self):
+        """DNP footprints should be included when include_dnp=True."""
+        footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("R2", "1k", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd", dnp=True),
+        ]
+        config = PnPExportConfig(include_dnp=True)
+        placements = extract_placements(footprints, config)
+        refs = {p.reference for p in placements}
+        assert refs == {"R1", "R2"}
+
+
+class TestJLCPCBPnPFormatterDefaults:
+    """Tests for JLCPCB formatter default THT exclusion."""
+
+    def test_jlcpcb_defaults_exclude_tht(self):
+        """JLCPCB formatter should default to exclude_tht=True."""
+        formatter = JLCPCBPnPFormatter()
+        assert formatter.config.exclude_tht is True
+
+    def test_jlcpcb_explicit_include_tht(self):
+        """Passing exclude_tht=False should override JLCPCB default."""
+        config = PnPExportConfig(exclude_tht=False)
+        formatter = JLCPCBPnPFormatter(config)
+        assert formatter.config.exclude_tht is False
+
+    def test_generic_does_not_exclude_tht(self):
+        """Generic formatter should include THT by default."""
+        formatter = GenericPnPFormatter()
+        assert formatter.config.exclude_tht is False
+
+    def test_pcbway_does_not_exclude_tht(self):
+        """PCBWay formatter should include THT by default."""
+        formatter = PCBWayPnPFormatter()
+        assert formatter.config.exclude_tht is False
+
+
+class TestExportPnPTHTIntegration:
+    """Integration tests for THT filtering through export_pnp."""
+
+    @pytest.fixture
+    def mixed_footprints(self) -> list[MockFootprint]:
+        return [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+        ]
+
+    def test_jlcpcb_excludes_tht(self, mixed_footprints):
+        """JLCPCB export should exclude THT components by default."""
+        output = export_pnp(mixed_footprints, "jlcpcb")
+        assert "R1" in output
+        assert "J1" not in output
+
+    def test_jlcpcb_include_tht_override(self, mixed_footprints):
+        """JLCPCB export with exclude_tht=False should include THT."""
+        config = PnPExportConfig(exclude_tht=False)
+        output = export_pnp(mixed_footprints, "jlcpcb", config=config)
+        assert "R1" in output
+        assert "J1" in output
+
+    def test_generic_includes_tht(self, mixed_footprints):
+        """Generic export should include THT components by default."""
+        output = export_pnp(mixed_footprints, "generic")
+        assert "R1" in output
+        assert "J1" in output
+
+    def test_pcbway_includes_tht(self, mixed_footprints):
+        """PCBWay export should include THT components by default."""
+        output = export_pnp(mixed_footprints, "pcbway")
+        assert "R1" in output
+        assert "J1" in output
