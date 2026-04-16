@@ -41,7 +41,7 @@
 | Errors | {{ erc.error_count | default(0) }} |
 | Warnings | {{ erc.warning_count | default(0) }} |
 
-**Status**: {% if erc.passed | default(true) %}PASS{% else %}FAIL{% endif %}
+**Status**: {% if erc.skipped | default(false) %}SKIPPED{% elif erc.passed | default(true) %}PASS{% else %}FAIL{% endif %}
 
 {% if erc.details %}
 **Details**: {{ erc.details }}

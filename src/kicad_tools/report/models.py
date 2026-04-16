@@ -32,7 +32,9 @@ class ReportData:
     """DRC summary: {error_count, warning_count, blocking_count, passed}."""
 
     erc: dict | None = None
-    """ERC summary: {error_count, warning_count, passed, details}."""
+    """ERC summary: {error_count, warning_count, passed, skipped, details}.
+    When ``skipped`` is true the ERC check was not executed (e.g. no
+    schematic provided or ``--skip-erc`` flag used)."""
 
     audit: dict | None = None
     """Audit results: {verdict, action_items}."""

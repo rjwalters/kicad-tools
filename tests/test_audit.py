@@ -15,6 +15,33 @@ from kicad_tools.audit.auditor import (
 )
 
 
+class TestERCStatusSkipped:
+    """Tests for ERCStatus.skipped field."""
+
+    def test_default_skipped_is_false(self):
+        """ERCStatus defaults to skipped=False."""
+        status = ERCStatus()
+        assert status.skipped is False
+
+    def test_skipped_true(self):
+        """ERCStatus can be constructed with skipped=True."""
+        status = ERCStatus(skipped=True)
+        assert status.skipped is True
+
+    def test_to_dict_includes_skipped(self):
+        """ERCStatus.to_dict() includes skipped key."""
+        status = ERCStatus(skipped=True)
+        d = status.to_dict()
+        assert "skipped" in d
+        assert d["skipped"] is True
+
+    def test_to_dict_skipped_false_by_default(self):
+        """ERCStatus.to_dict() includes skipped=False by default."""
+        status = ERCStatus()
+        d = status.to_dict()
+        assert d["skipped"] is False
+
+
 class TestAuditResult:
     """Tests for AuditResult class."""
 
@@ -471,9 +498,17 @@ class TestManufacturingAudit:
         audit = ManufacturingAudit(drc_clean_pcb, skip_erc=True)
         result = audit.run()
 
-        # ERC should be skipped - check that we have default empty status
-        # (Either no errors or note about being skipped)
-        assert result.erc.error_count == 0 or result.erc.details
+        assert result.erc.skipped is True
+        assert result.erc.error_count == 0
+        assert "skipped" in result.erc.details.lower()
+
+    def test_pcb_only_audit_sets_erc_skipped(self, drc_clean_pcb: Path):
+        """PCB-only audit (no schematic) marks ERC as skipped."""
+        audit = ManufacturingAudit(drc_clean_pcb)
+        assert audit.skip_erc is True
+        result = audit.run()
+        assert result.erc.skipped is True
+        assert result.erc.passed is True  # default, not a real pass
 
 
 class TestAuditCLI:
