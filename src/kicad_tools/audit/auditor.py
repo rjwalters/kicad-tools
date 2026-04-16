@@ -179,6 +179,7 @@ class CostEstimate:
     total_cost: float = 0.0
     quantity: int = 5
     currency: str = "USD"
+    assembly_mode: str | None = None  # "none" when assembly is excluded
 
     def to_dict(self) -> dict:
         return {
@@ -188,6 +189,7 @@ class CostEstimate:
             "total_cost": self.total_cost,
             "quantity": self.quantity,
             "currency": self.currency,
+            "assembly_mode": self.assembly_mode,
         }
 
 
@@ -314,6 +316,7 @@ class ManufacturingAudit:
         copper_oz: float = 1.0,
         quantity: int = 5,
         skip_erc: bool = False,
+        no_assembly: bool = False,
     ):
         """Initialize the audit.
 
@@ -324,6 +327,7 @@ class ManufacturingAudit:
             copper_oz: Copper weight in oz
             quantity: Quantity for cost estimate
             skip_erc: Skip ERC check (for PCB-only audits)
+            no_assembly: Skip assembly cost calculation
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -331,6 +335,7 @@ class ManufacturingAudit:
         self.copper_oz = copper_oz
         self.quantity = quantity
         self.skip_erc = skip_erc
+        self.no_assembly = no_assembly
 
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
@@ -344,6 +349,13 @@ class ManufacturingAudit:
             self.skip_erc = True  # Skip ERC for PCB-only
         else:
             raise ValueError(f"Expected .kicad_pro or .kicad_pcb file, got: {self.path}")
+
+        # Read assembly mode from project.kct if not explicitly overridden
+        self._assembly_mode: str | None = None
+        if not self.no_assembly:
+            self._assembly_mode = self._read_assembly_mode()
+            if self._assembly_mode == "none":
+                self.no_assembly = True
 
         # Loaded objects (lazy)
         self._pcb: PCB | None = None
@@ -418,6 +430,35 @@ class ManufacturingAudit:
 
         # 2. Default to <basename>.kicad_sch
         return self.path.with_suffix(".kicad_sch")
+
+    def _read_assembly_mode(self) -> str | None:
+        """Read manufacturing.assembly from project.kct if available.
+
+        Returns the assembly mode string (e.g., "smt", "none") or None
+        if no project.kct exists or the field is not set.
+        """
+        project_dir = self.path.parent
+        kct_path = project_dir / "project.kct"
+        if not kct_path.exists():
+            kct_path = project_dir.parent / "project.kct"
+
+        if kct_path.exists():
+            try:
+                from kicad_tools.spec import load_spec
+
+                spec = load_spec(kct_path)
+                if (
+                    spec.requirements
+                    and spec.requirements.manufacturing
+                    and spec.requirements.manufacturing.assembly
+                ):
+                    mode = spec.requirements.manufacturing.assembly
+                    logger.debug(f"Assembly mode from project.kct: {mode}")
+                    return mode
+            except Exception as e:
+                logger.debug(f"Failed to read assembly mode from project.kct: {e}")
+
+        return None
 
     def _load_pcb(self) -> PCB:
         """Load and cache the PCB."""
@@ -802,8 +843,13 @@ class ManufacturingAudit:
         derives a synthetic BOM from PCB footprints when no schematic BOM is
         available, providing component and assembly cost breakdowns alongside
         PCB fabrication cost.
+
+        When ``self.no_assembly`` is True (from ``--no-assembly`` CLI flag or
+        ``manufacturing.assembly: "none"`` in project.kct), assembly cost is
+        excluded from the estimate.
         """
-        estimate = CostEstimate(quantity=self.quantity)
+        assembly_mode = "none" if self.no_assembly else self._assembly_mode
+        estimate = CostEstimate(quantity=self.quantity, assembly_mode=assembly_mode)
 
         try:
             from kicad_tools.cost import ManufacturingCostEstimator
@@ -819,8 +865,16 @@ class ManufacturingAudit:
 
             estimate.pcb_cost = full_result.pcb.total_cost
             estimate.component_cost = full_result.component_cost_per_unit * full_result.quantity
-            estimate.assembly_cost = full_result.assembly.total_cost
-            estimate.total_cost = full_result.total_for_quantity
+
+            if self.no_assembly:
+                estimate.assembly_cost = 0.0
+                # Total excludes assembly cost
+                estimate.total_cost = (
+                    full_result.total_for_quantity - full_result.assembly.total_cost
+                )
+            else:
+                estimate.assembly_cost = full_result.assembly.total_cost
+                estimate.total_cost = full_result.total_for_quantity
 
         except Exception as e:
             logger.warning(f"Cost estimation failed: {e}")
