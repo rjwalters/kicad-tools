@@ -566,7 +566,9 @@ class TestExtractPlacementsTHTFiltering:
         return [
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
             MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
-            MockFootprint("J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint(
+                "J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
             MockFootprint("U1", "STM32", "LQFP48", (30.0, 30.0), 45.0, "F.Cu", attr="smd"),
         ]
 
@@ -594,8 +596,12 @@ class TestExtractPlacementsTHTFiltering:
     def test_all_tht_board_produces_empty_cpl(self):
         """Board with only THT components + exclude_tht should produce empty list."""
         footprints = [
-            MockFootprint("J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
-            MockFootprint("J2", "Conn", "PinHeader", (20.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint(
+                "J1", "Conn", "PinHeader", (10.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+            MockFootprint(
+                "J2", "Conn", "PinHeader", (20.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
         ]
         config = PnPExportConfig(exclude_tht=True)
         placements = extract_placements(footprints, config)
@@ -659,7 +665,9 @@ class TestExportPnPTHTIntegration:
     def mixed_footprints(self) -> list[MockFootprint]:
         return [
             MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
-            MockFootprint("J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"),
+            MockFootprint(
+                "J1", "Conn", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
         ]
 
     def test_jlcpcb_excludes_tht(self, mixed_footprints):
@@ -686,3 +694,63 @@ class TestExportPnPTHTIntegration:
         output = export_pnp(mixed_footprints, "pcbway")
         assert "R1" in output
         assert "J1" in output
+
+
+class TestAssemblyPackageJLCPCBTHTIntegration:
+    """Integration test: AssemblyPackage JLCPCB path excludes THT components."""
+
+    def test_jlcpcb_assembly_package_excludes_tht(self, tmp_path):
+        """AssemblyPackage with manufacturer='jlcpcb' and no explicit pnp_config
+        should produce a CPL file that excludes through-hole components.
+
+        This guards against a regression where AssemblyPackage._generate_pnp()
+        created a bare PnPExportConfig (exclude_tht=False) instead of letting
+        the JLCPCB formatter supply its own default (exclude_tht=True).
+        """
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.export.assembly import AssemblyConfig, AssemblyPackage
+
+        # Create a minimal PCB file so the constructor's existence check passes
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb (version 20221018))")
+
+        config = AssemblyConfig(
+            include_bom=False,
+            include_gerbers=False,
+            include_pnp=True,
+            # Intentionally leave pnp_config=None to exercise the default path
+        )
+
+        pkg = AssemblyPackage(
+            pcb_path=pcb_file,
+            schematic_path=None,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+
+        # Mock PCB.load to return footprints with mixed SMD and THT
+        mock_pcb = MagicMock()
+        mock_pcb.footprints = [
+            MockFootprint("R1", "10k", "0402", (10.0, 20.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint("C1", "100nF", "0402", (15.0, 25.0), 0.0, "F.Cu", attr="smd"),
+            MockFootprint(
+                "J1", "Conn_01x04", "PinHeader_1x04", (50.0, 10.0), 0.0, "F.Cu", attr="through_hole"
+            ),
+        ]
+
+        # Patch PCB at the schema module level; the lazy import in
+        # _generate_pnp (``from ..schema.pcb import PCB``) resolves
+        # against this module.
+        with patch("kicad_tools.schema.pcb.PCB") as MockPCB:
+            MockPCB.load.return_value = mock_pcb
+            result = pkg.export(output_dir=tmp_path / "out")
+
+        assert result.pnp_path is not None
+        cpl_content = result.pnp_path.read_text()
+
+        # SMD components must be present
+        assert "R1" in cpl_content
+        assert "C1" in cpl_content
+        # THT connector must be excluded
+        assert "J1" not in cpl_content
