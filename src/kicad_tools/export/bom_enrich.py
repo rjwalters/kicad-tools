@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..cost.suggest import PartSuggester
+from ..parts.lcsc import LCSCForbiddenError
 
 if TYPE_CHECKING:
     from ..schema.bom import BOMItem
@@ -132,6 +133,9 @@ def enrich_bom_lcsc(
         key = (item.value, item.footprint)
         groups.setdefault(key, []).append(item)
 
+    api_forbidden = False
+    forbidden_error = "JLCPCB API unavailable (403)"
+
     with PartSuggester(
         prefer_basic=prefer_basic,
         min_stock=min_stock,
@@ -171,15 +175,50 @@ def enrich_bom_lcsc(
                 )
                 continue
 
+            # If the API is known to be forbidden, skip without calling
+            if api_forbidden:
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="unmatched",
+                        error=forbidden_error,
+                    )
+                )
+                continue
+
             # Use the first reference for type hinting (R1 -> resistor, etc.)
             first_ref = refs[0] if refs else ""
 
-            suggestion = suggester.suggest_for_component(
-                reference=first_ref,
-                value=value,
-                footprint=footprint,
-                existing_lcsc=None,
-            )
+            try:
+                suggestion = suggester.suggest_for_component(
+                    reference=first_ref,
+                    value=value,
+                    footprint=footprint,
+                    existing_lcsc=None,
+                )
+            except LCSCForbiddenError:
+                # API is globally unavailable -- emit a single warning and
+                # mark this and all remaining groups as unmatched.
+                api_forbidden = True
+                logger.warning(
+                    "JLCPCB API returned 403 Forbidden -- "
+                    "skipping remaining LCSC auto-matching. "
+                    "Use --no-auto-lcsc to suppress."
+                )
+                report.entries.append(
+                    EnrichmentEntry(
+                        value=value,
+                        footprint=footprint,
+                        references=refs,
+                        lcsc_part="",
+                        source="unmatched",
+                        error=forbidden_error,
+                    )
+                )
+                continue
 
             if suggestion.has_suggestion:
                 best = suggestion.best_suggestion

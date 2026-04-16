@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class LCSCForbiddenError(Exception):
+    """Raised when the JLCPCB API returns 403 Forbidden.
+
+    This indicates the API is globally unavailable (e.g. authentication
+    required, geo-blocking) and further requests should not be attempted.
+    """
+
+
 class RateLimiter:
     """
     Thread-safe rate limiter that enforces a minimum interval between requests.
@@ -254,6 +262,7 @@ class LCSCClient:
         self._rate_limiter = RateLimiter(rate_limit) if rate_limit > 0 else None
         self._max_retries = max_retries
         self._base_retry_delay = base_retry_delay
+        self._api_forbidden = False
 
     def _get_session(self):
         """Get or create requests session."""
@@ -274,8 +283,17 @@ class LCSCClient:
 
         Returns:
             Response JSON data, or None if the request fails after all retries
+
+        Raises:
+            LCSCForbiddenError: If the API returns 403 Forbidden (circuit breaker).
         """
         import requests
+
+        # Circuit breaker: if a previous request got 403, skip immediately
+        if self._api_forbidden:
+            raise LCSCForbiddenError(
+                "JLCPCB API returned 403 Forbidden -- skipping request (circuit breaker active)"
+            )
 
         session = self._get_session()
 
@@ -293,8 +311,16 @@ class LCSCClient:
             except requests.HTTPError as e:
                 status_code = e.response.status_code if e.response is not None else 0
 
+                # 403 is not transient -- trip the circuit breaker and raise
+                if status_code == 403:
+                    self._api_forbidden = True
+                    raise LCSCForbiddenError(
+                        "JLCPCB API returned 403 Forbidden -- "
+                        "API may require authentication or be geo-blocked"
+                    ) from e
+
                 # Only retry on rate limit and server errors
-                if status_code not in (403, 429, 500, 502, 503, 504):
+                if status_code not in (429, 500, 502, 503, 504):
                     raise
 
                 last_exception = e
