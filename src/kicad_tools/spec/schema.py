@@ -43,6 +43,7 @@ __all__ = [
     "Compliance",
     "Suggestions",
     "ComponentSuggestion",
+    "BOMEntry",
     "Decision",
     "Progress",
     "PhaseProgress",
@@ -272,6 +273,23 @@ class BOMSuggestions(BaseModel):
     cost_target: str | None = Field(default=None, description="Target BOM cost")
 
 
+class BOMEntry(BaseModel):
+    """Per-reference BOM mapping for explicit part assignment.
+
+    Allows the project spec to declare exact MPN and LCSC part numbers
+    for specific reference designators, overriding whatever the schematic
+    symbol properties may (or may not) contain.
+
+    The ``ref`` field accepts single references (``"U1"``) or dash-separated
+    ranges (``"Q1-Q4"``) which are expanded into individual designators.
+    """
+
+    ref: str = Field(..., description="Reference designator or range (e.g. 'U1' or 'Q1-Q4')")
+    part: str = Field(..., description="Manufacturer Part Number (MPN)")
+    source: str = Field(default="LCSC", description="Supplier name (e.g. 'LCSC', 'Digikey')")
+    lcsc: str | None = Field(default=None, description="Explicit LCSC part number if known")
+
+
 class Suggestions(BaseModel):
     """Design suggestions and preferences (SHOULD, not MUST)."""
 
@@ -355,6 +373,10 @@ class ProjectSpec(BaseModel):
     intent: DesignIntent | None = Field(default=None, description="Design intent")
     requirements: Requirements | None = Field(default=None, description="Requirements")
     suggestions: Suggestions | None = Field(default=None, description="Suggestions")
+    bom_entries: list[BOMEntry] | None = Field(
+        default=None,
+        description="Per-reference BOM part mappings (MPN, LCSC)",
+    )
     decisions: list[Decision] | None = Field(default=None, description="Design decisions")
     progress: Progress | None = Field(default=None, description="Progress tracking")
     validation: Validation | None = Field(default=None, description="Validation results")

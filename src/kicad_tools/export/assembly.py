@@ -15,6 +15,7 @@ from kicad_tools.exceptions import ValidationError
 
 from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
 from .bom_formats import BOMExportConfig, export_bom
+from .bom_spec_overlay import SpecOverlayReport, apply_spec_overlay, find_spec_file
 from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import PnPExportConfig, export_pnp
 
@@ -48,6 +49,10 @@ class AssemblyConfig:
     auto_lcsc_prefer_basic: bool = True
     auto_lcsc_min_stock: int = 100
 
+    # Spec overlay
+    no_spec: bool = False
+    spec_path: Path | None = None
+
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
 
@@ -60,6 +65,7 @@ class AssemblyPackageResult:
     bom_path: Path | None = None
     pnp_path: Path | None = None
     gerber_path: Path | None = None
+    spec_overlay: SpecOverlayReport | None = None
     lcsc_enrichment: EnrichmentReport | None = None
     errors: list[str] = field(default_factory=list)
 
@@ -253,6 +259,33 @@ class AssemblyPackage:
         if self.config.exclude_references:
             items = self._filter_references(items)
 
+        # Spec overlay: apply MPN/LCSC from .kct before auto-enrichment
+        spec_refs: set[str] = set()
+        if not self.config.no_spec:
+            try:
+                spec_file = self.config.spec_path
+                if spec_file is None:
+                    # Auto-detect from schematic/PCB directory
+                    spec_file = find_spec_file(self.pcb_path.parent)
+                if spec_file is not None:
+                    from ..spec.parser import load_spec
+
+                    spec = load_spec(spec_file)
+                    if spec.bom_entries:
+                        overlay_report = apply_spec_overlay(items, spec.bom_entries)
+                        if result is not None:
+                            result.spec_overlay = overlay_report
+                        for line in overlay_report.summary_lines():
+                            logger.info(line)
+                        # Collect refs that got an LCSC from spec
+                        spec_refs = {
+                            e.reference
+                            for e in overlay_report.entries
+                            if e.matched and e.lcsc
+                        }
+            except Exception as e:
+                logger.warning(f"Spec overlay failed (continuing without): {e}")
+
         # LCSC auto-matching for JLCPCB exports
         if self.config.auto_lcsc and self.manufacturer == "jlcpcb":
             try:
@@ -260,6 +293,7 @@ class AssemblyPackage:
                     items,
                     prefer_basic=self.config.auto_lcsc_prefer_basic,
                     min_stock=self.config.auto_lcsc_min_stock,
+                    spec_refs=spec_refs,
                 )
                 if result is not None:
                     result.lcsc_enrichment = enrichment

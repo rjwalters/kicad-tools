@@ -84,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable LCSC auto-matching",
     )
     parser.add_argument(
+        "--no-spec",
+        action="store_true",
+        help="Disable BOM enrichment from .kct project spec",
+    )
+    parser.add_argument(
         "--skip-preflight",
         action="store_true",
         help="Skip all pre-flight validation checks",
@@ -157,6 +162,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_report=not args.no_report,
         include_project_zip=not args.no_project_zip,
         auto_lcsc=auto_lcsc,
+        no_spec=getattr(args, "no_spec", False),
         preflight=preflight_cfg,
     )
 
@@ -223,6 +229,12 @@ def run_export(args: argparse.Namespace) -> int:
                 print(f"  [ok] CPL: {result.assembly_result.pnp_path.name}")
             if result.assembly_result.gerber_path:
                 print(f"  [ok] Gerbers: {result.assembly_result.gerber_path.name}")
+            # Report spec overlay results
+            if result.assembly_result.spec_overlay:
+                overlay = result.assembly_result.spec_overlay
+                print()
+                for line in overlay.summary_lines():
+                    print(f"  {line}")
             # Report LCSC enrichment results
             if result.assembly_result.lcsc_enrichment:
                 enrichment = result.assembly_result.lcsc_enrichment
