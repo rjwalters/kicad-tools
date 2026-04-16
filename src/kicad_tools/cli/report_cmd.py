@@ -105,6 +105,18 @@ def _run_generate(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     project_name = input_path.stem
 
+    # Resolve .kicad_pro to .kicad_pcb by stem matching so the S-expression
+    # parser receives a PCB file rather than JSON project metadata.
+    if input_path.suffix == ".kicad_pro":
+        pcb_path = input_path.with_suffix(".kicad_pcb")
+        if not pcb_path.exists():
+            print(
+                f"Error: PCB file not found: {pcb_path}",
+                file=sys.stderr,
+            )
+            return 1
+        input_path = pcb_path
+
     # Determine data source: explicit --data-dir, auto-collection, or skeleton
     version_dir: Path | None = None
     if args.data_dir:

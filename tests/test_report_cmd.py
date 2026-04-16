@@ -209,21 +209,36 @@ class TestFigureGenerationWiring:
         assert "## Schematic Overview" not in content
 
     @patch("kicad_tools.report.ReportFigureGenerator")
-    def test_no_figures_for_kicad_pro_input(self, mock_gen_cls, tmp_path):
-        """Figure generation is skipped for .kicad_pro files."""
+    def test_kicad_pro_resolves_to_kicad_pcb(self, mock_gen_cls, tmp_path):
+        """A .kicad_pro input is resolved to .kicad_pcb and triggers figures."""
+        mock_instance = mock_gen_cls.return_value
+        mock_instance.generate_all.return_value = _mock_figure_entries()
+
+        # Create project, PCB, and schematic files so resolution succeeds
+        pro_file = tmp_path / "project.kicad_pro"
+        pro_file.write_text("{}")
+        pcb_file = tmp_path / "project.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        sch_file = tmp_path / "project.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+
         output_dir = tmp_path / "reports"
         result = report_main(
             [
                 "generate",
-                "project.kicad_pro",
+                str(pro_file),
                 "--mfr",
                 "jlcpcb",
                 "-o",
                 str(output_dir),
+                "--skip-collect",
             ]
         )
         assert result == 0
-        mock_gen_cls.assert_not_called()
+        # Figure generation should be triggered since resolved path is .kicad_pcb
+        mock_instance.generate_all.assert_called_once()
+        call_args = mock_instance.generate_all.call_args
+        assert call_args[0][0] == pcb_file
 
     @patch("kicad_tools.report.ReportFigureGenerator")
     def test_data_dir_skips_figure_generation(self, mock_gen_cls, tmp_path):
@@ -511,3 +526,54 @@ class TestCLIFlags:
         parser = create_parser()
         args = parser.parse_args(["report", "generate", "board.kicad_pcb"])
         assert args.report_no_figures is False
+
+
+class TestKicadProResolution:
+    """Tests for .kicad_pro -> .kicad_pcb resolution in report generate."""
+
+    def test_missing_pcb_for_kicad_pro_returns_error(self, tmp_path, capsys):
+        """When .kicad_pro is given but .kicad_pcb does not exist, return error."""
+        pro_file = tmp_path / "project.kicad_pro"
+        pro_file.write_text("{}")
+        # Do NOT create the .kicad_pcb file
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                str(pro_file),
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+            ]
+        )
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "Error: PCB file not found" in captured.err
+        assert "project.kicad_pcb" in captured.err
+
+    @patch("kicad_tools.report.ReportFigureGenerator")
+    def test_kicad_pro_no_figures_flag_skips_figures(self, mock_gen_cls, tmp_path):
+        """.kicad_pro with --no-figures resolves to .kicad_pcb but skips figures."""
+        pro_file = tmp_path / "project.kicad_pro"
+        pro_file.write_text("{}")
+        pcb_file = tmp_path / "project.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        output_dir = tmp_path / "reports"
+        result = report_main(
+            [
+                "generate",
+                str(pro_file),
+                "--mfr",
+                "jlcpcb",
+                "-o",
+                str(output_dir),
+                "--no-figures",
+                "--skip-collect",
+            ]
+        )
+        assert result == 0
+        mock_gen_cls.assert_not_called()

@@ -287,8 +287,18 @@ def run_validate_connectivity_command(args) -> int:
                 pcb_path = f
                 break
             elif f.lower().endswith(".kicad_pro"):
-                # Project file - just pass it through
-                pcb_path = f
+                # Resolve .kicad_pro to .kicad_pcb by stem matching so the
+                # S-expression parser receives a PCB file, not JSON.
+                from pathlib import Path
+
+                pro_path = Path(f)
+                resolved = pro_path.with_suffix(".kicad_pcb")
+                if not resolved.exists():
+                    print(
+                        f"Error: PCB file not found: {resolved}"
+                    )
+                    return 1
+                pcb_path = str(resolved)
                 break
 
     if not pcb_path:

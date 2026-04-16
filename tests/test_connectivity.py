@@ -616,3 +616,55 @@ class TestConnectivityCLI:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "Error" in captured.err or "not found" in captured.err
+
+
+class TestConnectivityProResolution:
+    """Tests for .kicad_pro -> .kicad_pcb resolution in validate --connectivity."""
+
+    def test_kicad_pro_resolves_to_pcb(self, tmp_path: Path):
+        """run_validate_connectivity_command resolves .kicad_pro to .kicad_pcb."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.commands.validation import run_validate_connectivity_command
+
+        # Create a .kicad_pro and corresponding .kicad_pcb
+        pro_file = tmp_path / "board.kicad_pro"
+        pro_file.write_text("{}")
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(FULLY_CONNECTED_PCB)
+
+        args = SimpleNamespace(
+            connectivity=True,
+            validate_files=[str(pro_file)],
+            validate_pcb=None,
+            validate_format="table",
+            validate_errors_only=False,
+            validate_strict=False,
+            validate_verbose=False,
+        )
+        exit_code = run_validate_connectivity_command(args)
+        assert exit_code == 0
+
+    def test_kicad_pro_missing_pcb_returns_error(self, tmp_path: Path, capsys):
+        """run_validate_connectivity_command errors when .kicad_pcb is missing."""
+        from types import SimpleNamespace
+
+        from kicad_tools.cli.commands.validation import run_validate_connectivity_command
+
+        pro_file = tmp_path / "board.kicad_pro"
+        pro_file.write_text("{}")
+        # Do NOT create .kicad_pcb
+
+        args = SimpleNamespace(
+            connectivity=True,
+            validate_files=[str(pro_file)],
+            validate_pcb=None,
+            validate_format="table",
+            validate_errors_only=False,
+            validate_strict=False,
+            validate_verbose=False,
+        )
+        exit_code = run_validate_connectivity_command(args)
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "PCB file not found" in captured.out
