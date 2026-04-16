@@ -266,6 +266,47 @@ class TestExportCmdFromMainParser:
         assert rc == 0
         assert "--no-auto-lcsc" in captured_argv["value"]
 
+    def test_parser_strict_preflight_flag(self):
+        """--strict-preflight should be parsed correctly."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb", "--strict-preflight"])
+        assert args.export_strict_preflight is True
+
+    def test_parser_strict_preflight_default_false(self):
+        """--strict-preflight should default to False."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["export", "board.kicad_pcb"])
+        assert args.export_strict_preflight is False
+
+    def test_dispatch_forwards_strict_preflight(self, tmp_path, monkeypatch):
+        """--strict-preflight should be forwarded through dispatch to export_cmd."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        captured_argv = {}
+
+        import kicad_tools.cli.export_cmd as export_mod
+
+        original_main = export_mod.main
+
+        def spy_main(argv=None):
+            captured_argv["value"] = argv
+            return original_main(argv)
+
+        monkeypatch.setattr("kicad_tools.cli.export_cmd.main", spy_main)
+
+        from kicad_tools.cli import main as cli_main
+
+        rc = cli_main(
+            ["export", str(pcb), "--strict-preflight", "--dry-run", "-o", str(tmp_path / "out")]
+        )
+        assert rc == 0
+        assert "--strict-preflight" in captured_argv["value"]
+
     def test_dispatch_wiring(self, tmp_path, monkeypatch):
         """Verify that 'kct export ...' dispatches to export_cmd.main."""
         pcb = tmp_path / "board.kicad_pcb"
@@ -275,4 +316,17 @@ class TestExportCmdFromMainParser:
 
         # Just test dry-run to avoid needing kicad-cli
         rc = cli_main(["export", str(pcb), "--dry-run", "-o", str(tmp_path / "out")])
+        assert rc == 0
+
+
+class TestExportCmdStrictPreflight:
+    """Tests for --strict-preflight flag behavior."""
+
+    def test_strict_preflight_parsed(self, tmp_path):
+        """--strict-preflight flag should be parsed by export_cmd."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        # dry-run to avoid needing kicad-cli
+        rc = export_main([str(pcb), "--strict-preflight", "--dry-run", "-o", str(tmp_path / "out")])
         assert rc == 0

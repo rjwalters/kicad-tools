@@ -89,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip all pre-flight validation checks",
     )
     parser.add_argument(
+        "--strict-preflight",
+        action="store_true",
+        help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    parser.add_argument(
         "--skip-drc",
         action="store_true",
         help="Skip DRC check in pre-flight validation",
@@ -158,6 +163,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_project_zip=not args.no_project_zip,
         auto_lcsc=auto_lcsc,
         preflight=preflight_cfg,
+        strict_preflight=getattr(args, "strict_preflight", False),
     )
 
     pkg = ManufacturingPackage(
@@ -202,6 +208,13 @@ def run_export(args: argparse.Namespace) -> int:
                 print(f"         {pr.details}")
         print()
 
+    # Display preflight warnings (non-blocking failures) in text mode
+    if result.warnings and output_format == "text" and not quiet:
+        print(f"Preflight warnings ({len(result.warnings)}):")
+        for warn in result.warnings:
+            print(f"  - {warn}")
+        print()
+
     # JSON output mode
     if output_format == "json":
         json_result: dict = {
@@ -210,6 +223,8 @@ def run_export(args: argparse.Namespace) -> int:
             "files": [str(f) for f in result.all_files],
             "errors": result.errors,
         }
+        if result.warnings:
+            json_result["warnings"] = result.warnings
         if result.preflight_results:
             json_result["preflight"] = [pr.to_dict() for pr in result.preflight_results]
         print(json.dumps(json_result, indent=2))

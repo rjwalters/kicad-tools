@@ -678,6 +678,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--no-auto-lcsc")
     if getattr(args, "export_skip_preflight", False):
         sub_argv.append("--skip-preflight")
+    if getattr(args, "export_strict_preflight", False):
+        sub_argv.append("--strict-preflight")
     if getattr(args, "export_skip_drc", False):
         sub_argv.append("--skip-drc")
     if getattr(args, "export_skip_erc", False):

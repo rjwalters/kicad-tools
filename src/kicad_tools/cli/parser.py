@@ -3877,6 +3877,12 @@ def _add_export_parser(subparsers) -> None:
         help="Skip all pre-flight validation checks",
     )
     export_parser.add_argument(
+        "--strict-preflight",
+        dest="export_strict_preflight",
+        action="store_true",
+        help="Block export when preflight checks fail (for CI; default: export proceeds with warnings)",
+    )
+    export_parser.add_argument(
         "--skip-drc",
         dest="export_skip_drc",
         action="store_true",

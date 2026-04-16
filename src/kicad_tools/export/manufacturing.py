@@ -41,6 +41,11 @@ class ManufacturingConfig(AssemblyConfig):
     # Pre-flight validation settings
     preflight: PreflightConfig | None = None
 
+    # When True, preflight FAIL results block export (early return, no files).
+    # When False (default), preflight failures are recorded as warnings but
+    # export proceeds to generate output files.
+    strict_preflight: bool = False
+
 
 @dataclass
 class ManufacturingResult:
@@ -52,6 +57,7 @@ class ManufacturingResult:
     project_zip_path: Path | None = None
     manifest_path: Path | None = None
     preflight_results: list[PreflightResult] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -227,14 +233,20 @@ class ManufacturingPackage:
             result.preflight_results = preflight_results
 
             if PreflightChecker.has_failures(preflight_results):
-                # Collect failure messages into errors
+                # Collect failure messages
                 for pr in preflight_results:
                     if pr.status == "FAIL":
                         msg = f"Preflight FAIL [{pr.name}]: {pr.message}"
                         if pr.details:
                             msg += f" ({pr.details})"
-                        result.errors.append(msg)
-                return result
+                        if self.config.strict_preflight:
+                            result.errors.append(msg)
+                        else:
+                            result.warnings.append(msg)
+
+                # In strict mode, block export on preflight failures
+                if self.config.strict_preflight:
+                    return result
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
