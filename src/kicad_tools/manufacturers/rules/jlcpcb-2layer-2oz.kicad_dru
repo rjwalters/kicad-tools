@@ -1,8 +1,8 @@
 (version 1)
 (rule "Trace Width"
-  (constraint track_width (min 0.2032mm)))
+  (constraint track_width (min 0.1524mm)))
 (rule "Clearance"
-  (constraint clearance (min 0.2032mm)))
+  (constraint clearance (min 0.1524mm)))
 (rule "Via Drill"
   (constraint hole_size (min 0.3mm)))
 (rule "Via Diameter"

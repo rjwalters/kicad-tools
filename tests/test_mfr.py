@@ -510,8 +510,8 @@ class TestTwoLayerRules:
         profile = get_profile("jlcpcb")
         rules = profile.get_design_rules(layers=2, copper_oz=2.0)
 
-        assert rules.min_trace_width_mm == pytest.approx(0.2032)  # 8 mil for 2oz
-        assert rules.min_clearance_mm == pytest.approx(0.2032)
+        assert rules.min_trace_width_mm == pytest.approx(0.1524)  # 6 mil for 2oz
+        assert rules.min_clearance_mm == pytest.approx(0.1524)
         assert rules.outer_copper_oz == 2.0
 
     def test_seeed_2layer_1oz_rules(self):

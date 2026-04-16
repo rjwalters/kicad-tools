@@ -50,7 +50,7 @@ violations = checker.check("board.kicad_pcb")
 
 Budget-friendly manufacturer with fast turnaround.
 
-### Standard PCB (1-2 layers)
+### Standard PCB (1-2 layers, 1oz copper)
 
 | Parameter | Value |
 |-----------|-------|
@@ -59,6 +59,17 @@ Budget-friendly manufacturer with fast turnaround.
 | Min drill size | 0.3mm |
 | Min annular ring | 0.13mm |
 | Min via diameter | 0.45mm |
+| Board thickness | 0.4-2.0mm |
+
+### Standard PCB (1-2 layers, 2oz copper)
+
+| Parameter | Value |
+|-----------|-------|
+| Min trace width | 0.1524mm (6mil) |
+| Min trace spacing | 0.1524mm (6mil) |
+| Min drill size | 0.3mm |
+| Min annular ring | 0.15mm |
+| Min via diameter | 0.6mm |
 | Board thickness | 0.4-2.0mm |
 
 ### 4-6 Layer PCB

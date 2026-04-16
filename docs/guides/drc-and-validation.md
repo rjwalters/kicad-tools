@@ -147,7 +147,7 @@ print(f"  Min via drill: {rules_4l.min_via_drill_mm}mm")
 # 2oz copper has wider minimum trace requirements
 rules_2oz = jlc.get_design_rules(layers=2, copper_oz=2.0)
 print(f"\nJLCPCB 2-layer 2oz rules:")
-print(f"  Min trace width: {rules_2oz.min_trace_width_mm}mm")  # 0.2032mm (8 mil)
+print(f"  Min trace width: {rules_2oz.min_trace_width_mm}mm")  # 0.1524mm (6 mil)
 ```
 
 ## Python API: Compare All Manufacturers

@@ -10,9 +10,10 @@ rules:
     title: Minimum Trace Clearance
     spec_section: "PCB Specifications > Minimum Clearance"
     values:
-      2_layer: 0.2mm
-      4_layer: 0.15mm
-      6_layer: 0.15mm
+      2_layer_1oz: 0.127mm   # 5 mil
+      2_layer_2oz: 0.1524mm  # 6 mil
+      4_layer: 0.1016mm      # 4 mil (inner layer clearance governs)
+      6_layer: 0.0889mm      # 3.5 mil
     severity: error
     explanation: |
       Manufacturing process limits prevent reliable etching below these
@@ -30,8 +31,11 @@ rules:
     title: Minimum Trace Width
     spec_section: "PCB Specifications > Minimum Trace"
     values:
-      2_layer: 0.127mm  # 5 mil
-      4_layer: 0.1mm    # 4 mil
+      2_layer_1oz: 0.127mm   # 5 mil
+      2_layer_2oz: 0.1524mm  # 6 mil
+      4_layer_1oz: 0.1016mm  # 4 mil
+      4_layer_2oz: 0.1524mm  # 6 mil (outer layers, 2oz copper)
+      6_layer: 0.0889mm      # 3.5 mil
     severity: error
     explanation: |
       Trace width affects current carrying capacity and manufacturability.
