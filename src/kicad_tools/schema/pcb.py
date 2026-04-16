@@ -1591,11 +1591,25 @@ class PCB:
             if graphic.layer == layer:
                 yield graphic
 
+    @staticmethod
+    def _rect_to_segments(
+        start: tuple[float, float], end: tuple[float, float]
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Decompose a rectangle (start, end corners) into 4 line segments."""
+        x1, y1 = start
+        x2, y2 = end
+        return [
+            ((x1, y1), (x2, y1)),  # top
+            ((x2, y1), (x2, y2)),  # right
+            ((x2, y2), (x1, y2)),  # bottom
+            ((x1, y2), (x1, y1)),  # left
+        ]
+
     def get_board_outline(self) -> list[tuple[float, float]]:
         """Extract board outline polygon from Edge.Cuts layer.
 
         Returns an ordered list of (x, y) points forming the board outline.
-        Only includes line segments on the Edge.Cuts layer.
+        Handles gr_line, gr_arc, and gr_rect elements on the Edge.Cuts layer.
         Arc segments are approximated by their start and end points.
 
         Returns:
@@ -1604,8 +1618,13 @@ class PCB:
         # Collect all Edge.Cuts segments
         edge_lines = [line for line in self._graphic_lines if line.layer == "Edge.Cuts"]
         edge_arcs = [arc for arc in self._graphic_arcs if arc.layer == "Edge.Cuts"]
+        edge_rects = [
+            g
+            for g in self._graphics
+            if g.layer == "Edge.Cuts" and g.graphic_type == "rect"
+        ]
 
-        if not edge_lines and not edge_arcs:
+        if not edge_lines and not edge_arcs and not edge_rects:
             return []
 
         # Build a list of all line segments (including arc endpoints)
@@ -1618,6 +1637,9 @@ class PCB:
             # For arcs, include start->mid and mid->end as approximation
             segments.append((arc.start, arc.mid))
             segments.append((arc.mid, arc.end))
+
+        for rect in edge_rects:
+            segments.extend(self._rect_to_segments(rect.start, rect.end))
 
         if not segments:
             return []
@@ -1669,6 +1691,7 @@ class PCB:
         """Get board outline as a list of line segments.
 
         Returns all Edge.Cuts graphic elements as line segments.
+        Handles gr_line, gr_arc, and gr_rect elements.
         More useful for distance calculations than the polygon.
 
         Returns:
@@ -1685,6 +1708,10 @@ class PCB:
                 # Approximate arc with two segments through midpoint
                 segments.append((arc.start, arc.mid))
                 segments.append((arc.mid, arc.end))
+
+        for graphic in self._graphics:
+            if graphic.layer == "Edge.Cuts" and graphic.graphic_type == "rect":
+                segments.extend(self._rect_to_segments(graphic.start, graphic.end))
 
         return segments
 

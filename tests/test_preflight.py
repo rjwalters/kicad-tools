@@ -172,6 +172,50 @@ class TestPreflightBoardOutline:
         assert outline_result is not None
         assert outline_result.status == "OK"
 
+    def test_gr_rect_outline_ok(self, tmp_path):
+        """Board outline defined via gr_rect on Edge.Cuts should pass."""
+        pcb_content = """(kicad_pcb (version 20231014) (generator "pcbnew")
+  (general
+    (thickness 1.6)
+    (legacy_teardrops no)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_rect (start 0 0) (end 50 50)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"))
+)
+"""
+        pcb_path = tmp_path / "board.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        checker = PreflightChecker(
+            pcb_path=pcb_path,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        outline_result = _find_result(results, "board_outline")
+        assert outline_result is not None
+        assert outline_result.status == "OK"
+
+    def test_no_outline_error_message_empty(self, tmp_path):
+        """When Edge.Cuts has no content, message says 'No board outline found'."""
+        pcb = _create_minimal_pcb(tmp_path, include_outline=False)
+        checker = PreflightChecker(
+            pcb_path=pcb,
+            config=PreflightConfig(skip_drc=True, skip_erc=True),
+        )
+        results = checker.run_all()
+        outline_result = _find_result(results, "board_outline")
+        assert outline_result is not None
+        assert "No board outline found" in outline_result.message
+
 
 # ---------------------------------------------------------------------------
 # PreflightChecker -- board dimensions checks

@@ -224,10 +224,23 @@ class PreflightChecker:
 
         outline = self._pcb.get_board_outline()
         if not outline:
+            # Distinguish "no Edge.Cuts content" from "content but not extractable"
+            edge_cuts_count = sum(
+                1
+                for item in self._pcb.graphic_items
+                if hasattr(item, "layer") and item.layer == "Edge.Cuts"
+            )
+            if edge_cuts_count > 0:
+                message = (
+                    f"Edge.Cuts layer has {edge_cuts_count} graphic element(s) "
+                    "but no closed board outline could be extracted"
+                )
+            else:
+                message = "No board outline found on Edge.Cuts layer"
             return PreflightResult(
                 name="board_outline",
                 status="FAIL",
-                message="No board outline found on Edge.Cuts layer",
+                message=message,
                 details="A closed board outline is required for manufacturing",
             )
 
