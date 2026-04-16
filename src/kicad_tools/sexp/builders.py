@@ -379,6 +379,45 @@ def via_node(
     )
 
 
+def gr_line_node(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    layer: str,
+    width: float = 0.1,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB graphic line S-expression (gr_line).
+
+    Used for board outlines on Edge.Cuts layer and other graphic elements.
+
+    Args:
+        start_x, start_y: Start point coordinates in mm
+        end_x, end_y: End point coordinates in mm
+        layer: Layer name (e.g., "Edge.Cuts", "F.SilkS")
+        width: Stroke width in mm (default 0.1)
+        uuid_str: Unique identifier
+
+    Example output:
+        (gr_line
+            (start 100 100)
+            (end 200 100)
+            (stroke (width 0.1) (type default))
+            (layer "Edge.Cuts")
+            (uuid "...")
+        )
+    """
+    return SExp.list(
+        "gr_line",
+        SExp.list("start", fmt(start_x), fmt(start_y)),
+        SExp.list("end", fmt(end_x), fmt(end_y)),
+        SExp.list("stroke", SExp.list("width", fmt(width)), SExp.list("type", "default")),
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+    )
+
+
 def zone_node(
     net: int,
     net_name: str,

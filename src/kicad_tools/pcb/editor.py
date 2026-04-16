@@ -28,7 +28,7 @@ from pathlib import Path
 
 # Import SExp parsing and builders
 from kicad_tools.sexp import SExp, parse_file
-from kicad_tools.sexp.builders import fmt, segment_node, via_node, zone_node
+from kicad_tools.sexp.builders import fmt, gr_line_node, segment_node, via_node, zone_node
 
 
 @dataclass
@@ -478,6 +478,74 @@ class PCBEditor:
             self.doc.append(keepout.to_sexp_node())
 
         return keepout
+
+    def has_board_outline(self) -> bool:
+        """Check whether the PCB already has geometry on the Edge.Cuts layer.
+
+        Returns:
+            True if any gr_line, gr_rect, or gr_arc exists on Edge.Cuts.
+        """
+        if not self.doc:
+            return False
+
+        for tag_name in ("gr_line", "gr_rect", "gr_arc"):
+            for node in self.doc.find_all(tag_name):
+                layer = node.find("layer")
+                if layer and layer.get_string(0) == "Edge.Cuts":
+                    return True
+        return False
+
+    def add_board_outline(
+        self,
+        width: float,
+        height: float,
+        origin_x: float = 100.0,
+        origin_y: float = 100.0,
+        insert: bool = True,
+    ) -> list[SExp]:
+        """Add a rectangular board outline on Edge.Cuts using gr_line segments.
+
+        Creates four gr_line segments forming a closed rectangle. The outline
+        is compatible with ``get_board_outline()`` which chains gr_line segments.
+
+        Does nothing if an outline already exists on Edge.Cuts (idempotent).
+
+        Args:
+            width: Board width in mm
+            height: Board height in mm
+            origin_x: X coordinate of the top-left corner (default 100.0,
+                standard KiCad origin)
+            origin_y: Y coordinate of the top-left corner (default 100.0)
+            insert: If True, insert into document immediately
+
+        Returns:
+            List of SExp nodes created (4 gr_line nodes), or empty list if
+            outline already exists.
+        """
+        if self.has_board_outline():
+            return []
+
+        # Four corners: top-left, top-right, bottom-right, bottom-left
+        x0, y0 = origin_x, origin_y
+        x1, y1 = origin_x + width, origin_y + height
+
+        corners = [
+            (x0, y0),  # top-left
+            (x1, y0),  # top-right
+            (x1, y1),  # bottom-right
+            (x0, y1),  # bottom-left
+        ]
+
+        nodes = []
+        for i in range(4):
+            sx, sy = corners[i]
+            ex, ey = corners[(i + 1) % 4]
+            node = gr_line_node(sx, sy, ex, ey, "Edge.Cuts", uuid_str=str(uuid_module.uuid4()))
+            nodes.append(node)
+            if insert and self.doc:
+                self.doc.append(node)
+
+        return nodes
 
     def get_zones(self) -> list[dict]:
         """Get all zones from the PCB.
