@@ -565,6 +565,62 @@ class TestReportGenerator:
         assert "FAIL" in content
         assert "pin_not_connected (2x), power_pin_not_driven (1x)" in content
 
+    def test_erc_skipped_status(self, tmp_path: Path) -> None:
+        """ERC section renders SKIPPED when skipped is True."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "skipped": True,
+                "details": "ERC skipped by user request",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        assert "## ERC Status" in content
+        assert "SKIPPED" in content
+        assert "PASS" not in content.split("## ERC Status")[1].split("##")[0]
+
+    def test_erc_pass_not_affected_by_skipped_false(self, tmp_path: Path) -> None:
+        """ERC renders PASS when skipped is False (explicit)."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "skipped": False,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        erc_section = content.split("## ERC Status")[1].split("##")[0]
+        assert "PASS" in erc_section
+        assert "SKIPPED" not in erc_section
+
+    def test_erc_pass_when_skipped_key_absent(self, tmp_path: Path) -> None:
+        """ERC renders PASS when skipped key is absent (backward compat)."""
+        data = _full_data(
+            erc={
+                "error_count": 0,
+                "warning_count": 0,
+                "passed": True,
+                "details": "",
+            }
+        )
+        gen = ReportGenerator()
+        report_path = gen.generate(data, tmp_path)
+
+        content = report_path.read_text(encoding="utf-8")
+        erc_section = content.split("## ERC Status")[1].split("##")[0]
+        assert "PASS" in erc_section
+        assert "SKIPPED" not in erc_section
+
     def test_erc_omitted_when_none(self, tmp_path: Path) -> None:
         """ERC section is absent when erc is None."""
         data = _full_data(erc=None)

@@ -36,6 +36,7 @@ class ERCStatus:
     warning_count: int = 0
     blocking_error_count: int = 0  # Only electrical errors that block readiness
     passed: bool = True
+    skipped: bool = False
     details: str = ""
     report_path: Path | None = None
 
@@ -45,6 +46,7 @@ class ERCStatus:
             "warning_count": self.warning_count,
             "blocking_error_count": self.blocking_error_count,
             "passed": self.passed,
+            "skipped": self.skipped,
             "details": self.details,
         }
 
@@ -450,6 +452,12 @@ class ManufacturingAudit:
         # Run checks
         if not self.skip_erc and self.schematic_path.exists():
             result.erc = self._check_erc()
+        else:
+            result.erc.skipped = True
+            if self.skip_erc:
+                result.erc.details = "ERC skipped by user request"
+            else:
+                result.erc.details = "ERC skipped (no schematic provided)"
 
         if self.pcb_path.exists():
             pcb = self._load_pcb()
