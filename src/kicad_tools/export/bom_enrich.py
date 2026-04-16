@@ -57,6 +57,11 @@ class EnrichmentReport:
         return len([e for e in self.entries if e.source == "schematic"])
 
     @property
+    def spec_populated(self) -> int:
+        """Groups that already had LCSC numbers from the project spec."""
+        return len([e for e in self.entries if e.source == "spec"])
+
+    @property
     def auto_matched(self) -> int:
         """Groups that were auto-matched via LCSC search."""
         return len([e for e in self.entries if e.source == "auto"])
@@ -73,11 +78,12 @@ class EnrichmentReport:
 
     def summary_lines(self) -> list[str]:
         """Return human-readable summary lines."""
-        lines = [
-            f"LCSC enrichment: {self.auto_matched} auto-matched, "
-            f"{self.already_populated} from schematic, "
-            f"{self.unmatched} unmatched"
-        ]
+        parts = [f"{self.auto_matched} auto-matched"]
+        if self.spec_populated:
+            parts.append(f"{self.spec_populated} from spec")
+        parts.append(f"{self.already_populated} from schematic")
+        parts.append(f"{self.unmatched} unmatched")
+        lines = [f"LCSC enrichment: {', '.join(parts)}"]
         if self.unmatched_entries:
             lines.append("Unmatched parts:")
             for entry in self.unmatched_entries:
@@ -92,6 +98,7 @@ def enrich_bom_lcsc(
     *,
     prefer_basic: bool = True,
     min_stock: int = 100,
+    spec_refs: set[str] | None = None,
 ) -> EnrichmentReport:
     """
     Populate missing LCSC part numbers on BOM items in-place.
@@ -106,6 +113,9 @@ def enrich_bom_lcsc(
         items: List of BOM items to enrich (modified in place).
         prefer_basic: Prefer JLCPCB Basic parts (no extra assembly fee).
         min_stock: Minimum stock level to consider a part viable.
+        spec_refs: Set of reference designators whose LCSC was populated
+            by the project spec overlay.  These are reported with
+            ``source="spec"`` instead of ``"schematic"``.
 
     Returns:
         EnrichmentReport summarising what was matched.
@@ -141,13 +151,22 @@ def enrich_bom_lcsc(
                 for it in group_items:
                     if not it.lcsc:
                         it.lcsc = existing_lcsc
+
+                # Determine source: if any ref in the group was set by spec,
+                # report as "spec"; otherwise "schematic".
+                _spec_refs = spec_refs or set()
+                source = (
+                    "spec"
+                    if any(r in _spec_refs for r in refs)
+                    else "schematic"
+                )
                 report.entries.append(
                     EnrichmentEntry(
                         value=value,
                         footprint=footprint,
                         references=refs,
                         lcsc_part=existing_lcsc,
-                        source="schematic",
+                        source=source,
                     )
                 )
                 continue

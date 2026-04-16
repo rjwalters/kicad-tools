@@ -44,6 +44,13 @@ from .bom_enrich import (
     EnrichmentReport,
     enrich_bom_lcsc,
 )
+from .bom_spec_overlay import (
+    SpecOverlayEntry,
+    SpecOverlayReport,
+    apply_spec_overlay,
+    expand_ref_range,
+    find_spec_file,
+)
 from .bom_formats import (
     BOM_FORMATTERS,
     BOMExportConfig,
@@ -97,6 +104,12 @@ __all__ = [
     "enrich_bom_lcsc",
     "EnrichmentReport",
     "EnrichmentEntry",
+    # BOM spec overlay
+    "apply_spec_overlay",
+    "SpecOverlayReport",
+    "SpecOverlayEntry",
+    "expand_ref_range",
+    "find_spec_file",
     # Manufacturing package
     "ManufacturingPackage",
     "ManufacturingConfig",
