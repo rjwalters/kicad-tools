@@ -8,6 +8,7 @@ import pytest
 from kicad_tools.audit import AuditResult, AuditVerdict, ManufacturingAudit
 from kicad_tools.audit.auditor import (
     ConnectivityStatus,
+    CostEstimate,
     DRCStatus,
     ERCStatus,
     ManufacturerCompatibility,
@@ -1954,3 +1955,157 @@ class TestOrphanedFootprints:
         assert len(items) == 1
         assert "15 orphaned footprint(s)" in items[0].description
         assert "(and 5 more)" in items[0].description
+
+
+# ---------------------------------------------------------------------------
+# Test: assembly mode / --no-assembly flag
+# ---------------------------------------------------------------------------
+
+
+class TestAssemblyMode:
+    """Tests for assembly cost exclusion via project.kct and --no-assembly flag."""
+
+    def test_cost_estimate_assembly_mode_field(self):
+        """CostEstimate dataclass has assembly_mode field included in to_dict."""
+        est = CostEstimate(assembly_mode="none")
+        d = est.to_dict()
+        assert "assembly_mode" in d
+        assert d["assembly_mode"] == "none"
+
+    def test_cost_estimate_assembly_mode_default_none(self):
+        """CostEstimate.assembly_mode defaults to None."""
+        est = CostEstimate()
+        assert est.assembly_mode is None
+        assert est.to_dict()["assembly_mode"] is None
+
+    def test_no_assembly_flag_skips_assembly_cost(self, drc_clean_pcb: Path):
+        """ManufacturingAudit with no_assembly=True zeros assembly cost."""
+        audit = ManufacturingAudit(drc_clean_pcb, no_assembly=True)
+        result = audit.run()
+
+        assert result.cost.assembly_cost == 0.0
+        assert result.cost.assembly_mode == "none"
+        # Total should not include assembly
+        # (just verify assembly is excluded from total)
+        assert result.cost.total_cost >= 0.0
+
+    def test_default_includes_assembly_cost(self, drc_clean_pcb: Path):
+        """Default audit (no flags) includes assembly cost as before."""
+        audit = ManufacturingAudit(drc_clean_pcb)
+        result = audit.run()
+
+        # assembly_mode should be None when not explicitly set to "none"
+        assert result.cost.assembly_mode is None
+
+    def test_assembly_none_from_project_kct(self, tmp_path: Path):
+        """When project.kct has assembly: none, assembly cost is excluded."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        # Write project.kct with assembly: none
+        kct_path = tmp_path / "project.kct"
+        kct_path.write_text(
+            """kct_version: "1.0"
+project:
+  name: test
+  board: test
+requirements:
+  manufacturing:
+    assembly: "none"
+"""
+        )
+
+        audit = ManufacturingAudit(project_file)
+        assert audit.no_assembly is True
+        assert audit._assembly_mode == "none"
+
+    def test_assembly_smt_from_project_kct(self, tmp_path: Path):
+        """When project.kct has assembly: smt, assembly cost is included."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        kct_path = tmp_path / "project.kct"
+        kct_path.write_text(
+            """kct_version: "1.0"
+project:
+  name: test
+  board: test
+requirements:
+  manufacturing:
+    assembly: "smt"
+"""
+        )
+
+        audit = ManufacturingAudit(project_file)
+        assert audit.no_assembly is False
+        assert audit._assembly_mode == "smt"
+
+    def test_no_assembly_flag_overrides_project_kct(self, tmp_path: Path):
+        """--no-assembly CLI flag overrides project.kct assembly: smt."""
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text("")
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        kct_path = tmp_path / "project.kct"
+        kct_path.write_text(
+            """kct_version: "1.0"
+project:
+  name: test
+  board: test
+requirements:
+  manufacturing:
+    assembly: "smt"
+"""
+        )
+
+        # no_assembly=True should override the smt setting
+        audit = ManufacturingAudit(project_file, no_assembly=True)
+        assert audit.no_assembly is True
+
+    def test_cli_no_assembly_flag(self, drc_clean_pcb: Path, capsys):
+        """CLI --no-assembly flag produces assembly_mode: none in JSON."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--no-assembly", "--format", "json"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["cost"]["assembly_mode"] == "none"
+        assert data["cost"]["assembly_cost"] == 0.0
+
+    def test_cli_no_assembly_table_output(self, drc_clean_pcb: Path, capsys):
+        """CLI --no-assembly shows 'Assembly: excluded' in table output."""
+        from kicad_tools.cli.audit_cmd import main
+
+        result = main([str(drc_clean_pcb), "--no-assembly"])
+        assert result in [0, 1, 2]
+
+        captured = capsys.readouterr()
+        assert "Assembly: excluded" in captured.out

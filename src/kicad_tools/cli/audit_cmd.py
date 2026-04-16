@@ -80,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip ERC check (for PCB-only audits)",
     )
     parser.add_argument(
+        "--no-assembly",
+        action="store_true",
+        help="Skip assembly cost in estimate (overrides project.kct)",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -115,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             copper_oz=args.copper,
             quantity=args.quantity,
             skip_erc=args.skip_erc,
+            no_assembly=args.no_assembly,
         )
         result = audit.run()
     except ValueError as e:
@@ -267,7 +273,9 @@ def output_table(result: AuditResult, verbose: bool = False) -> None:
         print(f"    PCB cost: ${result.cost.pcb_cost:.2f}")
         if result.cost.component_cost:
             print(f"    Components: ${result.cost.component_cost:.2f}")
-        if result.cost.assembly_cost:
+        if result.cost.assembly_mode == "none":
+            print("    Assembly: excluded (assembly: none)")
+        elif result.cost.assembly_cost:
             print(f"    Assembly: ${result.cost.assembly_cost:.2f}")
         print(f"    Total: ${result.cost.total_cost:.2f} {result.cost.currency}")
 
