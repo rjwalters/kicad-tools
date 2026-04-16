@@ -14,7 +14,7 @@ from kicad_tools.export.manufacturing import (
     _create_project_zip,
     _sha256_file,
 )
-from kicad_tools.export.preflight import PreflightConfig
+from kicad_tools.export.preflight import PreflightChecker, PreflightConfig, PreflightResult
 
 
 class TestSha256File:
@@ -385,3 +385,116 @@ class TestManufacturingPackageExport:
         result = pkg.export(tmp_path / "out")
 
         assert result.report_path is None
+
+    def test_preflight_failure_proceeds_by_default(self, tmp_path, monkeypatch):
+        """Preflight FAIL should NOT block export when strict_preflight is False (default)."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            bom_path = od / "bom_jlcpcb.csv"
+            bom_path.write_text("Comment,Designator,Footprint,LCSC Part #\n")
+            return assembly.AssemblyPackageResult(
+                output_dir=od,
+                bom_path=bom_path,
+            )
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Mock preflight to return a FAIL result
+        fail_results = [
+            PreflightResult(name="board_outline", status="FAIL", message="No board outline found"),
+            PreflightResult(name="bom_pcb_match", status="OK", message="All BOM components placed"),
+        ]
+        monkeypatch.setattr(
+            PreflightChecker, "run_all", lambda self: fail_results
+        )
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            # strict_preflight defaults to False
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        result = pkg.export(tmp_path / "out")
+
+        # Export should have proceeded
+        assert assembly_called["value"], "Assembly generation should have been called"
+        assert result.assembly_result is not None
+        assert result.assembly_result.bom_path is not None
+
+        # Preflight failures should appear as warnings, not errors
+        assert len(result.warnings) == 1
+        assert "board_outline" in result.warnings[0]
+        assert result.success, f"Unexpected errors: {result.errors}"
+
+        # Preflight results should still be recorded
+        assert len(result.preflight_results) == 2
+
+    def test_strict_preflight_blocks_export(self, tmp_path, monkeypatch):
+        """Preflight FAIL should block export when strict_preflight is True."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        from kicad_tools.export import assembly
+
+        assembly_called = {"value": False}
+
+        def fake_assembly_export(self, output_dir=None):
+            assembly_called["value"] = True
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Mock preflight to return a FAIL result
+        fail_results = [
+            PreflightResult(
+                name="board_outline",
+                status="FAIL",
+                message="No board outline found",
+                details="Expected Edge.Cuts layer",
+            ),
+        ]
+        monkeypatch.setattr(
+            PreflightChecker, "run_all", lambda self: fail_results
+        )
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            strict_preflight=True,
+        )
+        pkg = ManufacturingPackage(
+            pcb_path=pcb,
+            manufacturer="jlcpcb",
+            config=config,
+        )
+        out_dir = tmp_path / "out"
+        result = pkg.export(out_dir)
+
+        # Export should NOT have proceeded
+        assert not assembly_called["value"], "Assembly generation should NOT have been called"
+        assert not result.success
+        assert len(result.errors) == 1
+        assert "board_outline" in result.errors[0]
+        assert "Expected Edge.Cuts layer" in result.errors[0]
+
+        # Output directory should not exist
+        assert not out_dir.exists()
