@@ -188,13 +188,13 @@ See `docs/mcp/` for complete documentation.
 Build schematics using reusable, tested circuit blocks:
 
 ```python
-from kicad_tools.schematic import Schematic
+from kicad_tools.schematic.models import Schematic
 from kicad_tools.schematic.blocks import (
     MCUBlock, CrystalOscillator, LDOBlock, USBConnector,
     DebugHeader, I2CPullups, ResetButton
 )
 
-sch = Schematic.create("project.kicad_sch")
+sch = Schematic("My STM32 Design")
 
 # Add an MCU with bypass capacitors
 mcu = MCUBlock(sch, x=150, y=100,
