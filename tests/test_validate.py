@@ -1098,6 +1098,61 @@ class TestBoardOutline:
 
         assert outline == []
 
+    def test_get_board_outline_gr_rect(self, tmp_path: Path):
+        """Test extracting board outline from a gr_rect on Edge.Cuts."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 0 0) (end 50 30)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "rect_outline.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        outline = pcb.get_board_outline()
+
+        # gr_rect decomposes to 4 segments -> 5 points (closed rectangle)
+        assert len(outline) == 5
+        # First and last point should be close (closed polygon)
+        assert pcb._points_close(outline[0], outline[-1])
+
+    def test_get_board_outline_segments_gr_rect(self, tmp_path: Path):
+        """Test getting board outline segments from a gr_rect on Edge.Cuts."""
+        from kicad_tools.schema.pcb import PCB
+
+        pcb_content = """(kicad_pcb
+          (version 20240108)
+          (generator "test")
+          (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+          (net 0 "")
+          (gr_rect (start 10 20) (end 60 70)
+            (stroke (width 0.1) (type default))
+            (fill none)
+            (layer "Edge.Cuts")
+            (uuid "12345678-1234-1234-1234-123456789abc"))
+        )"""
+        pcb_file = tmp_path / "rect_segments.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        pcb = PCB.load(str(pcb_file))
+        segments = pcb.get_board_outline_segments()
+
+        # gr_rect should produce 4 segments
+        assert len(segments) == 4
+        for seg_start, seg_end in segments:
+            assert isinstance(seg_start, tuple)
+            assert isinstance(seg_end, tuple)
+            assert len(seg_start) == 2
+            assert len(seg_end) == 2
+
 
 class TestEdgeClearanceRule:
     """Tests for EdgeClearanceRule."""
