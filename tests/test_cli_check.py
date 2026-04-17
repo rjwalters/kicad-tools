@@ -158,6 +158,79 @@ class TestCheckCommand:
         assert "Pure Python DRC" in captured.out or "kct check" in captured.out
 
 
+class TestCheckOutputFlag:
+    """Tests for the --output flag that writes JSON report to file."""
+
+    def test_output_writes_json_file(self, drc_clean_pcb: Path, tmp_path: Path):
+        """Test that --output writes a valid JSON report file."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "drc_report.json"
+        result = main([str(drc_clean_pcb), "--output", str(output_file)])
+        assert result == 0
+
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert "file" in data
+        assert "summary" in data
+        assert "violations" in data
+        assert data["summary"]["passed"] is True
+
+    def test_output_with_table_format(self, drc_clean_pcb: Path, tmp_path: Path, capsys):
+        """Test that --output writes JSON file even with table format (default)."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "drc_report.json"
+        result = main([str(drc_clean_pcb), "--output", str(output_file)])
+        assert result == 0
+
+        # Table output should still go to stdout
+        captured = capsys.readouterr()
+        assert "PURE PYTHON DRC CHECK" in captured.out
+
+        # JSON file should also be written
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert data["summary"]["passed"] is True
+
+    def test_output_creates_parent_directories(self, drc_clean_pcb: Path, tmp_path: Path):
+        """Test that --output creates parent directories if needed."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "subdir" / "nested" / "drc_report.json"
+        result = main([str(drc_clean_pcb), "--output", str(output_file)])
+        assert result == 0
+
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert "summary" in data
+
+    def test_output_without_flag_no_file(self, drc_clean_pcb: Path, tmp_path: Path, capsys):
+        """Test that no file is written when --output is not specified."""
+        from kicad_tools.cli.check_cmd import main
+
+        result = main([str(drc_clean_pcb)])
+        assert result == 0
+
+        # No drc_report.json should exist in the PCB directory
+        report = drc_clean_pcb.parent / "drc_report.json"
+        assert not report.exists()
+
+    def test_output_with_violations(self, minimal_pcb: Path, tmp_path: Path):
+        """Test that --output captures violations in the report file."""
+        from kicad_tools.cli.check_cmd import main
+
+        output_file = tmp_path / "drc_report.json"
+        result = main([str(minimal_pcb), "--output", str(output_file)])
+        assert result == 2  # Violations found
+
+        assert output_file.exists()
+        data = json.loads(output_file.read_text())
+        assert data["summary"]["passed"] is False
+        assert data["summary"]["errors"] > 0
+        assert len(data["violations"]) > 0
+
+
 class TestCheckCommandIntegration:
     """Integration tests for check command via main CLI."""
 

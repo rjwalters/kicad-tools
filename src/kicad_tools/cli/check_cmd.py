@@ -120,6 +120,12 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Skip specific checks (comma-separated: {', '.join(CHECK_CATEGORIES)})",
     )
     parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Write JSON report to file (implies --format json for file output)",
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -216,6 +222,12 @@ def main(argv: list[str] | None = None) -> int:
         output_summary(violations, results, pcb_path)
     else:
         output_table(violations, results, pcb_path, args.mfr, layers, args.verbose)
+
+    # Write JSON report to file if --output specified
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_report(violations, results, pcb_path, args.mfr, layers, output_path)
 
     # Determine exit code
     # Exit 2 = check ran successfully but found issues (errors, or warnings+strict)
@@ -379,6 +391,33 @@ def output_json(
         "violations": [v.to_dict() for v in violations],
     }
     print(json.dumps(data, indent=2))
+
+
+def write_json_report(
+    violations: list[DRCViolation],
+    results: DRCResults,
+    pcb_path: Path,
+    mfr: str,
+    layers: int,
+    output_path: Path,
+) -> None:
+    """Write DRC results as a JSON report file."""
+    error_count = sum(1 for v in violations if v.is_error)
+    warning_count = len(violations) - error_count
+
+    data = {
+        "file": str(pcb_path),
+        "manufacturer": mfr,
+        "layers": layers,
+        "summary": {
+            "errors": error_count,
+            "warnings": warning_count,
+            "rules_checked": results.rules_checked,
+            "passed": error_count == 0,
+        },
+        "violations": [v.to_dict() for v in violations],
+    }
+    output_path.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def output_summary(
