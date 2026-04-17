@@ -120,6 +120,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         y=100,
         ref="U1",
         value="AMS1117-3.3",
+        footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
     )
     print(f"   LDO: {ldo.reference}")
 
@@ -130,6 +131,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         y=100,
         ref="C1",
         value="10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     print(f"   Input cap: {c_in.reference} = 10uF")
 
@@ -140,6 +142,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         y=100,
         ref="C2",
         value="10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     c_out2 = sch.add_symbol(
         "Device:C_Small",
@@ -147,6 +150,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         y=100,
         ref="C3",
         value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     print(f"   Output caps: {c_out1.reference} = 10uF, {c_out2.reference} = 100nF")
 

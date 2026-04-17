@@ -131,6 +131,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=100,
         ref="J1",
         value="Power Input",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
     )
     print(f"   Power connector: {j_power.reference}")
 
@@ -141,6 +142,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=100,
         ref="F1",
         value="15A",
+        footprint="Fuse:Fuse_1206_3216Metric",
     )
     print(f"   Fuse: {fuse.reference} = 15A")
 
@@ -152,6 +154,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         ref="D1",
         value="SMBJ24A",
         rotation=90,
+        footprint="Diode_SMD:D_SMA",
     )
     print(f"   TVS diode: {tvs.reference}")
 
@@ -162,6 +165,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=120,
         ref="C1",
         value="470uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     c_bulk2 = sch.add_symbol(
         "Device:C",
@@ -169,6 +173,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=120,
         ref="C2",
         value="100nF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     print(f"   Bulk caps: {c_bulk1.reference} = 470uF, {c_bulk2.reference} = 100nF")
 
@@ -255,6 +260,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=100,
         ref="U2",
         value="AMS1117-3.3",
+        footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
     )
     print(f"   LDO: {ldo.reference}")
 
@@ -265,6 +271,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=120,
         ref="C5",
         value="10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     c_ldo_out = sch.add_symbol(
         "Device:C",
@@ -272,6 +279,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=120,
         ref="C6",
         value="10uF",
+        footprint="Capacitor_SMD:C_0805_2012Metric",
     )
 
     # Wire LDO
@@ -304,9 +312,9 @@ def create_bldc_controller(output_dir: Path) -> Path:
     print("   MCU: STM32G431KB (placeholder)")
 
     # Bypass capacitors for MCU
-    c_mcu1 = sch.add_symbol("Device:C", x=X_MCU, y=100, ref="C7", value="100nF")
-    c_mcu2 = sch.add_symbol("Device:C", x=X_MCU + 10, y=100, ref="C8", value="100nF")
-    c_mcu3 = sch.add_symbol("Device:C", x=X_MCU + 20, y=100, ref="C9", value="4.7uF")
+    c_mcu1 = sch.add_symbol("Device:C", x=X_MCU, y=100, ref="C7", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
+    c_mcu2 = sch.add_symbol("Device:C", x=X_MCU + 10, y=100, ref="C8", value="100nF", footprint="Capacitor_SMD:C_0805_2012Metric")
+    c_mcu3 = sch.add_symbol("Device:C", x=X_MCU + 20, y=100, ref="C9", value="4.7uF", footprint="Capacitor_SMD:C_0805_2012Metric")
     print(f"   Bypass caps: {c_mcu1.reference}, {c_mcu2.reference}, {c_mcu3.reference}")
 
     for cap in [c_mcu1, c_mcu2, c_mcu3]:
@@ -430,6 +438,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=Y_POWER_STAGE + 20,
         ref="J2",
         value="Motor Output",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
     )
     print(f"   Motor connector: {j_motor.reference} (U/V/W)")
 
@@ -460,6 +469,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         y=100,
         ref="J3",
         value="Hall Sensors",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
     )
     print(f"   Hall connector: {j_hall.reference}")
 
