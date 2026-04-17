@@ -74,7 +74,7 @@ class LEDIndicator(CircuitBlock):
         # Wire LED cathode to resistor
         led_cathode = self.led.pin_position("K")
         r_pin1 = self.resistor.pin_position("1")
-        sch.add_wire(led_cathode, r_pin1)
+        sch.add_wire(led_cathode, r_pin1, warn_on_collision=False)
 
         # Define ports
         led_anode = self.led.pin_position("A")
@@ -99,10 +99,10 @@ class LEDIndicator(CircuitBlock):
         gnd_pos = self.ports["GND"]
 
         # Connect anode to VCC rail
-        sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+        sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y), warn_on_collision=False)
 
         # Connect resistor to GND rail
-        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         if add_junctions:
             sch.add_junction(vcc_pos[0], vcc_rail_y)

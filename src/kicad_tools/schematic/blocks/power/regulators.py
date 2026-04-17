@@ -538,11 +538,11 @@ class BuckConverter(CircuitBlock):
 
         # Connect regulator VIN to input rail
         vin_pos = self.ports["VIN"]
-        sch.add_wire(vin_pos, (vin_pos[0], vin_rail_y))
+        sch.add_wire(vin_pos, (vin_pos[0], vin_rail_y), warn_on_collision=False)
 
         # Connect regulator GND to ground rail
         gnd_pos = self.ports["GND"]
-        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         # Wire input cap
         sch.wire_decoupling_cap(self.input_cap, vin_rail_y, gnd_rail_y)
@@ -552,19 +552,19 @@ class BuckConverter(CircuitBlock):
 
         # Connect VOUT to output rail
         vout_pos = self.ports["VOUT"]
-        sch.add_wire(vout_pos, (vout_pos[0], vout_rail_y))
+        sch.add_wire(vout_pos, (vout_pos[0], vout_rail_y), warn_on_collision=False)
 
         # Connect diode anode to GND (async topology)
         if self.topology == "async":
             d_anode = self.diode.pin_position("A")
-            sch.add_wire(d_anode, (d_anode[0], gnd_rail_y))
+            sch.add_wire(d_anode, (d_anode[0], gnd_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(d_anode[0], gnd_rail_y)
 
         # Connect feedback divider bottom to GND if present
         if self.has_feedback_divider:
             r_bottom_2 = self.r_fb_bottom.pin_position("2")
-            sch.add_wire(r_bottom_2, (r_bottom_2[0], gnd_rail_y))
+            sch.add_wire(r_bottom_2, (r_bottom_2[0], gnd_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(r_bottom_2[0], gnd_rail_y)
 

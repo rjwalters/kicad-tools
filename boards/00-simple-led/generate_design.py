@@ -153,7 +153,7 @@ def create_led_schematic(output_dir: Path) -> Path:
     sch.add_junction(x_j1, rail_vcc_y)
 
     # J1 Pin 2 (GND) to GND rail
-    sch.add_wire(j1_pin2, (x_j1, rail_gnd_y))
+    sch.add_wire(j1_pin2, (x_j1, rail_gnd_y), warn_on_collision=False)
     sch.add_junction(x_j1, rail_gnd_y)
     print("   J1 -> VCC/GND rails")
 
@@ -163,7 +163,7 @@ def create_led_schematic(output_dir: Path) -> Path:
     print("   R1 -> VCC rail")
 
     # R1 Pin 2 to D1 Pin 1 (Cathode) - LED_ANODE net
-    sch.add_wire(r1_pin2, d1_pin1)
+    sch.add_wire(r1_pin2, d1_pin1, warn_on_collision=False)
     print("   R1 <-> D1 (internal connection)")
 
     # D1 Pin 2 (Anode) to GND rail

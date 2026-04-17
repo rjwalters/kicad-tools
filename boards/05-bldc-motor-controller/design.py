@@ -179,15 +179,15 @@ def create_bldc_controller(output_dir: Path) -> Path:
     fuse_out = fuse.pin_position("2")
 
     sch.add_wire(pin1_pos, fuse_in)
-    sch.add_wire(fuse_out, (fuse_out[0], RAIL_VMOTOR))
+    sch.add_wire(fuse_out, (fuse_out[0], RAIL_VMOTOR), warn_on_collision=False)
     sch.add_junction(fuse_out[0], RAIL_VMOTOR)
 
     # Wire TVS and caps to rails (TVS has pins A1, A2 for bidirectional)
     tvs_a1 = tvs.pin_position("A1")
     tvs_a2 = tvs.pin_position("A2")
-    sch.add_wire(tvs_a1, (tvs_a1[0], RAIL_VMOTOR))
+    sch.add_wire(tvs_a1, (tvs_a1[0], RAIL_VMOTOR), warn_on_collision=False)
     sch.add_junction(tvs_a1[0], RAIL_VMOTOR)
-    sch.add_wire(tvs_a2, (tvs_a2[0], RAIL_GND))
+    sch.add_wire(tvs_a2, (tvs_a2[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(tvs_a2[0], RAIL_GND)
 
     sch.wire_decoupling_cap(c_bulk1, RAIL_VMOTOR, RAIL_GND)
@@ -195,7 +195,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
 
     # Connector pin 2 → GND
     pin2_pos = j_power.pin_position("2")
-    sch.add_wire(pin2_pos, (pin2_pos[0], RAIL_GND))
+    sch.add_wire(pin2_pos, (pin2_pos[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(pin2_pos[0], RAIL_GND)
 
     # =========================================================================
@@ -228,13 +228,13 @@ def create_bldc_controller(output_dir: Path) -> Path:
     # The LM2596 ON/OFF pin is active-low: GND = ON, >1.3V = OFF
     try:
         on_off_pos = buck.regulator.pin_position("~{ON}/OFF")
-        sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND))
+        sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND), warn_on_collision=False)
         sch.add_junction(on_off_pos[0], RAIL_GND)
     except KeyError:
         # Some LM2596 symbols may have different pin names
         try:
             on_off_pos = buck.regulator.pin_position("ON/OFF")
-            sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND))
+            sch.add_wire(on_off_pos, (on_off_pos[0], RAIL_GND), warn_on_collision=False)
             sch.add_junction(on_off_pos[0], RAIL_GND)
         except KeyError:
             pass  # Pin not found, may not be present on this symbol variant
@@ -279,11 +279,11 @@ def create_bldc_controller(output_dir: Path) -> Path:
     ldo_vout = ldo.pin_position("VO")
     ldo_gnd = ldo.pin_position("GND")
 
-    sch.add_wire(ldo_vin, (ldo_vin[0], RAIL_5V))
+    sch.add_wire(ldo_vin, (ldo_vin[0], RAIL_5V), warn_on_collision=False)
     sch.add_junction(ldo_vin[0], RAIL_5V)
-    sch.add_wire(ldo_vout, (ldo_vout[0], RAIL_3V3))
+    sch.add_wire(ldo_vout, (ldo_vout[0], RAIL_3V3), warn_on_collision=False)
     sch.add_junction(ldo_vout[0], RAIL_3V3)
-    sch.add_wire(ldo_gnd, (ldo_gnd[0], RAIL_GND))
+    sch.add_wire(ldo_gnd, (ldo_gnd[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(ldo_gnd[0], RAIL_GND)
 
     sch.wire_decoupling_cap(c_ldo_in, RAIL_5V, RAIL_GND)
@@ -406,15 +406,15 @@ def create_bldc_controller(output_dir: Path) -> Path:
         phase_gnd = inverter.half_bridges[i].port("GND")
         sense_in = sense.port("IN_POS")
         sense_gnd = sense.port("GND")
-        sch.add_wire(phase_gnd, sense_in)
+        sch.add_wire(phase_gnd, sense_in, warn_on_collision=False)
 
         # Add current sense labels with connecting wires
         label_x = x_phase - 10
         # Wire from sense_in to label position for ISENSE+
-        sch.add_wire(sense_in, (label_x, sense_in[1]))
+        sch.add_wire(sense_in, (label_x, sense_in[1]), warn_on_collision=False)
         sch.add_label(f"ISENSE_{phase}+", label_x, sense_in[1], rotation=0)
         # Wire from sense GND to label position for ISENSE-
-        sch.add_wire(sense_gnd, (label_x, sense_gnd[1]))
+        sch.add_wire(sense_gnd, (label_x, sense_gnd[1]), warn_on_collision=False)
         sch.add_label(f"ISENSE_{phase}-", label_x, sense_gnd[1], rotation=0)
 
         print(f"   Phase {phase}: Current sense R{10 + i} (CurrentSenseShunt block)")
@@ -446,7 +446,7 @@ def create_bldc_controller(output_dir: Path) -> Path:
         # Vertical wire down to phase output Y level
         sch.add_wire((mid_x, pin_pos[1]), (mid_x, phase_out[1]))
         # Horizontal wire to connect to phase output
-        sch.add_wire((mid_x, phase_out[1]), phase_out)
+        sch.add_wire((mid_x, phase_out[1]), phase_out, warn_on_collision=False)
         sch.add_junction(phase_out[0], phase_out[1])
 
     # =========================================================================
@@ -470,17 +470,17 @@ def create_bldc_controller(output_dir: Path) -> Path:
         pin_pos = j_hall.pin_position(str(i + 1))
         label_x = X_CONNECTORS - 20
         # Add wire from pin to label position
-        sch.add_wire(pin_pos, (label_x, pin_pos[1]))
+        sch.add_wire(pin_pos, (label_x, pin_pos[1]), warn_on_collision=False)
         sch.add_label(label, label_x, pin_pos[1], rotation=0)
 
     # Wire hall connector VCC (pin 4) to 3.3V rail
     hall_vcc_pos = j_hall.pin_position("4")
-    sch.add_wire(hall_vcc_pos, (hall_vcc_pos[0], RAIL_3V3))
+    sch.add_wire(hall_vcc_pos, (hall_vcc_pos[0], RAIL_3V3), warn_on_collision=False)
     sch.add_junction(hall_vcc_pos[0], RAIL_3V3)
 
     # Wire hall connector GND (pin 5) to GND rail
     hall_gnd_pos = j_hall.pin_position("5")
-    sch.add_wire(hall_gnd_pos, (hall_gnd_pos[0], RAIL_GND))
+    sch.add_wire(hall_gnd_pos, (hall_gnd_pos[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(hall_gnd_pos[0], RAIL_GND)
 
     # =========================================================================

@@ -158,33 +158,33 @@ def create_voltage_divider_schematic(output_dir: Path) -> Path:
     sch.add_junction(x_j1, rail_vin_y)
 
     # J1 Pin 2 to GND rail (vertical wire)
-    sch.add_wire(j1_pin2, (x_j1, rail_gnd_y))
+    sch.add_wire(j1_pin2, (x_j1, rail_gnd_y), warn_on_collision=False)
     sch.add_junction(x_j1, rail_gnd_y)
     print("   J1 -> VIN/GND rails")
 
     # R1 Pin 1 to VIN rail
-    sch.add_wire(r1_pin1, (x_r1, rail_vin_y))
+    sch.add_wire(r1_pin1, (x_r1, rail_vin_y), warn_on_collision=False)
     sch.add_junction(x_r1, rail_vin_y)
     print("   R1 -> VIN rail")
 
     # R1-R2 connection (VOUT junction)
-    sch.add_wire(r1_pin2, r2_pin1)
+    sch.add_wire(r1_pin2, r2_pin1, warn_on_collision=False)
     sch.add_junction(r1_pin2[0], r1_pin2[1])
     print("   R1 <-> R2 (VOUT)")
 
     # R2 Pin 2 to GND rail
-    sch.add_wire(r2_pin2, (x_r2, rail_gnd_y))
+    sch.add_wire(r2_pin2, (x_r2, rail_gnd_y), warn_on_collision=False)
     sch.add_junction(x_r2, rail_gnd_y)
     print("   R2 -> GND rail")
 
     # J2 Pin 1 to VOUT (horizontal then vertical)
     vout_y = r1_pin2[1]  # VOUT is at R1 pin 2 Y position
-    sch.add_wire(r1_pin2, (x_j2, vout_y))  # Horizontal from VOUT to J2's X
+    sch.add_wire(r1_pin2, (x_j2, vout_y), warn_on_collision=False)  # Horizontal from VOUT to J2's X
     sch.add_wire((x_j2, vout_y), j2_pin1)  # Vertical down to J2 Pin 1
     print("   VOUT -> J2 Pin 1")
 
     # J2 Pin 2 to GND rail
-    sch.add_wire(j2_pin2, (x_j2, rail_gnd_y))
+    sch.add_wire(j2_pin2, (x_j2, rail_gnd_y), warn_on_collision=False)
     sch.add_junction(x_j2, rail_gnd_y)
     print("   J2 -> GND rail")
 
