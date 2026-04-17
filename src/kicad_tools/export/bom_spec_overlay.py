@@ -122,19 +122,19 @@ class SpecOverlayReport:
 # ---------------------------------------------------------------------------
 
 
-def find_spec_file(project_dir: Path) -> Path | None:
-    """Locate a ``.kct`` spec file in *project_dir*.
+def _find_spec_in_dir(directory: Path) -> Path | None:
+    """Check a single directory for a ``.kct`` spec file.
 
     Prefers ``project.kct``; falls back to the first ``.kct`` found.
     Warns if multiple ``.kct`` files exist and none is named ``project.kct``.
 
-    Returns ``None`` when no spec file is found.
+    Returns ``None`` when no spec file is found in *directory*.
     """
-    project_kct = project_dir / "project.kct"
+    project_kct = directory / "project.kct"
     if project_kct.is_file():
         return project_kct
 
-    kct_files = sorted(project_dir.glob("*.kct"))
+    kct_files = sorted(directory.glob("*.kct"))
     if not kct_files:
         return None
 
@@ -142,11 +142,47 @@ def find_spec_file(project_dir: Path) -> Path | None:
         logger.warning(
             "Multiple .kct files found in %s; using %s. "
             "Rename the primary spec to 'project.kct' to suppress this warning.",
-            project_dir,
+            directory,
             kct_files[0].name,
         )
 
     return kct_files[0]
+
+
+def find_spec_file(project_dir: Path) -> Path | None:
+    """Locate a ``.kct`` spec file in *project_dir* or its ancestors.
+
+    Searches *project_dir* first, then walks up parent directories until a
+    ``.kct`` file is found, the filesystem root is reached, or a ``.git``
+    directory is encountered (to avoid escaping the repository).
+
+    Within each directory, ``project.kct`` is preferred over other ``.kct``
+    files.
+
+    Returns ``None`` when no spec file is found.
+    """
+    current = project_dir.resolve()
+
+    while True:
+        result = _find_spec_in_dir(current)
+        if result is not None:
+            if current != project_dir.resolve():
+                logger.info(
+                    "Auto-detected spec file in parent directory: %s",
+                    result,
+                )
+            return result
+
+        # Stop if we hit a .git boundary (don't escape the repo)
+        if (current / ".git").exists():
+            return None
+
+        parent = current.parent
+        # Stop at filesystem root
+        if parent == current:
+            return None
+
+        current = parent
 
 
 # ---------------------------------------------------------------------------

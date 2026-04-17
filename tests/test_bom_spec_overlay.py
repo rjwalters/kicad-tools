@@ -219,6 +219,62 @@ class TestFindSpecFile:
             assert result is not None
             mock_logger.warning.assert_called_once()
 
+    def test_find_spec_file_in_parent_dir(self, tmp_path: Path):
+        """A .kct in the parent directory is found when PCB is in a subdirectory."""
+        (tmp_path / "project.kct").write_text("kct_version: '1.0'")
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        result = find_spec_file(output_dir)
+        assert result is not None
+        assert result.name == "project.kct"
+        assert result.parent == tmp_path
+
+    def test_find_spec_file_stops_at_git_boundary(self, tmp_path: Path):
+        """Walk-up should not cross a .git boundary."""
+        # Place .kct above a directory that contains .git
+        (tmp_path / "project.kct").write_text("kct_version: '1.0'")
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        (repo_dir / ".git").mkdir()  # simulates a git repo root
+        output_dir = repo_dir / "output"
+        output_dir.mkdir()
+
+        result = find_spec_file(output_dir)
+        # Should stop at repo_dir (which has .git) and NOT find the .kct above
+        assert result is None
+
+    def test_find_spec_file_stops_at_root(self, tmp_path: Path):
+        """No infinite loop when no .kct exists anywhere."""
+        deep_dir = tmp_path / "a" / "b" / "c"
+        deep_dir.mkdir(parents=True)
+
+        result = find_spec_file(deep_dir)
+        assert result is None
+
+    def test_find_spec_file_prefers_same_dir(self, tmp_path: Path):
+        """If .kct exists in both current and parent, use current."""
+        (tmp_path / "project.kct").write_text("kct_version: '1.0'")
+        child = tmp_path / "child"
+        child.mkdir()
+        (child / "project.kct").write_text("kct_version: '1.0'")
+
+        result = find_spec_file(child)
+        assert result is not None
+        assert result.parent == child
+
+    def test_find_spec_file_parent_logs_info(self, tmp_path: Path):
+        """An INFO log is emitted when the spec is found in a parent directory."""
+        (tmp_path / "project.kct").write_text("kct_version: '1.0'")
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+
+        with patch("kicad_tools.export.bom_spec_overlay.logger") as mock_logger:
+            result = find_spec_file(output_dir)
+            assert result is not None
+            mock_logger.info.assert_called_once()
+            assert "parent" in mock_logger.info.call_args[0][0].lower()
+
 
 # ---------------------------------------------------------------------------
 # Integration: spec source in enrichment report
