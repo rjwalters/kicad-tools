@@ -725,19 +725,16 @@ class GateDriverBlock(CircuitBlock):
         # Select symbol based on driver type
         if driver_symbol is None:
             if driver_type == "3-phase":
-                driver_symbol = "Driver_FET:DRV8301"
+                driver_symbol = "Driver_Motor:DRV8308"
             else:
                 driver_symbol = "Driver_FET:IR2110"
 
-        # Add placeholder text for the driver IC
-        # (In production, would use actual driver symbol from library)
-        sch.add_text(
-            f"Gate Driver: {value}\nType: {driver_type}\n(Add from library)",
-            x=x,
-            y=y,
+        # Add the driver IC symbol
+        self.driver = sch.add_symbol(
+            driver_symbol, x, y, ref, value
         )
 
-        self.components = {}
+        self.components = {"DRIVER": self.driver}
 
         # Number of phases
         num_phases = 3 if driver_type == "3-phase" else 1
