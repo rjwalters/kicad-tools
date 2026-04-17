@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -239,6 +240,87 @@ class TestExportManufacturing:
             except ExportError as e:
                 # kicad-cli may fail for various reasons
                 pytest.skip(f"kicad-cli export failed: {e}")
+
+
+class TestGenerateReport:
+    """Tests for ManufacturingPackage._generate_report method."""
+
+    def test_generate_report_produces_markdown(self, test_project_pcb):
+        """_generate_report should produce a report.md and set result.report_path."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingConfig,
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+            config=ManufacturingConfig(include_report=True),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+            pkg._generate_report(out_dir, result)
+
+            # report_path should be set to a valid .md file
+            assert result.report_path is not None
+            assert result.report_path.exists()
+            assert result.report_path.suffix == ".md"
+            # No errors should be recorded
+            report_errors = [e for e in result.errors if "Report" in e or "report" in e]
+            assert len(report_errors) == 0
+
+    def test_generate_report_no_import_error(self, test_project_pcb):
+        """_generate_report must not trigger an ImportError for generate_report."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+
+            # Patch logger to capture warnings -- ImportError would produce
+            # "report module not available" warning
+            with patch(
+                "kicad_tools.export.manufacturing.logger"
+            ) as mock_logger:
+                pkg._generate_report(out_dir, result)
+
+                # Verify the old misleading message does NOT appear
+                for call in mock_logger.warning.call_args_list:
+                    msg = call[0][0] if call[0] else ""
+                    assert "report module not available" not in msg
+
+    def test_generate_report_sets_report_path_in_result(self, test_project_pcb):
+        """ManufacturingResult.report_path should point to the generated file."""
+        from kicad_tools.export.manufacturing import (
+            ManufacturingPackage,
+            ManufacturingResult,
+        )
+
+        pkg = ManufacturingPackage(
+            pcb_path=test_project_pcb,
+            manufacturer="jlcpcb",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            result = ManufacturingResult(output_dir=out_dir)
+            pkg._generate_report(out_dir, result)
+
+            assert result.report_path is not None
+            content = result.report_path.read_text(encoding="utf-8")
+            # Should contain some markdown content
+            assert len(content) > 0
 
 
 # Fixtures

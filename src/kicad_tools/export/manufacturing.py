@@ -332,26 +332,96 @@ class ManufacturingPackage:
     def _generate_report(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Generate a Markdown design report."""
         try:
-            from ..report.generator import generate_report
+            from ..report.collector import ReportDataCollector
+            from ..report.generator import ReportGenerator
+            from ..report.models import ReportData
+        except ImportError:
+            logger.warning(
+                "Report generation skipped: required dependency not installed "
+                "(e.g. jinja2)"
+            )
+            return
 
-            generate_report(
-                input_path=self.pcb_path,
-                output_dir=out_dir,
+        try:
+            # Pre-determine the version directory so collected data and report
+            # land in the same vN/ directory.
+            version_dir = ReportGenerator.next_version_dir(out_dir)
+            data_dir = version_dir / "data"
+
+            # Collect design data snapshots
+            collector = ReportDataCollector(
+                pcb_path=self.pcb_path,
                 manufacturer=self.manufacturer,
             )
-            # The report generator writes to a versioned subdir;
-            # look for the produced .md file.
-            md_files = sorted(out_dir.glob("**/*.md"))
-            if md_files:
-                result.report_path = md_files[0]
-                logger.info(f"Generated report: {result.report_path}")
-            else:
-                result.errors.append("Report generation produced no output")
-        except ImportError:
-            logger.warning("Report generation skipped: report module not available")
+            collector.collect_all(data_dir)
+
+            # Load collected JSON snapshots into ReportData kwargs
+            data_kwargs = self._load_report_data_dir(data_dir)
+
+            project_name = self.pcb_path.stem
+            data = ReportData(
+                project_name=project_name,
+                revision=data_kwargs.pop("revision", "1"),
+                date=data_kwargs.pop(
+                    "date",
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                ),
+                manufacturer=self.manufacturer,
+                **data_kwargs,
+            )
+
+            generator = ReportGenerator()
+            report_path = generator.generate(data, out_dir, version_dir=version_dir)
+            result.report_path = report_path
+            logger.info(f"Generated report: {result.report_path}")
         except Exception as e:
             result.errors.append(f"Report generation failed: {e}")
             logger.error(f"Report generation failed: {e}")
+
+    @staticmethod
+    def _load_report_data_dir(data_dir: Path) -> dict:
+        """Load JSON snapshot files from *data_dir* into ReportData kwargs.
+
+        Mirrors the logic in ``cli/report_cmd.py:_load_data_dir`` but is
+        self-contained so the manufacturing exporter has no dependency on the
+        CLI layer.
+        """
+        import json as _json
+
+        mappings = {
+            "board_summary.json": "board_stats",
+            "bom.json": "bom_groups",
+            "drc_summary.json": "drc",
+            "erc_summary.json": "erc",
+            "audit.json": "audit",
+            "net_status.json": "net_status",
+            "cost.json": "cost",
+            "analog_components.json": "analog_components",
+        }
+
+        result: dict = {}
+        for filename, field_name in mappings.items():
+            json_path = data_dir / filename
+            if json_path.exists():
+                with open(json_path, encoding="utf-8") as f:
+                    raw = _json.load(f)
+                # Unwrap the envelope written by ReportDataCollector
+                data = raw.get("data") if isinstance(raw, dict) else raw
+                if data is None:
+                    continue
+                result[field_name] = data
+
+        # BOM: collector nests group list under ``groups`` key;
+        # ReportData.bom_groups expects a plain list[dict].
+        if "bom_groups" in result and isinstance(result["bom_groups"], dict):
+            result["bom_groups"] = result["bom_groups"].get("groups", [])
+
+        # Analog components: collector nests list under ``components``;
+        # ReportData.analog_components expects a plain list[dict].
+        if "analog_components" in result and isinstance(result["analog_components"], dict):
+            result["analog_components"] = result["analog_components"].get("components", [])
+
+        return result
 
     def _generate_project_zip(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Create ZIP of KiCad project files."""
