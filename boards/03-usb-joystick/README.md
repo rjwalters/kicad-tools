@@ -44,7 +44,7 @@ kct build boards/03-usb-joystick --dry-run
 |-----------|-------------|-----------|
 | U1 | Microcontroller (ATmega32U4-style) | TQFP-32 7x7mm |
 | J1 | USB Type-C Connector | USB-C Receptacle |
-| JOY1 | 2-axis Analog Joystick | 5-pin module |
+| J2 | 2-axis Analog Joystick | 5-pin module |
 | SW1-SW4 | Tactile Buttons | 6x6mm SMD |
 | Y1 | 16MHz Crystal | HC49 Vertical |
 | C1-C4 | Decoupling Capacitors (100nF) | 0402 SMD |
