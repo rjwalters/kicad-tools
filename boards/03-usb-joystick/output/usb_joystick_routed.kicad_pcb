@@ -126,7 +126,7 @@
     (layer "F.Cu")
     (uuid "4b31dab1-1edb-437a-b120-414f48e5d96b")
     (at 112.0 122.0)
-    (fp_text reference "JOY1" (at 0 -3) (layer "F.SilkS") (uuid "dfb2b620-62ba-4cba-a091-6e1241fae8c9")
+    (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "dfb2b620-62ba-4cba-a091-6e1241fae8c9")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "Joystick" (at 0 3) (layer "F.Fab") (uuid "eceba65f-5a31-4491-8f4e-08b809a2e6e4")

@@ -636,7 +636,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "JOY1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "Joystick" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
@@ -711,7 +711,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     print("\n1. Adding footprints...")
     print("   U1 (MCU) at board center")
     print("   J1 (USB-C) at top")
-    print("   JOY1 (Joystick) at left")
+    print("   J2 (Joystick) at left")
     print("   Y1 (Crystal) near MCU")
 
     button_y = BOARD_ORIGIN_Y + 35

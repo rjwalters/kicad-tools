@@ -334,7 +334,7 @@ def generate_joystick() -> str:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "JOY1" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "J2" (at 0 -3) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "Joystick" (at 0 3) (layer "F.Fab") (uuid "{generate_uuid()}")
