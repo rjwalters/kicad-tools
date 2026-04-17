@@ -150,10 +150,11 @@ class AssemblyPackage:
         if schematic_path:
             self.schematic_path = Path(schematic_path)
         else:
-            # Look for schematic with same name
-            self.schematic_path = self.pcb_path.with_suffix(".kicad_sch")
+            from kicad_tools.report.utils import find_schematic
 
-        if not self.schematic_path.exists():
+            self.schematic_path = find_schematic(self.pcb_path)
+
+        if self.schematic_path is not None and not self.schematic_path.exists():
             logger.warning(f"Schematic not found: {self.schematic_path}")
             self.schematic_path = None
 

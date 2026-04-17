@@ -198,9 +198,11 @@ class PreflightChecker:
     def _check_schematic_exists(self) -> PreflightResult:
         """Check that the schematic file exists (needed for BOM/CPL)."""
         if self.schematic_path is None:
-            # Try auto-detection
-            auto_sch = self.pcb_path.with_suffix(".kicad_sch")
-            if auto_sch.exists():
+            # Try auto-detection using shared find_schematic logic
+            from kicad_tools.report.utils import find_schematic
+
+            auto_sch = find_schematic(self.pcb_path)
+            if auto_sch is not None:
                 self.schematic_path = auto_sch
                 return PreflightResult(
                     name="schematic_file",

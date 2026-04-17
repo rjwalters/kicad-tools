@@ -41,6 +41,16 @@ def find_schematic(pcb_path: Path) -> Path | None:
     if candidate.exists():
         return candidate
 
+    # Step 1.5: strip known suffixes (_routed, _fixed, etc.) from the PCB stem
+    _STRIP_SUFFIXES = ("_routed", "_fixed", "_v2", "_final")
+    stem = pcb_path.stem
+    for suffix in _STRIP_SUFFIXES:
+        if stem.endswith(suffix):
+            stripped = directory / (stem[: -len(suffix)] + ".kicad_sch")
+            if stripped.exists():
+                return stripped
+            break  # only strip one suffix
+
     # Step 2: project file lookup
     pro_files = list(directory.glob("*.kicad_pro"))
     for pro in pro_files:
