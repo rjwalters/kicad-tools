@@ -284,14 +284,14 @@ class DebugHeader(CircuitBlock):
         # Connect VCC
         if "VCC" in self.ports:
             vcc_pos = self.ports["VCC"]
-            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(vcc_pos[0], vcc_rail_y)
 
         # Connect GND
         if "GND" in self.ports:
             gnd_pos = self.ports["GND"]
-            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(gnd_pos[0], gnd_rail_y)
 

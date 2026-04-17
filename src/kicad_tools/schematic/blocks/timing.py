@@ -248,7 +248,7 @@ class CrystalOscillator(CircuitBlock):
         sch.add_wire((c2_pin1[0], xtal_pin2[1]), c2_pin1)  # Vertical down to cap
 
         # Wire cap bottoms together (ground bus)
-        sch.add_wire(c1_pin2, c2_pin2)
+        sch.add_wire(c1_pin2, c2_pin2, warn_on_collision=False)
 
         # Add junctions at crystal-to-cap connection points
         sch.add_junction(c1_pin1[0], xtal_pin1[1])
@@ -282,7 +282,7 @@ class CrystalOscillator(CircuitBlock):
         gnd_pos = self.ports["GND"]
 
         # Connect ground bus to GND rail
-        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         if add_junction:
             sch.add_junction(gnd_pos[0], gnd_rail_y)

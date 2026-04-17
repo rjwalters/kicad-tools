@@ -2274,6 +2274,43 @@ class TestWireCollisionDetection:
         assert (50, 100) in endpoints
         assert (150, 100) in endpoints
 
+    def test_t_connection_no_warn_with_suppression(self):
+        """Intentional T-connections don't warn when warn_on_collision=False."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Create a horizontal rail (simulating add_rail)
+        sch.add_wire((0, 100), (200, 100), snap=False, warn_on_collision=False)
+
+        # Create multiple vertical T-connections to the rail with suppression
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sch.add_wire((50, 50), (50, 100), snap=False, warn_on_collision=False)
+            sch.add_wire((100, 50), (100, 100), snap=False, warn_on_collision=False)
+            sch.add_wire((150, 50), (150, 100), snap=False, warn_on_collision=False)
+
+            collision_warnings = [x for x in w if "lands on existing wire" in str(x.message)]
+            assert len(collision_warnings) == 0
+
+    def test_t_connection_still_warns_without_suppression(self):
+        """T-connections still warn when warn_on_collision is True (default)."""
+        import warnings
+
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+
+        # Create a horizontal rail
+        sch.add_wire((0, 100), (200, 100), snap=False, warn_on_collision=False)
+
+        # Create a vertical T-connection WITHOUT suppression
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sch.add_wire((50, 50), (50, 100), snap=False, warn_on_collision=True)
+
+            collision_warnings = [x for x in w if "lands on existing wire" in str(x.message)]
+            assert len(collision_warnings) == 1
+            assert "(50, 100)" in str(collision_warnings[0].message)
+
     def test_wire_collision_str(self):
         """WireCollision has a useful string representation."""
         from kicad_tools.schematic.models import Wire, WireCollision

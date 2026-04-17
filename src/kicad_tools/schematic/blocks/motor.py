@@ -231,11 +231,11 @@ class HalfBridge(CircuitBlock):
 
         # Connect HS drain to VIN rail
         vin_pos = self._vin_pos
-        sch.add_wire(vin_pos, (vin_pos[0], vin_rail_y))
+        sch.add_wire(vin_pos, (vin_pos[0], vin_rail_y), warn_on_collision=False)
 
         # Connect LS source to GND rail
         gnd_pos = self._gnd_pos
-        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         if add_junctions:
             sch.add_junction(vin_pos[0], vin_rail_y)
@@ -244,7 +244,7 @@ class HalfBridge(CircuitBlock):
         # Connect bootstrap diode anode to VIN rail
         if self.has_bootstrap:
             boot_vin = self.ports["VIN_BOOT"]
-            sch.add_wire(boot_vin, (boot_vin[0], vin_rail_y))
+            sch.add_wire(boot_vin, (boot_vin[0], vin_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(boot_vin[0], vin_rail_y)
 
@@ -347,7 +347,7 @@ class ThreePhaseInverter(CircuitBlock):
             phase_pos = hb.port("VOUT")
             label_x = phase_pos[0] + 10
             # Add wire from phase output to label position
-            sch.add_wire(phase_pos, (label_x, phase_pos[1]))
+            sch.add_wire(phase_pos, (label_x, phase_pos[1]), warn_on_collision=False)
             sch.add_label(f"PHASE_{label}", label_x, phase_pos[1], rotation=0)
 
         # Store all components
@@ -563,7 +563,7 @@ class CurrentSenseShunt(CircuitBlock):
 
         # Connect shunt GND to rail
         gnd_pos = self.ports["GND"]
-        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+        sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
         if add_junctions:
             sch.add_junction(gnd_pos[0], gnd_rail_y)

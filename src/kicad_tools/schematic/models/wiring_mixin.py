@@ -347,12 +347,12 @@ class SchematicWiringMixin:
             pin2_pos = cap.pin_position("~")
 
         # Wire top to power rail
-        wires.append(self.add_wire(pin1_pos, (pin1_pos[0], power_rail_y)))
+        wires.append(self.add_wire(pin1_pos, (pin1_pos[0], power_rail_y), warn_on_collision=False))
         if add_junctions:
             self.add_junction(pin1_pos[0], power_rail_y)
 
         # Wire bottom to ground rail
-        wires.append(self.add_wire(pin2_pos, (pin2_pos[0], gnd_rail_y)))
+        wires.append(self.add_wire(pin2_pos, (pin2_pos[0], gnd_rail_y), warn_on_collision=False))
         if add_junctions:
             self.add_junction(pin2_pos[0], gnd_rail_y)
 

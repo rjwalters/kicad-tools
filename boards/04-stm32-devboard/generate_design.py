@@ -153,17 +153,17 @@ def create_stm32_schematic(output_dir: Path) -> Path:
     # Wire LDO to power rails
     # VIN to 5V rail
     vin_pos = ldo.pin_position("VI")
-    sch.add_wire(vin_pos, (vin_pos[0], RAIL_5V))
+    sch.add_wire(vin_pos, (vin_pos[0], RAIL_5V), warn_on_collision=False)
     sch.add_junction(vin_pos[0], RAIL_5V)
 
     # VOUT to 3.3V rail
     vout_pos = ldo.pin_position("VO")
-    sch.add_wire(vout_pos, (vout_pos[0], RAIL_3V3))
+    sch.add_wire(vout_pos, (vout_pos[0], RAIL_3V3), warn_on_collision=False)
     sch.add_junction(vout_pos[0], RAIL_3V3)
 
     # GND to ground rail
     gnd_pos = ldo.pin_position("GND")
-    sch.add_wire(gnd_pos, (gnd_pos[0], RAIL_GND))
+    sch.add_wire(gnd_pos, (gnd_pos[0], RAIL_GND), warn_on_collision=False)
     sch.add_junction(gnd_pos[0], RAIL_GND)
 
     # Wire decoupling capacitors
