@@ -792,6 +792,9 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
 
     # Run DRC check
     try:
+        # Write DRC report next to the PCB file so kct export preflight can find it
+        drc_report_path = pcb_to_verify.parent / "drc_report.json"
+
         cmd = [
             sys.executable,
             "-m",
@@ -800,6 +803,8 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
             str(pcb_to_verify),
             "--mfr",
             ctx.mfr,
+            "--output",
+            str(drc_report_path),
         ]
 
         result = subprocess.run(
