@@ -59,6 +59,86 @@ class TestDirectStemMatch:
 
 
 # ---------------------------------------------------------------------------
+# Step 1.5: suffix stripping (_routed, _fixed, etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestSuffixStripping:
+    """find_schematic strips known suffixes like _routed from the PCB stem."""
+
+    def test_routed_suffix_finds_base_schematic(self, tmp_path: Path) -> None:
+        """foo_routed.kicad_pcb finds foo.kicad_sch."""
+        pcb = tmp_path / "foo_routed.kicad_pcb"
+        sch = tmp_path / "foo.kicad_sch"
+        pcb.write_text("")
+        sch.write_text("")
+
+        result = find_schematic(pcb)
+        assert result == sch
+
+    def test_fixed_suffix_finds_base_schematic(self, tmp_path: Path) -> None:
+        """board_fixed.kicad_pcb finds board.kicad_sch."""
+        pcb = tmp_path / "board_fixed.kicad_pcb"
+        sch = tmp_path / "board.kicad_sch"
+        pcb.write_text("")
+        sch.write_text("")
+
+        result = find_schematic(pcb)
+        assert result == sch
+
+    def test_direct_match_takes_priority_over_suffix_strip(self, tmp_path: Path) -> None:
+        """foo_routed.kicad_sch wins over foo.kicad_sch when both exist."""
+        pcb = tmp_path / "foo_routed.kicad_pcb"
+        sch_direct = tmp_path / "foo_routed.kicad_sch"
+        sch_base = tmp_path / "foo.kicad_sch"
+        pcb.write_text("")
+        sch_direct.write_text("")
+        sch_base.write_text("")
+
+        result = find_schematic(pcb)
+        assert result == sch_direct
+
+    def test_suffix_strip_no_base_schematic_falls_through(self, tmp_path: Path) -> None:
+        """foo_routed.kicad_pcb with no foo.kicad_sch falls to later steps."""
+        pcb = tmp_path / "foo_routed.kicad_pcb"
+        sch = tmp_path / "other.kicad_sch"
+        pcb.write_text("")
+        sch.write_text("")
+
+        # Should fall through to single-glob fallback and find other.kicad_sch
+        result = find_schematic(pcb)
+        assert result == sch
+
+    def test_suffix_strip_returns_none_when_no_match(self, tmp_path: Path) -> None:
+        """foo_routed.kicad_pcb with no schematics returns None."""
+        pcb = tmp_path / "foo_routed.kicad_pcb"
+        pcb.write_text("")
+
+        result = find_schematic(pcb)
+        assert result is None
+
+    def test_v2_suffix_finds_base_schematic(self, tmp_path: Path) -> None:
+        """board_v2.kicad_pcb finds board.kicad_sch."""
+        pcb = tmp_path / "board_v2.kicad_pcb"
+        sch = tmp_path / "board.kicad_sch"
+        pcb.write_text("")
+        sch.write_text("")
+
+        result = find_schematic(pcb)
+        assert result == sch
+
+    def test_final_suffix_finds_base_schematic(self, tmp_path: Path) -> None:
+        """board_final.kicad_pcb finds board.kicad_sch."""
+        pcb = tmp_path / "board_final.kicad_pcb"
+        sch = tmp_path / "board.kicad_sch"
+        pcb.write_text("")
+        sch.write_text("")
+
+        result = find_schematic(pcb)
+        assert result == sch
+
+
+# ---------------------------------------------------------------------------
 # Step 2: project file lookup
 # ---------------------------------------------------------------------------
 
