@@ -115,6 +115,26 @@ suggestions:
     preferred_vendors: ["LCSC", "Digikey"]
     cost_target: "$5/board"
 
+bom_entries:
+  - ref: U1
+    part: ATMEGA32U4-AU
+    lcsc: C44854
+  - ref: J1
+    part: TYPE-C-31-M-12
+    lcsc: C165948
+  - ref: J2
+    part: B-5100S05P-A110
+    lcsc: C50950
+  - ref: Y1
+    part: X49SM16MSD2SC
+    lcsc: C13738
+  - ref: SW1-SW4
+    part: TS-1187A-B-A-B
+    lcsc: C318884
+  - ref: C1-C4
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+
 decisions:
   - date: 2025-01-08
     phase: concept

@@ -143,6 +143,72 @@ suggestions:
       - "Keep PWM traces away from sense traces"
       - "Use ground guard traces around sensitive signals"
 
+bom_entries:
+  - ref: J1
+    part: WJ15EDGRC-3.81-2P
+    lcsc: C8465
+  - ref: F1
+    part: 0685P9150-01
+    lcsc: C89657
+  - ref: D1
+    part: SMDJ24A
+    lcsc: C35208
+  - ref: C1
+    part: 470uF/35V
+    lcsc: C134742
+  - ref: C2
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: U1
+    part: LM2596S-5.0
+    lcsc: C29781
+  - ref: U2
+    part: AMS1117-3.3
+    lcsc: C6186
+  - ref: C5
+    part: CL21A106KAYNNNE
+    lcsc: C15850
+  - ref: C6
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: C7-C8
+    part: CL21B104KBCNNNC
+    lcsc: C1525
+  - ref: C9
+    part: CL21A475KAQNNNE
+    lcsc: C1779
+  - ref: Y1
+    part: X49SM8MSD2SC
+    lcsc: C12674
+  - ref: C10-C11
+    part: CL21C200JBANNNC
+    lcsc: C1554
+  - ref: U3
+    part: DRV8301DCAR
+    lcsc: C129292
+  - ref: Q1-Q6
+    part: IRLZ44NPBF
+    lcsc: C2537
+  - ref: R10-R12
+    part: CS2512-0R005-J-T
+    source: LCSC
+    lcsc: C76662
+  - ref: J2
+    part: WJ15EDGRC-3.81-3P
+    lcsc: C8390
+  - ref: J3
+    part: B-5100S05P-A110
+    lcsc: C50950
+  - ref: J4
+    part: B-6100S06P-A110
+    lcsc: C40877
+  - ref: D3
+    part: 17-21SUGC/S530-A2/TR8
+    lcsc: C72043
+  - ref: D4
+    part: 17-21SURC/S530-A2/TR8
+    lcsc: C72038
+
 decisions:
   - id: "discrete-mosfets"
     description: "Use discrete MOSFETs instead of integrated driver"
