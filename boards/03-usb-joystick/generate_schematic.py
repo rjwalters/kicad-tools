@@ -97,6 +97,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             y=88.9,  # Center vertically
             ref="U1",
             value="MCU",
+            footprint="Package_QFP:TQFP-32_7x7mm_P0.8mm",
         )
         print(f"   U1 (MCU): placed at ({mcu.x}, {mcu.y})")
     except Exception as e:
@@ -108,6 +109,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             y=88.9,
             ref="U1",
             value="MCU",
+            footprint="Package_QFP:TQFP-32_7x7mm_P0.8mm",
         )
         print(f"   U1 (MCU): placed at ({mcu.x}, {mcu.y})")
 
@@ -134,6 +136,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         y=suggested_pos[1],
         ref="J1",
         value="USB-C",
+        footprint="Connector_USB:USB_C_Receptacle_GCT_USB4105",
     )
     print(f"   J1 (USB-C): placed at ({usb_conn.x}, {usb_conn.y})")
 
@@ -155,6 +158,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         y=joy_pos[1],
         ref="J2",
         value="Joystick",
+        footprint="Module:Joystick_Analog",
     )
     print(f"   J2 (Joystick): placed at ({joy_conn.x}, {joy_conn.y})")
 
@@ -177,6 +181,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             y=xtal_pos[1],
             ref="Y1",
             value="16MHz",
+            footprint="Crystal:Crystal_HC49-U_Vertical",
         )
         print(f"   Y1 (Crystal): placed at ({xtal.x}, {xtal.y})")
     except Exception as e:
@@ -188,6 +193,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             y=xtal_pos[1],
             ref="Y1",
             value="16MHz",
+            footprint="Crystal:Crystal_HC49-U_Vertical",
         )
         print(f"   Y1 (Crystal placeholder): placed at ({xtal.x}, {xtal.y})")
 
@@ -214,6 +220,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
             y=pos[1],
             ref=ref,
             value="Button",
+            footprint="Button_Switch_SMD:SW_SPST_TL3342",
         )
         buttons.append(btn)
         print(f"   {ref}: placed at ({btn.x}, {btn.y})")
@@ -245,6 +252,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
                 y=pos[1],
                 ref=ref,
                 value="100nF",
+                footprint="Capacitor_SMD:C_0402_1005Metric",
             )
         except Exception:
             # Fallback if C not available
@@ -254,6 +262,7 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
                 y=pos[1],
                 ref=ref,
                 value="100nF",
+                footprint="Capacitor_SMD:C_0402_1005Metric",
             )
         caps.append(cap)
         print(f"   {ref}: placed at ({cap.x}, {cap.y})")
