@@ -397,6 +397,12 @@ def _add_check_parser(subparsers) -> None:
         help="Skip specific checks (comma-separated)",
     )
     check_parser.add_argument("-v", "--verbose", action="store_true")
+    check_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Write JSON report to file (implies --format json for file output)",
+    )
 
 
 def _add_sch_parser(subparsers) -> None:

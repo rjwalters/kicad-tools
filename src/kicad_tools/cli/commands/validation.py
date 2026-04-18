@@ -212,6 +212,8 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--skip", args.skip_checks])
     if args.verbose:
         sub_argv.append("--verbose")
+    if getattr(args, "output", None):
+        sub_argv.extend(["--output", args.output])
     return check_main(sub_argv)
 
 
