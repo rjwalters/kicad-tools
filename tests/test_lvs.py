@@ -8,6 +8,7 @@ from kicad_tools.validate.consistency import (
     LVSMatch,
     LVSResult,
     SchematicPCBChecker,
+    _extract_package_size,
     _extract_ref_prefix,
     _normalize_footprint,
 )
@@ -478,6 +479,27 @@ class TestHelpers:
         assert _normalize_footprint("Resistor_SMD:R_0402_1005Metric") == "R_0402_1005Metric"
         assert _normalize_footprint("R_0402_1005Metric") == "R_0402_1005Metric"
 
+    def test_extract_package_size_standard(self):
+        assert _extract_package_size("R_0402_1005Metric") == "0402"
+        assert _extract_package_size("C_0805_2012Metric") == "0805"
+        assert _extract_package_size("L_1206_3216Metric") == "1206"
+        assert _extract_package_size("R_0603_1608Metric") == "0603"
+
+    def test_extract_package_size_with_library_prefix(self):
+        assert _extract_package_size("Resistor_SMD:R_0402_1005Metric") == "0402"
+        assert _extract_package_size("Capacitor_SMD:C_0805_2012Metric") == "0805"
+
+    def test_extract_package_size_non_passive(self):
+        assert _extract_package_size("SOT-23-5") is None
+        assert _extract_package_size("TSSOP-20_4.4x6.5mm_P0.65mm") is None
+        assert _extract_package_size("TestPoint_Pad_1.0x1.0mm") is None
+        assert _extract_package_size("") is None
+
+    def test_extract_package_size_bare_code(self):
+        # Bare 4-digit code at boundary
+        assert _extract_package_size("C_0402") == "0402"
+        assert _extract_package_size("R-0805") == "0805"
+
 
 # ---------------------------------------------------------------------------
 # Tests: Multi-pass LVS matching
@@ -528,20 +550,88 @@ class TestLVSPass2ValueFootprint:
 class TestLVSPass3ValuePrefix:
     """Pass 3: value+prefix match (footprint may differ)."""
 
-    def test_footprint_mismatch_same_value(self, sch_r1_c1: Path, pcb_footprint_mismatch: Path):
+    def test_footprint_mismatch_same_value_different_size(
+        self, sch_r1_c1: Path, pcb_footprint_mismatch: Path
+    ):
+        """Schematic R1=10k 0402 vs PCB R1=10k 0603: same value but different
+        package size.  The size constraint should prevent a cross-size match,
+        leaving R1 unmatched on both sides."""
         checker = SchematicPCBChecker(sch_r1_c1, pcb_footprint_mismatch)
         result = checker.check_lvs()
 
-        # C1 exact, R1 matched at pass 3 with footprint mismatch
+        # C1 exact match.  R1 should be rejected by the size constraint in
+        # Pass 3 (and Pass 4 has no nets), so it remains unmatched.
         assert result.exact_match_count == 1  # C1
-        assert not result.unmatched_pcb
-        assert not result.unmatched_sch
+        assert "R1" in result.unmatched_sch
+        assert "R1" in result.unmatched_pcb
 
-        r1_match = next(m for m in result.matches if m.sch_ref == "R1")
-        # Pass 3: value+prefix match, confidence 0.6
-        assert r1_match.confidence == 0.6
-        assert r1_match.value_match
-        assert not r1_match.footprint_match
+    def test_footprint_mismatch_same_value_same_size(self, tmp_path: Path):
+        """Pass 3 should still match when footprints differ only in non-size
+        details but the package size is the same."""
+        # Schematic: R1=10k R_0402_1005Metric
+        sch = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:R")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (property "Reference" "R1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "10k" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000003"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000004"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "R1") (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        # PCB: R5=10k R_0402_1005Metric (same size, different ref)
+        pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 100 100)
+    (property "Reference" "R5" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-r5-ref"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-r5-val"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  )
+)
+"""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text(sch)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        checker = SchematicPCBChecker(sch_path, pcb_path)
+        result = checker.check_lvs()
+
+        # R1 -> R5 should match via Pass 2 (unique value+footprint)
+        assert len(result.matches) == 1
+        assert result.matches[0].sch_ref == "R1"
+        assert result.matches[0].pcb_ref == "R5"
+        assert result.matches[0].confidence == 0.8
+        assert result.matches[0].value_match
+        assert result.matches[0].footprint_match
 
 
 class TestLVSPass4NetBased:
@@ -591,6 +681,307 @@ class TestLVSOrphans:
         assert result.exact_match_count == 0
         assert result.unmatched_sch == []
         assert set(result.unmatched_pcb) == {"R1", "C1"}
+
+
+class TestLVSSizeConstraint:
+    """Tests for package-size consistency constraint in Passes 3 and 4."""
+
+    def test_pass3_rejects_cross_size_match(self, tmp_path: Path):
+        """Pass 3 should NOT match same-value caps that differ in package size."""
+        # Schematic: C1=100nF 0402, C2=100nF 0603
+        sch = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:C")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "C1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100nF" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "C1") (unit 1)
+        )
+      )
+    )
+  )
+  (symbol
+    (lib_id "Device:C")
+    (at 120 100 0)
+    (uuid "00000000-0000-0000-0000-000000000020")
+    (property "Reference" "C2" (at 120 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100nF" (at 120 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0603_1608Metric" (at 120 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 120 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000021"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000022"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "C2") (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        # PCB: C3=100nF 0402, C4=100nF 0603 (swapped refs)
+        pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (at 100 100)
+    (property "Reference" "C3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c3-ref"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c3-val"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+  (footprint "Capacitor_SMD:C_0603_1608Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000040")
+    (at 110 100)
+    (property "Reference" "C4" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c4-ref"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c4-val"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+)
+"""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text(sch)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        checker = SchematicPCBChecker(sch_path, pcb_path)
+        result = checker.check_lvs()
+
+        # Pass 2 should match C1(0402)->C3(0402) and C2(0603)->C4(0603)
+        # because value+footprint is unique per size.  No cross-size match.
+        matched_pairs = {(m.sch_ref, m.pcb_ref) for m in result.matches}
+        assert ("C1", "C3") in matched_pairs
+        assert ("C2", "C4") in matched_pairs
+        # Crucially, no cross-size pairing
+        assert ("C1", "C4") not in matched_pairs
+        assert ("C2", "C3") not in matched_pairs
+
+    def test_pass3_rejects_cross_size_with_unique_value_prefix(self, tmp_path: Path):
+        """When two caps have the same value but different sizes and unique
+        prefix+value, Pass 3 must NOT cross-match them."""
+        # Schematic: C1=100nF 0402
+        sch = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:C")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "C1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "100nF" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "C1") (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        # PCB: C5=100nF 0603 (different ref AND different size)
+        pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (footprint "Capacitor_SMD:C_0603_1608Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (at 100 100)
+    (property "Reference" "C5" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c5-ref"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c5-val"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+)
+"""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text(sch)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        checker = SchematicPCBChecker(sch_path, pcb_path)
+        result = checker.check_lvs()
+
+        # Pass 3: C1 and C5 have same value+prefix but different sizes.
+        # The size constraint should reject the match.
+        # Pass 4: same -- different sizes should still be rejected.
+        assert result.matches == []
+        assert "C1" in result.unmatched_sch
+        assert "C5" in result.unmatched_pcb
+
+    def test_pass4_rejects_cross_size_net_based(self, tmp_path: Path):
+        """Pass 4 net-based match should reject when package sizes differ."""
+        # Schematic: C1=100nF 0402
+        sch = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:C")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "C1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "2.2uF" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Capacitor_SMD:C_0402_1005Metric" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "C1") (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        # PCB: C3=100nF 0603 (different value AND different size)
+        # This should NOT match even through Pass 4 net-based
+        pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (footprint "Capacitor_SMD:C_0603_1608Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (at 100 100)
+    (property "Reference" "C3" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-c3-ref"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-c3-val"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+)
+"""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text(sch)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        checker = SchematicPCBChecker(sch_path, pcb_path)
+        result = checker.check_lvs()
+
+        # Neither Pass 3 nor Pass 4 should cross-match
+        assert result.matches == []
+        assert "C1" in result.unmatched_sch
+        assert "C3" in result.unmatched_pcb
+
+    def test_ic_matching_unaffected(self, tmp_path: Path):
+        """ICs/connectors without recognised package sizes should still match."""
+        # Schematic: U1 in TSSOP-20
+        sch = """(kicad_sch
+  (version 20231120)
+  (generator "test")
+  (generator_version "8.0")
+  (uuid "00000000-0000-0000-0000-000000000001")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "Device:U")
+    (at 100 100 0)
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (property "Reference" "U1" (at 100 90 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "ATmega328P" (at 100 110 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm" (at 100 100 0) (effects (hide yes)))
+    (property "Datasheet" "" (at 100 100 0) (effects (hide yes)))
+    (pin "1" (uuid "00000000-0000-0000-0000-000000000011"))
+    (pin "2" (uuid "00000000-0000-0000-0000-000000000012"))
+    (instances
+      (project "test"
+        (path "/00000000-0000-0000-0000-000000000001"
+          (reference "U1") (unit 1)
+        )
+      )
+    )
+  )
+)
+"""
+        # PCB: U5 with same value+footprint (different ref)
+        pcb = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "VCC")
+  (footprint "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000030")
+    (at 100 100)
+    (property "Reference" "U5" (at 0 -1.5 0) (layer "F.SilkS") (uuid "fp-u5-ref"))
+    (property "Value" "ATmega328P" (at 0 1.5 0) (layer "F.Fab") (uuid "fp-u5-val"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25))
+  )
+)
+"""
+        sch_path = tmp_path / "test.kicad_sch"
+        sch_path.write_text(sch)
+        pcb_path = tmp_path / "test.kicad_pcb"
+        pcb_path.write_text(pcb)
+
+        checker = SchematicPCBChecker(sch_path, pcb_path)
+        result = checker.check_lvs()
+
+        # U1 -> U5 should still match via Pass 2 (unique value+footprint)
+        assert len(result.matches) == 1
+        assert result.matches[0].sch_ref == "U1"
+        assert result.matches[0].pcb_ref == "U5"
+        assert result.matches[0].confidence == 0.8
 
 
 class TestLVSEdgeCases:
