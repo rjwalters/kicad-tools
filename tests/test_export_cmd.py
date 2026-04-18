@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from kicad_tools.cli.export_cmd import main as export_main
+from kicad_tools.cli.export_cmd import _find_pcb_for_export, main as export_main
 
 
 class TestExportCmdParsing:
@@ -422,4 +422,125 @@ class TestExportCmdIncludeTHT:
         )
         assert rc == 0
         assert captured_config["pnp_config"] is None
+
+
+class TestFindPcbForExport:
+    """Tests for the _find_pcb_for_export helper function."""
+
+    def test_prefers_routed_file(self, tmp_path):
+        """When both routed and unrouted PCB files exist, prefer the routed one."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        unrouted = tmp_path / "board.kicad_pcb"
+        unrouted.write_text("(kicad_pcb)")
+        routed = output_dir / "board_routed.kicad_pcb"
+        routed.write_text("(kicad_pcb)")
+
+        result = _find_pcb_for_export(tmp_path)
+        assert result == routed
+
+    def test_falls_back_to_unrouted(self, tmp_path):
+        """When only an unrouted PCB file exists, use it."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        result = _find_pcb_for_export(tmp_path)
+        assert result == pcb
+
+    def test_returns_none_for_empty_directory(self, tmp_path):
+        """Empty directory should return None."""
+        result = _find_pcb_for_export(tmp_path)
+        assert result is None
+
+    def test_ignores_backup_files(self, tmp_path):
+        """Backup files (*-bak.kicad_pcb) should be excluded."""
+        bak = tmp_path / "board-bak.kicad_pcb"
+        bak.write_text("(kicad_pcb)")
+
+        result = _find_pcb_for_export(tmp_path)
+        assert result is None
+
+    def test_only_backup_files_returns_none(self, tmp_path):
+        """Directory with only backup files should return None."""
+        (tmp_path / "board-bak.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "other-bak.kicad_pcb").write_text("(kicad_pcb)")
+
+        result = _find_pcb_for_export(tmp_path)
+        assert result is None
+
+    def test_searches_subdirectories(self, tmp_path):
+        """Should find PCB files in nested subdirectories."""
+        sub = tmp_path / "output"
+        sub.mkdir()
+        pcb = sub / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        result = _find_pcb_for_export(tmp_path)
+        assert result == pcb
+
+
+class TestExportCmdDirectoryInput:
+    """Tests for directory path input to kct export."""
+
+    def test_directory_with_routed_pcb_dry_run(self, tmp_path):
+        """Directory containing a routed PCB should work with --dry-run."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        routed = output_dir / "board_routed.kicad_pcb"
+        routed.write_text("(kicad_pcb)")
+
+        rc = export_main([str(tmp_path), "--dry-run", "-o", str(tmp_path / "mfg")])
+        assert rc == 0
+
+    def test_directory_with_only_unrouted_pcb_dry_run(self, tmp_path):
+        """Directory with only unrouted PCB should work."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        rc = export_main([str(tmp_path), "--dry-run", "-o", str(tmp_path / "mfg")])
+        assert rc == 0
+
+    def test_directory_with_no_pcb_returns_error(self, tmp_path, capsys):
+        """Empty directory should return exit code 1 with helpful message."""
+        rc = export_main([str(tmp_path)])
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        assert "No .kicad_pcb file found" in captured.err
+        assert "Hint:" in captured.err
+
+    def test_explicit_pcb_path_still_works(self, tmp_path):
+        """Direct file path should behave as before (regression check)."""
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+
+        rc = export_main([str(pcb), "--dry-run", "-o", str(tmp_path / "mfg")])
+        assert rc == 0
+
+    def test_wrong_file_extension_returns_error(self, tmp_path, capsys):
+        """Non-.kicad_pcb file should return exit code 1."""
+        wrong = tmp_path / "board.txt"
+        wrong.write_text("not a pcb")
+
+        rc = export_main([str(wrong)])
+        assert rc == 1
+
+        captured = capsys.readouterr()
+        assert "Expected .kicad_pcb file" in captured.err
+
+    def test_directory_prefers_routed_over_unrouted(self, tmp_path, capsys):
+        """When both routed and unrouted exist, routed is selected for export."""
+        output_dir = tmp_path / "output"
+        output_dir.mkdir()
+        (tmp_path / "board.kicad_pcb").write_text("(kicad_pcb)")
+        routed = output_dir / "board_routed.kicad_pcb"
+        routed.write_text("(kicad_pcb)")
+
+        rc = export_main([str(tmp_path), "--dry-run", "-o", str(tmp_path / "mfg")])
+        assert rc == 0
+
+        captured = capsys.readouterr()
+        # The dry-run output should reference the output directory,
+        # confirming we got past the directory resolution step
+        assert "Dry run" in captured.out
 
