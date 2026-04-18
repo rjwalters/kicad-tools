@@ -122,6 +122,17 @@
   (net 21 "NRST")
   (net 22 "SYNC_L")
   (net 23 "SYNC_R")
+  (net 24 "SCL")
+  (net 25 "SDA")
+  (net 26 "Net-C19-Pad1")
+  (net 27 "Net-C19-Pad2")
+  (net 28 "Net-U6-VNEG")
+  (net 29 "Net-U6-VCOM")
+  (net 30 "Net-U6-LDOO")
+  (net 31 "Net-U6-GPIO3")
+  (net 32 "Net-U6-GPIO4")
+  (net 33 "Net-U6-OUTL")
+  (net 34 "Net-U6-OUTR")
   (gr_rect
     (start 115.0 75.0)
     (end 180.0 131.0)
@@ -895,7 +906,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 1 "GND")
+      (net 26 "Net-C19-Pad1")
       (uuid "e7c2b0df-cb60-429e-ba22-3127f0a4cbc3")
     )
     (pad "3" smd roundrect
@@ -903,7 +914,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 9 "I2S_BCLK")
+      (net 5 "GNDA")
       (uuid "134e2e64-7a0b-4f74-8806-5bc3187cd22b")
     )
     (pad "4" smd roundrect
@@ -911,7 +922,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 10 "I2S_LRCLK")
+      (net 27 "Net-C19-Pad2")
       (uuid "a921df67-c843-4077-bf38-939e147b6d28")
     )
     (pad "5" smd roundrect
@@ -919,7 +930,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 11 "I2S_DIN")
+      (net 28 "Net-U6-VNEG")
       (uuid "eb19d6e8-f0c4-44ea-875e-ae5b6a916298")
     )
     (pad "6" smd roundrect
@@ -927,6 +938,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 33 "Net-U6-OUTL")
       (uuid "793d54d1-af2f-44a1-a34b-34ed727c7b29")
     )
     (pad "7" smd roundrect
@@ -934,6 +946,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 34 "Net-U6-OUTR")
       (uuid "ab671320-9a1c-4a1b-9ba2-a9901f89f446")
     )
     (pad "8" smd roundrect
@@ -941,6 +954,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 4 "+3.3VA")
       (uuid "aaabdf7b-d999-4967-9a58-25f2e5962a4b")
     )
     (pad "9" smd roundrect
@@ -948,6 +962,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 5 "GNDA")
       (uuid "7e0c51f8-b61a-48ca-82c5-ede7e50b669f")
     )
     (pad "10" smd roundrect
@@ -955,6 +970,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 29 "Net-U6-VCOM")
       (uuid "45f92b32-ef71-4775-818f-a349a9bac6e1")
     )
     (pad "11" smd roundrect
@@ -962,6 +978,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 25 "SDA")
       (uuid "e1a38b99-9ddc-4684-8ad6-6dba50395525")
     )
     (pad "12" smd roundrect
@@ -969,6 +986,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 24 "SCL")
       (uuid "93a24810-0555-42be-bc70-81750f705e4a")
     )
     (pad "13" smd roundrect
@@ -983,7 +1001,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 1 "GND")
+      (net 32 "Net-U6-GPIO4")
       (uuid "6962b65e-5d44-4001-b2f3-c09338a86706")
     )
     (pad "15" smd roundrect
@@ -991,7 +1009,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 4 "+3.3VA")
+      (net 31 "Net-U6-GPIO3")
       (uuid "b698982b-c3a9-4c87-99ff-c15bb04373e4")
     )
     (pad "16" smd roundrect
@@ -999,6 +1017,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "GND")
       (uuid "a1521602-bf3c-4f9b-82df-5ee5067d618e")
     )
     (pad "17" smd roundrect
@@ -1006,6 +1025,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "GND")
       (uuid "5c05ca42-9bfa-4ddf-92aa-e03aa2dbe4e1")
     )
     (pad "18" smd roundrect
@@ -1013,6 +1033,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 3 "+3.3V")
       (uuid "8ae7d0a8-3ad3-49da-b8b3-8533bcc759f5")
     )
     (pad "19" smd roundrect
@@ -1027,6 +1048,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 7 "MCLK_DAC")
       (uuid "59d749c1-4701-4915-be38-6f4a2227c1e8")
     )
     (pad "21" smd roundrect
@@ -1034,6 +1056,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 9 "I2S_BCLK")
       (uuid "282ab107-f500-4608-b57c-dccb35fcd6a5")
     )
     (pad "22" smd roundrect
@@ -1041,6 +1064,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 11 "I2S_DIN")
       (uuid "2c73edc8-6eda-4303-9e36-fd51bdeabbf9")
     )
     (pad "23" smd roundrect
@@ -1048,6 +1072,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 10 "I2S_LRCLK")
       (uuid "95009bca-a76b-403b-9c47-5e95eccf7b8b")
     )
     (pad "24" smd roundrect
@@ -1055,6 +1080,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "GND")
       (uuid "940030ad-4717-4d5b-813a-71d8ab4f30f8")
     )
     (pad "25" smd roundrect
@@ -1069,6 +1095,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 30 "Net-U6-LDOO")
       (uuid "018f7981-767a-41a8-97ad-9b4e9e6675e9")
     )
     (pad "27" smd roundrect
@@ -1076,6 +1103,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
+      (net 1 "GND")
       (uuid "90db48d4-ece4-4ec5-9450-73d946f18ad9")
     )
     (pad "28" smd roundrect
@@ -1083,7 +1111,7 @@
       (size 1.5000 0.4000)
       (roundrect_rratio 0.25)
       (layers "F.Cu" "F.Paste" "F.Mask")
-      (net 1 "GND")
+      (net 3 "+3.3V")
       (uuid "526c814d-dd03-40d1-9bc7-07b8753faa9d")
     )
   )
