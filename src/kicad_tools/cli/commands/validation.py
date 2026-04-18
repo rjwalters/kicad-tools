@@ -460,6 +460,8 @@ def run_audit_command(args) -> int:
         sub_argv.extend(["--quantity", str(args.audit_quantity)])
     if getattr(args, "audit_skip_erc", False):
         sub_argv.append("--skip-erc")
+    if getattr(args, "audit_pcb", None):
+        sub_argv.extend(["--pcb", args.audit_pcb])
     if getattr(args, "audit_strict", False):
         sub_argv.append("--strict")
     if getattr(args, "audit_verbose", False):

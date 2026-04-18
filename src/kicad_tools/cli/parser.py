@@ -2513,6 +2513,13 @@ def _add_audit_parser(subparsers) -> None:
         help="Skip ERC check (for PCB-only audits)",
     )
     audit_parser.add_argument(
+        "--pcb",
+        dest="audit_pcb",
+        type=str,
+        default=None,
+        help="Override auto-detected PCB path (takes precedence over project.kct)",
+    )
+    audit_parser.add_argument(
         "--strict",
         dest="audit_strict",
         action="store_true",

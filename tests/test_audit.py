@@ -904,20 +904,11 @@ project:
         # Should resolve to the routed PCB from project.kct
         assert audit.pcb_path == routed_pcb
 
-    def test_resolve_pcb_fallback_to_routed_suffix(self, tmp_path: Path):
-        """Test that audit falls back to *_routed.kicad_pcb if no project.kct."""
-        # Create routed PCB
+    def test_resolve_pcb_fallback_to_routed_only(self, tmp_path: Path):
+        """Test that audit uses *_routed.kicad_pcb when only routed exists."""
+        # Create routed PCB only (no base PCB)
         routed_pcb = tmp_path / "test_routed.kicad_pcb"
         routed_pcb.write_text(
-            """(kicad_pcb (version 20221018)
-  (generator pcbnew)
-  (layers (0 "F.Cu" signal))
-)"""
-        )
-
-        # Create unrouted PCB
-        unrouted_pcb = tmp_path / "test.kicad_pcb"
-        unrouted_pcb.write_text(
             """(kicad_pcb (version 20221018)
   (generator pcbnew)
   (layers (0 "F.Cu" signal))
@@ -931,7 +922,7 @@ project:
         # Initialize audit with project file
         audit = ManufacturingAudit(project_file)
 
-        # Should fallback to *_routed.kicad_pcb
+        # Should use routed PCB since it's the only one
         assert audit.pcb_path == routed_pcb
 
     def test_resolve_pcb_default_no_routed(self, tmp_path: Path):
@@ -954,6 +945,114 @@ project:
 
         # Should default to <basename>.kicad_pcb
         assert audit.pcb_path == unrouted_pcb
+
+    def test_resolve_pcb_prefers_newer_base(self, tmp_path: Path):
+        """Test that audit prefers base PCB when it is newer than routed."""
+        import os
+
+        # Create both PCB files
+        base_pcb = tmp_path / "test.kicad_pcb"
+        base_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Set base PCB as newer
+        os.utime(routed_pcb, (1000, 1000))
+        os.utime(base_pcb, (2000, 2000))
+
+        # Create project file (no project.kct)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # Should prefer the newer base PCB
+        assert audit.pcb_path == base_pcb
+
+    def test_resolve_pcb_prefers_newer_routed(self, tmp_path: Path):
+        """Test that audit prefers routed PCB when it is newer than base."""
+        import os
+
+        # Create both PCB files
+        base_pcb = tmp_path / "test.kicad_pcb"
+        base_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Set routed PCB as newer
+        os.utime(base_pcb, (1000, 1000))
+        os.utime(routed_pcb, (2000, 2000))
+
+        # Create project file (no project.kct)
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file)
+
+        # Should prefer the newer routed PCB
+        assert audit.pcb_path == routed_pcb
+
+    def test_pcb_override_flag(self, tmp_path: Path):
+        """Test that pcb_override takes precedence over auto-detection."""
+        # Create an explicit PCB file
+        override_pcb = tmp_path / "custom.kicad_pcb"
+        override_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create routed PCB (would normally be selected)
+        routed_pcb = tmp_path / "test_routed.kicad_pcb"
+        routed_pcb.write_text(
+            """(kicad_pcb (version 20221018)
+  (generator pcbnew)
+  (layers (0 "F.Cu" signal))
+)"""
+        )
+
+        # Create project file
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        audit = ManufacturingAudit(project_file, pcb_override=override_pcb)
+
+        # Should use the override path
+        assert audit.pcb_path == override_pcb
+
+    def test_pcb_override_nonexistent(self, tmp_path: Path):
+        """Test that pcb_override raises ValueError for nonexistent file."""
+        import pytest
+
+        project_file = tmp_path / "test.kicad_pro"
+        project_file.write_text("{}")
+
+        with pytest.raises(ValueError, match="PCB override file not found"):
+            ManufacturingAudit(
+                project_file,
+                pcb_override=tmp_path / "nonexistent.kicad_pcb",
+            )
 
 
 class TestAuditJsonSchema:
