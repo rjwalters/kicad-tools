@@ -2089,6 +2089,18 @@ def _add_validate_parser(subparsers) -> None:
         help="Check BOM components are placed on PCB",
     )
     validate_parser.add_argument(
+        "--lvs",
+        action="store_true",
+        help="Layout-vs-schematic check with hierarchical support and fuzzy matching",
+    )
+    validate_parser.add_argument(
+        "--min-confidence",
+        dest="validate_min_confidence",
+        type=float,
+        default=0.0,
+        help="Minimum match confidence to include in LVS results (0.0-1.0, default: 0.0)",
+    )
+    validate_parser.add_argument(
         "--schematic",
         "-s",
         dest="validate_schematic",
