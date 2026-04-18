@@ -54,6 +54,14 @@ Thumbs.db
 # Board outputs (regenerated artifacts)
 boards/*/design_output.log
 boards/*/output/*.kicad_pro
+boards/*/output/*.kicad_prl
+boards/*/output/drc_report.json
+boards/*/output/manufacturing/
+boards/external/
+boards/manufacturing/
+
+# Claude
+.claude/worktrees/
 .loom/daemon-state.json
 .loom/00-daemon-state.json
 .loom/stop-daemon
