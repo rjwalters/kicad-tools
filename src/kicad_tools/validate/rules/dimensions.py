@@ -168,13 +168,15 @@ class DimensionRules(DRCRule):
         min_clearance = design_rules.min_clearance_mm
 
         # Collect all drill holes: vias + through-hole pads
-        drills: list[tuple[tuple[float, float], float, str]] = []
+        # Each entry: (position, drill_diameter, item_description, footprint_reference)
+        # footprint_reference is "" for vias (no footprint context)
+        drills: list[tuple[tuple[float, float], float, str, str]] = []
 
         # Add vias
         for via in pcb.vias:
             net = pcb.get_net(via.net_number)
             net_name = net.name if net else f"net:{via.net_number}"
-            drills.append((via.position, via.drill, net_name))
+            drills.append((via.position, via.drill, net_name, ""))
 
         # Add through-hole pads from footprints
         for fp in pcb.footprints:
@@ -185,13 +187,18 @@ class DimensionRules(DRCRule):
                     abs_y = fp.position[1] + pad.position[1]
                     net_name = pad.net_name if pad.net_name else f"net:{pad.net_number}"
                     drills.append(
-                        ((abs_x, abs_y), pad.drill, f"{fp.reference}-{pad.number}:{net_name}")
+                        (
+                            (abs_x, abs_y),
+                            pad.drill,
+                            f"{fp.reference}-{pad.number}:{net_name}",
+                            fp.reference,
+                        )
                     )
 
         # Check all pairs for clearance
         # Edge-to-edge distance = center-to-center - (r1 + r2)
-        for i, (pos1, drill1, item1) in enumerate(drills):
-            for pos2, drill2, item2 in drills[i + 1 :]:
+        for i, (pos1, drill1, item1, fp_ref1) in enumerate(drills):
+            for pos2, drill2, item2, fp_ref2 in drills[i + 1 :]:
                 # Calculate center-to-center distance
                 dx = pos2[0] - pos1[0]
                 dy = pos2[1] - pos1[1]
@@ -201,6 +208,15 @@ class DimensionRules(DRCRule):
                 edge_distance = center_distance - (drill1 / 2) - (drill2 / 2)
 
                 if edge_distance < min_clearance:
+                    # Downgrade to warning when both holes belong to the
+                    # same footprint (e.g. dense connector pads).  These
+                    # are intentional by design and should not block builds.
+                    same_footprint = fp_ref1 != "" and fp_ref1 == fp_ref2
+                    severity = "warning" if same_footprint else "error"
+                    message_prefix = (
+                        "(same-footprint) " if same_footprint else ""
+                    )
+
                     # Use midpoint as violation location
                     mid_x = (pos1[0] + pos2[0]) / 2
                     mid_y = (pos1[1] + pos2[1]) / 2
@@ -208,9 +224,10 @@ class DimensionRules(DRCRule):
                     results.add(
                         DRCViolation(
                             rule_id="dimension_drill_clearance",
-                            severity="error",
+                            severity=severity,
                             message=(
-                                f"Drill-to-drill clearance {edge_distance:.3f}mm < "
+                                f"{message_prefix}Drill-to-drill clearance "
+                                f"{edge_distance:.3f}mm < "
                                 f"minimum {min_clearance:.3f}mm"
                             ),
                             location=(mid_x, mid_y),
