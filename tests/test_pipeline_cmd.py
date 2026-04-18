@@ -1612,7 +1612,7 @@ def pcb_without_schematic(tmp_path: Path) -> Path:
 
 
 class TestResolveSchematic:
-    """Tests for _resolve_schematic helper."""
+    """Tests for _resolve_schematic helper (delegates to find_schematic)."""
 
     def test_finds_schematic_from_pcb(self, pcb_with_schematic):
         """Resolves .kicad_sch from .kicad_pcb with same stem."""
@@ -1636,6 +1636,72 @@ class TestResolveSchematic:
         result = _resolve_schematic(pcb_without_schematic)
         assert result is None
 
+    def test_finds_schematic_with_routed_suffix(self, tmp_path: Path):
+        """Resolves .kicad_sch when PCB has _routed suffix."""
+        pcb_file = tmp_path / "board_routed.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        sch_file = tmp_path / "board.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+        result = _resolve_schematic(pcb_file)
+        assert result == sch_file
+
+    def test_finds_schematic_via_project_file_lookup(self, tmp_path: Path):
+        """Resolves .kicad_sch via .kicad_pro when PCB stem differs."""
+        pcb_file = tmp_path / "board_routed.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        pro_file = tmp_path / "design.kicad_pro"
+        pro_file.write_text('{"meta": {"filename": "design.kicad_pro"}}')
+        sch_file = tmp_path / "design.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+        # _resolve_schematic now auto-discovers the project file
+        result = _resolve_schematic(pcb_file)
+        assert result == sch_file
+
+    def test_finds_schematic_via_single_glob_fallback(self, tmp_path: Path):
+        """Resolves .kicad_sch when exactly one exists in directory."""
+        pcb_file = tmp_path / "mismatched.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        sch_file = tmp_path / "only_one.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+        result = _resolve_schematic(pcb_file)
+        assert result == sch_file
+
+
+class TestSchematicFlag:
+    """Tests for --sch / --schematic CLI flag."""
+
+    def test_sch_flag_overrides_autodiscovery(self, tmp_path: Path):
+        """--sch flag uses the specified schematic, bypassing auto-discovery."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        # Create a schematic with a different name than the PCB
+        sch_file = tmp_path / "other.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+
+        # dry-run so we don't need kicad-cli
+        result = main(["--step", "erc", "--dry-run", "--sch", str(sch_file), str(pcb_file)])
+        assert result == 0
+
+    def test_sch_flag_nonexistent_file_errors(self, tmp_path: Path):
+        """--sch flag with nonexistent file produces error."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+
+        result = main(["--dry-run", "--sch", str(tmp_path / "missing.kicad_sch"), str(pcb_file)])
+        assert result == 1
+
+    def test_schematic_long_form_alias(self, tmp_path: Path):
+        """--schematic long-form alias works the same as --sch."""
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(ROUTED_PCB)
+        sch_file = tmp_path / "other.kicad_sch"
+        sch_file.write_text("(kicad_sch)")
+
+        result = main(
+            ["--step", "erc", "--dry-run", "--schematic", str(sch_file), str(pcb_file)]
+        )
+        assert result == 0
+
 
 class TestERCStep:
     """Tests for ERC pipeline step."""
@@ -1651,6 +1717,7 @@ class TestERCStep:
         assert result.success is True
         assert result.skipped is True
         assert "no .kicad_sch" in result.message
+        assert "--sch" in result.message
 
     @patch("kicad_tools.cli.runner.find_kicad_cli", return_value=None)
     def test_erc_skip_when_no_kicad_cli(self, mock_find, pcb_with_schematic):

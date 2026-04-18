@@ -176,29 +176,23 @@ def _resolve_pcb_from_project(project_file: Path) -> Path | None:
 def _resolve_schematic(pcb_file: Path, project_file: Path | None = None) -> Path | None:
     """Resolve .kicad_sch path from a project or PCB file.
 
-    Resolution chain:
-        .kicad_pro -> stem.kicad_sch
-        .kicad_pcb -> sibling stem.kicad_sch
+    Delegates to :func:`kicad_tools.report.utils.find_schematic` which
+    implements the full discovery chain: direct stem match, suffix
+    stripping (``_routed``, ``_fixed``, etc.), project file lookup, and
+    single-glob fallback.
 
     Args:
         pcb_file: Path to .kicad_pcb file
-        project_file: Optional path to .kicad_pro file
+        project_file: Optional path to .kicad_pro file (unused; retained
+            for API compatibility -- ``find_schematic`` discovers project
+            files automatically)
 
     Returns:
         Path to the corresponding .kicad_sch if it exists, None otherwise.
     """
-    # Try from project file first
-    if project_file is not None:
-        sch_path = project_file.with_suffix(".kicad_sch")
-        if sch_path.exists():
-            return sch_path
+    from ..report.utils import find_schematic
 
-    # Try from PCB file (sibling with same stem)
-    sch_path = pcb_file.with_suffix(".kicad_sch")
-    if sch_path.exists():
-        return sch_path
-
-    return None
+    return find_schematic(pcb_file)
 
 
 def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
@@ -215,7 +209,7 @@ def _run_step_erc(ctx: PipelineContext, console: Console) -> PipelineResult:
         return PipelineResult(
             step=PipelineStep.ERC,
             success=True,
-            message="erc: no .kicad_sch found alongside PCB — skipped",
+            message="erc: no .kicad_sch found alongside PCB — skipped (use --sch to specify)",
             skipped=True,
         )
 
@@ -1428,6 +1422,13 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--sch",
+        "--schematic",
+        dest="sch",
+        default=None,
+        help="Path to root .kicad_sch file (overrides auto-discovery)",
+    )
+    parser.add_argument(
         "--zones",
         action="store_true",
         default=False,
@@ -1494,7 +1495,14 @@ Examples:
             resolved_layers = "2"
 
     # Resolve schematic file for ERC step
-    schematic_file = _resolve_schematic(pcb_file, project_file)
+    if args.sch is not None:
+        sch_path = Path(args.sch).resolve()
+        if not sch_path.exists():
+            print(f"Error: Schematic file not found: {sch_path}", file=sys.stderr)
+            return 1
+        schematic_file = sch_path
+    else:
+        schematic_file = _resolve_schematic(pcb_file, project_file)
 
     # Build context
     ctx = PipelineContext(
