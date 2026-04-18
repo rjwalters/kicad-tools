@@ -178,6 +178,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_build_native_parser(subparsers)
     _add_spec_parser(subparsers)
     _add_benchmark_parser(subparsers)
+    _add_sync_parser(subparsers)
     _add_run_parser(subparsers)
     _add_explain_parser(subparsers)
     _add_detect_mistakes_parser(subparsers)
@@ -3388,6 +3389,91 @@ def _add_benchmark_parser(subparsers) -> None:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+
+
+def _add_sync_parser(subparsers) -> None:
+    """Add sync subcommand parser for schematic/PCB reconciliation."""
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Reconcile schematic and PCB references",
+        description="Analyze and fix mismatches between schematic and PCB",
+    )
+
+    # Mode selection
+    mode = sync_parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--analyze",
+        dest="sync_analyze",
+        action="store_true",
+        help="Analyze mismatches and report proposed changes",
+    )
+    mode.add_argument(
+        "--apply",
+        dest="sync_apply",
+        action="store_true",
+        help="Apply proposed changes (requires --dry-run or --confirm)",
+    )
+
+    # File arguments
+    sync_parser.add_argument(
+        "sync_project",
+        nargs="?",
+        help="Path to .kicad_pro file (auto-finds schematic and PCB)",
+    )
+    sync_parser.add_argument(
+        "--schematic",
+        "-s",
+        dest="sync_schematic",
+        help="Path to .kicad_sch file (required if no project file)",
+    )
+    sync_parser.add_argument(
+        "--pcb",
+        "-p",
+        dest="sync_pcb",
+        help="Path to .kicad_pcb file (required if no project file)",
+    )
+
+    # Output options
+    sync_parser.add_argument(
+        "--format",
+        dest="sync_format",
+        choices=["table", "json"],
+        default="table",
+        help="Output format (default: table)",
+    )
+    sync_parser.add_argument(
+        "--output-mapping",
+        "-m",
+        dest="sync_output_mapping",
+        help="Save analysis mapping to JSON file",
+    )
+    sync_parser.add_argument(
+        "-o",
+        "--output",
+        dest="sync_output",
+        help="Write modified PCB to this file instead of overwriting",
+    )
+
+    # Apply options
+    sync_parser.add_argument(
+        "--dry-run",
+        dest="sync_dry_run",
+        action="store_true",
+        help="Show what would change without modifying files",
+    )
+    sync_parser.add_argument(
+        "--confirm",
+        dest="sync_confirm",
+        action="store_true",
+        help="Actually apply changes (required with --apply)",
+    )
+    sync_parser.add_argument(
+        "--min-confidence",
+        dest="sync_min_confidence",
+        choices=["high", "medium", "low"],
+        default="high",
+        help="Minimum confidence level to apply (default: high)",
     )
 
 

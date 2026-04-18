@@ -45,6 +45,7 @@ from .run import run_run_command
 from .schematic import run_sch_command
 from .spec import run_spec_command
 from .suggest import run_suggest_command
+from .sync import run_sync_command
 from .validation import (
     run_audit_command,
     run_check_command,
@@ -127,4 +128,6 @@ __all__ = [
     "run_run_command",
     # Pipeline
     "run_pipeline_command",
+    # Sync
+    "run_sync_command",
 ]
