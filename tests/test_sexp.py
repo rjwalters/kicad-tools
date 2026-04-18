@@ -14,7 +14,7 @@ from kicad_tools.core.sexp_file import (
 )
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 
 class TestSExpBasicParsing:
@@ -23,14 +23,14 @@ class TestSExpBasicParsing:
     def test_parse_simple(self):
         """Parse a simple S-expression."""
         text = '(test "value")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.tag == "test"
         assert sexp.get_string(0) == "value"
 
     def test_parse_nested(self):
         """Parse nested S-expressions."""
         text = '(outer (inner "value"))'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.tag == "outer"
         inner = sexp.find("inner")
         assert inner is not None
@@ -39,7 +39,7 @@ class TestSExpBasicParsing:
     def test_parse_numbers(self):
         """Parse numeric values."""
         text = "(point 1.5 -2.3)"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.tag == "point"
         assert sexp.get_float(0) == 1.5
         assert sexp.get_float(1) == -2.3
@@ -47,20 +47,20 @@ class TestSExpBasicParsing:
     def test_parse_integers(self):
         """Parse integer values."""
         text = "(count 42 -7)"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.get_int(0) == 42
         assert sexp.get_int(1) == -7
 
     def test_parse_scientific_notation(self):
         """Parse scientific notation."""
         text = "(value 1.5e-3)"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.get_float(0) == pytest.approx(0.0015)
 
     def test_parse_empty_list(self):
         """Parse empty list."""
         text = "()"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         # Empty list has name=None (or tag=None via compat property)
         assert sexp.name is None
         assert len(sexp.children) == 0
@@ -69,7 +69,7 @@ class TestSExpBasicParsing:
         """Parse with comments."""
         text = """(test ; this is a comment
             "value")"""
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.tag == "test"
         assert sexp.get_string(0) == "value"
 
@@ -80,25 +80,25 @@ class TestSExpStringParsing:
     def test_parse_escaped_newline(self):
         """Parse string with escaped newline."""
         text = r'(text "line1\nline2")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.get_string(0) == "line1\nline2"
 
     def test_parse_escaped_tab(self):
         """Parse string with escaped tab."""
         text = r'(text "col1\tcol2")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.get_string(0) == "col1\tcol2"
 
     def test_parse_escaped_quote(self):
         """Parse string with escaped quote."""
         text = r'(text "say \"hello\"")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.get_string(0) == 'say "hello"'
 
     def test_parse_escaped_backslash(self):
         """Parse string with escaped backslash."""
         text = r'(text "path\\to\\file")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.get_string(0) == "path\\to\\file"
 
 
@@ -108,17 +108,75 @@ class TestSExpErrors:
     def test_unexpected_end_in_list(self):
         """Error on unclosed list."""
         with pytest.raises(ValueError, match="Unexpected end"):
-            parse_sexp("(test")
+            parse_string("(test")
 
     def test_unexpected_end_in_string(self):
         """Error on unclosed string."""
         with pytest.raises(ValueError, match="Unterminated string"):
-            parse_sexp('(test "unclosed')
+            parse_string('(test "unclosed')
 
     def test_trailing_content(self):
         """Error on trailing content."""
         with pytest.raises(ValueError, match="Unexpected content"):
-            parse_sexp("(test) extra")
+            parse_string("(test) extra")
+
+
+class TestFilePathGuard:
+    """Tests for parse_string file-path guard."""
+
+    def test_rejects_kicad_sch_path(self):
+        """parse_string raises ValueError for .kicad_sch paths."""
+        with pytest.raises(ValueError, match="parse_file"):
+            parse_string("path/to/file.kicad_sch")
+
+    def test_rejects_kicad_pcb_path(self):
+        """parse_string raises ValueError for .kicad_pcb paths."""
+        with pytest.raises(ValueError, match="parse_file"):
+            parse_string("board.kicad_pcb")
+
+    def test_rejects_kicad_sym_path(self):
+        """parse_string raises ValueError for .kicad_sym paths."""
+        with pytest.raises(ValueError, match="parse_file"):
+            parse_string("lib.kicad_sym")
+
+    def test_rejects_kicad_mod_path(self):
+        """parse_string raises ValueError for .kicad_mod paths."""
+        with pytest.raises(ValueError, match="parse_file"):
+            parse_string("footprint.kicad_mod")
+
+    def test_allows_valid_sexp_with_path_substrings(self):
+        """Legitimate S-expressions with path-like substrings parse correctly."""
+        result = parse_string('(lib_id "path/to/lib.kicad_sym")')
+        assert result.name == "lib_id"
+
+    def test_allows_normal_sexp(self):
+        """Normal S-expression strings are not rejected."""
+        result = parse_string("(test 1 2 3)")
+        assert result.name == "test"
+
+    def test_rejects_path_with_whitespace(self):
+        """Paths with leading/trailing whitespace are still detected."""
+        with pytest.raises(ValueError, match="parse_file"):
+            parse_string("  board.kicad_pcb  ")
+
+
+class TestParseSexpDeprecation:
+    """Tests for parse_sexp deprecation warning."""
+
+    def test_emits_deprecation_warning(self):
+        """parse_sexp emits DeprecationWarning."""
+        from kicad_tools.sexp import parse_sexp
+
+        with pytest.warns(DeprecationWarning, match="parse_sexp.*deprecated"):
+            parse_sexp("(test 42)")
+
+    def test_still_parses_correctly(self):
+        """parse_sexp still returns correct result while deprecated."""
+        from kicad_tools.sexp import parse_sexp
+
+        with pytest.warns(DeprecationWarning):
+            result = parse_sexp("(hello 1 2 3)")
+        assert result.name == "hello"
 
 
 class TestSExpMethods:
@@ -127,18 +185,18 @@ class TestSExpMethods:
     def test_find_all(self):
         """Find all matching children."""
         text = "(root (item 1) (item 2) (other 3))"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         items = sexp.find_all("item")
         assert len(items) == 2
 
     def test_find_not_found(self):
         """Find returns None when not found."""
-        sexp = parse_sexp("(test)")
+        sexp = parse_string("(test)")
         assert sexp.find("missing") is None
 
     def test_getitem_by_index(self):
         """Get child by index returns SExp node."""
-        sexp = parse_sexp("(test 1 2 3)")
+        sexp = parse_string("(test 1 2 3)")
         # __getitem__ with int returns SExp nodes (new API behavior)
         assert sexp[0].value == 1
         assert sexp[1].value == 2
@@ -151,20 +209,20 @@ class TestSExpMethods:
 
     def test_getitem_by_tag(self):
         """Get child by tag."""
-        sexp = parse_sexp("(outer (inner 42))")
+        sexp = parse_string("(outer (inner 42))")
         inner = sexp["inner"]
         assert inner is not None
         assert inner.tag == "inner"
 
     def test_get_value(self):
         """Get value by index."""
-        sexp = parse_sexp("(test 1 2 3)")
+        sexp = parse_string("(test 1 2 3)")
         assert sexp.get_value(0) == 1
         assert sexp.get_value(99) is None
 
     def test_get_string_from_number(self):
         """Get string from numeric value."""
-        sexp = parse_sexp("(test 42)")
+        sexp = parse_string("(test 42)")
         assert sexp.get_string(0) == "42"
 
     def test_get_int_from_string(self):
@@ -181,7 +239,7 @@ class TestSExpMethods:
 
     def test_get_float_from_int(self):
         """Get float from integer."""
-        sexp = parse_sexp("(test 42)")
+        sexp = parse_string("(test 42)")
         assert sexp.get_float(0) == 42.0
 
     def test_get_float_invalid_string(self):
@@ -192,7 +250,7 @@ class TestSExpMethods:
 
     def test_iter_children(self):
         """Iterate over child SExp nodes."""
-        sexp = parse_sexp("(root 1 (a) 2 (b) 3)")
+        sexp = parse_string("(root 1 (a) 2 (b) 3)")
         children = list(sexp.iter_children())
         assert len(children) == 2
         assert children[0].tag == "a"
@@ -200,7 +258,7 @@ class TestSExpMethods:
 
     def test_has_tag(self):
         """Check for tag presence."""
-        sexp = parse_sexp("(root (child))")
+        sexp = parse_string("(root (child))")
         assert sexp.has_tag("child") is True
         assert sexp.has_tag("missing") is False
 
@@ -227,13 +285,13 @@ class TestSExpMethods:
 
     def test_remove_child(self):
         """Remove child by tag."""
-        sexp = parse_sexp("(root (a) (b) (c))")
+        sexp = parse_string("(root (a) (b) (c))")
         assert sexp.remove_child("b") is True
         assert len(sexp.find_all("b")) == 0
 
     def test_remove_child_not_found(self):
         """Remove returns False if not found."""
-        sexp = parse_sexp("(root (a))")
+        sexp = parse_string("(root (a))")
         assert sexp.remove_child("missing") is False
 
     def test_repr_empty(self):
@@ -257,16 +315,16 @@ class TestSExpSerialization:
     def test_serialize_simple(self):
         """Serialize simple S-expression."""
         text = '(test "value")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         result = serialize_sexp(sexp)
         assert "test" in result
         assert "value" in result
 
     def test_serialize_roundtrip(self):
         """Serialize and parse should preserve data."""
-        original = parse_sexp('(test 1.5 "hello" (nested 42))')
+        original = parse_string('(test 1.5 "hello" (nested 42))')
         serialized = serialize_sexp(original)
-        reparsed = parse_sexp(serialized)
+        reparsed = parse_string(serialized)
         assert reparsed.tag == "test"
         assert reparsed.get_float(0) == 1.5
         assert reparsed.get_string(1) == "hello"
@@ -328,7 +386,7 @@ class TestSExpSerialization:
         sexp = SExp("text")
         sexp.add(original_text)
         serialized = serialize_sexp(sexp)
-        reparsed = parse_sexp(serialized)
+        reparsed = parse_string(serialized)
         assert reparsed.get_string(0) == original_text
 
     def test_serialize_tabs_escaped(self):
@@ -467,7 +525,7 @@ class TestSExpInsertMethods:
 
     def test_insert_at_beginning(self):
         """Insert node at beginning of children list."""
-        sexp = parse_sexp("(root (a) (b) (c))")
+        sexp = parse_string("(root (a) (b) (c))")
         new_node = SExp("new")
         sexp.insert(0, new_node)
         assert sexp.children[0].name == "new"
@@ -476,7 +534,7 @@ class TestSExpInsertMethods:
 
     def test_insert_at_middle(self):
         """Insert node in middle of children list."""
-        sexp = parse_sexp("(root (a) (b) (c))")
+        sexp = parse_string("(root (a) (b) (c))")
         new_node = SExp("new")
         sexp.insert(2, new_node)
         assert sexp.children[0].name == "a"
@@ -486,7 +544,7 @@ class TestSExpInsertMethods:
 
     def test_insert_at_end(self):
         """Insert node at end of children list."""
-        sexp = parse_sexp("(root (a) (b) (c))")
+        sexp = parse_string("(root (a) (b) (c))")
         new_node = SExp("new")
         sexp.insert(3, new_node)
         assert sexp.children[2].name == "c"
@@ -494,7 +552,7 @@ class TestSExpInsertMethods:
 
     def test_insert_negative_index(self):
         """Insert node using negative index."""
-        sexp = parse_sexp("(root (a) (b) (c))")
+        sexp = parse_string("(root (a) (b) (c))")
         new_node = SExp("new")
         sexp.insert(-1, new_node)  # Insert before last element
         assert sexp.children[-2].name == "new"
@@ -509,7 +567,7 @@ class TestSExpInsertMethods:
 
     def test_insert_after_existing_node(self):
         """Insert node after an existing node by name."""
-        sexp = parse_sexp("(root (layer) (uuid) (property))")
+        sexp = parse_string("(root (layer) (uuid) (property))")
         at_node = SExp("at")
         at_node.add(50)
         at_node.add(30)
@@ -520,28 +578,28 @@ class TestSExpInsertMethods:
 
     def test_insert_after_last_node(self):
         """Insert after the last child with matching name."""
-        sexp = parse_sexp("(root (a) (b))")
+        sexp = parse_string("(root (a) (b))")
         new_node = SExp("new")
         sexp.insert_after("b", new_node)
         assert sexp.children[-1].name == "new"
 
     def test_insert_after_returns_child(self):
         """insert_after should return the inserted child."""
-        sexp = parse_sexp("(root (a))")
+        sexp = parse_string("(root (a))")
         new_node = SExp("new")
         result = sexp.insert_after("a", new_node)
         assert result is new_node
 
     def test_insert_after_not_found(self):
         """insert_after raises KeyError when target not found."""
-        sexp = parse_sexp("(root (a) (b))")
+        sexp = parse_string("(root (a) (b))")
         new_node = SExp("new")
         with pytest.raises(KeyError, match="No child named 'missing'"):
             sexp.insert_after("missing", new_node)
 
     def test_insert_before_existing_node(self):
         """Insert node before an existing node by name."""
-        sexp = parse_sexp("(root (layer) (property) (pad))")
+        sexp = parse_string("(root (layer) (property) (pad))")
         at_node = SExp("at")
         at_node.add(50)
         at_node.add(30)
@@ -552,7 +610,7 @@ class TestSExpInsertMethods:
 
     def test_insert_before_first_node(self):
         """Insert before the first child."""
-        sexp = parse_sexp("(root (a) (b))")
+        sexp = parse_string("(root (a) (b))")
         new_node = SExp("new")
         sexp.insert_before("a", new_node)
         assert sexp.children[0].name == "new"
@@ -560,14 +618,14 @@ class TestSExpInsertMethods:
 
     def test_insert_before_returns_child(self):
         """insert_before should return the inserted child."""
-        sexp = parse_sexp("(root (a))")
+        sexp = parse_string("(root (a))")
         new_node = SExp("new")
         result = sexp.insert_before("a", new_node)
         assert result is new_node
 
     def test_insert_before_not_found(self):
         """insert_before raises KeyError when target not found."""
-        sexp = parse_sexp("(root (a) (b))")
+        sexp = parse_string("(root (a) (b))")
         new_node = SExp("new")
         with pytest.raises(KeyError, match="No child named 'missing'"):
             sexp.insert_before("missing", new_node)
@@ -579,7 +637,7 @@ class TestSExpInsertMethods:
         (at ...) comes early in the tree, not at the end.
         """
         # Simulate a footprint with (at) missing
-        footprint = parse_sexp("""(footprint "Library:Name"
+        footprint = parse_string("""(footprint "Library:Name"
             (layer "F.Cu")
             (uuid "abc123")
             (property "Reference" "U1")

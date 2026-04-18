@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_file, serialize_sexp
 
 # Valid KiCad pin types
 VALID_PIN_TYPES = frozenset(
@@ -932,8 +932,7 @@ class SymbolLibrary:
     @classmethod
     def load(cls, path: str) -> SymbolLibrary:
         """Load a symbol library from a .kicad_sym file."""
-        text = Path(path).read_text()
-        sexp = parse_sexp(text)
+        sexp = parse_file(path)
 
         if sexp.tag != "kicad_symbol_lib":
             raise ValueError(f"Not a KiCad symbol library: {path}")

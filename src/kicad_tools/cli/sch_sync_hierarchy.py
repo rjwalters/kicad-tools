@@ -29,7 +29,7 @@ from kicad_tools.schema.hierarchy_validation import (
     ValidationIssueType,
     validate_hierarchy,
 )
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 from kicad_tools.sexp.builders import hier_label_node
 
 
@@ -221,7 +221,7 @@ def _remove_sheet_pin(
     content = path.read_text()
 
     # Parse and find the sheet block
-    sexp = parse_sexp(content)
+    sexp = parse_string(content)
 
     # Find the sheet by name
     target_sheet = None
@@ -430,7 +430,7 @@ def execute_add_labels(
         # Get page size
         child_path = Path(child_node.path)
         child_content = child_path.read_text()
-        child_sexp = parse_sexp(child_content)
+        child_sexp = parse_string(child_content)
         page_size = _get_schematic_size(child_sexp)
 
         # Calculate position for new label

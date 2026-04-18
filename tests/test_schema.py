@@ -20,7 +20,7 @@ from kicad_tools.schema.library import (
 )
 from kicad_tools.schema.schematic import Schematic, SheetInstance, TitleBlock
 from kicad_tools.schema.wire import Bus, Junction, Wire
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_string
 
 
 class TestWire:
@@ -28,7 +28,7 @@ class TestWire:
 
     def test_wire_from_sexp(self):
         """Test parsing wire from S-expression."""
-        sexp = parse_sexp("""(wire
+        sexp = parse_string("""(wire
             (pts (xy 90 100) (xy 110 100))
             (stroke (width 0.2) (type solid))
             (uuid "test-uuid-123")
@@ -42,7 +42,7 @@ class TestWire:
 
     def test_wire_from_sexp_minimal(self):
         """Test parsing wire with minimal data."""
-        sexp = parse_sexp("(wire)")
+        sexp = parse_string("(wire)")
         wire = Wire.from_sexp(sexp)
         assert wire.start == (0.0, 0.0)
         assert wire.end == (0.0, 0.0)
@@ -119,7 +119,7 @@ class TestJunction:
 
     def test_junction_from_sexp(self):
         """Test parsing junction from S-expression."""
-        sexp = parse_sexp("""(junction
+        sexp = parse_string("""(junction
             (at 50.8 76.2)
             (diameter 1.0)
             (uuid "junction-uuid")
@@ -131,7 +131,7 @@ class TestJunction:
 
     def test_junction_from_sexp_minimal(self):
         """Test parsing junction with minimal data."""
-        sexp = parse_sexp("(junction)")
+        sexp = parse_string("(junction)")
         junc = Junction.from_sexp(sexp)
         assert junc.position == (0.0, 0.0)
         assert junc.diameter == 0.0
@@ -149,7 +149,7 @@ class TestBus:
 
     def test_bus_from_sexp(self):
         """Test parsing bus from S-expression."""
-        sexp = parse_sexp("""(bus
+        sexp = parse_string("""(bus
             (pts (xy 10 20) (xy 30 40))
             (uuid "bus-uuid")
         )""")
@@ -160,7 +160,7 @@ class TestBus:
 
     def test_bus_from_sexp_minimal(self):
         """Test parsing bus with minimal data."""
-        sexp = parse_sexp("(bus)")
+        sexp = parse_string("(bus)")
         bus = Bus.from_sexp(sexp)
         assert bus.start == (0.0, 0.0)
         assert bus.end == (0.0, 0.0)
@@ -171,7 +171,7 @@ class TestLabel:
 
     def test_label_from_sexp(self):
         """Test parsing label from S-expression."""
-        sexp = parse_sexp("""(label "NET1"
+        sexp = parse_string("""(label "NET1"
             (at 50 60 90)
             (uuid "label-uuid")
         )""")
@@ -183,7 +183,7 @@ class TestLabel:
 
     def test_label_from_sexp_no_rotation(self):
         """Test parsing label without rotation."""
-        sexp = parse_sexp("""(label "VCC"
+        sexp = parse_string("""(label "VCC"
             (at 10 20)
             (uuid "uuid")
         )""")
@@ -203,7 +203,7 @@ class TestHierarchicalLabel:
 
     def test_hierarchical_label_from_sexp(self):
         """Test parsing hierarchical label."""
-        sexp = parse_sexp("""(hierarchical_label "CLK"
+        sexp = parse_string("""(hierarchical_label "CLK"
             (shape output)
             (at 100 50 180)
             (uuid "hlabel-uuid")
@@ -218,7 +218,7 @@ class TestHierarchicalLabel:
     def test_hierarchical_label_shapes(self):
         """Test different hierarchical label shapes."""
         for shape in ["input", "output", "bidirectional", "tri_state", "passive"]:
-            sexp = parse_sexp(f"""(hierarchical_label "SIG"
+            sexp = parse_string(f"""(hierarchical_label "SIG"
                 (shape {shape})
                 (at 0 0)
             )""")
@@ -227,7 +227,7 @@ class TestHierarchicalLabel:
 
     def test_hierarchical_label_default_shape(self):
         """Test default shape for hierarchical label."""
-        sexp = parse_sexp("""(hierarchical_label "SIG" (at 0 0))""")
+        sexp = parse_string("""(hierarchical_label "SIG" (at 0 0))""")
         label = HierarchicalLabel.from_sexp(sexp)
         assert label.shape == "input"
 
@@ -244,7 +244,7 @@ class TestGlobalLabel:
 
     def test_global_label_from_sexp(self):
         """Test parsing global label."""
-        sexp = parse_sexp("""(global_label "RESET"
+        sexp = parse_string("""(global_label "RESET"
             (shape input)
             (at 75 25 0)
             (uuid "glabel-uuid")
@@ -268,7 +268,7 @@ class TestPowerSymbol:
 
     def test_power_symbol_from_sexp(self):
         """Test parsing power symbol."""
-        sexp = parse_sexp("""(symbol
+        sexp = parse_string("""(symbol
             (lib_id "power:GND")
             (at 50 100 0)
             (uuid "power-uuid")
@@ -284,7 +284,7 @@ class TestPowerSymbol:
 
     def test_power_symbol_vcc(self):
         """Test parsing VCC power symbol."""
-        sexp = parse_sexp("""(symbol
+        sexp = parse_string("""(symbol
             (lib_id "power:+5V")
             (at 30 40 0)
             (property "Value" "+5V" (at 0 0 0))
@@ -296,7 +296,7 @@ class TestPowerSymbol:
 
     def test_power_symbol_non_power_returns_none(self):
         """Test that non-power symbol returns None."""
-        sexp = parse_sexp("""(symbol
+        sexp = parse_string("""(symbol
             (lib_id "Device:R")
             (at 50 100 0)
         )""")
@@ -636,7 +636,7 @@ class TestTitleBlock:
 
     def test_title_block_from_sexp(self):
         """Test parsing title block."""
-        sexp = parse_sexp("""(title_block
+        sexp = parse_string("""(title_block
             (title "Test Project")
             (date "2024-01-15")
             (rev "1.0")
@@ -654,7 +654,7 @@ class TestTitleBlock:
 
     def test_title_block_empty(self):
         """Test empty title block."""
-        sexp = parse_sexp("(title_block)")
+        sexp = parse_string("(title_block)")
         tb = TitleBlock.from_sexp(sexp)
         assert tb.title == ""
         assert tb.date == ""
@@ -668,7 +668,7 @@ class TestSchematicSheetInstance:
 
     def test_sheet_instance_from_sexp(self):
         """Test parsing sheet instance."""
-        sexp = parse_sexp("""(sheet
+        sexp = parse_string("""(sheet
             (at 100 50)
             (size 76.2 50.8)
             (uuid "sheet-uuid")
@@ -801,7 +801,7 @@ class TestLibraryPin:
 
     def test_library_pin_from_sexp(self):
         """Test parsing library pin."""
-        sexp = parse_sexp("""(pin input line
+        sexp = parse_string("""(pin input line
             (at 5.08 0 180)
             (length 2.54)
             (name "IN")
@@ -834,7 +834,7 @@ class TestLibrarySymbol:
 
     def test_library_symbol_from_sexp(self):
         """Test parsing library symbol."""
-        sexp = parse_sexp("""(symbol "Device:R"
+        sexp = parse_string("""(symbol "Device:R"
             (property "Reference" "R")
             (property "Value" "R")
             (symbol "Device:R_0_1"
@@ -1031,7 +1031,7 @@ class TestHierarchySheetPin:
 
     def test_sheet_pin_from_sexp(self):
         """Test parsing sheet pin."""
-        sexp = parse_sexp("""(pin "CLK" input
+        sexp = parse_string("""(pin "CLK" input
             (at 100 50 0)
             (uuid "pin-uuid")
         )""")
@@ -1047,7 +1047,7 @@ class TestHierarchySheetInstance:
 
     def test_sheet_instance_from_sexp(self):
         """Test parsing sheet instance."""
-        sexp = parse_sexp("""(sheet
+        sexp = parse_string("""(sheet
             (at 100 50)
             (size 76.2 50.8)
             (uuid "sheet-uuid")

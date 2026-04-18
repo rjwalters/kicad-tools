@@ -9,13 +9,13 @@ It provides feature-rich S-expression parsing with:
 - Full backward compatibility with the legacy core/sexp.py API
 
 Usage:
-    from kicad_tools.sexp import SExp, parse_sexp, parse_string, parse_file
+    from kicad_tools.sexp import SExp, parse_file, parse_string
+
+    # Parse from file (preferred for file paths)
+    doc = parse_file("project.kicad_sch")
 
     # Parse from string
-    doc = parse_string(text)  # or parse_sexp(text) for backward compat
-
-    # Parse from file
-    doc = parse_file("project.kicad_sch")
+    doc = parse_string('(kicad_sch (version 20231120))')
 
     # Access elements using either new or legacy API
     doc.name  # or doc.tag for backward compat
@@ -41,8 +41,8 @@ __all__ = [
     "Parser",
     "ParseError",
     "Document",
-    "parse_string",
     "parse_file",
+    "parse_string",
     # Backward compatibility with core/sexp.py
     "parse_sexp",
     "serialize_sexp",

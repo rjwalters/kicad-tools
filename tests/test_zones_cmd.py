@@ -1089,10 +1089,10 @@ class TestKiCad10NetFormat:
     def test_pad_from_sexp_name_only_format(self):
         """Pad.from_sexp handles (net "name") without a number."""
         from kicad_tools.schema.pcb import Pad
-        from kicad_tools.sexp import parse_sexp
+        from kicad_tools.sexp import parse_string
 
         sexp_text = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net "GND"))'
-        sexp = parse_sexp(sexp_text)
+        sexp = parse_string(sexp_text)
         pad = Pad.from_sexp(sexp)
         assert pad is not None
         assert pad.net_name == "GND"
@@ -1101,10 +1101,10 @@ class TestKiCad10NetFormat:
     def test_pad_from_sexp_traditional_format(self):
         """Pad.from_sexp handles (net N "name") traditional format."""
         from kicad_tools.schema.pcb import Pad
-        from kicad_tools.sexp import parse_sexp
+        from kicad_tools.sexp import parse_string
 
         sexp_text = '(pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))'
-        sexp = parse_sexp(sexp_text)
+        sexp = parse_string(sexp_text)
         pad = Pad.from_sexp(sexp)
         assert pad is not None
         assert pad.net_name == "GND"

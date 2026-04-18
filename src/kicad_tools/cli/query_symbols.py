@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 
 # Pin type descriptions
 PIN_TYPES = {
@@ -229,7 +229,7 @@ class SymbolLibrary:
     def load(cls, path: Path) -> "SymbolLibrary":
         """Load a symbol library from file."""
         text = path.read_text(encoding="utf-8")
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
 
         if sexp.tag != "kicad_symbol_lib":
             raise ValueError(f"Not a symbol library: {sexp.tag}")

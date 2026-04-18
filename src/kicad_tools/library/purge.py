@@ -21,7 +21,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_string
 
 
 @dataclass
@@ -185,7 +185,7 @@ class UnusedLibraryAnalyzer:
         refs: set[str] = set()
         try:
             text = sch_path.read_text(encoding="utf-8")
-            sexp = parse_sexp(text)
+            sexp = parse_string(text)
         except Exception:
             return refs
 
@@ -209,7 +209,7 @@ class UnusedLibraryAnalyzer:
         refs: set[str] = set()
         try:
             text = pcb_path.read_text(encoding="utf-8")
-            sexp = parse_sexp(text)
+            sexp = parse_string(text)
         except Exception:
             return refs
 
@@ -230,7 +230,7 @@ class UnusedLibraryAnalyzer:
         refs: set[str] = set()
         try:
             text = sch_path.read_text(encoding="utf-8")
-            sexp = parse_sexp(text)
+            sexp = parse_string(text)
         except Exception:
             return refs
 
@@ -267,7 +267,7 @@ class UnusedLibraryAnalyzer:
             library_name = sym_path.stem  # e.g. "my_project_lib"
             try:
                 text = sym_path.read_text(encoding="utf-8")
-                sexp = parse_sexp(text)
+                sexp = parse_string(text)
             except Exception:
                 continue
 

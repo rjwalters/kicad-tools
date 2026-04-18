@@ -5,7 +5,7 @@ from __future__ import annotations
 from kicad_tools.layout import NetMapper, NetMapping, RemapResult, remap_traces
 from kicad_tools.layout.types import MatchReason, OrphanedSegment, SegmentRemap
 from kicad_tools.operations.netlist import Netlist, NetlistNet, NetNode
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_string
 
 
 class TestNetMapping:
@@ -370,7 +370,7 @@ class TestRemapTraces:
 
     def test_remap_renamed_net(self):
         """Test remapping segments when net is renamed."""
-        pcb_doc = parse_sexp(self.PCB_WITH_SEGMENTS)
+        pcb_doc = parse_string(self.PCB_WITH_SEGMENTS)
 
         mappings = [
             NetMapping("OLD_NET", "NEW_NET", 0.9, MatchReason.CONNECTIVITY),
@@ -394,7 +394,7 @@ class TestRemapTraces:
 
     def test_orphan_removed_net_segments(self):
         """Test that segments on removed nets become orphaned."""
-        pcb_doc = parse_sexp(self.PCB_WITH_SEGMENTS)
+        pcb_doc = parse_string(self.PCB_WITH_SEGMENTS)
 
         mappings = [
             NetMapping("OLD_NET", None, 0.0, MatchReason.REMOVED),
@@ -414,7 +414,7 @@ class TestRemapTraces:
 
     def test_exact_match_no_change(self):
         """Test that exact matches don't produce remap entries."""
-        pcb_doc = parse_sexp(self.PCB_WITH_SEGMENTS)
+        pcb_doc = parse_string(self.PCB_WITH_SEGMENTS)
 
         mappings = [
             NetMapping("OLD_NET", "OLD_NET", 1.0, MatchReason.EXACT),
@@ -429,7 +429,7 @@ class TestRemapTraces:
 
     def test_new_nets_detected(self):
         """Test detection of new nets in result."""
-        pcb_doc = parse_sexp(self.PCB_WITH_SEGMENTS)
+        pcb_doc = parse_string(self.PCB_WITH_SEGMENTS)
 
         mappings = [
             NetMapping("OLD_NET", "OLD_NET", 1.0, MatchReason.EXACT),
@@ -442,7 +442,7 @@ class TestRemapTraces:
 
     def test_missing_new_net_id(self):
         """Test handling when new net ID not found in PCB."""
-        pcb_doc = parse_sexp(self.PCB_WITH_SEGMENTS)
+        pcb_doc = parse_string(self.PCB_WITH_SEGMENTS)
 
         mappings = [
             NetMapping("OLD_NET", "NONEXISTENT_NET", 0.9, MatchReason.CONNECTIVITY),
@@ -550,7 +550,7 @@ class TestIntegration:
           (segment (start 100 110) (end 110 110) (width 0.2) (layer "F.Cu") (net 3) (uuid "seg-unused"))
         )"""
 
-        pcb_doc = parse_sexp(pcb_content)
+        pcb_doc = parse_string(pcb_content)
         net_id_lookup = {"GND": 1, "MCU_TX": 2, "NEW_SIGNAL": 4}
 
         result = remap_traces(pcb_doc, mappings, net_id_lookup)

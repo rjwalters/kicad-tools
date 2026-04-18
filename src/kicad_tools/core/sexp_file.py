@@ -6,7 +6,7 @@ from pathlib import Path
 
 from kicad_tools.exceptions import FileFormatError
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 
 def load_schematic(path: str | Path) -> SExp:
@@ -35,7 +35,7 @@ def load_schematic(path: str | Path) -> SExp:
         )
 
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     if sexp.tag != "kicad_sch":
         raise FileFormatError(
@@ -91,7 +91,7 @@ def load_symbol_lib(path: str | Path) -> SExp:
         )
 
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     if sexp.tag != "kicad_symbol_lib":
         raise FileFormatError(
@@ -148,7 +148,7 @@ def load_pcb(path: str | Path) -> SExp:
         )
 
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     if sexp.tag != "kicad_pcb":
         raise FileFormatError(
@@ -211,7 +211,7 @@ def load_footprint(path: str | Path) -> SExp:
         )
 
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     # KiCad 5 uses "module", KiCad 6+ uses "footprint"
     if sexp.tag not in ("module", "footprint"):
@@ -285,7 +285,7 @@ def load_design_rules(path: str | Path) -> SExp:
     # DRU files are a sequence of S-expressions, wrap in a container
     # to parse as a single tree
     wrapped_text = f"(design_rules {text})"
-    sexp = parse_sexp(wrapped_text)
+    sexp = parse_string(wrapped_text)
 
     # Validate structure - should have version as first child
     if not sexp.values:

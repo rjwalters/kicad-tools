@@ -19,7 +19,7 @@ from kicad_tools.core.sexp_file import (
 from kicad_tools.query.base import BaseQuery
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.schematic import Schematic
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 # --- Empty/Minimal File Edge Cases ---
 
@@ -139,23 +139,23 @@ class TestMalformedSexp:
     def test_unclosed_parenthesis(self):
         """Test error on unclosed parenthesis."""
         with pytest.raises(ValueError, match="Unexpected end"):
-            parse_sexp("(test (inner)")
+            parse_string("(test (inner)")
 
     def test_extra_closing_parenthesis(self):
         """Test error on extra closing parenthesis."""
         with pytest.raises(ValueError, match="Unexpected"):
-            parse_sexp("(test))")
+            parse_string("(test))")
 
     def test_unterminated_string(self):
         """Test error on unterminated string."""
         with pytest.raises(ValueError, match="Unterminated string"):
-            parse_sexp('(test "hello)')
+            parse_string('(test "hello)')
 
     def test_deeply_nested_structure(self):
         """Test parsing deeply nested structures."""
         # Create a deeply nested structure (100 levels)
         nested = "(" * 100 + "leaf" + ")" * 100
-        sexp = parse_sexp(nested)
+        sexp = parse_string(nested)
         # Navigate to the deepest level
         current = sexp
         for _ in range(99):
@@ -166,28 +166,28 @@ class TestMalformedSexp:
     def test_multiple_top_level_elements(self):
         """Test error on multiple top-level elements."""
         with pytest.raises(ValueError, match="Unexpected content"):
-            parse_sexp("(a)(b)")
+            parse_string("(a)(b)")
 
     def test_empty_input(self):
         """Test error on empty input."""
         with pytest.raises(ValueError):
-            parse_sexp("")
+            parse_string("")
 
     def test_whitespace_only_input(self):
         """Test error on whitespace-only input."""
         with pytest.raises(ValueError):
-            parse_sexp("   \n\t  ")
+            parse_string("   \n\t  ")
 
     def test_comment_only_input(self):
         """Test error on comment-only input."""
         with pytest.raises(ValueError):
-            parse_sexp("; just a comment")
+            parse_string("; just a comment")
 
     def test_invalid_escape_sequence(self):
         """Test handling of invalid escape sequences."""
         # Invalid escape should be handled gracefully
         text = r'(test "hello\xworld")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         # The parser should handle this somehow
         assert sexp.tag == "test"
 
@@ -196,7 +196,7 @@ class TestMalformedSexp:
         text = '(test "hello\\x00world")'
         # This might raise an error or handle it gracefully
         try:
-            sexp = parse_sexp(text)
+            sexp = parse_string(text)
             assert sexp.tag == "test"
         except ValueError:
             # Also acceptable - explicit rejection
@@ -205,14 +205,14 @@ class TestMalformedSexp:
     def test_mixed_quotes(self):
         """Test strings with embedded quotes."""
         text = r'(test "say \"hello\" to the world")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         result = sexp.get_string(0)
         assert "hello" in result
 
     def test_unicode_in_string(self):
         """Test Unicode characters in strings."""
         text = '(test "caf\u00e9 \u4e2d\u6587")'
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         result = sexp.get_string(0)
         assert "\u00e9" in result  # e with accent
         assert "\u4e2d" in result  # Chinese character
@@ -366,7 +366,7 @@ class TestBoundaryValues:
     def test_zero_dimension_values(self):
         """Test handling of zero dimension values in S-expressions."""
         text = "(pad 1 smd roundrect (at 0 0) (size 0 0))"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.tag == "pad"
         size = sexp.find("size")
         assert size is not None
@@ -376,7 +376,7 @@ class TestBoundaryValues:
     def test_negative_zero(self):
         """Test handling of negative zero in coordinates."""
         text = "(at -0.0 0.0)"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         assert sexp.tag == "at"
         # Both should be treated as zero
         assert sexp.get_float(0) == 0.0
@@ -385,7 +385,7 @@ class TestBoundaryValues:
     def test_scientific_notation_extreme(self):
         """Test handling of extreme scientific notation."""
         text = "(value 1.5e-15 2.3e+20)"
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         val1 = sexp.get_float(0)
         val2 = sexp.get_float(1)
         assert val1 == pytest.approx(1.5e-15)
@@ -753,7 +753,7 @@ class TestSexpSerializationEdgeCases:
         sexp = SExp("test")
         sexp.add('value with "quotes" and \\backslash')
         result = serialize_sexp(sexp)
-        parsed = parse_sexp(result)
+        parsed = parse_string(result)
         # Round-trip should preserve the string
         assert parsed.tag == "test"
 
@@ -763,7 +763,7 @@ class TestSexpSerializationEdgeCases:
         sexp.add("yes")
         sexp.add("no")
         result = serialize_sexp(sexp)
-        parsed = parse_sexp(result)
+        parsed = parse_string(result)
         assert parsed.tag == "test"
 
     def test_roundtrip_complex_structure(self):
@@ -776,9 +776,9 @@ class TestSexpSerializationEdgeCases:
             (property "Value" "10k" (at 0 1 0))
           )
         )"""
-        parsed = parse_sexp(original)
+        parsed = parse_string(original)
         serialized = serialize_sexp(parsed)
-        reparsed = parse_sexp(serialized)
+        reparsed = parse_string(serialized)
 
         # Check key elements preserved
         assert reparsed.tag == "kicad_sch"

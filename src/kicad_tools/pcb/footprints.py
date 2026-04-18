@@ -31,7 +31,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp.parser import parse_sexp
+from kicad_tools.sexp.parser import parse_file
 
 
 @dataclass
@@ -81,8 +81,7 @@ class Footprint:
         Raises:
             ValueError: If the file is not a valid footprint file.
         """
-        content = filepath.read_text(encoding="utf-8")
-        sexp = parse_sexp(content)
+        sexp = parse_file(filepath)
 
         if sexp.name not in ("footprint", "module"):
             raise ValueError(f"Not a footprint file: {filepath}")

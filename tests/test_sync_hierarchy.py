@@ -19,7 +19,7 @@ from kicad_tools.cli.sch_sync_hierarchy import (
     main,
 )
 from kicad_tools.schema.hierarchy import HierarchicalLabelInfo
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_string
 
 
 @pytest.fixture
@@ -45,21 +45,21 @@ class TestGetSchematicSize:
 
     def test_a4_paper(self):
         """A4 paper should return correct size."""
-        sexp = parse_sexp('(kicad_sch (paper "A4"))')
+        sexp = parse_string('(kicad_sch (paper "A4"))')
         width, height = _get_schematic_size(sexp)
         assert width == 297
         assert height == 210
 
     def test_us_letter(self):
         """US Letter should return correct size."""
-        sexp = parse_sexp('(kicad_sch (paper "A"))')
+        sexp = parse_string('(kicad_sch (paper "A"))')
         width, height = _get_schematic_size(sexp)
         assert width == 279.4
         assert height == 215.9
 
     def test_default_size(self):
         """Missing paper should default to A4."""
-        sexp = parse_sexp("(kicad_sch)")
+        sexp = parse_string("(kicad_sch)")
         width, height = _get_schematic_size(sexp)
         assert width == 297
         assert height == 210

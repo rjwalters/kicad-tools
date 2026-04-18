@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ class Netlist:
         """Load and parse a netlist file."""
         path = Path(path)
         text = path.read_text(encoding="utf-8")
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
         return cls.from_sexp(sexp)
 
     def get_component(self, reference: str) -> NetlistComponent | None:
