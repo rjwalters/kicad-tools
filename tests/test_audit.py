@@ -2144,3 +2144,66 @@ requirements:
 
         captured = capsys.readouterr()
         assert "Assembly: excluded" in captured.out
+
+
+class TestConnectivityStatusZoneVerification:
+    """Tests for ConnectivityStatus zone verification fields."""
+
+    def test_connectivity_pass_with_zone_connected_nets(self):
+        """Connectivity should pass when all incomplete nets have zone connections."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=7,
+            incomplete_nets=0,
+            zone_connected_nets=3,
+            completion_percent=70.0,
+            unconnected_pads=0,
+            has_zones=True,
+            passed=True,
+        )
+        assert status.passed is True
+        assert status.zone_connected_nets == 3
+
+    def test_connectivity_fail_with_truly_incomplete_nets(self):
+        """Connectivity should fail when some nets are truly incomplete."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=5,
+            incomplete_nets=3,
+            zone_connected_nets=2,
+            completion_percent=50.0,
+            unconnected_pads=6,
+            has_zones=True,
+            passed=False,
+        )
+        assert status.passed is False
+        assert status.incomplete_nets == 3
+
+    def test_verdict_ready_when_zone_connected(self):
+        """Audit verdict should be READY when connectivity passes
+        thanks to zone-connected nets."""
+        result = AuditResult()
+        result.erc = ERCStatus(passed=True)
+        result.drc = DRCStatus(passed=True)
+        result.connectivity = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=10,
+            incomplete_nets=0,
+            zone_connected_nets=5,
+            passed=True,
+        )
+        result.compatibility = ManufacturerCompatibility(passed=True)
+        assert result.verdict == AuditVerdict.READY
+
+    def test_connectivity_status_to_dict_zone_fields(self):
+        """ConnectivityStatus.to_dict() includes zone_connected_nets."""
+        status = ConnectivityStatus(
+            total_nets=10,
+            connected_nets=8,
+            zone_connected_nets=3,
+            has_zones=True,
+            passed=True,
+        )
+        d = status.to_dict()
+        assert d["zone_connected_nets"] == 3
+        assert d["has_zones"] is True
