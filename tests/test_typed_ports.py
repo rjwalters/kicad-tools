@@ -512,16 +512,29 @@ class TestLDOBlockTypedPorts:
         sch = Mock()
 
         def make_mock_symbol(symbol, x, y, ref, *args, **kwargs):
+            from kicad_tools.schematic.exceptions import PinNotFoundError
+
             mock = Mock()
+            # XC6206PxxxMR is SOT-23-3: no EN pin
+            has_en = "XC6206" not in str(symbol)
             pin_map = {
                 "VIN": (x - 10, y),
                 "VOUT": (x + 10, y),
                 "GND": (x, y + 10),
-                "EN": (x - 5, y + 5),
                 "1": (x, y - 5),
                 "2": (x, y + 5),
             }
-            mock.pin_position.side_effect = lambda name: pin_map.get(name, (0, 0))
+            if has_en:
+                pin_map["EN"] = (x - 5, y + 5)
+
+            def _pin_pos(name, _pm=pin_map, _sym=symbol):
+                if name in _pm:
+                    return _pm[name]
+                raise PinNotFoundError(
+                    pin_name=name, symbol_name=str(_sym), available_pins=[]
+                )
+
+            mock.pin_position.side_effect = _pin_pos
             return mock
 
         sch.add_symbol = Mock(side_effect=make_mock_symbol)

@@ -232,7 +232,7 @@ COMMON_FOOTPRINTS = {
     # Voltage Regulators
     # -------------------------------------------------------------------------
     "Package_TO_SOT_SMD:SOT-23-5": {
-        # Typical LDO pinout (e.g., XC6206, AP2112):
+        # Typical 5-pin LDO pinout (e.g., AP2204K, AP2112):
         # Pin 1: VIN (left, bottom)
         # Pin 2: GND (left, middle)
         # Pin 3: EN (left, top)

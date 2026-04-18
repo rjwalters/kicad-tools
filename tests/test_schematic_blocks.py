@@ -582,15 +582,30 @@ class TestLDOBlockMocked:
         sch = Mock()
 
         def create_mock_component(symbol, x, y, ref, *args, **kwargs):
+            from kicad_tools.schematic.exceptions import PinNotFoundError
+
             comp = Mock()
-            # LDO pins
+            # LDO pins -- XC6206PxxxMR is SOT-23-3 (no EN pin)
             if "LDO" in str(symbol) or "Regulator" in str(symbol) or "AP2204" in str(symbol):
-                comp.pin_position.side_effect = lambda name: {
+                has_en = "XC6206" not in str(symbol)
+                pin_map = {
                     "VIN": (x - 10, y),
                     "VOUT": (x + 10, y),
                     "GND": (x, y + 10),
-                    "EN": (x - 5, y + 5),
-                }.get(name, (0, 0))
+                }
+                if has_en:
+                    pin_map["EN"] = (x - 5, y + 5)
+
+                def _pin_position(name, _pin_map=pin_map, _symbol=symbol):
+                    if name in _pin_map:
+                        return _pin_map[name]
+                    raise PinNotFoundError(
+                        pin_name=name,
+                        symbol_name=str(_symbol),
+                        available_pins=[],
+                    )
+
+                comp.pin_position.side_effect = _pin_position
             else:
                 # Capacitor pins
                 comp.pin_position.side_effect = lambda name: {"1": (x, y - 5), "2": (x, y + 5)}.get(
@@ -606,10 +621,26 @@ class TestLDOBlockMocked:
         return sch
 
     def test_ldo_block_creation(self, mock_schematic):
-        """Create LDO block."""
+        """Create LDO block with default XC6206 (3-pin, no EN)."""
         ldo = LDOBlock(mock_schematic, x=100, y=100, ref="U1", value="3.3V")
 
         assert ldo.schematic == mock_schematic
+        assert "VIN" in ldo.ports
+        assert "VOUT" in ldo.ports
+        assert "GND" in ldo.ports
+        assert "EN" not in ldo.ports  # XC6206PxxxMR has no EN pin
+
+    def test_ldo_block_creation_with_en(self, mock_schematic):
+        """Create LDO block with 5-pin symbol that has EN."""
+        ldo = LDOBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            value="3.3V",
+            ldo_symbol="Regulator_Linear:AP2204K-1.5",
+        )
+
         assert "VIN" in ldo.ports
         assert "VOUT" in ldo.ports
         assert "GND" in ldo.ports
@@ -625,11 +656,25 @@ class TestLDOBlockMocked:
         assert "C_OUT2" in ldo.components
 
     def test_ldo_en_tied_to_vin(self, mock_schematic):
-        """EN pin tied to VIN when requested."""
-        LDOBlock(mock_schematic, x=100, y=100, ref="U1", en_tied_to_vin=True)
+        """EN pin tied to VIN when symbol has EN."""
+        LDOBlock(
+            mock_schematic,
+            x=100,
+            y=100,
+            ref="U1",
+            en_tied_to_vin=True,
+            ldo_symbol="Regulator_Linear:AP2204K-1.5",
+        )
 
         # Should add wire connecting EN to VIN level
         assert mock_schematic.add_wire.called
+
+    def test_ldo_no_en_wire_for_3pin(self, mock_schematic):
+        """No EN wire added for 3-pin LDO without EN pin."""
+        LDOBlock(mock_schematic, x=100, y=100, ref="U1", en_tied_to_vin=True)
+
+        # XC6206PxxxMR has no EN pin, so no wire should be added for EN
+        assert not mock_schematic.add_wire.called
 
     def test_ldo_connect_to_rails(self, mock_schematic):
         """Connect LDO to power rails."""

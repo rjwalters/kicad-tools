@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from ..base import CircuitBlock
+from ...exceptions import PinNotFoundError
 from ..interfaces import PowerPort
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ class LDOBlock(CircuitBlock):
         y: float,
         ref: str = "U1",
         value: str = "LDO",
-        ldo_symbol: str = "Regulator_Linear:AP2204K-1.5",
+        ldo_symbol: str = "Regulator_Linear:XC6206PxxxMR",
         input_cap: str = "10uF",
         output_caps: list[str] = None,
         cap_ref_start: int = 1,
@@ -111,15 +112,21 @@ class LDOBlock(CircuitBlock):
         vin_pos = self.ldo.pin_position("VIN")
         vout_pos = self.ldo.pin_position("VOUT")
         gnd_pos = self.ldo.pin_position("GND")
-        en_pos = self.ldo.pin_position("EN")
+
+        # EN pin is optional -- 3-pin LDOs (e.g., XC6206PxxxMR) lack it
+        try:
+            en_pos = self.ldo.pin_position("EN")
+        except PinNotFoundError:
+            en_pos = None
 
         # Define ports
         self.ports = {
             "VIN": vin_pos,
             "VOUT": vout_pos,
             "GND": gnd_pos,
-            "EN": en_pos,
         }
+        if en_pos is not None:
+            self.ports["EN"] = en_pos
 
         # Register typed ports with power interface metadata
         self.typed_ports = {
@@ -145,8 +152,8 @@ class LDOBlock(CircuitBlock):
             ),
         }
 
-        # Tie EN to VIN if requested
-        if en_tied_to_vin:
+        # Tie EN to VIN if requested and EN pin exists
+        if en_tied_to_vin and en_pos is not None:
             # Connect EN to VIN (vertical wire)
             sch.add_wire(en_pos, (en_pos[0], vin_pos[1]))
 
@@ -643,7 +650,7 @@ def create_3v3_ldo(
         y,
         ref=ref,
         value="XC6206-3.3V",
-        ldo_symbol="Regulator_Linear:AP2204K-1.5",
+        ldo_symbol="Regulator_Linear:XC6206PxxxMR",
         input_cap="10uF",
         output_caps=["10uF", "100nF"],
         cap_ref_start=cap_ref_start,
