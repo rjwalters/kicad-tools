@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 
 
 @dataclass
@@ -225,7 +225,7 @@ def load_symbol_from_file(path: str | Path) -> tuple[str, list[Pin]]:
     """Load a symbol from a .kicad_sym file."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     if sexp.tag != "kicad_symbol_lib":
         raise ValueError(f"Not a symbol library: {path}")
@@ -256,7 +256,7 @@ def load_symbol_from_schematic(sch_path: str | Path, lib_id: str) -> tuple[str, 
     """Load an embedded symbol from a schematic's lib_symbols section."""
     path = Path(sch_path)
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     if sexp.tag != "kicad_sch":
         raise ValueError(f"Not a schematic: {path}")

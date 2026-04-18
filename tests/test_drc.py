@@ -471,9 +471,9 @@ class TestTraceInfo:
     def test_creation(self):
         """Test creating TraceInfo."""
         from kicad_tools.drc.fixer import TraceInfo
-        from kicad_tools.sexp import parse_sexp
+        from kicad_tools.sexp import parse_string
 
-        node = parse_sexp("(segment)")
+        node = parse_string("(segment)")
         info = TraceInfo(
             start_x=10.0,
             start_y=20.0,
@@ -503,9 +503,9 @@ class TestViaInfo:
     def test_creation(self):
         """Test creating ViaInfo."""
         from kicad_tools.drc.fixer import ViaInfo
-        from kicad_tools.sexp import parse_sexp
+        from kicad_tools.sexp import parse_string
 
-        node = parse_sexp("(via)")
+        node = parse_string("(via)")
         info = ViaInfo(
             x=50.0,
             y=50.0,

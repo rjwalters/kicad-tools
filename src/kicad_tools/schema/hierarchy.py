@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 
 
 @dataclass
@@ -305,7 +305,7 @@ class HierarchyBuilder:
         # Parse the schematic
         try:
             text = full_path.read_text()
-            sexp = parse_sexp(text)
+            sexp = parse_string(text)
         except Exception:
             # Return empty node if file can't be loaded
             return HierarchyNode(

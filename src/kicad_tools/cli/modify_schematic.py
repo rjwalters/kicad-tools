@@ -31,7 +31,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 
 KICAD_SCRIPTS = Path(__file__).resolve().parent
 
@@ -419,7 +419,7 @@ def add_lib_symbol_from_file(sexp: SExp, lib_file: Path, dry_run: bool = False) 
 
     # Parse the symbol library
     lib_text = lib_file.read_text(encoding="utf-8")
-    lib_sexp = parse_sexp(lib_text)
+    lib_sexp = parse_string(lib_text)
 
     if lib_sexp.tag != "kicad_symbol_lib":
         return False, f"Not a symbol library: {lib_file}"
@@ -577,7 +577,7 @@ def main():
     # Load schematic
     try:
         text = args.schematic.read_text(encoding="utf-8")
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
     except Exception as e:
         print(f"Error loading schematic: {e}")
         return 1

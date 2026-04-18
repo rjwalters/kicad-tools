@@ -8,7 +8,7 @@ import pytest
 
 from kicad_tools.cli import netlist_cmd
 from kicad_tools.operations.netlist import Netlist, NetlistComponent, NetlistNet, NetNode
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_string
 
 
 class TestNetNodeFromSexp:
@@ -21,7 +21,7 @@ class TestNetNodeFromSexp:
         incorrectly trying to get the reference as a direct string value
         instead of from the (ref ...) child node.
         """
-        sexp = parse_sexp('(node (ref "R1") (pin "1"))')
+        sexp = parse_string('(node (ref "R1") (pin "1"))')
         node = NetNode.from_sexp(sexp)
 
         assert node.reference == "R1"
@@ -29,7 +29,7 @@ class TestNetNodeFromSexp:
 
     def test_from_sexp_parses_all_fields(self):
         """Test that all node fields are correctly parsed."""
-        sexp = parse_sexp('(node (ref "U1") (pin "3") (pinfunction "VCC") (pintype "power_in"))')
+        sexp = parse_string('(node (ref "U1") (pin "3") (pinfunction "VCC") (pintype "power_in"))')
         node = NetNode.from_sexp(sexp)
 
         assert node.reference == "U1"
@@ -39,7 +39,7 @@ class TestNetNodeFromSexp:
 
     def test_from_sexp_handles_missing_optional_fields(self):
         """Test parsing when optional fields are missing."""
-        sexp = parse_sexp('(node (ref "C1") (pin "2"))')
+        sexp = parse_string('(node (ref "C1") (pin "2"))')
         node = NetNode.from_sexp(sexp)
 
         assert node.reference == "C1"
@@ -49,7 +49,7 @@ class TestNetNodeFromSexp:
 
     def test_from_sexp_handles_empty_node(self):
         """Test parsing an empty node."""
-        sexp = parse_sexp("(node)")
+        sexp = parse_string("(node)")
         node = NetNode.from_sexp(sexp)
 
         assert node.reference == ""

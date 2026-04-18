@@ -34,7 +34,7 @@ from kicad_tools.operations.symbol_ops import (
 )
 from kicad_tools.schema.schematic import Schematic
 from kicad_tools.schema.wire import Wire
-from kicad_tools.sexp import parse_sexp
+from kicad_tools.sexp import parse_string
 
 
 class TestPinNormalization:
@@ -215,7 +215,7 @@ class TestExtractPinsFromSexp:
 
     def test_extract_basic_pins(self):
         """Test extracting pins from symbol S-expression."""
-        sexp = parse_sexp("""(symbol "Device:R"
+        sexp = parse_string("""(symbol "Device:R"
             (symbol "Device:R_0_1"
                 (pin passive line (at -2.54 0 0) (length 2.54) (name "1") (number "1"))
                 (pin passive line (at 2.54 0 180) (length 2.54) (name "2") (number "2"))
@@ -228,7 +228,7 @@ class TestExtractPinsFromSexp:
 
     def test_extract_with_type_mapping(self):
         """Test that pin types are mapped correctly."""
-        sexp = parse_sexp("""(symbol "Test"
+        sexp = parse_string("""(symbol "Test"
             (symbol "Test_0_1"
                 (pin input line (at 0 0 0) (length 2.54) (name "IN") (number "1"))
                 (pin output line (at 0 0 0) (length 2.54) (name "OUT") (number "2"))
@@ -242,7 +242,7 @@ class TestExtractPinsFromSexp:
 
     def test_no_duplicate_pins(self):
         """Test that duplicate pin numbers are skipped (multi-unit symbols)."""
-        sexp = parse_sexp("""(symbol "Test"
+        sexp = parse_string("""(symbol "Test"
             (symbol "Test_1_1"
                 (pin passive line (at 0 0 0) (length 2.54) (name "A") (number "1"))
             )
@@ -317,26 +317,26 @@ class TestSymbolOps:
 
     def test_find_symbol_by_reference(self, minimal_schematic: Path):
         """Test finding symbol by reference."""
-        sexp = parse_sexp(minimal_schematic.read_text())
+        sexp = parse_string(minimal_schematic.read_text())
         symbol = find_symbol_by_reference(sexp, "R1")
         assert symbol is not None
 
     def test_find_symbol_by_reference_not_found(self, minimal_schematic: Path):
         """Test finding non-existent symbol."""
-        sexp = parse_sexp(minimal_schematic.read_text())
+        sexp = parse_string(minimal_schematic.read_text())
         symbol = find_symbol_by_reference(sexp, "U99")
         assert symbol is None
 
     def test_get_symbol_lib_id(self, minimal_schematic: Path):
         """Test getting lib_id from symbol."""
-        sexp = parse_sexp(minimal_schematic.read_text())
+        sexp = parse_string(minimal_schematic.read_text())
         symbol = find_symbol_by_reference(sexp, "R1")
         lib_id = get_symbol_lib_id(symbol)
         assert lib_id == "Device:R"
 
     def test_get_symbol_pins(self, minimal_schematic: Path):
         """Test getting pins from symbol."""
-        sexp = parse_sexp(minimal_schematic.read_text())
+        sexp = parse_string(minimal_schematic.read_text())
         symbol = find_symbol_by_reference(sexp, "R1")
         pins = get_symbol_pins(symbol)
         assert len(pins) == 2
@@ -360,7 +360,7 @@ class TestSymbolOps:
         assert len(result.changes_made) > 0
 
         # Verify file wasn't changed (dry_run)
-        sexp = parse_sexp(test_file.read_text())
+        sexp = parse_string(test_file.read_text())
         symbol = find_symbol_by_reference(sexp, "R1")
         assert get_symbol_lib_id(symbol) == "Device:R"
 
@@ -378,7 +378,7 @@ class TestSymbolOps:
         )
 
         # Verify file was changed
-        sexp = parse_sexp(test_file.read_text())
+        sexp = parse_string(test_file.read_text())
         symbol = find_symbol_by_reference(sexp, "R1")
         assert get_symbol_lib_id(symbol) == "NewLib:NewSymbol"
 
@@ -513,7 +513,7 @@ class TestNetlistComponent:
 
     def test_from_sexp(self):
         """Test parsing component from S-expression."""
-        sexp = parse_sexp("""(comp
+        sexp = parse_string("""(comp
             (ref "R1")
             (value "10k")
             (footprint "Resistor_SMD:R_0402")
@@ -534,7 +534,7 @@ class TestNetNode:
 
     def test_from_sexp(self):
         """Test parsing net node from S-expression."""
-        sexp = parse_sexp("""(node "R1"
+        sexp = parse_string("""(node "R1"
             (pin "1")
             (pinfunction "~")
             (pintype "passive")
@@ -550,7 +550,7 @@ class TestNetlistNet:
 
     def test_from_sexp(self):
         """Test parsing net from S-expression."""
-        sexp = parse_sexp("""(net
+        sexp = parse_string("""(net
             (code "1")
             (name "GND")
             (node "R1" (pin "1"))
@@ -579,7 +579,7 @@ class TestNetlist:
 
     def test_from_sexp_basic(self):
         """Test parsing basic netlist."""
-        sexp = parse_sexp("""(export
+        sexp = parse_string("""(export
             (design
                 (source "test.kicad_sch")
                 (tool "Eeschema 8.0")
@@ -760,6 +760,6 @@ class TestNetlistFromSexpErrors:
 
     def test_invalid_root_tag(self):
         """Test error on invalid root tag."""
-        sexp = parse_sexp("(not_export)")
+        sexp = parse_string("(not_export)")
         with pytest.raises(ValueError, match="Expected 'export'"):
             Netlist.from_sexp(sexp)

@@ -31,6 +31,7 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -1214,6 +1215,35 @@ class SExpSerializer:
         return sexp.to_string() + "\n"
 
 
+# KiCad file extensions that trigger the file-path guard in parse_string()
+_KICAD_FILE_EXTENSIONS = frozenset({
+    ".kicad_sch",
+    ".kicad_pcb",
+    ".kicad_sym",
+    ".kicad_mod",
+    ".kicad_pro",
+    ".kicad_dru",
+    ".kicad_wks",
+})
+
+
+def _looks_like_file_path(text: str) -> bool:
+    """Check if the input text looks like a KiCad file path rather than S-expression content.
+
+    Only triggers when the *entire* input (stripped) looks like a path, not when
+    path-like substrings appear inside valid S-expression content.
+    """
+    stripped = text.strip()
+    # Valid S-expressions start with '(' -- a bare path never does
+    if stripped.startswith("("):
+        return False
+    # Check for common KiCad file extensions
+    for ext in _KICAD_FILE_EXTENSIONS:
+        if stripped.endswith(ext):
+            return True
+    return False
+
+
 def parse_string(text: str, track_positions: bool = False) -> SExp:
     """Parse an S-expression string.
 
@@ -1223,12 +1253,40 @@ def parse_string(text: str, track_positions: bool = False) -> SExp:
 
     Returns:
         The parsed SExp tree
+
+    Raises:
+        ValueError: If the input looks like a file path instead of S-expression
+            content. Use ``parse_file()`` to parse files by path.
     """
+    if _looks_like_file_path(text):
+        raise ValueError(
+            f"Input looks like a file path, not S-expression content: {text!r}. "
+            "Use parse_file() to parse a KiCad file by path."
+        )
     return Parser(text, track_positions=track_positions).parse()
 
 
-# Backward compatibility alias
-parse_sexp = parse_string
+def parse_sexp(text: str, track_positions: bool = False) -> SExp:
+    """Parse an S-expression string (deprecated).
+
+    .. deprecated::
+        Use ``parse_string()`` for S-expression text or ``parse_file()`` for
+        file paths.
+
+    Args:
+        text: The S-expression text to parse
+        track_positions: If True, track line/column positions for each node
+
+    Returns:
+        The parsed SExp tree
+    """
+    warnings.warn(
+        "parse_sexp() is deprecated. Use parse_string() for S-expression text "
+        "or parse_file() for file paths.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return parse_string(text, track_positions=track_positions)
 
 
 def serialize_sexp(sexp: SExp, indent: str = "  ") -> str:

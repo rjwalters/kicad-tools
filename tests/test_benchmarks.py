@@ -31,7 +31,7 @@ requires_benchmark = pytest.mark.skipif(
 
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.schema.schematic import Schematic
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 # --- Fixture Generators ---
 
@@ -252,42 +252,42 @@ class TestSexpParseBenchmarks:
 
     def test_parse_small_schematic(self, benchmark, small_schematic_content):
         """Benchmark parsing small schematic S-expression."""
-        result = benchmark(parse_sexp, small_schematic_content)
+        result = benchmark(parse_string, small_schematic_content)
         assert result.tag == "kicad_sch"
 
     def test_parse_medium_schematic(self, benchmark, medium_schematic_content):
         """Benchmark parsing medium schematic S-expression."""
-        result = benchmark(parse_sexp, medium_schematic_content)
+        result = benchmark(parse_string, medium_schematic_content)
         assert result.tag == "kicad_sch"
 
     def test_parse_large_schematic(self, benchmark, large_schematic_content):
         """Benchmark parsing large schematic S-expression."""
-        result = benchmark(parse_sexp, large_schematic_content)
+        result = benchmark(parse_string, large_schematic_content)
         assert result.tag == "kicad_sch"
 
     def test_parse_xlarge_schematic(self, benchmark, xlarge_schematic_content):
         """Benchmark parsing xlarge schematic S-expression."""
-        result = benchmark(parse_sexp, xlarge_schematic_content)
+        result = benchmark(parse_string, xlarge_schematic_content)
         assert result.tag == "kicad_sch"
 
     def test_parse_small_pcb(self, benchmark, small_pcb_content):
         """Benchmark parsing small PCB S-expression."""
-        result = benchmark(parse_sexp, small_pcb_content)
+        result = benchmark(parse_string, small_pcb_content)
         assert result.tag == "kicad_pcb"
 
     def test_parse_medium_pcb(self, benchmark, medium_pcb_content):
         """Benchmark parsing medium PCB S-expression."""
-        result = benchmark(parse_sexp, medium_pcb_content)
+        result = benchmark(parse_string, medium_pcb_content)
         assert result.tag == "kicad_pcb"
 
     def test_parse_large_pcb(self, benchmark, large_pcb_content):
         """Benchmark parsing large PCB S-expression."""
-        result = benchmark(parse_sexp, large_pcb_content)
+        result = benchmark(parse_string, large_pcb_content)
         assert result.tag == "kicad_pcb"
 
     def test_parse_xlarge_pcb(self, benchmark, xlarge_pcb_content):
         """Benchmark parsing xlarge PCB S-expression."""
-        result = benchmark(parse_sexp, xlarge_pcb_content)
+        result = benchmark(parse_string, xlarge_pcb_content)
         assert result.tag == "kicad_pcb"
 
 
@@ -461,12 +461,12 @@ class TestSerializationBenchmarks:
     @pytest.fixture
     def parsed_large_schematic(self, large_schematic_content) -> SExp:
         """Parse large schematic for serialization benchmarks."""
-        return parse_sexp(large_schematic_content)
+        return parse_string(large_schematic_content)
 
     @pytest.fixture
     def parsed_large_pcb(self, large_pcb_content) -> SExp:
         """Parse large PCB for serialization benchmarks."""
-        return parse_sexp(large_pcb_content)
+        return parse_string(large_pcb_content)
 
     def test_serialize_large_schematic(self, benchmark, parsed_large_schematic):
         """Benchmark serializing large schematic."""
@@ -491,7 +491,7 @@ class TestMemoryUsage:
     def test_xlarge_schematic_memory(self, xlarge_schematic_content):
         """Verify xlarge schematic can be parsed without excessive memory."""
         # Parse the content - validates memory usage is reasonable
-        sexp = parse_sexp(xlarge_schematic_content)
+        sexp = parse_string(xlarge_schematic_content)
 
         # The parsed structure should exist and be navigable
         assert sexp.tag == "kicad_sch"
@@ -501,7 +501,7 @@ class TestMemoryUsage:
     def test_xlarge_pcb_memory(self, xlarge_pcb_content):
         """Verify xlarge PCB can be parsed without excessive memory."""
         # Parse the content - validates memory usage is reasonable
-        sexp = parse_sexp(xlarge_pcb_content)
+        sexp = parse_string(xlarge_pcb_content)
 
         # Verify structure is navigable
         assert sexp.tag == "kicad_pcb"

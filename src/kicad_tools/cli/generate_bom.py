@@ -39,7 +39,7 @@ KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 # Try to import sexp parser for direct schematic reading
 try:
-    from kicad_tools.sexp import parse_sexp
+    from kicad_tools.sexp import parse_string
 
     HAS_SEXP_PARSER = True
 except ImportError:
@@ -188,7 +188,7 @@ def extract_components_from_schematic(sch_path: Path, sheet_name: str = "") -> l
         raise RuntimeError("sexp parser not available - use --use-netlist instead")
 
     text = sch_path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     if sexp.tag != "kicad_sch":
         raise ValueError(f"Not a schematic: {sch_path}")
@@ -275,7 +275,7 @@ def extract_components_hierarchical(main_sch: Path) -> list[Component]:
 
         # Find sub-sheets
         text = sch_path.read_text(encoding="utf-8")
-        sexp = parse_sexp(text)
+        sexp = parse_string(text)
 
         for sheet in sexp.find_all("sheet"):
             # Get sheet file property

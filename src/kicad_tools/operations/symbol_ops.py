@@ -10,7 +10,7 @@ import uuid as uuid_lib
 from dataclasses import dataclass
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_string, serialize_sexp
 
 
 @dataclass
@@ -93,7 +93,7 @@ def replace_symbol_lib_id(
 
     # Parse the schematic
     text = path.read_text()
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
 
     # Find the symbol
     symbol = find_symbol_by_reference(sexp, reference)
@@ -235,7 +235,7 @@ def create_replacement_symbol(
     """
     # Read template
     template_text = Path(template_path).read_text()
-    template_sexp = parse_sexp(template_text)
+    template_sexp = parse_string(template_text)
 
     # Find the symbol definition
     sym_def = None

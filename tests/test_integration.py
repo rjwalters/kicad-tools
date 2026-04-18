@@ -18,7 +18,7 @@ import pytest
 
 from kicad_tools.project import Project
 from kicad_tools.schema import PCB, Schematic
-from kicad_tools.sexp import parse_sexp, serialize_sexp
+from kicad_tools.sexp import parse_string, serialize_sexp
 
 
 @pytest.fixture
@@ -353,9 +353,9 @@ class TestRoundTrip:
         original_text = simple_rc_schematic.read_text()
 
         # Parse → serialize → parse
-        sexp1 = parse_sexp(original_text)
+        sexp1 = parse_string(original_text)
         serialized = serialize_sexp(sexp1)
-        sexp2 = parse_sexp(serialized)
+        sexp2 = parse_string(serialized)
 
         # Verify tag matches
         assert sexp2.tag == sexp1.tag

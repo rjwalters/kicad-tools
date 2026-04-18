@@ -1,6 +1,6 @@
 """KiCad core utilities for parsing and generating S-expression files."""
 
-from kicad_tools.sexp import SExp, parse_sexp, serialize_sexp
+from kicad_tools.sexp import SExp, parse_file, parse_string, serialize_sexp
 
 from .severity import SeverityMixin
 from .sexp_file import (
@@ -22,7 +22,8 @@ from .types import (
 
 __all__ = [
     "SExp",
-    "parse_sexp",
+    "parse_file",
+    "parse_string",
     "serialize_sexp",
     "load_schematic",
     "save_schematic",

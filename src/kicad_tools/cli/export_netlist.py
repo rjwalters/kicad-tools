@@ -22,7 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_tools.sexp import SExp, parse_sexp
+from kicad_tools.sexp import SExp, parse_string
 
 
 @dataclass
@@ -347,7 +347,7 @@ def export_netlist(
 def load_netlist(path: Path) -> Netlist:
     """Load and parse a netlist file."""
     text = path.read_text(encoding="utf-8")
-    sexp = parse_sexp(text)
+    sexp = parse_string(text)
     return Netlist.from_sexp(sexp)
 
 
