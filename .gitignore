@@ -57,11 +57,7 @@ boards/*/output/*.kicad_pro
 boards/*/output/*.kicad_prl
 boards/*/output/drc_report.json
 boards/*/output/manufacturing/
-boards/external/*
-!boards/external/chorus-test-revA/
-boards/external/chorus-test-revA/*.kicad_prl
-boards/external/chorus-test-revA/manufacturing/
-boards/external/chorus-test-revA/reports/
+boards/external/
 boards/manufacturing/
 
 # Claude
