@@ -77,6 +77,7 @@ from .commands import (
     run_sch_command,
     run_spec_command,
     run_suggest_command,
+    run_sync_command,
     run_validate_command,
     run_validate_footprints_command,
     run_zones_command,
@@ -377,6 +378,9 @@ def _dispatch_command(args) -> int:
 
     elif args.command == "suggest":
         return run_suggest_command(args)
+
+    elif args.command == "sync":
+        return run_sync_command(args)
 
     elif args.command == "net-status":
         from .net_status_cmd import main as net_status_cmd
