@@ -14,6 +14,35 @@ import sys
 from pathlib import Path
 
 
+def _find_pcb_for_export(directory: Path) -> Path | None:
+    """Find a .kicad_pcb file in the given directory for export.
+
+    Searches recursively and prefers routed files (*_routed.kicad_pcb)
+    since those are the manufacturing-ready artifacts. Falls back to the
+    primary (non-backup) PCB file if no routed version exists.
+
+    Args:
+        directory: Directory to search
+
+    Returns:
+        Path to PCB file if found, None otherwise
+    """
+    pcb_files = list(directory.glob("**/*.kicad_pcb"))
+    # Filter out backup files
+    pcb_files = [f for f in pcb_files if not f.name.endswith("-bak.kicad_pcb")]
+
+    if not pcb_files:
+        return None
+
+    # Prefer routed files (manufacturing-ready)
+    routed = [f for f in pcb_files if f.name.endswith("_routed.kicad_pcb")]
+    if routed:
+        return routed[0]
+
+    # Fall back to non-routed PCB files
+    return pcb_files[0]
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the kct export command."""
     parser = argparse.ArgumentParser(
@@ -22,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "pcb",
-        help="Path to .kicad_pcb file",
+        help="Path to .kicad_pcb file or directory containing one",
     )
     parser.add_argument(
         "--mfr",
@@ -145,10 +174,31 @@ def run_export(args: argparse.Namespace) -> int:
     )
     from kicad_tools.export.preflight import PreflightConfig
 
-    pcb_path = Path(args.pcb)
-    if not pcb_path.exists():
-        print(f"Error: PCB file not found: {pcb_path}", file=sys.stderr)
+    input_path = Path(args.pcb).resolve()
+
+    if not input_path.exists():
+        print(f"Error: Path not found: {input_path}", file=sys.stderr)
         return 1
+
+    if input_path.is_dir():
+        # Auto-discover PCB file in directory (consistent with kct build/check)
+        pcb_path = _find_pcb_for_export(input_path)
+        if pcb_path is None:
+            print(
+                f"Error: No .kicad_pcb file found in directory: {input_path}",
+                file=sys.stderr,
+            )
+            print(
+                "Hint: Specify a .kicad_pcb file directly, or ensure the directory contains one.",
+                file=sys.stderr,
+            )
+            return 1
+    elif input_path.suffix != ".kicad_pcb":
+        print(f"Error: Expected .kicad_pcb file, got: {input_path.name}", file=sys.stderr)
+        print("Hint: Provide a .kicad_pcb file or a directory containing one.", file=sys.stderr)
+        return 1
+    else:
+        pcb_path = input_path
 
     # Determine output directory
     output_dir = Path(args.output) if args.output else pcb_path.parent / "manufacturing"
