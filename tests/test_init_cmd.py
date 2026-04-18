@@ -5,6 +5,8 @@ from pathlib import Path
 
 from kicad_tools.cli.init_cmd import (
     create_dru_content,
+    create_gitignore,
+    create_gitignore_content,
     create_project_file,
     init_project,
     main,
@@ -429,3 +431,128 @@ class TestDruFileContent:
         assert f"{rules.min_trace_width_mm}mm" in dru_content
         assert f"{rules.min_clearance_mm}mm" in dru_content
         assert f"{rules.min_via_drill_mm}mm" in dru_content
+
+
+class TestGitignore:
+    """Tests for .gitignore creation in init command."""
+
+    def test_gitignore_content_has_required_patterns(self):
+        """Test that gitignore template contains the required patterns."""
+        content = create_gitignore_content()
+
+        assert "*.kicad_prl" in content
+        assert "drc_report.json" in content
+        assert "manufacturing/" in content
+
+    def test_gitignore_content_has_comments(self):
+        """Test that gitignore template includes explanatory comments."""
+        content = create_gitignore_content()
+
+        assert "# KiCad local settings" in content
+        assert "# Build outputs" in content
+
+    def test_create_gitignore_creates_file(self, tmp_path: Path):
+        """Test that create_gitignore creates a .gitignore file."""
+        result = create_gitignore(tmp_path)
+
+        assert result is True
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        content = gitignore.read_text()
+        assert "*.kicad_prl" in content
+
+    def test_create_gitignore_skips_existing(self, tmp_path: Path):
+        """Test that create_gitignore does not overwrite an existing file."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# existing content\n")
+
+        result = create_gitignore(tmp_path)
+
+        assert result is False
+        assert gitignore.read_text() == "# existing content\n"
+
+    def test_create_gitignore_dry_run(self, tmp_path: Path):
+        """Test that create_gitignore respects dry_run flag."""
+        result = create_gitignore(tmp_path, dry_run=True)
+
+        assert result is None
+        assert not (tmp_path / ".gitignore").exists()
+
+    def test_init_project_creates_gitignore(self, tmp_path: Path):
+        """Test that init_project creates a .gitignore alongside project files."""
+        result = init_project(
+            target=str(tmp_path / "testproject"),
+            manufacturer="jlcpcb",
+            layers=2,
+        )
+
+        assert result == 0
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        content = gitignore.read_text()
+        assert "*.kicad_prl" in content
+        assert "drc_report.json" in content
+        assert "manufacturing/" in content
+
+    def test_init_project_does_not_overwrite_gitignore(self, tmp_path: Path):
+        """Test that init_project skips .gitignore if one already exists."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# my custom gitignore\n")
+
+        result = init_project(
+            target=str(tmp_path / "testproject"),
+            manufacturer="jlcpcb",
+            layers=2,
+        )
+
+        assert result == 0
+        assert gitignore.read_text() == "# my custom gitignore\n"
+
+    def test_init_project_dry_run_no_gitignore(self, tmp_path: Path):
+        """Test that dry-run does not create .gitignore."""
+        result = init_project(
+            target=str(tmp_path / "testproject"),
+            manufacturer="jlcpcb",
+            layers=2,
+            dry_run=True,
+        )
+
+        assert result == 0
+        assert not (tmp_path / ".gitignore").exists()
+
+    def test_json_output_includes_gitignore_fields(self, tmp_path: Path, capsys):
+        """Test that JSON output includes gitignore_path and will_create_gitignore."""
+        result = init_project(
+            target=str(tmp_path / "testproject"),
+            manufacturer="jlcpcb",
+            layers=2,
+            dry_run=True,
+            output_format="json",
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert "gitignore_path" in data
+        assert "will_create_gitignore" in data
+        assert data["will_create_gitignore"] is True
+        assert data["gitignore_path"].endswith(".gitignore")
+
+    def test_json_output_will_create_gitignore_false(self, tmp_path: Path, capsys):
+        """Test JSON output when .gitignore already exists."""
+        (tmp_path / ".gitignore").write_text("# existing\n")
+
+        result = init_project(
+            target=str(tmp_path / "testproject"),
+            manufacturer="jlcpcb",
+            layers=2,
+            dry_run=True,
+            output_format="json",
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        assert data["will_create_gitignore"] is False
