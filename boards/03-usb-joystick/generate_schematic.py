@@ -315,6 +315,15 @@ def create_usb_joystick_schematic(output_path: Path, verbose: bool = False) -> b
         "11": "BTN3",  # GPIO - Button 3
         "12": "BTN4",  # GPIO - Button 4
         "13": "JOY_BTN",  # GPIO - Joystick button
+        # Unused inputs tied to GND to prevent JLCPCB review holds
+        "5": "GND",
+        "6": "GND",
+        "18": "GND",
+        "19": "GND",
+        "20": "GND",
+        "21": "GND",
+        "22": "GND",
+        "31": "GND",
     }
 
     # USB connector pin assignments (4-pin USB):

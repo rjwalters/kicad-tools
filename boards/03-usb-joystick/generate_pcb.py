@@ -144,8 +144,8 @@ def generate_mcu() -> str:
         2: ("XTAL1", 15),
         3: ("XTAL2", 16),
         4: ("VCC", 2),
-        5: ("", 0),  # NC
-        6: ("", 0),  # NC
+        5: ("GND", 3),  # Unused input tied to GND
+        6: ("GND", 3),  # Unused input tied to GND
         7: ("GND", 3),
         8: ("VCC", 2),
         # Bottom (left to right) - GPIO
@@ -159,11 +159,11 @@ def generate_mcu() -> str:
         16: ("GND", 3),
         # Right side (bottom to top) - Power
         17: ("VCC", 2),
-        18: ("", 0),  # NC
-        19: ("", 0),  # NC
-        20: ("", 0),  # NC
-        21: ("", 0),  # NC
-        22: ("", 0),  # NC
+        18: ("GND", 3),  # Unused input tied to GND
+        19: ("GND", 3),  # Unused input tied to GND
+        20: ("GND", 3),  # Unused input tied to GND
+        21: ("GND", 3),  # Unused input tied to GND
+        22: ("GND", 3),  # Unused input tied to GND
         23: ("GND", 3),
         24: ("VCC", 2),
         # Top (right to left) - USB signals (closest to USB connector)
@@ -173,7 +173,7 @@ def generate_mcu() -> str:
         28: ("USB_D-", 5),
         29: ("USB_D+", 4),
         30: ("VBUS", 1),
-        31: ("", 0),  # NC
+        31: ("GND", 3),  # Unused input tied to GND
         32: ("GND", 3),
     }
 
