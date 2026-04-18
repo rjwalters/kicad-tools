@@ -651,6 +651,240 @@ class TestUpdateFootprintPosition:
         assert result is False
 
 
+class TestUpdateFootprintReference:
+    """Tests for PCB.update_footprint_reference method."""
+
+    def test_rename_reference_kicad8(self, minimal_pcb, tmp_path):
+        """Test renaming a reference designator in KiCad 8+ format (property)."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # Verify footprint exists
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+
+        # Rename R1 -> R100
+        result = pcb.update_footprint_reference("R1", "R100")
+        assert result is True
+
+        # Verify in memory
+        assert pcb.get_footprint("R1") is None
+        fp = pcb.get_footprint("R100")
+        assert fp is not None
+        assert fp.reference == "R100"
+
+        # Verify FootprintText also updated
+        ref_texts = [t for t in fp.texts if t.text_type == "reference"]
+        assert len(ref_texts) > 0
+        assert ref_texts[0].text == "R100"
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        # Verify persisted
+        assert pcb2.get_footprint("R1") is None
+        fp2 = pcb2.get_footprint("R100")
+        assert fp2 is not None
+        assert fp2.reference == "R100"
+
+    def test_rename_reference_kicad7(self, routing_test_pcb, tmp_path):
+        """Test renaming a reference designator in KiCad 7 format (fp_text)."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        # Rename R1 -> R50
+        result = pcb.update_footprint_reference("R1", "R50")
+        assert result is True
+
+        # Verify in memory
+        assert pcb.get_footprint("R1") is None
+        fp = pcb.get_footprint("R50")
+        assert fp is not None
+        assert fp.reference == "R50"
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        assert pcb2.get_footprint("R1") is None
+        fp2 = pcb2.get_footprint("R50")
+        assert fp2 is not None
+        assert fp2.reference == "R50"
+
+    def test_rename_reference_collision(self, routing_test_pcb):
+        """Test that renaming to an existing reference returns False."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        # U1 and R1 both exist -- renaming R1 to U1 should fail
+        result = pcb.update_footprint_reference("R1", "U1")
+        assert result is False
+
+        # Original should be unchanged
+        assert pcb.get_footprint("R1") is not None
+        assert pcb.get_footprint("R1").reference == "R1"
+
+    def test_rename_reference_nonexistent(self, routing_test_pcb):
+        """Test that renaming a nonexistent reference returns False."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        result = pcb.update_footprint_reference("NONEXISTENT", "R99")
+        assert result is False
+
+    def test_rename_reference_same_name(self, routing_test_pcb):
+        """Test renaming to the same name succeeds (no-op)."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        result = pcb.update_footprint_reference("R1", "R1")
+        assert result is True
+        assert pcb.get_footprint("R1") is not None
+
+
+class TestUpdateFootprintValue:
+    """Tests for PCB.update_footprint_value method."""
+
+    def test_update_value_kicad8(self, minimal_pcb, tmp_path):
+        """Test updating value in KiCad 8+ format (property)."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # The minimal_pcb has R1 with value "10k"
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+        assert fp.value == "10k"
+
+        # Update value
+        result = pcb.update_footprint_value("R1", "4.7k")
+        assert result is True
+
+        # Verify in memory
+        fp = pcb.get_footprint("R1")
+        assert fp.value == "4.7k"
+
+        # Verify FootprintText also updated
+        val_texts = [t for t in fp.texts if t.text_type == "value"]
+        assert len(val_texts) > 0
+        assert val_texts[0].text == "4.7k"
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.value == "4.7k"
+
+    def test_update_value_kicad7(self, tmp_path):
+        """Test updating value in KiCad 7 format (fp_text)."""
+        # Create a KiCad 7-style PCB with fp_text value entries
+        pcb_content = """(kicad_pcb
+  (version 20171130)
+  (generator "test")
+  (general
+    (thickness 1.6)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (gr_rect (start 100 100) (end 150 140)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 120 120)
+    (fp_text reference "R1" (at 0 -1.5) (layer "F.SilkS"))
+    (fp_text value "10k" (at 0 1.5) (layer "F.Fab"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 0 ""))
+  )
+)
+"""
+        pcb_file = tmp_path / "kicad7.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+
+        doc = load_pcb(str(pcb_file))
+        pcb = PCB(doc)
+
+        fp = pcb.get_footprint("R1")
+        assert fp is not None
+        assert fp.value == "10k"
+
+        # Update value
+        result = pcb.update_footprint_value("R1", "4.7k")
+        assert result is True
+
+        # Verify in memory
+        fp = pcb.get_footprint("R1")
+        assert fp.value == "4.7k"
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2 is not None
+        assert fp2.value == "4.7k"
+
+    def test_update_value_nonexistent(self, routing_test_pcb):
+        """Test that updating value of nonexistent reference returns False."""
+        doc = load_pcb(str(routing_test_pcb))
+        pcb = PCB(doc)
+
+        result = pcb.update_footprint_value("NONEXISTENT", "4.7k")
+        assert result is False
+
+    def test_update_value_round_trip(self, minimal_pcb, tmp_path):
+        """Test that updating value does not corrupt other footprint fields."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+
+        # Record original state
+        fp = pcb.get_footprint("R1")
+        original_pos = fp.position
+        original_ref = fp.reference
+
+        # Update value
+        pcb.update_footprint_value("R1", "100k")
+
+        # Save and reload
+        output_path = tmp_path / "output.kicad_pcb"
+        pcb.save(output_path)
+
+        doc2 = load_pcb(str(output_path))
+        pcb2 = PCB(doc2)
+
+        fp2 = pcb2.get_footprint("R1")
+        assert fp2.value == "100k"
+        assert fp2.position == pytest.approx(original_pos)
+        assert fp2.reference == original_ref
+
+
 class TestAddFootprint:
     """Tests for PCB.add_footprint and add_footprint_from_file methods."""
 

@@ -1866,6 +1866,118 @@ class PCB:
 
         return False
 
+    def update_footprint_reference(
+        self,
+        old_reference: str,
+        new_reference: str,
+    ) -> bool:
+        """
+        Update a footprint's reference designator.
+
+        Renames the reference designator in both the parsed footprint object
+        and the underlying S-expression tree. Handles both KiCad 7 (fp_text)
+        and KiCad 8+ (property) formats.
+
+        Args:
+            old_reference: Current reference designator (e.g., "R1")
+            new_reference: New reference designator (e.g., "R100")
+
+        Returns:
+            True if footprint was found and updated, False if the old
+            reference was not found or the new reference already exists.
+        """
+        # Check that the old reference exists
+        fp = self.get_footprint(old_reference)
+        if not fp:
+            return False
+
+        # Check for collision with existing reference
+        if old_reference != new_reference and self.get_footprint(new_reference):
+            return False
+
+        # Update the S-expression tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref != old_reference:
+                continue
+
+            # Update KiCad 7 format: fp_text with type "reference"
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "reference":
+                    fp_text.set_value(1, new_reference)
+
+            # Update KiCad 8+ format: property with name "Reference"
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Reference":
+                    prop.set_value(1, new_reference)
+
+            # Update parsed footprint object
+            fp.reference = new_reference
+            for text in fp.texts:
+                if text.text_type == "reference":
+                    text.text = new_reference
+
+            return True
+
+        return False
+
+    def update_footprint_value(
+        self,
+        reference: str,
+        new_value: str,
+    ) -> bool:
+        """
+        Update a footprint's value field.
+
+        Updates the value in both the parsed footprint object and the
+        underlying S-expression tree. Handles both KiCad 7 (fp_text)
+        and KiCad 8+ (property) formats.
+
+        Args:
+            reference: Reference designator of the footprint (e.g., "R1")
+            new_value: New value string (e.g., "4.7k")
+
+        Returns:
+            True if footprint was found and updated, False if the
+            reference was not found.
+        """
+        # Check that the reference exists
+        fp = self.get_footprint(reference)
+        if not fp:
+            return False
+
+        # Update the S-expression tree
+        for child in self._sexp.iter_children():
+            if child.tag != "footprint":
+                continue
+
+            fp_ref = self._get_footprint_reference(child)
+            if fp_ref != reference:
+                continue
+
+            # Update KiCad 7 format: fp_text with type "value"
+            for fp_text in child.find_all("fp_text"):
+                if fp_text.get_string(0) == "value":
+                    fp_text.set_value(1, new_value)
+
+            # Update KiCad 8+ format: property with name "Value"
+            for prop in child.find_all("property"):
+                if prop.get_string(0) == "Value":
+                    prop.set_value(1, new_value)
+
+            # Update parsed footprint object
+            fp.value = new_value
+            for text in fp.texts:
+                if text.text_type == "value":
+                    text.text = new_value
+
+            return True
+
+        return False
+
     # Silkscreen management methods
 
     def set_reference_visibility(
