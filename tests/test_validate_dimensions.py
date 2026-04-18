@@ -406,6 +406,229 @@ class TestDrillClearanceCheck:
         assert len(clearance_violations) == 0
 
 
+class TestSameFootprintDrillClearance:
+    """Tests for same-footprint drill clearance downgrade."""
+
+    def test_same_footprint_pads_produce_warning(self):
+        """Same-footprint pads closer than min clearance should produce warning, not error."""
+        # A 2-pin connector with 2.54mm pitch and 1.0mm drills:
+        # edge distance = 2.54 - 0.5 - 0.5 = 1.54mm -- that passes.
+        # Use tighter spacing to trigger a violation.
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                        MockPad(
+                            number="2",
+                            type="thru_hole",
+                            position=(1.2, 0),  # edge distance = 1.2 - 0.5 - 0.5 = 0.2mm
+                            drill=1.0,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "warning"
+        assert "(same-footprint)" in clearance_violations[0].message
+
+    def test_cross_footprint_pads_remain_errors(self):
+        """Pads from different footprints closer than min clearance should produce error."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                    ],
+                ),
+                MockFootprint(
+                    reference="J2",
+                    position=(1.2, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 1.2 - 0.5 - 0.5 = 0.2mm < 0.25
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+        assert "(same-footprint)" not in clearance_violations[0].message
+
+    def test_via_to_pad_remains_error(self):
+        """Via near a through-hole pad should remain error (vias have no footprint)."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.4, layers=["F.Cu", "B.Cu"], net_number=1),
+            ],
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0.5, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=0.4,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 0.5 - 0.2 - 0.2 = 0.1mm < 0.127
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+
+    def test_via_to_via_remains_error(self):
+        """Two close vias should produce error (no footprint context)."""
+        pcb = MockPCB(
+            vias=[
+                MockVia((0, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=1),
+                MockVia((0.4, 0), size=0.6, drill=0.3, layers=["F.Cu", "B.Cu"], net_number=2),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        # edge distance = 0.4 - 0.15 - 0.15 = 0.1mm < 0.127
+        rules = MockDesignRules(min_clearance_mm=0.127)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 1
+        assert clearance_violations[0].severity == "error"
+
+    def test_single_pad_footprint_no_same_footprint_pair(self):
+        """A footprint with only 1 thru-hole pad cannot trigger same-footprint logic."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+    def test_same_footprint_pads_with_sufficient_clearance_no_violation(self):
+        """Same-footprint pads with enough clearance should produce no violation."""
+        pcb = MockPCB(
+            footprints=[
+                MockFootprint(
+                    reference="J1",
+                    position=(0, 0),
+                    pads=[
+                        MockPad(
+                            number="1",
+                            type="thru_hole",
+                            position=(0, 0),
+                            drill=1.0,
+                            net_name="NET1",
+                            net_number=1,
+                        ),
+                        MockPad(
+                            number="2",
+                            type="thru_hole",
+                            position=(2.54, 0),  # edge distance = 2.54 - 0.5 - 0.5 = 1.54mm
+                            drill=1.0,
+                            net_name="NET2",
+                            net_number=2,
+                        ),
+                    ],
+                ),
+            ],
+            nets={1: MockNet(1, "NET1"), 2: MockNet(2, "NET2")},
+        )
+        rules = MockDesignRules(min_clearance_mm=0.25)
+        rule = DimensionRules()
+
+        results = rule.check(pcb, rules)
+
+        clearance_violations = [
+            v for v in results.violations if v.rule_id == "dimension_drill_clearance"
+        ]
+        assert len(clearance_violations) == 0
+
+
 class TestEmptyPCB:
     """Tests for edge cases with empty PCB."""
 
