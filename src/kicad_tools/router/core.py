@@ -432,7 +432,9 @@ class Autorouter:
             grid = RoutingGrid(
                 width, height, self.rules, origin_x, origin_y, layer_stack=self.layer_stack
             )
-        router = create_hybrid_router(grid, self.rules, force_python=self._force_python)
+        router = create_hybrid_router(
+            grid, self.rules, force_python=self._force_python, net_class_map=self.net_class_map
+        )
         zone_manager = ZoneManager(grid, self.rules)
         return grid, router, zone_manager
 
@@ -633,7 +635,7 @@ class Autorouter:
         self, net: int, pads: list[tuple[str, str]]
     ) -> tuple[list[Route], set[int]]:
         """Create direct routes for same-IC pins on the same net."""
-        return create_intra_ic_routes(net, pads, self.pads, self.rules)
+        return create_intra_ic_routes(net, pads, self.pads, self.rules, self.net_class_map)
 
     def _get_unrouted_pads(self, exclude_net: int | None = None) -> list[Pad]:
         """Get list of pads that haven't been routed yet.
@@ -3190,7 +3192,9 @@ class Autorouter:
     def _escape(self) -> EscapeRouter:
         """Lazy-initialize escape router."""
         if self._escape_router is None:
-            self._escape_router = EscapeRouter(self.grid, self.rules)
+            self._escape_router = EscapeRouter(
+                self.grid, self.rules, net_class_map=self.net_class_map
+            )
         return self._escape_router
 
     def detect_dense_packages(self) -> list[PackageInfo]:
@@ -3747,7 +3751,9 @@ class Autorouter:
                     fine_grid.add_pad(pad)
 
         # Create a fine-grid router
-        fine_router = create_hybrid_router(fine_grid, fine_rules, force_python=self._force_python)
+        fine_router = create_hybrid_router(
+            fine_grid, fine_rules, force_python=self._force_python, net_class_map=self.net_class_map
+        )
 
         fine_grid_nets_count = 0
         fine_grid_deadline: float | None = None
@@ -3981,7 +3987,8 @@ class Autorouter:
 
             # Create a relaxed router for these nets
             relaxed_router = create_hybrid_router(
-                self.grid, relaxed_rules, force_python=self._force_python
+                self.grid, relaxed_rules, force_python=self._force_python,
+                net_class_map=self.net_class_map,
             )
 
             # Try to route each failed net with relaxed clearance

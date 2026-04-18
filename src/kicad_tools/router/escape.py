@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .grid import RoutingGrid
-    from .rules import DesignRules
+    from .rules import DesignRules, NetClassRouting
 
 from .layers import Layer
 from .primitives import Pad, Route, Segment, Via
@@ -545,6 +545,7 @@ class EscapeRouter:
         rules: DesignRules,
         via_spacing: float | None = None,
         escape_clearance: float | None = None,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         """Initialize the escape router.
 
@@ -553,11 +554,26 @@ class EscapeRouter:
             rules: Design rules for dimensions
             via_spacing: Minimum via-to-via spacing (defaults to via_diameter + clearance)
             escape_clearance: Clearance from package edge (defaults to trace_clearance * 2)
+            net_class_map: Optional net class map for per-net trace widths
         """
         self.grid = grid
         self.rules = rules
         self.via_spacing = via_spacing or (rules.via_diameter + rules.via_clearance)
         self.escape_clearance = escape_clearance or (rules.trace_clearance * 2)
+        self.net_class_map = net_class_map or {}
+
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        """Get the trace width for a net based on its net class.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Trace width in mm
+        """
+        if self.net_class_map and net_name in self.net_class_map:
+            return self.net_class_map[net_name].trace_width
+        return self.rules.trace_width
 
     def analyze_package(self, pads: list[Pad]) -> PackageInfo:
         """Analyze a package to determine escape routing needs.
@@ -758,7 +774,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=via_x,
                     y2=via_y,
-                    width=self.rules.trace_width,
+                    width=self._get_trace_width_for_net(pad.net_name),
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -783,7 +799,7 @@ class EscapeRouter:
                     y1=via_y,
                     x2=escape_x,
                     y2=escape_y,
-                    width=self.rules.trace_width,
+                    width=self._get_trace_width_for_net(pad.net_name),
                     layer=escape_layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -797,7 +813,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=escape_x,
                     y2=escape_y,
-                    width=self.rules.trace_width,
+                    width=self._get_trace_width_for_net(pad.net_name),
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -912,7 +928,7 @@ class EscapeRouter:
             y1=pad.y,
             x2=escape_x,
             y2=escape_y,
-            width=self.rules.trace_width,
+            width=self._get_trace_width_for_net(pad.net_name),
             layer=pad.layer,
             net=pad.net,
             net_name=pad.net_name,
@@ -1088,7 +1104,7 @@ class EscapeRouter:
                         y1=pad.y,
                         x2=via_x,
                         y2=via_y,
-                        width=self.rules.trace_width,
+                        width=self._get_trace_width_for_net(pad.net_name),
                         layer=pad.layer,
                         net=pad.net,
                         net_name=pad.net_name,
@@ -1113,7 +1129,7 @@ class EscapeRouter:
                         y1=via_y,
                         x2=escape_x,
                         y2=escape_y,
-                        width=self.rules.trace_width,
+                        width=self._get_trace_width_for_net(pad.net_name),
                         layer=escape_layer,
                         net=pad.net,
                         net_name=pad.net_name,
@@ -1145,7 +1161,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=escape_x,
                     y2=escape_y,
-                    width=self.rules.trace_width,
+                    width=self._get_trace_width_for_net(pad.net_name),
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -1315,7 +1331,7 @@ class EscapeRouter:
                     y1=pad.y,
                     x2=via_x,
                     y2=via_y,
-                    width=self.rules.trace_width,
+                    width=self._get_trace_width_for_net(pad.net_name),
                     layer=pad.layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -1340,7 +1356,7 @@ class EscapeRouter:
                     y1=via_y,
                     x2=escape_x,
                     y2=escape_y,
-                    width=self.rules.trace_width,
+                    width=self._get_trace_width_for_net(pad.net_name),
                     layer=escape_layer,
                     net=pad.net,
                     net_name=pad.net_name,
@@ -1389,7 +1405,7 @@ class EscapeRouter:
                 y1=pad.y,
                 x2=escape_x,
                 y2=escape_y,
-                width=self.rules.trace_width,
+                width=self._get_trace_width_for_net(pad.net_name),
                 layer=pad.layer,
                 net=pad.net,
                 net_name=pad.net_name,

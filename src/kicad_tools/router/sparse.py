@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 from .layers import Layer
 from .primitives import Route, Segment, Via
-from .rules import DesignRules
+from .rules import DesignRules, NetClassRouting
 
 
 @dataclass
@@ -205,6 +205,7 @@ class SparseRoutingGraph:
         num_layers: int = 2,
         contour_samples: int = 8,
         sparse_grid_spacing: float = 2.0,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         """Initialize sparse routing graph.
 
@@ -215,6 +216,7 @@ class SparseRoutingGraph:
             num_layers: Number of routing layers
             contour_samples: Number of waypoints per obstacle contour (8 = octagon)
             sparse_grid_spacing: Spacing for sparse interior grid points (mm)
+            net_class_map: Optional net class map for per-net trace widths
         """
         self.width = width
         self.height = height
@@ -224,6 +226,7 @@ class SparseRoutingGraph:
         self.num_layers = num_layers
         self.contour_samples = contour_samples
         self.sparse_grid_spacing = sparse_grid_spacing
+        self.net_class_map = net_class_map or {}
 
         # Clearance buffer: distance from obstacle edge to valid routing
         self.clearance_buffer = rules.trace_clearance + rules.trace_width / 2
@@ -436,6 +439,19 @@ class SparseRoutingGraph:
 
         return True
 
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        """Get the trace width for a net based on its net class.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Trace width in mm
+        """
+        if self.net_class_map and net_name in self.net_class_map:
+            return self.net_class_map[net_name].trace_width
+        return self.rules.trace_width
+
     def route(
         self,
         start_pad: Pad,
@@ -597,6 +613,8 @@ class SparseRoutingGraph:
             return route
 
         # Convert to segments and vias
+        # Issue #1543: Use net-class-aware trace width
+        trace_width = self._get_trace_width_for_net(start_pad.net_name)
         current_x, current_y = start_pad.x, start_pad.y
         current_layer = path[0][0].layer
 
@@ -622,7 +640,7 @@ class SparseRoutingGraph:
                         y1=current_y,
                         x2=wp.x,
                         y2=wp.y,
-                        width=self.rules.trace_width,
+                        width=trace_width,
                         layer=Layer(current_layer),
                         net=start_pad.net,
                         net_name=start_pad.net_name,
@@ -637,7 +655,7 @@ class SparseRoutingGraph:
                 y1=current_y,
                 x2=end_pad.x,
                 y2=end_pad.y,
-                width=self.rules.trace_width,
+                width=trace_width,
                 layer=Layer(current_layer),
                 net=start_pad.net,
                 net_name=start_pad.net_name,
@@ -884,6 +902,7 @@ class SparseRouter:
         origin_x: float = 0,
         origin_y: float = 0,
         num_layers: int = 2,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         """Initialize sparse router.
 
@@ -892,6 +911,7 @@ class SparseRouter:
             rules: Design rules
             origin_x, origin_y: Board origin
             num_layers: Number of copper layers
+            net_class_map: Optional net class map for per-net trace widths
         """
         self.graph = SparseRoutingGraph(
             width=width,
@@ -902,6 +922,7 @@ class SparseRouter:
             num_layers=num_layers,
             contour_samples=8,  # Octagonal contours
             sparse_grid_spacing=max(2.0, rules.trace_clearance * 10),
+            net_class_map=net_class_map,
         )
         self.rules = rules
         self.pads: dict[str, Pad] = {}

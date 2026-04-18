@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .core import Autorouter
     from .grid import RoutingGrid
-    from .rules import DesignRules
+    from .rules import DesignRules, NetClassRouting
 
 from .diffpair import (
     DifferentialPair,
@@ -116,6 +116,7 @@ class CoupledPathfinder:
         grid: RoutingGrid,
         rules: DesignRules,
         target_spacing_cells: int,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         """Initialize coupled pathfinder.
 
@@ -123,10 +124,12 @@ class CoupledPathfinder:
             grid: The routing grid
             rules: Design rules for routing
             target_spacing_cells: Target spacing between P/N in grid cells
+            net_class_map: Optional net class map for per-net trace widths
         """
         self.grid = grid
         self.rules = rules
         self.target_spacing_cells = target_spacing_cells
+        self.net_class_map = net_class_map or {}
 
         # Pre-calculate trace clearance radius
         self._trace_half_width_cells = max(
@@ -412,6 +415,19 @@ class CoupledPathfinder:
 
         return p_route, n_route
 
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        """Get the trace width for a net based on its net class.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Trace width in mm
+        """
+        if self.net_class_map and net_name in self.net_class_map:
+            return self.net_class_map[net_name].trace_width
+        return self.rules.trace_width
+
     def _build_route_from_path(
         self,
         route: Route,
@@ -423,6 +439,8 @@ class CoupledPathfinder:
         if len(path) < 2:
             return
 
+        # Issue #1543: Use net-class-aware trace width
+        trace_width = self._get_trace_width_for_net(start_pad.net_name)
         current_x, current_y = start_pad.x, start_pad.y
         current_layer_idx = self.grid.layer_to_index(start_pad.layer.value)
 
@@ -451,7 +469,7 @@ class CoupledPathfinder:
                         y1=current_y,
                         x2=wx,
                         y2=wy,
-                        width=self.rules.trace_width,
+                        width=trace_width,
                         layer=Layer(self.grid.index_to_layer(layer_idx)),
                         net=start_pad.net,
                         net_name=start_pad.net_name,
@@ -467,7 +485,7 @@ class CoupledPathfinder:
                 y1=current_y,
                 x2=end_pad.x,
                 y2=end_pad.y,
-                width=self.rules.trace_width,
+                width=trace_width,
                 layer=Layer(self.grid.index_to_layer(current_layer_idx)),
                 net=start_pad.net,
                 net_name=start_pad.net_name,
@@ -777,6 +795,7 @@ class DiffPairRouter:
             self.autorouter.grid,
             self.autorouter.rules,
             spacing_cells,
+            net_class_map=self.autorouter.net_class_map,
         )
 
         routes: list[Route] = []

@@ -273,9 +273,13 @@ class CppPathfinder:
         grid: CppGrid,
         rules: DesignRules,
         diagonal_routing: bool = True,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         if not _CPP_AVAILABLE:
             raise RuntimeError("C++ router backend not available")
+
+        # Net class map for per-net trace width lookup
+        self._net_class_map = net_class_map or {}
 
         # Convert Python rules to C++ DesignRules
         cpp_rules = router_cpp.DesignRules()
@@ -398,6 +402,12 @@ class CppPathfinder:
         # Convert C++ result to Python Route
         route = Route(net=start.net, net_name=start.net_name)
 
+        # Issue #1543: Apply net-class-aware trace width to segments.
+        # The C++ backend uses the global rules.trace_width for all segments,
+        # so we override with the per-net width when converting to Python.
+        net_class = self._net_class_map.get(start.net_name)
+        trace_width = net_class.trace_width if net_class else None
+
         for cpp_seg in result.segments:
             # Convert grid index to Layer enum value
             layer_enum_value = self._grid.index_to_layer(cpp_seg.layer)
@@ -406,7 +416,7 @@ class CppPathfinder:
                 y1=cpp_seg.y1,
                 x2=cpp_seg.x2,
                 y2=cpp_seg.y2,
-                width=cpp_seg.width,
+                width=trace_width if trace_width is not None else cpp_seg.width,
                 layer=Layer(layer_enum_value),
                 net=cpp_seg.net,
                 net_name=start.net_name,
@@ -528,6 +538,7 @@ def create_hybrid_router(
     rules: DesignRules,
     diagonal_routing: bool = True,
     force_python: bool = False,
+    net_class_map: dict[str, NetClassRouting] | None = None,
 ):
     """Create a router, preferring C++ backend if available.
 
@@ -540,6 +551,7 @@ def create_hybrid_router(
         rules: Design rules
         diagonal_routing: Enable 45-degree diagonal routing
         force_python: Force use of Python backend (for testing)
+        net_class_map: Optional net class map for per-net trace widths
 
     Returns:
         Either CppPathfinder or Python Router instance
@@ -547,7 +559,7 @@ def create_hybrid_router(
     if _CPP_AVAILABLE and not force_python:
         try:
             cpp_grid = CppGrid.from_routing_grid(grid)
-            return CppPathfinder(cpp_grid, rules, diagonal_routing)
+            return CppPathfinder(cpp_grid, rules, diagonal_routing, net_class_map=net_class_map)
         except Exception:
             # Fall back to Python if C++ initialization fails
             pass
@@ -555,4 +567,4 @@ def create_hybrid_router(
     # Fall back to Python implementation
     from .pathfinder import Router
 
-    return Router(grid, rules, diagonal_routing=diagonal_routing)
+    return Router(grid, rules, net_class_map=net_class_map, diagonal_routing=diagonal_routing)

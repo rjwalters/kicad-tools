@@ -470,6 +470,24 @@ class Router:
         """Get the net class for a net name."""
         return self.net_class_map.get(net_name)
 
+    def _get_trace_width_for_net(self, net_name: str) -> float:
+        """Get the trace width for a net based on its net class.
+
+        Looks up the net's class in the net_class_map and returns the
+        class-specific trace width. Falls back to rules.trace_width if
+        the net has no class mapping.
+
+        Args:
+            net_name: Name of the net
+
+        Returns:
+            Trace width in mm
+        """
+        net_class = self._get_net_class(net_name)
+        if net_class is not None:
+            return net_class.trace_width
+        return self.rules.trace_width
+
     def _get_pad_metal_bounds(self, pad: Pad) -> tuple[int, int, int, int]:
         """Calculate the grid coordinate bounds of a pad's metal area.
 
@@ -1567,6 +1585,11 @@ class Router:
         start_needs_neckdown = self.rules.should_apply_neck_down(start_pad.ref, start_pitch)
         end_needs_neckdown = self.rules.should_apply_neck_down(end_pad.ref, end_pitch)
 
+        # Issue #1543: Use net-class-aware trace width as the base width.
+        # Look up the net class for this net and use its trace_width if defined,
+        # falling back to the global rules.trace_width for unclassified nets.
+        base_trace_width = self._get_trace_width_for_net(start_pad.net_name)
+
         def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
             """Normalize direction vector, return None if no movement."""
             length = (dx * dx + dy * dy) ** 0.5
@@ -1586,19 +1609,22 @@ class Router:
             return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
         def _calculate_segment_width(x1: float, y1: float, x2: float, y2: float) -> float:
-            """Calculate trace width for a segment based on distance to pads.
+            """Calculate trace width for a segment based on net class and distance to pads.
+
+            Issue #1543: Uses net-class-aware base width (e.g., POWER=0.5mm)
+            instead of the global rules.trace_width.
 
             Issue #1018: For segments near fine-pitch pads, the width tapers
-            from normal trace width to minimum trace width. The width is
+            from the base trace width to minimum trace width. The width is
             determined by the minimum distance from the segment endpoints
             to either pad that needs neck-down.
             """
-            # If no neck-down needed at either end, use normal width
+            # If no neck-down needed at either end, use net-class base width
             if not start_needs_neckdown and not end_needs_neckdown:
-                return self.rules.trace_width
+                return base_trace_width
 
             # Calculate distances from segment endpoints to pads
-            min_width = self.rules.trace_width
+            min_width = base_trace_width
 
             # Check start pad influence
             if start_needs_neckdown:
