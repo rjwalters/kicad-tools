@@ -93,12 +93,14 @@ class PreflightChecker:
         output_dir: str | Path | None = None,
         config: PreflightConfig | None = None,
         exclude_tht: bool | None = None,
+        bom_source: str = "schematic",
     ):
         self.pcb_path = Path(pcb_path)
         self.schematic_path = Path(schematic_path) if schematic_path else None
         self.manufacturer = manufacturer.lower()
         self.output_dir = Path(output_dir) if output_dir else None
         self.config = config or PreflightConfig()
+        self._bom_source = bom_source
 
         # Determine THT exclusion: explicit override, or default per manufacturer
         if exclude_tht is not None:
@@ -138,8 +140,12 @@ class PreflightChecker:
         if self._pcb is not None:
             results.append(self._check_tht_in_cpl())
 
-        # BOM checks (only if schematic is available)
-        if self.schematic_path and self.schematic_path.exists():
+        # BOM checks: run if schematic is available OR bom_source is "pcb"/"auto"
+        can_load_bom = (
+            (self.schematic_path and self.schematic_path.exists())
+            or self._bom_source in ("pcb", "auto")
+        )
+        if can_load_bom:
             results.append(self._check_bom_fields())
             results.append(self._check_bom_footprint_match())
             if self._pcb is not None:
@@ -196,7 +202,12 @@ class PreflightChecker:
             )
 
     def _check_schematic_exists(self) -> PreflightResult:
-        """Check that the schematic file exists (needed for BOM/CPL)."""
+        """Check that the schematic file exists (needed for BOM/CPL).
+
+        When ``bom_source`` is ``"pcb"``, the schematic is not required
+        for BOM generation, so a missing schematic is downgraded to an
+        informational OK status instead of WARN.
+        """
         if self.schematic_path is None:
             # Try auto-detection using shared find_schematic logic
             from kicad_tools.report.utils import find_schematic
@@ -209,6 +220,12 @@ class PreflightChecker:
                     status="OK",
                     message=f"Schematic auto-detected: {auto_sch.name}",
                 )
+            if self._bom_source == "pcb":
+                return PreflightResult(
+                    name="schematic_file",
+                    status="OK",
+                    message="No schematic file (BOM sourced from PCB footprints)",
+                )
             return PreflightResult(
                 name="schematic_file",
                 status="WARN",
@@ -216,6 +233,12 @@ class PreflightChecker:
             )
 
         if not self.schematic_path.exists():
+            if self._bom_source == "pcb":
+                return PreflightResult(
+                    name="schematic_file",
+                    status="OK",
+                    message=f"Schematic not found: {self.schematic_path.name} (BOM sourced from PCB footprints)",
+                )
             return PreflightResult(
                 name="schematic_file",
                 status="WARN",
@@ -801,10 +824,34 @@ class PreflightChecker:
     # ------------------------------------------------------------------
 
     def _load_bom(self):
-        """Load and cache BOM data from schematic."""
+        """Load and cache BOM data.
+
+        Respects the ``bom_source`` setting: when set to ``"pcb"`` or
+        ``"auto"`` (with no usable schematic), the BOM is extracted
+        from PCB footprints instead of schematic symbols.
+        """
         if self._bom is not None:
             return self._bom
 
+        if self._bom_source == "pcb":
+            from ..schema.bom import extract_bom_from_pcb
+
+            self._bom = extract_bom_from_pcb(str(self.pcb_path))
+            return self._bom
+
+        if self._bom_source == "auto":
+            # Try schematic first, fall back to PCB
+            if self.schematic_path and self.schematic_path.exists():
+                from ..schema.bom import extract_bom
+
+                self._bom = extract_bom(str(self.schematic_path))
+            else:
+                from ..schema.bom import extract_bom_from_pcb
+
+                self._bom = extract_bom_from_pcb(str(self.pcb_path))
+            return self._bom
+
+        # Default: schematic source
         if self.schematic_path is None or not self.schematic_path.exists():
             raise FileNotFoundError("Schematic file not available for BOM extraction")
 

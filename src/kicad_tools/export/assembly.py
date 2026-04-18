@@ -53,6 +53,9 @@ class AssemblyConfig:
     no_spec: bool = False
     spec_path: Path | None = None
 
+    # BOM source: "schematic" (default), "pcb", or "auto"
+    bom_source: str = "schematic"
+
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
 
@@ -236,6 +239,14 @@ class AssemblyPackage:
         populated automatically via :func:`enrich_bom_lcsc` before
         the BOM CSV is written.
 
+        The ``bom_source`` config field controls where BOM data is
+        sourced from:
+
+        - ``"schematic"`` (default): extract from schematic symbols
+        - ``"pcb"``: extract from PCB footprints (no schematic needed)
+        - ``"auto"``: use schematic by default, fall back to PCB when
+          reference sets diverge significantly
+
         Args:
             output_dir: Directory to write the BOM CSV into.
             result: Optional result object to attach enrichment report.
@@ -243,18 +254,31 @@ class AssemblyPackage:
         Returns:
             Path to the written BOM CSV.
         """
-        if not self.schematic_path:
-            raise ValidationError(
-                ["Schematic path required for BOM generation"],
-                context={"pcb": str(self.pcb_path)},
-                suggestions=["Provide a schematic file path when creating the AssemblyPackage"],
-            )
+        bom_source = self.config.bom_source
 
-        # Import here to avoid circular imports
-        from ..schema.bom import extract_bom
+        if bom_source == "pcb":
+            from ..schema.bom import extract_bom_from_pcb
 
-        bom = extract_bom(self.schematic_path)
-        items = bom.items
+            bom = extract_bom_from_pcb(str(self.pcb_path))
+            items = bom.items
+        elif bom_source == "auto":
+            items = self._resolve_auto_bom_source()
+        else:
+            # Default: schematic source
+            if not self.schematic_path:
+                raise ValidationError(
+                    ["Schematic path required for BOM generation"],
+                    context={"pcb": str(self.pcb_path)},
+                    suggestions=[
+                        "Provide a schematic file path when creating the AssemblyPackage",
+                        "Use --bom-source pcb to generate BOM from PCB footprints instead",
+                    ],
+                )
+
+            from ..schema.bom import extract_bom
+
+            bom = extract_bom(self.schematic_path)
+            items = bom.items
 
         # Filter excluded references
         if self.config.exclude_references:
@@ -350,6 +374,51 @@ class AssemblyPackage:
         else:
             config = self.config.gerber_config or GerberConfig()
             return exporter.export(config, gerber_dir)
+
+    def _resolve_auto_bom_source(self) -> list:
+        """Resolve BOM source automatically.
+
+        Uses schematic when available and reference sets align with PCB.
+        Falls back to PCB when the mismatch exceeds 10% or 5 references.
+        """
+        from ..schema.bom import extract_bom_from_pcb
+
+        pcb_bom = extract_bom_from_pcb(str(self.pcb_path))
+        pcb_refs = {item.reference for item in pcb_bom.items if not item.is_virtual}
+
+        if self.schematic_path and self.schematic_path.exists():
+            from ..schema.bom import extract_bom
+
+            sch_bom = extract_bom(self.schematic_path)
+            sch_refs = {
+                item.reference
+                for item in sch_bom.items
+                if not item.is_virtual and not item.dnp
+            }
+
+            # Compute mismatch
+            mismatch = len(sch_refs.symmetric_difference(pcb_refs))
+            total = max(len(sch_refs), len(pcb_refs), 1)
+            mismatch_pct = mismatch / total
+
+            if mismatch <= 5 and mismatch_pct <= 0.10:
+                logger.info(
+                    "Auto BOM source: using schematic (mismatch: %d refs, %.0f%%)",
+                    mismatch,
+                    mismatch_pct * 100,
+                )
+                return sch_bom.items
+            else:
+                logger.warning(
+                    "Auto BOM source: using PCB due to significant reference "
+                    "mismatch with schematic (%d refs, %.0f%%)",
+                    mismatch,
+                    mismatch_pct * 100,
+                )
+                return pcb_bom.items
+        else:
+            logger.info("Auto BOM source: using PCB (no schematic available)")
+            return pcb_bom.items
 
     def _filter_references(self, items: list) -> list:
         """Filter items by excluded reference patterns."""

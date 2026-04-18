@@ -287,6 +287,7 @@ class ManufacturingPackage:
             output_dir=self.config.output_dir,
             config=preflight_cfg,
             exclude_tht=exclude_tht,
+            bom_source=self.config.bom_source,
         )
         return checker.run_all()
 

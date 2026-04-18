@@ -420,6 +420,7 @@ class Footprint:
     exclude_from_pos_files: bool = False
     exclude_from_bom: bool = False
     dnp: bool = False
+    properties: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Footprint:
@@ -495,6 +496,9 @@ class Footprint:
                 # Also create FootprintText for validation
                 fp_text = FootprintText._from_property_sexp(prop, "value")
                 fp.texts.append(fp_text)
+            elif prop_name not in ("Reference", "Value", "Footprint"):
+                # Store additional properties (LCSC, MPN, Manufacturer, etc.)
+                fp.properties[prop_name] = prop_value
 
         # Pads
         for pad_sexp in sexp.find_all("pad"):

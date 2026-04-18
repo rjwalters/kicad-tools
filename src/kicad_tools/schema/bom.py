@@ -302,3 +302,85 @@ def extract_bom(schematic_path: str, hierarchical: bool = True) -> BOM:
         sch = Schematic.load(schematic_path)
         items = extract_bom_from_schematic(sch)
         return BOM(items=items, source=schematic_path)
+
+
+def extract_bom_from_pcb(pcb_path: str) -> BOM:
+    """
+    Extract BOM from PCB footprints instead of schematic symbols.
+
+    This is useful when the schematic and PCB have divergent reference
+    designators (e.g., partial builds, re-annotations, external designs).
+
+    Footprint properties such as LCSC, MPN, Manufacturer, and Description
+    are extracted when present. Missing fields generate warnings but do
+    not cause failures.
+
+    Args:
+        pcb_path: Path to .kicad_pcb file
+
+    Returns:
+        BOM object built from PCB footprints
+    """
+    import logging
+
+    from .pcb import PCB
+
+    logger = logging.getLogger(__name__)
+
+    pcb = PCB.load(pcb_path)
+    items: list[BOMItem] = []
+
+    for fp in pcb.footprints:
+        # Skip footprints excluded from BOM
+        if fp.exclude_from_bom:
+            continue
+
+        # Warn about missing fields
+        if not fp.value:
+            logger.warning(
+                "PCB footprint %s has empty value field; BOM entry may be incomplete",
+                fp.reference,
+            )
+        if not fp.name:
+            logger.warning(
+                "PCB footprint %s has empty footprint name; BOM entry may be incomplete",
+                fp.reference,
+            )
+
+        # Map footprint properties to BOM fields
+        props = fp.properties
+        description = ""
+        manufacturer = ""
+        mpn = ""
+        lcsc = ""
+        extra_props: dict[str, str] = {}
+
+        for name, value in props.items():
+            name_lower = name.lower()
+            if name_lower in ("description", "desc"):
+                description = value
+            elif name_lower in ("manufacturer", "mfr", "mfg"):
+                manufacturer = value
+            elif name_lower in ("mpn", "mfr_pn", "manufacturer_pn", "pn"):
+                mpn = value
+            elif name_lower in ("lcsc", "lcsc_pn", "lcsc part", "jlc", "jlcpcb"):
+                lcsc = value
+            else:
+                extra_props[name] = value
+
+        item = BOMItem(
+            reference=fp.reference,
+            value=fp.value,
+            footprint=fp.name,
+            lib_id="",  # No lib_id available from PCB
+            description=description,
+            manufacturer=manufacturer,
+            mpn=mpn,
+            lcsc=lcsc,
+            dnp=fp.dnp,
+            in_bom=True,
+            properties=extra_props,
+        )
+        items.append(item)
+
+    return BOM(items=items, source=pcb_path)
