@@ -46,7 +46,13 @@ Difference from ``kicad_tools.drc``:
 
 from .checker import DRCChecker
 from .connectivity import ConnectivityIssue, ConnectivityResult, ConnectivityValidator
-from .consistency import ConsistencyIssue, ConsistencyResult, SchematicPCBChecker
+from .consistency import (
+    ConsistencyIssue,
+    ConsistencyResult,
+    LVSMatch,
+    LVSResult,
+    SchematicPCBChecker,
+)
 from .models import (
     BaseViolation,
     DRCResult,
@@ -83,6 +89,9 @@ __all__ = [
     "SchematicPCBChecker",
     "ConsistencyIssue",
     "ConsistencyResult",
+    # LVS (Layout-vs-Schematic) validation
+    "LVSMatch",
+    "LVSResult",
     # BOM placement validation
     "BOMPlacementVerifier",
     "PlacementStatus",

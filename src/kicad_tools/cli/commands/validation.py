@@ -5,6 +5,7 @@ __all__ = [
     "run_validate_command",
     "run_validate_connectivity_command",
     "run_validate_consistency_command",
+    "run_validate_lvs_command",
     "run_validate_placement_command",
     "run_validate_footprints_command",
     "run_fix_footprints_command",
@@ -227,6 +228,10 @@ def run_validate_command(args) -> int:
     if getattr(args, "consistency", False):
         return run_validate_consistency_command(args)
 
+    # Route to LVS validation if --lvs flag is set
+    if getattr(args, "lvs", False):
+        return run_validate_lvs_command(args)
+
     # Route to placement validation if --placement flag is set
     if getattr(args, "placement", False):
         return run_validate_placement_command(args)
@@ -238,6 +243,7 @@ def run_validate_command(args) -> int:
         print("       kicad-tools validate --connectivity [options] <pcb>")
         print("       kicad-tools validate --consistency [options] <project>")
         print("       kicad-tools validate --placement [options] <project>")
+        print("       kicad-tools validate --lvs [options] <project>")
         print("\nOptions:")
         print("  --sync           Check schematic-to-PCB netlist synchronization")
         print("  --connectivity   Check net connectivity on PCB (detect unrouted nets)")
@@ -245,6 +251,9 @@ def run_validate_command(args) -> int:
             "  --consistency    Check schematic-to-PCB consistency (components, nets, properties)"
         )
         print("  --placement      Check BOM components are placed on PCB")
+        print(
+            "  --lvs            Layout-vs-schematic check with hierarchical support"
+        )
         return 1
 
     from ..validate_sync_cmd import main as validate_sync_main
@@ -346,6 +355,36 @@ def run_validate_consistency_command(args) -> int:
         sub_argv.append("--verbose")
 
     return validate_consistency_main(sub_argv)
+
+
+def run_validate_lvs_command(args) -> int:
+    """Handle validate --lvs command."""
+    from ..validate_lvs_cmd import main as validate_lvs_main
+
+    sub_argv = []
+
+    # Handle positional file arguments
+    validate_files = getattr(args, "validate_files", []) or []
+    for f in validate_files:
+        sub_argv.append(f)
+
+    if getattr(args, "validate_schematic", None):
+        sub_argv.extend(["--schematic", args.validate_schematic])
+    if getattr(args, "validate_pcb", None):
+        sub_argv.extend(["--pcb", args.validate_pcb])
+    if getattr(args, "validate_format", "table") != "table":
+        sub_argv.extend(["--format", args.validate_format])
+    if getattr(args, "validate_errors_only", False):
+        sub_argv.append("--errors-only")
+    if getattr(args, "validate_strict", False):
+        sub_argv.append("--strict")
+    if getattr(args, "validate_verbose", False):
+        sub_argv.append("--verbose")
+    min_conf = getattr(args, "validate_min_confidence", 0.0)
+    if min_conf > 0.0:
+        sub_argv.extend(["--min-confidence", str(min_conf)])
+
+    return validate_lvs_main(sub_argv)
 
 
 def run_validate_placement_command(args) -> int:

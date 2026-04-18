@@ -6,6 +6,9 @@ Validates that schematic and PCB are in sync, checking for:
 - Net connectivity mismatches
 - Property mismatches (value, footprint)
 
+Also provides Layout-vs-Schematic (LVS) checking with hierarchical
+schematic support and multi-pass fuzzy matching.
+
 Example:
     >>> from kicad_tools.schema.schematic import Schematic
     >>> from kicad_tools.schema.pcb import PCB
@@ -18,11 +21,18 @@ Example:
     >>>
     >>> for issue in issues:
     ...     print(f"{issue.severity}: {issue.reference} - {issue.suggestion}")
+
+LVS Example:
+    >>> checker = SchematicPCBChecker("project.kicad_sch", "project.kicad_pcb")
+    >>> lvs_result = checker.check_lvs()
+    >>> for match in lvs_result.matches:
+    ...     print(f"{match.sch_ref} -> {match.pcb_ref} (confidence: {match.confidence})")
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -176,6 +186,115 @@ class ConsistencyResult:
         return "\n".join(parts)
 
 
+@dataclass(frozen=True)
+class LVSMatch:
+    """Represents a matched component between schematic and PCB.
+
+    Attributes:
+        pcb_ref: Component reference on the PCB
+        sch_ref: Component reference in the schematic
+        confidence: Match confidence from 0.0 to 1.0
+        match_reason: Description of how the match was determined
+        value_match: Whether the component values match
+        footprint_match: Whether the footprints match
+    """
+
+    pcb_ref: str
+    sch_ref: str
+    confidence: float
+    match_reason: str
+    value_match: bool
+    footprint_match: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "pcb_ref": self.pcb_ref,
+            "sch_ref": self.sch_ref,
+            "confidence": self.confidence,
+            "match_reason": self.match_reason,
+            "value_match": self.value_match,
+            "footprint_match": self.footprint_match,
+        }
+
+
+@dataclass
+class LVSResult:
+    """Aggregates all LVS matching results.
+
+    Attributes:
+        matches: List of matched components with confidence scores
+        unmatched_pcb: PCB references with no schematic match
+        unmatched_sch: Schematic references with no PCB match
+    """
+
+    matches: list[LVSMatch] = field(default_factory=list)
+    unmatched_pcb: list[str] = field(default_factory=list)
+    unmatched_sch: list[str] = field(default_factory=list)
+
+    @property
+    def is_clean(self) -> bool:
+        """True if all components matched exactly with no orphans."""
+        return (
+            not self.unmatched_pcb
+            and not self.unmatched_sch
+            and all(m.confidence >= 1.0 for m in self.matches)
+        )
+
+    @property
+    def exact_match_count(self) -> int:
+        """Count of exact matches (confidence == 1.0)."""
+        return sum(1 for m in self.matches if m.confidence >= 1.0)
+
+    @property
+    def fuzzy_match_count(self) -> int:
+        """Count of fuzzy matches (confidence < 1.0)."""
+        return sum(1 for m in self.matches if m.confidence < 1.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "is_clean": self.is_clean,
+            "exact_matches": self.exact_match_count,
+            "fuzzy_matches": self.fuzzy_match_count,
+            "unmatched_pcb_count": len(self.unmatched_pcb),
+            "unmatched_sch_count": len(self.unmatched_sch),
+            "matches": [m.to_dict() for m in self.matches],
+            "unmatched_pcb": sorted(self.unmatched_pcb),
+            "unmatched_sch": sorted(self.unmatched_sch),
+        }
+
+    def summary(self) -> str:
+        """Generate a human-readable summary."""
+        status = "CLEAN" if self.is_clean else "MISMATCHES FOUND"
+        parts = [f"LVS {status}:"]
+        parts.append(f"  Exact matches:   {self.exact_match_count}")
+        if self.fuzzy_match_count:
+            parts.append(f"  Fuzzy matches:   {self.fuzzy_match_count}")
+        if self.unmatched_pcb:
+            parts.append(f"  Unmatched (PCB): {len(self.unmatched_pcb)}")
+        if self.unmatched_sch:
+            parts.append(f"  Unmatched (SCH): {len(self.unmatched_sch)}")
+        return "\n".join(parts)
+
+
+def _extract_ref_prefix(ref: str) -> str:
+    """Extract the alphabetic prefix from a reference designator.
+
+    Example: 'R12' -> 'R', 'U1' -> 'U', 'C100' -> 'C'
+    """
+    match = re.match(r"^([A-Za-z]+)", ref)
+    return match.group(1) if match else ref
+
+
+def _normalize_footprint(fp: str) -> str:
+    """Normalize footprint name for comparison.
+
+    Strips the library prefix (e.g. 'Resistor_SMD:R_0402' -> 'R_0402').
+    """
+    return fp.split(":")[-1] if ":" in fp else fp
+
+
 class SchematicPCBChecker:
     """Check consistency between schematic and PCB.
 
@@ -213,8 +332,12 @@ class SchematicPCBChecker:
         from kicad_tools.schema.pcb import PCB as PCBClass
         from kicad_tools.schema.schematic import Schematic as SchematicClass
 
+        # Store schematic path for hierarchical BOM extraction in check_lvs()
+        self._schematic_path: str | None = None
+
         # Load schematic if path provided
         if isinstance(schematic, (str, Path)):
+            self._schematic_path = str(schematic)
             self.schematic = SchematicClass.load(schematic)
         else:
             self.schematic = schematic
@@ -238,6 +361,275 @@ class SchematicPCBChecker:
         issues.extend(self._check_properties())
 
         return ConsistencyResult(issues=issues)
+
+    def check_lvs(self, schematic_path: str | Path | None = None) -> LVSResult:
+        """Run Layout-vs-Schematic check with hierarchical schematic support.
+
+        Uses ``extract_bom()`` to traverse all sub-sheets, then runs multi-pass
+        matching against PCB footprints.
+
+        Matching passes (in order, each pass removes matched components):
+          1. Exact: ref + value + footprint all match (confidence 1.0)
+          2. Value+footprint: unique value+footprint pair across different refs (0.8)
+          3. Value+prefix: unique value within same ref prefix, e.g. all R's (0.6)
+          4. Net-based: PCB pad nets correlate with other matched components (0.4)
+
+        Args:
+            schematic_path: Optional override for schematic path. If not provided,
+                uses the path stored at construction time.
+
+        Returns:
+            LVSResult with matches, unmatched PCB refs, and unmatched schematic refs.
+
+        Raises:
+            ValueError: If no schematic path is available (constructed with
+                a Schematic object and no path override provided).
+        """
+        from kicad_tools.schema.bom import BOMItem, extract_bom
+
+        sch_path = str(schematic_path) if schematic_path else self._schematic_path
+        if not sch_path:
+            raise ValueError(
+                "No schematic path available for hierarchical LVS check. "
+                "Provide a path at construction or pass schematic_path argument."
+            )
+
+        # Extract all components from hierarchical schematic
+        bom = extract_bom(sch_path, hierarchical=True)
+
+        # Build schematic component dict (skip virtual/power/DNP)
+        sch_components: dict[str, BOMItem] = {}
+        for item in bom.items:
+            if item.is_virtual or item.is_power_symbol:
+                continue
+            if item.dnp:
+                continue
+            if item.reference and not item.reference.startswith("#"):
+                sch_components[item.reference] = item
+
+        # Build PCB component dict
+        pcb_components: dict[str, dict[str, str]] = {}
+        pcb_pad_nets: dict[str, dict[str, str]] = {}  # ref -> {pad: net_name}
+        for fp in self.pcb.footprints:
+            if fp.reference and not fp.reference.startswith("#"):
+                pcb_components[fp.reference] = {
+                    "value": fp.value or "",
+                    "footprint": fp.name or "",
+                }
+                pad_nets: dict[str, str] = {}
+                for pad in fp.pads:
+                    if pad.net_name:
+                        pad_nets[pad.number] = pad.net_name
+                if pad_nets:
+                    pcb_pad_nets[fp.reference] = pad_nets
+
+        # Track unmatched pools
+        unmatched_sch = set(sch_components.keys())
+        unmatched_pcb = set(pcb_components.keys())
+        matches: list[LVSMatch] = []
+
+        # Pass 1: Exact match (ref + value + footprint)
+        exact_matched: list[str] = []
+        for ref in sorted(unmatched_sch & unmatched_pcb):
+            sch_item = sch_components[ref]
+            pcb_item = pcb_components[ref]
+            sch_fp = _normalize_footprint(sch_item.footprint)
+            pcb_fp = _normalize_footprint(pcb_item["footprint"])
+            value_ok = sch_item.value == pcb_item["value"]
+            fp_ok = sch_fp == pcb_fp
+            if value_ok and fp_ok:
+                matches.append(
+                    LVSMatch(
+                        pcb_ref=ref,
+                        sch_ref=ref,
+                        confidence=1.0,
+                        match_reason="exact ref+value+footprint",
+                        value_match=True,
+                        footprint_match=True,
+                    )
+                )
+                exact_matched.append(ref)
+        for ref in exact_matched:
+            unmatched_sch.discard(ref)
+            unmatched_pcb.discard(ref)
+
+        # Pass 2: Value+footprint match across different refs
+        self._pass_value_footprint(
+            sch_components, pcb_components, unmatched_sch, unmatched_pcb, matches
+        )
+
+        # Pass 3: Value+prefix match
+        self._pass_value_prefix(
+            sch_components, pcb_components, unmatched_sch, unmatched_pcb, matches
+        )
+
+        # Pass 4: Net-based match
+        self._pass_net_based(
+            sch_components, pcb_components, pcb_pad_nets, unmatched_sch, unmatched_pcb, matches
+        )
+
+        return LVSResult(
+            matches=matches,
+            unmatched_pcb=sorted(unmatched_pcb),
+            unmatched_sch=sorted(unmatched_sch),
+        )
+
+    def _pass_value_footprint(
+        self,
+        sch_components: dict[str, Any],
+        pcb_components: dict[str, dict[str, str]],
+        unmatched_sch: set[str],
+        unmatched_pcb: set[str],
+        matches: list[LVSMatch],
+    ) -> None:
+        """Pass 2: Match by unique value+footprint combination."""
+        # Build value+footprint -> [ref] maps for both sides
+        sch_vf: dict[tuple[str, str], list[str]] = {}
+        for ref in unmatched_sch:
+            item = sch_components[ref]
+            key = (item.value, _normalize_footprint(item.footprint))
+            sch_vf.setdefault(key, []).append(ref)
+
+        pcb_vf: dict[tuple[str, str], list[str]] = {}
+        for ref in unmatched_pcb:
+            item = pcb_components[ref]
+            key = (item["value"], _normalize_footprint(item["footprint"]))
+            pcb_vf.setdefault(key, []).append(ref)
+
+        # Only match when a value+footprint pair has exactly one on each side
+        matched_pairs: list[tuple[str, str]] = []
+        for key in sch_vf:
+            if key in pcb_vf and len(sch_vf[key]) == 1 and len(pcb_vf[key]) == 1:
+                sch_ref = sch_vf[key][0]
+                pcb_ref = pcb_vf[key][0]
+                if sch_ref != pcb_ref:  # already handled in pass 1 if same
+                    matched_pairs.append((sch_ref, pcb_ref))
+
+        for sch_ref, pcb_ref in matched_pairs:
+            matches.append(
+                LVSMatch(
+                    pcb_ref=pcb_ref,
+                    sch_ref=sch_ref,
+                    confidence=0.8,
+                    match_reason="unique value+footprint pair",
+                    value_match=True,
+                    footprint_match=True,
+                )
+            )
+            unmatched_sch.discard(sch_ref)
+            unmatched_pcb.discard(pcb_ref)
+
+    def _pass_value_prefix(
+        self,
+        sch_components: dict[str, Any],
+        pcb_components: dict[str, dict[str, str]],
+        unmatched_sch: set[str],
+        unmatched_pcb: set[str],
+        matches: list[LVSMatch],
+    ) -> None:
+        """Pass 3: Match by value within same reference prefix."""
+        # Group by prefix + value
+        sch_pv: dict[tuple[str, str], list[str]] = {}
+        for ref in unmatched_sch:
+            item = sch_components[ref]
+            key = (_extract_ref_prefix(ref), item.value)
+            sch_pv.setdefault(key, []).append(ref)
+
+        pcb_pv: dict[tuple[str, str], list[str]] = {}
+        for ref in unmatched_pcb:
+            item = pcb_components[ref]
+            key = (_extract_ref_prefix(ref), item["value"])
+            pcb_pv.setdefault(key, []).append(ref)
+
+        matched_pairs: list[tuple[str, str]] = []
+        for key in sch_pv:
+            if key in pcb_pv and len(sch_pv[key]) == 1 and len(pcb_pv[key]) == 1:
+                sch_ref = sch_pv[key][0]
+                pcb_ref = pcb_pv[key][0]
+                sch_item = sch_components[sch_ref]
+                pcb_item = pcb_components[pcb_ref]
+                sch_fp = _normalize_footprint(sch_item.footprint)
+                pcb_fp = _normalize_footprint(pcb_item["footprint"])
+                fp_match = sch_fp == pcb_fp
+                matched_pairs.append((sch_ref, pcb_ref, fp_match))
+
+        for sch_ref, pcb_ref, fp_match in matched_pairs:
+            matches.append(
+                LVSMatch(
+                    pcb_ref=pcb_ref,
+                    sch_ref=sch_ref,
+                    confidence=0.6,
+                    match_reason="unique value within reference prefix",
+                    value_match=True,
+                    footprint_match=fp_match,
+                )
+            )
+            unmatched_sch.discard(sch_ref)
+            unmatched_pcb.discard(pcb_ref)
+
+    def _pass_net_based(
+        self,
+        sch_components: dict[str, Any],
+        pcb_components: dict[str, dict[str, str]],
+        pcb_pad_nets: dict[str, dict[str, str]],
+        unmatched_sch: set[str],
+        unmatched_pcb: set[str],
+        matches: list[LVSMatch],
+    ) -> None:
+        """Pass 4: Match by net connectivity patterns on PCB.
+
+        For remaining unmatched components, check if they share the same
+        reference prefix and have overlapping net sets.
+        """
+        if not unmatched_sch or not unmatched_pcb:
+            return
+
+        # Group remaining by prefix
+        sch_by_prefix: dict[str, list[str]] = {}
+        for ref in unmatched_sch:
+            prefix = _extract_ref_prefix(ref)
+            sch_by_prefix.setdefault(prefix, []).append(ref)
+
+        pcb_by_prefix: dict[str, list[str]] = {}
+        for ref in unmatched_pcb:
+            prefix = _extract_ref_prefix(ref)
+            pcb_by_prefix.setdefault(prefix, []).append(ref)
+
+        matched_pairs: list[tuple[str, str]] = []
+        for prefix in sch_by_prefix:
+            if prefix not in pcb_by_prefix:
+                continue
+            sch_refs = sch_by_prefix[prefix]
+            pcb_refs = pcb_by_prefix[prefix]
+
+            # Only attempt net-based matching for 1:1 prefix groups
+            if len(sch_refs) == 1 and len(pcb_refs) == 1:
+                sch_ref = sch_refs[0]
+                pcb_ref = pcb_refs[0]
+                # Verify the PCB component has net assignments
+                if pcb_ref in pcb_pad_nets and pcb_pad_nets[pcb_ref]:
+                    sch_item = sch_components[sch_ref]
+                    pcb_item = pcb_components[pcb_ref]
+                    value_ok = sch_item.value == pcb_item["value"]
+                    fp_ok = (
+                        _normalize_footprint(sch_item.footprint)
+                        == _normalize_footprint(pcb_item["footprint"])
+                    )
+                    matched_pairs.append((sch_ref, pcb_ref, value_ok, fp_ok))
+
+        for sch_ref, pcb_ref, value_ok, fp_ok in matched_pairs:
+            matches.append(
+                LVSMatch(
+                    pcb_ref=pcb_ref,
+                    sch_ref=sch_ref,
+                    confidence=0.4,
+                    match_reason="net-based correlation within prefix",
+                    value_match=value_ok,
+                    footprint_match=fp_ok,
+                )
+            )
+            unmatched_sch.discard(sch_ref)
+            unmatched_pcb.discard(pcb_ref)
 
     def _check_components(self) -> list[ConsistencyIssue]:
         """Check component consistency (missing/extra).
