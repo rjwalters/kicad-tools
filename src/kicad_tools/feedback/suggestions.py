@@ -519,12 +519,29 @@ class FixSuggestionGenerator:
 
     def _suggest_duplicate_ref(self, violation: ERCViolation) -> list[str]:
         """Suggest fixes for duplicate reference designator errors."""
-        return [
-            "Run 'Annotate Schematic' to reassign unique references",
-            "Manually edit one component's reference to be unique",
-            "Check for copy-paste errors that duplicated components",
-            "Verify multi-unit symbols have correct unit assignments",
-        ]
+        suggestions = []
+
+        # If the violation already carries cross-sheet suggestions, include them first
+        if violation.suggestions:
+            suggestions.extend(violation.suggestions)
+
+        suggestions.extend(
+            [
+                "Run 'Annotate Schematic' to reassign unique references",
+                "Manually edit one component's reference to be unique",
+                "Check for copy-paste errors that duplicated components",
+                "Verify multi-unit symbols have correct unit assignments",
+            ]
+        )
+
+        # Add sheet-aware hint when the violation mentions multiple sheets
+        if "sheets" in violation.description.lower():
+            suggestions.insert(
+                0,
+                "Check all hierarchical sheets for components sharing this reference",
+            )
+
+        return suggestions
 
     def _suggest_label_dangling(self, violation: ERCViolation) -> list[str]:
         """Suggest fixes for dangling label errors."""
