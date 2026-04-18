@@ -318,7 +318,7 @@ def create_charlieplex_pcb(output_dir: Path) -> Path:
 
         pin_nets = [
             (1, "LINE_A"), (2, "LINE_B"), (3, "LINE_C"), (4, "LINE_D"),
-            (5, ""), (6, ""), (7, "VCC"), (8, "GND"),
+            (5, "GND"), (6, "GND"), (7, "VCC"), (8, "GND"),
         ]
 
         pads = []

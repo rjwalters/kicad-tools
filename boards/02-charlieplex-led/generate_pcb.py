@@ -152,8 +152,8 @@ def generate_mcu() -> str:
         (2, "LINE_B"),
         (3, "LINE_C"),
         (4, "LINE_D"),
-        (5, ""),  # NC
-        (6, ""),  # NC
+        (5, "GND"),  # Unused input tied to GND
+        (6, "GND"),  # Unused input tied to GND
         (7, "VCC"),
         (8, "GND"),
     ]

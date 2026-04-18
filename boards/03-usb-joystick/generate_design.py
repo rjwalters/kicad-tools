@@ -292,6 +292,15 @@ def create_usb_joystick_schematic(output_dir: Path) -> Path:
         "11": "BTN3",
         "12": "BTN4",
         "13": "JOY_BTN",
+        # Unused inputs tied to GND to prevent JLCPCB review holds
+        "5": "GND",
+        "6": "GND",
+        "18": "GND",
+        "19": "GND",
+        "20": "GND",
+        "21": "GND",
+        "22": "GND",
+        "31": "GND",
     }
 
     USB_PIN_MAP = {"1": "VCC", "2": "USB_D-", "3": "USB_D+", "4": "GND"}
@@ -475,8 +484,8 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
             2: ("XTAL1", 15),
             3: ("XTAL2", 16),
             4: ("VCC", 2),
-            5: ("", 0),
-            6: ("", 0),
+            5: ("GND", 3),
+            6: ("GND", 3),
             7: ("GND", 3),
             8: ("VCC", 2),
             9: ("JOY_X", 8),
@@ -488,11 +497,11 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
             15: ("BTN4", 14),
             16: ("GND", 3),
             17: ("VCC", 2),
-            18: ("", 0),
-            19: ("", 0),
-            20: ("", 0),
-            21: ("", 0),
-            22: ("", 0),
+            18: ("GND", 3),
+            19: ("GND", 3),
+            20: ("GND", 3),
+            21: ("GND", 3),
+            22: ("GND", 3),
             23: ("GND", 3),
             24: ("VCC", 2),
             25: ("GND", 3),
@@ -501,7 +510,7 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
             28: ("USB_D-", 5),
             29: ("USB_D+", 4),
             30: ("VBUS", 1),
-            31: ("", 0),
+            31: ("GND", 3),
             32: ("GND", 3),
         }
 
