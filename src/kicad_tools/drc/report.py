@@ -240,12 +240,104 @@ def parse_text_report(content: str, source_file: str = "") -> DRCReport:
 
 
 def parse_json_report(content: str, source_file: str = "") -> DRCReport:
-    """Parse KiCad JSON-format DRC report.
+    """Parse JSON-format DRC report (KiCad-cli or kct-check format).
 
-    KiCad 8+ can output DRC reports in JSON format with --format json.
+    Supports two JSON schemas:
+    - KiCad-cli format: has "source", "date", violations with "type"/"description"
+      and dict items with "description"/"pos"/"net" keys.
+    - kct-check format: has "summary", "manufacturer", violations with "rule_id"/
+      "message" and string items (e.g., ["Pad 1", "Pad 2"]).
     """
     data = json.loads(content)
 
+    # Detect kct-check format by presence of "summary" or "manufacturer" keys
+    if "summary" in data or "manufacturer" in data:
+        return _parse_kct_check_json(data, source_file)
+
+    return _parse_kicad_cli_json(data, source_file)
+
+
+def _parse_kct_check_json(data: dict, source_file: str = "") -> DRCReport:
+    """Parse kct-check JSON format written by ``kct check --output``.
+
+    Expected schema::
+
+        {
+            "file": "/path/to/board.kicad_pcb",
+            "manufacturer": "jlcpcb",
+            "layers": 2,
+            "summary": {"errors": 0, "warnings": 0, "rules_checked": 4, "passed": true},
+            "violations": [
+                {
+                    "rule_id": "clearance_pad_pad",
+                    "severity": "warning",
+                    "message": "...",
+                    "location": [x, y],
+                    "layer": "F.Cu",
+                    "actual_value": 0.15,
+                    "required_value": 0.2,
+                    "items": ["Pad 1", "Pad 2"]
+                }
+            ]
+        }
+    """
+    pcb_name = data.get("file", "")
+
+    violations: list[DRCViolation] = []
+
+    for item in data.get("violations", []):
+        type_str = item.get("rule_id", "unknown")
+        message = item.get("message", "")
+        severity = Severity.from_string(item.get("severity", "error"))
+
+        locations: list[Location] = []
+
+        # Parse location from [x, y] tuple
+        loc = item.get("location")
+        if loc and isinstance(loc, (list, tuple)) and len(loc) >= 2:
+            layer = item.get("layer", "")
+            locations.append(Location(x_mm=loc[0], y_mm=loc[1], layer=layer))
+
+        # Items are plain strings in kct-check format
+        raw_items = item.get("items", [])
+        items = [str(i) for i in raw_items]
+
+        raw_type = ViolationType.from_string(type_str)
+        refined_type = _infer_segment_via_type(raw_type, items)
+
+        violation = DRCViolation(
+            type=refined_type,
+            type_str=type_str,
+            severity=severity,
+            message=message,
+            rule=type_str,
+            locations=locations,
+            items=items,
+            nets=[],
+            required_value_mm=item.get("required_value"),
+            actual_value_mm=item.get("actual_value"),
+        )
+        _extract_values(violation.__dict__, message)
+        # Generate fix suggestions
+        from kicad_tools.feedback import generate_drc_suggestions
+
+        violation.suggestions = generate_drc_suggestions(violation)
+        violations.append(violation)
+
+    return DRCReport(
+        source_file=source_file,
+        created_at=None,
+        pcb_name=pcb_name,
+        violations=violations,
+        footprint_errors=0,
+    )
+
+
+def _parse_kicad_cli_json(data: dict, source_file: str = "") -> DRCReport:
+    """Parse KiCad-cli JSON-format DRC report.
+
+    KiCad 8+ can output DRC reports in JSON format with --format json.
+    """
     # Extract metadata
     pcb_name = data.get("source", "")
     created_at = None
