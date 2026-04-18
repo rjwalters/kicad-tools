@@ -172,6 +172,8 @@ class CrystalOscillator(CircuitBlock):
         cap_ref_start: int = 1,
         crystal_symbol: str = "Device:Crystal",
         cap_symbol: str = "Device:C",
+        crystal_footprint: str = "",
+        cap_footprint: str = "",
     ):
         """
         Create a crystal oscillator with load capacitors.
@@ -188,6 +190,8 @@ class CrystalOscillator(CircuitBlock):
             cap_ref_start: Starting reference number for capacitors
             crystal_symbol: KiCad symbol for crystal
             cap_symbol: KiCad symbol for capacitors
+            crystal_footprint: Footprint for crystal (e.g., "Crystal:Crystal_HC49-4H_Vertical")
+            cap_footprint: Footprint for load capacitors (e.g., "Capacitor_SMD:C_0805_2012Metric")
         """
         super().__init__(sch, x, y)
 
@@ -209,7 +213,7 @@ class CrystalOscillator(CircuitBlock):
         cap_x_spacing = 15  # mm between caps (crystal is centered)
 
         # Place crystal
-        self.crystal = sch.add_symbol(crystal_symbol, x, y, y_ref, frequency)
+        self.crystal = sch.add_symbol(crystal_symbol, x, y, y_ref, frequency, footprint=crystal_footprint)
 
         # Place load capacitors below crystal
         c1_x = x - cap_x_spacing / 2
@@ -219,8 +223,8 @@ class CrystalOscillator(CircuitBlock):
         c1_ref = f"C{cap_ref_start}"
         c2_ref = f"C{cap_ref_start + 1}"
 
-        self.cap1 = sch.add_symbol(cap_symbol, c1_x, cap_y, c1_ref, cap1_value)
-        self.cap2 = sch.add_symbol(cap_symbol, c2_x, cap_y, c2_ref, cap2_value)
+        self.cap1 = sch.add_symbol(cap_symbol, c1_x, cap_y, c1_ref, cap1_value, footprint=cap_footprint)
+        self.cap2 = sch.add_symbol(cap_symbol, c2_x, cap_y, c2_ref, cap2_value, footprint=cap_footprint)
 
         self.components = {
             "XTAL": self.crystal,

@@ -33,6 +33,8 @@ class LEDIndicator(CircuitBlock):
         led_symbol: str = "Device:LED",
         resistor_symbol: str = "Device:R",
         vertical: bool = True,
+        led_footprint: str = "",
+        resistor_footprint: str = "",
     ):
         """
         Create an LED indicator.
@@ -47,6 +49,8 @@ class LEDIndicator(CircuitBlock):
             led_symbol: KiCad symbol for LED
             resistor_symbol: KiCad symbol for resistor
             vertical: If True, LED is vertical (rotated 90°)
+            led_footprint: Footprint for LED (e.g., "LED_SMD:LED_0805_2012Metric")
+            resistor_footprint: Footprint for resistor (e.g., "Resistor_SMD:R_0805_2012Metric")
         """
         super().__init__(sch, x, y)
 
@@ -60,14 +64,14 @@ class LEDIndicator(CircuitBlock):
 
         # Place LED
         rotation = 90 if vertical else 0
-        self.led = sch.add_symbol(led_symbol, x, y, d_ref, label, rotation=rotation)
+        self.led = sch.add_symbol(led_symbol, x, y, d_ref, label, rotation=rotation, footprint=led_footprint)
 
         # Place resistor below LED (if vertical)
         if vertical:
             r_y = y + led_resistor_spacing
         else:
             r_y = y
-        self.resistor = sch.add_symbol(resistor_symbol, x, r_y, r_ref, resistor_value)
+        self.resistor = sch.add_symbol(resistor_symbol, x, r_y, r_ref, resistor_value, footprint=resistor_footprint)
 
         self.components = {"LED": self.led, "R": self.resistor}
 

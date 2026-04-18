@@ -190,6 +190,8 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         load_caps="20pF",
         ref_prefix="Y",
         cap_ref_start=10,
+        crystal_footprint="Crystal:Crystal_HC49-4H_Vertical",
+        cap_footprint="Capacitor_SMD:C_0805_2012Metric",
     )
     print(f"   Crystal: {xtal.crystal.reference} with C10, C11")
 
@@ -220,6 +222,7 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         pins=6,
         series_resistors=False,
         ref="J1",
+        header_footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
     )
     print(f"   Debug header: {debug.header.reference} (SWD-6)")
 
@@ -239,6 +242,8 @@ def create_stm32_schematic(output_dir: Path) -> Path:
         ref_prefix="D1",
         label="USER",
         resistor_value="330R",
+        led_footprint="LED_SMD:LED_0805_2012Metric",
+        resistor_footprint="Resistor_SMD:R_0805_2012Metric",
     )
     print(f"   LED: {led.led.reference} with current-limiting resistor")
 
