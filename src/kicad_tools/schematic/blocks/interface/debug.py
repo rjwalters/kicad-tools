@@ -114,6 +114,7 @@ class DebugHeader(CircuitBlock):
         resistor_ref_start: int = 1,
         header_symbol: str | None = None,
         resistor_symbol: str = "Device:R",
+        header_footprint: str = "",
     ):
         """
         Create a debug header block.
@@ -130,6 +131,7 @@ class DebugHeader(CircuitBlock):
             resistor_ref_start: Starting reference number for resistors
             header_symbol: KiCad symbol for header (auto-selected if None)
             resistor_symbol: KiCad symbol for resistors
+            header_footprint: Footprint for header (e.g., "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical")
         """
         super().__init__(sch, x, y)
         self.interface = interface.lower()
@@ -148,7 +150,7 @@ class DebugHeader(CircuitBlock):
 
         # Place header
         value = self._get_value_label()
-        self.header = sch.add_symbol(header_symbol, x, y, ref, value)
+        self.header = sch.add_symbol(header_symbol, x, y, ref, value, footprint=header_footprint)
         self.components = {"HEADER": self.header}
 
         # Get signals that need resistors (data lines, not power/ground)
