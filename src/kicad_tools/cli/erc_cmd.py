@@ -20,7 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-from ..erc import ERC_CATEGORIES, ERC_TYPE_DESCRIPTIONS, ERCReport, ERCViolation
+from ..erc import ERC_CATEGORIES, ERC_TYPE_DESCRIPTIONS, ERCReport, ERCViolation, check_cross_sheet_duplicates
 from .runner import find_kicad_cli, run_erc
 
 
@@ -112,6 +112,14 @@ def main(argv: list[str] | None = None) -> int:
         report = run_erc_on_schematic(input_path, args.output, args.keep_report)
         if report is None:
             return 1
+
+        # Run cross-sheet duplicate reference check (supplements KiCad ERC)
+        try:
+            cross_sheet_violations = check_cross_sheet_duplicates(str(input_path))
+            report.violations.extend(cross_sheet_violations)
+        except Exception:
+            # Non-fatal: cross-sheet check is supplemental
+            pass
     elif input_path.suffix in (".json", ".rpt"):
         # Parse existing report
         try:
