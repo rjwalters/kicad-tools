@@ -319,6 +319,7 @@ class ManufacturingAudit:
         quantity: int = 5,
         skip_erc: bool = False,
         no_assembly: bool = False,
+        pcb_override: Path | None = None,
     ):
         """Initialize the audit.
 
@@ -330,6 +331,8 @@ class ManufacturingAudit:
             quantity: Quantity for cost estimate
             skip_erc: Skip ERC check (for PCB-only audits)
             no_assembly: Skip assembly cost calculation
+            pcb_override: Explicit PCB path override (takes precedence over
+                all auto-detection including project.kct)
         """
         self.path = Path(project_or_pcb)
         self.manufacturer = manufacturer
@@ -342,7 +345,14 @@ class ManufacturingAudit:
         # Resolve paths
         if self.path.suffix == ".kicad_pro":
             self.project_path = self.path
-            self.pcb_path = self._resolve_pcb_path()
+            if pcb_override is not None:
+                pcb_override = Path(pcb_override)
+                if not pcb_override.exists():
+                    raise ValueError(f"PCB override file not found: {pcb_override}")
+                logger.info(f"Using PCB override: {pcb_override}")
+                self.pcb_path = pcb_override
+            else:
+                self.pcb_path = self._resolve_pcb_path()
             self.schematic_path = self._resolve_schematic_path()
         elif self.path.suffix == ".kicad_pcb":
             self.project_path = None
@@ -368,8 +378,9 @@ class ManufacturingAudit:
 
         Resolution order:
         1. Check project.kct for artifacts.pcb
-        2. Look for *_routed.kicad_pcb file
-        3. Default to <basename>.kicad_pcb
+        2. When both base and *_routed exist, prefer the most recently modified
+        3. Fall back to *_routed.kicad_pcb if only routed exists
+        4. Default to <basename>.kicad_pcb
         """
         project_dir = self.path.parent
         basename = self.path.stem
@@ -394,10 +405,19 @@ class ManufacturingAudit:
             except Exception as e:
                 logger.debug(f"Failed to load project.kct: {e}")
 
-        # 2. Look for *_routed.kicad_pcb
+        # 2. When both base and routed exist, prefer the most recently modified
+        base_path = project_dir / f"{basename}.kicad_pcb"
         routed_path = project_dir / f"{basename}_routed.kicad_pcb"
-        if routed_path.exists():
-            logger.debug(f"Using routed PCB: {routed_path}")
+
+        if base_path.exists() and routed_path.exists():
+            if base_path.stat().st_mtime >= routed_path.stat().st_mtime:
+                logger.info(f"Using base PCB (newer): {base_path}")
+                return base_path
+            else:
+                logger.info(f"Using routed PCB (newer): {routed_path}")
+                return routed_path
+        elif routed_path.exists():
+            logger.info(f"Using routed PCB: {routed_path}")
             return routed_path
 
         # 3. Default to <basename>.kicad_pcb

@@ -85,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip assembly cost in estimate (overrides project.kct)",
     )
     parser.add_argument(
+        "--pcb",
+        type=Path,
+        default=None,
+        help="Override auto-detected PCB path (takes precedence over project.kct)",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exit with code 2 on warnings",
@@ -121,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             quantity=args.quantity,
             skip_erc=args.skip_erc,
             no_assembly=args.no_assembly,
+            pcb_override=args.pcb,
         )
         result = audit.run()
     except ValueError as e:
