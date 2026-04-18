@@ -241,7 +241,7 @@ class SymbolRegistry:
         self._opl_mapping = {
             # Regulators
             "XC6206P332MR-G": "Regulator_Linear:XC6206PxxxMR",
-            "XC6206-3.3V": "Regulator_Linear:AP2204K-1.5",  # Compatible pinout
+            "XC6206-3.3V": "Regulator_Linear:XC6206PxxxMR",  # SOT-23-3 (3-pin)
             # Passive components
             "470R_FB": "Device:FerriteBead_Small",
             # Discretes
