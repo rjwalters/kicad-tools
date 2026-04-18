@@ -148,6 +148,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to pre-existing ERC report file",
     )
     parser.add_argument(
+        "--bom-source",
+        default="schematic",
+        choices=["schematic", "pcb", "auto"],
+        help=(
+            "Source for BOM data: 'schematic' (default) extracts from .kicad_sch; "
+            "'pcb' extracts from PCB footprints (no schematic needed); "
+            "'auto' uses schematic but falls back to PCB on reference mismatch"
+        ),
+    )
+    parser.add_argument(
         "--include-tht",
         action="store_true",
         help="Include through-hole components in CPL (they are excluded by default for JLCPCB)",
@@ -230,8 +240,9 @@ def run_export(args: argparse.Namespace) -> int:
         include_project_zip=not args.no_project_zip,
         auto_lcsc=auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
+        bom_source=getattr(args, "bom_source", "schematic"),
         preflight=preflight_cfg,
-strict_preflight=getattr(args, "strict_preflight", False),
+        strict_preflight=getattr(args, "strict_preflight", False),
         pnp_config=pnp_config,
     )
 
