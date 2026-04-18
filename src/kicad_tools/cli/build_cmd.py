@@ -100,15 +100,14 @@ def _find_spec_file(directory: Path) -> Path | None:
     return None
 
 
-def _find_generator_script(directory: Path, script_type: str) -> Path | None:
-    """Find a generator script in the project directory.
+def _generator_candidates(script_type: str) -> list[str]:
+    """Return the list of candidate filenames for a generator script type.
 
     Args:
-        directory: Project directory to search
         script_type: Type of script ('schematic', 'pcb', 'design')
 
     Returns:
-        Path to the generator script if found
+        List of candidate filenames in search order
     """
     candidates = [
         f"generate_{script_type}.py",
@@ -121,12 +120,46 @@ def _find_generator_script(directory: Path, script_type: str) -> Path | None:
         candidates.append("generate_design.py")
         candidates.append("design.py")
 
-    for candidate in candidates:
+    return candidates
+
+
+def _find_generator_script(directory: Path, script_type: str) -> Path | None:
+    """Find a generator script in the project directory.
+
+    Args:
+        directory: Project directory to search
+        script_type: Type of script ('schematic', 'pcb', 'design')
+
+    Returns:
+        Path to the generator script if found
+    """
+    for candidate in _generator_candidates(script_type):
         script_path = directory / candidate
         if script_path.exists():
             return script_path
 
     return None
+
+
+def _format_no_generator_message(script_type: str, directory: Path) -> str:
+    """Format an informative error message when no generator script is found.
+
+    Args:
+        script_type: Type of script ('schematic' or 'pcb')
+        directory: The project directory that was searched
+
+    Returns:
+        Multi-line error message with candidate list and guidance
+    """
+    candidates = _generator_candidates(script_type)
+    candidate_list = "\n".join(f"  - {c}" for c in candidates)
+    return (
+        f"No {script_type} generator found in {directory}\n"
+        f"Searched for:\n"
+        f"{candidate_list}\n"
+        f"Hint: create one of these files, or use a combined generator "
+        f"(see boards/00-simple-led/generate_design.py for an example)"
+    )
 
 
 def _get_expected_pcb_artifact(ctx: BuildContext) -> str | None:
@@ -252,7 +285,7 @@ def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
         return BuildResult(
             step="schematic",
             success=False,
-            message="No schematic generator found (generate_schematic.py)",
+            message=_format_no_generator_message("schematic", ctx.project_dir),
         )
 
     if ctx.dry_run:
@@ -297,7 +330,7 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
         return BuildResult(
             step="pcb",
             success=False,
-            message="No PCB generator found (generate_pcb.py)",
+            message=_format_no_generator_message("pcb", ctx.project_dir),
         )
 
     # Skip if this script was already executed (e.g., generate_design.py ran in schematic step)
