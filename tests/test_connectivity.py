@@ -551,6 +551,326 @@ class TestPositionTolerance:
         assert len(net1_errors) > 0, "NET1 should be disconnected with 0.02mm displacement"
 
 
+class TestZoneConnectivity:
+    """Tests for zone boundary polygon containment in connectivity validation.
+
+    Verifies that pads inside zone boundary polygons on matching copper
+    layers are detected as electrically connected through the zone pour.
+    """
+
+    # PCB with two pads on the same net connected only by a zone boundary
+    # polygon (no traces).  The zone polygon encloses both pads.
+    ZONE_CONNECTED_SAME_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone-gnd")
+    (fill yes)
+    (polygon
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
+  )
+)
+"""
+
+    # PCB with two pads: one on F.Cu inside a zone on F.Cu, and one on B.Cu
+    # outside the zone.  Without a via, they should NOT be connected.
+    ZONE_DIFFERENT_LAYER_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "B.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "B.SilkS") (uuid "ref-r2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "B.Cu") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone-gnd")
+    (fill yes)
+    (polygon
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
+  )
+)
+"""
+
+    # PCB with pad outside zone boundary -- should not be zone-connected.
+    ZONE_PAD_OUTSIDE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 200 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone-gnd")
+    (fill yes)
+    (polygon
+      (pts
+        (xy 95 95)
+        (xy 105 95)
+        (xy 105 105)
+        (xy 95 105)
+      )
+    )
+  )
+)
+"""
+
+    # PCB with through-hole pads (*.Cu) matching a zone on F.Cu
+    ZONE_THRU_HOLE_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Connector:Conn_01x02"
+    (layer "F.Cu")
+    (uuid "fp-j1")
+    (at 100 100)
+    (property "Reference" "J1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-j1"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "GND"))
+  )
+  (footprint "Connector:Conn_01x02"
+    (layer "F.Cu")
+    (uuid "fp-j2")
+    (at 110 100)
+    (property "Reference" "J2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-j2"))
+    (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone-gnd")
+    (fill yes)
+    (polygon
+      (pts
+        (xy 95 95)
+        (xy 120 95)
+        (xy 120 105)
+        (xy 95 105)
+      )
+    )
+  )
+)
+"""
+
+    # PCB with zone but empty polygon data
+    ZONE_EMPTY_POLYGON_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r1")
+    (at 100 100)
+    (property "Reference" "R1" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r1"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402"
+    (layer "F.Cu")
+    (uuid "fp-r2")
+    (at 110 100)
+    (property "Reference" "R2" (at 0 0 0) (layer "F.SilkS") (uuid "ref-r2"))
+    (pad "2" smd rect (at 0.5 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "GND"))
+  )
+  (zone (net 1) (net_name "GND") (layer "F.Cu")
+    (uuid "zone-gnd")
+    (fill yes)
+  )
+)
+"""
+
+    def test_pads_inside_same_net_zone_same_layer_connected(self, tmp_path: Path):
+        """Pads geometrically inside a same-net zone on the same layer
+        should be detected as connected (high confidence)."""
+        pcb_file = tmp_path / "zone_same_layer.kicad_pcb"
+        pcb_file.write_text(self.ZONE_CONNECTED_SAME_LAYER_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # Both pads are inside the GND zone on F.Cu -- should be connected
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) == 0, (
+            f"GND should be connected via zone containment, got: {gnd_errors}"
+        )
+        assert result.zone_connected_nets >= 1
+
+    def test_pads_inside_zone_different_layer_not_connected(self, tmp_path: Path):
+        """A pad on B.Cu should NOT be connected to a zone on F.Cu
+        without a via bridging the layers."""
+        pcb_file = tmp_path / "zone_diff_layer.kicad_pcb"
+        pcb_file.write_text(self.ZONE_DIFFERENT_LAYER_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # R2.2 is on B.Cu, zone is on F.Cu only -- should be disconnected
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) > 0, "GND should be disconnected (layer mismatch)"
+
+    def test_pad_outside_zone_boundary_not_connected(self, tmp_path: Path):
+        """A pad outside the zone boundary polygon should NOT be
+        zone-connected even if on the same net and layer."""
+        pcb_file = tmp_path / "zone_outside.kicad_pcb"
+        pcb_file.write_text(self.ZONE_PAD_OUTSIDE_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # R2.2 is at (200.5, 100) which is far outside the zone at (95-105, 95-105)
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) > 0, "GND should be disconnected (pad outside zone)"
+
+    def test_thru_hole_pads_match_zone_via_wildcard(self, tmp_path: Path):
+        """Through-hole pads with *.Cu layers should match zones on any
+        copper layer."""
+        pcb_file = tmp_path / "zone_thru_hole.kicad_pcb"
+        pcb_file.write_text(self.ZONE_THRU_HOLE_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # Both through-hole pads are inside the zone and *.Cu matches F.Cu
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) == 0, (
+            f"GND should be connected (thru-hole *.Cu matches F.Cu zone): {gnd_errors}"
+        )
+
+    def test_zone_with_empty_polygon_no_crash(self, tmp_path: Path):
+        """A zone with no polygon data should not cause a crash and
+        should not claim connectivity."""
+        pcb_file = tmp_path / "zone_empty.kicad_pcb"
+        pcb_file.write_text(self.ZONE_EMPTY_POLYGON_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        # With no polygon data, pads cannot be verified as zone-connected
+        gnd_errors = [i for i in result.errors if i.net_name == "GND"]
+        assert len(gnd_errors) > 0, "GND should be disconnected (no zone polygon)"
+
+    def test_zone_connected_nets_count_in_result(self, tmp_path: Path):
+        """ConnectivityResult.zone_connected_nets should count nets
+        that were connected through zone containment geometry."""
+        pcb_file = tmp_path / "zone_count.kicad_pcb"
+        pcb_file.write_text(self.ZONE_CONNECTED_SAME_LAYER_PCB)
+
+        validator = ConnectivityValidator(pcb_file)
+        result = validator.validate()
+
+        assert result.zone_connected_nets > 0
+        assert "zone_connected_nets" in result.to_dict()
+        assert result.to_dict()["zone_connected_nets"] > 0
+
+    def test_point_in_polygon_basic(self):
+        """Test the point_in_polygon static method directly."""
+        # Square from (0,0) to (10,10)
+        polygon = [(0, 0), (10, 0), (10, 10), (0, 10)]
+
+        assert ConnectivityValidator._point_in_polygon((5, 5), polygon) is True
+        assert ConnectivityValidator._point_in_polygon((15, 5), polygon) is False
+        assert ConnectivityValidator._point_in_polygon((-1, 5), polygon) is False
+
+    def test_pad_layer_matches_zone_exact(self):
+        """Test exact layer matching."""
+        assert ConnectivityValidator._pad_layer_matches_zone(["F.Cu"], "F.Cu") is True
+        assert ConnectivityValidator._pad_layer_matches_zone(["B.Cu"], "F.Cu") is False
+
+    def test_pad_layer_matches_zone_wildcard(self):
+        """Test wildcard *.Cu matching."""
+        assert ConnectivityValidator._pad_layer_matches_zone(["*.Cu"], "F.Cu") is True
+        assert ConnectivityValidator._pad_layer_matches_zone(["*.Cu"], "B.Cu") is True
+        assert ConnectivityValidator._pad_layer_matches_zone(["*.Cu"], "In1.Cu") is True
+
+
 class TestConnectivityCLI:
     """Tests for connectivity validation CLI."""
 

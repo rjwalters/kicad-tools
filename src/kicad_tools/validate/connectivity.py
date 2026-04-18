@@ -100,6 +100,7 @@ class ConnectivityResult:
     issues: list[ConnectivityIssue] = field(default_factory=list)
     total_nets: int = 0
     connected_nets: int = 0
+    zone_connected_nets: int = 0
 
     @property
     def has_issues(self) -> bool:
@@ -173,6 +174,7 @@ class ConnectivityResult:
             "is_fully_routed": self.is_fully_routed,
             "total_nets": self.total_nets,
             "connected_nets": self.connected_nets,
+            "zone_connected_nets": self.zone_connected_nets,
             "error_count": self.error_count,
             "warning_count": self.warning_count,
             "unconnected_pads": self.unconnected_pad_count,
@@ -186,6 +188,10 @@ class ConnectivityResult:
             f"Net Connectivity {status}: {self.error_count} errors, {self.warning_count} warnings"
         ]
         parts.append(f"  Nets: {self.connected_nets}/{self.total_nets} fully connected")
+        if self.zone_connected_nets > 0:
+            parts.append(
+                f"  Zone-connected nets: {self.zone_connected_nets} (verified by geometry)"
+            )
 
         if self.unrouted:
             parts.append(f"  Unrouted nets: {len(self.unrouted)}")
@@ -255,6 +261,7 @@ class ConnectivityValidator:
 
         result.total_nets = len(nets)
         connected_count = 0
+        zone_connected_count = 0
 
         # Determine whether the board has footprints.  If it does but a
         # named net has zero pads, the net assignments may have been
@@ -277,6 +284,9 @@ class ConnectivityValidator:
                 connected_count += 1
                 continue
 
+            # Reset per-net zone tracking
+            self._last_zone_connected_pads: set[str] = set()
+
             # Build connectivity graph from copper (segments, vias, zones)
             graph = self._build_connectivity_graph(net_number)
 
@@ -285,6 +295,9 @@ class ConnectivityValidator:
 
             if len(islands) <= 1:
                 connected_count += 1
+                # Track whether this net was connected via zone geometry
+                if self._last_zone_connected_pads:
+                    zone_connected_count += 1
                 continue
 
             # Create issue for this net
@@ -292,6 +305,7 @@ class ConnectivityValidator:
             result.add(issue)
 
         result.connected_nets = connected_count
+        result.zone_connected_nets = zone_connected_count
         return result
 
     def _get_net_pads(self, net_number: int) -> list[str]:
@@ -321,6 +335,11 @@ class ConnectivityValidator:
         Creates a graph where nodes are points (pad positions, track endpoints,
         via positions) and edges connect points that are electrically connected.
 
+        Zone boundary polygon containment is used to detect pads connected
+        through copper pours: if a pad position falls geometrically inside a
+        zone boundary polygon on a matching copper layer, the pad is treated
+        as electrically connected to every other pad within the same zone.
+
         Args:
             net_number: Net number to analyze
 
@@ -329,8 +348,9 @@ class ConnectivityValidator:
         """
         graph: dict[str, set[str]] = defaultdict(set)
 
-        # Get all pad positions for this net
+        # Get all pad positions and layer info for this net
         pad_positions: dict[str, tuple[float, float]] = {}
+        pad_layers: dict[str, list[str]] = {}
         for fp in self.pcb.footprints:
             if not fp.reference or fp.reference.startswith("#"):
                 continue
@@ -344,6 +364,7 @@ class ConnectivityValidator:
                     # Transform pad position from footprint-local to board coordinates
                     pad_x, pad_y = self._transform_pad_position(pad.position, fp_x, fp_y, rotation)
                     pad_positions[pad_id] = (pad_x, pad_y)
+                    pad_layers[pad_id] = pad.layers
 
         # Get all track segment endpoints for this net
         segments = list(self.pcb.segments_in_net(net_number))
@@ -415,6 +436,47 @@ class ConnectivityValidator:
         # Build full transitive closure through segment chains
         # Track endpoints can form chains connecting distant pads
         graph = self._build_segment_chains(segments, pad_positions, graph)
+
+        # --- Zone boundary polygon containment checks ---
+        # For each zone on this net, check if pads fall inside the zone
+        # boundary polygon on a matching copper layer.  Pads within the
+        # same zone are electrically connected via the copper pour.
+        zone_connected_pads: set[str] = set()
+        for zone in self.pcb.zones:
+            if zone.net_number != net_number:
+                continue
+            if not zone.polygon or len(zone.polygon) < 3:
+                continue
+
+            # Find all pads inside this zone boundary on a matching layer
+            pads_in_zone: list[str] = []
+            for pad_id, pad_pos in pad_positions.items():
+                layers = pad_layers.get(pad_id, [])
+                if not self._pad_layer_matches_zone(layers, zone.layer):
+                    continue
+                if self._point_in_polygon(pad_pos, zone.polygon):
+                    pads_in_zone.append(pad_id)
+                    zone_connected_pads.add(pad_id)
+
+            # Also check vias inside zone boundary -- vias bridge layers,
+            # so pads reachable through a via inside a zone are connected.
+            for via in vias:
+                if hasattr(via, "layers") and zone.layer in via.layers:
+                    if self._point_in_polygon(via.position, zone.polygon):
+                        # Find pads at via position on any layer
+                        via_pads = self._find_pads_at_point(via.position, pad_positions)
+                        pads_in_zone.extend(via_pads)
+                        zone_connected_pads.update(via_pads)
+
+            # Connect all pads in this zone to each other
+            for i, pad in enumerate(pads_in_zone):
+                for other in pads_in_zone[i + 1 :]:
+                    if pad != other:
+                        graph[pad].add(other)
+                        graph[other].add(pad)
+
+        # Store zone-connected pad set for reporting
+        self._last_zone_connected_pads = zone_connected_pads
 
         return graph
 
@@ -549,6 +611,66 @@ class ConnectivityValidator:
         dx = p1[0] - p2[0]
         dy = p1[1] - p2[1]
         return (dx * dx + dy * dy) < (self.POSITION_TOLERANCE * self.POSITION_TOLERANCE)
+
+    @staticmethod
+    def _point_in_polygon(
+        point: tuple[float, float],
+        polygon: list[tuple[float, float]],
+    ) -> bool:
+        """Test if point is inside polygon using ray casting algorithm.
+
+        Args:
+            point: (x, y) coordinates to test
+            polygon: List of (x, y) vertices defining the polygon boundary
+
+        Returns:
+            True if point is inside polygon
+        """
+        n = len(polygon)
+        if n < 3:
+            return False
+
+        x, y = point
+        inside = False
+        j = n - 1
+
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+
+            if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+
+        return inside
+
+    @staticmethod
+    def _pad_layer_matches_zone(
+        pad_layers: list[str],
+        zone_layer: str,
+    ) -> bool:
+        """Check if a pad exists on the same copper layer as a zone.
+
+        Handles wildcard layers like ``*.Cu`` which match any copper layer,
+        allowing through-hole pads to match zones on any copper layer.
+
+        Args:
+            pad_layers: List of layers the pad exists on
+            zone_layer: Layer the zone is on (e.g., ``F.Cu``, ``B.Cu``)
+
+        Returns:
+            True if the pad and zone share a copper layer
+        """
+        for pad_layer in pad_layers:
+            if pad_layer == zone_layer:
+                return True
+            # Wildcard match: "*.Cu" matches any copper layer
+            if pad_layer == "*.Cu" and zone_layer.endswith(".Cu"):
+                return True
+            # General wildcard: "*.Mask" etc.
+            if pad_layer.startswith("*.") and zone_layer.endswith(pad_layer[1:]):
+                return True
+        return False
 
     def _find_islands(
         self,

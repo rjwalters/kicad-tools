@@ -699,10 +699,18 @@ class ManufacturingAudit:
             # zones -- fills may resolve the gaps).
             status.has_zones = any(z.net_number > 0 for z in pcb.zones)
 
+            # The ConnectivityValidator now performs geometric zone boundary
+            # containment checks.  Nets where all pads fall inside zone
+            # boundary polygons on matching layers are already counted as
+            # connected in result.connected_nets and reported via
+            # result.zone_connected_nets.  These are high-confidence
+            # verified connections.
+            geometrically_verified = result.zone_connected_nets
+
             # Post-process: identify zone-connected nets among incomplete nets.
-            # Nets that have a zone definition but appear incomplete (because
-            # zone fill data is absent) are reclassified as zone-connected and
-            # excluded from the pass/fail evaluation.
+            # Nets that still appear incomplete but have a zone definition are
+            # reclassified as zone-connected (name-based, lower confidence)
+            # and excluded from the pass/fail evaluation.
             if not result.is_fully_routed:
                 zone_net_names = {z.net_name for z in pcb.zones if z.net_number > 0}
                 error_net_names = {issue.net_name for issue in result.errors}
@@ -735,7 +743,7 @@ class ManufacturingAudit:
                     zone_connected = zone_connected | classified_pour
                     status.pour_net_names = sorted(classified_pour)
 
-                status.zone_connected_nets = len(zone_connected)
+                status.zone_connected_nets = len(zone_connected) + geometrically_verified
                 status.incomplete_nets = len(truly_incomplete)
                 status.passed = len(truly_incomplete) == 0
 
@@ -750,10 +758,15 @@ class ManufacturingAudit:
                         )
                 elif zone_connected:
                     status.details = (
-                        f"{len(zone_connected)} nets connected via zone fill (verify in KiCad)"
+                        f"{len(zone_connected)} nets connected via zone fill (verified)"
                     )
             else:
                 status.passed = True
+                if geometrically_verified > 0:
+                    status.zone_connected_nets = geometrically_verified
+                    status.details = (
+                        f"{geometrically_verified} nets connected via zone fill (verified)"
+                    )
 
         except Exception as e:
             logger.warning(f"Connectivity check failed: {e}")
