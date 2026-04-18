@@ -526,6 +526,7 @@ class TestPcbStrip:
 
         # Verify the output file has no traces
         from kicad_tools.schema.pcb import PCB
+
         stripped_pcb = PCB.load(output_file)
         assert len(stripped_pcb.segments) == 0
 
@@ -670,3 +671,599 @@ class TestPcbStrip:
         # Check that the stripped file was created with the suffix
         expected_output = minimal_pcb.with_stem(f"{minimal_pcb.stem}-stripped")
         assert expected_output.exists()
+
+
+# PCB with multiple footprints for reannotation testing
+MULTI_FOOTPRINT_PCB = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000001")
+    (at 100 100)
+    (property "Reference" "C1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000101"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000102"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000002")
+    (at 110 100)
+    (property "Reference" "C2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000201"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000202"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Capacitor_SMD:C_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000003")
+    (at 120 100)
+    (property "Reference" "C3" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000301"))
+    (property "Value" "100nF" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000302"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000004")
+    (at 130 100)
+    (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000401"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000402"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000005")
+    (at 140 100)
+    (property "Reference" "R2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15)))
+      (uuid "00000000-0000-0000-0000-000000000501"))
+    (property "Value" "10k" (at 0 1.5 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-000000000502"))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+    (pad "2" smd roundrect (at 0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "+3.3V"))
+  )
+)
+"""
+
+
+# KiCad 7 format PCB with fp_text instead of property
+KICAD7_MULTI_FOOTPRINT_PCB = """(kicad_pcb
+  (version 20230101)
+  (generator "test")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (37 "F.SilkS" user "F.Silkscreen")
+    (44 "Edge.Cuts" user)
+    (49 "F.Fab" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000010")
+    (at 100 100)
+    (fp_text reference "R1" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (fp_text value "10k" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+  (footprint "Resistor_SMD:R_0402_1005Metric"
+    (layer "F.Cu")
+    (uuid "00000000-0000-0000-0000-000000000020")
+    (at 110 100)
+    (fp_text reference "R2" (at 0 -1.5 0) (layer "F.SilkS")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (fp_text value "22k" (at 0 1.5 0) (layer "F.Fab")
+      (effects (font (size 1.0 1.0) (thickness 0.15))))
+    (pad "1" smd roundrect (at -0.51 0) (size 0.54 0.64)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "GND"))
+  )
+)
+"""
+
+
+@pytest.fixture
+def multi_fp_pcb(tmp_path: Path) -> Path:
+    """Create a PCB with multiple footprints for reannotation testing."""
+    pcb_file = tmp_path / "multi.kicad_pcb"
+    pcb_file.write_text(MULTI_FOOTPRINT_PCB)
+    return pcb_file
+
+
+@pytest.fixture
+def kicad7_multi_fp_pcb(tmp_path: Path) -> Path:
+    """Create a KiCad 7 format PCB with multiple footprints."""
+    pcb_file = tmp_path / "kicad7_multi.kicad_pcb"
+    pcb_file.write_text(KICAD7_MULTI_FOOTPRINT_PCB)
+    return pcb_file
+
+
+class TestPcbReannotate:
+    """Tests for pcb reannotate command."""
+
+    def test_simple_rename(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test simple non-conflicting rename (A->B where B does not exist)."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        # Create mapping file
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10", "R1": "R10"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Verify renames applied
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C10" in refs
+        assert "R10" in refs
+        assert "C1" not in refs
+        assert "R1" not in refs
+        # Unchanged refs still present
+        assert "C2" in refs
+        assert "C3" in refs
+        assert "R2" in refs
+
+    def test_collision_chain(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test collision chain: A->B, B->C where B is both source and target."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        # C1->C2, C2->C3, C3->C10 (chain)
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C2", "C2": "C3", "C3": "C10"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Verify: original C1 should now be C2, original C2 should be C3,
+        # original C3 should be C10
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C2" in refs
+        assert "C3" in refs
+        assert "C10" in refs
+        assert "C1" not in refs
+
+    def test_cyclic_rename(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test cyclic rename: A->B, B->A (swap)."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C2", "C2": "C1"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Load and check: both C1 and C2 should still exist (swapped)
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C1" in refs
+        assert "C2" in refs
+
+    def test_three_way_cycle(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test 3-way cyclic rename: A->B, B->C, C->A."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C2", "C2": "C3", "C3": "C1"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        # All three should still exist after the cycle
+        assert "C1" in refs
+        assert "C2" in refs
+        assert "C3" in refs
+
+    def test_dry_run_no_modification(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test --dry-run produces output without modifying the file."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10"}))
+
+        # Read original content
+        original_content = multi_fp_pcb.read_text()
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # File should be unchanged
+        assert multi_fp_pcb.read_text() == original_content
+
+        captured = capsys.readouterr()
+        assert "dry run" in captured.out.lower()
+        assert "C1" in captured.out
+        assert "C10" in captured.out
+
+    def test_dry_run_json_format(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test --dry-run with JSON output format."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10", "C2": "C20"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="json",
+            dry_run=True,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["dry_run"] is True
+        assert len(data["renames"]) > 0
+        assert data["mapping"] == {"C1": "C10", "C2": "C20"}
+
+    def test_json_output_format(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test JSON output format for actual renames."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="json",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["dry_run"] is False
+        assert data["output"] == str(output_file)
+        assert len(data["renames"]) == 1
+
+    def test_missing_source_ref_error(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error when source reference does not exist in PCB."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"NONEXISTENT": "C10"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "NONEXISTENT" in captured.err
+        assert "not found" in captured.err.lower()
+
+    def test_target_collides_with_existing_non_mapped_ref(
+        self, multi_fp_pcb: Path, tmp_path, capsys
+    ):
+        """Test error when target collides with existing ref not in the mapping."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        # C1 -> R1, but R1 exists and is NOT being renamed
+        # Actually R1 is in the PCB. Map C1 to R2 (R2 also exists and is not mapped).
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "R2"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "R2" in captured.err
+        assert "already exists" in captured.err.lower()
+
+    def test_empty_mapping(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test empty mapping file is a no-op."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text("{}")
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+    def test_empty_mapping_json_format(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test empty mapping with JSON output."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text("{}")
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="json",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["status"] == "no-op"
+
+    def test_invalid_json_mapping(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error on invalid JSON mapping file."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text("not json at all")
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "invalid json" in captured.err.lower()
+
+    def test_mapping_file_not_found(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error when mapping file does not exist."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(tmp_path / "nonexistent.json"),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "not found" in captured.err.lower()
+
+    def test_overwrite_input_when_no_output(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test that without -o, the input file is overwritten."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"C1": "C10"}))
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        # Verify input file was modified
+        pcb = PCB.load(multi_fp_pcb)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "C10" in refs
+        assert "C1" not in refs
+
+    def test_kicad7_format_rename(self, kicad7_multi_fp_pcb: Path, tmp_path, capsys):
+        """Test rename with KiCad 7 fp_text format."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.schema.pcb import PCB
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text(json.dumps({"R1": "R10", "R2": "R20"}))
+
+        output_file = tmp_path / "output.kicad_pcb"
+        args = Namespace(
+            pcb=str(kicad7_multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=str(output_file),
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 0
+
+        pcb = PCB.load(output_file)
+        refs = {fp.reference for fp in pcb.footprints}
+        assert "R10" in refs
+        assert "R20" in refs
+        assert "R1" not in refs
+        assert "R2" not in refs
+
+    def test_mapping_not_a_dict(self, multi_fp_pcb: Path, tmp_path, capsys):
+        """Test error when mapping file contains a non-dict JSON value."""
+        from argparse import Namespace
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        map_file = tmp_path / "map.json"
+        map_file.write_text('["C1", "C2"]')
+
+        args = Namespace(
+            pcb=str(multi_fp_pcb),
+            pcb_command="reannotate",
+            map=str(map_file),
+            output=None,
+            format="text",
+            dry_run=False,
+        )
+
+        result = run_pcb_command(args)
+        assert result == 1
+
+        captured = capsys.readouterr()
+        assert "object" in captured.err.lower() or "dict" in captured.err.lower()

@@ -627,6 +627,38 @@ def _add_pcb_parser(subparsers) -> None:
         help="Show what would be removed without modifying files",
     )
 
+    # pcb reannotate
+    pcb_reannotate = pcb_subparsers.add_parser(
+        "reannotate",
+        help="Batch rename reference designators",
+        description="Rename reference designators in a PCB using a JSON mapping file. "
+        "Handles collision chains (e.g., C6->C10 while C10->C15) safely using "
+        "temporary intermediate references.",
+    )
+    pcb_reannotate.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_reannotate.add_argument(
+        "--map",
+        required=True,
+        help='Path to JSON mapping file (e.g., {"C1": "C10", "C10": "C15"})',
+    )
+    pcb_reannotate.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        help="Output file path (default: overwrite input)",
+    )
+    pcb_reannotate.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for results",
+    )
+    pcb_reannotate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview renames without modifying the PCB file",
+    )
+
 
 def _add_lib_parser(subparsers) -> None:
     """Add library subcommand parser with its subcommands."""
