@@ -13,8 +13,29 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .primitives import Pad, Route
+    from .rules import NetClassRouting
 
 from .primitives import Route, Segment
+
+
+def _get_trace_width_for_net(
+    net_name: str,
+    rules,
+    net_class_map: dict[str, NetClassRouting] | None = None,
+) -> float:
+    """Get the trace width for a net based on its net class.
+
+    Args:
+        net_name: Name of the net
+        rules: Design rules with trace_width default
+        net_class_map: Optional mapping of net names to NetClassRouting
+
+    Returns:
+        Trace width in mm
+    """
+    if net_class_map and net_name in net_class_map:
+        return net_class_map[net_name].trace_width
+    return rules.trace_width
 
 
 def create_intra_ic_routes(
@@ -22,6 +43,7 @@ def create_intra_ic_routes(
     pads: list[tuple[str, str]],
     pad_lookup: dict[tuple[str, str], Pad],
     rules,
+    net_class_map: dict[str, NetClassRouting] | None = None,
 ) -> tuple[list[Route], set[int]]:
     """Create direct routes for same-IC pins on the same net.
 
@@ -34,6 +56,7 @@ def create_intra_ic_routes(
         pads: List of (ref, pin) tuples for this net
         pad_lookup: Dictionary mapping (ref, pin) to Pad objects
         rules: Design rules with trace_width
+        net_class_map: Optional net class map for per-net trace widths
 
     Returns:
         Tuple of (routes created, set of pad indices that were connected)
@@ -74,13 +97,15 @@ def create_intra_ic_routes(
                 continue  # Too far apart, let normal router handle it
 
             # Create route with single segment
+            # Issue #1543: Use net-class-aware trace width
+            trace_width = _get_trace_width_for_net(net_name, rules, net_class_map)
             route = Route(net=net, net_name=net_name)
             seg = Segment(
                 x1=pad1.x,
                 y1=pad1.y,
                 x2=pad2.x,
                 y2=pad2.y,
-                width=rules.trace_width,
+                width=trace_width,
                 layer=pad1.layer,  # Use pad layer (typically F.Cu for SMD)
                 net=net,
                 net_name=net_name,

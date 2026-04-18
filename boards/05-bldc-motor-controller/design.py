@@ -1284,9 +1284,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # Configure design rules (from project.kct spec)
     # min_trace: 0.2mm signal, min_space: 0.2mm, min_drill: 0.3mm
     # Grid resolution must be <= clearance/2 for reliable DRC compliance
+    # Issue #1543: Increased trace_width from 0.15mm to 0.2mm for reliable
+    # signal routing on a motor controller board. Power nets get wider traces
+    # (0.5mm+) via the net-class system automatically.
     rules = DesignRules(
         grid_resolution=0.05,
-        trace_width=0.15,
+        trace_width=0.2,
         trace_clearance=0.3,
         via_drill=0.3,
         via_diameter=0.6,
