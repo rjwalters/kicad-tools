@@ -295,6 +295,43 @@ def _normalize_footprint(fp: str) -> str:
     return fp.split(":")[-1] if ":" in fp else fp
 
 
+def _extract_package_size(footprint: str) -> str | None:
+    """Extract the imperial package size code from a footprint name.
+
+    Recognises standard KiCad footprint naming such as
+    ``R_0402_1005Metric``, ``C_0805_2012Metric``, ``L_1206_3216Metric``,
+    as well as bare names like ``0402`` or ``C_0603``.
+
+    Returns the 4-digit imperial size (e.g. ``"0402"``, ``"0805"``) or
+    ``None`` when the footprint does not encode a recognisable passive size
+    (ICs, connectors, test points, etc.).
+
+    Examples:
+        >>> _extract_package_size("R_0402_1005Metric")
+        '0402'
+        >>> _extract_package_size("Resistor_SMD:R_0805_2012Metric")
+        '0805'
+        >>> _extract_package_size("SOT-23-5")
+        >>> _extract_package_size("")
+    """
+    # Work on the library-stripped name
+    name = footprint.split(":")[-1] if ":" in footprint else footprint
+    if not name:
+        return None
+
+    # Preferred: <size>_<metric>Metric  (e.g. 0402_1005Metric)
+    m = re.search(r"(\d{4})_\d{4}Metric", name)
+    if m:
+        return m.group(1)
+
+    # Fallback: isolated 4-digit code preceded by _ or - or start
+    m = re.search(r"(?:^|[_-])(\d{4})(?:[_-]|$)", name)
+    if m:
+        return m.group(1)
+
+    return None
+
+
 class SchematicPCBChecker:
     """Check consistency between schematic and PCB.
 
@@ -550,6 +587,14 @@ class SchematicPCBChecker:
                 pcb_item = pcb_components[pcb_ref]
                 sch_fp = _normalize_footprint(sch_item.footprint)
                 pcb_fp = _normalize_footprint(pcb_item["footprint"])
+
+                # Reject match when both sides have a recognised package
+                # size and they differ (e.g. 0402 vs 0603).
+                sch_size = _extract_package_size(sch_fp)
+                pcb_size = _extract_package_size(pcb_fp)
+                if sch_size and pcb_size and sch_size != pcb_size:
+                    continue
+
                 fp_match = sch_fp == pcb_fp
                 matched_pairs.append((sch_ref, pcb_ref, fp_match))
 
@@ -610,11 +655,18 @@ class SchematicPCBChecker:
                 if pcb_ref in pcb_pad_nets and pcb_pad_nets[pcb_ref]:
                     sch_item = sch_components[sch_ref]
                     pcb_item = pcb_components[pcb_ref]
+
+                    # Reject match when both sides have a recognised package
+                    # size and they differ (e.g. 0402 vs 0603).
+                    sch_fp = _normalize_footprint(sch_item.footprint)
+                    pcb_fp = _normalize_footprint(pcb_item["footprint"])
+                    sch_size = _extract_package_size(sch_fp)
+                    pcb_size = _extract_package_size(pcb_fp)
+                    if sch_size and pcb_size and sch_size != pcb_size:
+                        continue
+
                     value_ok = sch_item.value == pcb_item["value"]
-                    fp_ok = (
-                        _normalize_footprint(sch_item.footprint)
-                        == _normalize_footprint(pcb_item["footprint"])
-                    )
+                    fp_ok = sch_fp == pcb_fp
                     matched_pairs.append((sch_ref, pcb_ref, value_ok, fp_ok))
 
         for sch_ref, pcb_ref, value_ok, fp_ok in matched_pairs:
