@@ -104,7 +104,7 @@ def create_charlieplex_schematic(output_dir: Path) -> Path:
         y=mcu_y,
         ref="U1",
         value="MCU",
-        footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+        footprint="Package_DIP:DIP-8_W7.62mm",
     )
     print(f"   U1 (MCU): placed at ({mcu.x}, {mcu.y})")
 

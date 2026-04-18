@@ -59,8 +59,8 @@ DEFAULT_PROFILES: dict[str, ProfileRules] = {
             FootprintRule(float("inf"), "Capacitor_SMD:C_1206_3216Metric"),  # >10µF
         ],
         resistor_rules=[
-            FootprintRule(1.01e4, "Resistor_SMD:R_0402_1005Metric"),  # ≤10k
-            FootprintRule(float("inf"), "Resistor_SMD:R_0603_1608Metric"),  # >10k
+            FootprintRule(1.01e4, "Resistor_SMD:R_0805_2012Metric"),  # ≤10k
+            FootprintRule(float("inf"), "Resistor_SMD:R_0805_2012Metric"),  # >10k
         ],
         inductor_rules=[
             FootprintRule(1.01e-6, "Inductor_SMD:L_0603_1608Metric"),  # ≤1µH

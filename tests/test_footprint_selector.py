@@ -169,13 +169,13 @@ class TestFootprintSelectorResistors:
         """Test resistor footprint selection with default profile."""
         selector = FootprintSelector(profile="default")
 
-        # ≤10k -> 0402
-        assert selector.select_resistor_footprint("10k") == "Resistor_SMD:R_0402_1005Metric"
-        assert selector.select_resistor_footprint("1k") == "Resistor_SMD:R_0402_1005Metric"
+        # ≤10k -> 0805
+        assert selector.select_resistor_footprint("10k") == "Resistor_SMD:R_0805_2012Metric"
+        assert selector.select_resistor_footprint("1k") == "Resistor_SMD:R_0805_2012Metric"
 
-        # >10k -> 0603
-        assert selector.select_resistor_footprint("100k") == "Resistor_SMD:R_0603_1608Metric"
-        assert selector.select_resistor_footprint("1M") == "Resistor_SMD:R_0603_1608Metric"
+        # >10k -> 0805
+        assert selector.select_resistor_footprint("100k") == "Resistor_SMD:R_0805_2012Metric"
+        assert selector.select_resistor_footprint("1M") == "Resistor_SMD:R_0805_2012Metric"
 
     def test_machine_profile_resistor_selection(self):
         """Test resistor footprint selection with machine profile."""
@@ -222,10 +222,10 @@ class TestFootprintSelectorAutoDetection:
         selector = FootprintSelector(profile="default")
 
         fp = selector.select_footprint("Device:R", "10k")
-        assert fp == "Resistor_SMD:R_0402_1005Metric"
+        assert fp == "Resistor_SMD:R_0805_2012Metric"
 
         fp = selector.select_footprint("Device:R_Small", "100k")
-        assert fp == "Resistor_SMD:R_0603_1608Metric"
+        assert fp == "Resistor_SMD:R_0805_2012Metric"
 
     def test_select_footprint_inductor(self):
         """Test auto-detection of inductor from lib_id."""
@@ -319,4 +319,4 @@ class TestFootprintSelectorBoundaryValues:
         selector = FootprintSelector(profile="default")
 
         # Exactly 10k should be ≤10k
-        assert selector.select_resistor_footprint("10k") == "Resistor_SMD:R_0402_1005Metric"
+        assert selector.select_resistor_footprint("10k") == "Resistor_SMD:R_0805_2012Metric"
