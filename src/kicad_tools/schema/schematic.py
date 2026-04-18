@@ -6,6 +6,7 @@ Provides a high-level interface to KiCad schematic files.
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +16,8 @@ from kicad_tools.sexp import SExp
 
 from ..core.sexp_file import load_schematic, save_schematic
 from .label import GlobalLabel, HierarchicalLabel, Label
-from .symbol import SymbolInstance
+from .library import LibrarySymbol
+from .symbol import SymbolInstance, SymbolPin, SymbolProperty
 from .wire import Junction, Wire
 
 if TYPE_CHECKING:
@@ -287,6 +289,328 @@ class Schematic:
                 if sym_name == lib_id:
                     return sym
         return None
+
+    # Editing API
+
+    def _find_insertion_index(self) -> int:
+        """Find the S-expression index where new elements should be inserted.
+
+        Elements are inserted before ``sheet_instances`` and
+        ``symbol_instances`` sections at the end of the file.  If neither
+        exists, elements are appended at the very end.
+        """
+        sentinel_tags = {"sheet_instances", "symbol_instances"}
+        for i, child in enumerate(self._sexp.children):
+            if child.name in sentinel_tags:
+                return i
+        return len(self._sexp.children)
+
+    def add_symbol(
+        self,
+        lib_id: str,
+        reference: str,
+        value: str,
+        footprint: str,
+        position: tuple[float, float],
+        rotation: float = 0,
+        mirror: str = "",
+        unit: int = 1,
+        pin_numbers: list[str] | None = None,
+        datasheet: str = "",
+    ) -> SymbolInstance:
+        """Add a new component symbol to the schematic.
+
+        The symbol's library definition must already exist in the
+        schematic's ``lib_symbols`` section.  Use
+        :meth:`embed_lib_symbol` to add it first if needed.
+
+        Args:
+            lib_id: Library identifier (e.g. ``"Device:R"``).
+            reference: Reference designator (e.g. ``"R1"``).
+            value: Component value (e.g. ``"10k"``).
+            footprint: Footprint name (e.g. ``"Resistor_SMD:R_0402_1005Metric"``).
+            position: ``(x, y)`` placement in schematic coordinates.
+            rotation: Rotation in degrees (default 0).
+            mirror: Mirror mode (``""``, ``"x"``, or ``"y"``).
+            unit: Unit number for multi-unit symbols (default 1).
+            pin_numbers: Optional list of pin numbers.  When *None*, pins
+                are auto-detected from the embedded ``lib_symbols`` entry.
+            datasheet: Optional datasheet URL.
+
+        Returns:
+            The created :class:`SymbolInstance`.
+
+        Raises:
+            ValueError: If ``lib_id`` is not found in ``lib_symbols`` and
+                *pin_numbers* was not supplied.
+        """
+        sym_uuid = str(uuid_mod.uuid4())
+
+        # Build properties
+        props: dict[str, SymbolProperty] = {
+            "Reference": SymbolProperty(
+                name="Reference",
+                value=reference,
+                position=position,
+                rotation=0,
+                visible=True,
+            ),
+            "Value": SymbolProperty(
+                name="Value",
+                value=value,
+                position=(position[0], position[1] + 2.54),
+                rotation=0,
+                visible=True,
+            ),
+            "Footprint": SymbolProperty(
+                name="Footprint",
+                value=footprint,
+                position=position,
+                rotation=0,
+                visible=False,
+            ),
+            "Datasheet": SymbolProperty(
+                name="Datasheet",
+                value=datasheet,
+                position=position,
+                rotation=0,
+                visible=False,
+            ),
+        }
+
+        # Determine pin numbers from lib_symbols when not explicitly given
+        if pin_numbers is None:
+            lib_sym_sexp = self.get_lib_symbol(lib_id)
+            if lib_sym_sexp is not None:
+                lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+                pin_numbers = [p.number for p in lib_sym.pins]
+            else:
+                raise ValueError(
+                    f"lib_id '{lib_id}' not found in schematic lib_symbols. "
+                    "Use embed_lib_symbol() first, or supply pin_numbers explicitly."
+                )
+
+        pins = [SymbolPin(number=num, uuid=str(uuid_mod.uuid4())) for num in pin_numbers]
+
+        instance = SymbolInstance(
+            lib_id=lib_id,
+            uuid=sym_uuid,
+            position=position,
+            rotation=rotation,
+            mirror=mirror,
+            unit=unit,
+            in_bom=True,
+            on_board=True,
+            dnp=False,
+            properties=props,
+            pins=pins,
+        )
+
+        # Insert into S-expression tree before sentinel sections
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, instance.to_sexp())
+        self.invalidate_cache()
+        return instance
+
+    def add_power(
+        self,
+        name: str,
+        position: tuple[float, float],
+        rotation: float = 0,
+    ) -> SymbolInstance:
+        """Add a power symbol (e.g. GND, +3V3).
+
+        Power symbols have ``in_bom=False`` and ``on_board=False``.
+        The library entry must already exist in ``lib_symbols``.
+
+        Args:
+            name: Power symbol name (e.g. ``"GND"``, ``"+3V3"``).
+            position: ``(x, y)`` placement.
+            rotation: Rotation in degrees (default 0).
+
+        Returns:
+            The created :class:`SymbolInstance`.
+        """
+        lib_id = f"power:{name}"
+        sym_uuid = str(uuid_mod.uuid4())
+
+        # Detect pins from lib_symbols
+        pin_numbers: list[str] = []
+        lib_sym_sexp = self.get_lib_symbol(lib_id)
+        if lib_sym_sexp is not None:
+            lib_sym = LibrarySymbol.from_sexp(lib_sym_sexp)
+            pin_numbers = [p.number for p in lib_sym.pins]
+        else:
+            # Power symbols typically have a single pin "1"
+            pin_numbers = ["1"]
+
+        props: dict[str, SymbolProperty] = {
+            "Reference": SymbolProperty(
+                name="Reference",
+                value=f"#{name}",
+                position=position,
+                rotation=0,
+                visible=False,
+            ),
+            "Value": SymbolProperty(
+                name="Value",
+                value=name,
+                position=(position[0], position[1] + 2.54),
+                rotation=0,
+                visible=True,
+            ),
+            "Footprint": SymbolProperty(
+                name="Footprint",
+                value="",
+                position=position,
+                rotation=0,
+                visible=False,
+            ),
+            "Datasheet": SymbolProperty(
+                name="Datasheet",
+                value="",
+                position=position,
+                rotation=0,
+                visible=False,
+            ),
+        }
+
+        pins = [SymbolPin(number=num, uuid=str(uuid_mod.uuid4())) for num in pin_numbers]
+
+        instance = SymbolInstance(
+            lib_id=lib_id,
+            uuid=sym_uuid,
+            position=position,
+            rotation=rotation,
+            mirror="",
+            unit=1,
+            in_bom=False,
+            on_board=False,
+            dnp=False,
+            properties=props,
+            pins=pins,
+        )
+
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, instance.to_sexp())
+        self.invalidate_cache()
+        return instance
+
+    def add_wire(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> Wire:
+        """Add a wire segment to the schematic.
+
+        Args:
+            start: ``(x, y)`` start point.
+            end: ``(x, y)`` end point.
+
+        Returns:
+            The created :class:`Wire`.
+        """
+        wire = Wire(
+            start=start,
+            end=end,
+            uuid=str(uuid_mod.uuid4()),
+            stroke_width=0,
+            stroke_type="default",
+        )
+        idx = self._find_insertion_index()
+        self._sexp.insert(idx, wire.to_sexp())
+        self.invalidate_cache()
+        return wire
+
+    def embed_lib_symbol(self, lib_sym: LibrarySymbol) -> None:
+        """Insert a library symbol definition into ``lib_symbols``.
+
+        If a definition with the same name already exists, this is a
+        no-op.
+
+        Args:
+            lib_sym: The :class:`LibrarySymbol` to embed.
+        """
+        lib_syms = self.lib_symbols
+        if lib_syms is None:
+            # Create the lib_symbols section
+            lib_syms = SExp.list("lib_symbols")
+            # Insert it early (after uuid/paper, before symbols)
+            # Find a good insertion point
+            insert_idx = 0
+            for i, child in enumerate(self._sexp.children):
+                if child.name in (
+                    "uuid",
+                    "paper",
+                    "title_block",
+                    "generator",
+                    "generator_version",
+                    "version",
+                ):
+                    insert_idx = i + 1
+            self._sexp.insert(insert_idx, lib_syms)
+
+        # Check if already present
+        for sym in lib_syms.find_all("symbol"):
+            sym_name = sym.get_string(0)
+            if sym_name == lib_sym.name:
+                return  # Already embedded
+
+        lib_syms.append(lib_sym.to_sexp_node())
+
+    @staticmethod
+    def snap_to_grid(
+        value: float,
+        grid: float = 1.27,
+    ) -> float:
+        """Round a coordinate value to the nearest grid point.
+
+        Args:
+            value: Coordinate value in mm.
+            grid: Grid spacing in mm (default 1.27 = 50mil).
+
+        Returns:
+            The snapped value.
+        """
+        return round(value / grid) * grid
+
+    def snap_all_to_grid(self, grid: float = 1.27) -> None:
+        """Snap all symbol and wire positions to the nearest grid point.
+
+        This modifies both the Python dataclass fields *and* the
+        underlying S-expression tree, then invalidates the cache.
+
+        Args:
+            grid: Grid spacing in mm (default 1.27 = 50mil).
+        """
+        snap = self.snap_to_grid
+
+        # Snap symbols
+        for sym_sexp in self._sexp.find_children("symbol"):
+            if at := sym_sexp.find("at"):
+                x = at.get_float(0) or 0
+                y = at.get_float(1) or 0
+                at.set_value(0, snap(x, grid))
+                at.set_value(1, snap(y, grid))
+
+        # Snap wires
+        for wire_sexp in self._sexp.find_all("wire"):
+            if pts := wire_sexp.find("pts"):
+                for xy in pts.find_all("xy"):
+                    x = xy.get_float(0) or 0
+                    y = xy.get_float(1) or 0
+                    xy.set_value(0, snap(x, grid))
+                    xy.set_value(1, snap(y, grid))
+
+        # Snap junctions
+        for junc_sexp in self._sexp.find_all("junction"):
+            if at := junc_sexp.find("at"):
+                x = at.get_float(0) or 0
+                y = at.get_float(1) or 0
+                at.set_value(0, snap(x, grid))
+                at.set_value(1, snap(y, grid))
+
+        self.invalidate_cache()
 
     # Modification helpers
 

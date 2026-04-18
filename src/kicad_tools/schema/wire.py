@@ -6,6 +6,7 @@ Represents electrical connections in a schematic.
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from dataclasses import dataclass
 
 from kicad_tools.sexp import SExp
@@ -24,6 +25,30 @@ class Wire:
     uuid: str = ""
     stroke_width: float = 0
     stroke_type: str = "default"
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format::
+
+            (wire
+              (pts (xy X1 Y1) (xy X2 Y2))
+              (stroke (width 0) (type default))
+              (uuid "...")
+            )
+        """
+        wire_uuid = self.uuid or str(uuid_mod.uuid4())
+        pts = SExp.list(
+            "pts",
+            SExp.list("xy", self.start[0], self.start[1]),
+            SExp.list("xy", self.end[0], self.end[1]),
+        )
+        stroke = SExp.list(
+            "stroke",
+            SExp.list("width", self.stroke_width),
+            SExp.list("type", self.stroke_type),
+        )
+        return SExp.list("wire", pts, stroke, SExp.list("uuid", wire_uuid))
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Wire:
@@ -101,6 +126,22 @@ class Junction:
     position: tuple[float, float]
     uuid: str = ""
     diameter: float = 0
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format::
+
+            (junction (at X Y) (diameter D) (color 0 0 0 0) (uuid "..."))
+        """
+        junc_uuid = self.uuid or str(uuid_mod.uuid4())
+        return SExp.list(
+            "junction",
+            SExp.list("at", self.position[0], self.position[1]),
+            SExp.list("diameter", self.diameter),
+            SExp.list("color", 0, 0, 0, 0),
+            SExp.list("uuid", junc_uuid),
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> Junction:
