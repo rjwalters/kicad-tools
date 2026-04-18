@@ -6,6 +6,7 @@ Represents a component instance placed in a schematic.
 
 from __future__ import annotations
 
+import uuid as uuid_mod
 from dataclasses import dataclass, field
 
 from kicad_tools.sexp import SExp
@@ -18,6 +19,14 @@ class SymbolPin:
     number: str
     uuid: str
     name: str | None = None
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format: ``(pin "1" (uuid "..."))``
+        """
+        pin_uuid = self.uuid or str(uuid_mod.uuid4())
+        return SExp.list("pin", self.number, SExp.list("uuid", pin_uuid))
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> SymbolPin:
@@ -38,6 +47,28 @@ class SymbolProperty:
     position: tuple[float, float] = (0, 0)
     rotation: float = 0
     visible: bool = True
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression.
+
+        Format::
+
+            (property "Reference" "R1" (at X Y 0)
+              (effects (font (size 1.27 1.27))))
+
+        Hidden properties include ``(hide yes)`` in the effects block.
+        """
+        effects_children: list[SExp] = [SExp.list("font", SExp.list("size", 1.27, 1.27))]
+        if not self.visible:
+            effects_children.append(SExp.list("hide", "yes"))
+
+        return SExp.list(
+            "property",
+            self.name,
+            self.value,
+            SExp.list("at", self.position[0], self.position[1], self.rotation),
+            SExp(name="effects", children=effects_children),
+        )
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> SymbolProperty:
@@ -108,6 +139,51 @@ class SymbolInstance:
         if "Datasheet" in self.properties:
             return self.properties["Datasheet"].value
         return ""
+
+    def to_sexp(self) -> SExp:
+        """Convert to S-expression for insertion into a schematic.
+
+        Produces the standard KiCad 8 symbol instance format::
+
+            (symbol
+              (lib_id "Device:R")
+              (at X Y ROT)
+              (mirror x)          ; only if mirror is set
+              (unit 1)
+              (in_bom yes)
+              (on_board yes)
+              (dnp no)
+              (uuid "...")
+              (property "Reference" "R1" ...)
+              (property "Value" "10k" ...)
+              (pin "1" (uuid "..."))
+              (pin "2" (uuid "..."))
+              (instances ...)
+            )
+        """
+        sym = SExp.list("symbol")
+        sym.append(SExp.list("lib_id", self.lib_id))
+        if self.rotation != 0:
+            sym.append(SExp.list("at", self.position[0], self.position[1], self.rotation))
+        else:
+            sym.append(SExp.list("at", self.position[0], self.position[1], 0))
+        if self.mirror:
+            sym.append(SExp.list("mirror", self.mirror))
+        sym.append(SExp.list("unit", self.unit))
+        sym.append(SExp.list("in_bom", "yes" if self.in_bom else "no"))
+        sym.append(SExp.list("on_board", "yes" if self.on_board else "no"))
+        sym.append(SExp.list("dnp", "yes" if self.dnp else "no"))
+        sym.append(SExp.list("uuid", self.uuid))
+
+        # Properties
+        for prop in self.properties.values():
+            sym.append(prop.to_sexp())
+
+        # Pins
+        for pin in self.pins:
+            sym.append(pin.to_sexp())
+
+        return sym
 
     @classmethod
     def from_sexp(cls, sexp: SExp) -> SymbolInstance:
