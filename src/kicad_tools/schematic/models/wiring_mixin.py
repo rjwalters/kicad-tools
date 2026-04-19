@@ -115,7 +115,14 @@ class SchematicWiringMixin:
                 return  # Only warn once per connection
 
     def add_rail(
-        self, y: float, x_start: float, x_end: float, net_label: str = None, snap: bool = True
+        self,
+        y: float,
+        x_start: float,
+        x_end: float,
+        net_label: str = None,
+        start_power: str = None,
+        end_power: str = None,
+        snap: bool = True,
     ) -> Wire:
         """Add a horizontal power/ground rail as a single wire.
 
@@ -139,11 +146,29 @@ class SchematicWiringMixin:
             sch.add_segmented_rail(y=30, x_points=[25, 50, 100, 150, 175])
             ```
 
+        Power symbols can be placed at rail endpoints to prevent dangling wire
+        validation errors. The symbol connects electrically at the wire endpoint,
+        capping the rail::
+
+            # 3.3V rail with power symbols at both ends
+            sch.add_rail(y=30, x_start=100, x_end=500,
+                         start_power="power:+3V3", end_power="power:+3V3")
+
+            # GND rail with power symbol only at the right end
+            sch.add_rail(y=280, x_start=25, x_end=600,
+                         end_power="power:GND")
+
         Args:
             y: Y coordinate of the rail (snapped to grid)
             x_start: Starting X coordinate (snapped to grid)
             x_end: Ending X coordinate (snapped to grid)
             net_label: Optional net label to add at the start
+            start_power: Optional power symbol lib_id to place at x_start
+                        (e.g., "power:+3V3", "power:GND"). Placed 10 units
+                        above the rail for supply symbols, 10 units below
+                        for ground symbols.
+            end_power: Optional power symbol lib_id to place at x_end.
+                      Same placement rules as start_power.
             snap: Whether to apply grid snapping (default: True)
 
         Returns:
@@ -165,6 +190,18 @@ class SchematicWiringMixin:
         if net_label:
             # Use the actual snapped wire coordinates for the label
             self.add_label(net_label, wire.x1, wire.y1, rotation=0, snap=False)
+
+        # Place power symbols at endpoints to cap the rail
+        for power_lib, px in [
+            (start_power, actual_x_start),
+            (end_power, actual_x_end),
+        ]:
+            if power_lib:
+                # Ground symbols go below the rail; supply symbols go above
+                is_ground = "gnd" in power_lib.lower()
+                py = wire.y1 + (10 if is_ground else -10)
+                self.add_power(power_lib, x=px, y=py, rotation=0, snap=False)
+
         return wire
 
     def add_segmented_rail(
