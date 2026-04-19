@@ -1,15 +1,14 @@
 """Tests for the build pipeline zones step and auto_create_zones_for_pour_nets."""
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
+from rich.console import Console
 
 from kicad_tools.cli.build_cmd import BuildContext, BuildStep, _run_step_zones
 from kicad_tools.router.net_class import NetClass
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
-
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -67,6 +66,32 @@ MINIMAL_PCB_NO_POWER = """\
 )
 """
 
+MINIMAL_PCB_AGND = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general
+    (thickness 1.6)
+  )
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "AGND")
+  (net 2 "+3.3V")
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+)
+"""
+
 MINIMAL_PCB_GND_ONLY = """\
 (kicad_pcb
   (version 20240108)
@@ -107,6 +132,14 @@ def pcb_no_power(tmp_path: Path) -> Path:
     """PCB with only signal nets (no power/ground)."""
     p = tmp_path / "board.kicad_pcb"
     p.write_text(MINIMAL_PCB_NO_POWER)
+    return p
+
+
+@pytest.fixture
+def pcb_agnd(tmp_path: Path) -> Path:
+    """PCB with AGND (non-standard ground net name) and +3.3V."""
+    p = tmp_path / "board.kicad_pcb"
+    p.write_text(MINIMAL_PCB_AGND)
     return p
 
 
@@ -197,6 +230,27 @@ class TestAutoCreateZonesForPourNets:
         assert len(pcb.zones) == 1
         assert pcb.zones[0].net_name == "GND"
 
+    def test_non_gnd_ground_net_uses_correct_name(self, pcb_agnd: Path):
+        """Ground nets with non-standard names (e.g. AGND) must use actual net name."""
+        pour_nets = [
+            ("AGND", NetClass.GROUND),
+            ("+3.3V", NetClass.POWER),
+        ]
+        count = auto_create_zones_for_pour_nets(pcb_agnd, pour_nets)
+        assert count == 2
+
+        pcb = PCB.load(str(pcb_agnd))
+        zone_nets = {z.net_name for z in pcb.zones}
+        # Zone must be created for "AGND", not hardcoded "GND"
+        assert "AGND" in zone_nets, f"Expected 'AGND' in zone nets, got {zone_nets}"
+        assert "GND" not in zone_nets, f"'GND' should not appear - got {zone_nets}"
+        assert "+3.3V" in zone_nets
+
+        # Verify AGND is on B.Cu (ground layer)
+        agnd_zones = [z for z in pcb.zones if z.net_name == "AGND"]
+        assert len(agnd_zones) == 1
+        assert agnd_zones[0].layer == "B.Cu"
+
     def test_empty_pour_nets_no_save(self, pcb_with_power: Path):
         original = pcb_with_power.read_text()
         count = auto_create_zones_for_pour_nets(pcb_with_power, [])
@@ -272,7 +326,3 @@ class TestRunStepZones:
 
         pcb2 = PCB.load(str(pcb_with_power))
         assert len(pcb2.zones) == zone_count_1
-
-
-# Import Console at module level for type hints in fixtures
-from rich.console import Console

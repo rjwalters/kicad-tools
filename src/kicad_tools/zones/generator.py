@@ -435,7 +435,7 @@ def auto_create_zones_for_pour_nets(
     count = 0
     for net_name, net_class in pour_nets:
         if net_class == NetClass.GROUND:
-            gen.add_ground_plane(layer="B.Cu", priority=1)
+            gen.add_zone(net=net_name, layer="B.Cu", priority=1)
         else:
             # POWER nets go on F.Cu
             gen.add_power_plane(net=net_name, layer="F.Cu", priority=0)
