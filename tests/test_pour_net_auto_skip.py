@@ -380,3 +380,74 @@ class TestClassifyPourNets:
 
         result = classify_and_apply_rules({})
         assert result == {}
+
+    def test_power_net_3v3_is_pour_net(self) -> None:
+        """+3.3V should be classified as a pour net (power class)."""
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        net_names = {1: "+3.3V", 2: "SPI_CLK"}
+        result = classify_and_apply_rules(net_names)
+
+        assert "+3.3V" in result
+        assert result["+3.3V"].is_pour_net is True
+
+    def test_suffix_gnd_is_pour_net(self) -> None:
+        """Nets ending in _GND (e.g. SCAP_POS_GND) should be classified as pour nets."""
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        net_names = {1: "SCAP_POS_GND", 2: "SCAP_NEG_GND", 3: "SPI_CLK"}
+        result = classify_and_apply_rules(net_names)
+
+        assert "SCAP_POS_GND" in result
+        assert result["SCAP_POS_GND"].is_pour_net is True
+        assert "SCAP_NEG_GND" in result
+        assert result["SCAP_NEG_GND"].is_pour_net is True
+
+
+# ===========================================================================
+# Tests for _auto_skip_pour_nets helper function
+# ===========================================================================
+
+
+class TestAutoSkipPourNetsHelper:
+    """Verify the _auto_skip_pour_nets helper function works correctly."""
+
+    def test_auto_skip_detects_gnd(self, pcb_with_gnd: Path) -> None:
+        """GND should be detected and added to skip_nets."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
+
+        assert "GND" in skip_nets
+        assert "GND" in auto_skipped
+
+    def test_auto_skip_does_not_duplicate(self, pcb_with_gnd: Path) -> None:
+        """If GND is already in skip_nets, it should not be added again."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets = ["GND"]
+        _auto_skip_pour_nets(pcb_with_gnd, skip_nets, quiet=True)
+
+        assert skip_nets.count("GND") == 1
+
+    def test_auto_skip_returns_empty_for_signal_only(self, pcb_no_ground: Path) -> None:
+        """Board with no pour nets should return empty auto-skip list."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_no_ground, skip_nets, quiet=True)
+
+        assert auto_skipped == []
+        assert skip_nets == []
+
+    def test_auto_skip_detects_multiple_pour_nets(self, pcb_multi_pour: Path) -> None:
+        """Multiple pour nets (GND, GNDA) should both be detected."""
+        from kicad_tools.cli.route_cmd import _auto_skip_pour_nets
+
+        skip_nets: list[str] = []
+        auto_skipped = _auto_skip_pour_nets(pcb_multi_pour, skip_nets, quiet=True)
+
+        assert "GND" in skip_nets
+        assert "GNDA" in skip_nets
+        assert len(auto_skipped) == 2
