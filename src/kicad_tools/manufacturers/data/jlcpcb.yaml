@@ -19,6 +19,8 @@ design_rules:
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.0            # No inner layers
@@ -36,6 +38,8 @@ design_rules:
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 0.0
@@ -53,6 +57,8 @@ design_rules:
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
@@ -70,6 +76,8 @@ design_rules:
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 0.5
@@ -87,6 +95,8 @@ design_rules:
     min_silkscreen_width_mm: 0.15
     min_silkscreen_height_mm: 1.0   # 40 mil (per JLCPCB specs)
     min_solder_mask_dam_mm: 0.1
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5

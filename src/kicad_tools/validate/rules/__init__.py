@@ -9,6 +9,7 @@ from .clearance import ClearanceRule
 from .dimensions import DimensionRules
 from .edge import EdgeClearanceRule
 from .impedance import ImpedanceRule, NetImpedanceSpec
+from .solder_mask import SolderMaskPadRules
 from .silkscreen import (
     check_all_silkscreen,
     check_silkscreen_line_width,
@@ -23,6 +24,7 @@ __all__ = [
     "EdgeClearanceRule",
     "ImpedanceRule",
     "NetImpedanceSpec",
+    "SolderMaskPadRules",
     "check_all_silkscreen",
     "check_silkscreen_line_width",
     "check_silkscreen_over_pads",

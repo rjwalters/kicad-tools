@@ -86,6 +86,7 @@ class DRCChecker:
         results.merge(self.check_dimensions())
         results.merge(self.check_edge_clearances())
         results.merge(self.check_silkscreen())
+        results.merge(self.check_solder_mask_pads())
 
         return results
 
@@ -144,6 +145,22 @@ class DRCChecker:
             DRCResults containing silkscreen violations
         """
         return check_all_silkscreen(self.pcb, self.design_rules)
+
+    def check_solder_mask_pads(self) -> DRCResults:
+        """Check solder mask and pad dimension rules.
+
+        Validates:
+        - Solder mask expansion meets manufacturer minimum clearance
+        - Minimum pad size for manufacturability
+        - PTH pad annular ring
+
+        Returns:
+            DRCResults containing solder mask and pad violations
+        """
+        from .rules.solder_mask import SolderMaskPadRules
+
+        rule = SolderMaskPadRules()
+        return rule.check(self.pcb, self.design_rules)
 
     def __repr__(self) -> str:
         return (

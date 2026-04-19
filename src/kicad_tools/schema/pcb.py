@@ -56,6 +56,7 @@ class Pad:
     net_number: int = 0
     net_name: str = ""
     drill: float = 0.0
+    solder_mask_margin: float | None = None
     uuid: str = ""
 
     @property
@@ -111,6 +112,10 @@ class Pad:
         # Drill
         if drill := sexp.find("drill"):
             pad.drill = drill.get_float(0) or 0.0
+
+        # Solder mask margin (per-pad override)
+        if mask_margin := sexp.find("solder_mask_margin"):
+            pad.solder_mask_margin = mask_margin.get_float(0)
 
         # UUID
         if uuid := sexp.find("uuid"):
