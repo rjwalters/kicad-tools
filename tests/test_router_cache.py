@@ -1,14 +1,13 @@
 """Tests for routing result cache."""
 
-import json
-import tempfile
+import sqlite3
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from kicad_tools.router import (
     CacheKey,
-    CachedRoutingResult,
     DesignRules,
     Route,
     RoutingCache,
@@ -16,6 +15,7 @@ from kicad_tools.router import (
     Via,
     compute_pad_positions_hash,
 )
+from kicad_tools.router.cache import CACHE_VERSION
 from kicad_tools.router.layers import Layer
 
 
@@ -96,12 +96,34 @@ class TestCacheKey:
         key = CacheKey(
             pcb_hash="a" * 64,
             rules_hash="b" * 64,
-            version="1.0.0",
+            version="1.0.0+cache.2.0.0",
         )
 
         assert ":" in key.full_key
         assert key.full_key.count(":") == 2
-        assert "1.0.0" in key.full_key
+        assert "1.0.0+cache.2.0.0" in key.full_key
+
+    def test_cache_version_included_in_computed_key(self):
+        """Test that CACHE_VERSION is included in the computed version field."""
+        pcb_content = "(kicad_pcb (test))"
+        rules = DesignRules()
+
+        key = CacheKey.compute(pcb_content, rules, 0.1)
+
+        assert f"+cache.{CACHE_VERSION}" in key.version
+
+    def test_cache_version_change_invalidates_key(self):
+        """Test that changing CACHE_VERSION produces a different cache key."""
+        pcb_content = "(kicad_pcb (test))"
+        rules = DesignRules()
+
+        key1 = CacheKey.compute(pcb_content, rules, 0.1)
+
+        with mock.patch("kicad_tools.router.cache.CACHE_VERSION", "99.0.0"):
+            key2 = CacheKey.compute(pcb_content, rules, 0.1)
+
+        assert key1.version != key2.version
+        assert key1.full_key != key2.full_key
 
 
 class TestRoutingCache:
@@ -121,14 +143,8 @@ class TestRoutingCache:
                 net=1,
                 net_name="NET1",
                 segments=[
-                    Segment(
-                        x1=0, y1=0, x2=10, y2=0,
-                        width=0.2, layer=Layer.F_CU, net=1
-                    ),
-                    Segment(
-                        x1=10, y1=0, x2=10, y2=10,
-                        width=0.2, layer=Layer.F_CU, net=1
-                    ),
+                    Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1),
+                    Segment(x1=10, y1=0, x2=10, y2=10, width=0.2, layer=Layer.F_CU, net=1),
                 ],
                 vias=[],
             ),
@@ -136,18 +152,10 @@ class TestRoutingCache:
                 net=2,
                 net_name="NET2",
                 segments=[
-                    Segment(
-                        x1=5, y1=5, x2=15, y2=5,
-                        width=0.2, layer=Layer.B_CU, net=2
-                    ),
+                    Segment(x1=5, y1=5, x2=15, y2=5, width=0.2, layer=Layer.B_CU, net=2),
                 ],
                 vias=[
-                    Via(
-                        x=5, y=5,
-                        drill=0.3, diameter=0.6,
-                        layers=(Layer.F_CU, Layer.B_CU),
-                        net=2
-                    ),
+                    Via(x=5, y=5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU), net=2),
                 ],
             ),
         ]
@@ -300,10 +308,7 @@ class TestPartialRouteCache:
             net=1,
             net_name="NET1",
             segments=[
-                Segment(
-                    x1=0, y1=0, x2=10, y2=0,
-                    width=0.2, layer=Layer.F_CU, net=1
-                ),
+                Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1),
             ],
             vias=[],
         )
@@ -357,10 +362,7 @@ class TestPartialRouteCache:
             net=2,
             net_name="NET2",
             segments=[
-                Segment(
-                    x1=5, y1=5, x2=15, y2=5,
-                    width=0.2, layer=Layer.B_CU, net=2
-                ),
+                Segment(x1=5, y1=5, x2=15, y2=5, width=0.2, layer=Layer.B_CU, net=2),
             ],
             vias=[],
         )
@@ -381,6 +383,33 @@ class TestPartialRouteCache:
         assert 1 in unchanged
         assert 2 not in unchanged
         assert 3 not in unchanged
+
+    def test_partial_route_version_mismatch(self, temp_cache, sample_route):
+        """Test that partial routes with a different CACHE_VERSION are not returned."""
+        pcb_hash = "abc123" * 10
+        pad_hash = "def456" * 10
+
+        # Store a partial route with current version
+        temp_cache.put_net_route(pcb_hash, 1, "NET1", sample_route, pad_hash)
+
+        # Retrieve with a different CACHE_VERSION -- should miss
+        with mock.patch("kicad_tools.router.cache.CACHE_VERSION", "99.0.0"):
+            result = temp_cache.get_net_route(pcb_hash, 1, pad_hash)
+
+        assert result is None
+
+    def test_unchanged_net_routes_version_mismatch(self, temp_cache, sample_route):
+        """Test that get_unchanged_net_routes filters by version."""
+        pcb_hash = "abc123" * 10
+        pad_hash = "hash1" * 13
+
+        temp_cache.put_net_route(pcb_hash, 1, "NET1", sample_route, pad_hash)
+
+        # With a different CACHE_VERSION the route should not be returned
+        with mock.patch("kicad_tools.router.cache.CACHE_VERSION", "99.0.0"):
+            unchanged = temp_cache.get_unchanged_net_routes(pcb_hash, {1: pad_hash})
+
+        assert len(unchanged) == 0
 
 
 class TestComputePadPositionsHash:
@@ -452,9 +481,14 @@ class TestCacheSizeLimits:
             # Create many segments to make a larger entry
             segments = [
                 Segment(
-                    x1=j, y1=j, x2=j + 10, y2=j,
-                    width=0.2, layer=Layer.F_CU, net=i,
-                    net_name=f"NET{i}" * 10  # Longer net name
+                    x1=j,
+                    y1=j,
+                    x2=j + 10,
+                    y2=j,
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=i,
+                    net_name=f"NET{i}" * 10,  # Longer net name
                 )
                 for j in range(100)  # 100 segments per route
             ]
@@ -487,12 +521,7 @@ class TestCacheExpiry:
     def test_expired_entry_not_returned(self, short_ttl_cache):
         """Test that expired entries are not returned by default."""
         key = CacheKey.compute("content", DesignRules(), 0.1)
-        routes = [
-            Route(
-                net=1, net_name="NET1",
-                segments=[], vias=[]
-            )
-        ]
+        routes = [Route(net=1, net_name="NET1", segments=[], vias=[])]
 
         short_ttl_cache.put(key, routes, {"routes": 1})
 
@@ -503,12 +532,7 @@ class TestCacheExpiry:
     def test_expired_entry_returned_with_flag(self, short_ttl_cache):
         """Test that expired entries can be retrieved with ignore_expiry."""
         key = CacheKey.compute("content", DesignRules(), 0.1)
-        routes = [
-            Route(
-                net=1, net_name="NET1",
-                segments=[], vias=[]
-            )
-        ]
+        routes = [Route(net=1, net_name="NET1", segments=[], vias=[])]
 
         short_ttl_cache.put(key, routes, {"routes": 1})
 
@@ -518,12 +542,7 @@ class TestCacheExpiry:
     def test_clear_expired(self, short_ttl_cache):
         """Test clearing expired entries."""
         key = CacheKey.compute("content", DesignRules(), 0.1)
-        routes = [
-            Route(
-                net=1, net_name="NET1",
-                segments=[], vias=[]
-            )
-        ]
+        routes = [Route(net=1, net_name="NET1", segments=[], vias=[])]
 
         short_ttl_cache.put(key, routes, {"routes": 1})
 
@@ -534,3 +553,109 @@ class TestCacheExpiry:
         # Entry should be gone
         result = short_ttl_cache.get(key, ignore_expiry=True)
         assert result is None
+
+
+class TestSchemaMigration:
+    """Tests for database schema migration from v1 to v2."""
+
+    def _create_v1_database(self, db_path: Path) -> None:
+        """Manually create a v1 schema database with sample data."""
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE routing_results (
+                cache_key TEXT PRIMARY KEY,
+                pcb_hash TEXT NOT NULL,
+                rules_hash TEXT NOT NULL,
+                version TEXT NOT NULL,
+                routes_data BLOB NOT NULL,
+                success_count INTEGER NOT NULL,
+                failure_count INTEGER NOT NULL,
+                total_segments INTEGER NOT NULL,
+                total_vias INTEGER NOT NULL,
+                compute_time_ms INTEGER NOT NULL,
+                data_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                last_accessed TEXT NOT NULL
+            );
+
+            CREATE TABLE partial_routes (
+                pcb_hash TEXT NOT NULL,
+                net_id INTEGER NOT NULL,
+                net_name TEXT NOT NULL,
+                route_data BLOB NOT NULL,
+                pad_positions_hash TEXT NOT NULL,
+                data_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (pcb_hash, net_id)
+            );
+
+            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            INSERT INTO meta (key, value) VALUES ('cache_version', '1.0.0');
+
+            INSERT INTO partial_routes (pcb_hash, net_id, net_name, route_data,
+                pad_positions_hash, data_size, created_at)
+            VALUES ('old_hash', 1, 'NET1', X'00', 'pad_hash', 1, '2024-01-01T00:00:00');
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_migration_v1_to_v2_drops_old_partial_routes(self, tmp_path):
+        """Test that migration from v1 drops stale partial routes."""
+        cache_dir = tmp_path / "migrate_cache"
+        cache_dir.mkdir()
+        db_path = cache_dir / "routing.db"
+        self._create_v1_database(db_path)
+
+        # Opening the cache should trigger migration
+        RoutingCache(cache_dir=cache_dir)
+
+        # Old partial routes should be gone
+        conn = sqlite3.connect(str(db_path))
+        count = conn.execute("SELECT COUNT(*) FROM partial_routes").fetchone()[0]
+        conn.close()
+        assert count == 0
+
+    def test_migration_v1_to_v2_adds_version_column(self, tmp_path):
+        """Test that migration adds a version column to partial_routes."""
+        cache_dir = tmp_path / "migrate_cache"
+        cache_dir.mkdir()
+        db_path = cache_dir / "routing.db"
+        self._create_v1_database(db_path)
+
+        cache = RoutingCache(cache_dir=cache_dir)
+
+        # Verify version column exists by inserting a partial route
+        route = Route(
+            net=1,
+            net_name="NET1",
+            segments=[Segment(x1=0, y1=0, x2=10, y2=0, width=0.2, layer=Layer.F_CU, net=1)],
+            vias=[],
+        )
+        cache.put_net_route("test_hash", 1, "NET1", route, "pad_hash")
+
+        # Verify the version was stored
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT version FROM partial_routes WHERE net_id = 1").fetchone()
+        conn.close()
+        assert row is not None
+        assert f"+cache.{CACHE_VERSION}" in row["version"]
+
+    def test_migration_updates_schema_version(self, tmp_path):
+        """Test that migration updates schema_version in meta table."""
+        cache_dir = tmp_path / "migrate_cache"
+        cache_dir.mkdir()
+        db_path = cache_dir / "routing.db"
+        self._create_v1_database(db_path)
+
+        RoutingCache(cache_dir=cache_dir)
+
+        conn = sqlite3.connect(str(db_path))
+        version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
+        conn.close()
+        assert version == "2"
