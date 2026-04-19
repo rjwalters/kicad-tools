@@ -1163,6 +1163,21 @@ class Router:
         )
         end_metal_gx1, end_metal_gy1, end_metal_gx2, end_metal_gy2 = self._get_pad_metal_bounds(end)
 
+        # Issue #1618: Precompute geometry-derived pad approach bounds.
+        # The approach zone is the pad metal area expanded by a small escape margin
+        # (2 cells beyond the metal edge). This replaces the old hardcoded
+        # pad_approach_radius=6 which created an oversized clearance-free zone
+        # around every pad regardless of actual pad geometry.
+        pad_escape_margin = 2  # cells beyond pad metal edge
+        start_approach_gx1 = start_metal_gx1 - pad_escape_margin
+        start_approach_gy1 = start_metal_gy1 - pad_escape_margin
+        start_approach_gx2 = start_metal_gx2 + pad_escape_margin
+        start_approach_gy2 = start_metal_gy2 + pad_escape_margin
+        end_approach_gx1 = end_metal_gx1 - pad_escape_margin
+        end_approach_gy1 = end_metal_gy1 - pad_escape_margin
+        end_approach_gx2 = end_metal_gx2 + pad_escape_margin
+        end_approach_gy2 = end_metal_gy2 + pad_escape_margin
+
         # Filter start/end layers by allowed_layers constraint (Issue #715)
         if self.rules.allowed_layers is not None:
             start_layers = [l for l in start_layers if self._is_layer_allowed(l)]
@@ -1261,16 +1276,18 @@ class Router:
                 # belong to the SAME NET. This handles TSSOP and other fine-pitch
                 # components where pad clearance zones overlap.
                 # But we MUST still block cells from OTHER nets (like GND pads).
-                pad_approach_radius = 6  # cells
+                # Issue #1618: Use geometry-derived approach bounds instead of
+                # hardcoded radius. The approach zone covers the pad metal area
+                # plus a small escape margin (2 cells) to allow trace escape routing.
                 # For PTH pads, allow approach from any valid layer
                 is_start_adjacent = (
-                    abs(nx - start_gx) <= pad_approach_radius
-                    and abs(ny - start_gy) <= pad_approach_radius
+                    start_approach_gx1 <= nx <= start_approach_gx2
+                    and start_approach_gy1 <= ny <= start_approach_gy2
                     and nlayer in start_layers
                 )
                 is_end_adjacent = (
-                    abs(nx - end_gx) <= pad_approach_radius
-                    and abs(ny - end_gy) <= pad_approach_radius
+                    end_approach_gx1 <= nx <= end_approach_gx2
+                    and end_approach_gy1 <= ny <= end_approach_gy2
                     and nlayer in end_layers
                 )
 
@@ -2078,6 +2095,17 @@ class Router:
         tgt_gx1, tgt_gy1, tgt_gx2, tgt_gy2 = target_metal_bounds
         source_gx, source_gy = self.grid.world_to_grid(source_pad.x, source_pad.y)
 
+        # Issue #1618: Precompute geometry-derived pad approach bounds
+        pad_escape_margin = 2  # cells beyond pad metal edge
+        src_approach_gx1 = src_gx1 - pad_escape_margin
+        src_approach_gy1 = src_gy1 - pad_escape_margin
+        src_approach_gx2 = src_gx2 + pad_escape_margin
+        src_approach_gy2 = src_gy2 + pad_escape_margin
+        tgt_approach_gx1 = tgt_gx1 - pad_escape_margin
+        tgt_approach_gy1 = tgt_gy1 - pad_escape_margin
+        tgt_approach_gx2 = tgt_gx2 + pad_escape_margin
+        tgt_approach_gy2 = tgt_gy2 + pad_escape_margin
+
         # Explore 2D neighbors (same layer moves)
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
@@ -2094,16 +2122,17 @@ class Router:
                 ):
                     continue
 
-            # Pad approach radius for relaxed blocking near pads
-            pad_approach_radius = 6
+            # Issue #1618: Use geometry-derived approach bounds instead of
+            # hardcoded pad_approach_radius=6. The approach zone covers the pad
+            # metal area plus a small escape margin.
             is_source_adjacent = (
-                abs(nx - source_gx) <= pad_approach_radius
-                and abs(ny - source_gy) <= pad_approach_radius
+                src_approach_gx1 <= nx <= src_approach_gx2
+                and src_approach_gy1 <= ny <= src_approach_gy2
                 and nlayer in source_layers
             )
             is_target_adjacent = (
-                tgt_gx1 - pad_approach_radius <= nx <= tgt_gx2 + pad_approach_radius
-                and tgt_gy1 - pad_approach_radius <= ny <= tgt_gy2 + pad_approach_radius
+                tgt_approach_gx1 <= nx <= tgt_approach_gx2
+                and tgt_approach_gy1 <= ny <= tgt_approach_gy2
                 and nlayer in target_layers
             )
 
