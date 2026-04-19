@@ -498,3 +498,195 @@ class TestManufacturingPackageExport:
 
         # Output directory should not exist
         assert not out_dir.exists()
+
+
+class TestLatestReportOnly:
+    """Tests for the latest_report_only flattening feature."""
+
+    def _setup_project(self, tmp_path):
+        """Create a minimal project directory and return pcb path."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        pcb = project_dir / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        sch = project_dir / "board.kicad_sch"
+        sch.write_text("(kicad_sch)")
+        return pcb
+
+    def _fake_report_generate(self, out_dir, version_num):
+        """Simulate report generation by creating a vN/ directory with report.md."""
+        version_dir = out_dir / f"v{version_num}"
+        version_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = version_dir / "data"
+        data_dir.mkdir(exist_ok=True)
+        (data_dir / "board_summary.json").write_text('{"layer_count": 2}')
+        (version_dir / "report.md").write_text(f"# Report v{version_num}\n")
+        (version_dir / "metadata.json").write_text('{"version": ' + str(version_num) + "}\n")
+        return version_dir / "report.md"
+
+    def test_flatten_latest_report(self, tmp_path, monkeypatch):
+        """With latest_report_only=True, output has report/ instead of vN/ dirs."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        # Pre-create versioned directories to simulate prior exports
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._fake_report_generate(out_dir, 1)
+        self._fake_report_generate(out_dir, 2)
+
+        # Mock _generate_report to create v3 (the latest)
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 3)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Flattened report/ directory should exist
+        report_dir = out_dir / "report"
+        assert report_dir.exists()
+        assert (report_dir / "report.md").exists()
+        assert "v3" in (report_dir / "report.md").read_text()
+
+        # Data subdirectory should also be copied
+        assert (report_dir / "data" / "board_summary.json").exists()
+
+        # No vN/ directories should remain
+        import re
+        for child in out_dir.iterdir():
+            if child.is_dir():
+                assert not re.fullmatch(r"v\d+", child.name), (
+                    f"Version directory {child.name} should have been removed"
+                )
+
+        # result.report_path should point to the flattened location
+        assert result.report_path == report_dir / "report.md"
+
+    def test_latest_only_false_preserves_version_dirs(self, tmp_path, monkeypatch):
+        """With latest_report_only=False (default), vN/ directories are preserved."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._fake_report_generate(out_dir, 1)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 2)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=False,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Version directories should remain
+        assert (out_dir / "v1").exists()
+        assert (out_dir / "v2").exists()
+
+        # No report/ directory should have been created
+        assert not (out_dir / "report").exists()
+
+    def test_latest_only_with_no_report(self, tmp_path, monkeypatch):
+        """latest_report_only=True with include_report=False should not fail."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        config = ManufacturingConfig(
+            include_report=False,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # Should succeed without errors
+        assert result.success
+        # No report/ or vN/ directories
+        assert not (out_dir / "report").exists()
+
+    def test_latest_only_fresh_project_single_version(self, tmp_path, monkeypatch):
+        """On a fresh project, latest_report_only flattens the single v1/ into report/."""
+        pcb = self._setup_project(tmp_path)
+        out_dir = tmp_path / "output"
+
+        from kicad_tools.export import assembly
+
+        def fake_assembly_export(self, output_dir=None):
+            od = Path(output_dir) if output_dir else self.config.output_dir
+            od.mkdir(parents=True, exist_ok=True)
+            return assembly.AssemblyPackageResult(output_dir=od)
+
+        monkeypatch.setattr(assembly.AssemblyPackage, "export", fake_assembly_export)
+
+        def fake_generate_report(self_pkg, od, result):
+            report_path = self._fake_report_generate(od, 1)
+            result.report_path = report_path
+
+        monkeypatch.setattr(ManufacturingPackage, "_generate_report", fake_generate_report)
+
+        config = ManufacturingConfig(
+            include_report=True,
+            include_project_zip=False,
+            include_manifest=False,
+            latest_report_only=True,
+            preflight=PreflightConfig(skip_all=True),
+        )
+        pkg = ManufacturingPackage(pcb_path=pcb, manufacturer="jlcpcb", config=config)
+        result = pkg.export(out_dir)
+
+        # report/ directory should exist with v1 content
+        assert (out_dir / "report" / "report.md").exists()
+        assert "v1" in (out_dir / "report" / "report.md").read_text()
+
+        # v1/ should be removed
+        assert not (out_dir / "v1").exists()
+
+    def test_config_default_latest_report_only(self):
+        """latest_report_only defaults to False."""
+        config = ManufacturingConfig()
+        assert config.latest_report_only is False

@@ -351,6 +351,38 @@ class TestReportGenerator:
         assert p2.parent.name == "v2"
         assert p3.parent.name == "v3"
 
+    def test_latest_version_dir_no_versions(self, tmp_path: Path) -> None:
+        """Returns None when no vN/ directories exist."""
+        assert ReportGenerator.latest_version_dir(tmp_path) is None
+
+    def test_latest_version_dir_nonexistent_dir(self) -> None:
+        """Returns None when the output directory does not exist."""
+        assert ReportGenerator.latest_version_dir(Path("/nonexistent/dir")) is None
+
+    def test_latest_version_dir_single_version(self, tmp_path: Path) -> None:
+        """Returns the only vN/ directory when there is one."""
+        (tmp_path / "v1").mkdir()
+        result = ReportGenerator.latest_version_dir(tmp_path)
+        assert result is not None
+        assert result.name == "v1"
+
+    def test_latest_version_dir_multiple_versions(self, tmp_path: Path) -> None:
+        """Returns the highest-numbered vN/ directory."""
+        for i in (1, 2, 5, 3):
+            (tmp_path / f"v{i}").mkdir()
+        result = ReportGenerator.latest_version_dir(tmp_path)
+        assert result is not None
+        assert result.name == "v5"
+
+    def test_latest_version_dir_ignores_non_version_dirs(self, tmp_path: Path) -> None:
+        """Non-vN directories are ignored."""
+        (tmp_path / "v1").mkdir()
+        (tmp_path / "report").mkdir()
+        (tmp_path / "data").mkdir()
+        result = ReportGenerator.latest_version_dir(tmp_path)
+        assert result is not None
+        assert result.name == "v1"
+
     def test_custom_template(self, tmp_path: Path) -> None:
         template_dir = tmp_path / "custom_templates"
         template_dir.mkdir()
