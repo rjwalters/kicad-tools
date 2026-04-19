@@ -84,7 +84,7 @@ class LEDIndicator(CircuitBlock):
         # Wire LED cathode to resistor
         led_cathode = self.led.pin_position("K")
         r_pin1 = self.resistor.pin_position("1")
-        sch.add_wire(led_cathode, r_pin1, warn_on_collision=False)
+        sch.add_wire(led_cathode, r_pin1)
 
         # Define ports
         led_anode = self.led.pin_position("A")

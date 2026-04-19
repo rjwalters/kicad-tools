@@ -347,7 +347,7 @@ class ThreePhaseInverter(CircuitBlock):
             phase_pos = hb.port("VOUT")
             label_x = phase_pos[0] + 10
             # Add wire from phase output to label position
-            sch.add_wire(phase_pos, (label_x, phase_pos[1]), warn_on_collision=False)
+            sch.add_wire(phase_pos, (label_x, phase_pos[1]))
             sch.add_label(f"PHASE_{label}", label_x, phase_pos[1], rotation=0)
 
         # Store all components
