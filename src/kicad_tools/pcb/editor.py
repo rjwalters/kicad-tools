@@ -28,7 +28,7 @@ from pathlib import Path
 
 # Import SExp parsing and builders
 from kicad_tools.sexp import SExp, parse_file
-from kicad_tools.sexp.builders import fmt, gr_line_node, segment_node, via_node, zone_node
+from kicad_tools.sexp.builders import fmt, gr_line_node, gr_text_node, segment_node, via_node, zone_node
 
 
 @dataclass
@@ -546,6 +546,41 @@ class PCBEditor:
                 self.doc.append(node)
 
         return nodes
+
+    def add_silkscreen_text(
+        self,
+        text: str,
+        x: float,
+        y: float,
+        layer: str = "F.SilkS",
+        font_size: float = 1.0,
+        font_thickness: float = 0.15,
+    ) -> SExp:
+        """Add board-level silkscreen text (gr_text) to the PCB.
+
+        Args:
+            text: Text content to display
+            x, y: Position coordinates in mm
+            layer: Silkscreen layer (default "F.SilkS")
+            font_size: Font size in mm (default 1.0)
+            font_thickness: Font stroke thickness in mm (default 0.15)
+
+        Returns:
+            The created gr_text SExp node.
+
+        Raises:
+            ValueError: If no PCB document is loaded.
+        """
+        if not self.doc:
+            raise ValueError("No PCB document loaded")
+
+        node = gr_text_node(
+            text, x, y, layer=layer, font_size=font_size,
+            font_thickness=font_thickness,
+            uuid_str=str(uuid_module.uuid4()),
+        )
+        self.doc.append(node)
+        return node
 
     def get_zones(self) -> list[dict]:
         """Get all zones from the PCB.
