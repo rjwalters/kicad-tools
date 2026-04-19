@@ -439,3 +439,97 @@ class TestProgress:
         current = spec.get_current_phase_progress()
         assert current is not None
         assert len(current.checklist) == 2
+
+
+class TestCopperWeight:
+    """Tests for copper_weight parsing on ManufacturingRequirements."""
+
+    def test_copper_weight_int(self):
+        """Test copper_weight accepts plain int (backward compat)."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight=2)
+        assert mfg.copper_weight == 2.0
+
+    def test_copper_weight_float(self):
+        """Test copper_weight accepts plain float."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight=0.5)
+        assert mfg.copper_weight == 0.5
+
+    def test_copper_weight_string_with_oz(self):
+        """Test copper_weight accepts '2oz' string."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight="2oz")
+        assert mfg.copper_weight == 2.0
+
+    def test_copper_weight_fractional_string(self):
+        """Test copper_weight accepts '0.5oz' string."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight="0.5oz")
+        assert mfg.copper_weight == 0.5
+
+    def test_copper_weight_string_with_space(self):
+        """Test copper_weight accepts '2 oz' (space-tolerant)."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight="2 oz")
+        assert mfg.copper_weight == 2.0
+
+    def test_copper_weight_case_insensitive(self):
+        """Test copper_weight accepts '2OZ' (case-insensitive)."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight="2OZ")
+        assert mfg.copper_weight == 2.0
+
+    def test_copper_weight_bare_number_string(self):
+        """Test copper_weight accepts bare number string '2'."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(copper_weight="2")
+        assert mfg.copper_weight == 2.0
+
+    def test_copper_weight_invalid_unit(self):
+        """Test copper_weight rejects invalid unit like '2lb'."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError, match="copper_weight"):
+            ManufacturingRequirements(copper_weight="2lb")
+
+    def test_copper_weight_invalid_string(self):
+        """Test copper_weight rejects non-numeric strings."""
+        from pydantic import ValidationError
+
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        with pytest.raises(ValidationError, match="copper_weight"):
+            ManufacturingRequirements(copper_weight="abc")
+
+    def test_copper_weight_default_none(self):
+        """Test copper_weight defaults to None."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements()
+        assert mfg.copper_weight is None
+
+    def test_copper_weight_extracted_from_layers(self):
+        """Test copper_weight is promoted from layers dict to top-level field."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(layers={"count": 2, "copper_weight": "2oz"})
+        assert mfg.copper_weight == 2.0
+        assert "copper_weight" not in mfg.layers
+
+    def test_layers_without_copper_weight(self):
+        """Test layers dict without copper_weight still works."""
+        from kicad_tools.spec.schema import ManufacturingRequirements
+
+        mfg = ManufacturingRequirements(layers={"count": 2})
+        assert mfg.layers == {"count": 2}
+        assert mfg.copper_weight is None
