@@ -2033,15 +2033,15 @@ class Autorouter:
             layer_count=self.grid.num_layers,
         )
 
-        print("  Board characteristics:")
-        print(f"    Pads: {characteristics.total_pads}")
-        print(f"    Nets: {characteristics.total_nets}")
-        print(f"    Pin density: {characteristics.pin_density:.4f} pads/mm²")
-        print(f"    Avg net span: {characteristics.avg_net_span:.1f}mm")
+        flush_print("  Board characteristics:")
+        flush_print(f"    Pads: {characteristics.total_pads}")
+        flush_print(f"    Nets: {characteristics.total_nets}")
+        flush_print(f"    Pin density: {characteristics.pin_density:.4f} pads/mm²")
+        flush_print(f"    Avg net span: {characteristics.avg_net_span:.1f}mm")
 
         if method == "adaptive":
             # Use adaptive routing with dynamic cost adjustment
-            print(f"  Method: Adaptive (max {max_iterations} iterations)")
+            flush_print(f"  Method: Adaptive (max {max_iterations} iterations)")
             adaptive_router = create_adaptive_router(
                 self,
                 max_iterations=max_iterations,
@@ -2050,41 +2050,41 @@ class Autorouter:
         elif method == "quick":
             # Fast heuristic tuning
             params = quick_tune(characteristics)
-            print("  Method: Quick heuristic tuning")
-            print("  Tuned parameters:")
-            print(f"    Via cost: {params.via:.1f}")
-            print(f"    Turn cost: {params.turn:.1f}")
-            print(f"    Congestion cost: {params.congestion:.1f}")
+            flush_print("  Method: Quick heuristic tuning")
+            flush_print("  Tuned parameters:")
+            flush_print(f"    Via cost: {params.via:.1f}")
+            flush_print(f"    Turn cost: {params.turn:.1f}")
+            flush_print(f"    Congestion cost: {params.congestion:.1f}")
 
             self.rules = params.apply_to_rules(self.rules)
             routes = self.route_all(progress_callback=progress_callback)
         else:
             # Full optimization
-            print(f"  Method: {method} optimization (max {max_iterations} iterations)")
+            flush_print(f"  Method: {method} optimization (max {max_iterations} iterations)")
             result = tune_parameters(
                 self,
                 max_iterations=max_iterations,
                 method=method,
             )
 
-            print(f"  Tuning completed in {result.tuning_time_ms:.0f}ms")
-            print("  Best parameters:")
-            print(f"    Via cost: {result.params.via:.1f}")
-            print(f"    Turn cost: {result.params.turn:.1f}")
-            print(f"    Congestion cost: {result.params.congestion:.1f}")
+            flush_print(f"  Tuning completed in {result.tuning_time_ms:.0f}ms")
+            flush_print("  Best parameters:")
+            flush_print(f"    Via cost: {result.params.via:.1f}")
+            flush_print(f"    Turn cost: {result.params.turn:.1f}")
+            flush_print(f"    Congestion cost: {result.params.congestion:.1f}")
 
             if result.quality:
-                print(f"  Quality score: {result.quality.score:.1f}")
-                print(f"    Completion: {result.quality.completion_rate * 100:.1f}%")
-                print(f"    Total vias: {result.quality.total_vias}")
+                flush_print(f"  Quality score: {result.quality.score:.1f}")
+                flush_print(f"    Completion: {result.quality.completion_rate * 100:.1f}%")
+                flush_print(f"    Total vias: {result.quality.total_vias}")
 
             self.rules = result.params.apply_to_rules(self.rules)
             routes = self.route_all(progress_callback=progress_callback)
 
-        print("\n=== Tuned Routing Complete ===")
-        print(f"  Routes: {len(routes)}")
-        print(f"  Segments: {sum(len(r.segments) for r in routes)}")
-        print(f"  Vias: {sum(len(r.vias) for r in routes)}")
+        flush_print("\n=== Tuned Routing Complete ===")
+        flush_print(f"  Routes: {len(routes)}")
+        flush_print(f"  Segments: {sum(len(r.segments) for r in routes)}")
+        flush_print(f"  Vias: {sum(len(r.vias) for r in routes)}")
 
         return routes
 

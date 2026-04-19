@@ -604,7 +604,7 @@ def route_with_layer_escalation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
-    from kicad_tools.cli.progress import spinner
+    from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
         LayerStack,
@@ -653,26 +653,26 @@ def route_with_layer_escalation(
     layer_configs = [(n, s) for n, s in layer_configs if n <= args.max_layers]
 
     if not quiet:
-        print("=" * 60)
-        print("KiCad PCB Autorouter - Layer Escalation Mode")
-        print("=" * 60)
-        print(f"Input:          {pcb_path}")
-        print(f"Output:         {output_path}")
-        print(f"Strategy:       {args.strategy}")
-        print(f"Max layers:     {args.max_layers}")
-        print(f"Min completion: {args.min_completion * 100:.0f}%")
+        flush_print("=" * 60)
+        flush_print("KiCad PCB Autorouter - Layer Escalation Mode")
+        flush_print("=" * 60)
+        flush_print(f"Input:          {pcb_path}")
+        flush_print(f"Output:         {output_path}")
+        flush_print(f"Strategy:       {args.strategy}")
+        flush_print(f"Max layers:     {args.max_layers}")
+        flush_print(f"Min completion: {args.min_completion * 100:.0f}%")
         if skip_nets:
-            print(f"Skip:           {', '.join(skip_nets)}")
-        print()
+            flush_print(f"Skip:           {', '.join(skip_nets)}")
+        flush_print()
 
     best_result: LayerEscalationResult | None = None
     successful_result: LayerEscalationResult | None = None
 
     for attempt_num, (layer_count, layer_stack) in enumerate(layer_configs, 1):
         if not quiet:
-            print("=" * 60)
-            print(f"Attempt {attempt_num}: {layer_count} layers")
-            print("=" * 60)
+            flush_print("=" * 60)
+            flush_print(f"Attempt {attempt_num}: {layer_count} layers")
+            flush_print("=" * 60)
 
         # Load PCB with this layer stack
         try:
@@ -699,12 +699,12 @@ def route_with_layer_escalation(
         nets_to_route = len(multi_pad_nets)
 
         if not quiet:
-            print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
-            print(f"  Nets to route: {nets_to_route}")
+            flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+            flush_print(f"  Nets to route: {nets_to_route}")
 
         # Route
         if not quiet:
-            print(f"\n  Routing ({args.strategy})...")
+            flush_print(f"\n  Routing ({args.strategy})...")
 
         escape_flag = _resolve_escape_routing_flag(args)
 
@@ -765,8 +765,8 @@ def route_with_layer_escalation(
         # Report attempt result
         status = "SUCCESS" if result.success else "INSUFFICIENT - escalating"
         if not quiet:
-            print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
-            print(f"  Status: {status}")
+            flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
+            flush_print(f"  Status: {status}")
 
         # Check for success
         if result.success:
@@ -945,7 +945,7 @@ def route_with_rule_relaxation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
-    from kicad_tools.cli.progress import spinner
+    from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
         LayerStack,
@@ -1001,28 +1001,28 @@ def route_with_rule_relaxation(
         layer_stack = layer_stack_map[args.layers]
 
     if not quiet:
-        print("=" * 60)
-        print("KiCad PCB Autorouter - Adaptive Rules Mode")
-        print("=" * 60)
-        print(f"Input:          {pcb_path}")
-        print(f"Output:         {output_path}")
-        print(f"Strategy:       {args.strategy}")
-        print(f"Manufacturer:   {args.manufacturer}")
-        print(f"Min completion: {args.min_completion * 100:.0f}%")
-        print(f"Relaxation tiers: {len(tiers)}")
+        flush_print("=" * 60)
+        flush_print("KiCad PCB Autorouter - Adaptive Rules Mode")
+        flush_print("=" * 60)
+        flush_print(f"Input:          {pcb_path}")
+        flush_print(f"Output:         {output_path}")
+        flush_print(f"Strategy:       {args.strategy}")
+        flush_print(f"Manufacturer:   {args.manufacturer}")
+        flush_print(f"Min completion: {args.min_completion * 100:.0f}%")
+        flush_print(f"Relaxation tiers: {len(tiers)}")
         if skip_nets:
-            print(f"Skip:           {', '.join(skip_nets)}")
-        print()
+            flush_print(f"Skip:           {', '.join(skip_nets)}")
+        flush_print()
 
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
 
     for tier in tiers:
         if not quiet:
-            print("=" * 60)
-            print(f"Attempt {tier.tier + 1}: {tier.description}")
-            print(f"  trace={tier.trace_width:.3f}mm, clearance={tier.clearance:.3f}mm")
-            print("=" * 60)
+            flush_print("=" * 60)
+            flush_print(f"Attempt {tier.tier + 1}: {tier.description}")
+            flush_print(f"  trace={tier.trace_width:.3f}mm, clearance={tier.clearance:.3f}mm")
+            flush_print("=" * 60)
 
         # Configure design rules for this tier
         rules = DesignRules(
@@ -1058,12 +1058,12 @@ def route_with_rule_relaxation(
         nets_to_route = len(multi_pad_nets)
 
         if not quiet:
-            print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
-            print(f"  Nets to route: {nets_to_route}")
+            flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+            flush_print(f"  Nets to route: {nets_to_route}")
 
         # Route
         if not quiet:
-            print(f"\n  Routing ({args.strategy})...")
+            flush_print(f"\n  Routing ({args.strategy})...")
 
         escape_flag = _resolve_escape_routing_flag(args)
 
@@ -1129,8 +1129,8 @@ def route_with_rule_relaxation(
         # Report attempt result
         status = "SUCCESS" if result.success else "INSUFFICIENT - relaxing rules"
         if not quiet:
-            print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
-            print(f"  Status: {status}")
+            flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
+            flush_print(f"  Status: {status}")
 
         # Check for success
         if result.success:
@@ -1322,7 +1322,7 @@ def route_with_combined_escalation(
     Returns:
         Exit code (0 = success, 1 = failure)
     """
-    from kicad_tools.cli.progress import spinner
+    from kicad_tools.cli.progress import flush_print, spinner
     from kicad_tools.router import (
         DesignRules,
         LayerStack,
@@ -1374,25 +1374,25 @@ def route_with_combined_escalation(
     layer_configs = [(n, s) for n, s in layer_configs if n <= args.max_layers]
 
     if not quiet:
-        print("=" * 60)
-        print("KiCad PCB Autorouter - Combined Escalation Mode")
-        print("=" * 60)
-        print(f"Input:          {pcb_path}")
-        print(f"Output:         {output_path}")
-        print(f"Strategy:       {args.strategy}")
-        print(f"Manufacturer:   {args.manufacturer}")
-        print(f"Max layers:     {args.max_layers}")
-        print(f"Min completion: {args.min_completion * 100:.0f}%")
-        print(f"Rule tiers:     {len(tiers)}")
-        print(f"Layer configs:  {[n for n, _ in layer_configs]}")
+        flush_print("=" * 60)
+        flush_print("KiCad PCB Autorouter - Combined Escalation Mode")
+        flush_print("=" * 60)
+        flush_print(f"Input:          {pcb_path}")
+        flush_print(f"Output:         {output_path}")
+        flush_print(f"Strategy:       {args.strategy}")
+        flush_print(f"Manufacturer:   {args.manufacturer}")
+        flush_print(f"Max layers:     {args.max_layers}")
+        flush_print(f"Min completion: {args.min_completion * 100:.0f}%")
+        flush_print(f"Rule tiers:     {len(tiers)}")
+        flush_print(f"Layer configs:  {[n for n, _ in layer_configs]}")
         if skip_nets:
-            print(f"Skip:           {', '.join(skip_nets)}")
-        print()
-        print("Search matrix:")
-        print("         ", end="")
+            flush_print(f"Skip:           {', '.join(skip_nets)}")
+        flush_print()
+        flush_print("Search matrix:")
+        flush_print("         ", end="")
         for n, _ in layer_configs:
-            print(f" {n}L    ", end="")
-        print()
+            flush_print(f" {n}L    ", end="")
+        flush_print()
 
     best_result: RuleRelaxationResult | None = None
     successful_result: RuleRelaxationResult | None = None
@@ -1402,7 +1402,7 @@ def route_with_combined_escalation(
     for layer_count, layer_stack in layer_configs:
         for tier in tiers:
             if not quiet:
-                print(
+                flush_print(
                     f"\nTrying: {layer_count} layers, tier {tier.tier} "
                     f"(trace={tier.trace_width:.2f}mm, clearance={tier.clearance:.2f}mm)"
                 )
@@ -1485,7 +1485,7 @@ def route_with_combined_escalation(
             results_matrix[(tier.tier, layer_count)] = completion
 
             if not quiet:
-                print(f"  Routed: {nets_routed}/{nets_to_route} ({completion * 100:.0f}%)")
+                flush_print(f"  Routed: {nets_routed}/{nets_to_route} ({completion * 100:.0f}%)")
 
             # Create result
             result = RuleRelaxationResult(
@@ -2592,18 +2592,18 @@ def main(argv: list[str] | None = None) -> int:
     power_nets_skipped = len(skip_nets)
 
     if not quiet:
-        print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
+        flush_print(f"  Board size: {router.grid.width}mm x {router.grid.height}mm")
         backend_info = router.backend_info
         grid_cells = router.grid.cols * router.grid.rows * router.grid.num_layers
         from kicad_tools.router.cpp_backend import format_backend_status
 
         backend_status = format_backend_status(backend_info, grid_cells)
-        print(f"  Backend:    {backend_status}")
-        print(
+        flush_print(f"  Backend:    {backend_status}")
+        flush_print(
             f"  Grid:       {router.grid.cols}x{router.grid.rows}x{router.grid.num_layers} = {grid_cells:,} cells"
         )
-        print(f"  Total nets: {len(net_map)}")
-        print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
+        flush_print(f"  Total nets: {len(net_map)}")
+        flush_print(f"  Nets to route: {nets_to_route} (multi-pad signal nets)")
 
         if args.verbose:
             print("\n  Net breakdown:")
@@ -2625,7 +2625,7 @@ def main(argv: list[str] | None = None) -> int:
             clearance=args.clearance,
         )
         if fine_pitch_report.has_warnings:
-            print("\n--- Fine-Pitch Component Analysis ---")
+            flush_print("\n--- Fine-Pitch Component Analysis ---")
             show_fine_pitch_warnings(fine_pitch_report, quiet=quiet, verbose=args.verbose)
 
     # Analyze routability if requested
@@ -3032,12 +3032,12 @@ def main(argv: list[str] | None = None) -> int:
     stats = router.get_statistics()
 
     if not quiet:
-        print("\n--- Results ---")
-        print(f"  Routes created:  {stats['routes']}")
-        print(f"  Segments:        {stats['segments']}")
-        print(f"  Vias:            {stats['vias']}")
-        print(f"  Total length:    {stats['total_length_mm']:.2f}mm")
-        print(f"  Nets routed:     {stats['nets_routed']}/{nets_to_route}")
+        flush_print("\n--- Results ---")
+        flush_print(f"  Routes created:  {stats['routes']}")
+        flush_print(f"  Segments:        {stats['segments']}")
+        flush_print(f"  Vias:            {stats['vias']}")
+        flush_print(f"  Total length:    {stats['total_length_mm']:.2f}mm")
+        flush_print(f"  Nets routed:     {stats['nets_routed']}/{nets_to_route}")
 
     # Report differential pair length mismatch warnings
     if diffpair_warnings and not quiet:
