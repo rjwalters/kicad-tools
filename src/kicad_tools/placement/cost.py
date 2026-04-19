@@ -38,6 +38,8 @@ class PlacementCostConfig:
         boundary_weight: Weight for board boundary violation penalty.
         wirelength_weight: Weight for total wirelength cost.
         area_weight: Weight for bounding-box area cost.
+        block_boundary_weight: Weight for block boundary violation penalty.
+        inter_block_spacing: Minimum spacing between block bounding boxes (mm).
         mode: Scoring mode (weighted_sum or lexicographic).
     """
 
@@ -46,7 +48,28 @@ class PlacementCostConfig:
     boundary_weight: float = 1e5
     wirelength_weight: float = 1.0
     area_weight: float = 0.1
+    block_boundary_weight: float = 1e5
+    inter_block_spacing: float = 1.0
     mode: CostMode = CostMode.WEIGHTED_SUM
+
+
+@dataclass(frozen=True)
+class BlockRegion:
+    """Axis-aligned region assigned to a block.
+
+    Attributes:
+        block_id: Identifier matching a :class:`BlockGroupDef`.
+        min_x: Left edge in mm.
+        min_y: Top edge in mm.
+        max_x: Right edge in mm.
+        max_y: Bottom edge in mm.
+    """
+
+    block_id: str
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
 
 
 @dataclass(frozen=True)
@@ -59,6 +82,8 @@ class CostBreakdown:
         boundary: Raw boundary violation penalty (sum of violation depths, mm).
         drc: Raw DRC violation count.
         area: Raw bounding-box area of all placements (mm^2).
+        block_boundary: Raw block boundary violation penalty (mm).
+        inter_block: Raw inter-block spacing violation penalty (mm).
     """
 
     wirelength: float = 0.0
@@ -66,6 +91,8 @@ class CostBreakdown:
     boundary: float = 0.0
     drc: float = 0.0
     area: float = 0.0
+    block_boundary: float = 0.0
+    inter_block: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -353,6 +380,133 @@ def compute_area(
     return width * height
 
 
+def compute_block_boundary_violation(
+    placements: Sequence[ComponentPlacement],
+    block_regions: Sequence[BlockRegion],
+    block_membership: dict[str, str],
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Compute total boundary violation for block member components.
+
+    For each component that belongs to a block, penalizes any portion of
+    its bounding box that extends outside the assigned block region. Uses
+    the same depth-based penalty approach as :func:`compute_boundary_violation`.
+
+    Args:
+        placements: Current component positions.
+        block_regions: Block boundary regions.
+        block_membership: Map from component reference to block_id.
+        footprint_sizes: Map from reference to (width, height) in mm.
+
+    Returns:
+        Sum of boundary violation depths across all block members (mm).
+        Zero means all block members are within their assigned regions.
+    """
+    if not block_regions or not block_membership:
+        return 0.0
+
+    default_size = (1.0, 1.0)
+    region_map = {r.block_id: r for r in block_regions}
+    total = 0.0
+
+    for p in placements:
+        bid = block_membership.get(p.reference)
+        if bid is None:
+            continue
+        region = region_map.get(bid)
+        if region is None:
+            continue
+
+        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        half_w, half_h = w / 2, h / 2
+
+        left = p.x - half_w
+        right = p.x + half_w
+        top = p.y - half_h
+        bottom = p.y + half_h
+
+        total += max(0.0, region.min_x - left)
+        total += max(0.0, right - region.max_x)
+        total += max(0.0, region.min_y - top)
+        total += max(0.0, bottom - region.max_y)
+
+    return total
+
+
+def compute_inter_block_spacing_violation(
+    placements: Sequence[ComponentPlacement],
+    block_membership: dict[str, str],
+    min_spacing: float,
+    footprint_sizes: dict[str, tuple[float, float]] | None = None,
+) -> float:
+    """Compute penalty for blocks placed closer than minimum spacing.
+
+    Computes the bounding box of each block from its member positions, then
+    checks pairwise edge-to-edge distance. If any pair is closer than
+    *min_spacing*, the shortfall is added to the penalty.
+
+    Args:
+        placements: Current component positions.
+        block_membership: Map from component reference to block_id.
+        min_spacing: Minimum spacing between block bounding boxes (mm).
+        footprint_sizes: Map from reference to (width, height) in mm.
+
+    Returns:
+        Sum of spacing shortfalls across all block pairs (mm).
+        Zero means all blocks are sufficiently spaced.
+    """
+    if not block_membership or min_spacing <= 0:
+        return 0.0
+
+    default_size = (1.0, 1.0)
+
+    # Compute bounding box per block
+    block_boxes: dict[str, list[float]] = {}  # block_id -> [min_x, min_y, max_x, max_y]
+    for p in placements:
+        bid = block_membership.get(p.reference)
+        if bid is None:
+            continue
+        w, h = (footprint_sizes or {}).get(p.reference, default_size)
+        half_w, half_h = w / 2, h / 2
+        left = p.x - half_w
+        right = p.x + half_w
+        top = p.y - half_h
+        bottom = p.y + half_h
+
+        if bid not in block_boxes:
+            block_boxes[bid] = [left, top, right, bottom]
+        else:
+            bb = block_boxes[bid]
+            bb[0] = min(bb[0], left)
+            bb[1] = min(bb[1], top)
+            bb[2] = max(bb[2], right)
+            bb[3] = max(bb[3], bottom)
+
+    # Pairwise spacing check
+    block_ids = list(block_boxes.keys())
+    total = 0.0
+    for i in range(len(block_ids)):
+        for j in range(i + 1, len(block_ids)):
+            a = block_boxes[block_ids[i]]
+            b = block_boxes[block_ids[j]]
+            # Edge-to-edge gap on each axis
+            gap_x = max(a[0], b[0]) - min(a[2], b[2])
+            gap_y = max(a[1], b[1]) - min(a[3], b[3])
+
+            if gap_x <= 0 and gap_y <= 0:
+                # Overlapping -- gap is 0
+                gap = 0.0
+            elif gap_x > 0 and gap_y > 0:
+                gap = (gap_x**2 + gap_y**2) ** 0.5
+            else:
+                gap = max(gap_x, gap_y)
+
+            if gap < min_spacing:
+                total += min_spacing - gap
+
+    return total
+
+
 def evaluate_placement(
     placements: Sequence[ComponentPlacement],
     nets: Sequence[Net],
@@ -360,6 +514,8 @@ def evaluate_placement(
     board: BoardOutline,
     config: PlacementCostConfig | None = None,
     footprint_sizes: dict[str, tuple[float, float]] | None = None,
+    block_regions: Sequence[BlockRegion] | None = None,
+    block_membership: dict[str, str] | None = None,
 ) -> PlacementScore:
     """Evaluate a placement configuration and return a composite score.
 
@@ -374,6 +530,8 @@ def evaluate_placement(
         config: Cost function configuration. Uses defaults if None.
         footprint_sizes: Optional map from reference to (width, height) in mm.
             Used by overlap, boundary, and DRC sub-functions.
+        block_regions: Optional block boundary regions for block-aware scoring.
+        block_membership: Optional map from component reference to block_id.
 
     Returns:
         PlacementScore with total score, per-component breakdown, and
@@ -389,15 +547,33 @@ def evaluate_placement(
     drc = compute_drc_violations(placements, rules, footprint_sizes)
     area = compute_area(placements)
 
+    # Block-aware cost components
+    block_boundary = 0.0
+    inter_block = 0.0
+    if block_regions and block_membership:
+        block_boundary = compute_block_boundary_violation(
+            placements, block_regions, block_membership, footprint_sizes
+        )
+        inter_block = compute_inter_block_spacing_violation(
+            placements, block_membership, config.inter_block_spacing, footprint_sizes
+        )
+
     breakdown = CostBreakdown(
         wirelength=wirelength,
         overlap=overlap,
         boundary=boundary,
         drc=drc,
         area=area,
+        block_boundary=block_boundary,
+        inter_block=inter_block,
     )
 
-    is_feasible = overlap == 0.0 and drc == 0.0 and boundary == 0.0
+    is_feasible = (
+        overlap == 0.0
+        and drc == 0.0
+        and boundary == 0.0
+        and block_boundary == 0.0
+    )
 
     if config.mode == CostMode.LEXICOGRAPHIC:
         total = _lexicographic_score(breakdown, config, is_feasible)
@@ -419,6 +595,8 @@ def _weighted_sum_score(breakdown: CostBreakdown, config: PlacementCostConfig) -
         + config.boundary_weight * breakdown.boundary
         + config.wirelength_weight * breakdown.wirelength
         + config.area_weight * breakdown.area
+        + config.block_boundary_weight * breakdown.block_boundary
+        + config.block_boundary_weight * breakdown.inter_block
     )
 
 

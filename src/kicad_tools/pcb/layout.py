@@ -5,6 +5,8 @@ This module provides the PCBLayout class for arranging blocks and
 routing between them.
 """
 
+from __future__ import annotations
+
 from .blocks.base import PCBBlock
 from .geometry import Layer
 from .primitives import TraceSegment, Via
@@ -79,6 +81,39 @@ class PCBLayout:
             )
 
         return result
+
+    def to_block_groups(self) -> list:
+        """Extract :class:`BlockGroupDef` instances from registered blocks.
+
+        Each ``PCBBlock`` is converted to a ``BlockGroupDef`` with relative
+        component offsets suitable for the placement optimizer's
+        reduced-dimensionality encoding.
+
+        Returns:
+            List of ``BlockGroupDef`` instances (one per block).
+        """
+        from kicad_tools.placement.vector import BlockGroupDef, RelativeOffset
+
+        groups: list[BlockGroupDef] = []
+        for name, block in self.blocks.items():
+            members: list[RelativeOffset] = []
+            for ref, comp in block.components.items():
+                members.append(
+                    RelativeOffset(
+                        reference=ref,
+                        dx=comp.position.x,
+                        dy=comp.position.y,
+                        rotation=comp.rotation,
+                        side=0,  # default front side
+                    )
+                )
+            groups.append(
+                BlockGroupDef(
+                    block_id=name,
+                    members=tuple(members),
+                )
+            )
+        return groups
 
     def summary(self) -> str:
         """Print layout summary."""

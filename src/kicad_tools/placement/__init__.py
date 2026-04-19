@@ -25,6 +25,11 @@ from .analyzer import DesignRules, PlacementAnalyzer
 with contextlib.suppress(ImportError):
     from .bo_strategy import BayesianOptStrategy
 
+from .cost import (
+    BlockRegion,
+    compute_block_boundary_violation,
+    compute_inter_block_spacing_violation,
+)
 from .cmaes_strategy import CMAESStrategy
 from .collision import (
     CollisionResult,
@@ -66,15 +71,23 @@ from .priors import (
 from .slide_off import SlideOffResult, slide_off_overlaps
 from .strategy import PlacementStrategy, StrategyConfig
 from .vector import (
+    BlockGroupDef,
     ComponentDef,
     PadDef,
     PlacedComponent,
     PlacementBounds,
     PlacementVector,
+    RelativeOffset,
     TransformedPad,
     bounds,
+    bounds_with_blocks,
     decode,
+    decode_with_blocks,
     encode,
+    encode_with_blocks,
+    move_block,
+    rotate_block,
+    swap_blocks,
 )
 from .visualization import (
     IterationRecord,
@@ -94,6 +107,8 @@ from .wirelength import (
 
 __all__ = [
     "AffinityGraph",
+    "BlockGroupDef",
+    "BlockRegion",
     "SlideOffResult",
     "BayesianOptStrategy",
     "CMAESStrategy",
@@ -123,6 +138,7 @@ __all__ = [
     "PlacementStrategy",
     "PlacementValidationResult",
     "PlacementVector",
+    "RelativeOffset",
     "RoutabilityResult",
     "SignalFlowResult",
     "StrategyConfig",
@@ -132,22 +148,30 @@ __all__ = [
     "OptimizationRecorder",
     "ParetoPoint",
     "bounds",
+    "bounds_with_blocks",
     "build_affinity_graph",
+    "compute_block_boundary_violation",
     "compute_hpwl",
     "compute_hpwl_breakdown",
+    "compute_inter_block_spacing_violation",
     "decode",
+    "decode_with_blocks",
     "detect_power_domains",
     "detect_signal_flow",
     "encode",
+    "encode_with_blocks",
     "evaluate_placement_multifidelity",
     "find_clusters",
     "make_adaptive_evaluator",
     "make_fixed_fidelity_evaluator",
+    "move_block",
     "plot_convergence",
     "plot_layout",
     "plot_pareto_front",
     "power_domain_clustering",
     "prior_mean_position",
+    "rotate_block",
     "schematic_proximity_prior",
     "slide_off_overlaps",
+    "swap_blocks",
 ]
