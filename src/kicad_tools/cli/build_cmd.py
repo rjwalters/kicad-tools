@@ -985,9 +985,17 @@ Examples:
         if spec_path.is_file():
             project_dir = spec_path.parent
             spec_file = spec_path
-        else:
+        elif spec_path.is_dir():
             project_dir = spec_path
             spec_file = _find_spec_file(project_dir)
+        else:
+            # Path doesn't exist -- if it looks like a file (.kct suffix), use parent
+            if spec_path.suffix == ".kct":
+                project_dir = spec_path.parent
+                spec_file = None
+            else:
+                project_dir = spec_path
+                spec_file = None
     else:
         project_dir = Path.cwd()
         spec_file = _find_spec_file(project_dir)
