@@ -274,6 +274,7 @@ class NegotiatedRouter:
         pad_objs: list[Pad],
         present_cost_factor: float,
         mark_route_callback: callable,
+        per_net_timeout: float | None = None,
     ) -> list[Route]:
         """Route a single net in negotiated mode.
 
@@ -281,6 +282,8 @@ class NegotiatedRouter:
             pad_objs: List of Pad objects to connect
             present_cost_factor: Multiplier for present sharing cost
             mark_route_callback: Callback to mark a route on the grid
+            per_net_timeout: Optional wall-clock timeout in seconds for each
+                A* search within this net (Issue #1605)
 
         Returns:
             List of routes created
@@ -332,6 +335,7 @@ class NegotiatedRouter:
                     target_pad,
                     negotiated_mode=True,
                     present_cost_factor=present_cost_factor,
+                    per_net_timeout=per_net_timeout,
                 )
                 if route:
                     mark_route_callback(route)
@@ -343,6 +347,7 @@ class NegotiatedRouter:
                 pad_objs[1],
                 negotiated_mode=True,
                 present_cost_factor=present_cost_factor,
+                per_net_timeout=per_net_timeout,
             )
             if route:
                 mark_route_callback(route)
@@ -427,6 +432,7 @@ class NegotiatedRouter:
         mark_route_callback: callable,
         ripup_history: dict[int, int] | None = None,
         max_ripups_per_net: int = 3,
+        per_net_timeout: float | None = None,
     ) -> bool:
         """Perform targeted rip-up of blocking nets and re-route.
 
@@ -445,6 +451,8 @@ class NegotiatedRouter:
             mark_route_callback: Callback to mark routes on the grid
             ripup_history: Optional dict tracking ripup count per net
             max_ripups_per_net: Maximum times a net can be ripped up (prevents loops)
+            per_net_timeout: Optional wall-clock timeout in seconds for each
+                A* search (Issue #1605)
 
         Returns:
             True if re-routing succeeded for all affected nets, False otherwise
@@ -473,7 +481,8 @@ class NegotiatedRouter:
         failed_net_success = False  # Issue #858: Track if failed net was routed
         if failed_pads and len(failed_pads) >= 2:
             routes = self.route_net_negotiated(
-                failed_pads, present_cost_factor, mark_route_callback
+                failed_pads, present_cost_factor, mark_route_callback,
+                per_net_timeout=per_net_timeout,
             )
             if routes:
                 net_routes[failed_net] = routes
@@ -488,7 +497,8 @@ class NegotiatedRouter:
             net_pads = pads_by_net.get(net, [])
             if net_pads and len(net_pads) >= 2:
                 routes = self.route_net_negotiated(
-                    net_pads, present_cost_factor, mark_route_callback
+                    net_pads, present_cost_factor, mark_route_callback,
+                    per_net_timeout=per_net_timeout,
                 )
                 if routes:
                     net_routes[net] = routes

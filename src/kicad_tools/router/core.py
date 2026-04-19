@@ -1889,6 +1889,7 @@ class Autorouter:
         history_increment: float = 1.0,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
+        per_net_timeout: float | None = 30.0,
         use_targeted_ripup: bool = False,
         max_ripups_per_net: int = 3,
         adaptive: bool = True,
@@ -1908,6 +1909,9 @@ class Autorouter:
             history_increment: Base history cost increment per iteration
             progress_callback: Optional callback for progress updates
             timeout: Optional timeout in seconds. If reached, returns best partial result.
+            per_net_timeout: Wall-clock timeout in seconds for each per-net A* search
+                (Issue #1605). Prevents individual nets from monopolizing the router
+                on dense grids. Set to None to disable. Default: 30s.
             use_targeted_ripup: If True, use targeted rip-up of blocking nets instead
                 of ripping up all nets through overused cells. This can improve
                 convergence by only displacing nets that actually block the failed
@@ -1970,6 +1974,8 @@ class Autorouter:
             print("  Batch routing: enabled (GPU-accelerated)")
         if timeout:
             print(f"  Timeout: {timeout}s")
+        if per_net_timeout:
+            print(f"  Per-net timeout: {per_net_timeout}s")
 
         # Track overflow history for adaptive mode (Issue #633)
         overflow_history: list[int] = []
@@ -2058,7 +2064,9 @@ class Autorouter:
         if region_router is not None:
 
             def route_fn_init(net: int, pf: float) -> list[Route]:
-                return self._route_net_negotiated(net, pf)
+                return self._route_net_negotiated(
+                    net, pf, per_net_timeout=per_net_timeout
+                )
 
             def mark_fn_init(route: Route) -> None:
                 self.grid.mark_route_usage(route)
@@ -2090,7 +2098,9 @@ class Autorouter:
                     f"  [{pct:5.1f}%] Routing net {i + 1}/{total_nets}: {net_name}... ({elapsed_str()})"
                 )
 
-                routes = self._route_net_negotiated(net, present_factor)
+                routes = self._route_net_negotiated(
+                    net, present_factor, per_net_timeout=per_net_timeout
+                )
                 if routes:
                     net_routes[net] = routes
                     for route in routes:
@@ -2116,6 +2126,22 @@ class Autorouter:
             # Some nets failed to route but no overflow - need rip-up
             failed_count = total_nets - len(net_routes)
             print(f"  ⚠ {failed_count} net(s) failed to route - attempting recovery")
+
+        # Issue #1605: Collect nets that are structurally unroutable (off-grid pads)
+        # These nets cannot be resolved by rip-up iterations and must be excluded
+        # from the recovery loop to avoid futile full-rip-up fallbacks.
+        off_grid_nets: set[int] = {
+            f.net for f in self.routing_failures
+            if f.reason.startswith("PADS_OFF_GRID")
+        }
+        if off_grid_nets:
+            off_grid_names = [
+                self.net_names.get(n, f"Net {n}") for n in off_grid_nets
+            ]
+            print(
+                f"  Excluding {len(off_grid_nets)} structurally unroutable net(s) "
+                f"from rip-up: {', '.join(off_grid_names)}"
+            )
 
         # Skip iteration loop if already timed out
         if not timed_out:
@@ -2168,8 +2194,10 @@ class Autorouter:
 
                 # Issue #858: Also include nets that completely failed to route
                 # (not in net_routes) - these need recovery via targeted rip-up
+                # Issue #1605: Exclude structurally unroutable nets (PADS_OFF_GRID)
                 failed_nets_to_recover = [
-                    n for n in net_order if n not in net_routes and n in pads_by_net
+                    n for n in net_order
+                    if n not in net_routes and n in pads_by_net and n not in off_grid_nets
                 ]
                 if failed_nets_to_recover:
                     # Add failed nets to reroute list if not already present
@@ -2228,6 +2256,7 @@ class Autorouter:
                                 mark_route_callback=mark_route,
                                 ripup_history=ripup_history,
                                 max_ripups_per_net=max_ripups_per_net,
+                                per_net_timeout=per_net_timeout,
                             )
                             if success:
                                 targeted_ripup_count += 1
@@ -2247,7 +2276,10 @@ class Autorouter:
                                 neg_router.rip_up_nets(routed_nets, net_routes, self.routes)
 
                                 # Route the failed net first (it now has priority)
-                                routes = self._route_net_negotiated(failed_net, present_factor)
+                                routes = self._route_net_negotiated(
+                                    failed_net, present_factor,
+                                    per_net_timeout=per_net_timeout,
+                                )
                                 if routes:
                                     net_routes[failed_net] = routes
                                     for route in routes:
@@ -2258,7 +2290,8 @@ class Autorouter:
                                 # Always re-route the other nets (even if failed net didn't route)
                                 for other_net in routed_nets:
                                     other_routes = self._route_net_negotiated(
-                                        other_net, present_factor
+                                        other_net, present_factor,
+                                        per_net_timeout=per_net_timeout,
                                     )
                                     if other_routes:
                                         net_routes[other_net] = other_routes
@@ -2267,7 +2300,10 @@ class Autorouter:
                                             self.routes.append(route)
                             else:
                                 # Fallback: try regular reroute
-                                routes = self._route_net_negotiated(failed_net, present_factor)
+                                routes = self._route_net_negotiated(
+                                    failed_net, present_factor,
+                                    per_net_timeout=per_net_timeout,
+                                )
                                 if routes:
                                     net_routes[failed_net] = routes
                                     targeted_ripup_count += 1
@@ -2337,7 +2373,9 @@ class Autorouter:
                     if region_router is not None and len(nets_to_reroute) > 1:
                         # Route using region-based parallelism
                         def route_fn(net: int, pf: float) -> list[Route]:
-                            return self._route_net_negotiated(net, pf)
+                            return self._route_net_negotiated(
+                                net, pf, per_net_timeout=per_net_timeout
+                            )
 
                         def mark_fn(route: Route) -> None:
                             self.grid.mark_route_usage(route)
@@ -2372,7 +2410,9 @@ class Autorouter:
                                 f"    Re-routing net {i + 1}/{len(nets_to_reroute)}: {net_name}... ({elapsed_str()})"
                             )
 
-                            routes = self._route_net_negotiated(net, present_factor)
+                            routes = self._route_net_negotiated(
+                                net, present_factor, per_net_timeout=per_net_timeout
+                            )
                             if routes:
                                 net_routes[net] = routes
                                 rerouted_count += 1
@@ -2454,8 +2494,20 @@ class Autorouter:
 
         return list(self.routes)
 
-    def _route_net_negotiated(self, net: int, present_cost_factor: float) -> list[Route]:
-        """Route a single net in negotiated mode."""
+    def _route_net_negotiated(
+        self,
+        net: int,
+        present_cost_factor: float,
+        per_net_timeout: float | None = None,
+    ) -> list[Route]:
+        """Route a single net in negotiated mode.
+
+        Args:
+            net: Net ID to route
+            present_cost_factor: Congestion cost factor
+            per_net_timeout: Optional wall-clock timeout in seconds for each
+                A* search within this net (Issue #1605)
+        """
         if net not in self.nets:
             return []
 
@@ -2479,7 +2531,10 @@ class Autorouter:
         def mark_route(route: Route):
             self._mark_route(route)
 
-        new_routes = neg_router.route_net_negotiated(pad_objs, present_cost_factor, mark_route)
+        new_routes = neg_router.route_net_negotiated(
+            pad_objs, present_cost_factor, mark_route,
+            per_net_timeout=per_net_timeout,
+        )
         routes.extend(new_routes)
         return routes
 
