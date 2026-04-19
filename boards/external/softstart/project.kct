@@ -1,0 +1,328 @@
+# KiCad Tools Project Specification
+# Format version: 1.0
+# Generator Soft-Start - Supercapacitor Power Assist
+# =============================================================================
+
+kct_version: "1.0"
+
+project:
+  name: "Generator Soft-Start"
+  revision: "A"
+  created: 2025-01-15
+  author: "rjwalters"
+  description: |
+    Supercapacitor-based power assist for starting window AC units on small
+    portable generators. Injects supplemental current during motor startup
+    to prevent generator overload.
+  artifacts:
+    schematic: "softstart.kicad_sch"
+    pcb: "softstart.kicad_pcb"
+
+intent:
+  summary: |
+    Enable a Honda EU1000i (1000W) generator to start an 8000 BTU window
+    air conditioner by supplementing current during the 300-500ms motor
+    startup surge. Uses supercapacitor banks charged from the AC line,
+    with STM32 MCU for PWM-controlled discharge synchronized to AC phase.
+
+  use_cases:
+    - Running window AC on camping/RV trips with small generator
+    - Emergency power backup for essential cooling
+    - Starting other inductive loads (refrigerator compressors, pumps)
+
+  interfaces:
+    - name: AC_INPUT
+      type: power
+      description: "Generator AC input"
+      voltage: "120VAC 60Hz"
+      current_max: "15A continuous, 40A surge"
+
+    - name: AC_OUTPUT
+      type: power
+      description: "Load AC output (pass-through)"
+      voltage: "120VAC 60Hz"
+      current_max: "15A continuous"
+
+    - name: SUPERCAP_BANK_POS
+      type: energy_storage
+      description: "Positive half-cycle supercapacitor bank"
+      voltage: "81V nominal"
+      capacitance: "0.4F"
+
+    - name: SUPERCAP_BANK_NEG
+      type: energy_storage
+      description: "Negative half-cycle supercapacitor bank"
+      voltage: "81V nominal"
+      capacitance: "0.4F"
+
+    - name: SWD
+      type: debug
+      description: "STM32 programming/debug interface"
+      protocol: "ARM SWD"
+      pins: ["SWCLK", "SWDIO", "NRST", "VCC", "GND"]
+
+  constraints:
+    - "Must handle 120VAC mains safely"
+    - "Supercaps hand-soldered (not JLCPCB assembly)"
+    - "2-layer PCB for cost"
+    - "High-current traces for discharge path"
+    - "Charge only when input voltage in safe range"
+
+requirements:
+  electrical:
+    input:
+      voltage:
+        nominal: "120VAC"
+        min: "100VAC"
+        max: "140VAC"
+      frequency:
+        nominal: "60Hz"
+        range: "55-65Hz"
+      current:
+        continuous: "15A"
+        surge: "40A"
+
+    supercap_banks:
+      cells_per_bank: 30
+      cells_total: 60
+      cell_spec:
+        part: "Tecate TPLH-2R7/12WR10X30"
+        capacitance: "12F"
+        voltage: "2.7V"
+        esr: "36mΩ"
+      bank_voltage: "81V"
+      bank_capacitance: "0.4F"
+      bank_esr: "1.08Ω"
+
+    boost_performance:
+      ac_coverage: "32%"
+      max_discharge_current: "25A"
+      effective_rms_current: "14A"
+      energy_200ms: "110J"
+      energy_500ms: "210J"
+
+    charging:
+      method: "resistor-limited from AC"
+      current: "0.5-1A"
+      time_to_full: "~60s"
+      enable_voltage_min: "100VAC peak"
+      enable_voltage_max: "140VAC peak"
+
+    mcu:
+      part: "STM32G031F6P6"
+      voltage: "3.3V"
+      clock: "64MHz"
+
+  mechanical:
+    dimensions:
+      width: "150mm"
+      height: "100mm"
+    mounting: "M3 standoffs, 4 corners"
+    connector_access: "AC terminals on one edge"
+
+  manufacturing:
+    target_fab: jlcpcb
+    layers:
+      count: 2
+      copper_weight: 2
+    min_trace: "0.2mm"
+    min_space: "0.2mm"
+    min_via: "0.3mm drill"
+    assembly: "none"  # Hand-solder supercaps
+
+  compliance:
+    safety_notes:
+      - "Device operates at mains voltage - proper isolation required"
+      - "Supercaps store significant energy - discharge before servicing"
+      - "For experimental/educational use only"
+
+suggestions:
+  components:
+    supercapacitor:
+      selected: "Tecate TPLH-2R7/12WR10X30"
+      rationale: "12F 2.7V at $0.91/ea - best cost/performance for this application"
+      alternatives: ["Maxwell 100F 2.7V ($6)", "Generic AliExpress"]
+
+    mcu:
+      selected: "STM32G031F6P6"
+      rationale: "Low cost ($1.50), adequate peripherals, TSSOP20 hand-solderable"
+      alternatives: ["STM32G031K6T6 (LQFP32)", "ATtiny1614"]
+
+    discharge_mosfet:
+      selected: "IRFB4110"
+      rationale: "100V 180A, low Rds(on) 3.7mΩ, TO-220 with heatsink"
+      alternatives: ["IPP040N06N", "IRLB8721"]
+
+    current_sense:
+      selected: "0.005Ω shunt + INA180"
+      rationale: "Low-side sensing, 50V/V gain, 0-40A range"
+      alternatives: ["ACS712 hall sensor", "high-side sensing"]
+
+    zero_crossing:
+      selected: "H11AA1 optocoupler"
+      rationale: "AC input optocoupler, provides isolation for ZC detect"
+      alternatives: ["Resistive divider + comparator"]
+
+  layout:
+    - "Supercaps arranged in 2 rows of 15 per bank (30 per side)"
+    - "High-current discharge path: wide traces + copper pour"
+    - "MOSFETs near supercap banks with heatsink clearance"
+    - "MCU section isolated from high-current paths"
+    - "AC terminals on board edge"
+    - "Star ground topology - separate power and signal grounds"
+    - "Current shunt close to MOSFET source"
+    - "Test points for V_ac, V_supercap, I_load"
+
+  pcb_stackup:
+    layer1: "Signal + power polygons (2oz)"
+    layer2: "Ground plane + power polygons (2oz)"
+
+decisions:
+  - date: 2025-01-15
+    phase: concept
+    topic: "Supercap vs Hybrid Design"
+    choice: "Supercap-only (60× 12F cells)"
+    rationale: |
+      Hybrid design (supercaps + electrolytics) delivers more energy but
+      costs 2-3× more and requires complex stacking/switching. Supercap-only
+      at 81V provides same AC coverage (32%) and sufficient energy for
+      8000 BTU startup at half the cost.
+    alternatives: ["16×100F + 56×4700µF hybrid ($224)", "LiPo battery tiers"]
+
+  - date: 2025-01-15
+    phase: concept
+    topic: "Supercap Selection"
+    choice: "Tecate 12F 2.7V @ $0.91"
+    rationale: |
+      DigiKey availability at $0.91/ea (qty 100). 60 cells = $54.60.
+      Smaller cells allow higher voltage (81V vs 21.6V with 100F cells)
+      while keeping costs low.
+    alternatives: ["100F 2.7V @ $6 (too expensive)", "AliExpress generic (quality concerns)"]
+
+  - date: 2025-01-15
+    phase: concept
+    topic: "Control Approach"
+    choice: "STM32 MCU with PWM"
+    rationale: |
+      MCU adds $1.50 but enables: sinusoidal current shaping, precise
+      protection limits, motor start detection, status feedback. Pure
+      analog would be simpler but less capable.
+    alternatives: ["Analog comparator control", "ATtiny microcontroller"]
+
+  - date: 2025-01-15
+    phase: concept
+    topic: "Charging Strategy"
+    choice: "Resistor-limited, MCU-enabled"
+    rationale: |
+      Simple resistor limits inrush, MCU enables charging only when
+      input voltage is in safe range (100-140V peak). Protects against
+      overvoltage from generator surges.
+    alternatives: ["Always-on charging", "Current-limited supply"]
+
+progress:
+  phase: schematic
+  phases:
+    concept:
+      status: completed
+      checklist:
+        - "[x] Define target application (8000 BTU AC + EU1000i)"
+        - "[x] Analyze motor startup requirements"
+        - "[x] Evaluate hybrid vs supercap-only"
+        - "[x] Select supercapacitor (Tecate 12F)"
+        - "[x] Determine bank configuration (30S × 2 banks)"
+        - "[x] Choose MCU (STM32G031)"
+        - "[x] Define charging strategy"
+
+    schematic:
+      status: pending
+      checklist:
+        - "[ ] Power input section (fuse, varistor, filter)"
+        - "[ ] Voltage sensing (AC, supercap banks)"
+        - "[ ] Zero-crossing detection"
+        - "[ ] Current sensing"
+        - "[ ] MCU and 3.3V regulation"
+        - "[ ] Charging circuits (2× banks)"
+        - "[ ] Discharge circuits (2× MOSFETs)"
+        - "[ ] Status LED"
+        - "[ ] Debug header"
+        - "[ ] Supercap symbols (60×)"
+
+    layout:
+      status: pending
+      checklist:
+        - "[ ] Board outline 150×100mm"
+        - "[ ] Supercap placement (60 cells)"
+        - "[ ] High-current routing"
+        - "[ ] Power plane pour"
+        - "[ ] Signal routing"
+        - "[ ] Silkscreen and labels"
+        - "[ ] DRC clean"
+        - "[ ] Design review"
+
+    firmware:
+      status: pending
+      checklist:
+        - "[ ] GPIO and peripheral init"
+        - "[ ] ADC sampling (V_ac, V_sc, I_load)"
+        - "[ ] Zero-crossing interrupt"
+        - "[ ] Motor start detection"
+        - "[ ] PWM discharge control"
+        - "[ ] Protection logic"
+        - "[ ] Status LED control"
+
+    prototype:
+      status: pending
+      checklist:
+        - "[ ] Order PCBs from JLCPCB"
+        - "[ ] Order components"
+        - "[ ] Assemble board"
+        - "[ ] Bench testing (low voltage)"
+        - "[ ] Full voltage testing"
+        - "[ ] Motor load testing"
+
+bom:
+  summary:
+    estimated_total: "$85"
+    categories:
+      supercapacitors: "$54.60"
+      semiconductors: "$6.45"
+      passives: "$4.30"
+      connectors: "$2.90"
+      pcb: "$15.00"
+      mechanical: "$1.40"
+
+  key_parts:
+    - ref: "C1-C60"
+      part: "Tecate TPLH-2R7/12WR10X30"
+      description: "12F 2.7V supercapacitor"
+      qty: 60
+      unit_cost: 0.91
+      source: "DigiKey"
+
+    - ref: "U1"
+      part: "STM32G031F6P6"
+      description: "ARM Cortex-M0+ MCU, TSSOP20"
+      qty: 1
+      unit_cost: 1.50
+      source: "LCSC"
+
+    - ref: "Q1, Q2"
+      part: "IRFB4110"
+      description: "100V 180A N-MOSFET, TO-220"
+      qty: 2
+      unit_cost: 1.50
+      source: "LCSC"
+
+    - ref: "U2"
+      part: "H11AA1"
+      description: "AC input optocoupler"
+      qty: 1
+      unit_cost: 0.50
+      source: "LCSC"
+
+    - ref: "U3"
+      part: "INA180A1"
+      description: "Current sense amplifier"
+      qty: 1
+      unit_cost: 1.00
+      source: "LCSC"

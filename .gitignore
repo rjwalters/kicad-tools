@@ -57,7 +57,9 @@ boards/*/output/*.kicad_pro
 boards/*/output/*.kicad_prl
 boards/*/output/drc_report.json
 boards/*/output/manufacturing/
-boards/external/
+boards/external/*
+!boards/external/softstart/
+boards/external/softstart/output/
 boards/manufacturing/
 
 # Claude
