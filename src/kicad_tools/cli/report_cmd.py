@@ -163,7 +163,26 @@ def _run_generate(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Report written to {report_path}")
+    # Render Markdown → HTML → PDF for a polished deliverable
+    try:
+        from kicad_tools.report.renderers import render_html, render_pdf
+
+        figures_dir = report_path.parent / "figures"
+        md_content = report_path.read_text(encoding="utf-8")
+        html_content = render_html(
+            md_content,
+            figures_dir if figures_dir.exists() else None,
+        )
+        pdf_path = report_path.with_suffix(".pdf")
+        render_pdf(html_content, pdf_path)
+        print(f"Report written to {pdf_path}")
+    except ImportError:
+        print(f"Report written to {report_path}")
+        print(
+            "Hint: install 'kicad-tools[report]' for PDF output",
+            file=sys.stderr,
+        )
+
     return 0
 
 

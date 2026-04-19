@@ -318,7 +318,7 @@ class ManufacturingPackage:
             ),
         )
         if self.config.include_report:
-            result.report_path = out_dir / "report.md"
+            result.report_path = out_dir / "report.pdf"
         if self.config.include_project_zip:
             result.project_zip_path = out_dir / self.config.project_zip_name
         if self.config.include_manifest:
@@ -384,8 +384,25 @@ class ManufacturingPackage:
 
             generator = ReportGenerator()
             report_path = generator.generate(data, out_dir, version_dir=version_dir)
-            result.report_path = report_path
-            logger.info(f"Generated report: {result.report_path}")
+
+            # Render Markdown → HTML → PDF for a polished deliverable
+            pdf_path = report_path.with_suffix(".pdf")
+            try:
+                from ..report.renderers import render_html, render_pdf
+
+                figures_dir = version_dir / "figures"
+                md_content = report_path.read_text(encoding="utf-8")
+                html_content = render_html(
+                    md_content,
+                    figures_dir if figures_dir.exists() else None,
+                )
+                render_pdf(html_content, pdf_path)
+                result.report_path = pdf_path
+                logger.info(f"Generated PDF report: {pdf_path}")
+            except ImportError:
+                # weasyprint or markdown not installed — fall back to .md
+                result.report_path = report_path
+                logger.info(f"Generated report: {report_path}")
         except Exception as e:
             result.errors.append(f"Report generation failed: {e}")
             logger.error(f"Report generation failed: {e}")
@@ -463,9 +480,13 @@ class ManufacturingPackage:
                 shutil.rmtree(child)
 
         # Update result.report_path to point to the flattened location
-        flat_report = report_dest / "report.md"
-        if flat_report.exists():
-            result.report_path = flat_report
+        # Prefer PDF over Markdown
+        flat_pdf = report_dest / "report.pdf"
+        flat_md = report_dest / "report.md"
+        if flat_pdf.exists():
+            result.report_path = flat_pdf
+        elif flat_md.exists():
+            result.report_path = flat_md
 
         logger.info(f"Flattened latest report into {report_dest}")
 
