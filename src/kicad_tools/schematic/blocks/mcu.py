@@ -499,11 +499,50 @@ class ResetButton(CircuitBlock):
         self._switch_bottom = sw_pin2
         self._cap_bottom = c_pin2
 
+    def _route_vertical_to_rail(
+        self,
+        start: tuple[float, float],
+        rail_y: float,
+        avoid_x_range: tuple[float, float] | None,
+        add_junction: bool,
+    ) -> None:
+        """Route a vertical wire from start to a rail, jogging around an X range if needed.
+
+        When ``avoid_x_range`` is provided and ``start[0]`` falls within the
+        range, the wire takes a horizontal jog one grid step (2.54 mm) to the
+        left of the range before descending/ascending to the rail.
+
+        Args:
+            start: Starting point (component pin position).
+            rail_y: Y coordinate of the target rail.
+            avoid_x_range: Optional (x_min, x_max) range to avoid.  If
+                ``start[0]`` is inside this range the wire jogs around it.
+            add_junction: Whether to add a junction marker at the rail.
+        """
+        sch = self.schematic
+        sx, sy = start
+
+        if avoid_x_range is not None and avoid_x_range[0] <= sx <= avoid_x_range[1]:
+            jog_x = avoid_x_range[0] - 2.54
+            # Horizontal out to jog_x
+            sch.add_wire(start, (jog_x, sy))
+            # Vertical down/up to rail
+            sch.add_wire((jog_x, sy), (jog_x, rail_y))
+            rail_x = jog_x
+        else:
+            # Straight vertical to rail
+            sch.add_wire(start, (sx, rail_y))
+            rail_x = sx
+
+        if add_junction:
+            sch.add_junction(rail_x, rail_y)
+
     def connect_to_rails(
         self,
         vcc_rail_y: float,
         gnd_rail_y: float,
         add_junctions: bool = True,
+        avoid_x_range: tuple[float, float] | None = None,
     ) -> None:
         """
         Connect reset button to power rails.
@@ -512,51 +551,42 @@ class ResetButton(CircuitBlock):
             vcc_rail_y: Y coordinate of VCC rail
             gnd_rail_y: Y coordinate of GND rail
             add_junctions: Whether to add junction markers
+            avoid_x_range: Optional (x_min, x_max) range of X coordinates to
+                avoid when routing vertical wires to rails.  Wires whose X
+                falls inside this range are jogged horizontally before going
+                vertical, preventing T-junction shorts with nearby MCU pin
+                wires.
         """
-        sch = self.schematic
-
         if self.active_low:
             # Active-low: Connect resistor top to VCC, switch bottom to GND
             vcc_pos = self._resistor_top
             gnd_pos = self._switch_bottom
 
             # Connect pull-up to VCC rail
-            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y), warn_on_collision=False)
+            self._route_vertical_to_rail(vcc_pos, vcc_rail_y, avoid_x_range, add_junctions)
 
             # Connect switch and cap bottom to GND rail
-            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
+            self._route_vertical_to_rail(gnd_pos, gnd_rail_y, avoid_x_range, add_junctions)
 
             # Connect cap bottom to GND rail
-            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], gnd_rail_y), warn_on_collision=False)
-
-            if add_junctions:
-                sch.add_junction(vcc_pos[0], vcc_rail_y)
-                sch.add_junction(gnd_pos[0], gnd_rail_y)
-                sch.add_junction(self._cap_bottom[0], gnd_rail_y)
+            self._route_vertical_to_rail(self._cap_bottom, gnd_rail_y, avoid_x_range, add_junctions)
         else:
             # Active-high: Connect resistor top to GND, switch bottom to VCC
             gnd_pos = self._resistor_top
             vcc_pos = self._switch_bottom
 
             # Connect pull-down to GND rail
-            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
+            self._route_vertical_to_rail(gnd_pos, gnd_rail_y, avoid_x_range, add_junctions)
 
             # Connect switch and cap bottom to VCC rail
-            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y), warn_on_collision=False)
+            self._route_vertical_to_rail(vcc_pos, vcc_rail_y, avoid_x_range, add_junctions)
 
             # Connect cap bottom to VCC rail
-            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], vcc_rail_y), warn_on_collision=False)
-
-            if add_junctions:
-                sch.add_junction(gnd_pos[0], gnd_rail_y)
-                sch.add_junction(vcc_pos[0], vcc_rail_y)
-                sch.add_junction(self._cap_bottom[0], vcc_rail_y)
+            self._route_vertical_to_rail(self._cap_bottom, vcc_rail_y, avoid_x_range, add_junctions)
 
         # Connect TVS cathode to GND if present
         if self.esd_protection and hasattr(self, "_tvs_cathode"):
-            sch.add_wire(self._tvs_cathode, (self._tvs_cathode[0], gnd_rail_y), warn_on_collision=False)
-            if add_junctions:
-                sch.add_junction(self._tvs_cathode[0], gnd_rail_y)
+            self._route_vertical_to_rail(self._tvs_cathode, gnd_rail_y, avoid_x_range, add_junctions)
 
 
 def create_reset_button(
