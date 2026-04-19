@@ -923,6 +923,44 @@ class TestSchematicConstruction:
         assert len(sch.labels) == 1
         assert sch.labels[0].text == "VCC"
 
+    def test_add_rail_with_end_power_symbols(self):
+        """add_rail() places power symbols at endpoints when requested."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wire = sch.add_rail(
+            y=100,
+            x_start=10,
+            x_end=50,
+            net_label="VCC",
+            start_power="power:+3V3",
+            end_power="power:+3V3",
+            snap=False,
+        )
+        assert len(sch.wires) == 1
+        assert len(sch.labels) == 1
+        # Two power symbols placed at endpoints
+        assert len(sch.power_symbols) == 2
+        # Supply symbols should be placed above the rail (y - 10)
+        assert sch.power_symbols[0].y == 90
+        assert sch.power_symbols[1].y == 90
+        # X positions should match wire endpoints
+        xs = sorted([sch.power_symbols[0].x, sch.power_symbols[1].x])
+        assert xs == [10, 50]
+
+    def test_add_rail_with_gnd_power_symbol(self):
+        """add_rail() places GND power symbols below the rail."""
+        sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
+        wire = sch.add_rail(
+            y=280,
+            x_start=25,
+            x_end=600,
+            end_power="power:GND",
+            snap=False,
+        )
+        assert len(sch.power_symbols) == 1
+        # GND symbols should be placed below the rail (y + 10)
+        assert sch.power_symbols[0].y == 290
+        assert sch.power_symbols[0].x == 600
+
     def test_add_rail_tracks_continuous_rails(self):
         """add_rail() registers the rail for T-connection warnings."""
         sch = Schematic(title="Test", snap_mode=SnapMode.OFF)
