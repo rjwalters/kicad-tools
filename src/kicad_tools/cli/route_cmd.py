@@ -234,7 +234,13 @@ def _export_failed_nets(
         return False
 
 
-def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: bool = False) -> str:
+def show_preview(
+    router,
+    net_map: dict[str, int],
+    nets_to_route: int,
+    quiet: bool = False,
+    nets_to_route_ids: set[int] | None = None,
+) -> str:
     """Display routing preview with per-net breakdown.
 
     Args:
@@ -242,6 +248,8 @@ def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: boo
         net_map: Mapping of net names to net IDs
         nets_to_route: Total number of nets expected to be routed
         quiet: If True, skip interactive prompt and return 'n'
+        nets_to_route_ids: Optional set of net IDs targeted for routing.
+            When provided, ``nets_routed`` only counts nets in this set.
 
     Returns:
         User response: 'y' (apply), 'n' (reject), or 'e' (edit - future)
@@ -302,8 +310,8 @@ def show_preview(router, net_map: dict[str, int], nets_to_route: int, quiet: boo
                 print(f"\nNet: {net_name}")
                 print("  Status:   \u2717 No path found")
 
-    # Summary statistics
-    overall_stats = router.get_statistics()
+    # Summary statistics — filter to target population (Issue #1643)
+    overall_stats = router.get_statistics(nets_to_route_ids=nets_to_route_ids)
     nets_routed = overall_stats["nets_routed"]
     success_rate = (nets_routed / nets_to_route * 100) if nets_to_route > 0 else 0
 
@@ -741,8 +749,9 @@ def route_with_layer_escalation(
                 print(f"  Routing error: {e}")
             continue
 
-        # Calculate completion
-        stats = router.get_statistics()
+        # Calculate completion — filter to multi-pad nets only (Issue #1643)
+        multi_pad_net_ids = set(multi_pad_nets)
+        stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
         nets_routed = stats["nets_routed"]
         completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
 
@@ -907,6 +916,10 @@ def route_with_layer_escalation(
                 f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
                 f"on {final_result.layer_count} layers"
             )
+            _multi_pad_ids = {
+                n for n, p in final_result.router.nets.items()
+                if n > 0 and len(p) >= 2
+            }
             show_routing_summary(
                 final_result.router,
                 final_result.net_map,
@@ -914,6 +927,7 @@ def route_with_layer_escalation(
                 quiet=quiet,
                 current_strategy=args.strategy,
                 pcb_file=args.pcb,
+                nets_to_route_ids=_multi_pad_ids,
             )
 
     if final_result.success:
@@ -1100,8 +1114,9 @@ def route_with_rule_relaxation(
                 print(f"  Routing error: {e}")
             continue
 
-        # Calculate completion
-        stats = router.get_statistics()
+        # Calculate completion — filter to multi-pad nets only (Issue #1643)
+        multi_pad_net_ids = set(multi_pad_nets)
+        stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
         nets_routed = stats["nets_routed"]
         completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
 
@@ -1284,6 +1299,10 @@ def route_with_rule_relaxation(
                 f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
                 f"at tier {final_result.tier}"
             )
+            _multi_pad_ids = {
+                n for n, p in final_result.router.nets.items()
+                if n > 0 and len(p) >= 2
+            }
             show_routing_summary(
                 final_result.router,
                 final_result.net_map,
@@ -1291,6 +1310,7 @@ def route_with_rule_relaxation(
                 quiet=quiet,
                 current_strategy=args.strategy,
                 pcb_file=args.pcb,
+                nets_to_route_ids=_multi_pad_ids,
             )
 
     if final_result.success:
@@ -1478,8 +1498,9 @@ def route_with_combined_escalation(
                 results_matrix[(tier.tier, layer_count)] = 0.0
                 continue
 
-            # Calculate completion
-            stats = router.get_statistics()
+            # Calculate completion — filter to multi-pad nets only (Issue #1643)
+            multi_pad_net_ids = set(multi_pad_nets)
+            stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
             nets_routed = stats["nets_routed"]
             completion = nets_routed / nets_to_route if nets_to_route > 0 else 1.0
             results_matrix[(tier.tier, layer_count)] = completion
@@ -1693,6 +1714,10 @@ def route_with_combined_escalation(
                 f"PARTIAL: Best result {final_result.completion * 100:.0f}% "
                 f"at {final_result.layer_count} layers, tier {final_result.tier}"
             )
+            _multi_pad_ids = {
+                n for n, p in final_result.router.nets.items()
+                if n > 0 and len(p) >= 2
+            }
             show_routing_summary(
                 final_result.router,
                 final_result.net_map,
@@ -1700,6 +1725,7 @@ def route_with_combined_escalation(
                 quiet=quiet,
                 current_strategy=args.strategy,
                 pcb_file=args.pcb,
+                nets_to_route_ids=_multi_pad_ids,
             )
 
     if final_result.success:
@@ -3028,8 +3054,10 @@ def main(argv: list[str] | None = None) -> int:
             if pre_vias > 0:
                 print(f"  Vias:     {pre_vias} -> {post_vias} ({-via_reduction:+.1f}%)")
 
-    # Get statistics
-    stats = router.get_statistics()
+    # Get statistics — pass multi-pad net IDs so nets_routed only counts
+    # signal nets, keeping numerator/denominator consistent (Issue #1643)
+    multi_pad_net_ids = set(multi_pad_nets)
+    stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
 
     if not quiet:
         print("\n--- Results ---")
@@ -3057,7 +3085,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Show preview if requested
     if args.preview:
-        response = show_preview(router, net_map, nets_to_route, quiet=quiet)
+        response = show_preview(
+            router, net_map, nets_to_route, quiet=quiet,
+            nets_to_route_ids=multi_pad_net_ids,
+        )
         if response != "y":
             if not quiet:
                 print("\nRouting cancelled. No changes saved.")
@@ -3272,7 +3303,8 @@ def main(argv: list[str] | None = None) -> int:
             # Use JSON format if requested
             if args.format == "json":
                 print_routing_diagnostics_json(
-                    router, net_map, nets_to_route, current_strategy=args.strategy
+                    router, net_map, nets_to_route, current_strategy=args.strategy,
+                    nets_to_route_ids=multi_pad_net_ids,
                 )
             else:
                 # Verbose mode shows detailed path analysis for each failure
@@ -3285,6 +3317,7 @@ def main(argv: list[str] | None = None) -> int:
                     verbose=verbose,
                     current_strategy=args.strategy,
                     pcb_file=args.pcb,
+                    nets_to_route_ids=multi_pad_net_ids,
                 )
 
     # Save partial results on clean partial exit (not just SIGINT)

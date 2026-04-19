@@ -18,6 +18,7 @@ def compute_routing_statistics(
     routes: list[Route],
     grid: RoutingGrid,
     layer_stats: dict,
+    nets_to_route_ids: set[int] | None = None,
 ) -> dict:
     """Compute routing statistics including congestion metrics.
 
@@ -25,6 +26,10 @@ def compute_routing_statistics(
         routes: List of completed routes
         grid: The routing grid (for congestion data)
         layer_stats: Pre-computed layer usage statistics
+        nets_to_route_ids: Optional set of net IDs that were targeted for
+            routing (multi-pad signal nets).  When provided, ``nets_routed``
+            only counts nets present in this set so the numerator and
+            denominator use the same population.
 
     Returns:
         Dictionary with routing statistics
@@ -36,12 +41,18 @@ def compute_routing_statistics(
     )
     congestion_stats = grid.get_congestion_map()
 
+    all_routed_nets = {r.net for r in routes}
+    if nets_to_route_ids is not None:
+        nets_routed = len(all_routed_nets & nets_to_route_ids)
+    else:
+        nets_routed = len(all_routed_nets)
+
     return {
         "routes": len(routes),
         "segments": sum(len(r.segments) for r in routes),
         "vias": sum(len(r.vias) for r in routes),
         "total_length_mm": total_length,
-        "nets_routed": len({r.net for r in routes}),
+        "nets_routed": nets_routed,
         "max_congestion": congestion_stats["max_congestion"],
         "avg_congestion": congestion_stats["avg_congestion"],
         "congested_regions": congestion_stats["congested_regions"],
