@@ -12,6 +12,7 @@ from kicad_tools.cli.build_cmd import (
     _format_no_generator_message,
     _generator_candidates,
     _run_step_pcb,
+    _run_step_route,
     _run_step_schematic,
     main,
 )
@@ -280,3 +281,143 @@ class TestOutputDirArgument:
         kct_file.write_text("[project]\nname = 'test'\n")
         ret = main([str(kct_file), "--dry-run"])
         assert ret in (0, 1)
+
+
+class TestBuildRouteExitCode2:
+    """Tests for build_cmd treating route exit code 2 as success (issue #1641).
+
+    When the router returns exit code 2 (partial routing), the build should
+    treat it as success because the unrouted nets are intentionally-skipped
+    pour nets (GND, +3.3V, etc.) that will be connected via zone fill.
+    """
+
+    def test_route_exit_code_2_is_success(self, tmp_path: Path) -> None:
+        """Route exit code 2 (partial routing) should be treated as success."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        output_file = tmp_path / "board_routed.kicad_pcb"
+        output_file.write_text("(kicad_pcb)")  # simulate output exists
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+
+        console = Console()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=2, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        assert result.success is True, (
+            f"Route exit code 2 should be success, got: {result.message}"
+        )
+        assert "skipped" in result.message.lower() or "zone fill" in result.message.lower()
+
+    def test_route_exit_code_0_is_success(self, tmp_path: Path) -> None:
+        """Route exit code 0 (full success) remains success."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+        output_file = tmp_path / "board_routed.kicad_pcb"
+        output_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+
+        console = Console()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            result = _run_step_route(ctx, console)
+
+        assert result.success is True
+
+    def test_route_exit_code_1_is_failure(self, tmp_path: Path) -> None:
+        """Route exit code 1 (fatal failure) remains failure."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+
+        console = Console()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stderr="routing failed", stdout=""
+            )
+            result = _run_step_route(ctx, console)
+
+        assert result.success is False
+
+    def test_route_exit_code_3_is_failure(self, tmp_path: Path) -> None:
+        """Route exit code 3 (DRC failure) remains failure."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text("(kicad_pcb)")
+
+        ctx = BuildContext(
+            project_dir=tmp_path,
+            spec_file=None,
+        )
+        ctx.pcb_file = pcb_file
+        ctx.mfr = "jlcpcb"
+        ctx.quiet = True
+        ctx.verbose = False
+        ctx.dry_run = False
+        ctx.force = True
+        ctx.output_dir = None
+        ctx.spec = None
+
+        console = Console()
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=3, stderr="DRC violations", stdout=""
+            )
+            result = _run_step_route(ctx, console)
+
+        assert result.success is False

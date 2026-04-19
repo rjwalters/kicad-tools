@@ -593,6 +593,57 @@ def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
     return new_content
 
 
+def _auto_skip_pour_nets(
+    pcb_path: Path,
+    skip_nets: list[str],
+    quiet: bool = False,
+) -> list[str]:
+    """Detect pour nets in the PCB and add them to the skip list.
+
+    Reads net definitions from the PCB file and classifies them.  Nets
+    identified as pour nets (GND, power rails, etc.) are appended to
+    *skip_nets* so the router excludes them -- they will be connected
+    via zone fill instead of traces.
+
+    Args:
+        pcb_path: Path to the .kicad_pcb file.
+        skip_nets: Mutable list of net names already marked for skipping
+            (e.g. from ``--skip-nets`` CLI flag).  Modified in place.
+        quiet: Suppress informational output.
+
+    Returns:
+        List of net names that were auto-skipped (subset of *skip_nets*).
+    """
+    try:
+        import re as _re
+
+        from kicad_tools.router.net_class import classify_and_apply_rules
+
+        pcb_text_for_nets = pcb_path.read_text()
+        net_names: dict[int, str] = {}
+        for m in _re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text_for_nets):
+            net_num, name = int(m.group(1)), m.group(2)
+            if net_num > 0:
+                net_names[net_num] = name
+        del pcb_text_for_nets  # free memory
+
+        if net_names:
+            net_class_map = classify_and_apply_rules(net_names)
+            auto_skip = [
+                name
+                for name, routing in net_class_map.items()
+                if routing.is_pour_net and name not in skip_nets
+            ]
+            if auto_skip:
+                skip_nets.extend(auto_skip)
+                if not quiet:
+                    print(f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets \u2014 use zone fill)")
+            return auto_skip
+    except Exception:
+        pass  # Fall back to user-supplied skip_nets only
+    return []
+
+
 def route_with_layer_escalation(
     pcb_path: Path,
     output_path: Path,
@@ -648,6 +699,9 @@ def route_with_layer_escalation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Auto-classify pour nets and extend skip_nets
+    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
     # Layer stacks to try (in escalation order)
     layer_configs = [
@@ -988,6 +1042,9 @@ def route_with_rule_relaxation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Auto-classify pour nets and extend skip_nets
+    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -1370,6 +1427,9 @@ def route_with_combined_escalation(
     skip_nets = []
     if args.skip_nets:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
+
+    # Auto-classify pour nets and extend skip_nets
+    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=quiet)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -2426,32 +2486,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_nets = [n.strip() for n in args.skip_nets.split(",")]
 
     # Auto-classify pour nets and extend skip_nets
-    try:
-        import re as _re
-
-        from kicad_tools.router.net_class import classify_and_apply_rules
-
-        pcb_text_for_nets = pcb_path.read_text()
-        net_names: dict[int, str] = {}
-        for m in _re.finditer(r'\(net\s+(\d+)\s+"([^"]+)"\)', pcb_text_for_nets):
-            net_num, name = int(m.group(1)), m.group(2)
-            if net_num > 0:
-                net_names[net_num] = name
-        del pcb_text_for_nets  # free memory
-
-        if net_names:
-            net_class_map = classify_and_apply_rules(net_names)
-            auto_skip = [
-                name
-                for name, routing in net_class_map.items()
-                if routing.is_pour_net and name not in skip_nets
-            ]
-            if auto_skip:
-                skip_nets.extend(auto_skip)
-                if not args.quiet:
-                    print(f"Auto-skip: {', '.join(sorted(auto_skip))} (pour nets — use zone fill)")
-    except Exception:
-        pass  # Fall back to user-supplied skip_nets only
+    _auto_skip_pour_nets(pcb_path, skip_nets, quiet=args.quiet)
 
     # Import router modules
     from kicad_tools.analysis import ComplexityAnalyzer, ComplexityRating

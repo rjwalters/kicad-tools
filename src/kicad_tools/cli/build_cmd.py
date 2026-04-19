@@ -820,6 +820,18 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                 message="Routing completed successfully",
                 output_file=output_file if output_file.exists() else None,
             )
+        elif result.returncode == 2:
+            # Exit code 2 = partial routing (some nets routed, some skipped).
+            # When pour nets (GND, +3.3V, etc.) are auto-skipped for zone fill,
+            # the router reports partial completion even though all signal nets
+            # routed successfully.  Treat this as success so the build pipeline
+            # continues to verification.
+            return BuildResult(
+                step="route",
+                success=True,
+                message="Routing completed (some nets skipped for zone fill)",
+                output_file=output_file if output_file.exists() else None,
+            )
         else:
             error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
             return BuildResult(
