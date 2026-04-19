@@ -13,11 +13,12 @@ Defines the schema for PCB project specifications including:
 from __future__ import annotations
 
 import datetime
+import re
 from enum import Enum
 from typing import Any
 
 try:
-    from pydantic import BaseModel, Field, field_validator
+    from pydantic import BaseModel, Field, field_validator, model_validator
 except ImportError as e:
     raise ImportError(
         "pydantic is required for the spec module. "
@@ -205,11 +206,43 @@ class EnvironmentalRequirements(BaseModel):
     ip_rating: str | None = Field(default=None, description="IP rating")
 
 
+_COPPER_WEIGHT_RE = re.compile(r"^\s*([\d.]+)\s*(?:oz)?\s*$", re.IGNORECASE)
+
+
+def _parse_copper_weight_oz(value: int | float | str) -> float:
+    """Parse a copper weight value to float oz.
+
+    Accepts:
+      - int or float (returned as-is, e.g. 2 -> 2.0)
+      - str like '2oz', '0.5oz', '2 oz', '2OZ', or bare '2'
+
+    Raises ValueError for unrecognised formats.
+    """
+    if isinstance(value, int | float):
+        return float(value)
+    if not isinstance(value, str):
+        raise ValueError(
+            f"Invalid copper_weight type: {type(value).__name__}. "
+            "Expected a number or string like '2oz', '0.5oz', '1 oz'."
+        )
+    m = _COPPER_WEIGHT_RE.match(value)
+    if m is None:
+        raise ValueError(
+            f"Invalid copper_weight: '{value}'. "
+            "Expected a number or string like '2oz', '0.5oz', '1 oz'."
+        )
+    return float(m.group(1))
+
+
 class ManufacturingRequirements(BaseModel):
     """Manufacturing requirements and constraints."""
 
     layers: dict[str, int] | None = Field(
         default=None, description="Layer count (preferred, min, max)"
+    )
+    copper_weight: float | None = Field(
+        default=None,
+        description="Copper weight in oz/ft^2 (e.g., 1, 2, '2oz', '0.5oz')",
     )
     min_trace: str | None = Field(default=None, description="Minimum trace width")
     min_space: str | None = Field(default=None, description="Minimum spacing")
@@ -222,6 +255,28 @@ class ManufacturingRequirements(BaseModel):
     finish: str | None = Field(default=None, description="Surface finish (HASL, ENIG, etc.)")
     solder_mask: str | None = Field(default=None, description="Solder mask color")
     silkscreen: str | None = Field(default=None, description="Silkscreen color")
+
+    @field_validator("copper_weight", mode="before")
+    @classmethod
+    def validate_copper_weight(cls, v: Any) -> float | None:
+        """Parse copper weight from int, float, or oz-bearing string."""
+        if v is None:
+            return None
+        return _parse_copper_weight_oz(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_copper_weight_from_layers(cls, data: Any) -> Any:
+        """Promote copper_weight from layers dict to top-level field if nested."""
+        if isinstance(data, dict):
+            layers = data.get("layers")
+            if isinstance(layers, dict) and "copper_weight" in layers:
+                # Only promote if not already set at top level
+                if "copper_weight" not in data or data["copper_weight"] is None:
+                    data["copper_weight"] = layers.pop("copper_weight")
+                else:
+                    layers.pop("copper_weight")
+        return data
 
 
 class Compliance(BaseModel):
