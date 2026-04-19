@@ -44,10 +44,13 @@ class TestSubgridPrepass:
 
     def _make_router_with_off_grid_pads(self):
         """Create a router with TSSOP-like off-grid pads (0.65mm pitch on 0.1mm grid)."""
+        # Use realistic TSSOP pad dimensions (0.3mm x 0.45mm) and fine-pitch
+        # trace/clearance settings so escape segments can pass clearance
+        # validation against neighboring pads (Issue #1626).
         rules = DesignRules(
             grid_resolution=0.1,
-            trace_width=0.2,
-            trace_clearance=0.15,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
         router = Autorouter(width=30.0, height=30.0, rules=rules)
 
@@ -62,7 +65,7 @@ class TestSubgridPrepass:
                 "net": 1,
                 "net_name": "NET1",
                 "width": 0.3,
-                "height": 0.8,
+                "height": 0.45,
             },
             {
                 "number": "2",
@@ -71,7 +74,7 @@ class TestSubgridPrepass:
                 "net": 2,
                 "net_name": "NET2",
                 "width": 0.3,
-                "height": 0.8,
+                "height": 0.45,
             },
             {
                 "number": "3",
@@ -80,7 +83,7 @@ class TestSubgridPrepass:
                 "net": 3,
                 "net_name": "NET3",
                 "width": 0.3,
-                "height": 0.8,
+                "height": 0.45,
             },
         ]
 

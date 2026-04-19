@@ -229,9 +229,12 @@ class TestSubGridEscapeGeneration:
         grid, rules = make_grid_and_rules(resolution=0.1)
         subgrid = SubGridRouter(grid, rules)
 
+        # Place pads far enough apart that escape segments don't violate
+        # clearance against each other. With 0.8mm-tall pads (radius 0.4mm),
+        # 0.2mm trace width, and 0.15mm clearance, pads need > 0.95mm apart.
         pads = [
             make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1"),
-            make_pad(x=1.65, y=1.0, net=2, ref="U1", pin="2"),  # Off grid
+            make_pad(x=2.65, y=1.0, net=2, ref="U1", pin="2"),  # Off grid, well separated
         ]
 
         # Add pads to grid so the grid knows about nets
@@ -249,7 +252,7 @@ class TestSubGridEscapeGeneration:
         grid, rules = make_grid_and_rules(resolution=0.1)
         subgrid = SubGridRouter(grid, rules)
 
-        pad = make_pad(x=1.65, y=1.0, net=1, ref="U1", pin="1")
+        pad = make_pad(x=2.65, y=1.0, net=1, ref="U1", pin="1")
         pads = [
             make_pad(x=1.0, y=1.0, net=2, ref="U1", pin="2"),
             pad,
@@ -279,7 +282,7 @@ class TestSubGridEscapeGeneration:
 
         pads = [
             make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1"),
-            make_pad(x=1.65, y=1.0, net=42, ref="U1", pin="2"),
+            make_pad(x=2.65, y=1.0, net=42, ref="U1", pin="2"),
         ]
 
         for p in pads:
@@ -297,7 +300,7 @@ class TestSubGridEscapeGeneration:
         rules = DesignRules(
             grid_resolution=0.1,
             trace_width=0.2,
-            trace_clearance=0.15,
+            trace_clearance=0.1,
             min_trace_width=0.1,
             neck_down_threshold=0.8,
         )
@@ -305,10 +308,12 @@ class TestSubGridEscapeGeneration:
         subgrid = SubGridRouter(grid, rules)
 
         # Create fine-pitch pads (0.65mm pitch < 0.8mm threshold)
+        # Use smaller pad dimensions to fit within clearance at 0.65mm pitch
         pads = []
         for i in range(4):
             pads.append(make_pad(
-                x=1.0 + i * 0.65, y=1.0, net=i + 1, ref="U1", pin=str(i + 1)
+                x=1.0 + i * 0.65, y=1.0, net=i + 1, ref="U1", pin=str(i + 1),
+                width=0.3, height=0.45,
             ))
 
         for p in pads:
@@ -500,16 +505,23 @@ class TestSubGridSSOP:
 
     def test_ssop20_escape_routing(self):
         """SSOP-20 with 0.65mm pitch should have off-grid pads detected and escaped."""
+        # Use realistic SSOP pad dimensions (0.3mm x 0.45mm) and fine-pitch
+        # clearance to ensure escape segments can pass clearance validation.
+        # With pad height 0.45mm (radius 0.225mm), trace width 0.15mm
+        # (half-width 0.075mm), and clearance 0.1mm, the minimum center-to-
+        # center distance is 0.4mm. At 0.65mm pitch this provides adequate
+        # margin for escape segments.
         grid, rules = make_grid_and_rules(
             width=30.0,
             height=30.0,
             resolution=0.1,
-            trace_width=0.2,
-            trace_clearance=0.15,
+            trace_width=0.15,
+            trace_clearance=0.1,
         )
         subgrid = SubGridRouter(grid, rules)
 
         # Create SSOP-20 like component: 10 pads per side, 0.65mm pitch
+        # Use realistic SSOP pad dimensions (smaller than the old 0.3x0.8)
         pads = []
         base_x = 10.0
         base_y = 10.0
@@ -522,6 +534,8 @@ class TestSubGridSSOP:
                 net=i + 1,
                 ref="U1",
                 pin=str(i + 1),
+                width=0.3,
+                height=0.45,
             ))
 
         # Right side pads
@@ -532,6 +546,8 @@ class TestSubGridSSOP:
                 net=i + 11,
                 ref="U1",
                 pin=str(i + 11),
+                width=0.3,
+                height=0.45,
             ))
 
         for p in pads:
@@ -621,3 +637,298 @@ class TestDesignRulesSubgrid:
 
 # Import Segment for use in test data construction
 from kicad_tools.router.primitives import Segment
+
+
+class TestEscapeClearanceValidation:
+    """Tests for escape segment clearance validation (Issue #1626).
+
+    Verifies that _find_escape_for_pad() validates candidate escape segments
+    against validate_segment_clearance() and rejects candidates that would
+    create DRC violations with neighboring pads/traces.
+    """
+
+    def test_escape_skips_clearance_violating_candidate(self):
+        """Escape should skip grid points where segment would violate clearance."""
+        # Use a tight grid with nearby pads from different nets to force
+        # clearance violations on certain escape directions.
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Off-grid pad (net 1) at 1.05mm -- between grid points 1.0 and 1.1
+        off_grid_pad = make_pad(
+            x=1.05, y=1.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+
+        # Neighboring pad (net 2) very close -- will create clearance violation
+        # for escape segments heading toward grid point 1.0 (leftward)
+        neighbor_pad = make_pad(
+            x=0.7, y=1.0, net=2, ref="U2", pin="1",
+            width=0.3, height=0.3,
+        )
+
+        # A pad on the other side for component center calculation
+        center_pad = make_pad(
+            x=1.05, y=2.0, net=3, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        all_pads = [off_grid_pad, neighbor_pad, center_pad]
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # The off-grid pad should either get an escape that passes clearance,
+        # or fail entirely -- it should never produce a segment that violates
+        # clearance against the neighbor pad.
+        for escape in result.escapes:
+            if escape.pad.net == 1:
+                is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                    escape.segment, exclude_net=1,
+                )
+                assert is_valid, (
+                    f"Escape segment for net 1 violates clearance: "
+                    f"({escape.segment.x1:.3f}, {escape.segment.y1:.3f}) -> "
+                    f"({escape.segment.x2:.3f}, {escape.segment.y2:.3f})"
+                )
+
+    def test_escape_finds_alternative_when_nearest_violates(self):
+        """When nearest grid point causes clearance violation, escape should
+        find a farther but clearance-safe alternative."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.127,
+        )
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=4)
+
+        # Off-grid pad at 5.05mm
+        off_grid_pad = make_pad(
+            x=5.05, y=5.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.8,
+        )
+
+        # Place neighbor pads of different nets very close on both sides
+        # to narrow the escape corridor
+        neighbor_left = make_pad(
+            x=4.7, y=5.0, net=10, ref="U2", pin="1",
+            width=0.3, height=0.8,
+        )
+        neighbor_right = make_pad(
+            x=5.4, y=5.0, net=11, ref="U2", pin="2",
+            width=0.3, height=0.8,
+        )
+
+        # Component center pad
+        center_pad = make_pad(
+            x=5.05, y=6.0, net=12, ref="U1", pin="2",
+            width=0.3, height=0.8,
+        )
+
+        all_pads = [off_grid_pad, neighbor_left, neighbor_right, center_pad]
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # If an escape was found, it must pass clearance validation
+        for escape in result.escapes:
+            if escape.pad.net == 1:
+                is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                    escape.segment, exclude_net=1,
+                )
+                assert is_valid, (
+                    "Escape segment should pass clearance validation"
+                )
+
+    def test_escape_all_candidates_fail_clearance(self):
+        """When all candidates violate clearance, pad should go to failed_pads."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.15,
+        )
+        # Very small search radius to limit candidates
+        subgrid = SubGridRouter(grid, rules, escape_search_radius=1)
+
+        # Off-grid pad surrounded by other-net pads on all sides
+        off_grid_pad = make_pad(
+            x=5.05, y=5.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+
+        # Surround with large pads from different nets
+        blockers = []
+        for bx, by, bnet in [
+            (4.8, 5.0, 10), (5.3, 5.0, 11),
+            (5.05, 4.7, 12), (5.05, 5.3, 13),
+            (4.8, 4.7, 14), (5.3, 4.7, 15),
+            (4.8, 5.3, 16), (5.3, 5.3, 17),
+        ]:
+            blockers.append(make_pad(
+                x=bx, y=by, net=bnet, ref="U2", pin=str(bnet),
+                width=0.4, height=0.4,
+            ))
+
+        all_pads = [off_grid_pad] + blockers
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # The pad should either have a valid escape or be in failed_pads
+        net1_escapes = [e for e in result.escapes if e.pad.net == 1]
+        for escape in net1_escapes:
+            is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                escape.segment, exclude_net=1,
+            )
+            assert is_valid, "Any accepted escape must pass clearance"
+
+    def test_ssop_adjacent_pads_escape_clearance(self):
+        """SSOP-like adjacent pads at 0.65mm pitch should not violate each
+        other's clearance when escaped."""
+        grid, rules = make_grid_and_rules(
+            width=30.0,
+            height=30.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.127,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Create a row of SSOP pads at 0.65mm pitch, each on different net
+        pads = []
+        base_x = 10.0
+        base_y = 10.0
+        for i in range(6):
+            pads.append(make_pad(
+                x=base_x,
+                y=base_y + i * 0.65,
+                net=i + 1,
+                ref="U1",
+                pin=str(i + 1),
+                width=0.3,
+                height=0.45,
+            ))
+
+        for p in pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Every accepted escape segment must pass clearance validation
+        component_pitches = grid.compute_component_pitches()
+        for escape in result.escapes:
+            is_valid, clearance, violation_loc = grid.validate_segment_clearance(
+                escape.segment,
+                exclude_net=escape.pad.net,
+                component_pitches=component_pitches,
+            )
+            assert is_valid, (
+                f"Escape for {escape.pad.ref}.{escape.pad.pin} (net {escape.pad.net}) "
+                f"violates clearance={clearance:.4f}mm at {violation_loc}"
+            )
+
+    def test_pad_on_grid_no_clearance_check_needed(self):
+        """On-grid pads should not generate escapes (no clearance check path)."""
+        grid, rules = make_grid_and_rules(resolution=0.1)
+        subgrid = SubGridRouter(grid, rules)
+
+        pads = [
+            make_pad(x=1.0, y=1.0, net=1, ref="U1", pin="1"),
+            make_pad(x=1.1, y=1.0, net=2, ref="U1", pin="2"),
+        ]
+
+        analysis = subgrid.analyze_pads(pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        assert result.success_count == 0
+        assert len(result.failed_pads) == 0
+
+    def test_escape_clearance_with_offset_at_half_resolution(self):
+        """Pad offset by exactly resolution/2 (worst case) should still
+        produce clearance-valid escapes when space permits."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Pad offset by exactly resolution/2 = 0.05mm
+        pad = make_pad(
+            x=5.05, y=5.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+        # Companion pad for component center
+        center_pad = make_pad(
+            x=5.05, y=7.0, net=2, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        for p in [pad, center_pad]:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads([pad, center_pad])
+        result = subgrid.generate_escape_segments(analysis)
+
+        # With generous clearance, the offset pad should find a valid escape
+        for escape in result.escapes:
+            if escape.pad.net == 1:
+                is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                    escape.segment, exclude_net=1,
+                )
+                assert is_valid
+
+    def test_escape_clearance_with_quarter_resolution_offset(self):
+        """Pad offset by resolution/4 should be treated as off-grid
+        (above default tolerance) and produce valid escapes."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        # Default tolerance is resolution/4 = 0.025mm
+        # Pad offset of 0.03mm > 0.025mm -> off-grid
+        subgrid = SubGridRouter(grid, rules)
+
+        pad = make_pad(
+            x=5.03, y=5.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+        center_pad = make_pad(
+            x=5.03, y=7.0, net=2, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        for p in [pad, center_pad]:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads([pad, center_pad])
+        assert analysis.has_off_grid_pads
+
+        result = subgrid.generate_escape_segments(analysis)
+        for escape in result.escapes:
+            is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                escape.segment, exclude_net=escape.pad.net,
+            )
+            assert is_valid
