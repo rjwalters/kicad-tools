@@ -35,6 +35,7 @@ class LEDIndicator(CircuitBlock):
         vertical: bool = True,
         led_footprint: str = "",
         resistor_footprint: str = "",
+        resistor_ref: str = "",
     ):
         """
         Create an LED indicator.
@@ -51,13 +52,18 @@ class LEDIndicator(CircuitBlock):
             vertical: If True, LED is vertical (rotated 90°)
             led_footprint: Footprint for LED (e.g., "LED_SMD:LED_0805_2012Metric")
             resistor_footprint: Footprint for resistor (e.g., "Resistor_SMD:R_0805_2012Metric")
+            resistor_ref: Explicit resistor reference (e.g., "R12"). If empty,
+                derived from ref_prefix digit (e.g., "D2" -> "R2").
         """
         super().__init__(sch, x, y)
 
         # Parse reference prefix
         d_ref = ref_prefix if ref_prefix[-1].isdigit() else ref_prefix
-        r_num = ref_prefix[-1] if ref_prefix[-1].isdigit() else "1"
-        r_ref = f"R{r_num}"
+        if resistor_ref:
+            r_ref = resistor_ref
+        else:
+            r_num = ref_prefix[-1] if ref_prefix[-1].isdigit() else "1"
+            r_ref = f"R{r_num}"
 
         # Component spacing
         led_resistor_spacing = 15  # mm between LED and resistor centers
