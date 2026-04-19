@@ -2541,12 +2541,12 @@ class Autorouter:
                     # Adaptive oscillation detection for targeted mode (Issue #633)
                     if adaptive and detect_oscillation(overflow_history):
                         print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                        print(f"    Attempting escape strategy {escape_strategy_index + 1}...")
+                        print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 
                         def mark_route_targeted(route: Route) -> None:
                             self._mark_route(route)
 
-                        success, new_overflow = neg_router.escape_local_minimum(
+                        success, new_overflow, tried = neg_router.escape_local_minimum(
                             overflow_history=overflow_history,
                             net_routes=net_routes,
                             routes_list=self.routes,
@@ -2556,7 +2556,7 @@ class Autorouter:
                             mark_route_callback=mark_route_targeted,
                             strategy_index=escape_strategy_index,
                         )
-                        escape_strategy_index += 1
+                        escape_strategy_index += tried
 
                         if success:
                             print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
@@ -2564,7 +2564,7 @@ class Autorouter:
                             overflow_history[-1] = new_overflow
                             overused = self.grid.find_overused_cells()
                         else:
-                            print("    Escape attempt did not improve overflow")
+                            print(f"    All {tried} escape strategies exhausted without improvement")
 
                     # Skip common code since targeted ripup handles everything
                     # (convergence and oscillation already checked above)
@@ -2649,12 +2649,12 @@ class Autorouter:
                 # Adaptive oscillation detection and escape (Issue #633)
                 if adaptive and detect_oscillation(overflow_history):
                     print(f"  ⚠ Oscillation detected: {overflow_history[-4:]}")
-                    print(f"    Attempting escape strategy {escape_strategy_index + 1}...")
+                    print(f"    Attempting escape strategies starting from {escape_strategy_index + 1}...")
 
                     def mark_route(route: Route) -> None:
                         self._mark_route(route)
 
-                    success, new_overflow = neg_router.escape_local_minimum(
+                    success, new_overflow, tried = neg_router.escape_local_minimum(
                         overflow_history=overflow_history,
                         net_routes=net_routes,
                         routes_list=self.routes,
@@ -2664,7 +2664,7 @@ class Autorouter:
                         mark_route_callback=mark_route,
                         strategy_index=escape_strategy_index,
                     )
-                    escape_strategy_index += 1
+                    escape_strategy_index += tried
 
                     if success:
                         print(f"    Escape successful! Overflow: {overflow} → {new_overflow}")
@@ -2672,7 +2672,7 @@ class Autorouter:
                         overflow_history[-1] = new_overflow  # Update last entry
                         overused = self.grid.find_overused_cells()
                     else:
-                        print("    Escape attempt did not improve overflow")
+                        print(f"    All {tried} escape strategies exhausted without improvement")
                         # Continue to next iteration with different parameters
 
         successful_nets = sum(1 for routes in net_routes.values() if routes)
