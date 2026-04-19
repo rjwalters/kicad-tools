@@ -29,8 +29,9 @@ class PCBBlock:
     routing only needs to connect to the ports.
     """
 
-    def __init__(self, name: str = "block"):
+    def __init__(self, name: str = "block", block_id: str | None = None):
         self.name = name
+        self.block_id: str = block_id if block_id is not None else name
 
         # Block placement (set by place())
         self.origin: Point = Point(0, 0)
@@ -256,6 +257,7 @@ class PCBBlock:
                     "width": trace.width,
                     "layer": trace.layer.value,
                     "net": trace.net,
+                    "block_id": self.block_id,
                 }
             )
         return result

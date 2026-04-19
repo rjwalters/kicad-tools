@@ -75,6 +75,7 @@ class PCBLayout:
                     "width": trace.width,
                     "layer": trace.layer.value,
                     "net": trace.net,
+                    "block_id": None,
                 }
             )
 
