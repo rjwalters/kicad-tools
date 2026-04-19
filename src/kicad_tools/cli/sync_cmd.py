@@ -218,6 +218,15 @@ def _output_table(analysis) -> None:
             print(f"  [{match.confidence}] {match.pcb_ref} -> {match.schematic_ref}")
             print(f"    Matched by: {match.match_type}")
 
+    if analysis.add_footprint_actions:
+        print(f"\n{'-' * 60}")
+        print(f"ADD FOOTPRINT ({len(analysis.add_footprint_actions)}):")
+        for action in analysis.add_footprint_actions:
+            ref = action["reference"]
+            fp = action.get("footprint", "")
+            val = action.get("value", "")
+            print(f"  {ref}: {fp} ({val}) - needs placement on PCB")
+
     if analysis.schematic_orphans:
         print(f"\n{'-' * 60}")
         print(f"SCHEMATIC-ONLY ({len(analysis.schematic_orphans)}):")
@@ -253,9 +262,14 @@ def _output_changes_table(changes, dry_run: bool) -> None:
         status = "(would apply)" if dry_run else "(applied)"
         if change.change_type == "update_footprint":
             status = "(manual - footprint change invalidates routing)"
+        elif change.change_type == "add_footprint":
+            status = "(manual - requires KiCad libraries for placement)"
 
         print(f"\n  {change.change_type}: {change.reference}")
-        print(f"    {change.old_value} -> {change.new_value} {status}")
+        if change.change_type == "add_footprint":
+            print(f"    {change.new_value} {status}")
+        else:
+            print(f"    {change.old_value} -> {change.new_value} {status}")
 
     print(f"\n{'=' * 60}")
     print(f"Total: {len(changes)} change(s)")
