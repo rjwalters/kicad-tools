@@ -118,6 +118,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable BOM enrichment from .kct project spec",
     )
     parser.add_argument(
+        "--no-merge-lcsc",
+        action="store_true",
+        help="Disable merging LCSC part numbers from an existing BOM CSV",
+    )
+    parser.add_argument(
         "--skip-preflight",
         action="store_true",
         help="Skip all pre-flight validation checks",
@@ -240,6 +245,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_project_zip=not args.no_project_zip,
         auto_lcsc=auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
+        merge_lcsc=not getattr(args, "no_merge_lcsc", False),
         bom_source=getattr(args, "bom_source", "schematic"),
         preflight=preflight_cfg,
         strict_preflight=getattr(args, "strict_preflight", False),

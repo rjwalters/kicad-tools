@@ -14,7 +14,7 @@ from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ValidationError
 
 from .bom_enrich import EnrichmentReport, enrich_bom_lcsc
-from .bom_formats import BOMExportConfig, export_bom
+from .bom_formats import BOMExportConfig, export_bom, read_existing_lcsc_assignments
 from .bom_spec_overlay import SpecOverlayReport, apply_spec_overlay, find_spec_file
 from .gerber import MANUFACTURER_PRESETS, GerberConfig, GerberExporter
 from .pnp import PnPExportConfig, export_pnp
@@ -55,6 +55,10 @@ class AssemblyConfig:
 
     # BOM source: "schematic" (default), "pcb", or "auto"
     bom_source: str = "schematic"
+
+    # LCSC CSV merge: preserve manually-assigned LCSC part numbers from
+    # an existing BOM CSV when regenerating.  Enabled by default.
+    merge_lcsc: bool = True
 
     # Filtering
     exclude_references: list[str] = field(default_factory=list)
@@ -311,6 +315,34 @@ class AssemblyPackage:
             except Exception as e:
                 logger.warning(f"Spec overlay failed (continuing without): {e}")
 
+        # Merge LCSC assignments from existing BOM CSV.  This runs after
+        # spec overlay (which has higher priority) but before API
+        # auto-matching (which has lower priority).  Items that already
+        # received an LCSC from the schematic or spec overlay are not
+        # overwritten.
+        csv_merge_refs: set[str] = set()
+        if self.config.merge_lcsc:
+            filename = self.config.bom_filename.format(manufacturer=self.manufacturer)
+            existing_csv = output_dir / filename
+            if existing_csv.is_file():
+                existing = read_existing_lcsc_assignments(existing_csv)
+                if existing:
+                    merged_count = 0
+                    for item in items:
+                        if getattr(item, "lcsc", "") or getattr(item, "dnp", False):
+                            continue
+                        key = (item.value, item.footprint)
+                        lcsc = existing.get(key)
+                        if lcsc:
+                            item.lcsc = lcsc
+                            csv_merge_refs.add(item.reference)
+                            merged_count += 1
+                    if merged_count:
+                        logger.info(
+                            "CSV merge: preserved %d LCSC assignment(s) from existing BOM",
+                            merged_count,
+                        )
+
         # LCSC auto-matching for JLCPCB exports
         if self.config.auto_lcsc and self.manufacturer == "jlcpcb":
             try:
@@ -318,7 +350,7 @@ class AssemblyPackage:
                     items,
                     prefer_basic=self.config.auto_lcsc_prefer_basic,
                     min_stock=self.config.auto_lcsc_min_stock,
-                    spec_refs=spec_refs,
+                    spec_refs=spec_refs | csv_merge_refs,
                 )
                 if result is not None:
                     result.lcsc_enrichment = enrichment
