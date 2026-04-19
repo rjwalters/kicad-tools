@@ -181,6 +181,7 @@ class ClearanceViolation:
     net_name: str = ""  # Human-readable net name
     obstacle_net_name: str = ""  # Human-readable obstacle net name
     location: tuple[float, float] | None = None  # Approximate violation location (x, y)
+    component_inherent: bool = False  # True if both pads are on the same component
 
 
 def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
@@ -781,6 +782,12 @@ def validate_routes(
             seg_half_width = segment.width / 2
 
             # --- Segment-to-pad checks ---
+            # Build set of component refs that this route's net connects to
+            route_component_refs: set[str] = set()
+            if route_net in router.nets:
+                for r, _p in router.nets[route_net]:
+                    route_component_refs.add(r)
+
             for (ref, num), pad in router.pads.items():
                 # Skip pads on the same net
                 if pad.net == route_net:
@@ -796,6 +803,10 @@ def validate_routes(
                 effective_dist = dist - pad_radius - seg_half_width
 
                 if effective_dist < clearance:
+                    # Detect component-inherent violations: obstacle pad is
+                    # on the same component as a pad in the route's net.
+                    is_component_inherent = ref in route_component_refs
+
                     violations.append(
                         ClearanceViolation(
                             segment_index=seg_idx,
@@ -811,6 +822,7 @@ def validate_routes(
                             net_name=_resolve_net_name(route_net),
                             obstacle_net_name=_resolve_net_name(pad.net),
                             location=(pad.x, pad.y),
+                            component_inherent=is_component_inherent,
                         )
                     )
 
@@ -906,6 +918,9 @@ def validate_routes(
 def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
     """Format clearance violations as a human-readable summary.
 
+    Separates routing-caused violations (reported as warnings) from
+    component-inherent pad spacings (reported as informational).
+
     Args:
         violations: List of ClearanceViolation objects from validate_routes()
 
@@ -915,32 +930,43 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
     if not violations:
         return ""
 
-    lines = []
-    lines.append(f"Found {len(violations)} clearance violation(s):")
+    # Separate routing violations from component-inherent pad spacings
+    routing_violations = [v for v in violations if not v.component_inherent]
+    inherent_violations = [v for v in violations if v.component_inherent]
 
-    # Group by obstacle type for summary
-    by_type: dict[str, int] = {}
-    for v in violations:
-        by_type[v.obstacle_type] = by_type.get(v.obstacle_type, 0) + 1
+    lines: list[str] = []
 
-    for obs_type, count in sorted(by_type.items()):
-        lines.append(f"  {obs_type}: {count}")
+    if routing_violations:
+        lines.append(f"Found {len(routing_violations)} clearance violation(s):")
 
-    # Show individual violations (limit to first 20 to avoid flooding output)
-    max_detail = 20
-    for i, v in enumerate(violations[:max_detail]):
-        net_label = v.net_name or f"Net {v.net}"
-        obs_label = v.obstacle_net_name or f"Net {v.obstacle_net}"
-        loc_str = ""
-        if v.location:
-            loc_str = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})"
+        # Group by obstacle type for summary
+        by_type: dict[str, int] = {}
+        for v in routing_violations:
+            by_type[v.obstacle_type] = by_type.get(v.obstacle_type, 0) + 1
+
+        for obs_type, count in sorted(by_type.items()):
+            lines.append(f"  {obs_type}: {count}")
+
+        # Show individual violations (limit to first 20 to avoid flooding output)
+        max_detail = 20
+        for i, v in enumerate(routing_violations[:max_detail]):
+            net_label = v.net_name or f"Net {v.net}"
+            obs_label = v.obstacle_net_name or f"Net {v.obstacle_net}"
+            loc_str = ""
+            if v.location:
+                loc_str = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})"
+            lines.append(
+                f"  [{v.obstacle_type}] {net_label} vs {obs_label}{loc_str}: "
+                f"{v.distance:.3f}mm (required {v.required:.3f}mm)"
+            )
+
+        if len(routing_violations) > max_detail:
+            lines.append(f"  ... and {len(routing_violations) - max_detail} more")
+
+    if inherent_violations:
         lines.append(
-            f"  [{v.obstacle_type}] {net_label} vs {obs_label}{loc_str}: "
-            f"{v.distance:.3f}mm (required {v.required:.3f}mm)"
+            f"Info: {len(inherent_violations)} component-inherent pad spacing(s) excluded"
         )
-
-    if len(violations) > max_detail:
-        lines.append(f"  ... and {len(violations) - max_detail} more")
 
     return "\n".join(lines)
 

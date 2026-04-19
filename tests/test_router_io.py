@@ -1146,6 +1146,131 @@ class TestValidateRoutes:
         assert "GND" in result
         assert "15.00" in result
 
+    def test_same_component_pad_marked_component_inherent(self):
+        """Test that pad violations within the same component are marked component_inherent."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Add two pads on the same component (U1) but different nets,
+        # at fine-pitch spacing (0.65mm apart, like SSOP-28)
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 0.4, "height": 1.2, "net": 1},
+                {"number": "2", "x": 10.65, "y": 10, "width": 0.4, "height": 1.2, "net": 2},
+            ],
+        )
+
+        # Route a segment to pad 1 that passes near pad 2
+        segment = Segment(x1=5, y1=10, x2=10, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="SPI_SCK", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # The pad-to-pad violation should be marked as component_inherent
+        pad_violations = [v for v in violations if v.obstacle_type == "pad"]
+        assert len(pad_violations) >= 1
+        for v in pad_violations:
+            assert v.component_inherent is True
+
+    def test_cross_component_pad_not_marked_component_inherent(self):
+        """Test that pad violations between different components are NOT component_inherent."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Pad on U1 (net 1) and pad on R1 (net 2), placed close together
+        router.add_component(
+            "U1",
+            [{"number": "1", "x": 10, "y": 10, "width": 0.4, "height": 1.2, "net": 1}],
+        )
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 10.65, "y": 10, "width": 0.4, "height": 1.2, "net": 2}],
+        )
+
+        # Route to U1 pad that passes near R1 pad
+        segment = Segment(x1=5, y1=10, x2=10, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="VCC", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        pad_violations = [v for v in violations if v.obstacle_type == "pad"]
+        assert len(pad_violations) >= 1
+        for v in pad_violations:
+            assert v.component_inherent is False
+
+    def test_format_separates_component_inherent_violations(self):
+        """Test format_clearance_violations separates component-inherent from routing."""
+        from kicad_tools.router.io import ClearanceViolation
+
+        violations = [
+            # A routing violation
+            ClearanceViolation(
+                segment_index=0,
+                x1=10, y1=10, x2=20, y2=10,
+                net=1, obstacle_type="pad", obstacle_net=2,
+                distance=-0.05, required=0.15,
+                net_name="VCC", obstacle_net_name="GND",
+                location=(15.0, 10.0),
+                component_inherent=False,
+            ),
+            # A component-inherent violation
+            ClearanceViolation(
+                segment_index=0,
+                x1=10, y1=10, x2=20, y2=10,
+                net=1, obstacle_type="pad", obstacle_net=3,
+                distance=-0.10, required=0.15,
+                net_name="SPI_SCK", obstacle_net_name="SPI_MISO",
+                location=(10.65, 10.0),
+                component_inherent=True,
+            ),
+        ]
+
+        result = format_clearance_violations(violations)
+
+        # Should report 1 routing violation (not 2)
+        assert "1 clearance violation" in result
+        # Should mention the component-inherent count separately
+        assert "1 component-inherent pad spacing(s) excluded" in result
+        # The routing violation details should be present
+        assert "VCC" in result
+        assert "GND" in result
+        # The component-inherent violation details should NOT be in the warnings
+        assert "[pad] SPI_SCK vs SPI_MISO" not in result
+
+    def test_format_only_component_inherent_no_routing_violations(self):
+        """Test format output when all violations are component-inherent."""
+        from kicad_tools.router.io import ClearanceViolation
+
+        violations = [
+            ClearanceViolation(
+                segment_index=0,
+                x1=10, y1=10, x2=20, y2=10,
+                net=1, obstacle_type="pad", obstacle_net=2,
+                distance=-0.10, required=0.15,
+                net_name="SPI_SCK", obstacle_net_name="SPI_MISO",
+                location=(10.65, 10.0),
+                component_inherent=True,
+            ),
+        ]
+
+        result = format_clearance_violations(violations)
+
+        # Should NOT say "0 clearance violation(s)"
+        assert "clearance violation" not in result
+        # Should report the component-inherent count
+        assert "1 component-inherent pad spacing(s) excluded" in result
+
 
 class TestLoadPcbForRoutingDrcCompliance:
     """Tests for DRC compliance features in load_pcb_for_routing."""
