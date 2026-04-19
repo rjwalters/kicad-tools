@@ -804,7 +804,11 @@ def route_with_layer_escalation(
 
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
-        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+        from kicad_tools.router.optimizer import (
+            GridCollisionChecker,
+            OptimizationConfig,
+            TraceOptimizer,
+        )
 
         if not quiet:
             print("\n--- Optimizing traces ---")
@@ -817,7 +821,8 @@ def route_with_layer_escalation(
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        optimizer = TraceOptimizer(config=opt_config)
+        collision_checker = GridCollisionChecker(final_result.router.grid)
+        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
@@ -1180,7 +1185,11 @@ def route_with_rule_relaxation(
 
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
-        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+        from kicad_tools.router.optimizer import (
+            GridCollisionChecker,
+            OptimizationConfig,
+            TraceOptimizer,
+        )
 
         if not quiet:
             print("\n--- Optimizing traces ---")
@@ -1193,7 +1202,8 @@ def route_with_rule_relaxation(
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        optimizer = TraceOptimizer(config=opt_config)
+        collision_checker = GridCollisionChecker(final_result.router.grid)
+        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
@@ -1574,7 +1584,11 @@ def route_with_combined_escalation(
 
     # Optimize traces
     if not args.no_optimize and final_result.router.routes:
-        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+        from kicad_tools.router.optimizer import (
+            GridCollisionChecker,
+            OptimizationConfig,
+            TraceOptimizer,
+        )
 
         if not quiet:
             print("\n--- Optimizing traces ---")
@@ -1587,7 +1601,8 @@ def route_with_combined_escalation(
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        optimizer = TraceOptimizer(config=opt_config)
+        collision_checker = GridCollisionChecker(final_result.router.grid)
+        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
@@ -2968,7 +2983,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Optimize traces (unless --no-optimize/--raw flag is set)
     if not args.no_optimize and router.routes:
-        from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
+        from kicad_tools.router.optimizer import (
+            GridCollisionChecker,
+            OptimizationConfig,
+            TraceOptimizer,
+        )
 
         if not quiet:
             print("\n--- Optimizing traces ---")
@@ -2986,7 +3005,8 @@ def main(argv: list[str] | None = None) -> int:
             corner_chamfer_size=0.5,
             minimize_vias=True,
         )
-        optimizer = TraceOptimizer(config=opt_config)
+        collision_checker = GridCollisionChecker(router.grid)
+        optimizer = TraceOptimizer(config=opt_config, collision_checker=collision_checker)
 
         with spinner("Optimizing traces...", quiet=quiet):
             optimized_routes = []
