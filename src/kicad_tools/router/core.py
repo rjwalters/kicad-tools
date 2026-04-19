@@ -3052,6 +3052,7 @@ class Autorouter:
             List of Route objects (block-internal + inter-block).
         """
         from .block_router import BlockRouter, BlockRoutingResult
+        from .global_router import GlobalRouter
         from .region_graph import RegionGraph
 
         # Determine which blocks to route
@@ -3170,6 +3171,40 @@ class Autorouter:
                 f"{len(all_inter_block_nets)}"
             )
 
+        # Issue #1654: Wire RegionGraph corridor costs into inter-block routing.
+        # Use GlobalRouter to assign corridors for inter-block nets so that
+        # detailed routing prefers paths through low-utilization regions
+        # (corridors between blocks) rather than block interiors.
+        corridor_width = 2.0 * self.rules.trace_clearance
+        global_router = GlobalRouter(
+            region_graph=region_graph,
+            corridor_width=corridor_width,
+            default_layer=0,
+        )
+        corridor_penalty = 5.0
+        corridor_assigned_nets: set[int] = set()
+
+        inter_block_to_route = all_inter_block_nets & set(nets_to_route)
+        for net in inter_block_to_route:
+            pad_keys = self.nets.get(net, [])
+            pad_positions = []
+            for pk in pad_keys:
+                pad_obj = self.pads.get(pk)
+                if pad_obj is not None:
+                    pad_positions.append((pad_obj.x, pad_obj.y))
+            assignment = global_router.route_net(net, pad_positions)
+            if assignment is not None:
+                self.grid.set_corridor_preference(
+                    assignment.corridor, net, corridor_penalty
+                )
+                corridor_assigned_nets.add(net)
+
+        if corridor_assigned_nets:
+            flush_print(
+                f"    Corridor assignments: {len(corridor_assigned_nets)}/"
+                f"{len(inter_block_to_route)} inter-block nets"
+            )
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
         all_routes.extend(escape_routes)
@@ -3201,6 +3236,10 @@ class Autorouter:
                     f"  Net {net}: {len(routes)} routes, "
                     f"{sum(len(r.segments) for r in routes)} segments"
                 )
+
+        # Clear corridor preferences after Phase B routing (Issue #1654)
+        if corridor_assigned_nets:
+            self.grid.clear_all_corridor_preferences()
 
         if progress_callback is not None:
             routed_count = len({r.net for r in all_routes})
