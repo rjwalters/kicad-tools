@@ -164,6 +164,36 @@ def _run_generate(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Report written to {report_path}")
+
+    # Attempt to render Markdown to HTML then PDF
+    try:
+        from kicad_tools.report.renderers import render_html, render_pdf
+
+        md_content = report_path.read_text(encoding="utf-8")
+        figures_dir = (
+            version_dir / "figures"
+            if version_dir is not None
+            else None
+        )
+        html_content = render_html(
+            md_content,
+            figures_dir=(
+                figures_dir
+                if figures_dir is not None and figures_dir.is_dir()
+                else None
+            ),
+        )
+        pdf_path = report_path.with_suffix(".pdf")
+        render_pdf(html_content, pdf_path)
+        print(f"PDF report written to {pdf_path}")
+    except ImportError:
+        print(
+            "Hint: install 'kicad-tools[report]' for automatic PDF generation",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        print(f"Warning: PDF rendering failed: {exc}", file=sys.stderr)
+
     return 0
 
 

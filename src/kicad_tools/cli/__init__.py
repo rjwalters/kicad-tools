@@ -731,6 +731,8 @@ def _run_export_command(args) -> int:
         sub_argv.append("--include-tht")
     if hasattr(args, "export_format") and args.export_format != "text":
         sub_argv.extend(["--format", args.export_format])
+    if getattr(args, "export_latest_only", False):
+        sub_argv.append("--latest-only")
 
     return export_cmd(sub_argv)
 
