@@ -114,8 +114,8 @@ class TestAutoSelectGridResolution:
         """Test that selected resolution respects DRC clearance."""
         pads = [PadPosition(x=0.0, y=0.0)]
         result = auto_select_grid_resolution(pads, clearance=0.15)
-        # Resolution must be <= clearance for DRC compliance
-        assert result.resolution <= 0.15
+        # Resolution must be <= clearance/2 for DRC compliance
+        assert result.resolution <= 0.15 / 2
 
     def test_prefers_coarser_when_equal(self):
         """Test that coarser resolution is preferred when off-grid counts are equal."""
@@ -162,12 +162,13 @@ class TestAutoSelectGridResolution:
     def test_tssop_pitch_alignment_with_default_candidates(self):
         """Test that default candidates include TSSOP-friendly 0.065mm."""
         # TSSOP pitch is 0.65mm, which divides evenly by 0.065mm
+        # Use clearance=0.15 so that 0.065 <= 0.15/2 = 0.075 passes the filter
         pads = [
             PadPosition(x=0.0, y=0.0),
             PadPosition(x=0.65, y=0.0),  # TSSOP pitch
             PadPosition(x=1.30, y=0.0),  # 2x TSSOP pitch
         ]
-        result = auto_select_grid_resolution(pads, clearance=0.1)
+        result = auto_select_grid_resolution(pads, clearance=0.15)
         # Should include 0.065mm in candidates tried
         resolutions_tried = [c[0] for c in result.candidates_tried]
         assert 0.065 in resolutions_tried
@@ -175,18 +176,46 @@ class TestAutoSelectGridResolution:
     def test_selects_0065_for_tssop_pads(self):
         """Test that 0.065mm is selected for pure TSSOP placement."""
         # All pads on 0.65mm grid
+        # Use clearance=0.15 so that 0.065 <= 0.075 passes the filter
         pads = [
             PadPosition(x=0.0, y=0.0),
             PadPosition(x=0.65, y=0.0),
             PadPosition(x=1.30, y=0.0),
             PadPosition(x=1.95, y=0.0),
         ]
-        result = auto_select_grid_resolution(pads, clearance=0.1)
+        result = auto_select_grid_resolution(pads, clearance=0.15)
         # 0.065mm should have zero off-grid pads (0.65 / 0.065 = 10 exact)
         # So should 0.05mm (0.65 / 0.05 = 13 exact)
         # Function prefers coarser when equal, so 0.065mm should be selected
         assert result.off_grid_pads == 0
         assert result.resolution in [0.065, 0.05]  # Either is valid
+
+
+    def test_no_candidate_exceeds_half_clearance(self):
+        """With clearance=0.15, no selected candidate should exceed 0.075."""
+        pads = [PadPosition(x=0.0, y=0.0), PadPosition(x=1.0, y=0.0)]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        assert result.resolution <= 0.15 / 2
+        # Also verify all *tried* candidates respect the threshold
+        for res, _off in result.candidates_tried:
+            assert res <= 0.15 / 2
+
+    def test_tight_clearance_floor(self):
+        """With very tight clearance (0.1mm), grid must not go below 0.05mm floor."""
+        pads = [PadPosition(x=0.0, y=0.0)]
+        result = auto_select_grid_resolution(pads, clearance=0.1)
+        # clearance/2 = 0.05, only candidate that fits is 0.05
+        assert result.resolution == 0.05
+
+    def test_board05_clearance_selects_fine_grid(self):
+        """Board 05 scenario: clearance=0.2mm should select grid <= 0.1mm."""
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=1.27, y=0.0),
+            PadPosition(x=2.54, y=1.27),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.2)
+        assert result.resolution <= 0.2 / 2  # Must be <= 0.1mm
 
 
 class TestGridAutoSelectionSummary:

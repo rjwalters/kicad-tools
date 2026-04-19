@@ -237,6 +237,6 @@ class TestGetRoutingParamsWithSpec:
 
         assert clearance == pytest.approx(0.2), "Should use 0.2mm from spec"
         assert trace_width == pytest.approx(0.3), "Should use 0.3mm from spec"
-        # Grid for 0.2mm clearance: 0.2/2 = 0.1mm, rounded down to 0.1mm
-        assert grid == pytest.approx(0.1), "Grid should be 0.1mm for 0.2mm clearance"
+        # Grid for 0.2mm clearance: 0.2/3 = 0.0667mm, rounded down to 0.05mm
+        assert grid == pytest.approx(0.05), "Grid should be 0.05mm for 0.2mm clearance"
         assert grid <= clearance / 2, "Grid should be DRC-compatible"
