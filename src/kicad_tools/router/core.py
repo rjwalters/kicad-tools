@@ -3052,6 +3052,7 @@ class Autorouter:
             List of Route objects (block-internal + inter-block).
         """
         from .block_router import BlockRouter, BlockRoutingResult
+        from .region_graph import RegionGraph
 
         # Determine which blocks to route
         if blocks is not None:
@@ -3070,9 +3071,21 @@ class Autorouter:
 
         all_routes: list[Route] = []
 
+        # Create a RegionGraph for inter-block routing guidance
+        region_graph = RegionGraph(
+            board_width=self.grid.width,
+            board_height=self.grid.height,
+            origin_x=self.grid.origin_x,
+            origin_y=self.grid.origin_y,
+            num_cols=10,
+            num_rows=10,
+        )
+        region_graph.register_obstacles(list(self.pads.values()))
+
         # Phase A: Route each block's internal nets via BlockRouter
         block_results: list[BlockRoutingResult] = []
         globally_connected: set[tuple[str, str]] = set()
+        all_inter_block_nets: set[int] = set()
 
         for i, block in enumerate(block_list):
             if progress_callback is not None:
@@ -3110,11 +3123,21 @@ class Autorouter:
                 self.routes.append(route)
             all_routes.extend(result.routes)
             globally_connected |= result.connected_pad_keys
+            all_inter_block_nets |= result.inter_block_nets
+
+            # Register block occupancy on the RegionGraph so Phase B
+            # global routing avoids block interiors.
+            min_x, min_y, max_x, max_y = block_router.bounds
+            region_graph.register_block_occupancy(
+                min_x, min_y, max_x, max_y,
+                trace_count=len(result.routes),
+            )
 
             flush_print(
                 f"    Routed {len(result.routed_nets)} nets, "
                 f"{len(result.routes)} routes, "
-                f"{len(result.failed_nets)} failed"
+                f"{len(result.failed_nets)} failed, "
+                f"{len(result.inter_block_nets)} inter-block"
             )
 
         # Phase B: Route inter-block and remaining nets on the main grid
@@ -3141,6 +3164,11 @@ class Autorouter:
             f"    Skipping {len(fully_routed_nets)} fully block-routed nets"
         )
         flush_print(f"    Routing {len(nets_to_route)} remaining nets")
+        if all_inter_block_nets:
+            flush_print(
+                f"    Inter-block nets (corridor routing): "
+                f"{len(all_inter_block_nets)}"
+            )
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
@@ -3158,7 +3186,15 @@ class Autorouter:
                 ):
                     break
 
-            routes = self.route_net(net)
+            if net in all_inter_block_nets:
+                # Inter-block nets use corridor-aware routing so they
+                # prefer paths through block ports rather than block
+                # interiors.  The RegionGraph congestion from
+                # register_block_occupancy() guides corridors away
+                # from occupied block regions.
+                routes = self._route_net_with_corridor(net, present_cost_factor=1.0)
+            else:
+                routes = self.route_net(net)
             all_routes.extend(routes)
             if routes:
                 flush_print(
