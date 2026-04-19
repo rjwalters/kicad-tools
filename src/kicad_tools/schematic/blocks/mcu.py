@@ -190,12 +190,12 @@ class MCUBlock(CircuitBlock):
                 prev_gnd = prev_cap.pin_position("2")
 
                 # Horizontal wire on VDD bus
-                sch.add_wire(prev_vdd, (cap_vdd[0], vdd_y))
-                sch.add_wire((cap_vdd[0], vdd_y), cap_vdd)
+                sch.add_wire(prev_vdd, (cap_vdd[0], vdd_y), warn_on_collision=False)
+                sch.add_wire((cap_vdd[0], vdd_y), cap_vdd, warn_on_collision=False)
 
                 # Horizontal wire on GND bus
-                sch.add_wire(prev_gnd, (cap_gnd[0], gnd_y))
-                sch.add_wire((cap_gnd[0], gnd_y), cap_gnd)
+                sch.add_wire(prev_gnd, (cap_gnd[0], gnd_y), warn_on_collision=False)
+                sch.add_wire((cap_gnd[0], gnd_y), cap_gnd, warn_on_collision=False)
 
     def _build_ports(self):
         """Build ports dict exposing all MCU pins."""
@@ -246,7 +246,7 @@ class MCUBlock(CircuitBlock):
         for pin_name in vdd_pins_to_wire:
             try:
                 pin_pos = self.mcu.pin_position(pin_name)
-                sch.add_wire(pin_pos, (pin_pos[0], vdd_rail_y))
+                sch.add_wire(pin_pos, (pin_pos[0], vdd_rail_y), warn_on_collision=False)
                 sch.add_junction(pin_pos[0], vdd_rail_y)
             except Exception:
                 pass
@@ -254,7 +254,7 @@ class MCUBlock(CircuitBlock):
         for pin_name in gnd_pins_to_wire:
             try:
                 pin_pos = self.mcu.pin_position(pin_name)
-                sch.add_wire(pin_pos, (pin_pos[0], gnd_rail_y))
+                sch.add_wire(pin_pos, (pin_pos[0], gnd_rail_y), warn_on_collision=False)
                 sch.add_junction(pin_pos[0], gnd_rail_y)
             except Exception:
                 pass
@@ -441,18 +441,18 @@ class ResetButton(CircuitBlock):
         # Wire resistor bottom to switch top and cap top (reset node)
 
         # Wire resistor pin 2 to switch pin 1 (vertical)
-        sch.add_wire(r_pin2, sw_pin1)
+        sch.add_wire(r_pin2, sw_pin1, warn_on_collision=False)
 
         # Wire reset node to cap top
         # Create junction at the reset node
-        sch.add_wire(sw_pin1, (c_pin1[0], sw_pin1[1]))  # Horizontal to cap x
-        sch.add_wire((c_pin1[0], sw_pin1[1]), c_pin1)  # Vertical to cap top
+        sch.add_wire(sw_pin1, (c_pin1[0], sw_pin1[1]), warn_on_collision=False)  # Horizontal to cap x
+        sch.add_wire((c_pin1[0], sw_pin1[1]), c_pin1, warn_on_collision=False)  # Vertical to cap top
         sch.add_junction(sw_pin1[0], sw_pin1[1])
 
         # Wire switch bottom to cap bottom (ground node for active-low)
         # For active-high, this would be VCC
-        sch.add_wire(sw_pin2, (c_pin2[0], sw_pin2[1]))  # Horizontal
-        sch.add_wire((c_pin2[0], sw_pin2[1]), c_pin2)  # Vertical
+        sch.add_wire(sw_pin2, (c_pin2[0], sw_pin2[1]), warn_on_collision=False)  # Horizontal
+        sch.add_wire((c_pin2[0], sw_pin2[1]), c_pin2, warn_on_collision=False)  # Vertical
 
         # Add TVS diode if requested
         self.tvs: SymbolInstance | None = None
@@ -467,8 +467,8 @@ class ResetButton(CircuitBlock):
             tvs_cathode = self.tvs.pin_position("K")
 
             # Wire TVS anode to reset node
-            sch.add_wire((c_pin1[0], sw_pin1[1]), (tvs_anode[0], sw_pin1[1]))
-            sch.add_wire((tvs_anode[0], sw_pin1[1]), tvs_anode)
+            sch.add_wire((c_pin1[0], sw_pin1[1]), (tvs_anode[0], sw_pin1[1]), warn_on_collision=False)
+            sch.add_wire((tvs_anode[0], sw_pin1[1]), tvs_anode, warn_on_collision=False)
 
             # TVS cathode goes to ground (will be wired in connect_to_rails)
             # Store for later
@@ -521,13 +521,13 @@ class ResetButton(CircuitBlock):
             gnd_pos = self._switch_bottom
 
             # Connect pull-up to VCC rail
-            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y), warn_on_collision=False)
 
             # Connect switch and cap bottom to GND rail
-            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
             # Connect cap bottom to GND rail
-            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], gnd_rail_y))
+            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], gnd_rail_y), warn_on_collision=False)
 
             if add_junctions:
                 sch.add_junction(vcc_pos[0], vcc_rail_y)
@@ -539,13 +539,13 @@ class ResetButton(CircuitBlock):
             vcc_pos = self._switch_bottom
 
             # Connect pull-down to GND rail
-            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y))
+            sch.add_wire(gnd_pos, (gnd_pos[0], gnd_rail_y), warn_on_collision=False)
 
             # Connect switch and cap bottom to VCC rail
-            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y))
+            sch.add_wire(vcc_pos, (vcc_pos[0], vcc_rail_y), warn_on_collision=False)
 
             # Connect cap bottom to VCC rail
-            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], vcc_rail_y))
+            sch.add_wire(self._cap_bottom, (self._cap_bottom[0], vcc_rail_y), warn_on_collision=False)
 
             if add_junctions:
                 sch.add_junction(gnd_pos[0], gnd_rail_y)
@@ -554,7 +554,7 @@ class ResetButton(CircuitBlock):
 
         # Connect TVS cathode to GND if present
         if self.esd_protection and hasattr(self, "_tvs_cathode"):
-            sch.add_wire(self._tvs_cathode, (self._tvs_cathode[0], gnd_rail_y))
+            sch.add_wire(self._tvs_cathode, (self._tvs_cathode[0], gnd_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(self._tvs_cathode[0], gnd_rail_y)
 
@@ -848,11 +848,11 @@ class BootModeSelector(CircuitBlock):
             if self.default_high:
                 # Button connects boot pin to GND when pressed
                 # Button is below the boot pin
-                sch.add_wire(sw_pin1, (boot_junction_x, boot_junction_y))
+                sch.add_wire(sw_pin1, (boot_junction_x, boot_junction_y), warn_on_collision=False)
             else:
                 # Button connects boot pin to VCC when pressed
                 # Button is above the boot pin
-                sch.add_wire(sw_pin2, (boot_junction_x, boot_junction_y))
+                sch.add_wire(sw_pin2, (boot_junction_x, boot_junction_y), warn_on_collision=False)
 
             # Store button rail pin for connect_to_rails
             if self.default_high:
@@ -908,25 +908,25 @@ class BootModeSelector(CircuitBlock):
         if self.default_high:
             # Pull-up configuration: resistor to VCC, button to GND
             # Connect resistor to VCC
-            sch.add_wire(self._r_rail_pin, (self._r_rail_pin[0], vcc_rail_y))
+            sch.add_wire(self._r_rail_pin, (self._r_rail_pin[0], vcc_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(self._r_rail_pin[0], vcc_rail_y)
 
             # Connect button to GND if present
             if self.include_button and self._button_rail_pin:
-                sch.add_wire(self._button_rail_pin, (self._button_rail_pin[0], gnd_rail_y))
+                sch.add_wire(self._button_rail_pin, (self._button_rail_pin[0], gnd_rail_y), warn_on_collision=False)
                 if add_junctions:
                     sch.add_junction(self._button_rail_pin[0], gnd_rail_y)
         else:
             # Pull-down configuration: resistor to GND, button to VCC
             # Connect resistor to GND
-            sch.add_wire(self._r_rail_pin, (self._r_rail_pin[0], gnd_rail_y))
+            sch.add_wire(self._r_rail_pin, (self._r_rail_pin[0], gnd_rail_y), warn_on_collision=False)
             if add_junctions:
                 sch.add_junction(self._r_rail_pin[0], gnd_rail_y)
 
             # Connect button to VCC if present
             if self.include_button and self._button_rail_pin:
-                sch.add_wire(self._button_rail_pin, (self._button_rail_pin[0], vcc_rail_y))
+                sch.add_wire(self._button_rail_pin, (self._button_rail_pin[0], vcc_rail_y), warn_on_collision=False)
                 if add_junctions:
                     sch.add_junction(self._button_rail_pin[0], vcc_rail_y)
 

@@ -1768,8 +1768,8 @@ class TestBlockIntegration:
             return comp
 
         sch.add_symbol = Mock(side_effect=mock_add_symbol)
-        sch.add_wire = Mock(side_effect=lambda *args: wires.append(args))
-        sch.add_junction = Mock(side_effect=lambda *args: junctions.append(args))
+        sch.add_wire = Mock(side_effect=lambda *args, **kwargs: wires.append(args))
+        sch.add_junction = Mock(side_effect=lambda *args, **kwargs: junctions.append(args))
         sch.wire_to_rail = Mock()
         sch.wire_decoupling_cap = Mock()
         sch.add_rail = Mock()
