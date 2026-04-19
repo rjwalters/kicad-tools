@@ -7,6 +7,7 @@ Orchestrates the full build pipeline:
 3. Run PCB generator (if exists)
 4. Run autorouter
 5. Run verification (DRC, audit)
+6. Export manufacturing package (Gerbers, BOM, CPL)
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ class BuildStep(str, Enum):
     PLACEMENT = "placement"
     ROUTE = "route"
     VERIFY = "verify"
+    EXPORT = "export"
     ALL = "all"
 
 
@@ -1061,6 +1063,108 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run manufacturing export step (Gerbers, BOM, CPL).
+
+    Invokes ``kct export`` as a subprocess to generate a manufacturing
+    package in a ``manufacturing/`` directory.
+    """
+    # Find the PCB to export (prefer routed version)
+    pcb_to_export = ctx.routed_pcb_file or ctx.pcb_file
+
+    if not pcb_to_export or not pcb_to_export.exists():
+        return BuildResult(
+            step="export",
+            success=False,
+            message="No PCB file found to export",
+        )
+
+    # Determine manufacturer: prefer target_fab from spec, fall back to ctx.mfr
+    mfr = ctx.mfr
+    if (
+        ctx.spec
+        and ctx.spec.requirements
+        and ctx.spec.requirements.manufacturing
+        and ctx.spec.requirements.manufacturing.target_fab
+    ):
+        mfr = ctx.spec.requirements.manufacturing.target_fab
+
+    # Determine output directory
+    if ctx.output_dir:
+        mfr_dir = ctx.output_dir / "manufacturing"
+    else:
+        mfr_dir = pcb_to_export.parent / "manufacturing"
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="export",
+            success=True,
+            message=(
+                f"[dry-run] Would run: kct export {pcb_to_export.name} "
+                f"--mfr {mfr} -o {mfr_dir}"
+            ),
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Exporting manufacturing package for {pcb_to_export.name}...")
+
+    try:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "export",
+            str(pcb_to_export),
+            "--mfr",
+            mfr,
+            "-o",
+            str(mfr_dir),
+        ]
+
+        # Pass schematic for BOM generation if available
+        if ctx.schematic_file and ctx.schematic_file.exists():
+            cmd.extend(["--sch", str(ctx.schematic_file)])
+
+        # Skip BOM/CPL if no assembly specified in spec
+        if not (
+            ctx.spec
+            and ctx.spec.requirements
+            and ctx.spec.requirements.manufacturing
+            and ctx.spec.requirements.manufacturing.assembly
+        ):
+            cmd.append("--no-bom")
+            cmd.append("--no-cpl")
+
+        result = subprocess.run(
+            cmd,
+            cwd=str(ctx.project_dir),
+            capture_output=not ctx.verbose,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            return BuildResult(
+                step="export",
+                success=True,
+                message=f"Manufacturing package exported to {mfr_dir}",
+                output_file=mfr_dir,
+            )
+        else:
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return BuildResult(
+                step="export",
+                success=False,
+                message=f"Export failed: {error_msg}",
+            )
+
+    except Exception as e:
+        return BuildResult(
+            step="export",
+            success=False,
+            message=f"Export failed: {e}",
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for kct build command."""
     parser = argparse.ArgumentParser(
@@ -1087,7 +1191,7 @@ Examples:
     parser.add_argument(
         "--step",
         "-s",
-        choices=["schematic", "pcb", "outline", "placement", "route", "verify", "all"],
+        choices=["schematic", "pcb", "outline", "placement", "route", "verify", "export", "all"],
         default="all",
         help="Run specific step or all (default: all)",
     )
@@ -1224,7 +1328,7 @@ Examples:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.PLACEMENT, BuildStep.ROUTE, BuildStep.VERIFY]
+        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.PLACEMENT, BuildStep.ROUTE, BuildStep.VERIFY, BuildStep.EXPORT]
     else:
         steps = [BuildStep(args.step)]
 
@@ -1264,6 +1368,9 @@ Examples:
             elif step == BuildStep.VERIFY:
                 result = _run_step_verify(ctx, console)
 
+            elif step == BuildStep.EXPORT:
+                result = _run_step_export(ctx, console)
+
             else:
                 result = BuildResult(step=step.value, success=False, message="Unknown step")
 
@@ -1275,8 +1382,8 @@ Examples:
                 status = "[green]OK[/green]" if result.success else "[red]FAIL[/red]"
                 console.print(f"  [{status}] {step.value}: {result.message}")
 
-            # Stop on failure unless just verifying
-            if not result.success and step != BuildStep.VERIFY:
+            # Stop on failure unless verifying or exporting
+            if not result.success and step not in (BuildStep.VERIFY, BuildStep.EXPORT):
                 break
 
     # Print summary
@@ -1295,6 +1402,11 @@ Examples:
                 console.print(f"\n[dim]Output:[/dim] {ctx.routed_pcb_file}")
             elif ctx.pcb_file and ctx.pcb_file.exists():
                 console.print(f"\n[dim]Output:[/dim] {ctx.pcb_file}")
+
+            # Show manufacturing output if export step ran
+            export_results = [r for r in results if r.step == "export" and r.success]
+            if export_results and export_results[0].output_file:
+                console.print(f"[dim]Manufacturing:[/dim] {export_results[0].output_file}")
         else:
             console.print(
                 f"[red]Build failed[/red] ({success_count}/{total_count} steps succeeded)"
