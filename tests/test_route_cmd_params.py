@@ -669,3 +669,113 @@ class TestEscapeRoutingFlag:
         help_text = help_output.getvalue()
         assert "--escape-routing" in help_text
         assert "--no-escape-routing" in help_text
+
+
+class TestRouteCommandNoCacheFlag:
+    """Tests for --no-cache flag in subcommand parser and dispatch bridge."""
+
+    def test_parser_accepts_no_cache(self):
+        """Centralized parser accepts --no-cache without error."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb", "--no-cache"])
+        assert args.no_cache is True
+
+    def test_parser_no_cache_default_is_false(self):
+        """--no-cache defaults to False when not provided."""
+        from kicad_tools.cli.parser import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["route", "test.kicad_pcb"])
+        assert args.no_cache is False
+
+    def test_no_cache_forwarded(self):
+        """--no-cache is forwarded to route_cmd.main."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=True,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--no-cache" in call_args
+
+    def test_no_cache_not_forwarded_when_false(self):
+        """--no-cache is not forwarded when False."""
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = SimpleNamespace(
+            pcb="test.kicad_pcb",
+            output=None,
+            strategy="negotiated",
+            skip_nets=None,
+            grid="0.25",
+            trace_width=0.2,
+            clearance=0.15,
+            via_drill=0.3,
+            via_diameter=0.6,
+            mc_trials=10,
+            iterations=15,
+            verbose=False,
+            dry_run=True,
+            quiet=True,
+            power_nets=None,
+            layers="auto",
+            force=False,
+            no_optimize=False,
+            auto_layers=False,
+            max_layers=6,
+            min_completion=0.95,
+            adaptive_rules=False,
+            min_trace=None,
+            min_clearance_floor=None,
+            manufacturer="jlcpcb",
+            high_performance=False,
+            skip_drc=False,
+            auto_fix=False,
+            auto_fix_passes=None,
+            export_failed_nets=None,
+            no_cache=False,
+        )
+
+        with patch("kicad_tools.cli.route_cmd.main") as mock_main:
+            mock_main.return_value = 0
+            run_route_command(args)
+
+            call_args = mock_main.call_args[0][0]
+            assert "--no-cache" not in call_args

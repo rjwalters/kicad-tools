@@ -1109,6 +1109,11 @@ def _add_route_parser(subparsers) -> None:
             "Useful for scripted workflows or manual completion in KiCad."
         ),
     )
+    route_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable routing cache (force fresh routing)",
+    )
 
 
 def _add_route_auto_parser(subparsers) -> None:
