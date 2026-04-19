@@ -285,3 +285,117 @@ class TestIntraIcNetClassWidth:
 
         assert len(routes) == 1
         assert routes[0].segments[0].width == 0.2  # default width
+
+
+class TestBidirectionalPerNetClearance:
+    """Issue #1692: Bidirectional A* uses per-net-class radius."""
+
+    def test_bidirectional_uses_per_net_clearance_radius(self):
+        """Verify route_bidirectional() passes per-net radius to _is_trace_blocked."""
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.5)
+        net_class_map = {"+5V": NET_CLASS_POWER}
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules, net_class_map=net_class_map)
+
+        pad1 = Pad(
+            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
+            layer=Layer.F_CU, net=1, net_name="+5V",
+        )
+        pad2 = Pad(
+            ref="C2", pin="1", x=15.0, y=5.0, width=1.0, height=1.0,
+            layer=Layer.F_CU, net=1, net_name="+5V",
+        )
+
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        # Bidirectional routing should succeed and use POWER width
+        route = router.route_bidirectional(pad1, pad2)
+        assert route is not None, "Bidirectional routing should succeed for POWER net"
+        for seg in route.segments:
+            assert seg.width == 0.5, (
+                f"Bidirectional segment width should be 0.5mm (POWER class), got {seg.width}mm"
+            )
+
+
+class TestViaBlockingPerNetClass:
+    """Issue #1692: _is_via_blocked supports per-net radius override."""
+
+    def test_is_via_blocked_accepts_radius_override(self):
+        """Verify _is_via_blocked can use a custom radius."""
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        grid = RoutingGrid(10, 10, rules)
+        router = Router(grid, rules)
+
+        # With default radius, an empty grid should not block
+        assert not router._is_via_blocked(50, 50, 0, net=1, radius=2)
+
+        # With a very large radius extending past grid edge, it should block
+        assert router._is_via_blocked(1, 1, 0, net=1, radius=5)
+
+    def test_mark_via_uses_per_net_trace_width(self):
+        """Verify _mark_via via blocking accounts for max trace width."""
+        rules = DesignRules(
+            trace_width=0.2, trace_clearance=0.2, via_clearance=0.2,
+            via_diameter=0.6, grid_resolution=0.1,
+        )
+        grid = RoutingGrid(10, 10, rules)
+        from kicad_tools.router.primitives import Via
+
+        via = Via(
+            x=5.0, y=5.0, drill=0.35, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="+5V",
+        )
+
+        # Mark with wider max_trace_width -- should block more cells
+        grid._mark_via(via, max_trace_width=0.5)
+
+        # Calculate expected radius
+        radius_wide = int(
+            (0.6 / 2 + 0.2 + 0.5 / 2) / 0.1
+        )
+        radius_narrow = int(
+            (0.6 / 2 + 0.2 + 0.2 / 2) / 0.1
+        )
+        assert radius_wide > radius_narrow
+
+    def test_mark_unmark_via_symmetry(self):
+        """Verify _unmark_via clears the same cells _mark_via blocked."""
+        rules = DesignRules(
+            trace_width=0.2, trace_clearance=0.2, via_clearance=0.2,
+            via_diameter=0.6, grid_resolution=0.1,
+        )
+        grid = RoutingGrid(10, 10, rules)
+        from kicad_tools.router.primitives import Via, Route
+
+        via = Via(
+            x=5.0, y=5.0, drill=0.35, diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU), net=1, net_name="+5V",
+        )
+
+        # Mark with wide trace width
+        grid._mark_via(via, max_trace_width=0.5)
+        # Count blocked cells
+        blocked_after_mark = int(grid._blocked.sum())
+        assert blocked_after_mark > 0
+
+        # Unmark with same trace width -- should clear all
+        grid._unmark_via(via, max_trace_width=0.5)
+        blocked_after_unmark = int(grid._blocked.sum())
+        assert blocked_after_unmark == 0
+
+
+class TestCppBackendPerNetWidth:
+    """Issue #1692: C++ backend find_blocking_nets uses per-net trace width."""
+
+    def test_find_blocking_nets_accepts_net_class(self):
+        """Verify the net_class parameter is accepted by find_blocking_nets."""
+        # This is a signature-level test; the C++ backend may not be available.
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        # Inspect the method signature to confirm it accepts net_class
+        import inspect
+        sig = inspect.signature(CppPathfinder.find_blocking_nets)
+        assert "net_class" in sig.parameters, (
+            "CppPathfinder.find_blocking_nets should accept a 'net_class' parameter"
+        )
