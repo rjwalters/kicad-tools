@@ -418,6 +418,54 @@ def gr_line_node(
     )
 
 
+def gr_text_node(
+    text: str,
+    x: float,
+    y: float,
+    layer: str = "F.SilkS",
+    font_size: float = 1.0,
+    font_thickness: float = 0.15,
+    uuid_str: str = "",
+) -> SExp:
+    """Build a PCB board-level text S-expression (gr_text).
+
+    Used for board markings such as project name, revision, and date
+    on silkscreen layers.
+
+    Args:
+        text: Text content to display
+        x, y: Position coordinates in mm
+        layer: Layer name (default "F.SilkS")
+        font_size: Font height and width in mm (default 1.0)
+        font_thickness: Stroke thickness of font in mm (default 0.15)
+        uuid_str: Unique identifier
+
+    Example output:
+        (gr_text "Board v1.0"
+            (at 105 118)
+            (layer "F.SilkS")
+            (uuid "...")
+            (effects (font (size 1 1) (thickness 0.15)))
+        )
+    """
+    effects_node = SExp.list(
+        "effects",
+        SExp.list(
+            "font",
+            SExp.list("size", fmt(font_size), fmt(font_size)),
+            SExp.list("thickness", fmt(font_thickness)),
+        ),
+    )
+    return SExp.list(
+        "gr_text",
+        text,
+        SExp.list("at", fmt(x), fmt(y)),
+        SExp.list("layer", layer),
+        uuid_node(uuid_str),
+        effects_node,
+    )
+
+
 def zone_node(
     net: int,
     net_name: str,

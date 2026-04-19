@@ -42,6 +42,7 @@ class BuildStep(str, Enum):
     PCB = "pcb"
     OUTLINE = "outline"
     PLACEMENT = "placement"
+    SILKSCREEN = "silkscreen"
     ROUTE = "route"
     VERIFY = "verify"
     EXPORT = "export"
@@ -755,6 +756,92 @@ def _run_step_placement(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+def _run_step_silkscreen(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run silkscreen generation step.
+
+    Ensures footprint reference designators are visible on silkscreen layers
+    and adds board-level markings (project name, revision, date) from the
+    project spec metadata.
+    """
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="silkscreen",
+            success=True,
+            message="No PCB file found, skipping silkscreen generation",
+        )
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="silkscreen",
+            success=True,
+            message="[dry-run] Would generate silkscreen content",
+        )
+
+    try:
+        from kicad_tools.silkscreen.generator import SilkscreenGenerator
+
+        gen = SilkscreenGenerator(ctx.pcb_file)
+
+        # Step 1: Ensure ref des are visible
+        ref_result = gen.ensure_ref_des_visible()
+
+        # Step 2: Add board markings from spec metadata
+        mark_result = None
+        name = None
+        revision = None
+        date_str = None
+
+        if ctx.spec and ctx.spec.project:
+            name = ctx.spec.project.name
+            revision = ctx.spec.project.revision
+            if ctx.spec.project.created:
+                date_str = str(ctx.spec.project.created)
+
+        if name:
+            mark_result = gen.add_board_markings(
+                name=name,
+                revision=revision,
+                date=date_str,
+            )
+
+        gen.save()
+
+        # Build summary message
+        parts = []
+        if ref_result.refs_unhidden:
+            parts.append(f"{ref_result.refs_unhidden} ref(s) unhidden")
+        if mark_result and mark_result.markings_added:
+            parts.append(f"{mark_result.markings_added} marking(s) added")
+        if mark_result and mark_result.markings_skipped:
+            parts.append(f"{mark_result.markings_skipped} marking(s) already present")
+
+        if parts:
+            message = "Silkscreen: " + ", ".join(parts)
+        else:
+            message = "Silkscreen: no changes needed"
+
+        if not ctx.quiet:
+            for msg in ref_result.messages:
+                console.print(f"    {msg}")
+            if mark_result:
+                for msg in mark_result.messages:
+                    console.print(f"    {msg}")
+
+        return BuildResult(
+            step="silkscreen",
+            success=True,
+            message=message,
+            output_file=ctx.pcb_file,
+        )
+
+    except Exception as e:
+        return BuildResult(
+            step="silkscreen",
+            success=False,
+            message=f"Silkscreen generation failed: {e}",
+        )
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
@@ -1191,7 +1278,7 @@ Examples:
     parser.add_argument(
         "--step",
         "-s",
-        choices=["schematic", "pcb", "outline", "placement", "route", "verify", "export", "all"],
+        choices=["schematic", "pcb", "outline", "placement", "silkscreen", "route", "verify", "export", "all"],
         default="all",
         help="Run specific step or all (default: all)",
     )
@@ -1328,7 +1415,7 @@ Examples:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.PLACEMENT, BuildStep.ROUTE, BuildStep.VERIFY, BuildStep.EXPORT]
+        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.PLACEMENT, BuildStep.SILKSCREEN, BuildStep.ROUTE, BuildStep.VERIFY, BuildStep.EXPORT]
     else:
         steps = [BuildStep(args.step)]
 
@@ -1359,6 +1446,9 @@ Examples:
 
             elif step == BuildStep.PLACEMENT:
                 result = _run_step_placement(ctx, console)
+
+            elif step == BuildStep.SILKSCREEN:
+                result = _run_step_silkscreen(ctx, console)
 
             elif step == BuildStep.ROUTE:
                 result = _run_step_route(ctx, console)
