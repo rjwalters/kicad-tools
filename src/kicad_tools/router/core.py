@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from kicad_tools.explain.decisions import DecisionStore
+    from kicad_tools.pcb.blocks.base import PCBBlock
     from kicad_tools.physics import Stackup, TransmissionLine
     from kicad_tools.progress import ProgressCallback
 
@@ -373,6 +374,9 @@ class Autorouter:
         # Cache for component pitches, computed lazily on first access
         self._component_pitches: dict[str, float] | None = None
 
+        # Registered PCB blocks for protected-zone routing (Issue #1586)
+        self.registered_blocks: dict[str, "PCBBlock"] = {}
+
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
         if not self._physics_enabled or self._stackup is None:
@@ -622,6 +626,84 @@ class Autorouter:
         """Add an obstacle (keepout area, mounting hole, etc.)."""
         obs = Obstacle(x, y, width, height, layer)
         self.grid.add_obstacle(obs)
+
+    def register_block(self, block: "PCBBlock") -> None:
+        """Register a PCBBlock as a protected zone on the routing grid.
+
+        This marks the block's bounding box as blocked for external routing,
+        while keeping port positions available as routing endpoints. Block
+        ports are registered as router pads so the pathfinder can route to them.
+
+        The obstacle is registered BEFORE port pads to ensure correct grid
+        state: add_obstacle blocks the bounding box, then add_pad for each
+        port punches through the blocked region for the port's net.
+
+        Args:
+            block: A placed PCBBlock with components and ports.
+
+        Raises:
+            ValueError: If the block has not been placed yet.
+        """
+        from kicad_tools.pcb.blocks.base import PCBBlock  # noqa: F811
+
+        if not block.placed:
+            raise ValueError(
+                f"Block '{block.block_id}' must be placed before registering with the router"
+            )
+
+        self.registered_blocks[block.block_id] = block
+
+        # Step 1: Compute absolute bounding box and block it on all routable layers
+        bbox = block.bounding_box
+        # Translate bounding box to absolute coordinates
+        abs_min_x = bbox.min_x + block.origin.x
+        abs_min_y = bbox.min_y + block.origin.y
+        abs_max_x = bbox.max_x + block.origin.x
+        abs_max_y = bbox.max_y + block.origin.y
+
+        # Block the bounding box on all routable layers
+        routable_layers = [
+            self.grid.index_to_layer(idx) for idx in self.grid.get_routable_indices()
+        ]
+        for layer_val in routable_layers:
+            router_layer = Layer(layer_val)
+            center_x = (abs_min_x + abs_max_x) / 2
+            center_y = (abs_min_y + abs_max_y) / 2
+            width = abs_max_x - abs_min_x
+            height = abs_max_y - abs_min_y
+            obs = Obstacle(center_x, center_y, width, height, router_layer)
+            self.grid.add_obstacle(obs)
+
+        # Step 2: Register port positions as router pads so they remain
+        # valid routing endpoints despite the blocked bounding box.
+        for port_name, port_obj in block.ports.items():
+            abs_pos = block.port(port_name)
+
+            # Map the PCB layer to a router CopperLayer
+            from kicad_tools.core.types import CopperLayer
+
+            try:
+                router_layer = CopperLayer.from_kicad_name(port_obj.layer.value)
+            except (ValueError, AttributeError):
+                # Default to F_CU if layer mapping fails
+                router_layer = Layer.F_CU
+
+            # Create a router Pad for this port
+            # Use a synthetic ref/pin derived from block_id and port name
+            port_pad = Pad(
+                x=abs_pos.x,
+                y=abs_pos.y,
+                width=0.5,  # Default port pad size
+                height=0.5,
+                net=0,  # Net assigned later when connecting
+                net_name="",
+                layer=router_layer,
+                ref=f"_block_{block.block_id}",
+                pin=port_name,
+            )
+            key = (port_pad.ref, port_pad.pin)
+            self.pads[key] = port_pad
+            self.grid.add_pad(port_pad)
 
     def clear_zones(self) -> None:
         """Remove all zone markings from the grid."""
