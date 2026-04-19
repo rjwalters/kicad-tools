@@ -2219,3 +2219,90 @@ class TestZoneFillViolationFiltering:
             items=[],
         )
         assert ClearanceRepairer._is_zone_fill_violation(v) is False
+
+
+# ---- Oscillation detection tests ----
+
+
+class TestOscillationDetection:
+    """Tests for the nudge oscillation detection in ClearanceRepairer."""
+
+    def test_no_oscillation_on_first_nudge(self, pcb_file: Path):
+        """First nudge for a UUID should never be flagged as oscillation."""
+        repairer = ClearanceRepairer(pcb_file)
+        assert not repairer._would_oscillate("seg-1", 0.1, 0.0)
+
+    def test_same_direction_not_oscillation(self, pcb_file: Path):
+        """Nudging in the same direction twice should not be flagged."""
+        repairer = ClearanceRepairer(pcb_file)
+        repairer._record_nudge("seg-1", 0.1, 0.0)
+        assert not repairer._would_oscillate("seg-1", 0.1, 0.0)
+
+    def test_reverse_direction_is_oscillation(self, pcb_file: Path):
+        """Nudging in the reverse direction should be flagged as oscillation."""
+        repairer = ClearanceRepairer(pcb_file)
+        repairer._record_nudge("seg-1", 0.1, 0.0)
+        assert repairer._would_oscillate("seg-1", -0.1, 0.0)
+
+    def test_perpendicular_not_oscillation(self, pcb_file: Path):
+        """Nudging perpendicular to previous direction should not be flagged."""
+        repairer = ClearanceRepairer(pcb_file)
+        repairer._record_nudge("seg-1", 0.1, 0.0)
+        assert not repairer._would_oscillate("seg-1", 0.0, 0.1)
+
+    def test_cumulative_history(self, pcb_file: Path):
+        """Cumulative nudge history should track total displacement."""
+        repairer = ClearanceRepairer(pcb_file)
+        repairer._record_nudge("seg-1", 0.1, 0.0)
+        repairer._record_nudge("seg-1", 0.1, 0.0)
+        # Cumulative is (0.2, 0.0); moving backward should be flagged
+        assert repairer._would_oscillate("seg-1", -0.05, 0.0)
+
+    def test_empty_uuid_not_tracked(self, pcb_file: Path):
+        """Empty UUID should not be tracked or flagged."""
+        repairer = ClearanceRepairer(pcb_file)
+        repairer._record_nudge("", 0.1, 0.0)
+        assert not repairer._would_oscillate("", -0.1, 0.0)
+
+    def test_different_uuids_independent(self, pcb_file: Path):
+        """Nudge history for different UUIDs should be independent."""
+        repairer = ClearanceRepairer(pcb_file)
+        repairer._record_nudge("seg-1", 0.1, 0.0)
+        # seg-2 has no history, should not be flagged
+        assert not repairer._would_oscillate("seg-2", -0.1, 0.0)
+
+    def test_oscillation_skips_repair(self, pcb_file: Path, drc_report: DRCReport):
+        """Oscillating segment should be skipped (not repaired) on second pass.
+
+        We simulate oscillation by running repair_from_report twice: the first
+        pass records nudge history, and a synthetic second pass with a reversed
+        violation direction should detect the oscillation and skip the repair.
+        """
+        repairer = ClearanceRepairer(pcb_file)
+
+        # First pass -- records nudge history
+        result1 = repairer.repair_from_report(
+            drc_report,
+            max_displacement=0.5,
+            dry_run=True,
+        )
+        # Should have repaired some violations
+        assert result1.repaired > 0
+
+        # Now manually reverse the nudge history for all recorded UUIDs
+        # to simulate the scenario where the violation direction reverses.
+        # After the first pass, the repairer has recorded nudges.
+        # We artificially flip them so the second pass detects oscillation.
+        for uuid_str in list(repairer._nudge_history.keys()):
+            dx, dy = repairer._nudge_history[uuid_str]
+            # Set history to the opposite direction so same violation = oscillation
+            repairer._nudge_history[uuid_str] = (-dx * 2, -dy * 2)
+
+        # Second pass with same violations -- should detect oscillation
+        result2 = repairer.repair_from_report(
+            drc_report,
+            max_displacement=0.5,
+            dry_run=True,
+        )
+        # At least some violations should be skipped due to oscillation
+        assert result2.skipped_infeasible > 0

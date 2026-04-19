@@ -639,3 +639,95 @@ class TestLocalRerouterExtraObstacles:
             extra_obstacles=[(101.0, 99.7, 0.4)],
         )
         assert result.success is True
+
+
+# ---- Same-net obstacle segment tests ----
+
+
+# PCB with two same-net segments that need clearance-aware rerouting.
+# Both segments are on net 1 ("GND") and on F.Cu.
+# seg-A runs from (100, 100) to (104, 100) -- the segment to reroute.
+# seg-B runs from (101.5, 100.4) to (102.5, 100.4) -- a short obstacle segment
+# offset 0.4mm below, only covering the middle portion. Since both are on
+# the same net, the rerouter would normally NOT block seg-B. The test verifies
+# that passing seg-B as same_net_obstacle_segs causes it to be blocked.
+PCB_WITH_SAME_NET_SEG_SEG = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (segment (start 100 100) (end 104 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-ss-a"))
+  (segment (start 101.5 100.4) (end 102.5 100.4) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-ss-b"))
+  (via (at 100 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ss-1"))
+  (via (at 104 100) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "via-ss-2"))
+)
+"""
+
+
+class TestLocalRerouterSameNetObstacle:
+    """Test rerouting with same-net obstacle segments (seg-seg violations)."""
+
+    def test_same_net_obstacle_seg_is_blocked(self):
+        """A same-net segment passed as same_net_obstacle_segs should be treated as an obstacle.
+
+        When seg-B is marked as a same-net obstacle, the rerouter should detour
+        around it, resulting in multiple segments (a non-straight path).
+        """
+        doc = _parse_pcb(PCB_WITH_SAME_NET_SEG_SEG)
+        nets = _build_nets(doc)
+        seg_a = _find_segment_by_uuid(doc, "seg-ss-a")
+        seg_b = _find_segment_by_uuid(doc, "seg-ss-b")
+        assert seg_a is not None
+        assert seg_b is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=1.0)
+
+        # Reroute seg-A around seg-B (same net, but seg-B is the obstacle)
+        result = rerouter.reroute_segment(
+            seg_node=seg_a,
+            obstacle_x=102.0,
+            obstacle_y=100.4,
+            obstacle_radius=0.125,  # half of seg-B width
+            trace_width=0.25,
+            trace_clearance=0.2,
+            same_net_obstacle_segs=[seg_b],
+        )
+
+        assert result.success is True
+        # Path should detour, requiring multiple segments
+        assert result.new_segments >= 2
+
+    def test_without_same_net_flag_straight_path(self):
+        """Without same_net_obstacle_segs, same-net segments are not blocked.
+
+        The reroute should succeed with a shorter/straighter path since the
+        same-net obstacle is not marked as blocked.
+        """
+        doc = _parse_pcb(PCB_WITH_SAME_NET_SEG_SEG)
+        nets = _build_nets(doc)
+        seg_a = _find_segment_by_uuid(doc, "seg-ss-a")
+        assert seg_a is not None
+
+        rerouter = LocalRerouter(doc, nets, resolution=0.05, padding=1.0)
+
+        # Without same_net_obstacle_segs, seg-B (same net) is not blocked
+        result = rerouter.reroute_segment(
+            seg_node=seg_a,
+            obstacle_x=102.0,
+            obstacle_y=100.4,
+            obstacle_radius=0.125,
+            trace_width=0.25,
+            trace_clearance=0.2,
+        )
+
+        # Should succeed (path may go straight through since obstacle not blocked)
+        assert result.success is True

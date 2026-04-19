@@ -89,6 +89,7 @@ class LocalRerouter:
         trace_clearance: float = 0.2,
         dry_run: bool = False,
         extra_obstacles: list[tuple[float, float, float]] | None = None,
+        same_net_obstacle_segs: list[SExp] | None = None,
     ) -> RerouteResult:
         """Attempt to reroute a segment around an obstacle.
 
@@ -107,6 +108,10 @@ class LocalRerouter:
                 additional obstacles to mark on the grid. Used by cluster
                 rerouting to ensure the path avoids all obstacles in a
                 spatial cluster, not just the primary one.
+            same_net_obstacle_segs: Optional list of segment SExp nodes that
+                share the same net as the segment being rerouted but should
+                still be treated as obstacles. Used for segment-to-segment
+                violations where the obstacle segment is on the same net.
 
         Returns:
             RerouteResult indicating success/failure and statistics
@@ -190,6 +195,7 @@ class LocalRerouter:
             seg_node,
             seg_width,
             trace_clearance,
+            same_net_obstacle_segs=same_net_obstacle_segs,
         )
 
         # Convert endpoints to grid coordinates
@@ -352,16 +358,27 @@ class LocalRerouter:
         exclude_seg: SExp,
         trace_width: float,
         trace_clearance: float,
+        same_net_obstacle_segs: list[SExp] | None = None,
     ) -> None:
         """Mark all PCB objects in the local area as obstacles.
 
         Marks vias and segments (on the same layer, different net).
         The segment being rerouted (exclude_seg) is excluded.
+
+        Args:
+            same_net_obstacle_segs: Optional list of segment nodes that share
+                the same net but should still be treated as obstacles (for
+                segment-to-segment clearance violations on the same net).
         """
         layer_str = str(layer)
         # Half-width buffer for blocking other traces:
         # other_trace_half_width + our_trace_half_width + clearance
         our_half_width = trace_width / 2
+
+        # Build a set of same-net obstacle segment identities for fast lookup
+        same_net_obs_ids: set[int] = set()
+        if same_net_obstacle_segs:
+            same_net_obs_ids = {id(s) for s in same_net_obstacle_segs}
 
         # Mark vias as obstacles
         for via_node in self.doc.find_all("via"):
@@ -412,7 +429,10 @@ class LocalRerouter:
 
             other_net_node = other_seg.find("net")
             other_net = int(other_net_node.get_first_atom()) if other_net_node else 0
-            if other_net == net and net != 0:
+
+            # Skip same-net segments unless they are explicitly listed as obstacles
+            is_same_net_obstacle = id(other_seg) in same_net_obs_ids
+            if other_net == net and net != 0 and not is_same_net_obstacle:
                 continue
 
             other_start = other_seg.find("start")

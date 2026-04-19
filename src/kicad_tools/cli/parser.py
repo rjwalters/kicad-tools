@@ -1493,8 +1493,8 @@ def _add_fix_drc_parser(subparsers) -> None:
     fix_drc_parser.add_argument(
         "--max-displacement",
         type=float,
-        default=0.25,
-        help="Maximum nudge/slide distance in mm (default: 0.25)",
+        default=0.5,
+        help="Maximum nudge/slide distance in mm (default: 0.5)",
     )
     fix_drc_parser.add_argument(
         "--margin",
@@ -1529,10 +1529,12 @@ def _add_fix_drc_parser(subparsers) -> None:
     )
     fix_drc_parser.add_argument(
         "--local-reroute",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Attempt local A* rerouting for infeasible violations "
-            "(segments with both endpoints at vias). Off by default."
+            "(segments with both endpoints at vias). On by default; "
+            "use --no-local-reroute to disable."
         ),
     )
     fix_drc_parser.add_argument(

@@ -455,6 +455,9 @@ def _run_auto_fix(
         str(output_path),
         "--max-passes",
         str(max_passes),
+        "--max-displacement",
+        "2.0",
+        "--local-reroute",
     ]
     if quiet:
         fix_argv.append("--quiet")

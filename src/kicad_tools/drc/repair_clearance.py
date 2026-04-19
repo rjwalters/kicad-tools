@@ -131,6 +131,9 @@ class ClearanceRepairer:
         self.net_names: dict[str, int] = {}
         self._parse_nets()
 
+        # Nudge history for oscillation detection: maps UUID -> (cumulative_dx, cumulative_dy)
+        self._nudge_history: dict[str, tuple[float, float]] = {}
+
     def _parse_nets(self):
         """Parse net definitions from the PCB.
 
@@ -617,6 +620,11 @@ class ClearanceRepairer:
         required_clearance = violation.required_value_mm or 0.2
         trace_clearance = required_clearance + margin
 
+        # For seg-seg violations, pass the obstacle segment as a same-net obstacle
+        same_net_obs: list[SExp] | None = None
+        if obs_obj is not None and obs_obj[1] == "segment":
+            same_net_obs = [obs_obj[0]]
+
         reroute_result = rerouter.reroute_segment(
             seg_node=seg_node,
             obstacle_x=obs_x,
@@ -626,6 +634,7 @@ class ClearanceRepairer:
             trace_clearance=trace_clearance,
             dry_run=dry_run,
             extra_obstacles=extra_obstacles,
+            same_net_obstacle_segs=same_net_obs,
         )
 
         if reroute_result.success:
@@ -707,6 +716,11 @@ class ClearanceRepairer:
         required_clearance = violation.required_value_mm or 0.2
         trace_clearance = required_clearance + margin
 
+        # For seg-seg violations, pass the obstacle segment as a same-net obstacle
+        same_net_obs: list[SExp] | None = None
+        if obs_obj is not None and obs_obj[1] == "segment":
+            same_net_obs = [obs_obj[0]]
+
         reroute_result = rerouter.reroute_segment(
             seg_node=seg_node,
             obstacle_x=obs_x,
@@ -715,6 +729,7 @@ class ClearanceRepairer:
             trace_width=trace_width,
             trace_clearance=trace_clearance,
             dry_run=dry_run,
+            same_net_obstacle_segs=same_net_obs,
         )
 
         if reroute_result.success:
@@ -735,6 +750,43 @@ class ClearanceRepairer:
                 # didn't actually move and local reroute also failed.  Undo the
                 # phantom repaired count to avoid double-counting.
                 result.repaired -= 1
+
+    def _would_oscillate(self, uuid_str: str, dx: float, dy: float) -> bool:
+        """Check if a proposed nudge would reverse a previous nudge direction.
+
+        A nudge oscillates when the dot product of the proposed displacement
+        with the cumulative displacement so far is negative, meaning the object
+        is being pushed back toward where it came from.
+
+        Args:
+            uuid_str: UUID of the object being nudged.
+            dx: Proposed displacement in X.
+            dy: Proposed displacement in Y.
+
+        Returns:
+            True if the nudge would reverse direction (oscillation detected).
+        """
+        if not uuid_str or uuid_str not in self._nudge_history:
+            return False
+        prev_dx, prev_dy = self._nudge_history[uuid_str]
+        dot = prev_dx * dx + prev_dy * dy
+        return dot < 0
+
+    def _record_nudge(self, uuid_str: str, dx: float, dy: float) -> None:
+        """Record a nudge in the history for oscillation detection.
+
+        Args:
+            uuid_str: UUID of the object being nudged.
+            dx: Applied displacement in X.
+            dy: Applied displacement in Y.
+        """
+        if not uuid_str:
+            return
+        if uuid_str in self._nudge_history:
+            prev_dx, prev_dy = self._nudge_history[uuid_str]
+            self._nudge_history[uuid_str] = (prev_dx + dx, prev_dy + dy)
+        else:
+            self._nudge_history[uuid_str] = (dx, dy)
 
     def _repair_single_violation(
         self,
@@ -820,6 +872,11 @@ class ClearanceRepairer:
         uuid_node = obj_node.find("uuid")
         uuid_str = uuid_node.get_first_atom() if uuid_node else ""
 
+        # Oscillation detection: skip if this nudge reverses a previous one
+        if self._would_oscillate(uuid_str, dx, dy):
+            result.skipped_infeasible += 1
+            return
+
         # Get actual clearance values for reporting
         actual_clearance = violation.actual_value_mm or 0.0
         required_clearance = violation.required_value_mm or 0.0
@@ -842,6 +899,9 @@ class ClearanceRepairer:
         if not dry_run:
             self._apply_nudge(obj_node, obj_type, dx, dy, result=result)
             self.modified = True
+
+        # Record the nudge for oscillation detection in subsequent passes
+        self._record_nudge(uuid_str, dx, dy)
 
         result.repaired += 1
 

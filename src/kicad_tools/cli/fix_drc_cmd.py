@@ -84,8 +84,8 @@ Examples:
     parser.add_argument(
         "--max-displacement",
         type=float,
-        default=0.25,
-        help="Maximum nudge/slide distance in mm (default: 0.25)",
+        default=0.5,
+        help="Maximum nudge/slide distance in mm (default: 0.5)",
     )
     parser.add_argument(
         "--margin",
@@ -120,10 +120,12 @@ Examples:
     )
     parser.add_argument(
         "--local-reroute",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Attempt local A* rerouting for infeasible violations "
-            "(segments with both endpoints at vias). Off by default."
+            "(segments with both endpoints at vias). On by default; "
+            "use --no-local-reroute to disable."
         ),
     )
     parser.add_argument(
