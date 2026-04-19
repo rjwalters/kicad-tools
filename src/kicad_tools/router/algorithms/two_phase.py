@@ -274,14 +274,14 @@ class TwoPhaseRouter:
         # Initial routing pass
         for i, net in enumerate(net_order):
             if check_timeout():
-                print(
+                flush_print(
                     f"  ⚠ Timeout during detailed routing at net {i}/{total_nets} ({elapsed_str()})"
                 )
                 break
 
             net_name = self.net_names.get(net, f"Net {net}")
             pct = (i / total_nets * 100) if total_nets > 0 else 0
-            print(f"  [{pct:5.1f}%] Routing {net_name}... ({elapsed_str()})")
+            flush_print(f"  [{pct:5.1f}%] Routing {net_name}... ({elapsed_str()})")
 
             routes = self._route_net_with_corridor(net, present_factor)
             if routes:
@@ -291,7 +291,7 @@ class TwoPhaseRouter:
                     self.routes.append(route)
 
         overflow = self.grid.get_total_overflow()
-        print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
+        flush_print(f"  Initial pass: {len(net_routes)}/{total_nets} nets, overflow: {overflow}")
 
         # Rip-up and reroute iterations if needed
         if overflow > 0:
@@ -301,7 +301,7 @@ class TwoPhaseRouter:
 
             for iteration in range(1, max_iterations + 1):
                 if check_timeout():
-                    print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
+                    flush_print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
                     break
 
                 if progress_callback is not None:
@@ -316,7 +316,7 @@ class TwoPhaseRouter:
 
                 overused = self.grid.find_overused_cells()
                 nets_to_reroute = neg_router.find_nets_through_overused_cells(net_routes, overused)
-                print(
+                flush_print(
                     f"  Iteration {iteration}: ripping up {len(nets_to_reroute)} nets ({elapsed_str()})"
                 )
 
@@ -333,10 +333,10 @@ class TwoPhaseRouter:
                             self.routes.append(route)
 
                 overflow = self.grid.get_total_overflow()
-                print(f"  Iteration {iteration} complete: overflow={overflow}")
+                flush_print(f"  Iteration {iteration} complete: overflow={overflow}")
 
                 if overflow == 0:
-                    print(f"  Converged at iteration {iteration}!")
+                    flush_print(f"  Converged at iteration {iteration}!")
                     break
 
         return list(self.routes)
