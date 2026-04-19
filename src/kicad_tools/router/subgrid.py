@@ -224,11 +224,13 @@ class SubGridRouter:
         rules: DesignRules,
         grid_tolerance: float | None = None,
         escape_search_radius: int = 3,
+        clearance_weight: float = 2.5,
     ):
         self.grid = grid
         self.rules = rules
         self.grid_tolerance = grid_tolerance if grid_tolerance is not None else grid.resolution / 4
         self.escape_search_radius = escape_search_radius
+        self.clearance_weight = clearance_weight
 
     def analyze_pads(
         self,
@@ -429,6 +431,53 @@ class SubGridRouter:
 
         return result
 
+    def _min_clearance_to_neighbors(
+        self,
+        x: float,
+        y: float,
+        half_width: float,
+        net: int,
+        layer_idx: int,
+    ) -> float:
+        """Compute minimum edge-to-edge distance from a candidate point to any different-net pad.
+
+        Used for clearance-weighted scoring of escape candidates (Issue #1642).
+        For each pad on the board that belongs to a different net and overlaps
+        the candidate's layer, computes the edge-to-edge distance (center-to-center
+        minus the candidate's half-width minus the pad's effective radius).
+
+        Args:
+            x: Candidate snap point X coordinate (world units, mm)
+            y: Candidate snap point Y coordinate (world units, mm)
+            half_width: Half the trace width of the escape segment
+            net: Net ID of the pad being escaped (neighbors on this net are skipped)
+            layer_idx: Grid layer index to check (SMD pads on other layers are skipped)
+
+        Returns:
+            Minimum edge-to-edge distance in mm. Returns ``float('inf')`` when
+            there are no different-net pads on the relevant layer.
+        """
+        min_dist = float("inf")
+        for pad in self.grid._pads:
+            if pad.net == net:
+                continue
+            # Layer filtering: through-hole pads appear on all layers,
+            # SMD pads only on their own layer.
+            if not pad.through_hole:
+                try:
+                    pad_li = self.grid.layer_to_index(pad.layer.value)
+                except Exception:
+                    continue
+                if pad_li != layer_idx:
+                    continue
+            pad_radius = max(pad.width, pad.height) / 2
+            dx = x - pad.x
+            dy = y - pad.y
+            dist = math.sqrt(dx * dx + dy * dy) - half_width - pad_radius
+            if dist < min_dist:
+                min_dist = dist
+        return min_dist
+
     def _find_escape_for_pad(self, sgp: SubGridPad) -> SubGridEscape | None:
         """Find the best escape point for a single off-grid pad.
 
@@ -454,6 +503,20 @@ class SubGridRouter:
             check_layers = list(range(self.grid.num_layers))
         else:
             check_layers = [self.grid.layer_to_index(pad.layer.value)]
+
+        # Determine trace width for escape segment (needed for clearance scoring)
+        layer = pad.layer
+        width = self.rules.trace_width
+
+        # Apply neck-down if configured for fine-pitch
+        if self.rules.min_trace_width is not None:
+            ref = pad.ref
+            pin_pitch = None
+            if ref:
+                pitches = self.grid.compute_component_pitches()
+                pin_pitch = pitches.get(ref)
+            if self.rules.should_apply_neck_down(ref, pin_pitch):
+                width = self.rules.min_trace_width
 
         # Collect all accessible candidates with their scores
         candidates: list[tuple[float, int, int, float, float]] = []
@@ -516,6 +579,24 @@ class SubGridRouter:
                 if dist > self.grid.resolution * radius:
                     score += dist * 2
 
+                # Clearance-aware scoring (Phase 2, Issue #1642)
+                # Penalize candidates that are close to different-net pads.
+                # This re-orders candidates so that high-clearance points are
+                # preferred, reducing DRC violations on tightly-packed ICs.
+                if self.clearance_weight > 0:
+                    required_clearance = self.rules.trace_clearance
+                    neighbor_clearance = self._min_clearance_to_neighbors(
+                        snap_x, snap_y, width / 2, pad.net, check_layers[0],
+                    )
+                    # Only penalize when clearance margin is tight
+                    # (below 2x required clearance)
+                    threshold = required_clearance * 2
+                    if neighbor_clearance < threshold:
+                        clearance_penalty = (
+                            (threshold - neighbor_clearance) * self.clearance_weight
+                        )
+                        score += clearance_penalty
+
                 candidates.append((score, gx, gy, snap_x, snap_y))
 
         if not candidates:
@@ -523,20 +604,6 @@ class SubGridRouter:
 
         # Sort candidates by score (lowest = best)
         candidates.sort(key=lambda c: c[0])
-
-        # Determine trace width for escape segment
-        layer = pad.layer
-        width = self.rules.trace_width
-
-        # Apply neck-down if configured for fine-pitch
-        if self.rules.min_trace_width is not None:
-            ref = pad.ref
-            pin_pitch = None
-            if ref:
-                pitches = self.grid.compute_component_pitches()
-                pin_pitch = pitches.get(ref)
-            if self.rules.should_apply_neck_down(ref, pin_pitch):
-                width = self.rules.min_trace_width
 
         # Compute component pitches once for clearance validation
         component_pitches = self.grid.compute_component_pitches()

@@ -932,3 +932,250 @@ class TestEscapeClearanceValidation:
                 escape.segment, exclude_net=escape.pad.net,
             )
             assert is_valid
+
+
+class TestClearanceWeightedSelection:
+    """Tests for clearance-aware grid snap selection (Issue #1642).
+
+    Verifies that _find_escape_for_pad() uses clearance-weighted scoring
+    to prefer grid points farther from different-net neighbors, reducing
+    DRC violations on tightly-packed fine-pitch components.
+    """
+
+    def test_prefers_high_clearance_candidate(self):
+        """When two candidates are equidistant, the one farther from a
+        different-net neighbor should be selected."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.127,
+        )
+        subgrid = SubGridRouter(grid, rules, clearance_weight=2.5)
+
+        # Off-grid pad at y=5.05 (between grid points 5.0 and 5.1)
+        off_grid_pad = make_pad(
+            x=5.0, y=5.05, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+
+        # Neighbor pad of different net close to grid point y=5.0 (below),
+        # making y=5.0 a worse escape target than y=5.1
+        neighbor_below = make_pad(
+            x=5.0, y=4.6, net=2, ref="U2", pin="1",
+            width=0.3, height=0.3,
+        )
+
+        # Component center pad (for escape direction calculation)
+        center_pad = make_pad(
+            x=5.0, y=7.0, net=3, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        all_pads = [off_grid_pad, neighbor_below, center_pad]
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # The escape for net 1 should exist and prefer the candidate
+        # farther from the neighbor (y=5.1 rather than y=5.0)
+        net1_escapes = [e for e in result.escapes if e.pad.net == 1]
+        assert len(net1_escapes) == 1
+        escape = net1_escapes[0]
+        # The snap point Y should be >= 5.05 (away from the neighbor at 4.6)
+        assert escape.snap_point[1] >= 5.05 - 0.001, (
+            f"Expected escape toward y>=5.05 (away from neighbor), "
+            f"got snap_y={escape.snap_point[1]:.3f}"
+        )
+        # Must also pass binary clearance validation
+        is_valid, _clearance, _loc = grid.validate_segment_clearance(
+            escape.segment, exclude_net=1,
+        )
+        assert is_valid
+
+    def test_fallback_when_no_neighbors(self):
+        """When no different-net neighbors exist, clearance scoring should
+        not change the selection (nearest/best-direction still wins)."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.127,
+        )
+
+        # Run with clearance_weight=0 and clearance_weight=2.5 and compare
+        subgrid_no_weight = SubGridRouter(grid, rules, clearance_weight=0.0)
+        subgrid_weighted = SubGridRouter(grid, rules, clearance_weight=2.5)
+
+        # Isolated off-grid pad -- no different-net neighbors nearby
+        off_grid_pad = make_pad(
+            x=10.05, y=10.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+        center_pad = make_pad(
+            x=10.05, y=12.0, net=2, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        all_pads = [off_grid_pad, center_pad]
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid_no_weight.analyze_pads(all_pads)
+        result_no = subgrid_no_weight.generate_escape_segments(analysis)
+
+        analysis2 = subgrid_weighted.analyze_pads(all_pads)
+        result_w = subgrid_weighted.generate_escape_segments(analysis2)
+
+        # Both should produce escapes for the same pad
+        net1_no = [e for e in result_no.escapes if e.pad.net == 1]
+        net1_w = [e for e in result_w.escapes if e.pad.net == 1]
+
+        assert len(net1_no) >= 1
+        assert len(net1_w) >= 1
+
+        # The selected snap points should be the same (no neighbor influence)
+        assert abs(net1_no[0].snap_point[0] - net1_w[0].snap_point[0]) < 0.001
+        assert abs(net1_no[0].snap_point[1] - net1_w[0].snap_point[1]) < 0.001
+
+    def test_min_clearance_to_neighbors_basic(self):
+        """_min_clearance_to_neighbors should compute correct edge-to-edge distance."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Place a pad at (5.0, 5.0) with width=0.4, height=0.4 -> radius=0.2
+        neighbor = make_pad(
+            x=5.0, y=5.0, net=2, ref="U2", pin="1",
+            width=0.4, height=0.4,
+        )
+        grid.add_pad(neighbor)
+
+        # Query from (5.5, 5.0) with half_width=0.075 for net=1
+        # Center-to-center = 0.5mm, edge-to-edge = 0.5 - 0.075 - 0.2 = 0.225
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        dist = subgrid._min_clearance_to_neighbors(
+            5.5, 5.0, 0.075, net=1, layer_idx=layer_idx,
+        )
+        expected = 0.5 - 0.075 - 0.2
+        assert abs(dist - expected) < 0.001, f"Expected {expected}, got {dist}"
+
+    def test_min_clearance_to_neighbors_skips_same_net(self):
+        """_min_clearance_to_neighbors should skip pads on the same net."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Pad on net=1 -- should be skipped when querying for net=1
+        same_net_pad = make_pad(
+            x=5.0, y=5.0, net=1, ref="U1", pin="1",
+            width=0.4, height=0.4,
+        )
+        grid.add_pad(same_net_pad)
+
+        layer_idx = grid.layer_to_index(Layer.F_CU.value)
+        dist = subgrid._min_clearance_to_neighbors(
+            5.5, 5.0, 0.075, net=1, layer_idx=layer_idx,
+        )
+        assert dist == float("inf"), "Same-net pad should be ignored"
+
+    def test_min_clearance_to_neighbors_layer_filtering(self):
+        """_min_clearance_to_neighbors should skip SMD pads on other layers."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Pad on B.Cu -- should be skipped when querying F.Cu layer
+        back_pad = make_pad(
+            x=5.0, y=5.0, net=2, ref="U2", pin="1",
+            width=0.4, height=0.4,
+            layer=Layer.B_CU,
+        )
+        grid.add_pad(back_pad)
+
+        f_cu_idx = grid.layer_to_index(Layer.F_CU.value)
+        dist = subgrid._min_clearance_to_neighbors(
+            5.5, 5.0, 0.075, net=1, layer_idx=f_cu_idx,
+        )
+        assert dist == float("inf"), "Pad on B.Cu should be skipped for F.Cu query"
+
+    def test_min_clearance_to_neighbors_through_hole_not_skipped(self):
+        """_min_clearance_to_neighbors should include through-hole pads on any layer."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.1,
+        )
+        subgrid = SubGridRouter(grid, rules)
+
+        # Through-hole pad should be visible on all layers
+        th_pad = make_pad(
+            x=5.0, y=5.0, net=2, ref="J1", pin="1",
+            width=1.7, height=1.7,
+            through_hole=True,
+        )
+        grid.add_pad(th_pad)
+
+        f_cu_idx = grid.layer_to_index(Layer.F_CU.value)
+        dist = subgrid._min_clearance_to_neighbors(
+            5.5, 5.0, 0.075, net=1, layer_idx=f_cu_idx,
+        )
+        # Through-hole pad radius = 1.7/2 = 0.85
+        # Distance = 0.5 - 0.075 - 0.85 = -0.425 (overlapping)
+        expected = 0.5 - 0.075 - 0.85
+        assert abs(dist - expected) < 0.001, f"Expected {expected}, got {dist}"
+
+    def test_clearance_weight_zero_disables_scoring(self):
+        """With clearance_weight=0, scoring should match pre-Phase-2 behavior."""
+        grid, rules = make_grid_and_rules(
+            width=20.0,
+            height=20.0,
+            resolution=0.1,
+            trace_width=0.15,
+            trace_clearance=0.127,
+        )
+        subgrid = SubGridRouter(grid, rules, clearance_weight=0.0)
+
+        off_grid_pad = make_pad(
+            x=5.05, y=5.0, net=1, ref="U1", pin="1",
+            width=0.3, height=0.3,
+        )
+        center_pad = make_pad(
+            x=5.05, y=7.0, net=2, ref="U1", pin="2",
+            width=0.3, height=0.3,
+        )
+
+        all_pads = [off_grid_pad, center_pad]
+        for p in all_pads:
+            grid.add_pad(p)
+
+        analysis = subgrid.analyze_pads(all_pads)
+        result = subgrid.generate_escape_segments(analysis)
+
+        # Should still produce valid escapes (binary check is defense-in-depth)
+        for escape in result.escapes:
+            is_valid, _clearance, _loc = grid.validate_segment_clearance(
+                escape.segment, exclude_net=escape.pad.net,
+            )
+            assert is_valid
