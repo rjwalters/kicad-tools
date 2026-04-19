@@ -153,7 +153,7 @@ class Router:
         # Via validity cache (Issue #966): caches whether via can be placed at (x, y, net)
         # Key: (gx, gy, net), Value: True if valid, False if blocked
         # Cache is cleared when routes are modified (invalidates blocking state)
-        self._via_cache: dict[tuple[int, int, int], bool] = {}
+        self._via_cache: dict[tuple[int, int, int, int], bool] = {}
         self._via_cache_enabled: bool = True
 
         # Issue #1016: Component pitch cache for per-component clearance
@@ -676,7 +676,8 @@ class Router:
         return False
 
     def _is_via_blocked(
-        self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False
+        self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False,
+        radius: int | None = None,
     ) -> bool:
         """Check if placing a via at this position would conflict.
 
@@ -689,10 +690,30 @@ class Router:
         Args:
             allow_sharing: If True (negotiated mode), allow routing through
                           non-obstacle blocked cells (they'll get high cost instead)
+            radius: Override the via half-width in grid cells. When None,
+                    uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
-        # Compute all cell coordinates within via radius using pre-computed offsets
-        cx_arr = gx + self._via_offset_dx
-        cy_arr = gy + self._via_offset_dy
+        # Issue #1692: Support per-net-class via radius override.
+        # When a custom radius is provided, compute offsets on the fly
+        # rather than using the pre-computed arrays (which use the global
+        # via diameter).
+        if radius is not None and radius != self._via_half_cells:
+            via_r = radius
+            via_offset_dx = np.array(
+                [dx for dy in range(-via_r, via_r + 1) for dx in range(-via_r, via_r + 1)],
+                dtype=np.int32,
+            )
+            via_offset_dy = np.array(
+                [dy for dy in range(-via_r, via_r + 1) for dx in range(-via_r, via_r + 1)],
+                dtype=np.int32,
+            )
+        else:
+            via_offset_dx = self._via_offset_dx
+            via_offset_dy = self._via_offset_dy
+
+        # Compute all cell coordinates within via radius using offsets
+        cx_arr = gx + via_offset_dx
+        cy_arr = gy + via_offset_dy
 
         # Check bounds - if any cell is out of bounds, via is blocked
         in_bounds = (
@@ -785,7 +806,8 @@ class Router:
         self._layer_priority = None
 
     def _check_via_placement_cached(
-        self, gx: int, gy: int, net: int, allow_sharing: bool = False
+        self, gx: int, gy: int, net: int, allow_sharing: bool = False,
+        radius: int | None = None,
     ) -> bool:
         """Check if a via can be placed at (gx, gy) for the given net, using cache.
 
@@ -797,27 +819,32 @@ class Router:
             gx, gy: Grid coordinates for via placement
             net: Net ID for the route
             allow_sharing: If True (negotiated mode), allow sharing
+            radius: Override the via half-width in grid cells (Issue #1692).
 
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
         """
         # Try cache first (only in non-sharing mode since sharing state can change)
+        # Issue #1692: Include radius in cache key so different net classes
+        # don't collide in the cache.
+        effective_radius = radius if radius is not None else self._via_half_cells
         if self._via_cache_enabled and not allow_sharing:
-            cache_key = (gx, gy, net)
+            cache_key = (gx, gy, net, effective_radius)
             if cache_key in self._via_cache:
                 return self._via_cache[cache_key]
 
         # Check all layers using priority ordering
         for check_layer in self._get_layer_priority():
-            if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing):
+            if self._is_via_blocked(gx, gy, check_layer, net, allow_sharing,
+                                     radius=radius):
                 # Cache the negative result
                 if self._via_cache_enabled and not allow_sharing:
-                    self._via_cache[(gx, gy, net)] = False
+                    self._via_cache[(gx, gy, net, effective_radius)] = False
                 return False
 
         # Via is valid on all layers - cache positive result
         if self._via_cache_enabled and not allow_sharing:
-            self._via_cache[(gx, gy, net)] = True
+            self._via_cache[(gx, gy, net, effective_radius)] = True
         return True
 
     def clear_via_cache(self) -> None:
@@ -1169,6 +1196,19 @@ class Router:
             ),
         )
 
+        # Issue #1692: Compute per-net via clearance radius.  Net classes
+        # may specify larger via_size which requires a wider blocking check.
+        net_via_size = net_class.via_size if net_class else self.rules.via_diameter
+        net_via_half_cells = max(
+            1,
+            math.ceil(
+                round(
+                    (net_via_size / 2 + self.rules.via_clearance) / self.grid.resolution,
+                    6,
+                )
+            ),
+        )
+
         # In negotiated mode, allow resource sharing
         allow_sharing = negotiated_mode
 
@@ -1470,8 +1510,10 @@ class Router:
 
                 # Check if via placement is valid on ALL layers (through-hole via)
                 # Issue #966: Use cached via check with layer priority ordering
+                # Issue #1692: Pass per-net via radius for wider net classes
                 if not self._check_via_placement_cached(
-                    current.x, current.y, start.net, allow_sharing
+                    current.x, current.y, start.net, allow_sharing,
+                    radius=net_via_half_cells,
                 ):
                     continue
 
@@ -1656,6 +1698,10 @@ class Router:
         # falling back to the global rules.trace_width for unclassified nets.
         base_trace_width = self._get_trace_width_for_net(start_pad.net_name)
 
+        # Issue #1692: Use per-net-class via size when creating vias.
+        _nc = self._get_net_class(start_pad.net_name)
+        net_via_diameter = _nc.via_size if _nc else self.rules.via_diameter
+
         def _normalize_direction(dx: float, dy: float) -> tuple[float, float] | None:
             """Normalize direction vector, return None if no movement."""
             length = (dx * dx + dy * dy) ** 0.5
@@ -1739,7 +1785,7 @@ class Router:
                     x=current_x,
                     y=current_y,
                     drill=self.rules.via_drill,
-                    diameter=self.rules.via_diameter,
+                    diameter=net_via_diameter,
                     layers=(
                         Layer(self.grid.index_to_layer(current_layer_idx)),
                         Layer(self.grid.index_to_layer(layer_idx)),
@@ -1939,6 +1985,34 @@ class Router:
         cost_mult = net_class.cost_multiplier if net_class else 1.0
         allow_sharing = negotiated_mode
 
+        # Issue #1692: Compute per-net trace clearance radius for A* search,
+        # matching the logic in route() (lines 1156-1170).  Without this,
+        # bidirectional A* falls back to the global _trace_half_width_cells
+        # which under-reserves space for wider net classes (e.g. POWER).
+        net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        net_trace_half_width_cells = max(
+            1,
+            math.ceil(
+                round(
+                    (net_trace_width / 2 + net_trace_clearance) / self.grid.resolution,
+                    6,
+                )
+            ),
+        )
+
+        # Issue #1692: Compute per-net via clearance radius.
+        net_via_size = net_class.via_size if net_class else self.rules.via_diameter
+        net_via_half_cells = max(
+            1,
+            math.ceil(
+                round(
+                    (net_via_size / 2 + self.rules.via_clearance) / self.grid.resolution,
+                    6,
+                )
+            ),
+        )
+
         # Convert to grid coordinates
         start_gx, start_gy = self.grid.world_to_grid(start.x, start.y)
         end_gx, end_gy = self.grid.world_to_grid(end.x, end.y)
@@ -2060,6 +2134,8 @@ class Router:
                         allow_sharing,
                         cost_mult,
                         weight,
+                        trace_radius=net_trace_half_width_cells,
+                        via_radius=net_via_half_cells,
                     )
 
             # Process backward step
@@ -2094,6 +2170,8 @@ class Router:
                         allow_sharing,
                         cost_mult,
                         weight,
+                        trace_radius=net_trace_half_width_cells,
+                        via_radius=net_via_half_cells,
                     )
 
             # Early termination: if we have a meeting point and both queues
@@ -2132,11 +2210,21 @@ class Router:
         allow_sharing: bool,
         cost_mult: float,
         weight: float,
+        trace_radius: int | None = None,
+        via_radius: int | None = None,
     ) -> None:
         """Expand neighbors for bidirectional A* search.
 
         This is a helper method that expands neighbors for either the forward
         or backward search direction. It handles 2D moves and via transitions.
+
+        Args:
+            trace_radius: Per-net-class trace half-width in grid cells.
+                When None, falls back to the global ``_trace_half_width_cells``
+                (Issue #1692).
+            via_radius: Per-net-class via half-width in grid cells.
+                When None, falls back to the global ``_via_half_cells``
+                (Issue #1692).
         """
         # Extract bounds (Issue #990: also need source bounds for pad exit check)
         src_gx1, src_gy1, src_gx2, src_gy2 = source_metal_bounds
@@ -2203,7 +2291,8 @@ class Router:
                 if cell.net == source_pad.net:
                     pass  # Same net - passable
                 elif cell.net == 0:
-                    if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing):
+                    if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
+                                              radius=trace_radius):
                         continue
                 else:
                     # Different net's blocked cell
@@ -2227,7 +2316,8 @@ class Router:
                     or is_exiting_target_pad
                 )
                 if not is_pad_exit_or_approach:
-                    if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing):
+                    if self._is_trace_blocked(nx, ny, nlayer, source_pad.net, allow_sharing,
+                                              radius=trace_radius):
                         continue
 
             # Check zone blocking
@@ -2290,8 +2380,10 @@ class Router:
 
             # Check via blocking on all layers
             # Issue #966: Use cached via check with layer priority ordering
+            # Issue #1692: Pass per-net via radius for wider net classes
             if not self._check_via_placement_cached(
-                current.x, current.y, source_pad.net, allow_sharing
+                current.x, current.y, source_pad.net, allow_sharing,
+                radius=via_radius,
             ):
                 continue
 

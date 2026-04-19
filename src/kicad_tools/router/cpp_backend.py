@@ -461,6 +461,7 @@ class CppPathfinder:
         start: Pad,
         end: Pad,
         layer: int | None = None,
+        net_class: "NetClassRouting | None" = None,
     ) -> set[int]:
         """Find which nets block the direct path from start to end.
 
@@ -472,6 +473,7 @@ class CppPathfinder:
             start: Source pad
             end: Destination pad
             layer: Optional layer index (uses pad layer if not specified)
+            net_class: Optional net class for per-net trace width (Issue #1692).
 
         Returns:
             Set of net IDs that block the path (excluding net 0 and the source net)
@@ -497,11 +499,15 @@ class CppPathfinder:
         err = dx - dy
         gx, gy = gx1, gy1
 
-        # Determine trace half width in cells (same calculation as C++)
+        # Determine trace half width in cells
+        # Issue #1692: Use per-net-class trace width when available,
+        # falling back to the global rules.trace_width.
+        net_trace_width = net_class.trace_width if net_class else self._rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self._rules.trace_clearance
         trace_half_width_cells = max(
             1,
             int(
-                (self._rules.trace_width / 2 + self._rules.trace_clearance) / self._grid.resolution
+                (net_trace_width / 2 + net_trace_clearance) / self._grid.resolution
                 + 0.5
             ),
         )
