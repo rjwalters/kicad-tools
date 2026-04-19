@@ -1075,6 +1075,65 @@ class RoutingGrid:
         is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
 
+    def validate_via_to_via_clearance(
+        self,
+        via: "Via",
+        exclude_net: int,
+        min_clearance: float | None = None,
+    ) -> tuple[bool, float, tuple[float, float] | None]:
+        """Validate geometric clearance of a via against all other-net vias.
+
+        Issue #1693: Complements validate_via_clearance() by checking vias
+        against other-net vias. Without this, two vias from different nets can
+        be placed too close together, creating a DRC violation that grid-based
+        checking misses because the grid marking radius is tuned for trace
+        avoidance, not via-to-via proximity.
+
+        Uses simple center-to-center Euclidean distance minus both via radii
+        to compute edge-to-edge clearance. No layer filtering is needed since
+        vias are through-hole.
+
+        Args:
+            via: The via to validate
+            exclude_net: Net ID to exclude (same-net vias don't violate clearance)
+            min_clearance: Minimum required clearance (default: rules.via_clearance)
+
+        Returns:
+            Tuple of (is_valid, actual_clearance, violation_location)
+            - is_valid: True if via meets clearance requirements
+            - actual_clearance: Minimum clearance found (negative if overlapping)
+            - violation_location: (x, y) of worst violation, or None if valid
+        """
+        import math
+
+        if min_clearance is None:
+            min_clearance = self.rules.via_clearance
+
+        via_radius = via.diameter / 2
+        min_actual_clearance = float("inf")
+        violation_loc: tuple[float, float] | None = None
+        has_violation = False
+
+        for route in self.routes:
+            if route.net == exclude_net:
+                continue
+
+            for existing_via in route.vias:
+                distance = math.sqrt(
+                    (via.x - existing_via.x) ** 2 + (via.y - existing_via.y) ** 2
+                )
+                existing_via_radius = existing_via.diameter / 2
+                clearance = distance - via_radius - existing_via_radius
+
+                if clearance < min_actual_clearance:
+                    min_actual_clearance = clearance
+                if clearance < min_clearance:
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
+
+        is_valid = not has_violation
+        return is_valid, min_actual_clearance, violation_loc
+
     def _point_to_segment_distance(
         self,
         px: float,
