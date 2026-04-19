@@ -7,7 +7,6 @@ Phase 2: Skip auto-routing for nets connected by block internal traces.
 import pytest
 
 from kicad_tools.pcb.blocks.base import PCBBlock
-from kicad_tools.pcb.geometry import Layer as PCBLayer
 from kicad_tools.pcb.layout import PCBLayout
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
