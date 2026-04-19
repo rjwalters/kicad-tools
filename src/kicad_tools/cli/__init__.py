@@ -20,6 +20,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools route-auto <pcb>       - Orchestrator-based smart routing for a net
     kicad-tools zones <command>        - Add and fill copper pour zones
+    kicad-tools stitch <pcb>           - Auto-add stitching vias for plane connections
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
     kicad-tools optimize-traces <pcb>  - Optimize PCB traces
@@ -306,6 +307,9 @@ def _dispatch_command(args) -> int:
     elif args.command == "zones":
         return run_zones_command(args)
 
+    elif args.command == "stitch":
+        return _run_stitch_command(args)
+
     elif args.command == "route":
         return run_route_command(args)
 
@@ -447,6 +451,37 @@ def _dispatch_command(args) -> int:
         return _run_export_command(args)
 
     return 0
+
+
+def _run_stitch_command(args) -> int:
+    """Run the stitch command."""
+    from .stitch_cmd import main as stitch_cmd
+
+    sub_argv = [args.pcb]
+
+    if hasattr(args, "stitch_nets") and args.stitch_nets:
+        for net in args.stitch_nets:
+            sub_argv.extend(["--net", net])
+    if hasattr(args, "stitch_via_size") and args.stitch_via_size != 0.45:
+        sub_argv.extend(["--via-size", str(args.stitch_via_size)])
+    if hasattr(args, "stitch_drill") and args.stitch_drill != 0.2:
+        sub_argv.extend(["--drill", str(args.stitch_drill)])
+    if hasattr(args, "stitch_clearance") and args.stitch_clearance != 0.2:
+        sub_argv.extend(["--clearance", str(args.stitch_clearance)])
+    if hasattr(args, "stitch_offset") and args.stitch_offset != 0.5:
+        sub_argv.extend(["--offset", str(args.stitch_offset)])
+    if hasattr(args, "stitch_target_layer") and args.stitch_target_layer:
+        sub_argv.extend(["--target-layer", args.stitch_target_layer])
+    if hasattr(args, "stitch_trace_width") and args.stitch_trace_width != 0.2:
+        sub_argv.extend(["--trace-width", str(args.stitch_trace_width)])
+    if hasattr(args, "stitch_dry_run") and args.stitch_dry_run:
+        sub_argv.append("--dry-run")
+    if hasattr(args, "stitch_output") and args.stitch_output:
+        sub_argv.extend(["-o", args.stitch_output])
+    if hasattr(args, "stitch_drc") and args.stitch_drc:
+        sub_argv.append("--drc")
+
+    return stitch_cmd(sub_argv)
 
 
 def _run_explain_command(args) -> int:
