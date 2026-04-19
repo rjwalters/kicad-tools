@@ -1778,7 +1778,7 @@ class Router:
         exclude_net: int,
         component_pitches: dict[str, float] | None = None,
     ) -> bool:
-        """Validate route segments against geometric clearance constraints.
+        """Validate route segments and vias against geometric clearance constraints.
 
         Issue #750: Grid-based A* checking is approximate; diagonal segments can
         cut through obstacle corners. This method validates actual geometry to
@@ -1786,6 +1786,10 @@ class Router:
 
         Issue #1016: Now supports per-component clearance validation via
         component_pitches dict for automatic fine-pitch detection.
+
+        Issue #1667: Now also validates vias against other-net segments to catch
+        seg-via clearance violations where a via's annular ring is too close to
+        an existing trace.
 
         Args:
             route: Route to validate
@@ -1801,6 +1805,15 @@ class Router:
             )
             if not is_valid:
                 return False
+
+        # Issue #1667: Validate vias against other-net segments
+        for via in route.vias:
+            is_valid, _clearance, _location = self.grid.validate_via_clearance(
+                via, exclude_net=exclude_net
+            )
+            if not is_valid:
+                return False
+
         return True
 
     def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:

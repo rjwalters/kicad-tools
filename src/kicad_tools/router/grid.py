@@ -1001,6 +1001,80 @@ class RoutingGrid:
         is_valid = not has_violation
         return is_valid, min_actual_clearance, violation_loc
 
+    def validate_via_clearance(
+        self,
+        via: "Via",
+        exclude_net: int,
+        min_clearance: float | None = None,
+    ) -> tuple[bool, float, tuple[float, float] | None]:
+        """Validate geometric clearance of a via against all other-net segments.
+
+        Issue #1667: Complements validate_segment_clearance() by checking vias
+        against other-net segments. Without this, a via's annular ring can be
+        placed too close to an existing segment on the same layer, creating a
+        DRC violation that grid-based checking misses.
+
+        For each copper layer the via spans, checks the via center-to-segment
+        distance minus (via_radius + segment_half_width) against the required
+        clearance.
+
+        Args:
+            via: The via to validate
+            exclude_net: Net ID to exclude (same-net elements don't violate clearance)
+            min_clearance: Minimum required clearance (default: rules.via_clearance)
+
+        Returns:
+            Tuple of (is_valid, actual_clearance, violation_location)
+            - is_valid: True if via meets clearance requirements
+            - actual_clearance: Minimum clearance found (negative if overlapping)
+            - violation_location: (x, y) of worst violation, or None if valid
+        """
+        if min_clearance is None:
+            min_clearance = self.rules.via_clearance
+
+        via_radius = via.diameter / 2
+        min_actual_clearance = float("inf")
+        violation_loc: tuple[float, float] | None = None
+        has_violation = False
+
+        # Determine which layer indices the via spans
+        via_layer_indices: set[int] = set()
+        for layer in via.layers:
+            try:
+                via_layer_indices.add(self.layer_to_index(layer.value))
+            except (KeyError, ValueError):
+                pass
+
+        # Check against segments from existing routes
+        for route in self.routes:
+            if route.net == exclude_net:
+                continue
+
+            for seg in route.segments:
+                # Only check segments on layers the via spans
+                seg_layer_idx = self.layer_to_index(seg.layer.value)
+                if seg_layer_idx not in via_layer_indices:
+                    continue
+
+                seg_half_width = seg.width / 2
+
+                # Point-to-segment distance from via center to segment
+                dist = self._point_to_segment_distance(
+                    via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+
+                # Edge-to-edge clearance: center distance minus radii
+                clearance = dist - via_radius - seg_half_width
+
+                if clearance < min_actual_clearance:
+                    min_actual_clearance = clearance
+                if clearance < min_clearance:
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
+
+        is_valid = not has_violation
+        return is_valid, min_actual_clearance, violation_loc
+
     def _point_to_segment_distance(
         self,
         px: float,
