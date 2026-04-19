@@ -9,6 +9,8 @@ Exercises the full four-stage pipeline:
 Issue #1615.
 """
 
+import pytest
+
 from kicad_tools.pcb.blocks.base import PCBBlock
 from kicad_tools.pcb.blocks.led import LEDBlock
 from kicad_tools.pcb.blocks.power import LDOBlock
@@ -83,12 +85,10 @@ def _register_block_pads(
             comp_pad_rel_y = comp.position.y + pad_point.y
             for trace in block.traces:
                 dist_start = (
-                    (trace.start.x - comp_pad_rel_x) ** 2
-                    + (trace.start.y - comp_pad_rel_y) ** 2
+                    (trace.start.x - comp_pad_rel_x) ** 2 + (trace.start.y - comp_pad_rel_y) ** 2
                 ) ** 0.5
                 dist_end = (
-                    (trace.end.x - comp_pad_rel_x) ** 2
-                    + (trace.end.y - comp_pad_rel_y) ** 2
+                    (trace.end.x - comp_pad_rel_x) ** 2 + (trace.end.y - comp_pad_rel_y) ** 2
                 ) ** 0.5
                 if (dist_start < 0.1 or dist_end < 0.1) and trace.net:
                     if trace.net in net_map:
@@ -268,6 +268,7 @@ class TestPlacementBridge:
 # ===========================================================================
 
 
+@pytest.mark.timeout(30)
 class TestBlockAwareRoutingPipeline:
     """Full pipeline: blocks -> layout -> router -> route_all_block_aware."""
 
@@ -280,7 +281,7 @@ class TestBlockAwareRoutingPipeline:
         layout, ldo, led = _create_ldo_led_layout()
 
         rules = DesignRules()
-        router = Autorouter(80, 60, force_python=True, rules=rules)
+        router = Autorouter(40, 30, force_python=True, rules=rules)
 
         # Net map: assign numeric IDs to net names used by blocks
         net_map = {
@@ -328,22 +329,14 @@ class TestBlockAwareRoutingPipeline:
         router, layout, ldo, led = self._setup_full_pipeline()
 
         # Capture internal traces before routing
-        ldo_internal_before = [
-            t for t in ldo.get_placed_traces() if t["internal"]
-        ]
-        led_internal_before = [
-            t for t in led.get_placed_traces() if t["internal"]
-        ]
+        ldo_internal_before = [t for t in ldo.get_placed_traces() if t["internal"]]
+        led_internal_before = [t for t in led.get_placed_traces() if t["internal"]]
 
         router.route_all_block_aware()
 
         # Internal traces should be unchanged after routing
-        ldo_internal_after = [
-            t for t in ldo.get_placed_traces() if t["internal"]
-        ]
-        led_internal_after = [
-            t for t in led.get_placed_traces() if t["internal"]
-        ]
+        ldo_internal_after = [t for t in ldo.get_placed_traces() if t["internal"]]
+        led_internal_after = [t for t in led.get_placed_traces() if t["internal"]]
 
         assert len(ldo_internal_after) == len(ldo_internal_before)
         assert len(led_internal_after) == len(led_internal_before)
@@ -404,10 +397,13 @@ class TestBlockAwareRoutingPipeline:
                         )
 
         # Violations may occur at block boundaries due to margin overlap;
-        # the primary check is that routing completes and attempts to avoid
-        # block interiors. Log any violations for diagnostic purposes.
-        # A strict assertion would be: assert len(violations) == 0
-        assert isinstance(violations, list)  # Pipeline ran without crash
+        # allow a small number of boundary violations but flag if the router
+        # is routing extensively through block interiors.
+        max_allowed_violations = 2  # tolerance for boundary-adjacent midpoints
+        assert len(violations) <= max_allowed_violations, (
+            f"Inter-block routing produced {len(violations)} interior violations "
+            f"(max {max_allowed_violations} allowed):\n" + "\n".join(violations)
+        )
 
     def test_block_router_contains_point_works(self):
         """Verify BlockRouter.contains_point correctly identifies block interior."""
@@ -446,6 +442,7 @@ class TestBlockAwareRoutingPipeline:
 # ===========================================================================
 
 
+@pytest.mark.timeout(30)
 class TestBlockRouterPerBlock:
     """Verify individual BlockRouter instances route correctly."""
 
@@ -492,19 +489,20 @@ class TestBlockRouterPerBlock:
 # ===========================================================================
 
 
+@pytest.mark.timeout(30)
 class TestThreeBlockDesign:
     """Verify pipeline works with 3 blocks and multiple inter-block nets."""
 
     def _setup_three_block_pipeline(self):
         """LDO powering two LED blocks."""
         ldo = LDOBlock(ldo_ref="U1", input_cap="C1", output_caps=["C2"])
-        ldo.place(15, 30)
+        ldo.place(15, 25)
 
         led1 = LEDBlock(led_ref="D1", res_ref="R1")
-        led1.place(45, 20)
+        led1.place(30, 15)
 
         led2 = LEDBlock(led_ref="D2", res_ref="R2")
-        led2.place(45, 40)
+        led2.place(30, 25)
 
         layout = PCBLayout(name="ldo_2led_board")
         layout.add_block(ldo)
@@ -515,7 +513,7 @@ class TestThreeBlockDesign:
         layout.route("LDO_U1", "VOUT", "LED_D2", "ANODE", net="VOUT_LED2")
 
         rules = DesignRules()
-        router = Autorouter(80, 60, force_python=True, rules=rules)
+        router = Autorouter(40, 30, force_python=True, rules=rules)
 
         net_map = {
             "VIN": 1,
