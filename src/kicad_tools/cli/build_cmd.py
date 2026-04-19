@@ -864,7 +864,7 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
     try:
         from kicad_tools.router.net_class import NetClass, auto_classify_nets
         from kicad_tools.schema.pcb import PCB
-        from kicad_tools.zones.generator import ZoneGenerator, auto_create_zones_for_pour_nets
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
 
         pcb = PCB.load(str(ctx.pcb_file))
 
@@ -899,9 +899,7 @@ def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
 
         # Check for existing zones on these nets (idempotency)
         existing_zone_nets = {z.net_name for z in pcb.zones}
-        new_pour_nets = [
-            (name, cls) for name, cls in pour_nets if name not in existing_zone_nets
-        ]
+        new_pour_nets = [(name, cls) for name, cls in pour_nets if name not in existing_zone_nets]
 
         if not new_pour_nets:
             return BuildResult(
@@ -1016,13 +1014,18 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
 
         script_args = [str(ctx.output_dir)] if ctx.output_dir else None
         success, message = _run_python_script(
-            route_script, ctx.project_dir, ctx.verbose, env_vars=route_env_vars,
+            route_script,
+            ctx.project_dir,
+            ctx.verbose,
+            env_vars=route_env_vars,
             script_args=script_args,
         )
 
         # Find routed PCB (check output dir first, then project dir)
         output_file: Path | None = None
-        for search_dir in ([ctx.output_dir, ctx.project_dir] if ctx.output_dir else [ctx.project_dir]):
+        for search_dir in (
+            [ctx.output_dir, ctx.project_dir] if ctx.output_dir else [ctx.project_dir]
+        ):
             routed_files_found = list(search_dir.glob("*_routed.kicad_pcb"))
             if routed_files_found:
                 output_file = routed_files_found[0]
@@ -1286,8 +1289,7 @@ def _run_step_export(ctx: BuildContext, console: Console) -> BuildResult:
             step="export",
             success=True,
             message=(
-                f"[dry-run] Would run: kct export {pcb_to_export.name} "
-                f"--mfr {mfr} -o {mfr_dir}"
+                f"[dry-run] Would run: kct export {pcb_to_export.name} --mfr {mfr} -o {mfr_dir}"
             ),
         )
 
@@ -1377,7 +1379,18 @@ Examples:
     parser.add_argument(
         "--step",
         "-s",
-        choices=["schematic", "pcb", "outline", "zones", "placement", "silkscreen", "route", "verify", "export", "all"],
+        choices=[
+            "schematic",
+            "pcb",
+            "outline",
+            "zones",
+            "placement",
+            "silkscreen",
+            "route",
+            "verify",
+            "export",
+            "all",
+        ],
         default="all",
         help="Run specific step or all (default: all)",
     )
@@ -1514,7 +1527,17 @@ Examples:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.ZONES, BuildStep.PLACEMENT, BuildStep.SILKSCREEN, BuildStep.ROUTE, BuildStep.VERIFY, BuildStep.EXPORT]
+        steps = [
+            BuildStep.SCHEMATIC,
+            BuildStep.PCB,
+            BuildStep.OUTLINE,
+            BuildStep.ZONES,
+            BuildStep.PLACEMENT,
+            BuildStep.SILKSCREEN,
+            BuildStep.ROUTE,
+            BuildStep.VERIFY,
+            BuildStep.EXPORT,
+        ]
     else:
         steps = [BuildStep(args.step)]
 
