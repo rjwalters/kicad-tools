@@ -130,6 +130,108 @@ class TestRouterNetClassWidth:
             )
 
 
+class TestPerNetClearanceDuringPathfinding:
+    """Issue #1674: A* search and grid marking use per-net-class trace widths."""
+
+    def test_router_computes_per_net_clearance_radius(self):
+        """Verify that the clearance radii cache includes per-net-class widths."""
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        net_class_map = {"+5V": NET_CLASS_POWER}
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules, net_class_map=net_class_map)
+
+        # Cache should contain entries for the global trace width (0.2)
+        # AND the POWER net class trace width (0.5)
+        assert (0.2, 0.2) in router._clearance_radii  # default width + default clearance
+        assert (0.5, 0.2) in router._clearance_radii  # POWER width + default clearance
+
+        # POWER radius should be larger than default
+        default_radius = router._clearance_radii[(0.2, 0.2)]
+        power_radius = router._clearance_radii[(0.5, 0.2)]
+        assert power_radius > default_radius, (
+            f"POWER radius ({power_radius}) should exceed default ({default_radius})"
+        )
+
+    def test_mark_route_uses_segment_width(self):
+        """Verify grid.mark_route() uses seg.width, not rules.trace_width."""
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        net_class_map = {"+5V": NET_CLASS_POWER}
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules, net_class_map=net_class_map)
+
+        # Create two pads for a POWER net
+        pad1 = Pad(
+            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
+            layer=Layer.F_CU, net=1, net_name="+5V",
+        )
+        pad2 = Pad(
+            ref="C2", pin="1", x=8.0, y=5.0, width=1.0, height=1.0,
+            layer=Layer.F_CU, net=1, net_name="+5V",
+        )
+
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        route = router.route(pad1, pad2)
+        assert route is not None, "Routing should succeed for POWER net"
+
+        # All segments should use the POWER net class width
+        for seg in route.segments:
+            assert seg.width == 0.5
+
+        # Mark the route and check that the blocked zone uses the wider width
+        grid.mark_route(route)
+
+        # Expected clearance cells for 0.5mm trace:
+        # (0.5/2 + 0.2) / 0.1 + 1 = 5.5 -> int(4.5) + 1 = 5, plus 1 safety = 6
+        wide_clearance = int((0.5 / 2 + rules.trace_clearance) / grid.resolution) + 1 + 1
+        narrow_clearance = int((0.2 / 2 + rules.trace_clearance) / grid.resolution) + 1 + 1
+        assert wide_clearance > narrow_clearance, (
+            f"POWER clearance ({wide_clearance}) must exceed default ({narrow_clearance})"
+        )
+
+    def test_unmark_route_uses_segment_width(self):
+        """Verify grid.unmark_route() mirrors mark_route() clearance."""
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        net_class_map = {"+5V": NET_CLASS_POWER}
+        grid = RoutingGrid(20, 20, rules)
+        router = Router(grid, rules, net_class_map=net_class_map)
+
+        pad1 = Pad(
+            ref="C1", pin="1", x=2.0, y=5.0, width=1.0, height=1.0,
+            layer=Layer.F_CU, net=1, net_name="+5V",
+        )
+        pad2 = Pad(
+            ref="C2", pin="1", x=8.0, y=5.0, width=1.0, height=1.0,
+            layer=Layer.F_CU, net=1, net_name="+5V",
+        )
+
+        grid.add_pad(pad1)
+        grid.add_pad(pad2)
+
+        route = router.route(pad1, pad2)
+        assert route is not None
+
+        # Mark then unmark -- should not crash and should clear route cells
+        grid.mark_route(route)
+        grid.unmark_route(route)
+
+    def test_get_clearance_radius_cells_with_custom_trace_width(self):
+        """Test get_clearance_radius_cells with explicit trace_width parameter."""
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.2, grid_resolution=0.1)
+        grid = RoutingGrid(10, 10, rules)
+        router = Router(grid, rules)
+
+        # Default trace width: (0.2/2 + 0.2) / 0.1 = 3 cells
+        default = router.get_clearance_radius_cells(0.2)
+        assert default == 3
+
+        # Custom trace width 0.5: (0.5/2 + 0.2) / 0.1 = 4.5 -> ceil = 5 cells
+        custom = router.get_clearance_radius_cells(0.2, trace_width=0.5)
+        assert custom == 5
+        assert custom > default
+
+
 class TestIntraIcNetClassWidth:
     """Test that intra-IC routes use net-class-aware trace widths."""
 

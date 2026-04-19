@@ -1256,13 +1256,14 @@ class RoutingGrid:
         always at least as large as the geometric clearance requirement.
         """
         with self._acquire_lock():
-            total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.resolution) + 1
-            # Issue #1666: Add safety margin to prevent grid-quantization
-            # clearance violations between parallel traces.
-            clearance_cells += 1
-
             for seg in route.segments:
+                # Issue #1674: Use seg.width instead of rules.trace_width
+                # so wider net-class traces block the correct number of cells.
+                total_clearance = seg.width / 2 + self.rules.trace_clearance
+                clearance_cells = int(total_clearance / self.resolution) + 1
+                # Issue #1666: Add safety margin to prevent grid-quantization
+                # clearance violations between parallel traces.
+                clearance_cells += 1
                 self._mark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
                 self._mark_via(via)
@@ -1345,12 +1346,16 @@ class RoutingGrid:
         """Unmark a route's cells (rip-up). Reverses mark_route().
 
         Thread-safe when thread_safe=True.
+
+        Issue #1674: Computes clearance per-segment from ``seg.width``
+        to match the per-segment marking done by ``mark_route()``.
         """
         with self._acquire_lock():
-            total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
-            clearance_cells = int(total_clearance / self.resolution) + 1
-
             for seg in route.segments:
+                total_clearance = seg.width / 2 + self.rules.trace_clearance
+                clearance_cells = int(total_clearance / self.resolution) + 1
+                # Issue #1666: Must match mark_route() safety margin
+                clearance_cells += 1
                 self._unmark_segment(seg, clearance_cells=clearance_cells)
             for via in route.vias:
                 self._unmark_via(via)
