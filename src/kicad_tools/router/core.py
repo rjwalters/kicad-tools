@@ -2846,7 +2846,11 @@ class Autorouter:
                     net_routes[net] = routes
                     rerouted_count += 1
                     for route in routes:
-                        self.grid.mark_route_usage(route)
+                        # Issue #1694: Use mark_route() (not mark_route_usage())
+                        # so rerouted nets block the correct width-aware envelope
+                        # on the grid, preventing subsequent reroutes from landing
+                        # too close to wider traces.
+                        self.grid.mark_route(route)
                         self.routes.append(route)
 
             total_corrected += rerouted_count

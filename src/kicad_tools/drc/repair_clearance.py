@@ -854,11 +854,58 @@ class ClearanceRepairer:
 
         obj_node, obj_type, obj_x, obj_y, obj_layer, obj_net = target
 
-        # Determine the other location (the one we're moving away from)
+        # Determine the other object and location (the one we're moving away from)
+        # Issue #1694: Use centerline-to-centerline direction when both objects
+        # are found, so the displacement vector is accurate for traces with
+        # different widths.  Fall back to the DRC violation location when the
+        # other object is not resolved.
         if obj1 is not None and obj1[0] is obj_node:
+            other_obj = obj2
             other_x, other_y = loc2.x_mm, loc2.y_mm
         else:
+            other_obj = obj1
             other_x, other_y = loc1.x_mm, loc1.y_mm
+
+        if other_obj is not None:
+            other_node, other_type, other_cx, other_cy, _other_layer, _other_net = other_obj
+            # Use centerline positions for direction computation so the
+            # displacement vector points center-to-center rather than
+            # centerline-to-edge (which is skewed for different widths).
+            other_x, other_y = other_cx, other_cy
+
+            # Issue #1694: For segment-to-segment violations where the two
+            # traces have different widths, the DRC-reported deficit (delta)
+            # applied along the center-to-center direction may still leave
+            # insufficient edge-to-edge clearance.  Validate that the
+            # post-nudge center-to-center distance will satisfy
+            # (w_target/2 + w_other/2 + required_clearance) and increase
+            # the displacement if needed.
+            if obj_type == "segment" and other_type == "segment":
+                target_width = self._get_node_width(obj_node)
+                other_width = self._get_node_width(other_node)
+
+                # Only apply width-aware boost when widths actually differ
+                if abs(target_width - other_width) > 1e-6:
+                    req_clearance = violation.required_value_mm or 0.0
+                    required_center_dist = (
+                        target_width / 2 + other_width / 2 + req_clearance + margin
+                    )
+
+                    center_dx = obj_x - other_cx
+                    center_dy = obj_y - other_cy
+                    current_center_dist = math.sqrt(
+                        center_dx * center_dx + center_dy * center_dy
+                    )
+
+                    width_aware_disp = max(
+                        0.0, required_center_dist - current_center_dist
+                    )
+                    required_displacement = max(required_displacement, width_aware_disp)
+
+                    # Re-check max_displacement with the adjusted value
+                    if required_displacement > max_displacement:
+                        result.skipped_exceeds_max += 1
+                        return
 
         # Calculate displacement vector (away from the other object)
         nudge = self._compute_nudge(obj_x, obj_y, other_x, other_y, required_displacement)
@@ -1255,6 +1302,22 @@ class ClearanceRepairer:
             return obj1
         else:
             return obj1
+
+    @staticmethod
+    def _get_node_width(node: SExp) -> float:
+        """Extract the width of a segment or via node.
+
+        For segments, reads the ``(width ...)`` child.  For vias, reads the
+        ``(size ...)`` child.  Returns a sensible default (0.25mm) when the
+        width child is missing.
+        """
+        width_node = node.find("width")
+        if width_node:
+            return float(width_node.get_first_atom())
+        size_node = node.find("size")
+        if size_node:
+            return float(size_node.get_first_atom())
+        return 0.25  # default trace width
 
     def _compute_nudge(
         self,
