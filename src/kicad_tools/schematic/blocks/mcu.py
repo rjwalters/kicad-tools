@@ -197,6 +197,11 @@ class MCUBlock(CircuitBlock):
                 sch.add_wire(prev_gnd, (cap_gnd[0], gnd_y), warn_on_collision=False)
                 sch.add_wire((cap_gnd[0], gnd_y), cap_gnd, warn_on_collision=False)
 
+                # Add junctions at intermediate cap pins where bus segments meet
+                if i > 1:
+                    sch.add_junction(prev_vdd[0], prev_vdd[1])
+                    sch.add_junction(prev_gnd[0], prev_gnd[1])
+
     def _build_ports(self):
         """Build ports dict exposing all MCU pins."""
         # Add VDD port (use first VDD pin position, or first cap's VDD)
@@ -453,6 +458,7 @@ class ResetButton(CircuitBlock):
         # For active-high, this would be VCC
         sch.add_wire(sw_pin2, (c_pin2[0], sw_pin2[1]), warn_on_collision=False)  # Horizontal
         sch.add_wire((c_pin2[0], sw_pin2[1]), c_pin2, warn_on_collision=False)  # Vertical
+        sch.add_junction(sw_pin2[0], sw_pin2[1])
 
         # Add TVS diode if requested
         self.tvs: SymbolInstance | None = None
@@ -469,6 +475,7 @@ class ResetButton(CircuitBlock):
             # Wire TVS anode to reset node
             sch.add_wire((c_pin1[0], sw_pin1[1]), (tvs_anode[0], sw_pin1[1]), warn_on_collision=False)
             sch.add_wire((tvs_anode[0], sw_pin1[1]), tvs_anode, warn_on_collision=False)
+            sch.add_junction(c_pin1[0], sw_pin1[1])
 
             # TVS cathode goes to ground (will be wired in connect_to_rails)
             # Store for later
@@ -883,6 +890,9 @@ class BootModeSelector(CircuitBlock):
                 # Button connects boot pin to VCC when pressed
                 # Button is above the boot pin
                 sch.add_wire(sw_pin2, (boot_junction_x, boot_junction_y), warn_on_collision=False)
+
+            # Mark the T-junction where button wire meets resistor-to-boot-pin wire
+            sch.add_junction(boot_junction_x, boot_junction_y)
 
             # Store button rail pin for connect_to_rails
             if self.default_high:
