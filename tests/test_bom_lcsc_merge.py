@@ -10,11 +10,8 @@ the priority hierarchy:
 from __future__ import annotations
 
 import csv
-import io
-import textwrap
 from pathlib import Path
 
-import pytest
 
 from kicad_tools.export.bom_formats import read_existing_lcsc_assignments
 from kicad_tools.schema.bom import BOMItem
@@ -288,7 +285,6 @@ class TestNoMergeLcscCliFlag:
 
     def test_flag_sets_merge_lcsc_false(self) -> None:
         """The --no-merge-lcsc flag should set merge_lcsc=False in config."""
-        from kicad_tools.cli.export_cmd import main
         import argparse
 
         # We can test the argument parsing directly
