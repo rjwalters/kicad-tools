@@ -2573,6 +2573,72 @@ class TestResetButtonMocked:
         reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
         assert mock_schematic.add_wire.call_count >= 2
 
+    def test_reset_button_connect_to_rails_no_avoid(self, mock_schematic):
+        """Without avoid_x_range, wires go straight vertical (backward compat)."""
+        reset = ResetButton(mock_schematic, x=100, y=100)
+        # Record wire call count after __init__ to isolate connect_to_rails calls
+        init_wire_count = mock_schematic.add_wire.call_count
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+        rail_calls = mock_schematic.add_wire.call_args_list[init_wire_count:]
+        # Each rail connection should be a single straight vertical wire
+        # Active-low: VCC (resistor top), GND (switch bottom), GND (cap bottom)
+        assert len(rail_calls) == 3
+        for call in rail_calls:
+            p1, p2 = call[0]  # positional args
+            # Start and end share the same X (straight vertical)
+            assert p1[0] == p2[0], f"Expected straight vertical wire, got {p1} -> {p2}"
+
+    def test_reset_button_connect_to_rails_with_avoid(self, mock_schematic):
+        """With avoid_x_range covering a component X, wires jog around it."""
+        # Place reset at x=100, cap at x=115 (offset 15)
+        reset = ResetButton(mock_schematic, x=100, y=100)
+        init_wire_count = mock_schematic.add_wire.call_count
+        # avoid_x_range covers 110-120, which includes cap bottom at x=115
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, avoid_x_range=(110, 120))
+        rail_calls = mock_schematic.add_wire.call_args_list[init_wire_count:]
+        # Cap bottom at x=115 is in range, so it should jog: 2 wires instead of 1
+        # Switch bottom at x=100 and resistor top at x=100 are outside range: 1 wire each
+        # Total: 1 (VCC) + 1 (GND switch) + 2 (GND cap jog) = 4
+        assert len(rail_calls) == 4
+        # Find the jog wires (the pair for cap bottom)
+        # The jog_x should be 110 - 2.54 = 107.46
+        jog_x = 110 - 2.54
+        jog_wire_starts = [c[0][0] for c in rail_calls]  # p1 of each call
+        # One wire should go horizontal from (115, ...) to (jog_x, ...)
+        has_horizontal_jog = any(
+            c[0][0][0] != c[0][1][0] and abs(c[0][1][0] - jog_x) < 0.01
+            for c in rail_calls
+        )
+        assert has_horizontal_jog, "Expected a horizontal jog wire to avoid X range"
+
+    def test_reset_button_connect_to_rails_avoid_with_esd(self, mock_schematic):
+        """With ESD protection and avoid_x_range, TVS cathode wire also jogs."""
+        reset = ResetButton(mock_schematic, x=100, y=100, esd_protection=True)
+        init_wire_count = mock_schematic.add_wire.call_count
+        # TVS cathode is at x=130 (x + tvs_offset_x=25 + 5 for K pin)
+        # Set avoid range to cover it
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150, avoid_x_range=(128, 135))
+        rail_calls = mock_schematic.add_wire.call_args_list[init_wire_count:]
+        # TVS cathode at x=130 is in range, should produce jog wires
+        jog_x = 128 - 2.54
+        has_tvs_jog = any(
+            abs(c[0][1][0] - jog_x) < 0.01 for c in rail_calls
+        )
+        assert has_tvs_jog, "Expected TVS cathode wire to jog around avoid X range"
+
+    def test_reset_button_connect_to_rails_warn_on_collision_enabled(self, mock_schematic):
+        """connect_to_rails should not suppress warn_on_collision."""
+        reset = ResetButton(mock_schematic, x=100, y=100)
+        init_wire_count = mock_schematic.add_wire.call_count
+        reset.connect_to_rails(vcc_rail_y=50, gnd_rail_y=150)
+        rail_calls = mock_schematic.add_wire.call_args_list[init_wire_count:]
+        for call in rail_calls:
+            kwargs = call[1]
+            # warn_on_collision should not be explicitly set to False
+            assert kwargs.get("warn_on_collision", True) is not False, (
+                "connect_to_rails should not suppress warn_on_collision"
+            )
+
 
 class TestResetButtonFactoryFunctions:
     """Tests for ResetButton factory functions."""

@@ -601,7 +601,11 @@ def create_softstart_schematic(output_dir: Path) -> Path:
         resistor_ref_start=10,
         cap_ref_start=5,
     )
-    reset.connect_to_rails(vcc_rail_y=RAIL_3V3, gnd_rail_y=RAIL_GND)
+    reset.connect_to_rails(
+        vcc_rail_y=RAIL_3V3,
+        gnd_rail_y=RAIL_GND,
+        avoid_x_range=(X_MCU - 30, X_MCU + 30),
+    )
     print(f"   SW1: Reset button with R10 pull-up, C5 debounce")
 
     # Boot mode selector (BOOT0 = low for normal flash boot)
