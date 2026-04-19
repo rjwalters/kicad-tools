@@ -23,6 +23,7 @@ Example::
     print(f"Routed {result.routed_nets}/{result.total_nets} nets")
 """
 
+from .block_router import BlockRouter, BlockRoutingResult
 from .cache import (
     CachedNetRoute,
     CachedRoutingResult,
@@ -256,6 +257,9 @@ from .zones import (
 )
 
 __all__ = [
+    # Block routing (Issue #1589)
+    "BlockRouter",
+    "BlockRoutingResult",
     # High-level API
     "Autorouter",
     "AdaptiveAutorouter",
