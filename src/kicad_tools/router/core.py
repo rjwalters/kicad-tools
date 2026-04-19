@@ -3277,14 +3277,21 @@ class Autorouter:
         """Generate KiCad S-expressions for all routes."""
         return "\n\t".join(route.to_sexp() for route in self.routes)
 
-    def get_statistics(self) -> dict:
-        """Get routing statistics including congestion metrics."""
+    def get_statistics(self, nets_to_route_ids: set[int] | None = None) -> dict:
+        """Get routing statistics including congestion metrics.
+
+        Args:
+            nets_to_route_ids: Optional set of net IDs that were targeted
+                for routing (multi-pad signal nets).  When provided,
+                ``nets_routed`` only counts nets in this set.
+        """
         from .observability import compute_routing_statistics
 
         return compute_routing_statistics(
             routes=self.routes,
             grid=self.grid,
             layer_stats=self.get_layer_usage_statistics(),
+            nets_to_route_ids=nets_to_route_ids,
         )
 
     def get_layer_usage_statistics(self) -> dict:

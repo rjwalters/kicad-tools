@@ -369,3 +369,122 @@ class TestJsonStrategyAwareSuggestions:
         fix_text = " ".join(suggestion_fixes)
         assert "negotiated" in fix_text
         assert "monte-carlo" in fix_text
+
+
+# ---------------------------------------------------------------------------
+# Issue #1643: Net count filtering with nets_to_route_ids
+# ---------------------------------------------------------------------------
+
+
+class TestNetCountFiltering:
+    """Numerator/denominator must use the same net population."""
+
+    def _make_route(self, net_id):
+        """Create a minimal mock route for a given net."""
+        route = MagicMock()
+        route.net = net_id
+        route.segments = []
+        route.vias = []
+        return route
+
+    def test_summary_filters_single_pad_nets(self, capsys):
+        """show_routing_summary should not count single-pad nets in routed count."""
+        # Routes for nets 1 (multi-pad), 2 (multi-pad), and 3 (single-pad)
+        routes = [self._make_route(1), self._make_route(2), self._make_route(3)]
+        router = _make_router(routes=routes)
+        net_map = {"NetA": 1, "NetB": 2, "NetC": 3}
+
+        # Only nets 1 and 2 are multi-pad signal nets
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+            nets_to_route_ids={1, 2},
+        )
+
+        output = capsys.readouterr().out
+        # Should show 2/2 (100%), not 3/2 (150%)
+        assert "2/2" in output
+        assert "100%" in output
+        assert "3/2" not in output
+
+    def test_summary_without_filter_counts_all(self, capsys):
+        """Without nets_to_route_ids, all routed nets are counted (backward compat)."""
+        routes = [self._make_route(1), self._make_route(2), self._make_route(3)]
+        router = _make_router(routes=routes)
+        net_map = {"NetA": 1, "NetB": 2, "NetC": 3}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+        )
+
+        output = capsys.readouterr().out
+        # Without filter, all 3 routed nets counted -> 3/2
+        assert "3/2" in output
+
+    def test_json_diagnostics_filters_routed_count(self):
+        """get_routing_diagnostics_json filters nets_routed to target population."""
+        routes = [self._make_route(1), self._make_route(2), self._make_route(3)]
+        router = _make_router(routes=routes)
+        net_map = {"NetA": 1, "NetB": 2, "NetC": 3}
+
+        result = get_routing_diagnostics_json(
+            router,
+            net_map,
+            nets_to_route=2,
+            nets_to_route_ids={1, 2},
+        )
+
+        assert result["summary"]["nets_routed"] == 2
+        assert result["summary"]["nets_requested"] == 2
+        assert result["summary"]["success_rate"] == 100.0
+
+    def test_json_diagnostics_without_filter(self):
+        """Without filter, JSON diagnostics counts all routed nets (backward compat)."""
+        routes = [self._make_route(1), self._make_route(2), self._make_route(3)]
+        router = _make_router(routes=routes)
+        net_map = {"NetA": 1, "NetB": 2, "NetC": 3}
+
+        result = get_routing_diagnostics_json(
+            router,
+            net_map,
+            nets_to_route=2,
+        )
+
+        assert result["summary"]["nets_routed"] == 3
+
+    def test_success_rate_never_exceeds_100_percent(self, capsys):
+        """With filtering, success rate should never exceed 100%."""
+        # 5 single-pad nets + 2 multi-pad nets, all routed
+        routes = [self._make_route(i) for i in range(1, 8)]
+        router = _make_router(routes=routes)
+        net_map = {f"Net{i}": i for i in range(1, 8)}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=2,
+            nets_to_route_ids={1, 2},
+        )
+
+        output = capsys.readouterr().out
+        assert "2/2" in output
+        assert "100%" in output
+
+    def test_zero_nets_to_route_no_division_error(self, capsys):
+        """Board with only single-pad nets should report 0/0 without error."""
+        router = _make_router(routes=[])
+        net_map = {"NetA": 1}
+
+        show_routing_summary(
+            router,
+            net_map,
+            nets_to_route=0,
+            nets_to_route_ids=set(),
+        )
+
+        output = capsys.readouterr().out
+        assert "0/0" in output
+        assert "0%" in output

@@ -24,6 +24,7 @@ def show_routing_summary(
     verbose: bool = False,
     current_strategy: str = "basic",
     pcb_file: str | None = None,
+    nets_to_route_ids: set[int] | None = None,
 ) -> None:
     """Show comprehensive routing summary with successes, failures, and suggestions.
 
@@ -42,6 +43,9 @@ def show_routing_summary(
             "negotiated", "monte-carlo"). Suggestions will exclude this strategy
             since the user already tried it.
         pcb_file: Optional PCB file path for inclusion in suggestion commands.
+        nets_to_route_ids: Optional set of net IDs targeted for routing
+            (multi-pad signal nets).  When provided, ``routed_net_ids`` is
+            filtered to this set so numerator and denominator are consistent.
     """
     if quiet:
         return
@@ -60,10 +64,15 @@ def show_routing_summary(
         # Track vias
         route_vias_by_net[net_id] = route_vias_by_net.get(net_id, 0) + len(route.vias)
 
-    # Identify routed and unrouted nets
-    routed_net_ids = {route.net for route in router.routes}
+    # Identify routed and unrouted nets — filter to target population
+    # so numerator/denominator are consistent (Issue #1643)
+    all_routed_net_ids = {route.net for route in router.routes}
+    if nets_to_route_ids is not None:
+        routed_net_ids = all_routed_net_ids & nets_to_route_ids
+    else:
+        routed_net_ids = all_routed_net_ids
     all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - routed_net_ids
+    unrouted_ids = all_net_ids - all_routed_net_ids
 
     # Group recorded failures by net
     failures_by_net: dict[int, list[RoutingFailure]] = {}
@@ -401,6 +410,7 @@ def get_routing_diagnostics_json(
     net_map: dict[str, int],
     nets_to_route: int,
     current_strategy: str = "basic",
+    nets_to_route_ids: set[int] | None = None,
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -412,6 +422,9 @@ def get_routing_diagnostics_json(
         nets_to_route: Total number of nets that should be routed
         current_strategy: The routing strategy that was used. Suggestions will
             exclude this strategy since the user already tried it.
+        nets_to_route_ids: Optional set of net IDs targeted for routing
+            (multi-pad signal nets).  When provided, ``routed_net_ids`` is
+            filtered to this set so numerator and denominator are consistent.
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
@@ -428,10 +441,15 @@ def get_routing_diagnostics_json(
         route_lengths_by_net[net_id] = route_lengths_by_net.get(net_id, 0) + length_mm
         route_vias_by_net[net_id] = route_vias_by_net.get(net_id, 0) + len(route.vias)
 
-    # Identify routed and unrouted nets
-    routed_net_ids = {route.net for route in router.routes}
+    # Identify routed and unrouted nets — filter to target population
+    # so numerator/denominator are consistent (Issue #1643)
+    all_routed_net_ids = {route.net for route in router.routes}
+    if nets_to_route_ids is not None:
+        routed_net_ids = all_routed_net_ids & nets_to_route_ids
+    else:
+        routed_net_ids = all_routed_net_ids
     all_net_ids = {v for k, v in net_map.items() if v > 0}
-    unrouted_ids = all_net_ids - routed_net_ids
+    unrouted_ids = all_net_ids - all_routed_net_ids
 
     # Build successful routes list
     successful_routes = []
@@ -616,6 +634,7 @@ def print_routing_diagnostics_json(
     net_map: dict[str, int],
     nets_to_route: int,
     current_strategy: str = "basic",
+    nets_to_route_ids: set[int] | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -625,9 +644,11 @@ def print_routing_diagnostics_json(
         nets_to_route: Total number of nets that should be routed
         current_strategy: The routing strategy that was used. Suggestions will
             exclude this strategy since the user already tried it.
+        nets_to_route_ids: Optional set of net IDs targeted for routing.
     """
     diagnostics = get_routing_diagnostics_json(
-        router, net_map, nets_to_route, current_strategy=current_strategy
+        router, net_map, nets_to_route, current_strategy=current_strategy,
+        nets_to_route_ids=nets_to_route_ids,
     )
     print(json.dumps(diagnostics, indent=2))
 
