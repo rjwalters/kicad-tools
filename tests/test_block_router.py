@@ -686,3 +686,199 @@ class TestBlockOccupancyIntegration:
 
         routes = router.route_all_block_aware()
         assert len(routes) > 0
+
+
+# ===========================================================================
+# Issue #1654: RegionGraph corridor costs wired into inter-block routing
+# ===========================================================================
+
+class TestCorridorCostsInterBlockRouting:
+    """Verify that route_all_block_aware sets corridor preferences for inter-block nets."""
+
+    def _setup_two_block_board(self):
+        """Create a board with 2 blocks and a shared inter-block signal net."""
+        rules = DesignRules()
+        router = Autorouter(80, 60, force_python=True, rules=rules)
+
+        # Block A at (15, 30)
+        block_a = PCBBlock(name="block_a", block_id="block_a")
+        block_a.add_component("U1A", "SOT-23", 0, 0,
+                              pads={"1": (-1, 0), "2": (1, 0)})
+        block_a.add_component("C1A", "C_0805", 3, 0,
+                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_a.add_port("VIN_A", -4, 0, direction="in")
+        block_a.add_port("VOUT_A", 6, 0, direction="out")
+        block_a.place(15, 30)
+
+        # Block B at (50, 30)
+        block_b = PCBBlock(name="block_b", block_id="block_b")
+        block_b.add_component("U1B", "SOT-23", 0, 0,
+                              pads={"1": (-1, 0), "2": (1, 0)})
+        block_b.add_component("C1B", "C_0805", 3, 0,
+                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_b.add_port("VIN_B", -4, 0, direction="in")
+        block_b.add_port("VOUT_B", 6, 0, direction="out")
+        block_b.place(50, 30)
+
+        # Block A pads
+        router.add_component("U1A", [
+            {"number": "1", "x": 14.0, "y": 30.0, "net": 1, "net_name": "NET_A1",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 16.0, "y": 30.0, "net": 2, "net_name": "NET_A2",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1A", [
+            {"number": "1", "x": 17.5, "y": 30.0, "net": 2, "net_name": "NET_A2",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 18.5, "y": 30.0, "net": 3, "net_name": "INTER_AB",
+             "width": 0.5, "height": 0.5},
+        ])
+        # Block B pads
+        router.add_component("U1B", [
+            {"number": "1", "x": 49.0, "y": 30.0, "net": 4, "net_name": "NET_B1",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 51.0, "y": 30.0, "net": 5, "net_name": "NET_B2",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1B", [
+            {"number": "1", "x": 52.5, "y": 30.0, "net": 5, "net_name": "NET_B2",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 53.5, "y": 30.0, "net": 3, "net_name": "INTER_AB",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        router.register_block(block_a)
+        router.register_block(block_b)
+        return router
+
+    def test_corridor_preferences_set_for_inter_block_nets(self):
+        """set_corridor_preference is called for inter-block nets during Phase B."""
+        from unittest.mock import patch
+
+        router = self._setup_two_block_board()
+
+        calls = []
+        original_set = router.grid.set_corridor_preference
+
+        def tracking_set(corridor, net, penalty):
+            calls.append((net, penalty))
+            return original_set(corridor, net, penalty)
+
+        with patch.object(router.grid, "set_corridor_preference", side_effect=tracking_set):
+            routes = router.route_all_block_aware()
+
+        # INTER_AB (net 3) is the inter-block net shared between block_a and block_b.
+        # It should have received a corridor assignment.
+        assigned_nets = {net for net, _ in calls}
+        assert 3 in assigned_nets, (
+            f"Inter-block INTER_AB net should receive corridor preference, "
+            f"but only these nets were assigned: {assigned_nets}"
+        )
+        # Penalty should match the expected value (5.0)
+        for net, penalty in calls:
+            assert penalty == 5.0, f"Corridor penalty should be 5.0, got {penalty}"
+
+        assert len(routes) > 0, "Should produce routes"
+
+    def test_corridor_preferences_cleared_after_routing(self):
+        """clear_all_corridor_preferences is called after Phase B routing."""
+        from unittest.mock import patch
+
+        router = self._setup_two_block_board()
+
+        clear_calls = []
+        original_clear = router.grid.clear_all_corridor_preferences
+
+        def tracking_clear():
+            clear_calls.append(True)
+            return original_clear()
+
+        with patch.object(router.grid, "clear_all_corridor_preferences", side_effect=tracking_clear):
+            router.route_all_block_aware()
+
+        assert len(clear_calls) > 0, (
+            "clear_all_corridor_preferences should be called after Phase B"
+        )
+
+    def test_no_corridor_for_non_inter_block_nets(self):
+        """Block-internal-only nets should not receive corridor preferences."""
+        from unittest.mock import patch
+
+        router = self._setup_two_block_board()
+
+        assigned_nets = []
+        original_set = router.grid.set_corridor_preference
+
+        def tracking_set(corridor, net, penalty):
+            assigned_nets.append(net)
+            return original_set(corridor, net, penalty)
+
+        with patch.object(router.grid, "set_corridor_preference", side_effect=tracking_set):
+            router.route_all_block_aware()
+
+        # Nets 1, 2 are block_a internal; nets 4, 5 are block_b internal.
+        # They should NOT receive corridor assignments.
+        for internal_net in [1, 2, 4, 5]:
+            assert internal_net not in assigned_nets, (
+                f"Block-internal net {internal_net} should not receive corridor preference"
+            )
+
+    def test_global_router_fallback_routes_without_corridor(self):
+        """If GlobalRouter returns None for a net, it still routes without corridor."""
+        from unittest.mock import patch
+
+        router = self._setup_two_block_board()
+
+        # Patch GlobalRouter.route_net to always return None
+        with patch(
+            "kicad_tools.router.global_router.GlobalRouter.route_net",
+            return_value=None,
+        ):
+            routes = router.route_all_block_aware()
+
+        # Routing should still succeed (fallback to no corridor guidance)
+        assert len(routes) > 0, "Should produce routes even without corridor assignments"
+
+    def test_single_block_no_corridor_assignments(self):
+        """Single-block design has no inter-block nets, so no corridors are assigned."""
+        from unittest.mock import patch
+
+        rules = DesignRules()
+        router = Autorouter(60, 40, force_python=True, rules=rules)
+
+        block = PCBBlock(name="only_block", block_id="only_block")
+        block.add_component("U1", "SOT-23", 0, 0,
+                            pads={"1": (-1, 0), "2": (1, 0)})
+        block.add_component("C1", "C_0805", 3, 0,
+                            pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block.place(20, 20)
+
+        router.add_component("U1", [
+            {"number": "1", "x": 19.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 21.0, "y": 20.0, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1", [
+            {"number": "1", "x": 22.5, "y": 20.0, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 23.5, "y": 20.0, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        router.register_block(block)
+
+        calls = []
+        original_set = router.grid.set_corridor_preference
+
+        def tracking_set(corridor, net, penalty):
+            calls.append(net)
+            return original_set(corridor, net, penalty)
+
+        with patch.object(router.grid, "set_corridor_preference", side_effect=tracking_set):
+            routes = router.route_all_block_aware()
+
+        # No inter-block nets means no corridor assignments
+        assert len(calls) == 0, (
+            f"Single-block board should have no corridor assignments, got {calls}"
+        )
