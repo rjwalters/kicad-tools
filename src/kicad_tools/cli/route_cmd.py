@@ -1871,10 +1871,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--grid",
         type=str,
-        default="0.25",
+        default="auto",
         help=(
             "Grid resolution in mm or 'auto' for automatic selection "
-            "(default: 0.25, use 0.1 for dense QFP, or 'auto' to analyze pads)"
+            "(default: auto, analyzes pad positions and clearance; "
+            "use explicit value like 0.1 for dense QFP)"
         ),
     )
     parser.add_argument(

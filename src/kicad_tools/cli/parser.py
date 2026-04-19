@@ -977,8 +977,8 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument(
         "--grid",
         type=str,
-        default="0.25",
-        help="Grid resolution in mm or 'auto' for automatic selection (default: 0.25)",
+        default="auto",
+        help="Grid resolution in mm or 'auto' for automatic selection (default: auto)",
     )
     route_parser.add_argument("--trace-width", type=float, default=0.2, help="Trace width in mm")
     route_parser.add_argument("--clearance", type=float, default=0.15, help="Clearance in mm")
