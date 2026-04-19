@@ -21,6 +21,7 @@ from kicad_tools.router.io import (
     PCBDesignRules,
     _extract_edge_segments,
     adjust_grid_for_compliance,
+    format_clearance_violations,
     generate_netclass_setup,
     load_pcb_for_routing,
     merge_routes_into_pcb,
@@ -972,6 +973,178 @@ class TestValidateRoutes:
 
         # No violation - route is on same net as nearby pads
         assert len(violations) == 0
+
+    def test_detects_segment_to_segment_violation(self):
+        """Test detection of clearance violations between segments on different nets."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Two parallel segments on different nets, too close together
+        # Segments are 0.1mm apart center-to-center, with 0.2mm width each
+        # Edge-to-edge distance: 0.1 - 0.1 - 0.1 = -0.1mm (overlap)
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.1, x2=20, y2=10.1, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) >= 1
+        assert seg_violations[0].net == 1
+        assert seg_violations[0].obstacle_net == 2
+        assert seg_violations[0].net_name == "NET1"
+        assert seg_violations[0].obstacle_net_name == "NET2"
+        assert seg_violations[0].location is not None
+
+    def test_no_segment_violation_for_same_net(self):
+        """Test no segment-to-segment violation when segments are on the same net."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Two close segments on the same net -- no violation expected
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        seg2 = Segment(x1=10, y1=10.1, x2=20, y2=10.1, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[seg1, seg2], vias=[])
+
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) == 0
+
+    def test_no_segment_violation_for_different_layers(self):
+        """Test no violation between segments on different layers."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Overlapping segments but on different layers
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.B_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+
+        violations = validate_routes(router)
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) == 0
+
+    def test_detects_segment_to_via_violation(self):
+        """Test detection of clearance violations between segment and via."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Segment on net 1 passing very close to a via on net 2
+        seg = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+
+        via = Via(x=15, y=10.2, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route2 = Route(net=2, net_name="NET2", segments=[], vias=[via])
+
+        router.routes.extend([route1, route2])
+
+        violations = validate_routes(router)
+
+        via_violations = [v for v in violations if v.obstacle_type == "via"]
+        assert len(via_violations) >= 1
+        assert via_violations[0].net == 1
+        assert via_violations[0].obstacle_net == 2
+        assert via_violations[0].location is not None
+
+    def test_no_via_violation_for_same_net(self):
+        """Test no via violation when segment and via are on the same net."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        seg = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        via = Via(x=15, y=10.2, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[via])
+
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+        via_violations = [v for v in violations if v.obstacle_type == "via"]
+        assert len(via_violations) == 0
+
+    def test_no_duplicate_segment_violations(self):
+        """Test that segment-to-segment violations are not reported twice."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.1, x2=20, y2=10.1, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+
+        violations = validate_routes(router)
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        # Should only report once, not both (A near B) and (B near A)
+        assert len(seg_violations) == 1
+
+    def test_format_clearance_violations_empty(self):
+        """Test format_clearance_violations returns empty string for no violations."""
+        assert format_clearance_violations([]) == ""
+
+    def test_format_clearance_violations_with_data(self):
+        """Test format_clearance_violations produces readable output."""
+        from kicad_tools.router.io import ClearanceViolation
+
+        violations = [
+            ClearanceViolation(
+                segment_index=0,
+                x1=10,
+                y1=10,
+                x2=20,
+                y2=10,
+                net=1,
+                obstacle_type="segment",
+                obstacle_net=2,
+                distance=0.05,
+                required=0.2,
+                net_name="VCC",
+                obstacle_net_name="GND",
+                location=(15.0, 10.0),
+            ),
+        ]
+        result = format_clearance_violations(violations)
+        assert "1 clearance violation" in result
+        assert "segment: 1" in result
+        assert "VCC" in result
+        assert "GND" in result
+        assert "15.00" in result
 
 
 class TestLoadPcbForRoutingDrcCompliance:

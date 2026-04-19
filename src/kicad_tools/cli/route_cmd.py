@@ -3079,6 +3079,15 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:
                 print(f"  Warning: Zone generation failed: {e}")
 
+    # Pre-save clearance validation
+    if stats["nets_routed"] > 0 and not args.dry_run:
+        from kicad_tools.router.io import format_clearance_violations, validate_routes
+
+        clearance_violations = validate_routes(router)
+        if clearance_violations and not quiet:
+            print("\n--- Pre-save Clearance Validation ---")
+            print(f"  WARNING: {format_clearance_violations(clearance_violations)}")
+
     # Save output
     if args.dry_run:
         if not quiet:
