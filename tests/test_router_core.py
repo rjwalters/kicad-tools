@@ -3029,3 +3029,54 @@ class TestPerNetTimeout:
             per_net_timeout=10.0,
         )
         assert isinstance(routes, list)
+
+
+class TestPostRouteClearanceCorrection:
+    """Tests for Issue #1666: post-route seg-seg clearance correction pass."""
+
+    def test_post_route_correction_method_exists(self):
+        """The _post_route_clearance_correction method must exist on Autorouter."""
+        router = Autorouter(width=50.0, height=40.0)
+        assert hasattr(router, "_post_route_clearance_correction")
+        assert callable(router._post_route_clearance_correction)
+
+    def test_post_route_correction_no_violations(self):
+        """Correction pass returns 0 when there are no violations."""
+        router = Autorouter(width=50.0, height=40.0)
+
+        # No routes means no violations
+        corrected = router._post_route_clearance_correction(
+            net_routes={},
+            pads_by_net={},
+            present_factor=0.5,
+        )
+        assert corrected == 0
+
+    def test_post_route_correction_with_routes(self):
+        """Correction pass runs without error when routes exist."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.127,
+        )
+        router = Autorouter(width=50.0, height=40.0, rules=rules)
+
+        # Add two simple nets
+        router.add_component(
+            "R1",
+            [
+                {"number": "1", "x": 5.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+                {"number": "2", "x": 15.0, "y": 10.0, "net": 1, "net_name": "NET1"},
+            ],
+        )
+        router.add_component(
+            "R2",
+            [
+                {"number": "1", "x": 5.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+                {"number": "2", "x": 15.0, "y": 20.0, "net": 2, "net_name": "NET2"},
+            ],
+        )
+
+        # Route with negotiated mode - should invoke the correction pass
+        routes = router.route_all_negotiated(max_iterations=2)
+        assert isinstance(routes, list)

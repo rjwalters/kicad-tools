@@ -1574,3 +1574,111 @@ class TestRoutingGrid:
         gx, gy = grid.world_to_grid(100.0, 100.0)
         assert gx == grid.cols - 1
         assert gy == grid.rows - 1
+
+
+class TestGridQuantizationClearance:
+    """Tests for Issue #1666: grid-quantization seg-seg clearance safety margin.
+
+    The blocking radius in ``mark_route()`` must be large enough that two
+    routes placed on adjacent grid cells cannot violate the world-coordinate
+    segment-to-segment clearance requirement.
+    """
+
+    @pytest.fixture
+    def tight_grid(self):
+        """Create a grid where resolution ~= clearance (worst-case quantization)."""
+        rules = DesignRules(
+            grid_resolution=0.1,
+            trace_width=0.2,
+            trace_clearance=0.102,  # Just above one grid cell
+        )
+        return RoutingGrid(width=20.0, height=20.0, rules=rules)
+
+    def test_parallel_segments_one_grid_cell_apart_blocked(self, tight_grid):
+        """Two parallel segments placed 1 grid cell apart must be detected.
+
+        Before the fix, the blocking radius allowed two traces whose
+        centerlines were ``(clearance_cells * resolution)`` apart,
+        which could be less than ``trace_width + 2 * trace_clearance``
+        due to truncation.  The safety margin prevents this.
+        """
+        # Route 1 at x=5.0
+        seg1 = Segment(
+            x1=5.0, y1=0.0, x2=5.0, y2=10.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        tight_grid.mark_route(route1)
+
+        # Route 2 at x=5.3 -- only 0.3mm apart (center-to-center).
+        # Edge-to-edge clearance = 0.3 - 0.1 - 0.1 = 0.1mm < 0.102mm required.
+        seg2 = Segment(
+            x1=5.3, y1=0.0, x2=5.3, y2=10.0,
+            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, _ = tight_grid.validate_segment_clearance(
+            seg2, exclude_net=2
+        )
+        assert is_valid is False, (
+            f"Parallel segments 0.3mm apart should violate 0.102mm clearance "
+            f"(actual clearance={clearance:.4f}mm)"
+        )
+
+    def test_mark_route_safety_margin_blocks_adjacent_cell(self, tight_grid):
+        """After mark_route, the grid cell adjacent to a route must be blocked.
+
+        The +1 safety margin ensures that grid cells immediately next to the
+        calculated clearance radius are also marked as blocked, preventing
+        a second route from being placed there.
+        """
+        seg = Segment(
+            x1=5.0, y1=5.0, x2=10.0, y2=5.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+        tight_grid.mark_route(route)
+
+        # Check that cells within the blocking radius + safety margin are blocked
+        center_gx, center_gy = tight_grid.world_to_grid(7.0, 5.0)
+        layer_idx = tight_grid.layer_to_index(Layer.F_CU.value)
+
+        # The required blocking radius without safety margin
+        total_clearance = tight_grid.rules.trace_width / 2 + tight_grid.rules.trace_clearance
+        base_cells = int(total_clearance / tight_grid.resolution) + 1
+        # With safety margin: base_cells + 1
+        safe_cells = base_cells + 1
+
+        # A cell at exactly base_cells offset should now be blocked
+        # (it would NOT have been blocked without the safety margin)
+        check_gy = center_gy + safe_cells
+        if 0 <= check_gy < tight_grid.rows:
+            cell = tight_grid.grid[layer_idx][check_gy][center_gx]
+            assert cell.blocked is True, (
+                f"Cell at offset {safe_cells} from route centerline should be "
+                f"blocked by the safety margin"
+            )
+
+    def test_sufficient_spacing_still_valid(self, tight_grid):
+        """Segments with clearly sufficient spacing must still pass validation."""
+        seg1 = Segment(
+            x1=5.0, y1=0.0, x2=5.0, y2=10.0,
+            width=0.2, layer=Layer.F_CU, net=1, net_name="NET1",
+        )
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+        tight_grid.mark_route(route1)
+
+        # Route 2 at x=5.6 -- center-to-center 0.6mm.
+        # Edge-to-edge = 0.6 - 0.1 - 0.1 = 0.4mm >> 0.102mm.
+        seg2 = Segment(
+            x1=5.6, y1=0.0, x2=5.6, y2=10.0,
+            width=0.2, layer=Layer.F_CU, net=2, net_name="NET2",
+        )
+
+        is_valid, clearance, _ = tight_grid.validate_segment_clearance(
+            seg2, exclude_net=2
+        )
+        assert is_valid is True, (
+            f"Segments 0.6mm apart should pass clearance validation "
+            f"(clearance={clearance:.4f}mm)"
+        )

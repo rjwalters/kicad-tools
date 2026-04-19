@@ -1172,10 +1172,21 @@ class RoutingGrid:
         """Mark a route's cells as used.
 
         Thread-safe when thread_safe=True.
+
+        Issue #1666: Add a 1-cell safety margin to the blocking radius to
+        prevent seg-seg clearance violations caused by grid quantization.
+        Two parallel traces that each pass grid-level clearance checks can
+        still have world-coordinate centerlines closer than
+        ``trace_width + 2 * trace_clearance`` when grid snap rounds their
+        positions inward.  The extra cell ensures the blocked envelope is
+        always at least as large as the geometric clearance requirement.
         """
         with self._acquire_lock():
             total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
             clearance_cells = int(total_clearance / self.resolution) + 1
+            # Issue #1666: Add safety margin to prevent grid-quantization
+            # clearance violations between parallel traces.
+            clearance_cells += 1
 
             for seg in route.segments:
                 self._mark_segment(seg, clearance_cells=clearance_cells)

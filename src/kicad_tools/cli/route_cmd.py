@@ -3166,13 +3166,26 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  Warning: Zone generation failed: {e}")
 
     # Pre-save clearance validation
+    # Issue #1666: Segment-to-segment violations now cause a non-zero exit
+    # code so that CI pipelines and DRC workflows can detect the failure.
+    seg_seg_violation_count = 0
     if stats["nets_routed"] > 0 and not args.dry_run:
         from kicad_tools.router.io import format_clearance_violations, validate_routes
 
         clearance_violations = validate_routes(router)
-        if clearance_violations and not quiet:
-            print("\n--- Pre-save Clearance Validation ---")
-            print(f"  WARNING: {format_clearance_violations(clearance_violations)}")
+        if clearance_violations:
+            seg_seg_violation_count = sum(
+                1 for v in clearance_violations
+                if v.obstacle_type == "segment" and not v.component_inherent
+            )
+            if not quiet:
+                print("\n--- Pre-save Clearance Validation ---")
+                if seg_seg_violation_count > 0:
+                    print(
+                        f"  ERROR: {seg_seg_violation_count} segment-to-segment "
+                        f"clearance violation(s) remain after routing"
+                    )
+                print(f"  {format_clearance_violations(clearance_violations)}")
 
     # Save output
     if args.dry_run:
@@ -3371,7 +3384,10 @@ def main(argv: list[str] | None = None) -> int:
     # 2 = Partial routing — some nets routed, output file exists with traces
     #     (also used for SIGINT partial save, handled earlier in the function)
     # 3 = All nets routed but DRC violations detected
-    if all_nets_routed and drc_passed:
+    # 4 = Seg-seg clearance violations remain after routing (Issue #1666)
+    if seg_seg_violation_count > 0:
+        return 4
+    elif all_nets_routed and drc_passed:
         return 0
     elif not all_nets_routed:
         # Partial routing: some nets were routed — pipeline should continue

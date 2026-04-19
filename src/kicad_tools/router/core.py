@@ -2691,6 +2691,27 @@ class Autorouter:
             if failure_summary:
                 print(failure_summary)
 
+        # Issue #1666: Post-route seg-seg clearance correction pass.
+        # After the negotiated loop converges, validate all routes for
+        # segment-to-segment clearance violations that slipped through
+        # grid-level checks due to quantization.  For each violation,
+        # rip up both offending nets and reroute them with the current
+        # (tightened) blocking radius so they settle into violation-free
+        # positions.
+        if not timed_out and successful_nets > 0:
+            corrected = self._post_route_clearance_correction(
+                net_routes=net_routes,
+                pads_by_net=pads_by_net,
+                present_factor=present_factor,
+                per_net_timeout=per_net_timeout,
+            )
+            if corrected > 0:
+                total_elapsed = time.time() - start_time
+                flush_print(
+                    f"\n  Post-route clearance correction rerouted {corrected} net(s) "
+                    f"({total_elapsed:.1f}s)"
+                )
+
         if progress_callback is not None:
             status = (
                 "converged"
@@ -2755,6 +2776,89 @@ class Autorouter:
         )
         routes.extend(new_routes)
         return routes
+
+    def _post_route_clearance_correction(
+        self,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_factor: float,
+        per_net_timeout: float | None = None,
+        max_correction_passes: int = 3,
+    ) -> int:
+        """Rip-up and reroute nets involved in seg-seg clearance violations.
+
+        Issue #1666: After the negotiated loop converges, grid quantization
+        can leave segment-to-segment distances slightly below the required
+        clearance.  This method detects those violations using
+        ``validate_routes()`` from ``io.py`` and selectively rip-up /
+        reroute the offending nets so they settle into positions that
+        satisfy the world-coordinate clearance constraint.
+
+        Args:
+            net_routes: Mapping of net ID to its current routes.
+            pads_by_net: Mapping of net ID to its pad objects.
+            present_factor: Congestion cost factor for rerouting.
+            per_net_timeout: Optional per-net A* timeout.
+            max_correction_passes: Maximum correction iterations (default 3).
+
+        Returns:
+            Total number of nets that were rerouted across all passes.
+        """
+        from .io import validate_routes
+
+        total_corrected = 0
+
+        for pass_idx in range(max_correction_passes):
+            violations = validate_routes(self)
+
+            # Only consider segment-to-segment violations
+            seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+            if not seg_violations:
+                break
+
+            # Collect unique nets involved in violations
+            violating_nets: set[int] = set()
+            for v in seg_violations:
+                violating_nets.add(v.net)
+                violating_nets.add(v.obstacle_net)
+
+            flush_print(
+                f"\n--- Post-route clearance pass {pass_idx + 1}: "
+                f"{len(seg_violations)} seg-seg violation(s) across "
+                f"{len(violating_nets)} net(s) ---"
+            )
+
+            neg_router = NegotiatedRouter(
+                self.grid, self.router, self.rules, self.net_class_map
+            )
+
+            # Rip up all violating nets
+            nets_to_reroute = [n for n in violating_nets if n in net_routes]
+            neg_router.rip_up_nets(nets_to_reroute, net_routes, self.routes)
+
+            # Reroute them
+            rerouted_count = 0
+            for net in nets_to_reroute:
+                routes = self._route_net_negotiated(
+                    net, present_factor, per_net_timeout=per_net_timeout
+                )
+                if routes:
+                    net_routes[net] = routes
+                    rerouted_count += 1
+                    for route in routes:
+                        self.grid.mark_route_usage(route)
+                        self.routes.append(route)
+
+            total_corrected += rerouted_count
+            flush_print(
+                f"  Rerouted {rerouted_count}/{len(nets_to_reroute)} net(s)"
+            )
+
+            if rerouted_count == 0:
+                # No progress -- stop trying
+                break
+
+        return total_corrected
 
     # =========================================================================
     # TWO-PHASE ROUTING (GLOBAL + DETAILED)
