@@ -10,6 +10,7 @@ import csv
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.exceptions import ConfigurationError
@@ -315,6 +316,52 @@ def get_bom_formatter(manufacturer: str, config: BOMExportConfig | None = None) 
             suggestions=[f"Use one of: {', '.join(available)}"],
         )
     return formatter_class(config)
+
+
+def read_existing_lcsc_assignments(csv_path: Path) -> dict[tuple[str, str], str]:
+    """Read LCSC part numbers from an existing JLCPCB BOM CSV.
+
+    Parses the CSV and builds a lookup mapping ``(value, footprint)`` to
+    the LCSC part number found in that row.  Column names are matched
+    case-insensitively so the function works across minor format
+    variations.
+
+    Args:
+        csv_path: Path to an existing BOM CSV file.
+
+    Returns:
+        A dict mapping ``(value, footprint)`` to the LCSC part number
+        string.  Only rows with a non-empty LCSC value are included.
+    """
+    assignments: dict[tuple[str, str], str] = {}
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames is None:
+                return assignments
+
+            # Build a case-insensitive header map
+            header_map: dict[str, str] = {h.lower().strip(): h for h in reader.fieldnames}
+
+            # Identify the columns we need
+            value_col = header_map.get("comment") or header_map.get("value")
+            footprint_col = header_map.get("footprint") or header_map.get("package/footprint")
+            lcsc_col = header_map.get("lcsc part #") or header_map.get("lcsc")
+
+            if not (value_col and footprint_col and lcsc_col):
+                return assignments
+
+            for row in reader:
+                value = (row.get(value_col) or "").strip()
+                footprint = (row.get(footprint_col) or "").strip()
+                lcsc = (row.get(lcsc_col) or "").strip()
+                if value and footprint and lcsc:
+                    assignments[(value, footprint)] = lcsc
+    except (OSError, UnicodeDecodeError, csv.Error):
+        # If the file can't be read or parsed, return empty — the
+        # caller will simply regenerate without merging.
+        return {}
+    return assignments
 
 
 def export_bom(
