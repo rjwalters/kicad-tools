@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
 from .cpp_backend import create_hybrid_router
 from .grid import RoutingGrid
-from .layers import Layer, LayerStack
-from .primitives import Obstacle, Pad, Route, Segment
+from .layers import LayerStack
+from .primitives import Pad, Route
 from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class BlockRoutingResult:
     routed_nets: set[int] = field(default_factory=set)
     failed_nets: set[int] = field(default_factory=set)
     connected_pad_keys: set[tuple[str, str]] = field(default_factory=set)
+    inter_block_nets: set[int] = field(default_factory=set)
 
 
 class BlockRouter:
@@ -106,6 +107,14 @@ class BlockRouter:
         self._pads: dict[tuple[str, str], Pad] = {}
         self._nets: dict[int, list[tuple[str, str]]] = {}
         self._net_names: dict[int, str] = {}
+
+        # Full autorouter net map for inter-block classification
+        self._autorouter_nets: dict[int, list[tuple[str, str]]] | None = None
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Absolute bounding box of the block sub-grid (min_x, min_y, max_x, max_y)."""
+        return (self._abs_min_x, self._abs_min_y, self._abs_max_x, self._abs_max_y)
 
     @property
     def origin_x(self) -> float:
@@ -174,6 +183,7 @@ class BlockRouter:
             nets: Autorouter's net-to-pad mapping.
             net_names: Autorouter's net name mapping.
         """
+        self._autorouter_nets = nets
         self._net_names.update(net_names)
         for key, pad in pads.items():
             self.add_pad(pad)
@@ -191,15 +201,23 @@ class BlockRouter:
         internal: list[int] = []
         inter_block: list[int] = []
 
-        for net_id, pad_keys in self._nets.items():
+        for net_id, local_pad_keys in self._nets.items():
             if net_id == 0:
                 continue
-            if len(pad_keys) < 2:
-                continue
-            # All pads for this net that are in our sub-grid are tracked;
-            # if the net also has pads outside, it's inter-block.
-            # For now, we route all nets that have >=2 pads in the block.
-            internal.append(net_id)
+
+            # Compare against the full autorouter net map when available
+            if self._autorouter_nets is not None:
+                full_pad_keys = self._autorouter_nets.get(net_id, [])
+                if len(local_pad_keys) < len(full_pad_keys):
+                    # Net has pads outside this block -- inter-block
+                    inter_block.append(net_id)
+                elif len(local_pad_keys) >= 2:
+                    # All pads are inside this block
+                    internal.append(net_id)
+            else:
+                # No autorouter context -- treat all multi-pad nets as internal
+                if len(local_pad_keys) >= 2:
+                    internal.append(net_id)
 
         return internal, inter_block
 
@@ -251,7 +269,9 @@ class BlockRouter:
         """
         result = BlockRoutingResult(block_id=self.block.block_id)
 
-        internal_nets, _ = self._classify_nets()
+        internal_nets, inter_block_nets = self._classify_nets()
+        result.inter_block_nets = set(inter_block_nets)
+
         if not internal_nets:
             logger.info(
                 "Block '%s': no internal nets to route", self.block.block_id

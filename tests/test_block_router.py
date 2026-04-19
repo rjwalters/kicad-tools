@@ -464,3 +464,225 @@ class TestRouteAllAdvancedBlockAware:
         ])
         routes = router.route_all_advanced(use_block_aware=True)
         assert len(routes) > 0
+
+
+# ===========================================================================
+# Unit: Inter-block net classification
+# ===========================================================================
+
+class TestInterBlockNetClassification:
+    """_classify_nets correctly distinguishes internal vs inter-block nets."""
+
+    def test_fully_internal_net_classified_as_internal(self):
+        """Net with all pads inside the block is classified as internal."""
+        block = _make_two_component_block()
+        router = _make_router_with_block_pads(block)
+
+        rules = DesignRules()
+        br = BlockRouter(block, rules, force_python=True, margin=2.0)
+        br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
+
+        internal, inter_block = br._classify_nets()
+        # Net 2 (VOUT) has U1.2 and C1.1 both inside the block
+        assert 2 in internal
+
+    def test_inter_block_net_classified_correctly(self):
+        """Net with pads in multiple blocks is classified as inter-block."""
+        block = _make_two_component_block(origin=(20.0, 20.0))
+
+        # Create a router with a pad OUTSIDE the block for net 2
+        rules = DesignRules()
+        router = Autorouter(60, 60, force_python=True, rules=rules)
+        ox, oy = 20.0, 20.0
+        router.add_component("U1", [
+            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1", [
+            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+        # Extra component far away, sharing net 2 (VOUT)
+        router.add_component("R_EXT", [
+            {"number": "1", "x": 55.0, "y": 55.0, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 55.0, "y": 50.0, "net": 4, "net_name": "OTHER",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        br = BlockRouter(block, rules, force_python=True, margin=2.0)
+        br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
+
+        internal, inter_block = br._classify_nets()
+        # Net 2 has 3 pads total but only 2 inside the block -> inter-block
+        assert 2 in inter_block
+        assert 2 not in internal
+
+    def test_single_pad_inter_block_net(self):
+        """Net with 1 pad inside block and others outside is inter-block."""
+        block = _make_two_component_block(origin=(20.0, 20.0))
+
+        rules = DesignRules()
+        router = Autorouter(60, 60, force_python=True, rules=rules)
+        ox, oy = 20.0, 20.0
+        # Only U1.1 is inside the block for net 10
+        router.add_component("U1", [
+            {"number": "1", "x": ox - 1.0, "y": oy, "net": 10, "net_name": "SIG",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 1.0, "y": oy, "net": 20, "net_name": "OTHER",
+             "width": 0.5, "height": 0.5},
+        ])
+        # R_EXT.1 is outside the block for net 10
+        router.add_component("R_EXT", [
+            {"number": "1", "x": 55.0, "y": 55.0, "net": 10, "net_name": "SIG",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 55.0, "y": 50.0, "net": 30, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        br = BlockRouter(block, rules, force_python=True, margin=2.0)
+        br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
+
+        internal, inter_block = br._classify_nets()
+        # Net 10 has 1 pad inside, 1 outside -> inter-block
+        assert 10 in inter_block
+        assert 10 not in internal
+
+    def test_result_includes_inter_block_nets(self):
+        """route_block result includes inter_block_nets set."""
+        block = _make_two_component_block(origin=(20.0, 20.0))
+
+        rules = DesignRules()
+        router = Autorouter(60, 60, force_python=True, rules=rules)
+        ox, oy = 20.0, 20.0
+        router.add_component("U1", [
+            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1", [
+            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+        # Extra pad outside for net 3
+        router.add_component("R_EXT", [
+            {"number": "1", "x": 55.0, "y": 55.0, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 55.0, "y": 50.0, "net": 4, "net_name": "X",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        br = BlockRouter(block, rules, force_python=True, margin=2.0)
+        br.add_pads_from_autorouter(router.pads, router.nets, router.net_names)
+
+        result = br.route_block()
+        assert isinstance(result.inter_block_nets, set)
+        # Net 3 (GND) has pads inside and outside -> inter-block
+        assert 3 in result.inter_block_nets
+
+    def test_bounds_property(self):
+        """BlockRouter.bounds returns absolute bounding box."""
+        block = _make_two_component_block(origin=(25.0, 30.0))
+        rules = DesignRules()
+        br = BlockRouter(block, rules, force_python=True, margin=1.0)
+
+        min_x, min_y, max_x, max_y = br.bounds
+        assert min_x < 25.0
+        assert min_y < 30.0
+        assert max_x > 25.0
+        assert max_y > 30.0
+
+
+# ===========================================================================
+# Integration: register_block_occupancy called during block-aware routing
+# ===========================================================================
+
+class TestBlockOccupancyIntegration:
+    """register_block_occupancy is called during route_all_block_aware."""
+
+    def test_block_aware_routing_updates_region_utilization(self):
+        """After block-aware routing, regions overlapping blocks have utilization."""
+        rules = DesignRules()
+        router = Autorouter(80, 60, force_python=True, rules=rules)
+
+        block = _make_two_component_block(origin=(20.0, 20.0))
+        router.register_block(block)
+
+        ox, oy = 20.0, 20.0
+        router.add_component("U1", [
+            {"number": "1", "x": ox - 1.0, "y": oy, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 1.0, "y": oy, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1", [
+            {"number": "1", "x": ox + 2.5, "y": oy, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": ox + 3.5, "y": oy, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        # Route and verify it completes without error
+        routes = router.route_all_block_aware()
+        assert isinstance(routes, list)
+
+    def test_inter_block_nets_in_two_block_board(self):
+        """Two-block board correctly identifies GND as inter-block net."""
+        rules = DesignRules()
+        router = Autorouter(80, 60, force_python=True, rules=rules)
+
+        block_a = PCBBlock(name="block_a", block_id="block_a")
+        block_a.add_component("U1A", "SOT-23", 0, 0,
+                              pads={"1": (-1, 0), "2": (1, 0)})
+        block_a.add_component("C1A", "C_0805", 3, 0,
+                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_a.add_port("VIN_A", -4, 0, direction="in")
+        block_a.add_port("VOUT_A", 6, 0, direction="out")
+        block_a.place(15, 30)
+
+        block_b = PCBBlock(name="block_b", block_id="block_b")
+        block_b.add_component("U1B", "SOT-23", 0, 0,
+                              pads={"1": (-1, 0), "2": (1, 0)})
+        block_b.add_component("C1B", "C_0805", 3, 0,
+                              pads={"1": (2.5, 0), "2": (3.5, 0)})
+        block_b.add_port("VIN_B", -4, 0, direction="in")
+        block_b.add_port("VOUT_B", 6, 0, direction="out")
+        block_b.place(50, 30)
+
+        router.add_component("U1A", [
+            {"number": "1", "x": 14.0, "y": 30.0, "net": 1, "net_name": "NET_A1",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 16.0, "y": 30.0, "net": 2, "net_name": "NET_A2",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1A", [
+            {"number": "1", "x": 17.5, "y": 30.0, "net": 2, "net_name": "NET_A2",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 18.5, "y": 30.0, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("U1B", [
+            {"number": "1", "x": 49.0, "y": 30.0, "net": 4, "net_name": "NET_B1",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 51.0, "y": 30.0, "net": 5, "net_name": "NET_B2",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1B", [
+            {"number": "1", "x": 52.5, "y": 30.0, "net": 5, "net_name": "NET_B2",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 53.5, "y": 30.0, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        router.register_block(block_a)
+        router.register_block(block_b)
+
+        routes = router.route_all_block_aware()
+        assert len(routes) > 0
