@@ -83,6 +83,9 @@ class DesignRules:
     min_solder_mask_dam_mm: float = 0.1
     min_solder_mask_clearance_mm: float = 0.05
 
+    # Pad constraints
+    min_pad_size_mm: float = 0.25
+
     # Board specifications
     board_thickness_mm: float = 1.6
     outer_copper_oz: float = 1.0
@@ -117,6 +120,8 @@ class DesignRules:
             "min_silkscreen_width_mm": self.min_silkscreen_width_mm,
             "min_silkscreen_height_mm": self.min_silkscreen_height_mm,
             "min_solder_mask_dam_mm": self.min_solder_mask_dam_mm,
+            "min_solder_mask_clearance_mm": self.min_solder_mask_clearance_mm,
+            "min_pad_size_mm": self.min_pad_size_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
             "inner_copper_oz": self.inner_copper_oz,

@@ -22,6 +22,8 @@ design_rules:
     min_silkscreen_width_mm: 0.08   # 3 mil
     min_silkscreen_height_mm: 0.8   # ~32 mil
     min_solder_mask_dam_mm: 0.13    # 5 mil (per FlashPCB instant tier)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.0            # No inner layers
@@ -42,6 +44,8 @@ design_rules:
     min_silkscreen_width_mm: 0.08   # 3 mil
     min_silkscreen_height_mm: 0.8   # ~32 mil
     min_solder_mask_dam_mm: 0.13    # 5 mil (per FlashPCB instant tier)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 0.0
@@ -62,6 +66,8 @@ design_rules:
     min_silkscreen_width_mm: 0.08   # 3 mil
     min_silkscreen_height_mm: 0.8   # ~32 mil
     min_solder_mask_dam_mm: 0.13    # 5 mil (per FlashPCB instant tier)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 0.5
@@ -82,6 +88,8 @@ design_rules:
     min_silkscreen_width_mm: 0.08   # 3 mil
     min_silkscreen_height_mm: 0.8   # ~32 mil
     min_solder_mask_dam_mm: 0.13    # 5 mil (per FlashPCB instant tier)
+    min_solder_mask_clearance_mm: 0.05
+    min_pad_size_mm: 0.25
     board_thickness_mm: 1.6
     outer_copper_oz: 2.0
     inner_copper_oz: 1.0
