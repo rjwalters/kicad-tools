@@ -176,6 +176,16 @@ class TestLEDIndicatorMocked:
         # Should add junctions
         assert mock_schematic.add_junction.called
 
+    def test_led_explicit_resistor_ref(self, mock_schematic):
+        """LED indicator uses explicit resistor_ref when provided."""
+        LEDIndicator(mock_schematic, x=100, y=100, ref_prefix="D2", resistor_ref="R12")
+
+        # The resistor add_symbol call should use "R12", not the auto-derived "R2"
+        add_calls = mock_schematic.add_symbol.call_args_list
+        # Second add_symbol call is the resistor
+        resistor_call_args = add_calls[1]
+        assert resistor_call_args[0][3] == "R12"
+
 
 class TestDecouplingCapsMocked:
     """Tests for DecouplingCaps with mocked schematic."""
