@@ -11,6 +11,7 @@ different routing strategies. See heuristics.py for available options.
 
 import heapq
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -1109,6 +1110,7 @@ class Router:
         negotiated_mode: bool = False,
         present_cost_factor: float = 0.0,
         weight: float = 1.0,
+        per_net_timeout: float | None = None,
     ) -> Route | None:
         """Route between two pads using congestion-aware A*.
 
@@ -1120,6 +1122,8 @@ class Router:
             present_cost_factor: Multiplier for current sharing penalty (increases each iteration)
             weight: A* weight factor (1.0 = optimal A*, >1.0 = faster but suboptimal)
                     Higher values explore fewer nodes but may miss optimal paths.
+            per_net_timeout: Optional wall-clock timeout in seconds for this A* search.
+                    If exceeded, returns None (no route found within time budget).
         """
         # Issue #966: Clear via cache at start of route (grid state may have changed)
         # Keep cache valid within this route call for same-position checks
@@ -1201,8 +1205,18 @@ class Router:
         iterations = 0
         max_iterations = self.grid.cols * self.grid.rows * 4  # Prevent infinite loops
 
+        # Per-net wall-clock timeout (Issue #1605)
+        # Check every 1024 iterations to amortize time.monotonic() overhead
+        deadline = time.monotonic() + per_net_timeout if per_net_timeout is not None else None
+        timeout_check_interval = 1024
+
         while open_set and iterations < max_iterations:
             iterations += 1
+
+            # Per-net timeout check (Issue #1605)
+            if deadline is not None and iterations % timeout_check_interval == 0:
+                if time.monotonic() >= deadline:
+                    break
 
             current = heapq.heappop(open_set)
             current_key = (current.x, current.y, current.layer)

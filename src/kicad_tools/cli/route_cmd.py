@@ -724,6 +724,7 @@ def route_with_layer_escalation(
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
@@ -1077,6 +1078,7 @@ def route_with_rule_relaxation(
                 router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
@@ -1448,6 +1450,7 @@ def route_with_combined_escalation(
                     router.route_all_negotiated(
                         max_iterations=args.iterations,
                         timeout=args.timeout,
+                        per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         batch_routing=getattr(args, "batch_routing", False)
                         or getattr(args, "high_performance", False),
                         hierarchical=getattr(args, "hierarchical", False),
@@ -1811,6 +1814,13 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="Timeout in seconds for routing (default: no timeout). Returns best partial result if reached.",
+    )
+    parser.add_argument(
+        "--per-net-timeout",
+        type=float,
+        default=30.0,
+        help="Wall-clock timeout in seconds for each per-net A* search (default: 30). "
+        "Prevents individual nets from monopolizing the router. Use 0 to disable.",
     )
     parser.add_argument(
         "-v",
@@ -2831,6 +2841,9 @@ def main(argv: list[str] | None = None) -> int:
             flush_print(f"\n--- Routing ({args.strategy}) ---")
             if args.timeout:
                 flush_print(f"  Timeout: {args.timeout}s")
+            per_net_timeout_val = getattr(args, "per_net_timeout", None)
+            if per_net_timeout_val:
+                flush_print(f"  Per-net timeout: {per_net_timeout_val}s")
             if args.profile:
                 profile_output = args.profile_output or "route_profile.prof"
                 flush_print(f"  Profiling enabled: {profile_output}")
@@ -2872,6 +2885,7 @@ def main(argv: list[str] | None = None) -> int:
                 return router.route_all_negotiated(
                     max_iterations=args.iterations,
                     timeout=args.timeout,
+                    per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     batch_routing=getattr(args, "batch_routing", False)
                     or getattr(args, "high_performance", False),
                     hierarchical=getattr(args, "hierarchical", False),
