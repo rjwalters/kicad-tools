@@ -439,14 +439,16 @@ def _generate_recommendations(
     if severity == FinePitchSeverity.OK:
         return recommendations
 
-    # Calculate a grid resolution that would align with the pitch
-    # Try common grid values that divide evenly into the pitch
-    common_grids = [0.005, 0.01, 0.0125, 0.025, 0.05, 0.1, 0.127, 0.25]
+    # Calculate a grid resolution that would align with the pitch.
+    # Try common grid values that divide evenly into the pitch,
+    # preferring the coarsest compatible grid to minimise cell count.
+    # Includes 0.127mm (5 mil) for imperial pitches (2.54mm, 5.08mm).
+    common_grids = [0.25, 0.127, 0.1, 0.065, 0.05, 0.025, 0.0125, 0.01, 0.005]
     suggested_grid = None
 
     for g in common_grids:
         if g < grid_resolution:
-            # Check if this grid would align better
+            # Check if this grid divides evenly into the pitch
             pitch_ratio = pin_pitch / g
             if abs(pitch_ratio - round(pitch_ratio)) < 0.01:
                 suggested_grid = g

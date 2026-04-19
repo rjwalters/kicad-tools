@@ -531,13 +531,18 @@ def auto_select_grid_resolution(
     # Default candidate resolutions (common PCB grid values in mm)
     # These are chosen to align with common footprint pitches:
     #   - 0.5mm: QFP (0.5mm pitch), 0805/0603 (1.0mm pitch)
-    #   - 0.25mm: QFP, through-hole (2.54mm / 0.25 = 10.16, close enough)
-    #   - 0.127mm: SOIC (1.27mm pitch), through-hole (2.54mm / 0.127 = 20)
+    #   - 0.25mm: QFP (0.5mm / 0.25 = 2 exact). NOT imperial-compatible
+    #             (2.54 / 0.25 = 10.16, off-grid by 0.04mm)
+    #   - 0.127mm (5 mil): SOIC (1.27mm / 0.127 = 10 exact),
+    #             imperial THT (2.54mm / 0.127 = 20, 5.08mm / 0.127 = 40)
     #   - 0.1mm: Metric footprints, QFP (0.5mm / 0.1 = 5)
     #   - 0.065mm: TSSOP (0.65mm / 0.065 = 10 exact)
-    #   - 0.05mm: Best overall alignment (0.65mm/13, 0.5mm/10, 1.0mm/20)
+    #   - 0.05mm: Good metric alignment but NOT imperial-compatible
+    #             (2.54 / 0.05 = 50.8, off-grid by 0.04mm)
+    #   - 0.0508mm (2 mil): Imperial-compatible for tight DRC constraints
+    #             (2.54 / 0.0508 = 50 exact, 5.08 / 0.0508 = 100 exact)
     if candidates is None:
-        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05]
+        candidates = [0.5, 0.25, 0.127, 0.1, 0.065, 0.05, 0.0508]
 
     # Sort candidates from coarsest to finest
     candidates = sorted(candidates, reverse=True)
@@ -622,11 +627,16 @@ def recommend_grid_for_board_size(
     - Large (>=150x100mm): 0.25mm grid (memory efficient, ~240k cells max)
 
     Common footprint pitch alignment:
-    | Grid   | TSSOP 0.65mm | QFP 0.5mm | SOIC 1.27mm | 100mil 2.54mm |
-    |--------|--------------|-----------|-------------|---------------|
-    | 0.05mm | 13 exact     | 10 exact  | 25.4 close  | 50.8 close    |
-    | 0.1mm  | 6.5 (off)    | 5 exact   | 12.7 close  | 25.4 close    |
-    | 0.25mm | 2.6 (off)    | 2 exact   | 5.08 close  | 10.16 close   |
+    | Grid    | TSSOP 0.65mm | QFP 0.5mm | SOIC 1.27mm | 100mil 2.54mm |
+    |---------|--------------|-----------|-------------|---------------|
+    | 0.05mm  | 13 exact     | 10 exact  | 25.4 (off)  | 50.8 (off)    |
+    | 0.1mm   | 6.5 (off)    | 5 exact   | 12.7 (off)  | 25.4 (off)    |
+    | 0.127mm | 5.12 (off)   | 3.94 (off)| 10 exact    | 20 exact      |
+    | 0.25mm  | 2.6 (off)    | 2 exact   | 5.08 (off)  | 10.16 (off)   |
+
+    Note: No single grid aligns with both metric (TSSOP/QFP) and imperial
+    (SOIC/THT) pitches. Use auto_select_grid_resolution() for pad-aware
+    selection that picks the best grid for the actual board contents.
 
     Args:
         board_width: Board width in mm

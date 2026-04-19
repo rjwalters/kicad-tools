@@ -53,13 +53,14 @@ class TestGetRoutingParams:
 
         assert grid <= clearance / 2, f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm)"
 
-    def test_grid_rounded_to_clean_value(self):
-        """Grid should be rounded to 0.05mm increments."""
+    def test_grid_is_known_candidate(self):
+        """Grid should be from the known-good candidate list."""
         grid, _, _, _, _ = _get_routing_params("jlcpcb")
 
-        # Check grid is a multiple of 0.05mm
-        assert grid * 20 == pytest.approx(round(grid * 20), abs=0.001), (
-            f"Grid {grid}mm should be rounded to 0.05mm increments"
+        # Grid should be one of the known-good candidate values
+        known_candidates = [0.25, 0.127, 0.1, 0.065, 0.05]
+        assert any(abs(grid - c) < 0.001 for c in known_candidates), (
+            f"Grid {grid}mm should be from known candidates: {known_candidates}"
         )
 
     def test_grid_minimum_value(self):
@@ -76,8 +77,9 @@ class TestGetRoutingParams:
 
         # Fallback defaults should still be DRC-compatible
         assert grid <= clearance / 2, "Fallback grid should be <= clearance/2"
-        # Grid is auto-calculated from clearance: 0.15/2 = 0.075, rounded down to 0.05
-        assert grid == pytest.approx(0.05, rel=0.01)
+        # Grid is selected from known-good candidates: clearance/2 = 0.075,
+        # coarsest candidate <= 0.075 is 0.065mm (TSSOP-compatible)
+        assert grid == pytest.approx(0.065, rel=0.01)
         assert clearance == pytest.approx(0.15, rel=0.01)
 
     def test_via_diameter_greater_than_drill(self):
@@ -224,8 +226,8 @@ class TestGetRoutingParamsWithSpec:
 
         # Grid must be <= clearance / 2 for DRC compliance
         assert grid <= clearance / 2, f"Grid {grid}mm must be <= clearance/2 ({clearance / 2}mm)"
-        # Grid should be rounded to 0.05mm increments
-        assert grid * 20 == pytest.approx(round(grid * 20), abs=0.001)
+        # Grid should be from a known-good candidate list
+        assert grid in [0.25, 0.127, 0.1, 0.065, 0.05], f"Grid {grid}mm should be a known candidate"
 
     def test_voltage_divider_project_values(self):
         """Test with values from the voltage-divider project.kct (issue #726 example)."""
@@ -237,6 +239,6 @@ class TestGetRoutingParamsWithSpec:
 
         assert clearance == pytest.approx(0.2), "Should use 0.2mm from spec"
         assert trace_width == pytest.approx(0.3), "Should use 0.3mm from spec"
-        # Grid for 0.2mm clearance: 0.2/3 = 0.0667mm, rounded down to 0.05mm
-        assert grid == pytest.approx(0.05), "Grid should be 0.05mm for 0.2mm clearance"
+        # Grid for 0.2mm clearance: max_grid = 0.1mm, coarsest candidate = 0.1mm
+        assert grid == pytest.approx(0.1), "Grid should be 0.1mm for 0.2mm clearance"
         assert grid <= clearance / 2, "Grid should be DRC-compatible"
