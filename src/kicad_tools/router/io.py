@@ -769,6 +769,7 @@ def validate_routes(
 
     violations: list[ClearanceViolation] = []
     clearance = rules.trace_clearance
+    via_clear = rules.via_clearance
     net_names = getattr(router, "net_names", {})
 
     def _resolve_net_name(net_id: int) -> str:
@@ -791,6 +792,10 @@ def validate_routes(
             for (ref, num), pad in router.pads.items():
                 # Skip pads on the same net
                 if pad.net == route_net:
+                    continue
+
+                # Skip SMD pads on a different layer than the segment
+                if not pad.through_hole and pad.layer != segment.layer:
                     continue
 
                 # Calculate minimum distance from segment to pad center
@@ -855,12 +860,8 @@ def validate_routes(
 
                     if effective_dist < clearance:
                         # Approximate violation location at midpoint of closest approach
-                        loc_x = (
-                            segment.x1 + segment.x2 + other_seg.x1 + other_seg.x2
-                        ) / 4
-                        loc_y = (
-                            segment.y1 + segment.y2 + other_seg.y1 + other_seg.y2
-                        ) / 4
+                        loc_x = (segment.x1 + segment.x2 + other_seg.x1 + other_seg.x2) / 4
+                        loc_y = (segment.y1 + segment.y2 + other_seg.y1 + other_seg.y2) / 4
                         violations.append(
                             ClearanceViolation(
                                 segment_index=seg_idx,
@@ -893,7 +894,7 @@ def validate_routes(
 
                     effective_dist = dist - seg_half_width - via_radius
 
-                    if effective_dist < clearance:
+                    if effective_dist < via_clear:
                         violations.append(
                             ClearanceViolation(
                                 segment_index=seg_idx,
@@ -905,10 +906,85 @@ def validate_routes(
                                 obstacle_type="via",
                                 obstacle_net=other_route.net,
                                 distance=effective_dist,
-                                required=clearance,
+                                required=via_clear,
                                 net_name=_resolve_net_name(route_net),
                                 obstacle_net_name=_resolve_net_name(other_route.net),
                                 location=(via.x, via.y),
+                            )
+                        )
+
+    # --- Via-to-pad checks ---
+    for route in router.routes:
+        route_net = route.net
+
+        # Build component refs connected to this route's net
+        route_component_refs: set[str] = set()
+        if route_net in router.nets:
+            for r, _p in router.nets[route_net]:
+                route_component_refs.add(r)
+
+        for via in route.vias:
+            via_radius = via.diameter / 2
+
+            for (ref, num), pad in router.pads.items():
+                if pad.net == route_net:
+                    continue
+
+                pad_radius = max(pad.width, pad.height) / 2
+                dist = math.sqrt((via.x - pad.x) ** 2 + (via.y - pad.y) ** 2)
+                effective_dist = dist - via_radius - pad_radius
+
+                if effective_dist < via_clear:
+                    is_component_inherent = ref in route_component_refs
+
+                    violations.append(
+                        ClearanceViolation(
+                            segment_index=-1,
+                            x1=via.x,
+                            y1=via.y,
+                            x2=via.x,
+                            y2=via.y,
+                            net=route_net,
+                            obstacle_type="pad",
+                            obstacle_net=pad.net,
+                            distance=effective_dist,
+                            required=via_clear,
+                            net_name=_resolve_net_name(route_net),
+                            obstacle_net_name=_resolve_net_name(pad.net),
+                            location=(pad.x, pad.y),
+                            component_inherent=is_component_inherent,
+                        )
+                    )
+
+    # --- Via-to-via checks ---
+    for i, route_a in enumerate(router.routes):
+        for route_b in router.routes[i + 1 :]:
+            if route_a.net == route_b.net:
+                continue
+
+            for via_a in route_a.vias:
+                for via_b in route_b.vias:
+                    dist = math.sqrt((via_a.x - via_b.x) ** 2 + (via_a.y - via_b.y) ** 2)
+                    effective_dist = dist - via_a.diameter / 2 - via_b.diameter / 2
+
+                    if effective_dist < via_clear:
+                        loc_x = (via_a.x + via_b.x) / 2
+                        loc_y = (via_a.y + via_b.y) / 2
+                        violations.append(
+                            ClearanceViolation(
+                                segment_index=-1,
+                                x1=via_a.x,
+                                y1=via_a.y,
+                                x2=via_a.x,
+                                y2=via_a.y,
+                                net=route_a.net,
+                                obstacle_type="via",
+                                obstacle_net=route_b.net,
+                                distance=effective_dist,
+                                required=via_clear,
+                                net_name=_resolve_net_name(route_a.net),
+                                obstacle_net_name=_resolve_net_name(route_b.net),
+                                location=(loc_x, loc_y),
                             )
                         )
 
@@ -964,9 +1040,7 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
             lines.append(f"  ... and {len(routing_violations) - max_detail} more")
 
     if inherent_violations:
-        lines.append(
-            f"Info: {len(inherent_violations)} component-inherent pad spacing(s) excluded"
-        )
+        lines.append(f"Info: {len(inherent_violations)} component-inherent pad spacing(s) excluded")
 
     return "\n".join(lines)
 

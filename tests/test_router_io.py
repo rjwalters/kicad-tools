@@ -1217,20 +1217,34 @@ class TestValidateRoutes:
             # A routing violation
             ClearanceViolation(
                 segment_index=0,
-                x1=10, y1=10, x2=20, y2=10,
-                net=1, obstacle_type="pad", obstacle_net=2,
-                distance=-0.05, required=0.15,
-                net_name="VCC", obstacle_net_name="GND",
+                x1=10,
+                y1=10,
+                x2=20,
+                y2=10,
+                net=1,
+                obstacle_type="pad",
+                obstacle_net=2,
+                distance=-0.05,
+                required=0.15,
+                net_name="VCC",
+                obstacle_net_name="GND",
                 location=(15.0, 10.0),
                 component_inherent=False,
             ),
             # A component-inherent violation
             ClearanceViolation(
                 segment_index=0,
-                x1=10, y1=10, x2=20, y2=10,
-                net=1, obstacle_type="pad", obstacle_net=3,
-                distance=-0.10, required=0.15,
-                net_name="SPI_SCK", obstacle_net_name="SPI_MISO",
+                x1=10,
+                y1=10,
+                x2=20,
+                y2=10,
+                net=1,
+                obstacle_type="pad",
+                obstacle_net=3,
+                distance=-0.10,
+                required=0.15,
+                net_name="SPI_SCK",
+                obstacle_net_name="SPI_MISO",
                 location=(10.65, 10.0),
                 component_inherent=True,
             ),
@@ -1255,10 +1269,17 @@ class TestValidateRoutes:
         violations = [
             ClearanceViolation(
                 segment_index=0,
-                x1=10, y1=10, x2=20, y2=10,
-                net=1, obstacle_type="pad", obstacle_net=2,
-                distance=-0.10, required=0.15,
-                net_name="SPI_SCK", obstacle_net_name="SPI_MISO",
+                x1=10,
+                y1=10,
+                x2=20,
+                y2=10,
+                net=1,
+                obstacle_type="pad",
+                obstacle_net=2,
+                distance=-0.10,
+                required=0.15,
+                net_name="SPI_SCK",
+                obstacle_net_name="SPI_MISO",
                 location=(10.65, 10.0),
                 component_inherent=True,
             ),
@@ -1270,6 +1291,241 @@ class TestValidateRoutes:
         assert "clearance violation" not in result
         # Should report the component-inherent count
         assert "1 component-inherent pad spacing(s) excluded" in result
+
+    def test_detects_via_to_pad_violation(self):
+        """Test detection of clearance violations between a via and a pad on different nets."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Pad on net 2
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 15, "y": 10, "width": 1.0, "height": 1.0, "net": 2}],
+        )
+
+        # Via on net 1 placed very close to the pad
+        via = Via(x=15, y=10.6, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route = Route(net=1, net_name="NET1", segments=[], vias=[via])
+        router.routes.append(route)
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        # Should detect via-to-pad violation
+        pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index == -1
+        ]
+        assert len(pad_violations) >= 1
+        assert pad_violations[0].net == 1
+        assert pad_violations[0].obstacle_net == 2
+
+    def test_no_via_to_pad_violation_same_net(self):
+        """Test no via-to-pad violation when via and pad are on the same net."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 15, "y": 10, "width": 1.0, "height": 1.0, "net": 1}],
+        )
+
+        via = Via(x=15, y=10.6, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route = Route(net=1, net_name="NET1", segments=[], vias=[via])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index == -1
+        ]
+        assert len(pad_violations) == 0
+
+    def test_detects_via_to_via_violation(self):
+        """Test detection of clearance violations between vias on different nets."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Two vias on different nets placed very close together
+        via1 = Via(x=15, y=10, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route1 = Route(net=1, net_name="NET1", segments=[], vias=[via1])
+
+        via2 = Via(x=15, y=10.5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route2 = Route(net=2, net_name="NET2", segments=[], vias=[via2])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        via_violations = [
+            v for v in violations if v.obstacle_type == "via" and v.segment_index == -1
+        ]
+        assert len(via_violations) >= 1
+        assert via_violations[0].net == 1
+        assert via_violations[0].obstacle_net == 2
+        assert via_violations[0].location is not None
+
+    def test_no_via_to_via_violation_same_net(self):
+        """Test no via-to-via violation when both vias are on the same net."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        via1 = Via(x=15, y=10, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        via2 = Via(x=15, y=10.5, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route = Route(net=1, net_name="NET1", segments=[], vias=[via1, via2])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        via_violations = [
+            v for v in violations if v.obstacle_type == "via" and v.segment_index == -1
+        ]
+        assert len(via_violations) == 0
+
+    def test_smd_pad_no_violation_different_layer(self):
+        """Test that SMD pad on F.Cu does NOT trigger violation with segment on B.Cu."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # SMD pad on F.Cu (through_hole=False is default)
+        router.add_component(
+            "R1",
+            [{"number": "1", "x": 15, "y": 10, "width": 1.0, "height": 1.0, "net": 2}],
+        )
+
+        # Segment on B.Cu passing right through the pad location
+        seg = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.B_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # SMD pad on F.Cu should not trigger against B.Cu segment
+        seg_pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index != -1
+        ]
+        assert len(seg_pad_violations) == 0
+
+    def test_through_hole_pad_violation_any_layer(self):
+        """Test that through-hole pad still triggers violation with segment on any layer."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Through-hole pad
+        router.add_component(
+            "J1",
+            [
+                {
+                    "number": "1",
+                    "x": 15,
+                    "y": 10,
+                    "width": 1.5,
+                    "height": 1.5,
+                    "net": 2,
+                    "through_hole": True,
+                }
+            ],
+        )
+
+        # Segment on B.Cu passing very close to the through-hole pad
+        seg = Segment(x1=10, y1=10, x2=15.5, y2=10, layer=Layer.B_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # Through-hole pad should still trigger violation on B.Cu
+        seg_pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index != -1
+        ]
+        assert len(seg_pad_violations) >= 1
+
+    def test_via_checks_use_via_clearance(self):
+        """Test that via-related checks use via_clearance, not trace_clearance."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.1,  # Small trace clearance
+            via_clearance=0.5,  # Large via clearance
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Two vias placed far enough apart to pass trace_clearance but fail via_clearance
+        # Distance = 1.0, radii = 0.3 + 0.3 = 0.6, effective = 0.4
+        # 0.4 > 0.1 (trace_clearance) but 0.4 < 0.5 (via_clearance)
+        via1 = Via(x=15, y=10, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route1 = Route(net=1, net_name="NET1", segments=[], vias=[via1])
+
+        via2 = Via(x=16, y=10, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route2 = Route(net=2, net_name="NET2", segments=[], vias=[via2])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        # Should detect violation because via_clearance (0.5) > effective_dist (0.4)
+        via_violations = [
+            v for v in violations if v.obstacle_type == "via" and v.segment_index == -1
+        ]
+        assert len(via_violations) >= 1
+        assert via_violations[0].required == 0.5  # Should use via_clearance
+
+    def test_segment_to_via_uses_via_clearance(self):
+        """Test that segment-to-via checks use via_clearance."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.1,  # Small trace clearance
+            via_clearance=0.5,  # Large via clearance
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Segment on net 1, via on net 2
+        seg = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg], vias=[])
+
+        # Via placed so effective distance passes trace_clearance but fails via_clearance
+        # dist from point to seg ~ 0.6, minus seg_half=0.1, minus via_radius=0.3 => 0.2
+        # 0.2 > 0.1 (trace) but 0.2 < 0.5 (via)
+        via = Via(x=15, y=10.6, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route2 = Route(net=2, net_name="NET2", segments=[], vias=[via])
+
+        router.routes.extend([route1, route2])
+
+        violations = validate_routes(router)
+
+        via_violations = [v for v in violations if v.obstacle_type == "via"]
+        assert len(via_violations) >= 1
+        assert via_violations[0].required == 0.5  # Should use via_clearance
 
 
 class TestLoadPcbForRoutingDrcCompliance:
@@ -2946,7 +3202,9 @@ class TestMergeRoutesViaConflicts:
         # The conflicting via (net 2) should have been removed; only net 1 remains
         assert result.count("(via") == 1
         assert "(net 1)" in result
-        assert _validate_sexp_parentheses(result), "Removal of conflicting via must not leave orphaned parentheses"
+        assert _validate_sexp_parentheses(result), (
+            "Removal of conflicting via must not leave orphaned parentheses"
+        )
 
     def test_merge_keeps_same_net_vias(self):
         """Co-located vias on the same net are not removed."""
@@ -2978,7 +3236,9 @@ class TestMergeRoutesViaConflicts:
         )
         assert result.count("(via") == 1
         assert "(net 1)" in result
-        assert _validate_sexp_parentheses(result), "Removal of within-clearance via must not leave orphaned parentheses"
+        assert _validate_sexp_parentheses(result), (
+            "Removal of within-clearance via must not leave orphaned parentheses"
+        )
 
     def test_merge_no_conflict_outside_clearance(self):
         """Vias outside clearance distance on different nets are kept."""
