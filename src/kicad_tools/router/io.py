@@ -831,6 +831,10 @@ def validate_routes(
                 if pad.net == route_net:
                     continue
 
+                # Skip unconnected pads (Net 0) -- these are pour/unconnected and not obstacles
+                if pad.net == 0:
+                    continue
+
                 # Skip SMD pads on a different layer than the segment
                 if not pad.through_hole and pad.layer != segment.layer:
                     continue
@@ -973,6 +977,10 @@ def validate_routes(
 
             for (ref, num), pad in router.pads.items():
                 if pad.net == route_net:
+                    continue
+
+                # Skip unconnected pads (Net 0)
+                if pad.net == 0:
                     continue
 
                 pad_radius = max(pad.width, pad.height) / 2

@@ -1715,6 +1715,101 @@ class TestValidateRoutes:
         assert len(pad_violations) >= 1
         assert pad_violations[0].required == pytest.approx(0.3)
 
+    def test_no_violation_for_net_zero_pad_segment(self):
+        """Test that Net 0 (unconnected) pads do not trigger segment-to-pad violations."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Add a pad on net 1 and a Net 0 (unconnected) pad right next to the route
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+                {"number": "2", "x": 19.5, "y": 10, "width": 1.0, "height": 1.0, "net": 0},
+            ],
+        )
+
+        # Route on net 1 passes right next to the Net 0 pad
+        segment = Segment(x1=10, y1=10, x2=19.5, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # Net 0 pad should not trigger any violation
+        pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index != -1
+        ]
+        assert len(pad_violations) == 0
+
+    def test_no_violation_for_net_zero_pad_via(self):
+        """Test that Net 0 (unconnected) pads do not trigger via-to-pad violations."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Net 0 pad at (15, 10)
+        router.add_component(
+            "U1",
+            [{"number": "1", "x": 15, "y": 10, "width": 1.0, "height": 1.0, "net": 0}],
+        )
+
+        # Via on net 1 placed very close to the Net 0 pad
+        via = Via(x=15, y=10.6, drill=0.3, diameter=0.6, layers=(Layer.F_CU, Layer.B_CU))
+        route = Route(net=1, net_name="NET1", segments=[], vias=[via])
+        router.routes.append(route)
+
+        violations = validate_routes(router)
+
+        # Net 0 pad should not trigger any via-to-pad violation
+        pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index == -1
+        ]
+        assert len(pad_violations) == 0
+
+    def test_legitimate_violation_still_detected_with_net_zero_present(self):
+        """Test that real violations are still detected when Net 0 pads also exist."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Net 0 pad (should be ignored) and net 2 pad (should trigger violation)
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+                {"number": "2", "x": 19.5, "y": 10, "width": 1.0, "height": 1.0, "net": 0},
+                {"number": "3", "x": 19.5, "y": 10, "width": 1.0, "height": 1.0, "net": 2},
+            ],
+        )
+
+        # Route on net 1 passes right next to both pads
+        segment = Segment(x1=10, y1=10, x2=19.5, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+        router.routes.append(route)
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        # Should still detect the net 2 violation but NOT a net 0 violation
+        pad_violations = [
+            v for v in violations if v.obstacle_type == "pad" and v.segment_index != -1
+        ]
+        assert len(pad_violations) >= 1
+        assert all(v.obstacle_net != 0 for v in pad_violations)
+        assert any(v.obstacle_net == 2 for v in pad_violations)
+
 
 class TestLoadPcbForRoutingDrcCompliance:
     """Tests for DRC compliance features in load_pcb_for_routing."""
