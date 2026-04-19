@@ -31,6 +31,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools datasheet <command>    - Datasheet search, download, and PDF parsing
     kicad-tools route <pcb>            - Autoroute a PCB
     kicad-tools zones <command>        - Add copper pour zones
+    kicad-tools stitch <pcb>           - Auto-add stitching vias for plane connections
     kicad-tools reason <pcb>           - LLM-driven PCB layout reasoning
     kicad-tools placement <command>    - Detect and fix placement conflicts
     kicad-tools optimize-placement     - Run CMA-ES placement optimization
@@ -144,6 +145,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_footprint_parser(subparsers)
     _add_mfr_parser(subparsers)
     _add_zones_parser(subparsers)
+    _add_stitch_parser(subparsers)
     _add_route_parser(subparsers)
     _add_route_auto_parser(subparsers)
     _add_reason_parser(subparsers)
@@ -881,6 +883,82 @@ def _add_zones_parser(subparsers) -> None:
     zones_fill.add_argument("-v", "--verbose", action="store_true")
     zones_fill.add_argument(
         "--dry-run", action="store_true", help="Show what would be done, no output"
+    )
+
+
+def _add_stitch_parser(subparsers) -> None:
+    """Add stitch subcommand parser for stitching vias."""
+    stitch_parser = subparsers.add_parser(
+        "stitch", help="Auto-add stitching vias for plane connections"
+    )
+    stitch_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    stitch_parser.add_argument(
+        "--net",
+        "-n",
+        action="append",
+        dest="stitch_nets",
+        help="Net name to add vias for (can be repeated). "
+        "If not specified, auto-detects all power plane nets from zones.",
+    )
+    stitch_parser.add_argument(
+        "--via-size",
+        type=float,
+        default=0.45,
+        dest="stitch_via_size",
+        help="Via pad diameter in mm (default: 0.45)",
+    )
+    stitch_parser.add_argument(
+        "--drill",
+        type=float,
+        default=0.2,
+        dest="stitch_drill",
+        help="Via drill size in mm (default: 0.2)",
+    )
+    stitch_parser.add_argument(
+        "--clearance",
+        type=float,
+        default=0.2,
+        dest="stitch_clearance",
+        help="Minimum clearance from existing copper in mm (default: 0.2)",
+    )
+    stitch_parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.5,
+        dest="stitch_offset",
+        help="Max distance from pad center for via placement in mm (default: 0.5)",
+    )
+    stitch_parser.add_argument(
+        "--target-layer",
+        "-t",
+        dest="stitch_target_layer",
+        help="Target plane layer (e.g., In1.Cu). Default: auto-detect",
+    )
+    stitch_parser.add_argument(
+        "--trace-width",
+        type=float,
+        default=0.2,
+        dest="stitch_trace_width",
+        help="Width of pad-to-via trace segments in mm (default: 0.2)",
+    )
+    stitch_parser.add_argument(
+        "--dry-run",
+        "-d",
+        action="store_true",
+        dest="stitch_dry_run",
+        help="Show changes without applying",
+    )
+    stitch_parser.add_argument(
+        "-o",
+        "--output",
+        dest="stitch_output",
+        help="Output file (default: modify in place)",
+    )
+    stitch_parser.add_argument(
+        "--drc",
+        action="store_true",
+        dest="stitch_drc",
+        help="Run DRC after stitching (fills zones automatically via kicad-cli)",
     )
 
 

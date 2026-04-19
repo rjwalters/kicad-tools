@@ -132,7 +132,7 @@ class NetStatus:
     def suggested_fix(self) -> str:
         """Suggest fix based on net type."""
         if self.is_plane_net:
-            return f"kicad-pcb-stitch board.kicad_pcb --net {self.net_name}"
+            return f"kct stitch board.kicad_pcb --net {self.net_name}"
         return f"Route traces to connect {self.unconnected_count} pads"
 
     def to_dict(self) -> dict:
