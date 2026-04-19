@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 from .core import Autorouter
 from .layers import Layer, LayerDefinition, LayerStack, LayerType
-from .rules import DEFAULT_NET_CLASS_MAP, DesignRules
+from .rules import DEFAULT_NET_CLASS_MAP, DesignRules, NetClassRouting
 
 # =============================================================================
 # DRC COMPLIANCE TYPES AND FUNCTIONS
@@ -754,6 +754,30 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
     return positions
 
 
+def _get_pair_clearance(
+    net_a: int,
+    net_b: int,
+    default_clearance: float,
+    net_names: dict[int, str],
+    net_class_map: dict[str, NetClassRouting] | None,
+) -> float:
+    """Resolve the effective clearance between two nets.
+
+    Uses the KiCad rule: ``max(net_a_class.clearance, net_b_class.clearance)``.
+    Falls back to *default_clearance* when the net class map is unavailable or
+    a net is not found in it.
+    """
+    if net_class_map is None:
+        return default_clearance
+    name_a = net_names.get(net_a, "")
+    name_b = net_names.get(net_b, "")
+    class_a = net_class_map.get(name_a)
+    class_b = net_class_map.get(name_b)
+    clearance_a = class_a.clearance if class_a else default_clearance
+    clearance_b = class_b.clearance if class_b else default_clearance
+    return max(clearance_a, clearance_b)
+
+
 def validate_routes(
     router: Autorouter,
     rules: DesignRules | None = None,
@@ -781,6 +805,9 @@ def validate_routes(
     clearance = rules.trace_clearance
     via_clear = rules.via_clearance
     net_names = getattr(router, "net_names", {})
+
+    # Resolve per-net-class clearance map (if available on the router)
+    ncm: dict[str, NetClassRouting] | None = getattr(router, "net_class_map", None)
 
     def _resolve_net_name(net_id: int) -> str:
         return net_names.get(net_id, f"Net {net_id}")
@@ -817,7 +844,11 @@ def validate_routes(
                 pad_radius = max(pad.width, pad.height) / 2
                 effective_dist = dist - pad_radius - seg_half_width
 
-                if effective_dist < clearance:
+                pair_clear = _get_pair_clearance(
+                    route_net, pad.net, clearance, net_names, ncm
+                )
+
+                if effective_dist < pair_clear:
                     # Detect component-inherent violations: obstacle pad is
                     # on the same component as a pad in the route's net.
                     is_component_inherent = ref in route_component_refs
@@ -833,7 +864,7 @@ def validate_routes(
                             obstacle_type="pad",
                             obstacle_net=pad.net,
                             distance=effective_dist,
-                            required=clearance,
+                            required=pair_clear,
                             net_name=_resolve_net_name(route_net),
                             obstacle_net_name=_resolve_net_name(pad.net),
                             location=(pad.x, pad.y),
@@ -868,7 +899,11 @@ def validate_routes(
                     other_half_width = other_seg.width / 2
                     effective_dist = dist - seg_half_width - other_half_width
 
-                    if effective_dist < clearance:
+                    pair_clear = _get_pair_clearance(
+                        route_net, other_route.net, clearance, net_names, ncm
+                    )
+
+                    if effective_dist < pair_clear:
                         # Approximate violation location at midpoint of closest approach
                         loc_x = (segment.x1 + segment.x2 + other_seg.x1 + other_seg.x2) / 4
                         loc_y = (segment.y1 + segment.y2 + other_seg.y1 + other_seg.y2) / 4
@@ -883,7 +918,7 @@ def validate_routes(
                                 obstacle_type="segment",
                                 obstacle_net=other_route.net,
                                 distance=effective_dist,
-                                required=clearance,
+                                required=pair_clear,
                                 net_name=_resolve_net_name(route_net),
                                 obstacle_net_name=_resolve_net_name(other_route.net),
                                 location=(loc_x, loc_y),

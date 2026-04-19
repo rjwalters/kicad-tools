@@ -1527,6 +1527,194 @@ class TestValidateRoutes:
         assert len(via_violations) >= 1
         assert via_violations[0].required == 0.5  # Should use via_clearance
 
+    # --- Per-net-class clearance tests ---
+
+    def test_same_class_pair_uses_class_clearance(self):
+        """Two nets both in Default class (clearance 0.25). Segment at 0.22mm should violate."""
+        ncm = {
+            "NET1": NetClassRouting(name="Default", clearance=0.25),
+            "NET2": NetClassRouting(name="Default", clearance=0.25),
+        }
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,  # global default is smaller
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules, net_class_map=ncm)
+
+        # Two parallel segments on different nets, edge-to-edge 0.22mm apart
+        # center-to-center = 0.22 + 0.1 + 0.1 = 0.42mm
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.42, x2=20, y2=10.42, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        # 0.22mm edge-to-edge < 0.25mm class clearance => violation
+        assert len(seg_violations) >= 1
+        assert seg_violations[0].required == pytest.approx(0.25)
+
+    def test_mixed_class_pair_uses_max_clearance(self):
+        """Power (0.3) vs HighSpeed (0.15): effective clearance should be max(0.3, 0.15)=0.3."""
+        ncm = {
+            "VCC": NetClassRouting(name="Power", clearance=0.3),
+            "CLK": NetClassRouting(name="HighSpeed", clearance=0.15),
+        }
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules, net_class_map=ncm)
+
+        # Edge-to-edge 0.25mm apart -- violates 0.3 but not 0.2
+        # center-to-center = 0.25 + 0.1 + 0.1 = 0.45mm
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="VCC", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.45, x2=20, y2=10.45, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="CLK", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "VCC", 2: "CLK"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) >= 1
+        assert seg_violations[0].required == pytest.approx(0.3)
+
+    def test_mixed_class_no_violation_when_clearance_met(self):
+        """Power (0.3) vs HighSpeed (0.15): at 0.32mm apart, no violation."""
+        ncm = {
+            "VCC": NetClassRouting(name="Power", clearance=0.3),
+            "CLK": NetClassRouting(name="HighSpeed", clearance=0.15),
+        }
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules, net_class_map=ncm)
+
+        # Edge-to-edge 0.32mm apart -- meets 0.3 clearance
+        # center-to-center = 0.32 + 0.1 + 0.1 = 0.52mm
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="VCC", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.52, x2=20, y2=10.52, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="CLK", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "VCC", 2: "CLK"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) == 0
+
+    def test_fallback_when_no_net_class_map(self):
+        """Router with no net_class_map uses rules.trace_clearance for all checks."""
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        # Bare Autorouter -- default net_class_map won't have these net names
+        router = Autorouter(width=50, height=50, rules=rules)
+
+        # Edge-to-edge overlap (violation for 0.2mm clearance)
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="NET1", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.1, x2=20, y2=10.1, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="NET2", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) >= 1
+        # Should use the global default
+        assert seg_violations[0].required == pytest.approx(0.2)
+
+    def test_unknown_net_falls_back_to_default(self):
+        """A net not in any class falls back to rules.trace_clearance for its side."""
+        ncm = {
+            "VCC": NetClassRouting(name="Power", clearance=0.3),
+            # "UNKNOWN" is not in the map
+        }
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules, net_class_map=ncm)
+
+        # Edge-to-edge 0.25mm: max(0.3, 0.2) = 0.3 => violation
+        # center-to-center = 0.25 + 0.1 + 0.1 = 0.45mm
+        seg1 = Segment(x1=10, y1=10, x2=20, y2=10, layer=Layer.F_CU, width=0.2)
+        route1 = Route(net=1, net_name="VCC", segments=[seg1], vias=[])
+
+        seg2 = Segment(x1=10, y1=10.45, x2=20, y2=10.45, layer=Layer.F_CU, width=0.2)
+        route2 = Route(net=2, net_name="UNKNOWN", segments=[seg2], vias=[])
+
+        router.routes.extend([route1, route2])
+        router.net_names = {1: "VCC", 2: "UNKNOWN"}
+
+        violations = validate_routes(router)
+
+        seg_violations = [v for v in violations if v.obstacle_type == "segment"]
+        assert len(seg_violations) >= 1
+        # VCC class has 0.3, UNKNOWN falls back to 0.2 => max is 0.3
+        assert seg_violations[0].required == pytest.approx(0.3)
+
+    def test_per_class_clearance_seg_to_pad(self):
+        """Seg-to-pad check uses per-net-class clearance."""
+        ncm = {
+            "NET1": NetClassRouting(name="Power", clearance=0.3),
+            "NET2": NetClassRouting(name="Default", clearance=0.2),
+        }
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,  # global is smaller than both classes
+            grid_resolution=0.1,
+        )
+        router = Autorouter(width=50, height=50, rules=rules, net_class_map=ncm)
+
+        # Pad on net 2 at (20, 10) with radius 0.5
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 1.0, "height": 1.0, "net": 1},
+                {"number": "2", "x": 20, "y": 10, "width": 1.0, "height": 1.0, "net": 2},
+            ],
+        )
+
+        # Segment on net 1 ending 0.25mm edge-to-edge from pad 2
+        # Pad radius = 0.5, seg half-width = 0.1
+        # dist from seg end to pad center = 0.25 + 0.5 + 0.1 = 0.85
+        # So segment endpoint at 20 - 0.85 = 19.15
+        segment = Segment(x1=10, y1=10, x2=19.15, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="NET1", segments=[segment], vias=[])
+        router.routes.append(route)
+        router.net_names = {1: "NET1", 2: "NET2"}
+
+        violations = validate_routes(router)
+
+        pad_violations = [v for v in violations if v.obstacle_type == "pad"]
+        # 0.25mm < max(0.3, 0.2) = 0.3 => violation
+        assert len(pad_violations) >= 1
+        assert pad_violations[0].required == pytest.approx(0.3)
+
 
 class TestLoadPcbForRoutingDrcCompliance:
     """Tests for DRC compliance features in load_pcb_for_routing."""
