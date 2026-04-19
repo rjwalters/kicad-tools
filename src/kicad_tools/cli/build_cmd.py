@@ -516,9 +516,11 @@ def _get_routing_params(
         if via_diameter is None:
             via_diameter = 0.6
 
-    # Auto-calculate grid: must be ≤ clearance / 2 for DRC compliance
-    # Round DOWN to a clean value (0.05mm increments) to ensure compliance
-    grid = clearance / 2
+    # Auto-calculate grid: use clearance / 3 so that worst-case quantisation
+    # error (up to resolution/sqrt(2) for two grid-snapped objects) stays
+    # well within the DRC clearance margin.
+    # Round DOWN to a clean value (0.05mm increments) to ensure compliance.
+    grid = clearance / 3
     grid = max(0.05, math.floor(grid / 0.05) * 0.05)  # Round DOWN to 0.05mm, min 0.05mm
 
     return grid, clearance, trace_width, via_drill, via_diameter

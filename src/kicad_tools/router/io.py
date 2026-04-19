@@ -541,8 +541,9 @@ def auto_select_grid_resolution(
     # Calculate minimum resolution for DRC compliance
     min_resolution = clearance / 2
 
-    # Filter candidates: must be DRC-compliant
-    valid_candidates = [c for c in candidates if c <= clearance]
+    # Filter candidates: must be DRC-compliant (grid <= clearance/2 so that
+    # worst-case grid-quantisation error never exceeds half the clearance)
+    valid_candidates = [c for c in candidates if c <= clearance / 2]
 
     if not valid_candidates:
         # All candidates are too coarse, use minimum DRC-compliant resolution
