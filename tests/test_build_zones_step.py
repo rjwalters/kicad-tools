@@ -173,12 +173,13 @@ class TestBuildStepEnum:
         assert BuildStep.ZONES.value == "zones"
 
     def test_step_ordering_in_all(self):
-        """ZONES should appear between OUTLINE and ROUTE in the enum definition."""
+        """ZONES should appear between OUTLINE and PLACEMENT in the enum definition."""
         members = list(BuildStep)
         outline_idx = members.index(BuildStep.OUTLINE)
         zones_idx = members.index(BuildStep.ZONES)
+        placement_idx = members.index(BuildStep.PLACEMENT)
         route_idx = members.index(BuildStep.ROUTE)
-        assert outline_idx < zones_idx < route_idx
+        assert outline_idx < zones_idx < placement_idx < route_idx
 
 
 # ---------------------------------------------------------------------------
