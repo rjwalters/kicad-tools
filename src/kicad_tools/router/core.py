@@ -778,6 +778,7 @@ class Autorouter:
         net: int,
         use_mst: bool = True,
         target_impedance: float | None = None,
+        _subgrid_retry: bool = False,
     ) -> list[Route]:
         """Route all connections for a net.
 
@@ -787,6 +788,8 @@ class Autorouter:
             target_impedance: Target characteristic impedance in ohms (optional).
                 When specified and physics module is available, calculates
                 appropriate trace widths per layer to achieve this impedance.
+            _subgrid_retry: Internal flag to prevent recursive retry loops.
+                Do not set this parameter directly.
 
         Returns:
             List of Route objects for this net
@@ -993,6 +996,18 @@ class Autorouter:
             new_routes = mst_router.route_net_star(pad_objs, mark_route, record_failure)
 
         routes.extend(new_routes)
+
+        # Issue #1603: Retry with sub-grid escape on PIN_ACCESS failure
+        if not _subgrid_retry and not new_routes:
+            # Check if this net has a PIN_ACCESS failure
+            has_pin_access_failure = any(
+                f.net == net and f.failure_cause == FailureCause.PIN_ACCESS
+                for f in self.routing_failures
+            )
+            if has_pin_access_failure:
+                retry_routes = self._retry_net_with_subgrid(net)
+                if retry_routes:
+                    routes.extend(retry_routes)
 
         # Record routing decision if enabled
         if self.record_decisions and routes:
@@ -1471,9 +1486,12 @@ class Autorouter:
                 max_workers=max_workers,
             )
 
+        # Issue #1603: Sub-grid escape pre-pass for off-grid pads
+        escape_routes = self._run_subgrid_prepass()
+
         nets_to_route = [n for n in net_order if n != 0]
         total_nets = len(nets_to_route)
-        all_routes: list[Route] = []
+        all_routes: list[Route] = list(escape_routes)
 
         for i, net in enumerate(nets_to_route):
             if progress_callback is not None:
@@ -1536,6 +1554,9 @@ class Autorouter:
         """
         print("\n=== Interleaved Net Routing ===")
 
+        # Issue #1603: Sub-grid escape pre-pass for off-grid pads
+        escape_routes = self._run_subgrid_prepass()
+
         # Get interleaved ordering and MST cache
         net_order, mst_cache = self._get_interleaved_net_order(use_interleaving=True)
         # Issue #1295: Filter out pour nets before routing
@@ -1546,7 +1567,7 @@ class Autorouter:
         print(f"  Total nets: {total_nets}")
         print(f"  N-port nets with cached MST: {len(mst_cache)}")
 
-        all_routes: list[Route] = []
+        all_routes: list[Route] = list(escape_routes)
         nport_routed_edges: dict[int, int] = {}  # net_id -> number of edges routed
 
         for i, net in enumerate(nets_to_route):
@@ -1741,6 +1762,9 @@ class Autorouter:
         print("\n=== Parallel Net Routing ===")
         print(f"  Max workers: {max_workers}")
 
+        # Issue #1603: Sub-grid escape pre-pass for off-grid pads
+        escape_routes = self._run_subgrid_prepass()
+
         # Find independent groups
         clearance = self.rules.trace_clearance * 2
         groups = find_independent_groups(self.nets, self.pads, clearance)
@@ -1763,7 +1787,7 @@ class Autorouter:
         print(f"  Conflicts resolved: {result.conflicts_resolved}")
         print(f"  Total time: {result.total_time_ms:.0f}ms")
 
-        return result.routes
+        return list(escape_routes) + result.routes
 
     def route_all_tuned(
         self,
@@ -1950,6 +1974,9 @@ class Autorouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
             )
+
+        # Issue #1603: Sub-grid escape pre-pass for off-grid pads
+        escape_routes = self._run_subgrid_prepass()
 
         flush_print("\n=== Negotiated Congestion Routing ===")
         flush_print(f"  Max iterations: {max_iterations}")
@@ -3480,6 +3507,101 @@ class Autorouter:
         """
         pad_list = list(self.pads.values())
         return self._subgrid.route_with_subgrid(pad_list)
+
+    def _run_subgrid_prepass(self) -> list[Route]:
+        """Run sub-grid escape pre-pass for off-grid pads.
+
+        Analyzes all pads, generates escape segments for any that fall
+        between main grid points, and unblocks grid cells at escape
+        endpoints. This is a no-op for boards with no off-grid pads.
+
+        Returns:
+            List of escape Route objects (empty if no off-grid pads)
+
+        Issue #1603: Wire sub-grid routing into default route_all pipeline.
+        """
+        subgrid_result = self.prepare_subgrid_escapes()
+
+        if not (subgrid_result.analysis and subgrid_result.analysis.has_off_grid_pads):
+            return []
+
+        flush_print(
+            f"  Sub-grid pre-pass: {subgrid_result.success_count} escape segments "
+            f"for {subgrid_result.analysis.off_grid_count} off-grid pads, "
+            f"{subgrid_result.unblocked_count} cells unblocked"
+        )
+
+        if subgrid_result.failed_pads:
+            failed_refs = sorted({p.ref for p in subgrid_result.failed_pads})
+            flush_print(
+                f"  Sub-grid pre-pass: {len(subgrid_result.failed_pads)} "
+                f"pads could not escape (components: {', '.join(failed_refs)})"
+            )
+
+        escape_routes = self._subgrid.get_escape_routes(subgrid_result)
+        for route in escape_routes:
+            self._mark_route(route)
+            self.routes.append(route)
+
+        return escape_routes
+
+    def _retry_net_with_subgrid(self, net: int) -> list[Route]:
+        """Retry routing a net after applying sub-grid escapes for its pads.
+
+        Called when route_net() fails with PIN_ACCESS for a specific net.
+        Generates escape segments only for the failing net's pads, then
+        retries routing.
+
+        Args:
+            net: Net ID to retry
+
+        Returns:
+            List of Route objects if retry succeeds, empty list otherwise
+
+        Issue #1603: Sub-grid retry on PIN_ACCESS failure.
+        """
+        if net not in self.nets:
+            return []
+
+        # Get only this net's pads
+        net_pad_keys = self.nets[net]
+        net_pads = [self.pads[key] for key in net_pad_keys if key in self.pads]
+
+        if len(net_pads) < 2:
+            return []
+
+        # Run sub-grid escape for just this net's pads
+        subgrid = self._subgrid
+        analysis = subgrid.analyze_pads(net_pads)
+
+        if not analysis.has_off_grid_pads:
+            return []
+
+        result = subgrid.generate_escape_segments(analysis)
+        subgrid.apply_escape_segments(result)
+
+        if result.success_count == 0:
+            return []
+
+        net_name = self.net_names.get(net, f"Net {net}")
+        flush_print(
+            f"  Sub-grid retry for {net_name}: "
+            f"{result.success_count} escapes, "
+            f"{result.unblocked_count} cells unblocked"
+        )
+
+        # Collect escape routes
+        escape_routes = subgrid.get_escape_routes(result)
+        for route in escape_routes:
+            self._mark_route(route)
+            self.routes.append(route)
+
+        # Remove the failure records for this net before retrying
+        self.routing_failures = [f for f in self.routing_failures if f.net != net]
+
+        # Retry routing
+        retry_routes = self.route_net(net, _subgrid_retry=True)
+        return escape_routes + retry_routes
 
     def route_with_subgrid(
         self,
