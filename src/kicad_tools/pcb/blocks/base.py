@@ -260,6 +260,31 @@ class PCBBlock:
             )
         return result
 
+    def relative_offsets(self) -> list:
+        """Export component positions as :class:`RelativeOffset` instances.
+
+        Returns a list of ``RelativeOffset`` objects describing each component's
+        position relative to the block origin.  Suitable for constructing a
+        ``BlockGroupDef``.
+
+        Returns:
+            List of ``RelativeOffset`` instances (one per component).
+        """
+        from kicad_tools.placement.vector import RelativeOffset
+
+        offsets: list[RelativeOffset] = []
+        for ref, comp in self.components.items():
+            offsets.append(
+                RelativeOffset(
+                    reference=ref,
+                    dx=comp.position.x,
+                    dy=comp.position.y,
+                    rotation=comp.rotation,
+                    side=0,
+                )
+            )
+        return offsets
+
     def __repr__(self):
         placed = f" at ({self.origin.x}, {self.origin.y})" if self.placed else ""
         return f"PCBBlock({self.name}, {len(self.components)} components, {len(self.ports)} ports{placed})"
