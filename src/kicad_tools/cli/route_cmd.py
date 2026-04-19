@@ -3254,7 +3254,7 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print("Suggestions:")
             print(f"  - Auto-repair DRC violations: kct fix-drc {output_path} --max-passes 20")
-            print("  - Try Monte Carlo routing: kct route --trials 10")
+            print(f"  - Try Monte Carlo routing: kct route {args.pcb} --strategy monte-carlo --mc-trials 10")
             print("  - Increase board area")
             print("  - Reduce component density")
             print("  - Try 4-layer routing: kct route --layers 4")
