@@ -162,7 +162,7 @@ class Router:
 
         # Issue #1016: Pre-compute trace clearance radii for component-specific clearances
         # Maps clearance value (mm) to grid cell radius
-        self._clearance_radii: dict[float, int] = {}
+        self._clearance_radii: dict[tuple[float, float], int] = {}
         self._precompute_clearance_radii()
 
         # Issue #1019: Via impact scoring for fine-pitch IC routing
@@ -407,43 +407,56 @@ class Router:
         if self.rules.fine_pitch_clearance is not None:
             clearances.add(self.rules.fine_pitch_clearance)
 
-        # Compute grid cell radius for each clearance value
-        for clearance in clearances:
-            radius = max(
-                1,
-                math.ceil(
-                    round(
-                        (self.rules.trace_width / 2 + clearance) / self.grid.resolution,
-                        6,
-                    )
-                ),
-            )
-            self._clearance_radii[clearance] = radius
+        # Collect all trace widths that may be used (global + per-net-class)
+        trace_widths = {self.rules.trace_width}
+        for nc in self.net_class_map.values():
+            trace_widths.add(nc.trace_width)
 
-    def get_clearance_radius_cells(self, clearance_mm: float) -> int:
+        # Compute grid cell radius for each (trace_width, clearance) pair
+        for tw in trace_widths:
+            for clearance in clearances:
+                radius = max(
+                    1,
+                    math.ceil(
+                        round(
+                            (tw / 2 + clearance) / self.grid.resolution,
+                            6,
+                        )
+                    ),
+                )
+                self._clearance_radii[(tw, clearance)] = radius
+
+    def get_clearance_radius_cells(self, clearance_mm: float, trace_width: float | None = None) -> int:
         """Get the trace clearance radius in grid cells for a given clearance.
 
         Args:
             clearance_mm: Clearance value in mm
+            trace_width: Trace width in mm.  When ``None``, uses
+                ``rules.trace_width`` (the global default).  Issue #1674:
+                per-net-class trace widths require computing radii with
+                the actual net trace width, not just the global default.
 
         Returns:
             Radius in grid cells (at least 1)
         """
+        tw = trace_width if trace_width is not None else self.rules.trace_width
+        cache_key = (tw, clearance_mm)
+
         # Check cache first
-        if clearance_mm in self._clearance_radii:
-            return self._clearance_radii[clearance_mm]
+        if cache_key in self._clearance_radii:
+            return self._clearance_radii[cache_key]
 
         # Compute and cache
         radius = max(
             1,
             math.ceil(
                 round(
-                    (self.rules.trace_width / 2 + clearance_mm) / self.grid.resolution,
+                    (tw / 2 + clearance_mm) / self.grid.resolution,
                     6,
                 )
             ),
         )
-        self._clearance_radii[clearance_mm] = radius
+        self._clearance_radii[cache_key] = radius
         return radius
 
     @property
@@ -535,7 +548,8 @@ class Router:
         return (gx1, gy1, gx2, gy2)
 
     def _is_trace_blocked(
-        self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False
+        self, gx: int, gy: int, layer: int, net: int, allow_sharing: bool = False,
+        radius: int | None = None,
     ) -> bool:
         """Check if placing a trace at this position would conflict.
 
@@ -549,8 +563,11 @@ class Router:
         Args:
             allow_sharing: If True (negotiated mode), allow routing through
                           non-obstacle blocked cells (they'll get high cost instead)
+            radius: Override the trace half-width in grid cells. When None,
+                    uses the global ``_trace_half_width_cells`` (Issue #1674).
         """
-        radius = self._trace_half_width_cells
+        if radius is None:
+            radius = self._trace_half_width_cells
 
         # Calculate region bounds
         x1 = gx - radius
@@ -1136,6 +1153,22 @@ class Router:
         # Net class cost multiplier (lower = prefer this net's route)
         cost_mult = net_class.cost_multiplier if net_class else 1.0
 
+        # Issue #1674: Compute per-net trace clearance radius for A* search.
+        # Use the net class trace width (if available) instead of the global
+        # rules.trace_width so wider nets (e.g. POWER at 0.5mm) correctly
+        # reserve space during pathfinding, not just at segment creation.
+        net_trace_width = net_class.trace_width if net_class else self.rules.trace_width
+        net_trace_clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        net_trace_half_width_cells = max(
+            1,
+            math.ceil(
+                round(
+                    (net_trace_width / 2 + net_trace_clearance) / self.grid.resolution,
+                    6,
+                )
+            ),
+        )
+
         # In negotiated mode, allow resource sharing
         allow_sharing = negotiated_mode
 
@@ -1330,7 +1363,8 @@ class Router:
                         pass
                     elif cell.net == 0:
                         # No-net blocked cell - use full check for obstacles
-                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
+                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing,
+                                                  radius=net_trace_half_width_cells):
                             continue
                     else:
                         # Different net's blocked cell
@@ -1363,7 +1397,8 @@ class Router:
                         or is_exiting_end_pad
                     )
                     if not is_pad_exit_or_approach:
-                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing):
+                        if self._is_trace_blocked(nx, ny, nlayer, start.net, allow_sharing,
+                                                  radius=net_trace_half_width_cells):
                             continue
 
                 # Check zone blocking (other-net zones block routing)

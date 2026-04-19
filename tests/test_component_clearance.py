@@ -325,11 +325,12 @@ class TestRouterComponentClearance:
         grid = RoutingGrid(30.0, 30.0, rules)
         router = Router(grid, rules)
 
-        # All clearance values should be precomputed
-        assert 0.15 in router._clearance_radii
-        assert 0.08 in router._clearance_radii
-        assert 0.10 in router._clearance_radii
-        assert 0.12 in router._clearance_radii
+        # All clearance values should be precomputed (keyed by (trace_width, clearance))
+        tw = rules.trace_width
+        assert (tw, 0.15) in router._clearance_radii
+        assert (tw, 0.08) in router._clearance_radii
+        assert (tw, 0.10) in router._clearance_radii
+        assert (tw, 0.12) in router._clearance_radii
 
     def test_router_get_clearance_radius_cells(self):
         """Test Router.get_clearance_radius_cells method."""

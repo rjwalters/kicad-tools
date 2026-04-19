@@ -470,12 +470,12 @@ class Autorouter:
         if cpp_grid is None:
             return
 
-        # Calculate clearance in grid cells (same logic as Python grid)
-        total_clearance = self.rules.trace_width / 2 + self.rules.trace_clearance
-        clearance_cells = int(total_clearance / self.grid.resolution) + 1
-
-        # Mark all segments on C++ grid
+        # Issue #1674: Compute clearance per-segment using seg.width
+        # instead of the global rules.trace_width, matching the Python
+        # grid's mark_route() behaviour for per-net-class trace widths.
         for seg in route.segments:
+            total_clearance = seg.width / 2 + self.rules.trace_clearance
+            clearance_cells = int(total_clearance / self.grid.resolution) + 1
             gx1, gy1 = self.grid.world_to_grid(seg.x1, seg.y1)
             gx2, gy2 = self.grid.world_to_grid(seg.x2, seg.y2)
             layer_idx = self.grid.layer_to_index(seg.layer.value)
