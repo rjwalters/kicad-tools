@@ -102,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip KiCad project ZIP creation",
     )
     parser.add_argument(
+        "--latest-only",
+        action="store_true",
+        help="Include only the latest report version in a flat report/ directory (removes vN/ dirs)",
+    )
+    parser.add_argument(
         "--auto-lcsc",
         action="store_true",
         default=True,
@@ -250,6 +255,7 @@ def run_export(args: argparse.Namespace) -> int:
         preflight=preflight_cfg,
         strict_preflight=getattr(args, "strict_preflight", False),
         pnp_config=pnp_config,
+        latest_report_only=getattr(args, "latest_only", False),
     )
 
     pkg = ManufacturingPackage(

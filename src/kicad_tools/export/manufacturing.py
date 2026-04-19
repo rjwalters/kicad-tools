@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import shutil
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -45,6 +47,11 @@ class ManufacturingConfig(AssemblyConfig):
     # When False (default), preflight failures are recorded as warnings but
     # export proceeds to generate output files.
     strict_preflight: bool = False
+
+    # When True, flatten the latest vN/ report directory into a ``report/``
+    # subdirectory and remove all vN/ directories from the output.
+    # When False (default), versioned directories are preserved as-is.
+    latest_report_only: bool = False
 
 
 @dataclass
@@ -257,6 +264,10 @@ class ManufacturingPackage:
         if self.config.include_report:
             self._generate_report(out_dir, result)
 
+        # Step 2.5: Flatten report into report/ when latest_report_only is set
+        if self.config.latest_report_only:
+            self._flatten_latest_report(out_dir, result)
+
         # Step 3: KiCad project ZIP (optional)
         if self.config.include_project_zip:
             self._generate_project_zip(out_dir, result)
@@ -423,6 +434,40 @@ class ManufacturingPackage:
             result["analog_components"] = result["analog_components"].get("components", [])
 
         return result
+
+    def _flatten_latest_report(self, out_dir: Path, result: ManufacturingResult) -> None:
+        """Copy the latest ``vN/`` contents into ``report/`` and remove version dirs.
+
+        When ``config.latest_report_only`` is ``True``, this post-processing
+        step replaces versioned directories with a single flat ``report/``
+        subdirectory containing only the latest version's contents.
+        """
+        try:
+            from ..report.generator import ReportGenerator
+        except ImportError:
+            return
+
+        latest = ReportGenerator.latest_version_dir(out_dir)
+        if latest is None:
+            # No versioned directories (e.g. --no-report was also set)
+            return
+
+        report_dest = out_dir / "report"
+        if report_dest.exists():
+            shutil.rmtree(report_dest)
+        shutil.copytree(latest, report_dest)
+
+        # Remove all vN/ directories from the output
+        for child in list(out_dir.iterdir()):
+            if child.is_dir() and re.fullmatch(r"v\d+", child.name):
+                shutil.rmtree(child)
+
+        # Update result.report_path to point to the flattened location
+        flat_report = report_dest / "report.md"
+        if flat_report.exists():
+            result.report_path = flat_report
+
+        logger.info(f"Flattened latest report into {report_dest}")
 
     def _generate_project_zip(self, out_dir: Path, result: ManufacturingResult) -> None:
         """Create ZIP of KiCad project files."""

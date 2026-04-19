@@ -173,6 +173,24 @@ class ReportGenerator:
         next_version = max(existing, default=0) + 1
         return output_dir / f"v{next_version}"
 
+    @staticmethod
+    def latest_version_dir(output_dir: Path) -> Path | None:
+        """Return the highest-numbered ``vN`` sub-directory under *output_dir*.
+
+        Returns ``None`` when no versioned directories exist.
+        """
+        output_dir = Path(output_dir)
+        existing: list[int] = []
+        if output_dir.exists():
+            for child in output_dir.iterdir():
+                if child.is_dir():
+                    match = re.fullmatch(r"v(\d+)", child.name)
+                    if match:
+                        existing.append(int(match.group(1)))
+        if not existing:
+            return None
+        return output_dir / f"v{max(existing)}"
+
     def _write_metadata(self, data: ReportData, version_dir: Path, rendered: str) -> None:
         """Write ``metadata.json`` alongside the report."""
         template_sha256 = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
