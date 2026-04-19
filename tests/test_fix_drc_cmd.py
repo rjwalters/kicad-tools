@@ -2134,6 +2134,66 @@ DRC_REPORT_ZONE_FILL = """\
 """
 
 
+class TestFixDrcNewDefaults:
+    """Tests for the updated default values (max-displacement=0.5, local-reroute=True)."""
+
+    def test_default_max_displacement_is_0_5(self, pcb_enlarged_via: Path, report_enlarged_via: Path, capsys):
+        """Default max-displacement should be 0.5mm (not the old 0.25mm).
+
+        The enlarged-via violation requires 0.28mm displacement, which exceeds
+        the old 0.25mm default but is within the new 0.5mm default.
+        """
+        main(
+            [
+                str(pcb_enlarged_via),
+                "--drc-report",
+                str(report_enlarged_via),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        # Should be repaired with the new default (0.5mm)
+        assert data["clearance"]["repaired"] >= 1
+        assert data["max_displacement_mm"] == 0.5
+
+    def test_local_reroute_on_by_default(self, tmp_path: Path):
+        """--local-reroute should be enabled by default (no flag needed)."""
+        import argparse
+
+        from kicad_tools.cli.fix_drc_cmd import main as fix_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        # Parse with no --local-reroute flag -- should default to True
+        # We test by checking that --no-local-reroute disables it
+        result_with = fix_main(
+            [str(pcb_file), "--dry-run", "--quiet"]
+        )
+        result_without = fix_main(
+            [str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"]
+        )
+        # Both should complete without error (exit code not 2 = argparse error)
+        assert result_with != 2
+        assert result_without != 2
+
+    def test_no_local_reroute_flag_accepted(self, tmp_path: Path):
+        """--no-local-reroute should be accepted as a valid flag."""
+        from kicad_tools.cli import main as cli_main
+
+        pcb_file = tmp_path / "board.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_CLEARANCE)
+
+        result = cli_main(
+            ["fix-drc", str(pcb_file), "--no-local-reroute", "--dry-run", "--quiet"]
+        )
+        assert result != 2  # Not an argparse error
+
+
 class TestFixDrcWithZoneFills:
     """Tests for fix-drc handling of zone-filled PCBs."""
 

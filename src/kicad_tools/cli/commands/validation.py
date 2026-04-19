@@ -149,7 +149,7 @@ def run_fix_drc_command(args) -> int:
     sub_argv = [args.pcb]
     if getattr(args, "drc_report", None):
         sub_argv.extend(["--drc-report", args.drc_report])
-    if args.max_displacement != 0.25:
+    if args.max_displacement != 0.5:
         sub_argv.extend(["--max-displacement", str(args.max_displacement)])
     if args.margin != 0.01:
         sub_argv.extend(["--margin", str(args.margin)])
@@ -161,8 +161,12 @@ def run_fix_drc_command(args) -> int:
         sub_argv.append("--dry-run")
     if getattr(args, "max_passes", 1) != 1:
         sub_argv.extend(["--max-passes", str(args.max_passes)])
-    if getattr(args, "local_reroute", False):
+    # local_reroute defaults to True; forward both states
+    local_reroute = getattr(args, "local_reroute", True)
+    if local_reroute:
         sub_argv.append("--local-reroute")
+    else:
+        sub_argv.append("--no-local-reroute")
     if getattr(args, "no_connectivity_check", False):
         sub_argv.append("--no-connectivity-check")
     if args.format != "text":
