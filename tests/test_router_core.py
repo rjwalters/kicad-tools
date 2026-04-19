@@ -1,5 +1,7 @@
 """Tests for router/core.py module."""
 
+from unittest.mock import patch
+
 import pytest
 
 from kicad_tools.router.core import (
@@ -2819,8 +2821,7 @@ class TestOffGridNetExclusionFromRipup:
 
         # Build the off_grid_nets set the same way route_all_negotiated does
         off_grid_nets = {
-            f.net for f in router.routing_failures
-            if f.reason.startswith("PADS_OFF_GRID")
+            f.net for f in router.routing_failures if f.reason.startswith("PADS_OFF_GRID")
         }
 
         assert 2 in off_grid_nets, "Net 2 should be identified as off-grid"
@@ -2832,7 +2833,8 @@ class TestOffGridNetExclusionFromRipup:
         pads_by_net = {1: [], 2: []}  # Both have pads
 
         failed_nets_to_recover = [
-            n for n in net_order
+            n
+            for n in net_order
             if n not in net_routes and n in pads_by_net and n not in off_grid_nets
         ]
 
@@ -2864,8 +2866,7 @@ class TestOffGridNetExclusionFromRipup:
         )
 
         off_grid_nets = {
-            f.net for f in router.routing_failures
-            if f.reason.startswith("PADS_OFF_GRID")
+            f.net for f in router.routing_failures if f.reason.startswith("PADS_OFF_GRID")
         }
 
         assert 3 not in off_grid_nets, "Congestion-failed net should not be off-grid"
@@ -2875,7 +2876,8 @@ class TestOffGridNetExclusionFromRipup:
         pads_by_net = {3: []}
 
         failed_nets_to_recover = [
-            n for n in net_order
+            n
+            for n in net_order
             if n not in net_routes and n in pads_by_net and n not in off_grid_nets
         ]
 
@@ -2888,8 +2890,7 @@ class TestOffGridNetExclusionFromRipup:
         router = Autorouter(width=50.0, height=40.0)
 
         off_grid_nets = {
-            f.net for f in router.routing_failures
-            if f.reason.startswith("PADS_OFF_GRID")
+            f.net for f in router.routing_failures if f.reason.startswith("PADS_OFF_GRID")
         }
 
         assert off_grid_nets == set()
@@ -2899,36 +2900,68 @@ class TestPerNetTimeout:
     """Tests for Issue #1605: per-net wall-clock timeout in A* search."""
 
     def test_route_returns_none_with_tiny_timeout(self):
-        """A* search should return None when per_net_timeout is extremely small."""
-        router = Autorouter(width=100.0, height=100.0)
+        """A* search should return None when per_net_timeout expires."""
+        # Use force_python=True to ensure the Python pathfinder (with timeout
+        # logic) is used instead of the C++ backend. Use a fine grid resolution
+        # (0.05mm) on a 20x20mm board = 400x400 grid cells.
+        rules = DesignRules(grid_resolution=0.05)
+        router = Autorouter(width=20.0, height=20.0, rules=rules, force_python=True)
 
-        # Add two pads far apart to ensure the A* search takes some time
+        # Place pads at opposite corners
         router.add_component(
             "R1",
             [
-                {"number": "1", "x": 5.0, "y": 5.0, "net": 1, "net_name": "TIMEOUT_TEST"},
+                {"number": "1", "x": 0.5, "y": 0.5, "net": 1, "net_name": "TIMEOUT_TEST"},
             ],
         )
         router.add_component(
             "R2",
             [
-                {"number": "1", "x": 95.0, "y": 95.0, "net": 1, "net_name": "TIMEOUT_TEST"},
+                {"number": "1", "x": 19.5, "y": 19.5, "net": 1, "net_name": "TIMEOUT_TEST"},
             ],
         )
+
+        # Block the direct diagonal with a second net's clearance zone,
+        # forcing A* to explore many alternative paths (well over 1024 nodes).
+        for i in range(1, 20):
+            ref = f"B{i}"
+            router.add_component(
+                ref,
+                [
+                    {
+                        "number": "1",
+                        "x": float(i),
+                        "y": float(i),
+                        "net": 2,
+                        "net_name": "BLOCKER",
+                    },
+                ],
+            )
 
         pad_start = router.pads[("R1", "1")]
         pad_end = router.pads[("R2", "1")]
 
-        # With an impossibly small timeout, the A* search should time out
-        # and return None. We use 0.0 seconds to guarantee it.
-        result = router.router.route(pad_start, pad_end, per_net_timeout=0.0)
-        # With timeout=0.0, the deadline is already in the past but the check
-        # only triggers every 1024 iterations. If the route completes in fewer
-        # than 1024 iterations (small grid), it may still succeed. That's OK --
-        # the important thing is that the timeout mechanism doesn't crash.
-        # For a 100x100 grid with pads at opposite corners, it should time out.
-        # But we can't guarantee it on all systems, so we just check no crash.
-        assert result is None or result is not None  # No crash
+        # Mock time.monotonic so the deadline is already expired when checked.
+        # First call sets the deadline, subsequent calls return a value past
+        # the deadline, guaranteeing the timeout fires at the 1024th iteration.
+        call_count = 0
+
+        def mock_monotonic():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Initial call to set deadline: deadline = 100.0 + 5.0 = 105.0
+                return 100.0
+            # All subsequent calls: well past deadline
+            return 200.0
+
+        with patch(
+            "kicad_tools.router.pathfinder.time.monotonic",
+            side_effect=mock_monotonic,
+        ):
+            result = router.router.route(pad_start, pad_end, per_net_timeout=5.0)
+
+        assert result is None
 
     def test_route_succeeds_without_timeout(self):
         """Normal routing should succeed when no per_net_timeout is set."""

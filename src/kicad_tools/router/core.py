@@ -1210,8 +1210,7 @@ class Autorouter:
 
         pour_names = [self.net_names.get(n, f"Net {n}") for n in pour_nets]
         flush_print(
-            f"  Skipping {len(pour_nets)} pour net(s) "
-            f"(use zone fill instead): {pour_names}"
+            f"  Skipping {len(pour_nets)} pour net(s) (use zone fill instead): {pour_names}"
         )
         return [n for n in net_order if not self._is_pour_net(n)]
 
@@ -1260,9 +1259,7 @@ class Autorouter:
 
         # Issue #1295: Complexity tier — simple 2-pin short nets (tier 0) before
         # multi-pin or long-span nets (tier 1).
-        complexity_tier = (
-            0 if (pad_count == 2 and distance < SIMPLE_NET_THRESHOLD_MM) else 1
-        )
+        complexity_tier = 0 if (pad_count == 2 and distance < SIMPLE_NET_THRESHOLD_MM) else 1
 
         return (priority, complexity_tier, -constraint_score, pad_count, distance)
 
@@ -1889,7 +1886,7 @@ class Autorouter:
         history_increment: float = 1.0,
         progress_callback: ProgressCallback | None = None,
         timeout: float | None = None,
-        per_net_timeout: float | None = 30.0,
+        per_net_timeout: float | None = None,
         use_targeted_ripup: bool = False,
         max_ripups_per_net: int = 3,
         adaptive: bool = True,
@@ -1911,7 +1908,7 @@ class Autorouter:
             timeout: Optional timeout in seconds. If reached, returns best partial result.
             per_net_timeout: Wall-clock timeout in seconds for each per-net A* search
                 (Issue #1605). Prevents individual nets from monopolizing the router
-                on dense grids. Set to None to disable. Default: 30s.
+                on dense grids. Set to None to disable. Default: None (disabled).
             use_targeted_ripup: If True, use targeted rip-up of blocking nets instead
                 of ripping up all nets through overused cells. This can improve
                 convergence by only displacing nets that actually block the failed
@@ -2064,9 +2061,7 @@ class Autorouter:
         if region_router is not None:
 
             def route_fn_init(net: int, pf: float) -> list[Route]:
-                return self._route_net_negotiated(
-                    net, pf, per_net_timeout=per_net_timeout
-                )
+                return self._route_net_negotiated(net, pf, per_net_timeout=per_net_timeout)
 
             def mark_fn_init(route: Route) -> None:
                 self.grid.mark_route_usage(route)
@@ -2131,13 +2126,10 @@ class Autorouter:
         # These nets cannot be resolved by rip-up iterations and must be excluded
         # from the recovery loop to avoid futile full-rip-up fallbacks.
         off_grid_nets: set[int] = {
-            f.net for f in self.routing_failures
-            if f.reason.startswith("PADS_OFF_GRID")
+            f.net for f in self.routing_failures if f.reason.startswith("PADS_OFF_GRID")
         }
         if off_grid_nets:
-            off_grid_names = [
-                self.net_names.get(n, f"Net {n}") for n in off_grid_nets
-            ]
+            off_grid_names = [self.net_names.get(n, f"Net {n}") for n in off_grid_nets]
             print(
                 f"  Excluding {len(off_grid_nets)} structurally unroutable net(s) "
                 f"from rip-up: {', '.join(off_grid_names)}"
@@ -2196,7 +2188,8 @@ class Autorouter:
                 # (not in net_routes) - these need recovery via targeted rip-up
                 # Issue #1605: Exclude structurally unroutable nets (PADS_OFF_GRID)
                 failed_nets_to_recover = [
-                    n for n in net_order
+                    n
+                    for n in net_order
                     if n not in net_routes and n in pads_by_net and n not in off_grid_nets
                 ]
                 if failed_nets_to_recover:
@@ -2277,7 +2270,8 @@ class Autorouter:
 
                                 # Route the failed net first (it now has priority)
                                 routes = self._route_net_negotiated(
-                                    failed_net, present_factor,
+                                    failed_net,
+                                    present_factor,
                                     per_net_timeout=per_net_timeout,
                                 )
                                 if routes:
@@ -2290,7 +2284,8 @@ class Autorouter:
                                 # Always re-route the other nets (even if failed net didn't route)
                                 for other_net in routed_nets:
                                     other_routes = self._route_net_negotiated(
-                                        other_net, present_factor,
+                                        other_net,
+                                        present_factor,
                                         per_net_timeout=per_net_timeout,
                                     )
                                     if other_routes:
@@ -2301,7 +2296,8 @@ class Autorouter:
                             else:
                                 # Fallback: try regular reroute
                                 routes = self._route_net_negotiated(
-                                    failed_net, present_factor,
+                                    failed_net,
+                                    present_factor,
                                     per_net_timeout=per_net_timeout,
                                 )
                                 if routes:
@@ -2532,7 +2528,9 @@ class Autorouter:
             self._mark_route(route)
 
         new_routes = neg_router.route_net_negotiated(
-            pad_objs, present_cost_factor, mark_route,
+            pad_objs,
+            present_cost_factor,
+            mark_route,
             per_net_timeout=per_net_timeout,
         )
         routes.extend(new_routes)
@@ -4124,7 +4122,9 @@ class Autorouter:
 
             # Create a relaxed router for these nets
             relaxed_router = create_hybrid_router(
-                self.grid, relaxed_rules, force_python=self._force_python,
+                self.grid,
+                relaxed_rules,
+                force_python=self._force_python,
                 net_class_map=self.net_class_map,
             )
 
