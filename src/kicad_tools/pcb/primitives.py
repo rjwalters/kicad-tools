@@ -57,6 +57,7 @@ class TraceSegment:
     width: float = 0.25  # mm
     layer: Layer = Layer.F_CU
     net: str | None = None
+    internal: bool = False  # True for block-internal traces
 
 
 @dataclass
