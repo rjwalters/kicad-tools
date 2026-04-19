@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# guard-readonly-dirs.sh - PreToolUse hook to block edits to protected directories
+#
+# TEMPLATE: Copy this file, remove the .template suffix, and customize
+# the PROTECTED_DIRS array for your project:
+#
+#   cp defaults/hooks/guard-readonly-dirs.sh.template .loom/hooks/guard-readonly-dirs.sh
+#   chmod +x .loom/hooks/guard-readonly-dirs.sh
+#   # Edit PROTECTED_DIRS in the copied file
+#
+# Then register it in .claude/settings.json:
+#
+#   {
+#     "hooks": {
+#       "PreToolUse": [
+#         {
+#           "matcher": "Edit|Write",
+#           "hooks": [{ "type": "command", "command": ".loom/hooks/guard-readonly-dirs.sh" }]
+#         }
+#       ]
+#     }
+#   }
+#
+# This hook intercepts Edit and Write tool calls and blocks any that target
+# files within the protected directories. It follows the Claude Code hooks
+# spec: exit 0 with JSON deny output to block, exit 0 with no output to allow.
+#
+# Error handling: This script MUST never exit with a non-zero code or produce
+# invalid output. Any internal error is caught by the trap, logged for
+# diagnostics, and results in an "allow" decision to prevent infinite retry
+# loops in Claude Code.
+
+# ============================================================================
+# CUSTOMIZE: Add your protected directory patterns below.
+# Each entry is a directory path relative to the repository root.
+# Any Edit/Write whose file_path falls within a listed directory is blocked.
+# ============================================================================
+PROTECTED_DIRS=(
+    # Examples — uncomment and adapt for your project:
+    # "vendor/"
+    # "third_party/"
+    # "generated/"
+    # "external/"
+    # "pdk/"
+)
+
+# ============================================================================
+# Hook boilerplate — generally no need to edit below this line
+# ============================================================================
+
+# Determine log directory relative to this script's location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
+HOOK_ERROR_LOG="${SCRIPT_DIR}/../logs/hook-errors.log"
+
+# Log a diagnostic error message (best-effort, never fails the script)
+log_hook_error() {
+    local msg="$1"
+    mkdir -p "$(dirname "$HOOK_ERROR_LOG")" 2>/dev/null || true
+    echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [guard-readonly-dirs] $msg" >> "$HOOK_ERROR_LOG" 2>/dev/null || true
+}
+
+# Top-level error trap: on ANY unexpected error, output valid JSON "allow"
+# and log the failure for debugging. This prevents Claude Code from showing
+# "PreToolUse hook error" which causes infinite retry loops.
+trap 'log_hook_error "Unexpected error on line ${LINENO}: ${BASH_COMMAND:-unknown} (exit=$?)"; exit 0' ERR
+
+# If no protected dirs configured, nothing to do
+if [[ ${#PROTECTED_DIRS[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+# Read stdin safely
+INPUT=$(cat 2>/dev/null) || INPUT=""
+
+# Verify jq is available before attempting to parse
+if ! command -v jq &>/dev/null; then
+    log_hook_error "jq not found in PATH — allowing (cannot parse input)"
+    exit 0
+fi
+
+# Extract file_path from tool input
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null) || FILE_PATH=""
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
+
+if [[ -z "$FILE_PATH" ]]; then
+    exit 0
+fi
+
+# Resolve to absolute path if relative
+if [[ "$FILE_PATH" != /* ]]; then
+    if [[ -n "$CWD" ]]; then
+        FILE_PATH="${CWD}/${FILE_PATH}"
+    fi
+fi
+
+# Normalize the path (resolve .. and . components)
+NORM_PATH=$(printf '%s' "$FILE_PATH" | python3 -c "import os,sys; print(os.path.normpath(sys.stdin.read()))" 2>/dev/null) || NORM_PATH="$FILE_PATH"
+
+# Resolve repo root from cwd (handles worktree paths)
+REPO_ROOT=""
+if [[ -n "$CWD" ]] && [[ -d "$CWD" ]]; then
+    REPO_ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)
+fi
+
+# Helper: output a deny decision and exit
+deny() {
+    local reason="$1"
+    if jq -n --arg reason "$reason" '{
+        hookSpecificOutput: {
+            permissionDecision: "deny",
+            permissionDecisionReason: $reason
+        }
+    }' 2>/dev/null; then
+        exit 0
+    fi
+    # jq failed — emit raw JSON as fallback
+    local escaped_reason
+    escaped_reason=$(echo "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g')
+    echo "{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
+    exit 0
+}
+
+# Check each protected directory
+for dir_pattern in "${PROTECTED_DIRS[@]}"; do
+    # Skip empty entries
+    [[ -z "$dir_pattern" ]] && continue
+
+    # Strip trailing slash for consistent matching
+    dir_pattern="${dir_pattern%/}"
+
+    # Build absolute path for the protected directory
+    if [[ "$dir_pattern" == /* ]]; then
+        # Already absolute
+        PROTECTED_ABS="$dir_pattern"
+    elif [[ -n "$REPO_ROOT" ]]; then
+        PROTECTED_ABS="${REPO_ROOT}/${dir_pattern}"
+    else
+        # No repo root available — try relative to cwd
+        if [[ -n "$CWD" ]]; then
+            PROTECTED_ABS="${CWD}/${dir_pattern}"
+        else
+            continue
+        fi
+    fi
+
+    # Check if the file path falls within the protected directory
+    if [[ "$NORM_PATH" == "$PROTECTED_ABS"/* ]] || [[ "$NORM_PATH" == "$PROTECTED_ABS" ]]; then
+        deny "BLOCKED: '${NORM_PATH}' is in read-only directory '${dir_pattern}/'. This directory is protected from edits."
+    fi
+done
+
+# No match — allow
+exit 0

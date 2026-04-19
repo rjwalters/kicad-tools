@@ -149,11 +149,11 @@ The roles work together following the label-based workflow:
 
 To create a custom slash command:
 
-1. Create `.claude/commands/your-command.md` with the complete role definition
+1. Create `.claude/commands/your-command.md` (or `.claude/commands/your-namespace/command.md`) with the complete role definition
 2. Include role purpose, workflow guidelines, and iteration instructions
-3. Use it with `/your-command`
+3. Use it with `/your-command` (or `/your-namespace/command`)
 
-**Note**: `.loom/roles/` contains symlinks to `.claude/commands/` for Tauri App compatibility. The single source of truth for all role definitions is `.claude/commands/`.
+**Note**: `.loom/roles/` contains symlinks to `.claude/commands/loom/` for Tauri App compatibility. The single source of truth for all Loom role definitions is `.claude/commands/loom/`.
 
 ## Custom Subagents
 

@@ -97,7 +97,7 @@ ${BOLD}TRACKED FILE LOCATIONS:${NC}
     .loom/roles/*.md, *.json       Role definitions
     .loom/scripts/*, cli/*         Helper scripts
     .loom/docs/*                   Documentation
-    .claude/commands/*.md          Slash commands
+    .claude/commands/loom/*.md     Slash commands
     .claude/agents/*.md            Agent definitions
     .claude/settings.json          Claude settings
     .github/labels.yml             Label definitions
@@ -156,10 +156,10 @@ collect_tracked_files() {
         files+=("${f#$root/}")
     done < <(find "$root/.loom/docs" -type f -print0 2>/dev/null || true)
 
-    # .claude/commands/*.md
+    # .claude/commands/loom/*.md
     while IFS= read -r -d '' f; do
         files+=("${f#$root/}")
-    done < <(find "$root/.claude/commands" -maxdepth 1 -type f -name "*.md" -print0 2>/dev/null || true)
+    done < <(find "$root/.claude/commands/loom" -maxdepth 1 -type f -name "*.md" -print0 2>/dev/null || true)
 
     # .claude/agents/*.md
     while IFS= read -r -d '' f; do

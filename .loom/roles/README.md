@@ -4,22 +4,22 @@ This directory contains role definitions for Loom terminal configurations.
 
 ## Source of Truth
 
-**The single source of truth for all Loom role definitions is `.claude/commands/*.md`.**
+**The single source of truth for all Loom role definitions is `.claude/commands/loom/*.md`.**
 
 This directory contains:
-- **Symlinks** (`*.md`) pointing to `../.claude/commands/*.md` for Tauri App compatibility
+- **Symlinks** (`*.md`) pointing to `../.claude/commands/loom/*.md` for Tauri App compatibility
 - **Metadata files** (`*.json`) with default settings for each role
 
 ### Why Symlinks?
 
-- **Claude Code CLI** uses `.claude/commands/` for slash commands (e.g., `/builder`, `/loom`)
+- **Claude Code CLI** uses `.claude/commands/loom/` for slash commands (e.g., `/loom/builder`, `/loom/loom`)
 - **Tauri App** reads role files from `.loom/roles/` for terminal configuration
 - Symlinks ensure both access the same content - single source of truth
 
 ### Editing Roles
 
 To edit a role definition:
-1. Edit the file in `.claude/commands/<role>.md`
+1. Edit the file in `.claude/commands/loom/<role>.md`
 2. The symlink in `roles/<role>.md` automatically reflects changes
 3. Both CLI and Tauri App get the updated content
 
@@ -67,9 +67,9 @@ Each role can have an optional JSON metadata file with default settings:
 
 To create a custom role:
 
-1. Create `.claude/commands/my-role.md` with the full role definition
+1. Create `.claude/commands/loom/my-role.md` with the full role definition
 2. Optionally create `roles/my-role.json` with metadata
-3. Use it via `/my-role` in CLI or select in Tauri App terminal settings
+3. Use it via `/loom/my-role` in CLI or select in Tauri App terminal settings
 
 ### Role File Structure
 
@@ -124,7 +124,7 @@ Worker completion is detected automatically through **phase contracts** - the or
 ## Default vs Workspace Roles
 
 When installed to a target repository:
-- `defaults/.claude/commands/*.md` → copied to `.claude/commands/`
+- `defaults/.claude/commands/loom/*.md` → copied to `.claude/commands/loom/`
 - `defaults/roles/*.md` (symlinks) → copied as files to `.loom/roles/`
 - `defaults/roles/*.json` → copied to `.loom/roles/`
 
