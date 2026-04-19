@@ -233,3 +233,50 @@ class TestSpecPathResolution:
             os.chdir(saved_cwd)
 
         assert rc == 1  # Should report directory not found
+
+class TestOutputDirArgument:
+    """Tests for -o/--output argument parsing and BuildContext.output_dir."""
+
+    def test_output_arg_parses_without_error(self, tmp_path: Path) -> None:
+        """Passing -o should not cause an 'unrecognized arguments' error."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        output_dir = tmp_path / "out"
+        # --dry-run prevents actual execution; we just verify parsing succeeds
+        ret = main([str(kct_file), "-o", str(output_dir), "--dry-run"])
+        # dry-run may fail on missing generators, but should not be an arg-parse error
+        assert ret in (0, 1)
+
+    def test_output_dir_created_when_missing(self, tmp_path: Path) -> None:
+        """When --output points to a non-existent nested directory, it should be created."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        output_dir = tmp_path / "nested" / "deep" / "dir"
+        assert not output_dir.exists()
+        main([str(kct_file), "-o", str(output_dir), "--dry-run"])
+        assert output_dir.exists()
+        assert output_dir.is_dir()
+
+    def test_build_context_output_dir_is_set(self) -> None:
+        """BuildContext should accept and store output_dir."""
+        ctx = BuildContext(
+            project_dir=Path("/tmp/test"),
+            spec_file=None,
+            output_dir=Path("/tmp/output"),
+        )
+        assert ctx.output_dir == Path("/tmp/output")
+
+    def test_build_context_output_dir_defaults_to_none(self) -> None:
+        """BuildContext.output_dir should default to None when not provided."""
+        ctx = BuildContext(
+            project_dir=Path("/tmp/test"),
+            spec_file=None,
+        )
+        assert ctx.output_dir is None
+
+    def test_omitting_output_preserves_default_behavior(self, tmp_path: Path) -> None:
+        """When -o is not passed, the build should still work (no regression)."""
+        kct_file = tmp_path / "project.kct"
+        kct_file.write_text("[project]\nname = 'test'\n")
+        ret = main([str(kct_file), "--dry-run"])
+        assert ret in (0, 1)

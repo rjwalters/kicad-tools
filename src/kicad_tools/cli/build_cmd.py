@@ -65,6 +65,7 @@ class BuildContext:
     schematic_file: Path | None = None
     pcb_file: Path | None = None
     routed_pcb_file: Path | None = None
+    output_dir: Path | None = None
     mfr: str = "jlcpcb"
     verbose: bool = False
     dry_run: bool = False
@@ -231,6 +232,7 @@ def _run_python_script(
     cwd: Path,
     verbose: bool = False,
     env_vars: dict[str, str] | None = None,
+    script_args: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Run a Python generator script.
 
@@ -239,6 +241,7 @@ def _run_python_script(
         cwd: Working directory for execution
         verbose: Whether to show script output
         env_vars: Optional additional environment variables to pass
+        script_args: Optional positional arguments to pass to the script
 
     Returns:
         Tuple of (success, output/error message)
@@ -252,7 +255,7 @@ def _run_python_script(
 
     try:
         result = subprocess.run(
-            [sys.executable, str(script_path)],
+            [sys.executable, str(script_path)] + (script_args or []),
             cwd=str(cwd),
             capture_output=not verbose,
             text=True,
@@ -298,13 +301,19 @@ def _run_step_schematic(ctx: BuildContext, console: Console) -> BuildResult:
     if not ctx.quiet:
         console.print(f"  Running {script.name}...")
 
-    success, message = _run_python_script(script, ctx.project_dir, ctx.verbose)
+    script_args = [str(ctx.output_dir)] if ctx.output_dir else None
+    success, message = _run_python_script(
+        script, ctx.project_dir, ctx.verbose, script_args=script_args
+    )
 
     # Mark this script as executed to avoid running it again in PCB step
     ctx.mark_script_executed(script)
 
-    # Re-scan for artifacts after generation
-    schematic, _ = _find_artifacts(ctx.project_dir, ctx.spec_file)
+    # Re-scan for artifacts after generation (check output dir first, then project dir)
+    search_dir = ctx.output_dir if ctx.output_dir else ctx.project_dir
+    schematic, _ = _find_artifacts(search_dir, ctx.spec_file)
+    if not schematic and ctx.output_dir:
+        schematic, _ = _find_artifacts(ctx.project_dir, ctx.spec_file)
 
     return BuildResult(
         step="schematic",
@@ -336,7 +345,10 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     # Skip if this script was already executed (e.g., generate_design.py ran in schematic step)
     if ctx.was_script_executed(script):
         # Re-scan for artifacts that may have been created by the earlier run
-        _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
+        search_dir = ctx.output_dir if ctx.output_dir else ctx.project_dir
+        _, pcb = _find_artifacts(search_dir, ctx.spec_file)
+        if not pcb and ctx.output_dir:
+            _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
 
         # Verify that a PCB was actually created
         if pcb and pcb.exists():
@@ -374,13 +386,19 @@ def _run_step_pcb(ctx: BuildContext, console: Console) -> BuildResult:
     if not ctx.quiet:
         console.print(f"  Running {script.name}...")
 
-    success, message = _run_python_script(script, ctx.project_dir, ctx.verbose)
+    script_args = [str(ctx.output_dir)] if ctx.output_dir else None
+    success, message = _run_python_script(
+        script, ctx.project_dir, ctx.verbose, script_args=script_args
+    )
 
     # Mark this script as executed
     ctx.mark_script_executed(script)
 
-    # Re-scan for artifacts after generation
-    _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
+    # Re-scan for artifacts after generation (check output dir first, then project dir)
+    search_dir = ctx.output_dir if ctx.output_dir else ctx.project_dir
+    _, pcb = _find_artifacts(search_dir, ctx.spec_file)
+    if not pcb and ctx.output_dir:
+        _, pcb = _find_artifacts(ctx.project_dir, ctx.spec_file)
 
     # Verify that a PCB was actually created (even if script reported success)
     if success and (not pcb or not pcb.exists()):
@@ -446,7 +464,7 @@ def _get_routing_params(
     2. Manufacturer profile defaults
 
     Auto-calculates grid to be compatible with clearance.
-    Grid must be ≤ clearance / 2 to allow routing without DRC violations.
+    Grid must be <= clearance / 2 to allow routing without DRC violations.
 
     Args:
         mfr: Manufacturer ID (e.g., "jlcpcb")
@@ -660,7 +678,12 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                     )
         else:
             # No unrouted PCB, search recursively for any routed PCB
-            routed_files = list(ctx.project_dir.glob("**/*_routed.kicad_pcb"))
+            search_dirs = [ctx.output_dir, ctx.project_dir] if ctx.output_dir else [ctx.project_dir]
+            routed_files: list[Path] = []
+            for sd in search_dirs:
+                routed_files = list(sd.glob("**/*_routed.kicad_pcb"))
+                if routed_files:
+                    break
             if routed_files:
                 routed_file = routed_files[0]
                 if not ctx.quiet:
@@ -706,13 +729,19 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
                 console.print(f"      Trace width: {trace_width}mm")
                 console.print(f"      Via: {via_drill}mm drill, {via_diameter}mm diameter")
 
+        script_args = [str(ctx.output_dir)] if ctx.output_dir else None
         success, message = _run_python_script(
-            route_script, ctx.project_dir, ctx.verbose, env_vars=route_env_vars
+            route_script, ctx.project_dir, ctx.verbose, env_vars=route_env_vars,
+            script_args=script_args,
         )
 
-        # Find routed PCB
-        routed_files = list(ctx.project_dir.glob("*_routed.kicad_pcb"))
-        output_file = routed_files[0] if routed_files else None
+        # Find routed PCB (check output dir first, then project dir)
+        output_file: Path | None = None
+        for search_dir in ([ctx.output_dir, ctx.project_dir] if ctx.output_dir else [ctx.project_dir]):
+            routed_files_found = list(search_dir.glob("*_routed.kicad_pcb"))
+            if routed_files_found:
+                output_file = routed_files_found[0]
+                break
 
         return BuildResult(
             step="route",
@@ -729,7 +758,11 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             message="No PCB file found to route",
         )
 
-    output_file = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
+    # Place routed PCB in output dir if specified, otherwise alongside input
+    if ctx.output_dir:
+        output_file = ctx.output_dir / (ctx.pcb_file.stem + "_routed.kicad_pcb")
+    else:
+        output_file = ctx.pcb_file.with_stem(ctx.pcb_file.stem + "_routed")
 
     # Get routing parameters from project spec (preferred) or manufacturer rules (fallback)
     grid, clearance, trace_width, via_drill, via_diameter = _get_routing_params(ctx.mfr, ctx.spec)
@@ -827,8 +860,11 @@ def _run_step_verify(ctx: BuildContext, console: Console) -> BuildResult:
 
     # Run DRC check
     try:
-        # Write DRC report next to the PCB file so kct export preflight can find it
-        drc_report_path = pcb_to_verify.parent / "drc_report.json"
+        # Write DRC report to output dir if specified, otherwise next to the PCB file
+        if ctx.output_dir:
+            drc_report_path = ctx.output_dir / "drc_report.json"
+        else:
+            drc_report_path = pcb_to_verify.parent / "drc_report.json"
 
         cmd = [
             sys.executable,
@@ -930,6 +966,7 @@ Examples:
     kct build --step verify --mfr jlcpcb # Run only verification for JLCPCB
     kct build --dry-run                 # Preview what would be done
     kct build --force                   # Rebuild even if outputs exist
+    kct build -o /tmp/output            # Write generated files to output dir
         """,
     )
 
@@ -975,6 +1012,11 @@ Examples:
         action="store_true",
         help="Force rebuild, ignoring existing outputs and timestamp checks",
     )
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output directory for generated files (default: project directory)",
+    )
 
     args = parser.parse_args(argv)
     console = Console(quiet=args.quiet)
@@ -1018,8 +1060,18 @@ Examples:
                 e,
             )
 
-    # Find existing artifacts
-    schematic, pcb = _find_artifacts(project_dir, spec_file)
+    # Resolve output directory if provided
+    output_dir: Path | None = None
+    if args.output:
+        output_dir = Path(args.output).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find existing artifacts (search output dir first, then project dir)
+    search_dir = output_dir if output_dir else project_dir
+    schematic, pcb = _find_artifacts(search_dir, spec_file)
+    # Fall back to project dir if nothing found in output dir
+    if output_dir and not schematic and not pcb:
+        schematic, pcb = _find_artifacts(project_dir, spec_file)
 
     # Create build context
     ctx = BuildContext(
@@ -1028,6 +1080,7 @@ Examples:
         spec=spec,
         schematic_file=schematic,
         pcb_file=pcb,
+        output_dir=output_dir,
         mfr=args.mfr,
         verbose=args.verbose,
         dry_run=args.dry_run,
@@ -1039,11 +1092,17 @@ Examples:
     if not args.quiet:
         project_name = spec.project.name if spec else project_dir.name
 
+        header_lines = (
+            f"[bold]Building:[/bold] {project_name}\n"
+            f"[dim]Directory:[/dim] {project_dir}\n"
+            f"[dim]Manufacturer:[/dim] {args.mfr}"
+        )
+        if output_dir:
+            header_lines += f"\n[dim]Output:[/dim] {output_dir}"
+
         console.print(
             Panel.fit(
-                f"[bold]Building:[/bold] {project_name}\n"
-                f"[dim]Directory:[/dim] {project_dir}\n"
-                f"[dim]Manufacturer:[/dim] {args.mfr}",
+                header_lines,
                 title="kct build",
             )
         )
