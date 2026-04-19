@@ -318,7 +318,15 @@ class ManufacturingPackage:
             ),
         )
         if self.config.include_report:
-            result.report_path = out_dir / "report.md"
+            try:
+                from ..report.renderers import _weasyprint_available
+
+                if _weasyprint_available():
+                    result.report_path = out_dir / "report.pdf"
+                else:
+                    result.report_path = out_dir / "report.md"
+            except ImportError:
+                result.report_path = out_dir / "report.md"
         if self.config.include_project_zip:
             result.project_zip_path = out_dir / self.config.project_zip_name
         if self.config.include_manifest:
@@ -386,9 +394,51 @@ class ManufacturingPackage:
             report_path = generator.generate(data, out_dir, version_dir=version_dir)
             result.report_path = report_path
             logger.info(f"Generated report: {result.report_path}")
+
+            # Attempt to render Markdown to HTML then PDF
+            self._render_report_pdf(report_path, version_dir, result)
         except Exception as e:
             result.errors.append(f"Report generation failed: {e}")
             logger.error(f"Report generation failed: {e}")
+
+    @staticmethod
+    def _render_report_pdf(
+        report_path: Path,
+        version_dir: Path,
+        result: ManufacturingResult,
+    ) -> None:
+        """Render the Markdown report to PDF via HTML.
+
+        Degrades gracefully: if ``weasyprint`` or ``markdown`` are not
+        installed, a warning is logged and only the ``.md`` file remains.
+        """
+        try:
+            from ..report.renderers import render_html, render_pdf
+        except ImportError:
+            logger.warning(
+                "PDF report rendering skipped: install 'kicad-tools[report]' "
+                "for PDF output"
+            )
+            return
+
+        try:
+            md_content = report_path.read_text(encoding="utf-8")
+            figures_dir = version_dir / "figures"
+            html_content = render_html(
+                md_content,
+                figures_dir=figures_dir if figures_dir.is_dir() else None,
+            )
+            pdf_path = report_path.with_suffix(".pdf")
+            render_pdf(html_content, pdf_path)
+            result.report_path = pdf_path
+            logger.info(f"Generated PDF report: {pdf_path}")
+        except ImportError:
+            logger.warning(
+                "PDF report rendering skipped: weasyprint or markdown not "
+                "installed (hint: pip install 'kicad-tools[report]')"
+            )
+        except Exception as exc:
+            logger.warning(f"PDF report rendering failed: {exc}")
 
     @staticmethod
     def _load_report_data_dir(data_dir: Path) -> dict:
@@ -462,9 +512,13 @@ class ManufacturingPackage:
             if child.is_dir() and re.fullmatch(r"v\d+", child.name):
                 shutil.rmtree(child)
 
-        # Update result.report_path to point to the flattened location
+        # Update result.report_path to point to the flattened location,
+        # preferring PDF over MD when both exist.
+        flat_pdf = report_dest / "report.pdf"
         flat_report = report_dest / "report.md"
-        if flat_report.exists():
+        if flat_pdf.exists():
+            result.report_path = flat_pdf
+        elif flat_report.exists():
             result.report_path = flat_report
 
         logger.info(f"Flattened latest report into {report_dest}")

@@ -4147,3 +4147,9 @@ def _add_export_parser(subparsers) -> None:
         choices=["text", "json"],
         help="Output format for preflight results (default: text)",
     )
+    export_parser.add_argument(
+        "--latest-only",
+        dest="export_latest_only",
+        action="store_true",
+        help="Flatten the latest versioned report into a single report/ directory",
+    )
