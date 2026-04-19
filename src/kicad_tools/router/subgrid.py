@@ -433,7 +433,13 @@ class SubGridRouter:
         """Find the best escape point for a single off-grid pad.
 
         Searches nearby grid points for the best escape target, considering
-        blockage, distance, and escape direction.
+        blockage, distance, escape direction, and clearance validation.
+
+        Issue #1626: Candidate escape segments are now validated against
+        ``validate_segment_clearance()`` before being accepted. If the
+        best-scoring candidate fails clearance, the next-best candidate is
+        tried, and so on. This prevents escape segments from creating DRC
+        violations against neighboring pads/traces of other nets.
 
         Args:
             sgp: SubGridPad to find escape for
@@ -442,16 +448,15 @@ class SubGridRouter:
             SubGridEscape if found, None if no valid escape point exists
         """
         pad = sgp.pad
-        best_score = float("inf")
-        best_gx, best_gy = sgp.grid_x, sgp.grid_y
-        best_snap_x, best_snap_y = sgp.snap_x, sgp.snap_y
-        found = False
 
         # Determine the layer to check
         if pad.through_hole:
             check_layers = list(range(self.grid.num_layers))
         else:
             check_layers = [self.grid.layer_to_index(pad.layer.value)]
+
+        # Collect all accessible candidates with their scores
+        candidates: list[tuple[float, int, int, float, float]] = []
 
         # Search in a spiral pattern around the nearest grid point
         radius = self.escape_search_radius
@@ -511,16 +516,15 @@ class SubGridRouter:
                 if dist > self.grid.resolution * radius:
                     score += dist * 2
 
-                if score < best_score:
-                    best_score = score
-                    best_gx, best_gy = gx, gy
-                    best_snap_x, best_snap_y = snap_x, snap_y
-                    found = True
+                candidates.append((score, gx, gy, snap_x, snap_y))
 
-        if not found:
+        if not candidates:
             return None
 
-        # Create escape segment from pad center to grid point
+        # Sort candidates by score (lowest = best)
+        candidates.sort(key=lambda c: c[0])
+
+        # Determine trace width for escape segment
         layer = pad.layer
         width = self.rules.trace_width
 
@@ -534,23 +538,58 @@ class SubGridRouter:
             if self.rules.should_apply_neck_down(ref, pin_pitch):
                 width = self.rules.min_trace_width
 
-        segment = Segment(
-            x1=pad.x,
-            y1=pad.y,
-            x2=best_snap_x,
-            y2=best_snap_y,
-            width=width,
-            layer=layer,
-            net=pad.net,
-            net_name=pad.net_name,
-        )
+        # Compute component pitches once for clearance validation
+        component_pitches = self.grid.compute_component_pitches()
 
-        return SubGridEscape(
-            pad=pad,
-            segment=segment,
-            grid_point=(best_gx, best_gy),
-            snap_point=(best_snap_x, best_snap_y),
+        # Issue #1626: Try candidates in score order, validate clearance
+        # before accepting. Skip candidates whose escape segments would
+        # violate clearance against neighboring pads/traces.
+        for _score, gx, gy, snap_x, snap_y in candidates:
+            segment = Segment(
+                x1=pad.x,
+                y1=pad.y,
+                x2=snap_x,
+                y2=snap_y,
+                width=width,
+                layer=layer,
+                net=pad.net,
+                net_name=pad.net_name,
+            )
+
+            # Validate segment clearance against all obstacles
+            is_valid, _clearance, violation_loc = self.grid.validate_segment_clearance(
+                segment,
+                exclude_net=pad.net,
+                component_pitches=component_pitches,
+            )
+
+            if is_valid:
+                return SubGridEscape(
+                    pad=pad,
+                    segment=segment,
+                    grid_point=(gx, gy),
+                    snap_point=(snap_x, snap_y),
+                )
+            else:
+                logger.debug(
+                    "Escape candidate (%d, %d) for %s.%s failed clearance "
+                    "at (%.3f, %.3f), trying next",
+                    gx,
+                    gy,
+                    pad.ref,
+                    pad.pin,
+                    violation_loc[0] if violation_loc else 0.0,
+                    violation_loc[1] if violation_loc else 0.0,
+                )
+
+        # All candidates failed clearance validation
+        logger.debug(
+            "All %d escape candidates for %s.%s failed clearance validation",
+            len(candidates),
+            pad.ref,
+            pad.pin,
         )
+        return None
 
     def get_escape_routes(self, result: SubGridResult) -> list[Route]:
         """Convert escape segments into Route objects for PCB output.
