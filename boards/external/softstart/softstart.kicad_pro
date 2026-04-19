@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "filename": "softstart",
+    "version": 1,
+    "manufacturer": "jlcpcb",
+    "layers": 2,
+    "copper_oz": 1.0
+  },
+  "board": {
+    "design_settings": {
+      "rules": {
+        "min_clearance": 0.127,
+        "min_track_width": 0.127,
+        "min_via_diameter": 0.6,
+        "min_via_annular_width": 0.15,
+        "min_through_hole_diameter": 0.3,
+        "min_via_hole": 0.3,
+        "min_copper_edge_clearance": 0.3
+      },
+      "defaults": {
+        "track_min_width": 0.127,
+        "clearance_min": 0.127,
+        "via_min_diameter": 0.6,
+        "via_min_drill": 0.3
+      }
+    }
+  },
+  "schematic": {
+    "meta": {
+      "version": 1
+    }
+  },
+  "sheets": [],
+  "text_variables": {}
+}
