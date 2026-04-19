@@ -40,6 +40,7 @@ class BuildStep(str, Enum):
     SCHEMATIC = "schematic"
     PCB = "pcb"
     OUTLINE = "outline"
+    PLACEMENT = "placement"
     ROUTE = "route"
     VERIFY = "verify"
     ALL = "all"
@@ -71,6 +72,7 @@ class BuildContext:
     dry_run: bool = False
     quiet: bool = False
     force: bool = False
+    optimize_placement: bool = False
     _executed_scripts: set[Path] | None = None
 
     def mark_script_executed(self, script: Path) -> None:
@@ -663,6 +665,94 @@ def _run_step_outline(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+def _run_step_placement(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run placement optimization step.
+
+    This step is opt-in: it only runs when ``--optimize-placement`` is passed.
+    When enabled it invokes ``kct optimize-placement`` as a subprocess so that
+    the existing PCB component positions are used as the starting layout and the
+    optimizer refines them in-place.
+    """
+    if not ctx.optimize_placement:
+        return BuildResult(
+            step="placement",
+            success=True,
+            message="Placement optimization not requested, skipping",
+        )
+
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="placement",
+            success=True,
+            message="No PCB file found, skipping placement optimization",
+        )
+
+    # Determine output path: optimise in-place (overwrite the PCB file) so the
+    # subsequent routing step picks up the improved positions.
+    output_path = ctx.pcb_file
+
+    if ctx.dry_run:
+        return BuildResult(
+            step="placement",
+            success=True,
+            message=f"[dry-run] Would run: kct optimize-placement {ctx.pcb_file.name}",
+        )
+
+    if not ctx.quiet:
+        console.print(f"  Running placement optimization on {ctx.pcb_file.name}...")
+
+    try:
+        cmd = [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "optimize-placement",
+            str(ctx.pcb_file),
+            "--strategy",
+            "cmaes",
+            "--max-iterations",
+            "300",
+            "--seed",
+            "force-directed",
+            "--output",
+            str(output_path),
+        ]
+
+        if ctx.quiet:
+            cmd.append("--quiet")
+        if ctx.verbose:
+            cmd.append("--verbose")
+
+        result = subprocess.run(
+            cmd,
+            cwd=str(ctx.project_dir),
+            capture_output=not ctx.verbose,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            return BuildResult(
+                step="placement",
+                success=True,
+                message="Placement optimization completed",
+                output_file=output_path,
+            )
+        else:
+            error_msg = result.stderr if result.stderr else f"Exit code: {result.returncode}"
+            return BuildResult(
+                step="placement",
+                success=False,
+                message=f"Placement optimization failed: {error_msg}",
+            )
+
+    except Exception as e:
+        return BuildResult(
+            step="placement",
+            success=False,
+            message=f"Placement optimization failed: {e}",
+        )
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
@@ -997,7 +1087,7 @@ Examples:
     parser.add_argument(
         "--step",
         "-s",
-        choices=["schematic", "pcb", "outline", "route", "verify", "all"],
+        choices=["schematic", "pcb", "outline", "placement", "route", "verify", "all"],
         default="all",
         help="Run specific step or all (default: all)",
     )
@@ -1035,6 +1125,11 @@ Examples:
         "-o",
         "--output",
         help="Output directory for generated files (default: project directory)",
+    )
+    parser.add_argument(
+        "--optimize-placement",
+        action="store_true",
+        help="Run CMA-ES placement optimization before routing (opt-in)",
     )
 
     args = parser.parse_args(argv)
@@ -1105,6 +1200,7 @@ Examples:
         dry_run=args.dry_run,
         quiet=args.quiet,
         force=args.force,
+        optimize_placement=args.optimize_placement,
     )
 
     # Print build header
@@ -1128,7 +1224,7 @@ Examples:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.ROUTE, BuildStep.VERIFY]
+        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.PLACEMENT, BuildStep.ROUTE, BuildStep.VERIFY]
     else:
         steps = [BuildStep(args.step)]
 
@@ -1156,6 +1252,9 @@ Examples:
 
             elif step == BuildStep.OUTLINE:
                 result = _run_step_outline(ctx, console)
+
+            elif step == BuildStep.PLACEMENT:
+                result = _run_step_placement(ctx, console)
 
             elif step == BuildStep.ROUTE:
                 result = _run_step_route(ctx, console)
