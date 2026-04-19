@@ -83,14 +83,27 @@ class PCBBlock:
         width: float = 0.25,
         layer: Layer = Layer.F_CU,
         net: str | None = None,
+        internal: bool = False,
     ) -> TraceSegment:
-        """Add an internal trace segment."""
+        """Add an internal trace segment.
+
+        Args:
+            start: Start point (tuple or Point).
+            end: End point (tuple or Point).
+            width: Trace width in mm.
+            layer: PCB layer.
+            net: Net name string.
+            internal: If True, marks this trace as block-internal so the
+                autorouter will skip pathfinding for the connected pads.
+        """
         if isinstance(start, tuple):
             start = Point(start[0], start[1])
         if isinstance(end, tuple):
             end = Point(end[0], end[1])
 
-        trace = TraceSegment(start=start, end=end, width=width, layer=layer, net=net)
+        trace = TraceSegment(
+            start=start, end=end, width=width, layer=layer, net=net, internal=internal
+        )
         self.traces.append(trace)
         return trace
 
@@ -158,7 +171,7 @@ class PCBBlock:
 
         port_pos = self.ports[port_name].position
 
-        self.add_trace(pad_pos, port_pos, width=width, layer=layer, net=net)
+        self.add_trace(pad_pos, port_pos, width=width, layer=layer, net=net, internal=True)
 
     def place(self, x: float, y: float, rotation: float = 0):
         """Place the block on the PCB."""
@@ -258,6 +271,7 @@ class PCBBlock:
                     "layer": trace.layer.value,
                     "net": trace.net,
                     "block_id": self.block_id,
+                    "internal": trace.internal,
                 }
             )
         return result

@@ -1,11 +1,13 @@
-"""Tests for PCBBlock-router integration (Issue #1586).
+"""Tests for PCBBlock-router integration (Issues #1586, #1587).
 
 Phase 1: Register PCBBlocks with router as protected zones.
+Phase 2: Skip auto-routing for nets connected by block internal traces.
 """
 
 import pytest
 
 from kicad_tools.pcb.blocks.base import PCBBlock
+from kicad_tools.pcb.geometry import Layer as PCBLayer
 from kicad_tools.pcb.layout import PCBLayout
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
@@ -282,3 +284,278 @@ class TestPortRouting:
         # verifies that port pads are created and accessible on the grid.
         # Full net-aware routing would be tested in Phase 2.
         assert port_pad_key in router.pads, "Port pad should be registered"
+
+
+# =========================================================================
+# Phase 2 tests (Issue #1587): Skip auto-routing for block-internal traces
+# =========================================================================
+
+
+def _make_block_with_internal_traces(
+    block_id: str = "ldo",
+    origin: tuple[float, float] = (20, 20),
+) -> PCBBlock:
+    """Create a block with explicitly marked internal traces."""
+    block = PCBBlock(name=block_id, block_id=block_id)
+    # U1: LDO with VIN, VOUT, GND
+    block.add_component(
+        "U1", "SOT-23", 0, 0,
+        pads={"1": (-1, 0), "2": (1, 0), "3": (0, 1)},
+    )
+    # C1: input cap
+    block.add_component(
+        "C1", "C_0805", -2, 1,
+        pads={"1": (-0.5, 0), "2": (0.5, 0)},
+    )
+    # Ports
+    block.add_port("VIN", -4, 0, direction="in")
+    block.add_port("VOUT", 4, 0, direction="out")
+    block.add_port("GND", 0, 3, direction="power")
+
+    # Internal trace: U1 pin 1 to C1 pin 1 (VIN internal)
+    block.add_trace((-1, 0), (-2.5, 1), net="VIN", internal=True)
+    # Route-to-port traces (also internal)
+    block.route_to_port("U1.1", "VIN", net="VIN")
+    block.route_to_port("U1.2", "VOUT", net="VOUT")
+    block.route_to_port("U1.3", "GND", net="GND")
+
+    block.place(origin[0], origin[1])
+    return block
+
+
+class TestTraceSegmentInternal:
+    """Verify TraceSegment internal flag."""
+
+    def test_default_internal_false(self):
+        from kicad_tools.pcb.primitives import TraceSegment
+        from kicad_tools.pcb.geometry import Point
+
+        t = TraceSegment(start=Point(0, 0), end=Point(1, 1))
+        assert t.internal is False
+
+    def test_internal_flag_set(self):
+        from kicad_tools.pcb.primitives import TraceSegment
+        from kicad_tools.pcb.geometry import Point
+
+        t = TraceSegment(start=Point(0, 0), end=Point(1, 1), internal=True)
+        assert t.internal is True
+
+
+class TestGetPlacedTracesInternal:
+    """Verify get_placed_traces includes internal flag."""
+
+    def test_internal_flag_in_output(self):
+        block = _make_block_with_internal_traces()
+        traces = block.get_placed_traces()
+        internal_traces = [t for t in traces if t["internal"]]
+        non_internal = [t for t in traces if not t["internal"]]
+        # We have 1 explicit internal trace + 3 route_to_port (auto-internal)
+        assert len(internal_traces) == 4
+        assert len(non_internal) == 0
+
+    def test_manual_trace_not_internal_by_default(self):
+        block = PCBBlock(name="test")
+        block.add_component("U1", "SOT-23", 0, 0, pads={"1": (0, 0)})
+        block.add_trace((0, 0), (1, 1), net="SIG")  # no internal flag
+        block.place(5, 5)
+        traces = block.get_placed_traces()
+        assert len(traces) == 1
+        assert traces[0]["internal"] is False
+
+
+class TestBlockInternalRouteSkip:
+    """Core Phase 2 test: router skips pathfinding for block-internal pads."""
+
+    def _setup_router_with_block(self):
+        """Set up a router with pads registered, then register a block
+        whose internal traces connect some of those pads."""
+        rules = DesignRules()
+        router = Autorouter(50, 50, force_python=True, rules=rules)
+
+        block = _make_block_with_internal_traces(origin=(20, 20))
+
+        # Add component pads that match the block's internal component positions.
+        # U1 is at block-relative (0,0) -> absolute (20,20)
+        # U1 pad 1 at (-1,0) relative -> (19, 20) absolute
+        # U1 pad 2 at (1,0) relative -> (21, 20) absolute
+        # U1 pad 3 at (0,1) relative -> (20, 21) absolute
+        # C1 is at block-relative (-2,1) -> absolute (18, 21)
+        # C1 pad 1 at (-0.5,0) relative to C1 -> (17.5, 21) absolute
+        # C1 pad 2 at (0.5,0) relative to C1 -> (18.5, 21) absolute
+        router.add_component("U1", [
+            {"number": "1", "x": 19.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 21.0, "y": 20.0, "net": 2, "net_name": "VOUT",
+             "width": 0.5, "height": 0.5},
+            {"number": "3", "x": 20.0, "y": 21.0, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1", [
+            {"number": "1", "x": 17.5, "y": 21.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 18.5, "y": 21.0, "net": 3, "net_name": "GND",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        # Register the block -- this should index internal traces
+        router.register_block(block)
+
+        return router, block
+
+    def test_internal_connections_indexed(self):
+        """After register_block, _block_internal_connections should have entries."""
+        router, block = self._setup_router_with_block()
+        assert len(router._block_internal_connections) > 0
+        # VIN net should have internal connections
+        assert "VIN" in router._block_internal_connections
+
+    def test_create_block_internal_routes_returns_routes(self):
+        """_create_block_internal_routes should produce Route objects for VIN."""
+        router, block = self._setup_router_with_block()
+        # VIN is net 1
+        pads = router.nets[1]
+        routes, connected = router._create_block_internal_routes(1, pads)
+        assert len(routes) > 0, "Should create at least one block-internal route"
+        assert len(connected) >= 2, "Should mark at least 2 pads as connected"
+
+    def test_block_internal_routes_in_route_all(self):
+        """route_all should include block-internal routes without pathfinding."""
+        router, block = self._setup_router_with_block()
+        router.route_all()
+        # At minimum, block-internal routes should be in router.routes
+        assert len(router.routes) > 0
+
+    def test_no_blocks_baseline(self):
+        """Without blocks, _create_block_internal_routes returns empty."""
+        router = Autorouter(50, 50, force_python=True)
+        router.add_component("R1", [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SIG",
+             "width": 0.5, "height": 0.5},
+            {"number": "2", "x": 20.0, "y": 10.0, "net": 1, "net_name": "SIG",
+             "width": 0.5, "height": 0.5},
+        ])
+        pads = router.nets[1]
+        routes, connected = router._create_block_internal_routes(1, pads)
+        assert routes == []
+        assert connected == set()
+
+
+class TestPartialNetRouting:
+    """Partial net: some pads inside block, some outside."""
+
+    def test_external_pads_still_routed(self):
+        """Pads outside the block should still be routed normally."""
+        rules = DesignRules()
+        router = Autorouter(50, 50, force_python=True, rules=rules)
+
+        block = _make_block_with_internal_traces(origin=(20, 20))
+
+        # U1 pad 1 and C1 pad 1 are both on VIN net, connected internally
+        router.add_component("U1", [
+            {"number": "1", "x": 19.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1", [
+            {"number": "1", "x": 17.5, "y": 21.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+        # External pad on VIN, far from block
+        router.add_component("EXT", [
+            {"number": "1", "x": 5.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        router.register_block(block)
+
+        # VIN net has 3 pads: U1.1, C1.1, EXT.1
+        assert len(router.nets[1]) == 3
+
+        # Block-internal routes should connect U1.1 and C1.1
+        routes, connected = router._create_block_internal_routes(1, router.nets[1])
+        assert len(connected) >= 2
+
+        # After routing, the external pad should also be connected
+        router.route_all()
+        assert len(router.routes) > 0
+
+
+class TestMultiBlockSameNet:
+    """Two blocks each with internal traces on the same net."""
+
+    def test_multi_block_internal_routes(self):
+        rules = DesignRules()
+        router = Autorouter(60, 40, force_python=True, rules=rules)
+
+        # Block A: has internal VIN trace
+        block_a = PCBBlock(name="block_a", block_id="block_a")
+        block_a.add_component("U1A", "SOT-23", 0, 0, pads={"1": (0, 0)})
+        block_a.add_component("C1A", "C_0805", 2, 0, pads={"1": (0, 0)})
+        block_a.add_port("VIN", -3, 0)
+        block_a.add_trace((0, 0), (2, 0), net="VIN", internal=True)
+        block_a.place(15, 20)
+
+        # Block B: has internal VIN trace
+        block_b = PCBBlock(name="block_b", block_id="block_b")
+        block_b.add_component("U1B", "SOT-23", 0, 0, pads={"1": (0, 0)})
+        block_b.add_component("C1B", "C_0805", 2, 0, pads={"1": (0, 0)})
+        block_b.add_port("VIN", -3, 0)
+        block_b.add_trace((0, 0), (2, 0), net="VIN", internal=True)
+        block_b.place(40, 20)
+
+        # Register component pads matching block positions
+        router.add_component("U1A", [
+            {"number": "1", "x": 15.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1A", [
+            {"number": "1", "x": 17.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("U1B", [
+            {"number": "1", "x": 40.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+        router.add_component("C1B", [
+            {"number": "1", "x": 42.0, "y": 20.0, "net": 1, "net_name": "VIN",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        router.register_block(block_a)
+        router.register_block(block_b)
+
+        # Both blocks' internal traces should be indexed for VIN
+        assert "VIN" in router._block_internal_connections
+        assert len(router._block_internal_connections["VIN"]) == 2
+
+        # Block-internal routes should exist for both blocks
+        pads = router.nets[1]
+        routes, connected = router._create_block_internal_routes(1, pads)
+        assert len(routes) == 2, "One route per block"
+        assert len(connected) == 4, "All 4 pads marked as internally connected"
+
+
+class TestBlockTraceUnknownNet:
+    """Block trace referencing a net not in the router's net map."""
+
+    def test_unknown_net_skipped_gracefully(self, capsys):
+        rules = DesignRules()
+        router = Autorouter(50, 50, force_python=True, rules=rules)
+
+        block = PCBBlock(name="test_block")
+        block.add_component("U1", "SOT-23", 0, 0, pads={"1": (0, 0)})
+        block.add_port("P1", -2, 0)
+        # Internal trace on a net that doesn't exist in the router
+        block.add_trace((0, 0), (-2, 0), net="NONEXISTENT_NET", internal=True)
+        block.place(20, 20)
+
+        # Register a dummy pad so the router has some nets
+        router.add_component("R1", [
+            {"number": "1", "x": 10.0, "y": 10.0, "net": 1, "net_name": "SIG",
+             "width": 0.5, "height": 0.5},
+        ])
+
+        # Should not raise, should log a warning
+        router.register_block(block)
+
+        captured = capsys.readouterr()
+        assert "unknown net" in captured.out.lower() or "NONEXISTENT_NET" in captured.out

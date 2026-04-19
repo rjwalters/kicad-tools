@@ -377,6 +377,12 @@ class Autorouter:
         # Registered PCB blocks for protected-zone routing (Issue #1586)
         self.registered_blocks: dict[str, "PCBBlock"] = {}
 
+        # Block-internal connectivity: net_name -> list of (pad_key_set, trace_data)
+        # Each entry is a group of pad keys connected by block-internal traces.
+        # Populated by register_block() when blocks have internal traces.
+        # (Issue #1587)
+        self._block_internal_connections: dict[str, list[dict]] = {}
+
     def _init_physics(self) -> None:
         """Initialize physics module if available and enabled."""
         if not self._physics_enabled or self._stackup is None:
@@ -705,6 +711,170 @@ class Autorouter:
             self.pads[key] = port_pad
             self.grid.add_pad(port_pad)
 
+        # Step 3: Index block-internal traces for auto-routing skip (Issue #1587)
+        self._index_block_internal_traces(block)
+
+    def _index_block_internal_traces(self, block: "PCBBlock") -> None:
+        """Build internal-connectivity map from a block's internal traces.
+
+        For each internal trace, match its start/end positions to router pads
+        by proximity (0.01 mm epsilon). Record the connected pad keys so that
+        ``_create_block_internal_routes`` can skip pathfinding for those pairs.
+
+        Args:
+            block: A placed PCBBlock whose internal traces should be indexed.
+        """
+        EPSILON = 0.01  # mm tolerance for pad-to-trace endpoint matching
+
+        placed_traces = block.get_placed_traces()
+        internal_traces = [t for t in placed_traces if t.get("internal", False)]
+        if not internal_traces:
+            return
+
+        # Build reverse map: net_name -> net_id
+        name_to_id: dict[str, int] = {}
+        for net_id, name in self.net_names.items():
+            name_to_id[name] = net_id
+
+        for trace_data in internal_traces:
+            net_name = trace_data.get("net")
+            if not net_name:
+                continue
+
+            if net_name not in name_to_id:
+                flush_print(
+                    f"  Warning: block '{block.block_id}' internal trace references "
+                    f"unknown net '{net_name}', skipping"
+                )
+                continue
+
+            start = trace_data["start"]
+            end = trace_data["end"]
+
+            # Find pads near the trace endpoints
+            start_keys = self._find_pads_near(start[0], start[1], EPSILON)
+            end_keys = self._find_pads_near(end[0], end[1], EPSILON)
+
+            if not start_keys or not end_keys:
+                continue
+
+            # Record the connection: all start pads are connected to all end pads
+            connected_keys = start_keys | end_keys
+
+            if net_name not in self._block_internal_connections:
+                self._block_internal_connections[net_name] = []
+
+            self._block_internal_connections[net_name].append(
+                {
+                    "pad_keys": connected_keys,
+                    "trace": trace_data,
+                    "block_id": block.block_id,
+                }
+            )
+
+    def _find_pads_near(
+        self, x: float, y: float, epsilon: float
+    ) -> set[tuple[str, str]]:
+        """Find all router pad keys within epsilon distance of (x, y).
+
+        Args:
+            x: X coordinate in mm.
+            y: Y coordinate in mm.
+            epsilon: Distance tolerance in mm.
+
+        Returns:
+            Set of (ref, pin) pad keys near the given position.
+        """
+        result: set[tuple[str, str]] = set()
+        eps_sq = epsilon * epsilon
+        for key, pad in self.pads.items():
+            dx = pad.x - x
+            dy = pad.y - y
+            if dx * dx + dy * dy <= eps_sq:
+                result.add(key)
+        return result
+
+    def _create_block_internal_routes(
+        self, net: int, pads: list[tuple[str, str]]
+    ) -> tuple[list[Route], set[int]]:
+        """Create Route objects for block-internal traces on this net.
+
+        Follows the same pattern as ``_create_intra_ic_routes``: returns
+        pre-built Route objects and the set of pad indices that were
+        connected internally so they can be removed from the MST pool.
+
+        Args:
+            net: Net ID being routed.
+            pads: List of (ref, pin) pad keys for this net.
+
+        Returns:
+            Tuple of (routes created, set of pad indices connected internally).
+        """
+        net_name = self.net_names.get(net, "")
+        if not net_name or net_name not in self._block_internal_connections:
+            return [], set()
+
+        routes: list[Route] = []
+        connected_indices: set[int] = set()
+
+        # Build a lookup from pad key to index in the pads list
+        key_to_indices: dict[tuple[str, str], list[int]] = {}
+        for i, key in enumerate(pads):
+            if key not in key_to_indices:
+                key_to_indices[key] = []
+            key_to_indices[key].append(i)
+
+        for conn in self._block_internal_connections[net_name]:
+            trace_data = conn["trace"]
+            block_id = conn["block_id"]
+            pad_keys = conn["pad_keys"]
+
+            # Find which pads from this net's pad list are in the connected set
+            matched_indices: set[int] = set()
+            for pk in pad_keys:
+                if pk in key_to_indices:
+                    for idx in key_to_indices[pk]:
+                        matched_indices.add(idx)
+
+            if len(matched_indices) < 2:
+                continue
+
+            # Create a Route from the block trace data (no pathfinding needed)
+            start = trace_data["start"]
+            end = trace_data["end"]
+            layer_name = trace_data.get("layer", "F.Cu")
+
+            from kicad_tools.core.types import CopperLayer
+
+            try:
+                router_layer = CopperLayer.from_kicad_name(layer_name)
+            except (ValueError, AttributeError):
+                router_layer = Layer.F_CU
+
+            from .primitives import Segment
+
+            route = Route(net=net, net_name=net_name)
+            seg = Segment(
+                x1=start[0],
+                y1=start[1],
+                x2=end[0],
+                y2=end[1],
+                width=trace_data.get("width", self.rules.trace_width),
+                layer=router_layer,
+                net=net,
+                net_name=net_name,
+            )
+            route.segments.append(seg)
+            routes.append(route)
+            connected_indices |= matched_indices
+
+            flush_print(
+                f"  Block-internal route: {block_id} net={net_name} "
+                f"({len(matched_indices)} pads skipped)"
+            )
+
+        return routes, connected_indices
+
     def clear_zones(self) -> None:
         """Remove all zone markings from the grid."""
         self.zone_manager.clear_all_zones()
@@ -819,6 +989,14 @@ class Autorouter:
             self._mark_route(route)
             routes.append(route)
             self.routes.append(route)
+
+        # Handle block-internal connections (Issue #1587)
+        block_routes, block_connected = self._create_block_internal_routes(net, pads)
+        for route in block_routes:
+            self._mark_route(route)
+            routes.append(route)
+            self.routes.append(route)
+        connected_indices |= block_connected
 
         # Build reduced pad list for inter-IC routing
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
@@ -1621,6 +1799,14 @@ class Autorouter:
             self._mark_route(route)
             routes.append(route)
             self.routes.append(route)
+
+        # Handle block-internal connections (Issue #1587)
+        block_routes, block_connected = self._create_block_internal_routes(net, pads)
+        for route in block_routes:
+            self._mark_route(route)
+            routes.append(route)
+            self.routes.append(route)
+        connected_indices |= block_connected
 
         # Build reduced pad list for inter-IC routing
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
@@ -2469,6 +2655,13 @@ class Autorouter:
             self._mark_route(route)
             routes.append(route)
 
+        # Handle block-internal connections (Issue #1587)
+        block_routes, block_connected = self._create_block_internal_routes(net, pads)
+        for route in block_routes:
+            self._mark_route(route)
+            routes.append(route)
+        connected_indices |= block_connected
+
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
         if len(pads_for_routing) < 2:
             return routes
@@ -2557,6 +2750,13 @@ class Autorouter:
         for route in intra_routes:
             self._mark_route(route)
             routes.append(route)
+
+        # Handle block-internal connections (Issue #1587)
+        block_routes, block_connected = self._create_block_internal_routes(net, pads)
+        for route in block_routes:
+            self._mark_route(route)
+            routes.append(route)
+        connected_indices |= block_connected
 
         pads_for_routing = reduce_pads_after_intra_ic(pads, connected_indices)
         if len(pads_for_routing) < 2:
