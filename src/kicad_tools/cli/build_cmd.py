@@ -41,8 +41,8 @@ class BuildStep(str, Enum):
     SCHEMATIC = "schematic"
     PCB = "pcb"
     OUTLINE = "outline"
-    ZONES = "zones"
     PLACEMENT = "placement"
+    ZONES = "zones"
     SILKSCREEN = "silkscreen"
     ROUTE = "route"
     VERIFY = "verify"
@@ -1383,8 +1383,8 @@ Examples:
             "schematic",
             "pcb",
             "outline",
-            "zones",
             "placement",
+            "zones",
             "silkscreen",
             "route",
             "verify",
@@ -1531,8 +1531,8 @@ Examples:
             BuildStep.SCHEMATIC,
             BuildStep.PCB,
             BuildStep.OUTLINE,
-            BuildStep.ZONES,
             BuildStep.PLACEMENT,
+            BuildStep.ZONES,
             BuildStep.SILKSCREEN,
             BuildStep.ROUTE,
             BuildStep.VERIFY,
@@ -1566,11 +1566,11 @@ Examples:
             elif step == BuildStep.OUTLINE:
                 result = _run_step_outline(ctx, console)
 
-            elif step == BuildStep.ZONES:
-                result = _run_step_zones(ctx, console)
-
             elif step == BuildStep.PLACEMENT:
                 result = _run_step_placement(ctx, console)
+
+            elif step == BuildStep.ZONES:
+                result = _run_step_zones(ctx, console)
 
             elif step == BuildStep.SILKSCREEN:
                 result = _run_step_silkscreen(ctx, console)
