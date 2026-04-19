@@ -10,10 +10,14 @@ from __future__ import annotations
 import uuid as uuid_module
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sexp import SExp, parse_file
 from kicad_tools.sexp.builders import zone_node
+
+if TYPE_CHECKING:
+    from kicad_tools.router.net_class import NetClass
 
 
 @dataclass
@@ -400,3 +404,44 @@ def parse_power_nets(spec: str) -> list[tuple[str, str]]:
         result.append((net_name, layer))
 
     return result
+
+
+def auto_create_zones_for_pour_nets(
+    pcb_path: str | Path,
+    pour_nets: list[tuple[str, NetClass]],
+) -> int:
+    """Create zones for power and ground nets on a PCB.
+
+    Loads the PCB, creates zone definitions for each pour net, and saves
+    the modified PCB in place.
+
+    For 2-layer boards:
+    - GROUND nets get a zone on B.Cu with priority 1
+    - POWER nets get a zone on F.Cu with priority 0
+
+    Args:
+        pcb_path: Path to .kicad_pcb file (modified in place)
+        pour_nets: List of (net_name, NetClass) tuples identifying
+            which nets need zones
+
+    Returns:
+        Number of zones created
+    """
+    from kicad_tools.router.net_class import NetClass
+
+    pcb_path = Path(pcb_path)
+    gen = ZoneGenerator.from_pcb(pcb_path)
+
+    count = 0
+    for net_name, net_class in pour_nets:
+        if net_class == NetClass.GROUND:
+            gen.add_ground_plane(layer="B.Cu", priority=1)
+        else:
+            # POWER nets go on F.Cu
+            gen.add_power_plane(net=net_name, layer="F.Cu", priority=0)
+        count += 1
+
+    if count > 0:
+        gen.save(pcb_path)
+
+    return count

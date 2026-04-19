@@ -41,6 +41,7 @@ class BuildStep(str, Enum):
     SCHEMATIC = "schematic"
     PCB = "pcb"
     OUTLINE = "outline"
+    ZONES = "zones"
     PLACEMENT = "placement"
     SILKSCREEN = "silkscreen"
     ROUTE = "route"
@@ -842,6 +843,104 @@ def _run_step_silkscreen(ctx: BuildContext, console: Console) -> BuildResult:
         )
 
 
+def _run_step_zones(ctx: BuildContext, console: Console) -> BuildResult:
+    """Run automatic zone creation for power and ground nets.
+
+    Identifies pour nets (POWER and GROUND) via net classification and
+    creates copper zone definitions on the PCB before routing.  GND gets
+    a zone on B.Cu with priority 1; other power nets get zones on F.Cu
+    with priority 0.
+
+    Zones are *defined* here (unfilled polygons).  Filling happens later
+    after routing, typically via kicad-cli.
+    """
+    if not ctx.pcb_file or not ctx.pcb_file.exists():
+        return BuildResult(
+            step="zones",
+            success=True,
+            message="No PCB file found, skipping zone creation",
+        )
+
+    try:
+        from kicad_tools.router.net_class import NetClass, auto_classify_nets
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.zones.generator import ZoneGenerator, auto_create_zones_for_pour_nets
+
+        pcb = PCB.load(str(ctx.pcb_file))
+
+        # Build net_names dict {net_id: net_name} for classification
+        net_names: dict[int, str] = {
+            net_id: net.name for net_id, net in pcb.nets.items() if net.name
+        }
+
+        if not net_names:
+            return BuildResult(
+                step="zones",
+                success=True,
+                message="No nets found in PCB, skipping zone creation",
+            )
+
+        # Classify nets
+        classifications = auto_classify_nets(net_names)
+
+        # Identify pour nets (POWER and GROUND)
+        pour_nets: list[tuple[str, NetClass]] = []
+        for net_id, classification in classifications.items():
+            if classification.net_class in (NetClass.POWER, NetClass.GROUND):
+                net_name = net_names[net_id]
+                pour_nets.append((net_name, classification.net_class))
+
+        if not pour_nets:
+            return BuildResult(
+                step="zones",
+                success=True,
+                message="No power/ground nets detected, skipping zone creation",
+            )
+
+        # Check for existing zones on these nets (idempotency)
+        existing_zone_nets = {z.net_name for z in pcb.zones}
+        new_pour_nets = [
+            (name, cls) for name, cls in pour_nets if name not in existing_zone_nets
+        ]
+
+        if not new_pour_nets:
+            return BuildResult(
+                step="zones",
+                success=True,
+                message="Zones already exist for all power/ground nets, skipping",
+                output_file=ctx.pcb_file,
+            )
+
+        if ctx.dry_run:
+            net_list = ", ".join(f"{name} ({cls.value})" for name, cls in new_pour_nets)
+            return BuildResult(
+                step="zones",
+                success=True,
+                message=f"[dry-run] Would create zones for: {net_list}",
+            )
+
+        if not ctx.quiet:
+            net_list = ", ".join(f"{name} ({cls.value})" for name, cls in new_pour_nets)
+            console.print(f"  Creating zones for: {net_list}")
+
+        count = auto_create_zones_for_pour_nets(ctx.pcb_file, new_pour_nets)
+
+        return BuildResult(
+            step="zones",
+            success=True,
+            message=f"Created {count} zone(s) for power/ground nets",
+            output_file=ctx.pcb_file,
+        )
+
+    except Exception as e:
+        logger.exception("Zone creation failed")
+        return BuildResult(
+            step="zones",
+            success=False,
+            message=f"Zone creation failed: {e}",
+        )
+
+
 def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
     """Run autorouting step."""
     # Check if a routed PCB already exists (e.g., from generate_design.py)
@@ -1278,7 +1377,7 @@ Examples:
     parser.add_argument(
         "--step",
         "-s",
-        choices=["schematic", "pcb", "outline", "placement", "silkscreen", "route", "verify", "export", "all"],
+        choices=["schematic", "pcb", "outline", "zones", "placement", "silkscreen", "route", "verify", "export", "all"],
         default="all",
         help="Run specific step or all (default: all)",
     )
@@ -1415,7 +1514,7 @@ Examples:
 
     # Determine steps to run
     if args.step == "all":
-        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.PLACEMENT, BuildStep.SILKSCREEN, BuildStep.ROUTE, BuildStep.VERIFY, BuildStep.EXPORT]
+        steps = [BuildStep.SCHEMATIC, BuildStep.PCB, BuildStep.OUTLINE, BuildStep.ZONES, BuildStep.PLACEMENT, BuildStep.SILKSCREEN, BuildStep.ROUTE, BuildStep.VERIFY, BuildStep.EXPORT]
     else:
         steps = [BuildStep(args.step)]
 
@@ -1443,6 +1542,9 @@ Examples:
 
             elif step == BuildStep.OUTLINE:
                 result = _run_step_outline(ctx, console)
+
+            elif step == BuildStep.ZONES:
+                result = _run_step_zones(ctx, console)
 
             elif step == BuildStep.PLACEMENT:
                 result = _run_step_placement(ctx, console)
