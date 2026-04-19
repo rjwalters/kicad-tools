@@ -1849,6 +1849,14 @@ class Router:
             if not is_valid:
                 return False
 
+        # Issue #1693: Validate vias against other-net vias
+        for via in route.vias:
+            is_valid, _clearance, _location = self.grid.validate_via_to_via_clearance(
+                via, exclude_net=exclude_net
+            )
+            if not is_valid:
+                return False
+
         return True
 
     def _reconstruct_route(self, end_node: AStarNode, start_pad: Pad, end_pad: Pad) -> Route | None:
