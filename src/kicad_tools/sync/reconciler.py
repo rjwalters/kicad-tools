@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.schema.bom import extract_bom
+
 
 @dataclass(frozen=True)
 class SyncMatch:
@@ -83,7 +85,7 @@ class SyncChange:
     """
 
     reference: str
-    change_type: str  # "rename", "update_value", "update_footprint"
+    change_type: str  # "rename", "update_value", "update_footprint", "add_footprint"
     old_value: str
     new_value: str
     applied: bool = False
@@ -111,6 +113,8 @@ class SyncAnalysis:
         pcb_orphans: References in PCB with no schematic match.
         value_mismatches: Components matched by reference but with different values.
         footprint_mismatches: Components matched by reference but with different footprints.
+        add_footprint_actions: Proposed add_footprint actions for schematic orphans
+            that have a footprint assigned and could be placed on the PCB.
     """
 
     matches: list[SyncMatch] = field(default_factory=list)
@@ -118,6 +122,7 @@ class SyncAnalysis:
     pcb_orphans: list[str] = field(default_factory=list)
     value_mismatches: list[dict[str, str]] = field(default_factory=list)
     footprint_mismatches: list[dict[str, str]] = field(default_factory=list)
+    add_footprint_actions: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def high_confidence_matches(self) -> list[SyncMatch]:
@@ -138,7 +143,7 @@ class SyncAnalysis:
     def has_actionable_items(self) -> bool:
         """True if there are any matches with actions to apply."""
         return any(m.actions for m in self.matches) or bool(
-            self.value_mismatches or self.footprint_mismatches
+            self.value_mismatches or self.footprint_mismatches or self.add_footprint_actions
         )
 
     @property
@@ -173,6 +178,8 @@ class SyncAnalysis:
             lines.append(f"  Schematic-only:       {len(self.schematic_orphans)}")
         if self.pcb_orphans:
             lines.append(f"  PCB-only:             {len(self.pcb_orphans)}")
+        if self.add_footprint_actions:
+            lines.append(f"  Add footprint:        {len(self.add_footprint_actions)}")
 
         return "\n".join(lines)
 
@@ -185,11 +192,13 @@ class SyncAnalysis:
             "pcb_orphans": self.pcb_orphans,
             "value_mismatches": self.value_mismatches,
             "footprint_mismatches": self.footprint_mismatches,
+            "add_footprint_actions": self.add_footprint_actions,
             "summary": {
                 "total_matches": len(self.matches),
                 "high_confidence": len(self.high_confidence_matches),
                 "medium_confidence": len(self.medium_confidence_matches),
                 "low_confidence": len(self.low_confidence_matches),
+                "add_footprint": len(self.add_footprint_actions),
             },
         }
 
@@ -456,16 +465,48 @@ class Reconciler:
         analysis.schematic_orphans = sorted(set(analysis.schematic_orphans) - matched_sch)
         analysis.pcb_orphans = sorted(set(analysis.pcb_orphans) - matched_pcb)
 
+        # Generate add_footprint actions for remaining schematic orphans
+        for ref in analysis.schematic_orphans:
+            sch = sch_components[ref]
+            footprint = sch.get("footprint", "")
+            value = sch.get("value", "")
+            lib_id = sch.get("lib_id", "")
+            if footprint:
+                action = {
+                    "type": "add_footprint",
+                    "reference": ref,
+                    "value": value,
+                    "footprint": footprint,
+                    "lib_id": lib_id,
+                }
+                analysis.add_footprint_actions.append(action)
+
         return analysis
 
     def _get_schematic_components(self, checker) -> dict[str, dict[str, str]]:
-        """Extract component info from schematic via the checker."""
+        """Extract component info from schematic using hierarchical BOM extraction.
+
+        Uses extract_bom() with hierarchical=True to traverse all sub-sheets,
+        mirroring the approach in SchematicPCBChecker.check_lvs(). This ensures
+        components in hierarchical sub-sheets are included in the analysis.
+
+        Skips virtual components, power symbols, and DNP components, consistent
+        with the LVS checker's filtering logic.
+        """
         components: dict[str, dict[str, str]] = {}
-        for sym in checker.schematic.symbols:
-            if sym.reference and not sym.reference.startswith("#"):
-                components[sym.reference] = {
-                    "value": sym.value or "",
-                    "footprint": sym.footprint or "",
+        sch_path = str(self._schematic_path)
+        bom = extract_bom(sch_path, hierarchical=True)
+
+        for item in bom.items:
+            if item.is_virtual or item.is_power_symbol:
+                continue
+            if item.dnp:
+                continue
+            if item.reference and not item.reference.startswith("#"):
+                components[item.reference] = {
+                    "value": item.value or "",
+                    "footprint": item.footprint or "",
+                    "lib_id": item.lib_id or "",
                 }
         return components
 
@@ -513,6 +554,9 @@ class Reconciler:
             match_level = confidence_order.get(match.confidence, 2)
             if match_level <= min_level and match.actions:
                 actions_to_apply.extend(match.actions)
+
+        # Include add_footprint actions from analysis
+        actions_to_apply.extend(analysis.add_footprint_actions)
 
         if not actions_to_apply:
             return changes
@@ -613,6 +657,23 @@ class Reconciler:
                 change_type="update_footprint",
                 old_value=old_fp,
                 new_value=new_fp,
+                applied=False,  # Never auto-applied
+            )
+
+        elif action_type == "add_footprint":
+            ref = action["reference"]
+            footprint = action.get("footprint", "")
+            value = action.get("value", "")
+
+            # add_footprint actions are recorded but not applied automatically
+            # because placing a new footprint requires KiCad standard libraries
+            # and net assignment from the schematic netlist. Use PCB.add_footprint()
+            # directly for programmatic placement.
+            return SyncChange(
+                reference=ref,
+                change_type="add_footprint",
+                old_value="",
+                new_value=f"{footprint} ({value})",
                 applied=False,  # Never auto-applied
             )
 

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.schema.bom import BOM, BOMItem
 from kicad_tools.sync.reconciler import (
     Reconciler,
     SyncAnalysis,
@@ -190,6 +191,37 @@ class TestSyncAnalysis:
         assert d["pcb_orphans"] == ["C3"]
         assert d["summary"]["total_matches"] == 1
 
+    def test_add_footprint_actions_in_has_actionable(self):
+        """Test that add_footprint_actions makes analysis actionable."""
+        analysis = SyncAnalysis(
+            add_footprint_actions=[
+                {"type": "add_footprint", "reference": "R5", "footprint": "R_0402", "value": "10k"}
+            ]
+        )
+        assert analysis.has_actionable_items
+
+    def test_add_footprint_actions_in_to_dict(self):
+        """Test that add_footprint_actions appear in to_dict output."""
+        actions = [
+            {"type": "add_footprint", "reference": "R5", "footprint": "R_0402", "value": "10k"}
+        ]
+        analysis = SyncAnalysis(add_footprint_actions=actions)
+        d = analysis.to_dict()
+        assert d["add_footprint_actions"] == actions
+        assert d["summary"]["add_footprint"] == 1
+
+    def test_summary_with_add_footprint(self):
+        """Test summary includes add_footprint count."""
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact")],
+            schematic_orphans=["R5"],
+            add_footprint_actions=[
+                {"type": "add_footprint", "reference": "R5", "footprint": "R_0402", "value": "10k"}
+            ],
+        )
+        summary = analysis.summary()
+        assert "Add footprint:" in summary
+
 
 class TestReconciler:
     """Tests for Reconciler class."""
@@ -228,13 +260,17 @@ class TestReconciler:
 class TestReconcilerAnalyze:
     """Tests for Reconciler.analyze() using mocked schematic/PCB data."""
 
-    def _make_mock_symbol(self, ref: str, value: str = "", footprint: str = ""):
-        """Create a mock schematic symbol."""
-        sym = MagicMock()
-        sym.reference = ref
-        sym.value = value
-        sym.footprint = footprint
-        return sym
+    def _make_bom_item(
+        self, ref: str, value: str = "", footprint: str = "", lib_id: str = ""
+    ):
+        """Create a BOMItem for mocking extract_bom."""
+        return BOMItem(
+            reference=ref,
+            value=value,
+            footprint=footprint,
+            lib_id=lib_id or "",
+            in_bom=True,
+        )
 
     def _make_mock_footprint(self, ref: str, value: str = "", name: str = ""):
         """Create a mock PCB footprint."""
@@ -245,44 +281,51 @@ class TestReconcilerAnalyze:
         fp.pads = []
         return fp
 
-    def _make_reconciler_with_mocks(self, symbols, footprints):
-        """Create a Reconciler with mocked file loading."""
+    def _make_reconciler_with_mocks(self, bom_items, footprints):
+        """Create a Reconciler with mocked file loading and extract_bom."""
         with tempfile.NamedTemporaryFile(suffix=".kicad_sch", delete=False) as sf:
             sch_path = sf.name
         with tempfile.NamedTemporaryFile(suffix=".kicad_pcb", delete=False) as pf:
             pcb_path = pf.name
 
-        mock_sch = MagicMock()
-        mock_sch.symbols = symbols
+        mock_bom = BOM(items=bom_items, source=sch_path)
         mock_pcb = MagicMock()
         mock_pcb.footprints = footprints
 
-        with patch("kicad_tools.validate.consistency.SchematicPCBChecker.__init__", return_value=None):
-            reconciler = Reconciler.__new__(Reconciler)
-            reconciler._schematic_path = Path(sch_path)
-            reconciler._pcb_path = Path(pcb_path)
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path(sch_path)
+        reconciler._pcb_path = Path(pcb_path)
 
-        return reconciler, mock_sch, mock_pcb, sch_path, pcb_path
+        return reconciler, mock_bom, mock_pcb, sch_path, pcb_path
 
-    def test_analyze_in_sync(self):
-        """Test analysis when schematic and PCB are in sync."""
-        symbols = [self._make_mock_symbol("R1", "10k", "Resistor_SMD:R_0402")]
-        footprints = [self._make_mock_footprint("R1", "10k", "Resistor_SMD:R_0402")]
-
-        reconciler, mock_sch, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
-            symbols, footprints
-        )
-
+    def _run_analyze(self, reconciler, mock_bom, mock_pcb):
+        """Run analyze() with mocked dependencies."""
         mock_checker = MagicMock()
-        mock_checker.schematic = mock_sch
         mock_checker.pcb = mock_pcb
         mock_checker.check.return_value = MagicMock(issues=[])
 
-        with patch(
-            "kicad_tools.validate.consistency.SchematicPCBChecker",
-            return_value=mock_checker,
+        with (
+            patch(
+                "kicad_tools.validate.consistency.SchematicPCBChecker",
+                return_value=mock_checker,
+            ),
+            patch(
+                "kicad_tools.sync.reconciler.extract_bom",
+                return_value=mock_bom,
+            ),
         ):
-            analysis = reconciler.analyze()
+            return reconciler.analyze()
+
+    def test_analyze_in_sync(self):
+        """Test analysis when schematic and PCB are in sync."""
+        bom_items = [self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402")]
+        footprints = [self._make_mock_footprint("R1", "10k", "Resistor_SMD:R_0402")]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
 
         assert analysis.is_in_sync
         assert len(analysis.matches) == 1
@@ -295,23 +338,14 @@ class TestReconcilerAnalyze:
 
     def test_analyze_value_mismatch(self):
         """Test analysis detects value mismatches."""
-        symbols = [self._make_mock_symbol("R1", "10k", "Resistor_SMD:R_0402")]
+        bom_items = [self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402")]
         footprints = [self._make_mock_footprint("R1", "4.7k", "Resistor_SMD:R_0402")]
 
-        reconciler, mock_sch, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
-            symbols, footprints
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
         )
 
-        mock_checker = MagicMock()
-        mock_checker.schematic = mock_sch
-        mock_checker.pcb = mock_pcb
-        mock_checker.check.return_value = MagicMock(issues=[])
-
-        with patch(
-            "kicad_tools.validate.consistency.SchematicPCBChecker",
-            return_value=mock_checker,
-        ):
-            analysis = reconciler.analyze()
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
 
         assert not analysis.is_in_sync
         assert len(analysis.value_mismatches) == 1
@@ -323,29 +357,20 @@ class TestReconcilerAnalyze:
 
     def test_analyze_orphans(self):
         """Test analysis detects orphans in both directions."""
-        symbols = [
-            self._make_mock_symbol("R1", "10k", "R_0402"),
-            self._make_mock_symbol("R2", "22k", "R_0402"),
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402"),
+            self._make_bom_item("R2", "22k", "R_0402"),
         ]
         footprints = [
             self._make_mock_footprint("R1", "10k", "R_0402"),
             self._make_mock_footprint("C1", "100nF", "C_0402"),
         ]
 
-        reconciler, mock_sch, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
-            symbols, footprints
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
         )
 
-        mock_checker = MagicMock()
-        mock_checker.schematic = mock_sch
-        mock_checker.pcb = mock_pcb
-        mock_checker.check.return_value = MagicMock(issues=[])
-
-        with patch(
-            "kicad_tools.validate.consistency.SchematicPCBChecker",
-            return_value=mock_checker,
-        ):
-            analysis = reconciler.analyze()
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
 
         assert "R2" in analysis.schematic_orphans
         assert "C1" in analysis.pcb_orphans
@@ -355,29 +380,20 @@ class TestReconcilerAnalyze:
 
     def test_analyze_medium_confidence_match(self):
         """Test that value+footprint matching produces medium confidence."""
-        symbols = [
-            self._make_mock_symbol("R1", "10k", "Resistor_SMD:R_0402"),
-            self._make_mock_symbol("R5", "22k", "Resistor_SMD:R_0402"),
+        bom_items = [
+            self._make_bom_item("R1", "10k", "Resistor_SMD:R_0402"),
+            self._make_bom_item("R5", "22k", "Resistor_SMD:R_0402"),
         ]
         footprints = [
             self._make_mock_footprint("R1", "10k", "Resistor_SMD:R_0402"),
             self._make_mock_footprint("R99", "22k", "Resistor_SMD:R_0402"),
         ]
 
-        reconciler, mock_sch, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
-            symbols, footprints
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
         )
 
-        mock_checker = MagicMock()
-        mock_checker.schematic = mock_sch
-        mock_checker.pcb = mock_pcb
-        mock_checker.check.return_value = MagicMock(issues=[])
-
-        with patch(
-            "kicad_tools.validate.consistency.SchematicPCBChecker",
-            return_value=mock_checker,
-        ):
-            analysis = reconciler.analyze()
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
 
         medium = analysis.medium_confidence_matches
         assert len(medium) == 1
@@ -394,34 +410,194 @@ class TestReconcilerAnalyze:
 
     def test_analyze_no_mismatches_is_in_sync(self):
         """Test that matching refs with same properties reports in-sync."""
-        symbols = [
-            self._make_mock_symbol("R1", "10k", "R_0402"),
-            self._make_mock_symbol("C1", "100nF", "C_0402"),
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402"),
+            self._make_bom_item("C1", "100nF", "C_0402"),
         ]
         footprints = [
             self._make_mock_footprint("R1", "10k", "R_0402"),
             self._make_mock_footprint("C1", "100nF", "C_0402"),
         ]
 
-        reconciler, mock_sch, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
-            symbols, footprints
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
         )
 
-        mock_checker = MagicMock()
-        mock_checker.schematic = mock_sch
-        mock_checker.pcb = mock_pcb
-        mock_checker.check.return_value = MagicMock(issues=[])
-
-        with patch(
-            "kicad_tools.validate.consistency.SchematicPCBChecker",
-            return_value=mock_checker,
-        ):
-            analysis = reconciler.analyze()
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
 
         assert analysis.is_in_sync
 
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
+
+    def test_analyze_hierarchical_components(self):
+        """Test that hierarchical sub-sheet components are included via extract_bom."""
+        # Simulate components from root sheet and a sub-sheet
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("U1", "ATmega328P", "TQFP-32", lib_id="MCU:ATmega328P"),
+            # Sub-sheet component
+            self._make_bom_item("R10", "4.7k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("C5", "100nF", "C_0402", lib_id="Device:C"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+            self._make_mock_footprint("U1", "ATmega328P", "TQFP-32"),
+            self._make_mock_footprint("R10", "4.7k", "R_0402"),
+            self._make_mock_footprint("C5", "100nF", "C_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 4
+        assert len(analysis.schematic_orphans) == 0
+        assert len(analysis.pcb_orphans) == 0
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_hierarchical_missing_from_pcb(self):
+        """Test that sub-sheet components missing from PCB are reported as orphans."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            # Sub-sheet components not in PCB
+            self._make_bom_item("R10", "4.7k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("C5", "100nF", "C_0402", lib_id="Device:C"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert not analysis.is_in_sync
+        assert "R10" in analysis.schematic_orphans
+        assert "C5" in analysis.schematic_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_skips_virtual_and_power(self):
+        """Test that virtual/power symbols and DNP components are skipped."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            BOMItem(
+                reference="PWR1",
+                value="+3V3",
+                footprint="",
+                lib_id="power:+3V3",
+                in_bom=False,
+            ),
+            BOMItem(
+                reference="R2",
+                value="100",
+                footprint="R_0402",
+                lib_id="Device:R",
+                dnp=True,
+            ),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert analysis.is_in_sync
+        assert len(analysis.matches) == 1
+        # PWR1 and R2 (DNP) should not appear anywhere
+        assert "PWR1" not in analysis.schematic_orphans
+        assert "R2" not in analysis.schematic_orphans
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+    def test_analyze_add_footprint_actions(self):
+        """Test that add_footprint actions are generated for schematic orphans."""
+        bom_items = [
+            self._make_bom_item("R1", "10k", "R_0402", lib_id="Device:R"),
+            self._make_bom_item("R2", "22k", "Resistor_SMD:R_0402", lib_id="Device:R"),
+        ]
+        footprints = [
+            self._make_mock_footprint("R1", "10k", "R_0402"),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = (
+            self._make_reconciler_with_mocks(bom_items, footprints)
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert len(analysis.add_footprint_actions) == 1
+        action = analysis.add_footprint_actions[0]
+        assert action["type"] == "add_footprint"
+        assert action["reference"] == "R2"
+        assert action["footprint"] == "Resistor_SMD:R_0402"
+        assert action["value"] == "22k"
+        assert action["lib_id"] == "Device:R"
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
+
+class TestReconcilerApplyAction:
+    """Tests for Reconciler._apply_action() with add_footprint."""
+
+    def test_apply_action_add_footprint(self):
+        """Test that add_footprint action produces a SyncChange record."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "add_footprint",
+            "reference": "R5",
+            "footprint": "Resistor_SMD:R_0402",
+            "value": "10k",
+            "lib_id": "Device:R",
+        }
+
+        sexp = MagicMock()
+        change = reconciler._apply_action(sexp, action, dry_run=True)
+
+        assert change is not None
+        assert change.change_type == "add_footprint"
+        assert change.reference == "R5"
+        assert change.old_value == ""
+        assert "Resistor_SMD:R_0402" in change.new_value
+        assert "10k" in change.new_value
+        assert change.applied is False  # Never auto-applied
+
+    def test_apply_action_add_footprint_not_auto_applied(self):
+        """Test that add_footprint is never auto-applied even when not dry_run."""
+        reconciler = Reconciler.__new__(Reconciler)
+        reconciler._schematic_path = Path("/tmp/test.kicad_sch")
+        reconciler._pcb_path = Path("/tmp/test.kicad_pcb")
+
+        action = {
+            "type": "add_footprint",
+            "reference": "C1",
+            "footprint": "C_0402",
+            "value": "100nF",
+        }
+
+        sexp = MagicMock()
+        change = reconciler._apply_action(sexp, action, dry_run=False)
+
+        assert change is not None
+        assert change.applied is False  # Still not auto-applied
 
 
 class TestReconcilerSaveMapping:
