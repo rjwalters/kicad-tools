@@ -2967,6 +2967,165 @@ class Autorouter:
             num_workers=num_workers,
         )
 
+    def route_all_block_aware(
+        self,
+        blocks: list[PCBBlock] | None = None,
+        block_margin: float = 1.0,
+        use_negotiated: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ) -> list[Route]:
+        """Route all nets using per-block detail routing with sub-Pathfinders.
+
+        This strategy routes in three phases:
+        - Phase A: For each registered block, create a BlockRouter with a
+          confined sub-grid and route block-internal nets independently.
+        - Phase B: Mark block-occupied regions on the main grid, then route
+          inter-block and non-block nets via the standard routing pipeline.
+        - Phase C: Combine block-internal and global routes.
+
+        When no blocks are defined (or *blocks* is empty), falls back to
+        ``route_all()`` for identical behavior on non-block designs.
+
+        Args:
+            blocks: Optional list of PCBBlocks to route. If None, uses
+                ``self.registered_blocks``.
+            block_margin: Extra margin around block bounding boxes for the
+                sub-grid (mm). Default: 1.0.
+            use_negotiated: Use negotiated congestion routing for inter-block
+                nets. Default: False.
+            progress_callback: Optional callback for progress updates.
+
+        Returns:
+            List of Route objects (block-internal + inter-block).
+        """
+        from .block_router import BlockRouter, BlockRoutingResult
+
+        # Determine which blocks to route
+        if blocks is not None:
+            block_list = list(blocks)
+        else:
+            block_list = list(self.registered_blocks.values())
+
+        # Fallback to flat routing when no blocks defined
+        if not block_list:
+            if use_negotiated:
+                return self.route_all_negotiated(progress_callback=progress_callback)
+            return self.route_all(progress_callback=progress_callback)
+
+        flush_print("\n=== Block-Aware Routing ===")
+        flush_print(f"  Blocks: {len(block_list)}")
+
+        all_routes: list[Route] = []
+
+        # Phase A: Route each block's internal nets via BlockRouter
+        block_results: list[BlockRoutingResult] = []
+        globally_connected: set[tuple[str, str]] = set()
+
+        for i, block in enumerate(block_list):
+            if progress_callback is not None:
+                progress = i / (len(block_list) + 1)
+                if not progress_callback(
+                    progress,
+                    f"Block routing: {block.block_id}",
+                    True,
+                ):
+                    break
+
+            flush_print(f"  Phase A: routing block '{block.block_id}'...")
+
+            block_router = BlockRouter(
+                block=block,
+                rules=self.rules,
+                net_class_map=self.net_class_map,
+                layer_stack=self.layer_stack,
+                margin=block_margin,
+                force_python=self._force_python,
+            )
+
+            # Feed pads from main router into block router
+            block_router.add_pads_from_autorouter(
+                self.pads, self.nets, self.net_names
+            )
+
+            result = block_router.route_block()
+            block_results.append(result)
+
+            # Mark block-internal routes on the main grid so inter-block
+            # routing respects them as obstacles.
+            for route in result.routes:
+                self._mark_route(route)
+                self.routes.append(route)
+            all_routes.extend(result.routes)
+            globally_connected |= result.connected_pad_keys
+
+            flush_print(
+                f"    Routed {len(result.routed_nets)} nets, "
+                f"{len(result.routes)} routes, "
+                f"{len(result.failed_nets)} failed"
+            )
+
+        # Phase B: Route inter-block and remaining nets on the main grid
+        flush_print("  Phase B: routing inter-block / global nets...")
+
+        # Build net ordering, excluding nets fully handled by block routing
+        fully_routed_nets: set[int] = set()
+        for br in block_results:
+            for net_id in br.routed_nets:
+                # A net is fully routed if ALL its pads were connected by block routing
+                pad_keys = self.nets.get(net_id, [])
+                if pad_keys and all(k in globally_connected for k in pad_keys):
+                    fully_routed_nets.add(net_id)
+
+        net_order = sorted(
+            self.nets.keys(), key=lambda n: self._get_net_priority(n)
+        )
+        net_order = self._filter_pour_nets(net_order)
+        nets_to_route = [
+            n for n in net_order if n != 0 and n not in fully_routed_nets
+        ]
+
+        flush_print(
+            f"    Skipping {len(fully_routed_nets)} fully block-routed nets"
+        )
+        flush_print(f"    Routing {len(nets_to_route)} remaining nets")
+
+        # Issue #1603: Sub-grid escape pre-pass for off-grid pads
+        escape_routes = self._run_subgrid_prepass()
+        all_routes.extend(escape_routes)
+
+        total_remaining = len(nets_to_route)
+        for i, net in enumerate(nets_to_route):
+            if progress_callback is not None:
+                progress = (len(block_list) + i) / (
+                    len(block_list) + total_remaining
+                )
+                net_name = self.net_names.get(net, f"Net {net}")
+                if not progress_callback(
+                    progress, f"Routing {net_name}", True
+                ):
+                    break
+
+            routes = self.route_net(net)
+            all_routes.extend(routes)
+            if routes:
+                flush_print(
+                    f"  Net {net}: {len(routes)} routes, "
+                    f"{sum(len(r.segments) for r in routes)} segments"
+                )
+
+        if progress_callback is not None:
+            routed_count = len({r.net for r in all_routes})
+            total = len([n for n in self.nets if n != 0])
+            progress_callback(1.0, f"Routed {routed_count}/{total} nets", False)
+
+        # Print failed nets summary if any routes failed
+        if self.routing_failures:
+            failure_summary = format_failed_nets_summary(self.routing_failures)
+            if failure_summary:
+                print(failure_summary)
+
+        return all_routes
+
     def route_all_advanced(
         self,
         monte_carlo_trials: int = 0,
@@ -2974,6 +3133,7 @@ class Autorouter:
         use_two_phase: bool = False,
         use_hierarchical: bool = False,
         use_multi_resolution: bool = False,
+        use_block_aware: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> list[Route]:
         """Unified entry point for advanced routing strategies.
@@ -2987,15 +3147,22 @@ class Autorouter:
                 corridor assignment before detailed routing.
             use_multi_resolution: Use multi-resolution routing with fine-grid
                 fallback for nets that fail on the coarse grid (Issue #1251).
+            use_block_aware: Use per-block detail routing with sub-Pathfinders
+                (Issue #1589). Routes each registered block's internal nets
+                independently before global inter-block routing.
             progress_callback: Optional callback for progress updates
 
         Returns:
             List of routes
 
         Note:
-            Priority order: monte_carlo > multi_resolution > hierarchical >
-            two_phase > negotiated > standard
+            Priority order: block_aware > monte_carlo > multi_resolution >
+            hierarchical > two_phase > negotiated > standard
         """
+        if use_block_aware and self.registered_blocks:
+            return self.route_all_block_aware(
+                use_negotiated=use_negotiated, progress_callback=progress_callback
+            )
         if monte_carlo_trials > 0:
             return self.route_all_monte_carlo(
                 monte_carlo_trials, use_negotiated, progress_callback=progress_callback

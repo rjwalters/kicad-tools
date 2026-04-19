@@ -481,6 +481,37 @@ class RegionGraph:
             coords.append((region.center_x, region.center_y))
         return coords
 
+    def register_block_occupancy(
+        self,
+        min_x: float,
+        min_y: float,
+        max_x: float,
+        max_y: float,
+        trace_count: int = 1,
+    ) -> None:
+        """Mark regions overlapping a block's area as partially occupied.
+
+        After block-internal routing completes, this increases utilization
+        for regions that overlap the block's bounding box. This guides
+        inter-block routing away from block interiors.
+
+        Args:
+            min_x: Minimum X of the block area (mm).
+            min_y: Minimum Y of the block area (mm).
+            max_x: Maximum X of the block area (mm).
+            max_y: Maximum Y of the block area (mm).
+            trace_count: Number of traces placed inside the block.
+        """
+        for region in self.regions.values():
+            # Check if region overlaps with block area
+            if (
+                region.max_x > min_x
+                and region.min_x < max_x
+                and region.max_y > min_y
+                and region.min_y < max_y
+            ):
+                region.utilization += trace_count
+
     def get_region_count(self) -> int:
         """Return the total number of regions."""
         return len(self.regions)
