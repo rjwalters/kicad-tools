@@ -72,14 +72,26 @@ class DRCFixer:
         self._parse_nets()
 
     def _parse_nets(self):
-        """Parse net definitions."""
-        for net_node in self.doc.find_all("net"):
-            atoms = net_node.get_atoms()
-            if len(atoms) >= 2:
+        """Parse net definitions from the PCB.
+
+        Only iterates top-level children of the PCB root node to avoid
+        finding nested ``(net N)`` attribute nodes inside zones, segments,
+        vias, and pads.  Top-level net definitions always have the form
+        ``(net <number> "<name>")``.
+        """
+        for child in self.doc.children:
+            if child.name != "net":
+                continue
+            atoms = child.get_atoms()
+            if len(atoms) < 2:
+                continue
+            try:
                 net_num = int(atoms[0])
-                net_name = str(atoms[1])
-                self.nets[net_num] = net_name
-                self.net_names[net_name] = net_num
+            except (ValueError, TypeError):
+                continue
+            net_name = str(atoms[1])
+            self.nets[net_num] = net_name
+            self.net_names[net_name] = net_num
 
     def find_segments_near(
         self,

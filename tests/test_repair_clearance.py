@@ -2025,3 +2025,197 @@ class TestPadClearanceRepair:
 
         # Should not crash; any return code acceptable in dry-run
         assert result in (0, 1, 2)
+
+
+# ── Tests for _parse_nets with zone-containing PCBs ──────────────────────────
+
+# PCB with zones that contain nested (net N) nodes -- triggers the crash
+# if _parse_nets uses recursive find_all("net").
+PCB_WITH_ZONES = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 1) (uuid "seg-z-1"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone-1")
+    (connect_pads (clearance 0.2))
+    (fill (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 90) (xy 120 90) (xy 120 120) (xy 90 120)))
+    (filled_polygon (layer "F.Cu")
+      (pts (xy 90.2 90.2) (xy 119.8 90.2) (xy 119.8 119.8) (xy 90.2 119.8))
+    )
+  )
+  (zone (net 2) (net_name "+3.3V") (layer "B.Cu") (uuid "zone-2")
+    (connect_pads (clearance 0.2))
+    (fill (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 90) (xy 120 90) (xy 120 120) (xy 90 120)))
+  )
+)
+"""
+
+
+class TestParseNetsWithZones:
+    """Tests for _parse_nets handling of PCBs with zone nodes."""
+
+    def test_parse_nets_no_crash_with_zones(self, tmp_path: Path):
+        """ClearanceRepairer should not crash when PCB contains zones with nested (net N) nodes."""
+        pcb_file = tmp_path / "zones.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONES)
+
+        # This would crash with ValueError before the fix because find_all("net")
+        # recursively found (net 1) inside zones where atoms[0] could be non-integer
+        repairer = ClearanceRepairer(pcb_file)
+
+        # Should parse only top-level net definitions
+        assert repairer.nets[0] == ""
+        assert repairer.nets[1] == "GND"
+        assert repairer.nets[2] == "+3.3V"
+        assert len(repairer.nets) == 3
+
+    def test_parse_nets_ignores_nested_net_attributes(self, tmp_path: Path):
+        """_parse_nets should only find top-level (net N "name") definitions,
+        not (net N) attributes nested inside segments, vias, or zones."""
+        pcb_file = tmp_path / "zones.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONES)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        # net_names should map only top-level definitions
+        assert repairer.net_names["GND"] == 1
+        assert repairer.net_names["+3.3V"] == 2
+        # Should NOT have extra entries from nested (net N) inside zones/segments
+        assert len(repairer.net_names) == 3  # "", "GND", "+3.3V"
+
+    def test_drill_repairer_no_crash_with_zones(self, tmp_path: Path):
+        """DrillClearanceRepairer should not crash when PCB contains zones."""
+        from kicad_tools.drc.repair_drill_clearance import DrillClearanceRepairer
+
+        pcb_file = tmp_path / "zones.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONES)
+
+        repairer = DrillClearanceRepairer(pcb_file)
+        assert repairer.nets[1] == "GND"
+        assert repairer.nets[2] == "+3.3V"
+
+    def test_fixer_no_crash_with_zones(self, tmp_path: Path):
+        """DRCFixer should not crash when PCB contains zones."""
+        from kicad_tools.drc.fixer import DRCFixer
+
+        pcb_file = tmp_path / "zones.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONES)
+
+        fixer = DRCFixer(str(pcb_file))
+        assert fixer.nets[1] == "GND"
+        assert fixer.nets[2] == "+3.3V"
+
+
+# ── Tests for zone-fill violation filtering ──────────────────────────────────
+
+
+class TestZoneFillViolationFiltering:
+    """Tests for filtering zone-fill violations before repair."""
+
+    def test_is_zone_fill_violation_detects_zone_items(self):
+        """_is_zone_fill_violation should return True for violations with zone items."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Clearance violation",
+            items=["Track [GND] on F.Cu", "Zone [+3.3V] on F.Cu"],
+        )
+        assert ClearanceRepairer._is_zone_fill_violation(v) is True
+
+    def test_is_zone_fill_violation_ignores_non_zone(self):
+        """_is_zone_fill_violation should return False for violations without zone items."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="Clearance violation",
+            items=["Track [GND] on F.Cu", "Via [+3.3V] on F.Cu - B.Cu"],
+        )
+        assert ClearanceRepairer._is_zone_fill_violation(v) is False
+
+    def test_zone_violations_excluded_from_total(self, tmp_path: Path):
+        """Zone-fill violations should be excluded from repair attempt count."""
+        pcb_file = tmp_path / "zones.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONES)
+
+        repairer = ClearanceRepairer(pcb_file)
+
+        report = DRCReport(
+            source_file="test",
+            created_at=None,
+            pcb_name="test",
+            violations=[
+                # Regular clearance violation (should be counted)
+                DRCViolation(
+                    type=ViolationType.CLEARANCE,
+                    type_str="clearance",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.05mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=100.0, y_mm=100.0, layer="F.Cu"),
+                        Location(x_mm=100.0, y_mm=100.15, layer="F.Cu"),
+                    ],
+                    items=["Track [GND] on F.Cu", "Track [+3.3V] on F.Cu"],
+                    nets=["GND", "+3.3V"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.05,
+                ),
+                # Zone-fill violation (should be excluded)
+                DRCViolation(
+                    type=ViolationType.CLEARANCE,
+                    type_str="clearance",
+                    severity=Severity.ERROR,
+                    message="Clearance violation (0.1mm < 0.2mm)",
+                    locations=[
+                        Location(x_mm=95.0, y_mm=95.0, layer="F.Cu"),
+                        Location(x_mm=95.0, y_mm=95.1, layer="F.Cu"),
+                    ],
+                    items=["Track [+3.3V] on F.Cu", "Zone [GND] on F.Cu"],
+                    nets=["+3.3V", "GND"],
+                    required_value_mm=0.2,
+                    actual_value_mm=0.1,
+                ),
+            ],
+        )
+
+        result = repairer.repair_from_report(report, max_displacement=0.5, dry_run=True)
+
+        # Only the non-zone violation should be counted
+        assert result.total_violations == 1
+
+    def test_zone_fill_violation_case_insensitive(self):
+        """Zone detection should be case-insensitive."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="test",
+            items=["track [GND] on F.Cu", "ZONE [+3.3V] on F.Cu"],
+        )
+        assert ClearanceRepairer._is_zone_fill_violation(v) is True
+
+    def test_zone_fill_violation_empty_items(self):
+        """Violation with no items should not be flagged as zone violation."""
+        v = DRCViolation(
+            type=ViolationType.CLEARANCE,
+            type_str="clearance",
+            severity=Severity.ERROR,
+            message="test",
+            items=[],
+        )
+        assert ClearanceRepairer._is_zone_fill_violation(v) is False

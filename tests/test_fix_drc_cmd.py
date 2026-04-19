@@ -2087,3 +2087,99 @@ class TestCountConnectedNets:
 
         result = _count_connected_nets(tmp_path / "nonexistent.kicad_pcb")
         assert result == -1
+
+
+# ── Tests for zone-filled PCBs in fix-drc pipeline ────────────────────────────
+
+PCB_WITH_ZONE_FILLS = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "+3.3V")
+  (segment (start 100 100) (end 110 100) (width 0.25) (layer "F.Cu") (net 2) (uuid "seg-zf-1"))
+  (zone (net 1) (net_name "GND") (layer "F.Cu") (uuid "zone-zf-1")
+    (connect_pads (clearance 0.2))
+    (fill (thermal_gap 0.3) (thermal_bridge_width 0.3))
+    (polygon (pts (xy 90 90) (xy 120 90) (xy 120 120) (xy 90 120)))
+    (filled_polygon (layer "F.Cu")
+      (pts (xy 90.2 90.2) (xy 119.8 90.2) (xy 119.8 119.8) (xy 90.2 119.8))
+    )
+  )
+)
+"""
+
+DRC_REPORT_ZONE_FILL = """\
+** Drc report for zone_fill.kicad_pcb **
+** Created on 2025-12-28T21:29:34-08:00 **
+
+** Found 1 DRC violations **
+[clearance]: Clearance violation (netclass 'Default' clearance 0.2000 mm; actual 0.1000 mm)
+    Rule: netclass 'Default'; error
+    @(100.0000 mm, 100.0000 mm): Track [+3.3V] on F.Cu
+    @(100.0000 mm, 100.1000 mm): Zone [GND] on F.Cu
+
+** Found 0 Footprint errors **
+** End of Report **
+"""
+
+
+class TestFixDrcWithZoneFills:
+    """Tests for fix-drc handling of zone-filled PCBs."""
+
+    def test_no_crash_loading_zone_pcb(self, tmp_path: Path):
+        """fix-drc should not crash when loading a PCB with zone fills."""
+        pcb_file = tmp_path / "zone_fill.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONE_FILLS)
+
+        report_file = tmp_path / "zone-drc.rpt"
+        report_file.write_text(DRC_REPORT_ZONE_FILL)
+
+        result = main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--quiet",
+            ]
+        )
+
+        # Should not crash; zone violations are filtered so no targeted violations
+        assert result in (0, 1, 2)
+
+    def test_zone_violations_filtered_in_json_output(self, tmp_path: Path, capsys):
+        """Zone-fill violations should be excluded from clearance repair count."""
+        pcb_file = tmp_path / "zone_fill.kicad_pcb"
+        pcb_file.write_text(PCB_WITH_ZONE_FILLS)
+
+        report_file = tmp_path / "zone-drc.rpt"
+        report_file.write_text(DRC_REPORT_ZONE_FILL)
+
+        main(
+            [
+                str(pcb_file),
+                "--drc-report",
+                str(report_file),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+
+        # The zone violation should have been filtered out by ClearanceRepairer
+        # so clearance violations count should be 0
+        assert data["clearance"]["violations"] == 0
