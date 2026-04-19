@@ -1,156 +1,151 @@
 # Release Manager
 
-You are preparing a release of the `kicad-tools` package from the {{workspace}} repository.
+You are preparing a release of **Loom** from the {{workspace}} repository.
 
 ## Overview
 
 This skill guides a careful, interactive release process. Every release must:
-1. Analyze what changed since the last release
-2. Help the user decide the correct semver bump
-3. Draft and refine the CHANGELOG entry
-4. Update version references
-5. Commit, tag, and (with confirmation) push
+1. Verify CI is green on main
+2. Analyze what changed since the last release
+3. Help the user decide the correct semver bump
+4. Draft and refine the CHANGELOG entry
+5. Update version across all 7 version-bearing files
+6. Commit, tag, and (with confirmation) push
+7. Create a GitHub Release to trigger the build workflow
 
 **Do not rush. Each phase requires user confirmation before proceeding.**
 
-## Phase 1: Gather Changes
+## Phase 1: Pre-flight Checks
 
-Run these commands to understand what's changed:
+Before starting, verify the release is safe to cut:
 
+```bash
+# Check CI status on main
+gh run list --branch main --limit 5 --json name,conclusion --jq '.[] | "\(.name): \(.conclusion)"'
+
+# Check for open PRs that might need to land first
+gh pr list --state open --json number,title --jq '.[] | "#\(.number) \(.title)"'
+
+# Check for uncommitted changes
+git status
 ```
+
+Present findings to the user. If CI is failing, stop and fix first. If there are open PRs, ask if they should land before the release.
+
+## Phase 2: Gather Changes
+
+```bash
 # Find the last release tag
 git tag --sort=-v:refname | head -1
+
+# Show current version
+./scripts/version.sh
 
 # List all commits since that tag
 git log <last-tag>..HEAD --oneline
 
 # Show the full diff stats
 git diff <last-tag>..HEAD --stat
-
-# Count by commit type (feat/fix/etc)
-git log <last-tag>..HEAD --oneline --format="%s"
 ```
 
 Present the user with:
 - **Last release**: tag name, date, and version
 - **Commits since release**: count and full list
-- **Change summary**: categorized by conventional commit prefix (feat, fix, refactor, docs, test, chore, etc.)
-- **Files changed**: high-level summary (which subsystems were touched)
+- **Change summary**: categorized by conventional commit prefix (feat, fix, refactor, docs, test, chore)
+- **Files changed**: high-level summary of which subsystems were touched
 
 If there are zero commits since the last tag, stop and tell the user there's nothing to release.
 
-## Phase 2: Semver Decision
+## Phase 3: Semver Decision
 
-Present a semver analysis to help the user choose the right version bump. Reference https://semver.org:
+Present a semver analysis. Reference https://semver.org:
 
-### Breaking Changes (would warrant MAJOR bump)
-Scan for any of these in the diff since last tag:
-- Removed or renamed public API functions/classes/methods
-- Changed function signatures (parameter order, required params added)
-- Changed return types or error behavior
-- Removed CLI commands or changed their flags/behavior
-- Removed or renamed MCP tools
-- Changed file format output
+### Breaking Changes (MAJOR bump)
+Scan for:
+- Removed or renamed public API functions/types
+- Changed ForgeClient protocol methods
+- Changed CLI command flags/behavior
+- Changed MCP tool interfaces
+- Removed or renamed Tauri commands
+- Changed config file format
 
-### New Capabilities (would warrant MINOR bump)
-- New CLI commands or subcommands
+### New Capabilities (MINOR bump)
+- New forge support (e.g., Gitea, GitLab)
+- New CLI commands (`loom-forge`, `loom-auto-merge`)
+- New agent roles or orchestration features
 - New MCP tools
-- New public API classes/functions
-- New optional dependencies or extras
 - New configuration options
 
-### Bug Fixes / Internal (would warrant PATCH bump)
+### Bug Fixes / Internal (PATCH bump)
 - Bug fixes that don't change API
 - Performance improvements
-- Test improvements
 - Internal refactoring
 - Documentation updates
+- Dependency bumps
 
-Present your analysis like this:
+Present your recommendation and **ask the user to confirm or override**. Do not proceed until confirmed.
 
-```
-## Semver Analysis
+## Phase 4: Draft CHANGELOG
 
-Current version: X.Y.Z
-
-### Breaking changes found:
-- [list or "None detected"]
-
-### New capabilities:
-- [list]
-
-### Fixes / internal:
-- [list]
-
-### Recommendation: X.Y.Z -> A.B.C (MINOR/PATCH/MAJOR)
-Rationale: [brief explanation]
-```
-
-**Ask the user to confirm or override the version number.** Do not proceed until they confirm.
-
-## Phase 3: Draft CHANGELOG
-
-Draft a CHANGELOG entry following the existing format in `CHANGELOG.md`. Study the existing entries to match style and structure.
+Draft a CHANGELOG entry following the existing format in `CHANGELOG.md`. Study existing entries to match style.
 
 Key formatting rules:
 - Use `## [X.Y.Z] - YYYY-MM-DD` header with today's date
-- Group changes under `### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Deprecated` as appropriate
-- Use sub-headers (#### Section Name) to group related changes by subsystem when there are many changes
-- Reference PR/issue numbers with `(#NNN)` format
-- Use bold for the item title, followed by description
-- Keep descriptions concise but informative — a user should understand what changed and why
-- Omit empty sections (don't include `### Changed` if nothing changed)
-- Add an `[Unreleased]` section above the new entry if one doesn't exist
+- Start with a `### Summary` paragraph describing the release theme
+- Group changes under `### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Renamed` as appropriate
+- Reference issue numbers with `(#NNN)` format
+- Keep descriptions concise but informative
+- Omit empty sections
 
-Present the draft to the user and ask for revisions. Iterate until they approve.
+Present the draft and ask for revisions. Iterate until approved.
 
-## Phase 4: Apply Changes
+## Phase 5: Apply Changes
 
-Once the user approves the CHANGELOG draft:
+Once the user approves:
 
-1. **Update `pyproject.toml`**: Change `version = "X.Y.Z"` to the new version
-2. **Update `CHANGELOG.md`**: Insert the new entry below the `## [Unreleased]` header (add one if missing)
-3. **Verify**: Read back both files to confirm the changes look correct
+1. **Update CHANGELOG.md**: Insert the new entry below `## [Unreleased]`
+2. **Bump version**: Run `./scripts/version.sh bump <level> --tag`
+   - This updates all 7 files: `package.json`, `mcp-loom/package.json`, `src-tauri/tauri.conf.json`, 3 `Cargo.toml` files, `CLAUDE.md`
+   - Plus `Cargo.lock`
+   - Creates the commit and tag automatically
+3. **Verify**: `./scripts/version.sh check`
 
-Show the user the exact changes (a diff summary) and ask for final confirmation.
+Note: The version bump script creates the commit, so commit the CHANGELOG first:
+```bash
+git add CHANGELOG.md
+git commit -m "docs: add X.Y.Z changelog entry"
+./scripts/version.sh bump <level> --tag
+# Move tag to include both commits
+git tag -f vX.Y.Z
+```
 
-## Phase 5: Commit and Tag
+Show the user the result and ask for final confirmation.
+
+## Phase 6: Push and Release
 
 After final confirmation:
 
-1. **Stage** the two changed files:
-   ```
-   git add pyproject.toml CHANGELOG.md
-   ```
-
-2. **Commit** with a conventional message:
-   ```
-   git commit -m "chore: release v{VERSION}"
+1. **Push commits and tag**:
+   ```bash
+   git push origin main --tags
    ```
 
-3. **Tag** the commit:
+2. **Create GitHub Release** (this triggers the build workflow):
+   ```bash
+   gh release create vX.Y.Z --title "vX.Y.Z" --notes-file - <<< "$(changelog excerpt)"
    ```
-   git tag v{VERSION}
+   Use the CHANGELOG entry as the release notes.
+
+3. **Verify build triggered**:
+   ```bash
+   gh run list --workflow=release.yml --limit 1
    ```
 
-4. **Show the result**:
-   ```
-   git log --oneline -3
-   git tag --sort=-v:refname | head -3
-   ```
+**Do not push or create the release without explicit user confirmation.**
 
-5. **Ask about pushing**: Tell the user what push commands are needed and ask if they want to proceed:
-   ```
-   git push origin main
-   git push origin v{VERSION}
-   ```
-   Explain that pushing the tag will trigger the PyPI publish workflow (`.github/workflows/publish.yml`).
+## Phase 7: Post-Release Summary
 
-**Do not push without explicit user confirmation.**
-
-## Phase 6: Post-Release Summary
-
-After everything is done, present a summary:
+Present a summary:
 
 ```
 ## Release Complete
@@ -158,13 +153,18 @@ After everything is done, present a summary:
 - Version: vX.Y.Z
 - Commit: <sha>
 - Tag: vX.Y.Z
-- PyPI publish: [will trigger on push / user declined push]
-- CHANGELOG: updated with N items across M categories
+- GitHub Release: created
+- Build workflow: [triggered / status]
+- CHANGELOG: updated with N items
+- Version files: 7 files + Cargo.lock updated
 ```
 
 ## Important Notes
 
-- **Single source of truth**: Version lives in `pyproject.toml` line 7. The `__init__.py` reads it via `importlib.metadata` automatically — no code change needed there.
-- **No pre-release versions**: This project uses simple semver (X.Y.Z), not pre-release suffixes.
-- **Conventional commits**: This project uses conventional commit prefixes (`feat:`, `fix:`, `chore:`, etc.) — use them to categorize changes.
-- **PyPI workflow**: Pushing a `v*` tag triggers `.github/workflows/publish.yml` which builds and publishes to PyPI automatically.
+- **Version script**: `scripts/version.sh` is the single source of truth for version management. Never manually edit version numbers.
+- **7 version-bearing files**: `package.json`, `mcp-loom/package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `loom-daemon/Cargo.toml`, `loom-api/Cargo.toml`, `CLAUDE.md`
+- **Release workflow trigger**: The build workflow (`.github/workflows/release.yml`) triggers on GitHub Release creation (`release: types: [created]`), NOT on tag push. You must create a GitHub Release via `gh release create`.
+- **Conventional commits**: This project uses conventional commit prefixes (`feat:`, `fix:`, `chore:`, etc.).
+- **Build output**: The release workflow builds macOS DMGs (Apple Silicon + Intel) and attaches them to the GitHub Release.
+- **CLAUDE.md update**: The version script updates the `**Loom Version**` line in CLAUDE.md automatically.
+- **Branch protection**: Direct pushes to main will show a ruleset bypass warning — this is expected for release commits.

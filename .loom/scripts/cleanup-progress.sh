@@ -14,6 +14,13 @@
 
 set -euo pipefail
 
+# Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea)
+if command -v loom-forge &>/dev/null; then
+    FORGE="loom-forge"
+else
+    FORGE="gh"
+fi
+
 # ANSI color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -168,7 +175,7 @@ for progress_file in "$PROGRESS_DIR"/shepherd-*.json; do
     stale)
       # Delete working files for closed issues
       if [[ "$file_status" == "working" && "$file_issue" != "0" ]]; then
-        issue_state=$(gh issue view "$file_issue" --json state --jq '.state' 2>/dev/null || echo "unknown")
+        issue_state=$($FORGE issue view "$file_issue" --json state --jq '.state' 2>/dev/null || echo "unknown")
         if [[ "$issue_state" == "CLOSED" ]]; then
           should_delete=true
         fi

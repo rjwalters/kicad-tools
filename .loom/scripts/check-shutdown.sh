@@ -14,6 +14,13 @@
 
 set -e
 
+# Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea)
+if command -v loom-forge &>/dev/null; then
+    FORGE="loom-forge"
+else
+    FORGE="gh"
+fi
+
 # Navigate to repository root (handle being called from worktree)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$SCRIPT_DIR/../..")"
@@ -37,7 +44,7 @@ fi
 
 # Check for issue-specific abort (if issue number provided)
 if [ -n "$ISSUE_NUMBER" ]; then
-    LABELS=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+    LABELS=$($FORGE issue view "$ISSUE_NUMBER" --json labels --jq '.labels[].name' 2>/dev/null || echo "")
     if echo "$LABELS" | grep -q "loom:abort"; then
         echo "SHUTDOWN:abort:$ISSUE_NUMBER"
         exit 0

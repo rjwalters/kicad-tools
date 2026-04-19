@@ -26,10 +26,14 @@
 
 set -euo pipefail
 
-# Use gh-cached for read-only queries to reduce API calls (see issue #1609)
-# Verify the Python interpreter works too — a broken runtime (e.g. unaccepted
-# Xcode license) would make every subsequent gh call fail with a misleading error.
+# Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea).
+# Falls back to gh-cached or gh for any commands not covered by loom-forge.
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if command -v loom-forge &>/dev/null; then
+    FORGE="loom-forge"
+else
+    FORGE="gh"
+fi
 GH_CACHED="$_SCRIPT_DIR/gh-cached"
 if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
     GH="$GH_CACHED"
@@ -140,7 +144,7 @@ log_info "Threshold (no PR): ${STALE_THRESHOLD_HOURS} hours"
 log_info "Threshold (with PR): ${STALE_WITH_PR_HOURS} hours"
 
 # Get all loom:building issues with their creation/update times
-BUILDING_ISSUES=$($GH issue list --label "loom:building" --state open --json number,title,createdAt,updatedAt 2>/dev/null || echo "[]")
+BUILDING_ISSUES=$($FORGE issue list --label "loom:building" --state open --json number,title,createdAt,updatedAt 2>/dev/null || echo "[]")
 
 if [[ "$BUILDING_ISSUES" == "[]" ]]; then
   log_success "No loom:building issues found"
@@ -155,7 +159,7 @@ log_info "Found $TOTAL_BUILDING issues with loom:building label"
 
 # Get all open PRs once (more efficient than per-issue queries)
 # Include labels to detect blocked PRs (loom:changes-requested)
-OPEN_PRS=$($GH pr list --state open --json number,headRefName,body,labels 2>/dev/null || echo "[]")
+OPEN_PRS=$($FORGE pr list --state open --json number,headRefName,body,labels 2>/dev/null || echo "[]")
 
 # Collect stale issues using a temp file to avoid subshell issues
 STALE_FILE=$(mktemp)
@@ -228,7 +232,7 @@ for i in $(seq 0 $((ISSUE_COUNT - 1))); do
 
       if [[ "$RECOVER" == "true" ]]; then
         log_info "Recovering #$NUMBER..."
-        gh issue edit "$NUMBER" --remove-label "loom:building" --add-label "loom:issue"
+        $FORGE issue edit "$NUMBER" --remove-label "loom:building" --add-label "loom:issue"
 
         # Create comment body
         COMMENT_BODY="🔄 **Auto-recovered from stale state**
@@ -246,7 +250,7 @@ This issue was in \`loom:building\` state for ${AGE_HOURS} hours without an asso
 
 This issue is now ready to be claimed by another agent."
 
-        gh issue comment "$NUMBER" --body "$COMMENT_BODY"
+        $FORGE issue comment "$NUMBER" --body "$COMMENT_BODY"
         log_success "Recovered #$NUMBER"
       fi
 
@@ -268,7 +272,7 @@ This issue is now ready to be claimed by another agent."
 
       if [[ "$RECOVER" == "true" ]]; then
         log_info "Transitioning #$NUMBER to blocked state..."
-        gh issue edit "$NUMBER" --remove-label "loom:building" --add-label "loom:blocked"
+        $FORGE issue edit "$NUMBER" --remove-label "loom:building" --add-label "loom:blocked"
 
         # Create comment body explaining the blocked state
         COMMENT_BODY="🚧 **Issue blocked - PR needs attention**
@@ -289,7 +293,7 @@ This issue's PR #$PR_NUMBER has been marked \`loom:changes-requested\`, indicati
 2. PR transitions to \`loom:review-requested\`
 3. After Judge approval, issue can be closed via PR merge"
 
-        gh issue comment "$NUMBER" --body "$COMMENT_BODY"
+        $FORGE issue comment "$NUMBER" --body "$COMMENT_BODY"
         log_success "Transitioned #$NUMBER to blocked state"
       fi
 

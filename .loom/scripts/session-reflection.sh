@@ -7,6 +7,13 @@
 
 set -euo pipefail
 
+# Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea)
+if command -v loom-forge &>/dev/null; then
+    FORGE="loom-forge"
+else
+    FORGE="gh"
+fi
+
 # ANSI color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -423,7 +430,7 @@ create_issues() {
       info "[DRY-RUN] Would create: $title"
     else
       local issue_url
-      issue_url=$(gh issue create \
+      issue_url=$($FORGE issue create \
         --repo "$UPSTREAM_REPO" \
         --title "$title" \
         --label "$category" \

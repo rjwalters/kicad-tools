@@ -181,10 +181,8 @@ collect_tracked_files() {
         files+=("${f#$root/}")
     done < <(find "$root/.github/ISSUE_TEMPLATE" -type f -print0 2>/dev/null || true)
 
-    # .github/workflows/*.yml (only loom-managed ones)
-    if [[ -f "$root/.github/workflows/label-external-issues.yml" ]]; then
-        files+=(".github/workflows/label-external-issues.yml")
-    fi
+    # .github/workflows/ - no workflows installed by default
+    # (label-external-issues.yml moved to optional in #3098)
 
     # Top-level docs
     if [[ -f "$root/CLAUDE.md" ]]; then

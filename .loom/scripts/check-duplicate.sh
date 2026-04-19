@@ -29,6 +29,13 @@
 
 set -euo pipefail
 
+# Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea)
+if command -v loom-forge &>/dev/null; then
+    FORGE="loom-forge"
+else
+    FORGE="gh"
+fi
+
 # Colors for output (only when stderr is a terminal)
 if [[ -t 2 ]]; then
     RED='\033[0;31m'
@@ -178,7 +185,7 @@ search_similar_issues() {
 
     # Search open issues
     local issues
-    if ! issues=$(gh issue list --state=open --limit=50 --json number,title,body 2>&1); then
+    if ! issues=$($FORGE issue list --state=open --limit=50 --json number,title,body 2>&1); then
         print_error "Failed to fetch issues: $issues"
         return 2
     fi
@@ -235,7 +242,7 @@ search_merged_prs() {
 
     # Search recently merged PRs
     local prs
-    if ! prs=$(gh pr list --state=merged --limit=20 --json number,title,body 2>&1); then
+    if ! prs=$($FORGE pr list --state=merged --limit=20 --json number,title,body 2>&1); then
         print_warning "Failed to fetch merged PRs: $prs"
         return 0
     fi
@@ -288,7 +295,7 @@ search_closed_issues() {
 
     # Search recently closed issues
     local issues
-    if ! issues=$(gh issue list --state=closed --limit=20 --json number,title,body 2>&1); then
+    if ! issues=$($FORGE issue list --state=closed --limit=20 --json number,title,body 2>&1); then
         print_warning "Failed to fetch closed issues: $issues"
         return 0
     fi
@@ -392,15 +399,15 @@ main() {
         exit 2
     fi
 
-    # Check for gh CLI
-    if ! command -v gh &> /dev/null; then
-        print_error "gh CLI not found. Please install GitHub CLI."
+    # Check for forge CLI
+    if ! command -v "$FORGE" &> /dev/null; then
+        print_error "$FORGE CLI not found. Please install loom-forge or GitHub CLI."
         exit 2
     fi
 
-    # Check gh authentication
-    if ! gh auth status &> /dev/null; then
-        print_error "Not authenticated with GitHub. Run 'gh auth login'."
+    # Check forge authentication
+    if ! $FORGE auth status &> /dev/null; then
+        print_error "Not authenticated with forge. Run 'gh auth login' (GitHub) or set GITEA_TOKEN (Gitea)."
         exit 2
     fi
 

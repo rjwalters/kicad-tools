@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# check-ci-status.sh - Check GitHub Actions CI status for the latest main branch commit
+# check-ci-status.sh - Check CI status for the latest main branch commit
+#
+# Supports both GitHub and Gitea forges. Forge detection is automatic.
+# - GitHub: uses Check Runs API + commit status API
+# - Gitea: uses commit status API only (mapped to check-run shape)
 #
 # Usage:
 #   ./check-ci-status.sh [--commit SHA]
@@ -18,6 +22,7 @@
 #
 # Environment Variables:
 #   LOOM_CI_TIMEOUT - Timeout for API calls in seconds (default: 10)
+#   LOOM_FORGE_TYPE - Override forge detection ("github" or "gitea")
 #
 # Examples:
 #   ./check-ci-status.sh                    # Check HEAD status
@@ -33,6 +38,9 @@ set -euo pipefail
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Source forge helpers for multi-forge support
+source "$SCRIPT_DIR/lib/forge-helpers.sh"
 
 # --- Color Output ---
 RED='\033[0;31m'
@@ -80,17 +88,27 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Validation ---
-if ! command -v gh &>/dev/null; then
-    echo "Error: GitHub CLI (gh) is required but not installed" >&2
-    exit 3
-fi
-
 if ! command -v jq &>/dev/null; then
     echo "Error: jq is required but not installed" >&2
     exit 3
 fi
 
 cd "$WORKSPACE_ROOT"
+
+# Detect forge type
+forge_detect
+
+# For GitHub, we need the gh CLI
+if [[ "$FORGE_TYPE" == "github" ]] && ! command -v gh &>/dev/null; then
+    echo "Error: GitHub CLI (gh) is required but not installed" >&2
+    exit 3
+fi
+
+# Get repo NWO for forge API calls
+REPO_NWO="$(forge_get_repo_nwo)" || {
+    echo "Error: Could not determine repository" >&2
+    exit 3
+}
 
 # --- Get Commit SHA ---
 if [[ -z "$COMMIT" ]]; then
@@ -105,41 +123,21 @@ fi
 SHORT_SHA="${COMMIT:0:7}"
 
 # --- Fetch CI Status ---
-# Use GitHub CLI to get combined check status
-# This combines both status API and check runs API
+# Uses forge helpers to get combined check status from either GitHub or Gitea
 
 get_ci_status() {
     local commit="$1"
 
-    # Get check runs (GitHub Actions workflow runs)
+    # Get check runs (GitHub Actions / Gitea CI statuses mapped to check-run shape)
     local check_runs
-    check_runs=$(gh api "repos/{owner}/{repo}/commits/$commit/check-runs" \
-        --header "Accept: application/vnd.github+json" \
-        --jq '{
-            total_count: .total_count,
-            check_runs: [.check_runs[] | {
-                name: .name,
-                status: .status,
-                conclusion: .conclusion,
-                html_url: .html_url
-            }]
-        }' 2>/dev/null) || {
-        echo "Error: Failed to fetch check runs from GitHub API" >&2
+    check_runs=$(forge_get_check_runs "$REPO_NWO" "$commit") || {
+        echo "Error: Failed to fetch check runs from forge API" >&2
         return 1
     }
 
-    # Get combined status (commit status API - older checks)
+    # Get combined status (commit status API)
     local combined_status
-    combined_status=$(gh api "repos/{owner}/{repo}/commits/$commit/status" \
-        --header "Accept: application/vnd.github+json" \
-        --jq '{
-            state: .state,
-            statuses: [.statuses[] | {
-                context: .context,
-                state: .state,
-                target_url: .target_url
-            }]
-        }' 2>/dev/null) || {
+    combined_status=$(forge_get_commit_status "$REPO_NWO" "$commit") || {
         # Not critical if this fails - check runs are more important
         combined_status='{"state": "unknown", "statuses": []}'
     }

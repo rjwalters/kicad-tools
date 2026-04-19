@@ -2,6 +2,8 @@
 
 # test-plan-metrics.sh - Test plan execution metrics from Judge PR reviews
 #
+# Supports both GitHub and Gitea forges. Forge detection is automatic.
+#
 # Extracts and aggregates test plan execution data from Judge review comments
 # on merged PRs. The Judge documents test execution using a structured format
 # with emoji markers (✅ executed, ⚠️ observation-only, ⏭️ skipped).
@@ -43,6 +45,12 @@
 
 set -euo pipefail
 
+# --- Configuration ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source forge helpers for multi-forge support
+source "$SCRIPT_DIR/lib/forge-helpers.sh"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -58,13 +66,10 @@ LIMIT=50
 REPO_SLUG=""
 
 # Cache repo slug to avoid repeated API calls
-# Uses gh repo view with fallback to git remote URL parsing for worktree contexts
+# Uses forge-helpers for detection, with fallback to git remote URL parsing
 get_repo_slug() {
     if [[ -z "$REPO_SLUG" ]]; then
-        REPO_SLUG=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null || echo "")
-        if [[ -z "$REPO_SLUG" ]]; then
-            REPO_SLUG=$(git remote get-url origin 2>/dev/null | sed -E 's|\.git$||; s|.*[:/]([^/]+/[^/]+)$|\1|' || echo "")
-        fi
+        REPO_SLUG=$(forge_get_repo_nwo 2>/dev/null || echo "")
     fi
     echo "$REPO_SLUG"
 }
@@ -109,7 +114,7 @@ ${YELLOW}METRICS${NC}
     - other (⏭️) - other skip reasons
 
 ${YELLOW}DATA SOURCE${NC}
-    Parses Judge review comments on merged PRs via GitHub API.
+    Parses Judge review comments on merged PRs via forge API (GitHub or Gitea).
     The Judge documents test execution using structured emoji markers:
       ✅ Executed    ⚠️ Observation-only    ⏭️ Skipped (long-running/external)
 EOF
@@ -141,12 +146,9 @@ get_date_filter() {
 # Fetch merged PRs for the period
 fetch_merged_prs() {
     local date_filter="$1"
-    if [[ -n "$date_filter" ]]; then
-        gh pr list --state merged --limit "$LIMIT" --json number,mergedAt \
-            --jq '[.[] | select(.mergedAt >= "'"$date_filter"'")] | .[].number' 2>/dev/null || echo ""
-    else
-        gh pr list --state merged --limit "$LIMIT" --json number --jq '.[].number' 2>/dev/null || echo ""
-    fi
+    local slug
+    slug=$(get_repo_slug)
+    forge_list_merged_prs "$slug" "$LIMIT" "$date_filter"
 }
 
 # Extract Judge review comment with Test Execution section from a PR
@@ -154,14 +156,16 @@ fetch_merged_prs() {
 # Handles both "## Test Execution" (heading) and "**Test Execution:**" (bold) formats.
 get_judge_test_execution() {
     local pr_number="$1"
+    local slug
+    slug=$(get_repo_slug)
     # Get all comments (issue comments + review comments) and find the most recent
     # one with a Test Execution section
     local comments
-    comments=$(gh pr view "$pr_number" --comments --json comments --jq '.comments[].body' 2>/dev/null || echo "")
+    comments=$(forge_get_pr_comments "$slug" "$pr_number")
 
     # Also check review bodies
     local reviews
-    reviews=$(gh api "repos/$(get_repo_slug)/pulls/${pr_number}/reviews" --jq '.[].body // empty' 2>/dev/null || echo "")
+    reviews=$(forge_get_pr_reviews "$slug" "$pr_number")
 
     # Combine and find the last one with Test Execution
     local all_bodies
@@ -196,7 +200,9 @@ pr_has_test_plan() {
     local pr_number="$1"
     local body="${2:-}"
     if [[ -z "$body" ]]; then
-        body=$(gh pr view "$pr_number" --json body --jq '.body // ""' 2>/dev/null || echo "")
+        local slug
+        slug=$(get_repo_slug)
+        body=$(forge_get_pr_body "$slug" "$pr_number")
     fi
     echo "$body" | grep -qi '## test plan' && return 0
     return 1
@@ -296,7 +302,9 @@ collect_metrics() {
 
         # Prefetch PR body to avoid redundant API calls
         local pr_body
-        pr_body=$(gh pr view "$pr_number" --json body --jq '.body // ""' 2>/dev/null || echo "")
+        local slug
+        slug=$(get_repo_slug)
+        pr_body=$(forge_get_pr_body "$slug" "$pr_number")
 
         # Get test execution section from Judge comments
         local test_section
@@ -517,6 +525,9 @@ case "$FORMAT" in
     text|json) ;;
     *) echo -e "${RED}Error: Invalid format '$FORMAT'. Use: text, json${NC}" >&2; exit 1 ;;
 esac
+
+# Detect forge type
+forge_detect
 
 # Run
 collect_metrics

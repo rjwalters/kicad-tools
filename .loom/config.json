@@ -1,6 +1,13 @@
 {
   "version": "2",
   "offlineMode": false,
+  "forge": {
+    "type": "auto",
+    "gitea": {
+      "api_url": null,
+      "known_hosts": []
+    }
+  },
   "health_monitoring": {
     "enabled": true,
     "collect_interval_minutes": 5,

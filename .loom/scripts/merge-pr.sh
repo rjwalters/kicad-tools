@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Loom PR Merge - Worktree-safe merge using GitHub API
+# Loom PR Merge - Worktree-safe merge using forge API (GitHub or Gitea)
 # Usage: ./.loom/scripts/merge-pr.sh <pr-number> [options]
 #
-# Merges a PR via the GitHub API (not `gh pr merge`) to avoid
+# Merges a PR via the forge API (not `gh pr merge`) to avoid
 # "already used by worktree" errors when merging from inside a worktree.
+#
+# Supports both GitHub and Gitea forges. Forge detection is automatic
+# (see forge-helpers.sh for details).
 #
 # Options:
 #   --no-cleanup-worktree  Skip local worktree cleanup after merge
@@ -61,30 +64,22 @@ find_main_repo_root() {
 REPO_ROOT="$(find_main_repo_root)" || \
   error "Not in a git repository"
 
+# Source forge helpers for multi-forge support
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/forge-helpers.sh"
+forge_detect
+
 # Use gh-cached for read-only queries to reduce API calls (see issue #1609)
 # Verify the Python interpreter works too — a broken runtime (e.g. unaccepted
 # Xcode license) would make every subsequent gh call fail with a misleading error.
 GH_CACHED="$REPO_ROOT/.loom/scripts/gh-cached"
-if [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
+if [[ "$FORGE_TYPE" == "github" ]] && [[ -x "$GH_CACHED" ]] && "$GH_CACHED" --version &>/dev/null; then
     GH="$GH_CACHED"
 else
     GH="gh"
 fi
 
-# Auto-detect owner/repo with fallback for worktree contexts
-# Primary: gh repo view (uses GitHub API, most reliable when authenticated)
-# Fallback: parse git remote URL (local operation, works when gh fails in worktrees)
-detect_repo_nwo() {
-  local nwo
-  # Try gh repo view first (works in most cases)
-  nwo="$($GH repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" && [[ -n "$nwo" ]] && echo "$nwo" && return 0
-  # Fallback: parse origin remote URL from the main repo root
-  # Handles both HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git)
-  nwo="$(cd "$REPO_ROOT" && git remote get-url origin 2>/dev/null | sed -E 's|\.git$||; s|.*[:/]([^/]+/[^/]+)$|\1|')" && [[ -n "$nwo" ]] && echo "$nwo" && return 0
-  return 1
-}
-
-REPO_NWO="$(detect_repo_nwo)" || \
+REPO_NWO="$(forge_get_repo_nwo "$GH")" || \
   error "Could not determine repository. Is 'gh' authenticated?"
 
 # Parse arguments
@@ -115,7 +110,7 @@ done
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || error "PR number must be numeric: $PR_NUMBER"
 
 # Fetch PR state
-PR_JSON=$($GH api "repos/$REPO_NWO/pulls/$PR_NUMBER" 2>/dev/null) || \
+PR_JSON=$(forge_get_pr "$REPO_NWO" "$PR_NUMBER" "$GH") || \
   error "Could not fetch PR #$PR_NUMBER"
 
 PR_STATE=$(echo "$PR_JSON" | jq -r '.state')
@@ -144,8 +139,18 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
     info "[dry-run] Would enable auto-merge for PR #$PR_NUMBER"
     exit 0
   fi
-  # Use gh CLI for auto-merge (API for this requires GraphQL)
-  if gh pr merge "$PR_NUMBER" --auto --squash --delete-branch 2>/dev/null; then
+  # Prefer loom-auto-merge CLI (forge-agnostic, with poll-and-merge for Gitea)
+  if command -v loom-auto-merge &>/dev/null; then
+    info "Using loom-auto-merge (forge-agnostic auto-merge)"
+    if loom-auto-merge "$PR_NUMBER" --method squash; then
+      success "Auto-merge completed for PR #$PR_NUMBER"
+      exit 0
+    else
+      error "Failed to auto-merge PR #$PR_NUMBER"
+    fi
+  fi
+  # Fallback: shell-based forge_auto_merge
+  if forge_auto_merge "$REPO_NWO" "$PR_NUMBER" 2>/dev/null; then
     success "Auto-merge enabled for PR #$PR_NUMBER"
     exit 0
   else
@@ -169,13 +174,11 @@ MAX_MERGE_RETRIES=3
 MERGE_RETRY_DELAY=5
 
 for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
-  MERGE_RESPONSE=$(gh api "repos/$REPO_NWO/pulls/$PR_NUMBER/merge" \
-    -X PUT \
-    -f merge_method=squash \
-    2>&1) && break  # Success, exit loop
+  MERGE_RESPONSE=$(forge_merge_pr "$REPO_NWO" "$PR_NUMBER" 2>&1) && break  # Success, exit loop
 
   # Check if it merged despite error (race condition)
-  RECHECK=$($GH --no-cache api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+  RECHECK_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
+  RECHECK=$(echo "$RECHECK_JSON" | jq -r '.merged // false')
   if [[ "$RECHECK" == "true" ]]; then
     warning "Merge reported error but PR is merged (race condition)"
     break
@@ -186,7 +189,8 @@ for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
   if echo "$MERGE_RESPONSE" | grep -q "Merge already in progress"; then
     info "Merge already in progress (HTTP 405), waiting for completion..."
     sleep 5
-    RECHECK=$($GH --no-cache api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+    RECHECK_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
+    RECHECK=$(echo "$RECHECK_JSON" | jq -r '.merged // false')
     if [[ "$RECHECK" == "true" ]]; then
       success "PR #$PR_NUMBER merged (concurrent merge completed)"
       break
@@ -201,10 +205,8 @@ for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
     if [[ $MERGE_ATTEMPT -lt $MAX_MERGE_RETRIES ]]; then
       info "Branch is behind base branch, updating... (attempt $MERGE_ATTEMPT/$MAX_MERGE_RETRIES)"
 
-      # Update branch via GitHub API
-      UPDATE_RESPONSE=$(gh api "repos/$REPO_NWO/pulls/$PR_NUMBER/update-branch" \
-        -X PUT \
-        2>&1) || {
+      # Update branch via forge API
+      UPDATE_RESPONSE=$(forge_update_branch "$REPO_NWO" "$PR_NUMBER" 2>&1) || {
         warning "Failed to update branch: $UPDATE_RESPONSE"
         # Continue to retry merge anyway - update may have partially succeeded
       }
@@ -226,7 +228,8 @@ for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
 done
 
 # Verify merge
-VERIFY_MERGED=$($GH --no-cache api "repos/$REPO_NWO/pulls/$PR_NUMBER" --jq '.merged' 2>/dev/null || echo "false")
+VERIFY_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')
+VERIFY_MERGED=$(echo "$VERIFY_JSON" | jq -r '.merged // false')
 if [[ "$VERIFY_MERGED" != "true" ]]; then
   error "Merge API call returned but PR #$PR_NUMBER is not merged"
 fi
@@ -237,13 +240,13 @@ success "PR #$PR_NUMBER merged successfully"
 # Labels on closed/merged items are harmless — all agents filter by open state.
 # See: https://github.com/rjwalters/loom/issues/2838
 
-# Delete remote branch (skip if GitHub auto-deletes on merge)
-DELETE_BRANCH_ON_MERGE=$($GH api "repos/$REPO_NWO" --jq '.delete_branch_on_merge' 2>/dev/null || echo "false")
+# Delete remote branch (skip if forge auto-deletes on merge)
+DELETE_BRANCH_ON_MERGE=$(forge_check_auto_delete "$REPO_NWO" "$GH")
 if [[ "$DELETE_BRANCH_ON_MERGE" == "true" ]]; then
-  info "Skipping branch deletion (GitHub auto-delete is enabled)"
+  info "Skipping branch deletion (auto-delete is enabled)"
 else
   info "Deleting remote branch: $PR_BRANCH"
-  gh api "repos/$REPO_NWO/git/refs/heads/$PR_BRANCH" -X DELETE 2>/dev/null && \
+  forge_delete_branch "$REPO_NWO" "$PR_BRANCH" && \
     success "Branch '$PR_BRANCH' deleted" || \
     warning "Could not delete branch '$PR_BRANCH' (may already be deleted)"
 fi

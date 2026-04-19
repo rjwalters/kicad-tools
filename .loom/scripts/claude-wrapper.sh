@@ -42,11 +42,17 @@ API_ERROR_IDLE_TIMEOUT="${LOOM_API_ERROR_IDLE_TIMEOUT:-60}"
 
 # Auth cache configuration
 # Short-TTL file cache to prevent concurrent `claude auth status` calls
-# from overwhelming the auth endpoint when multiple agents start simultaneously
-AUTH_CACHE_TTL="${LOOM_AUTH_CACHE_TTL:-120}"  # seconds
+# from overwhelming the auth endpoint when multiple agents start simultaneously.
+# 300s is safe because auth tokens have much longer lifetimes; if auth was valid
+# 5 minutes ago it is still valid now.  See issue #3109.
+AUTH_CACHE_TTL="${LOOM_AUTH_CACHE_TTL:-300}"  # seconds (was 120, raised to reduce contention)
 # Max time a single auth check cycle can take: 15s timeout × 3 retries + backoff (2+5+10) ≈ 62s
 AUTH_CACHE_STALE_LOCK_THRESHOLD="${LOOM_AUTH_CACHE_STALE_LOCK_THRESHOLD:-90}"  # seconds
-AUTH_CACHE_LOCK_WAIT="${LOOM_AUTH_CACHE_LOCK_WAIT:-60}"  # seconds
+AUTH_CACHE_LOCK_WAIT="${LOOM_AUTH_CACHE_LOCK_WAIT:-10}"  # seconds (was 60, reduced to fail fast)
+# Extended TTL for lock-contention fallback: when the lock is held AND the cache
+# is expired but younger than this threshold, use the stale cached result instead
+# of blocking.  Prevents the cascading 60s-per-agent delay pattern.  See #3109.
+AUTH_CACHE_GRACE_TTL="${LOOM_AUTH_CACHE_GRACE_TTL:-600}"  # seconds
 
 # Startup health monitor configuration
 # How long (seconds) to watch early output for MCP/plugin failures
@@ -554,7 +560,12 @@ _auth_cache_unlock() {
 # Read cached auth output if it exists and is within TTL.
 # On success, echoes the cached auth JSON output and returns 0.
 # Returns 1 if cache is missing, corrupt, or expired.
+#
+# Optional argument: $1 = TTL override (defaults to AUTH_CACHE_TTL).
+# Callers can pass AUTH_CACHE_GRACE_TTL when willing to accept slightly stale
+# data to avoid lock contention.  See issue #3109.
 _auth_cache_read() {
+    local ttl="${1:-${AUTH_CACHE_TTL}}"
     local cache_file
     cache_file=$(_auth_cache_file)
 
@@ -571,7 +582,7 @@ _auth_cache_read() {
     local now
     now=$(date +%s)
     local age=$(( now - cache_time ))
-    if [[ "${age}" -gt "${AUTH_CACHE_TTL}" ]]; then
+    if [[ "${age}" -gt "${ttl}" ]]; then
         return 1
     fi
 
@@ -633,7 +644,22 @@ check_auth_status() {
     if _auth_cache_lock; then
         lock_acquired=true
     else
-        # Another process is refreshing — wait for it to finish, polling cache
+        # Another process is refreshing the cache.
+        # First, check if we have a recently-expired-but-still-trustworthy cached
+        # result (within AUTH_CACHE_GRACE_TTL).  Auth tokens have long lifetimes so
+        # a result from a few minutes ago is almost certainly still valid.  Using the
+        # grace TTL avoids the cascading delay pattern where N agents each wait 60s
+        # for the lock holder.  See issue #3109.
+        if cached_output=$(_auth_cache_read "${AUTH_CACHE_GRACE_TTL}"); then
+            local logged_in
+            logged_in=$(echo "${cached_output}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('loggedIn', False))" 2>/dev/null || echo "")
+            if [[ "${logged_in}" == "True" ]]; then
+                log_info "Authentication check passed (grace-TTL cache, lock held by another process)"
+                return 0
+            fi
+        fi
+
+        # No usable grace cache — wait briefly for the lock holder to finish
         log_info "Auth cache lock held by another process, waiting up to ${AUTH_CACHE_LOCK_WAIT}s..."
         local wait_elapsed=0
         while [[ "${wait_elapsed}" -lt "${AUTH_CACHE_LOCK_WAIT}" ]]; do

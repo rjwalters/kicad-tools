@@ -17,6 +17,13 @@
 
 set -e  # Exit on error
 
+# Use loom-forge for forge-agnostic issue/PR operations (supports GitHub + Gitea)
+if command -v loom-forge &>/dev/null; then
+    FORGE="loom-forge"
+else
+    FORGE="gh"
+fi
+
 # Colors
 # shellcheck disable=SC2034  # Color palette - not all colors used in every script
 RED='\033[0;31m'
@@ -63,7 +70,7 @@ for branch in $branches; do
     ((checked++))
 
     # Check issue status
-    status=$(gh issue view "$issue_num" --json state --jq .state 2>/dev/null || echo "NOT_FOUND")
+    status=$($FORGE issue view "$issue_num" --json state --jq .state 2>/dev/null || echo "NOT_FOUND")
 
     if [[ "$status" == "CLOSED" ]]; then
         echo -e "${GREEN}✓${NC} Issue #$issue_num is CLOSED - deleting $branch"
