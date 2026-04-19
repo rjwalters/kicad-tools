@@ -215,6 +215,109 @@ class TestIsMonotonicallyDiverging:
         assert _is_monotonically_diverging([90, 96, 88, 130, 148, 155], window=3) is True
 
 
+class TestEscapeStrategyCycling:
+    """Tests for escape_local_minimum trying all strategies (Issue #1638)."""
+
+    def test_escape_tries_all_strategies_on_failure(self):
+        """escape_local_minimum should cycle through all 3 strategies before giving up."""
+        from unittest.mock import MagicMock, patch
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # Make all strategies fail
+        neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
+        neg._escape_reverse_order = MagicMock(return_value=(False, 10))
+        neg._escape_random_subset = MagicMock(return_value=(False, 10))
+
+        success, overflow, tried = neg.escape_local_minimum(
+            overflow_history=[10, 10, 10, 10],
+            net_routes={},
+            routes_list=[],
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            strategy_index=0,
+        )
+
+        assert success is False
+        assert tried == 3
+        assert neg._escape_shuffle_order.call_count == 1
+        assert neg._escape_reverse_order.call_count == 1
+        assert neg._escape_random_subset.call_count == 1
+
+    def test_escape_stops_on_first_success(self):
+        """escape_local_minimum should stop as soon as one strategy succeeds."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # First fails, second succeeds
+        neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
+        neg._escape_reverse_order = MagicMock(return_value=(True, 5))
+        neg._escape_random_subset = MagicMock(return_value=(False, 10))
+
+        success, overflow, tried = neg.escape_local_minimum(
+            overflow_history=[10, 10, 10, 10],
+            net_routes={},
+            routes_list=[],
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            strategy_index=0,
+        )
+
+        assert success is True
+        assert overflow == 5
+        assert tried == 2
+        assert neg._escape_shuffle_order.call_count == 1
+        assert neg._escape_reverse_order.call_count == 1
+        assert neg._escape_random_subset.call_count == 0  # Not tried
+
+    def test_escape_wraps_around_strategy_index(self):
+        """escape_local_minimum should wrap strategy index modulo num strategies."""
+        from unittest.mock import MagicMock
+
+        from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
+
+        mock_grid = MagicMock()
+        mock_router = MagicMock()
+        neg = NegotiatedRouter(mock_grid, mock_router, MagicMock(), {})
+
+        # All fail
+        neg._escape_shuffle_order = MagicMock(return_value=(False, 10))
+        neg._escape_reverse_order = MagicMock(return_value=(False, 10))
+        neg._escape_random_subset = MagicMock(return_value=(False, 10))
+
+        # Start from index 1 (reverse), should try reverse -> random -> shuffle
+        success, overflow, tried = neg.escape_local_minimum(
+            overflow_history=[10, 10, 10, 10],
+            net_routes={},
+            routes_list=[],
+            pads_by_net={},
+            net_order=[],
+            present_cost_factor=0.5,
+            mark_route_callback=lambda r: None,
+            strategy_index=1,
+        )
+
+        assert success is False
+        assert tried == 3
+        # All three should be called exactly once
+        assert neg._escape_shuffle_order.call_count == 1
+        assert neg._escape_reverse_order.call_count == 1
+        assert neg._escape_random_subset.call_count == 1
+
+
 class TestCalculatePresentCost:
     """Tests for calculate_present_cost function."""
 

@@ -540,12 +540,13 @@ class NegotiatedRouter:
         present_cost_factor: float,
         mark_route_callback: callable,
         strategy_index: int = 0,
-    ) -> tuple[bool, int]:
+    ) -> tuple[bool, int, int]:
         """Try escape strategies when router is stuck oscillating.
 
         When the negotiated router is stuck cycling between states without
         making progress (detected via detect_oscillation), this method
-        tries various strategies to escape the local minimum.
+        tries strategies starting from strategy_index, cycling through all
+        remaining strategies until one succeeds or all are exhausted.
 
         Args:
             overflow_history: List of overflow values from previous iterations
@@ -555,10 +556,11 @@ class NegotiatedRouter:
             net_order: List of net IDs in routing priority order
             present_cost_factor: Current congestion cost factor
             mark_route_callback: Callback to mark routes on the grid
-            strategy_index: Index of strategy to try (cycles through available)
+            strategy_index: Index of strategy to start from (cycles through available)
 
         Returns:
-            Tuple of (success, overflow) where success indicates if overflow improved
+            Tuple of (success, overflow, strategies_tried) where success indicates
+            if overflow improved and strategies_tried is how many were attempted
         """
         strategies = [
             self._escape_shuffle_order,
@@ -566,16 +568,30 @@ class NegotiatedRouter:
             self._escape_random_subset,
         ]
 
-        strategy = strategies[strategy_index % len(strategies)]
-        return strategy(
-            overflow_history=overflow_history,
-            net_routes=net_routes,
-            routes_list=routes_list,
-            pads_by_net=pads_by_net,
-            net_order=net_order,
-            present_cost_factor=present_cost_factor,
-            mark_route_callback=mark_route_callback,
-        )
+        num_strategies = len(strategies)
+        strategies_tried = 0
+
+        for i in range(num_strategies):
+            idx = (strategy_index + i) % num_strategies
+            strategy = strategies[idx]
+            strategies_tried += 1
+
+            success, new_overflow = strategy(
+                overflow_history=overflow_history,
+                net_routes=net_routes,
+                routes_list=routes_list,
+                pads_by_net=pads_by_net,
+                net_order=net_order,
+                present_cost_factor=present_cost_factor,
+                mark_route_callback=mark_route_callback,
+            )
+
+            if success:
+                return True, new_overflow, strategies_tried
+
+        # All strategies exhausted without success
+        current_overflow = overflow_history[-1] if overflow_history else 0
+        return False, current_overflow, strategies_tried
 
     def _escape_shuffle_order(
         self,
@@ -626,10 +642,10 @@ class NegotiatedRouter:
         new_overflow = self.grid.get_total_overflow()
         best_overflow = min(overflow_history) if overflow_history else float("inf")
 
-        # Only consider escape successful if ALL nets were re-routed AND overflow improved
-        # (Issue #762: escape was incorrectly reporting success when nets failed to re-route)
-        all_rerouted = rerouted_count == expected_count
-        return all_rerouted and new_overflow < best_overflow, new_overflow
+        # Accept escape if overflow improved and at least some nets survived
+        # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
+        # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
 
     def _escape_reverse_order(
         self,
@@ -678,10 +694,10 @@ class NegotiatedRouter:
         new_overflow = self.grid.get_total_overflow()
         best_overflow = min(overflow_history) if overflow_history else float("inf")
 
-        # Only consider escape successful if ALL nets were re-routed AND overflow improved
-        # (Issue #762: escape was incorrectly reporting success when nets failed to re-route)
-        all_rerouted = rerouted_count == expected_count
-        return all_rerouted and new_overflow < best_overflow, new_overflow
+        # Accept escape if overflow improved and at least some nets survived
+        # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
+        # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
 
     def _escape_random_subset(
         self,
@@ -731,7 +747,7 @@ class NegotiatedRouter:
         new_overflow = self.grid.get_total_overflow()
         best_overflow = min(overflow_history) if overflow_history else float("inf")
 
-        # Only consider escape successful if ALL nets were re-routed AND overflow improved
-        # (Issue #762: escape was incorrectly reporting success when nets failed to re-route)
-        all_rerouted = rerouted_count == expected_count
-        return all_rerouted and new_overflow < best_overflow, new_overflow
+        # Accept escape if overflow improved and at least some nets survived
+        # (Issue #762: require rerouted_count > 0 to avoid false success on total loss)
+        # (Issue #1638: relaxed from requiring ALL nets to allow partial progress)
+        return rerouted_count > 0 and new_overflow < best_overflow, new_overflow
