@@ -534,12 +534,19 @@ def _get_routing_params(
         if via_diameter is None:
             via_diameter = 0.6
 
-    # Auto-calculate grid: use clearance / 3 so that worst-case quantisation
-    # error (up to resolution/sqrt(2) for two grid-snapped objects) stays
-    # well within the DRC clearance margin.
-    # Round DOWN to a clean value (0.05mm increments) to ensure compliance.
-    grid = clearance / 3
-    grid = max(0.05, math.floor(grid / 0.05) * 0.05)  # Round DOWN to 0.05mm, min 0.05mm
+    # Auto-calculate grid: must be <= clearance / 2 so that worst-case
+    # grid-quantisation error stays within DRC clearance margin.
+    # Snap to a known-good grid value that divides evenly into common
+    # imperial pitches (2.54mm, 5.08mm) to avoid off-grid THT pads.
+    max_grid = clearance / 2
+    # Candidate grids ordered coarsest-first; includes 0.127mm (5 mil)
+    # which divides evenly into 2.54mm (20x) and 5.08mm (40x).
+    _GRID_CANDIDATES = [0.25, 0.127, 0.1, 0.065, 0.05]
+    grid = 0.05  # fallback minimum
+    for candidate in _GRID_CANDIDATES:
+        if candidate <= max_grid:
+            grid = candidate
+            break
 
     return grid, clearance, trace_width, via_drill, via_diameter
 
@@ -792,7 +799,7 @@ def _run_step_route(ctx: BuildContext, console: Console) -> BuildResult:
             "-o",
             str(output_file),
             "--grid",
-            str(grid),
+            "auto",  # Let route command auto-select grid from pad positions
             "--clearance",
             str(clearance),
             "--trace-width",

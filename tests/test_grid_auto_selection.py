@@ -217,6 +217,73 @@ class TestAutoSelectGridResolution:
         result = auto_select_grid_resolution(pads, clearance=0.2)
         assert result.resolution <= 0.2 / 2  # Must be <= 0.1mm
 
+    def test_imperial_tht_pads_zero_off_grid_with_loose_clearance(self):
+        """Imperial THT pads (2.54mm, 5.08mm) should have zero off-grid with loose clearance.
+
+        When clearance allows 0.127mm grid (clearance >= 0.254mm), the auto-selector
+        should pick 0.127mm which divides evenly into 2.54mm and 5.08mm.
+        """
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+            PadPosition(x=0.0, y=2.54),
+            PadPosition(x=2.54, y=2.54),
+            PadPosition(x=5.08, y=2.54),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.3)
+        assert result.off_grid_pads == 0, (
+            f"Imperial THT pads should have zero off-grid pads, got {result.off_grid_pads} "
+            f"with grid {result.resolution}mm"
+        )
+
+    def test_imperial_tht_pads_with_tight_clearance(self):
+        """Imperial THT pads with tight clearance (0.127mm) should use 0.0508mm grid.
+
+        When clearance is 0.127mm (JLCPCB), max_grid is 0.0635mm.
+        The 0.0508mm (2 mil) candidate divides evenly into 2.54mm (50x).
+        """
+        pads = [
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.127)
+        # 0.0508mm divides evenly into 2.54mm and 5.08mm
+        assert result.off_grid_pads == 0, (
+            f"Imperial THT pads should have zero off-grid pads even with tight clearance, "
+            f"got {result.off_grid_pads} with grid {result.resolution}mm"
+        )
+
+    def test_mixed_imperial_metric_pads(self):
+        """Mixed imperial THT + metric SMD pads should minimise off-grid count."""
+        pads = [
+            # Imperial THT pads at 2.54mm pitch
+            PadPosition(x=0.0, y=0.0),
+            PadPosition(x=2.54, y=0.0),
+            PadPosition(x=5.08, y=0.0),
+            # Metric SMD pads at 0.65mm pitch (TSSOP)
+            PadPosition(x=10.0, y=0.0),
+            PadPosition(x=10.65, y=0.0),
+            PadPosition(x=11.30, y=0.0),
+        ]
+        result = auto_select_grid_resolution(pads, clearance=0.15)
+        # No single grid aligns with both; auto-selector picks the one
+        # that minimises off-grid count
+        assert result.total_pads == 6
+        assert result.off_grid_pads < result.total_pads, (
+            "Should have fewer off-grid pads than total"
+        )
+
+    def test_0508mm_candidate_included(self):
+        """Default candidates should include 0.0508mm (2 mil) for imperial compatibility."""
+        pads = [PadPosition(x=0.0, y=0.0)]
+        result = auto_select_grid_resolution(pads, clearance=0.127)
+        resolutions_tried = [c[0] for c in result.candidates_tried]
+        assert 0.0508 in resolutions_tried, (
+            f"0.0508mm should be in candidates, got {resolutions_tried}"
+        )
+
 
 class TestGridAutoSelectionSummary:
     """Tests for GridAutoSelection.summary() method."""
