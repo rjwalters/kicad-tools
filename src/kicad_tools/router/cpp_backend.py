@@ -332,6 +332,7 @@ class CppPathfinder:
         weight: float = 1.0,
         start_layers: list[int] | None = None,
         end_layers: list[int] | None = None,
+        per_net_timeout: float | None = None,
     ) -> Route | None:
         """Route between two pads.
 

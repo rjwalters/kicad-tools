@@ -432,6 +432,12 @@ class Autorouter:
             * num_layers
         )
         adaptive_threshold = 500_000
+        # C++ backend handles much larger grids efficiently
+        if not self._force_python:
+            from .cpp_backend import is_cpp_available
+
+            if is_cpp_available():
+                adaptive_threshold = 50_000_000
 
         if estimated_cells > adaptive_threshold:
             # Use adaptive resolution for better performance on large boards

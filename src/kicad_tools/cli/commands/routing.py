@@ -219,6 +219,8 @@ def run_route_command(args) -> int:
         sub_argv.extend(["--export-failed-nets", args.export_failed_nets])
     if getattr(args, "no_cache", False):
         sub_argv.append("--no-cache")
+    if getattr(args, "backend", "auto") != "auto":
+        sub_argv.extend(["--backend", args.backend])
     return route_main(sub_argv)
 
 
