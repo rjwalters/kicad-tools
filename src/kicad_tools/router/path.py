@@ -181,20 +181,6 @@ def calculate_route_length(routes: list[Route]) -> float:
     return total_length
 
 
-def calculate_total_wirelength(routes: list[Route]) -> float:
-    """Calculate total wirelength including all segments.
-
-    Args:
-        routes: List of Route objects
-
-    Returns:
-        Total wirelength in mm
-    """
-    return sum(
-        math.sqrt((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) for r in routes for s in r.segments
-    )
-
-
 def count_vias(routes: list[Route]) -> int:
     """Count total number of vias in routes.
 

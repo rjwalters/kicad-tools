@@ -220,47 +220,6 @@ def group_buses(
     return groups
 
 
-def get_bus_routing_order(
-    groups: list[BusGroup],
-    mode: BusRoutingMode = BusRoutingMode.PARALLEL,
-) -> list[list[int]]:
-    """Get the routing order for bus signals.
-
-    Returns a list of routing batches. In PARALLEL mode, each batch contains
-    one signal from each bus to route simultaneously. In other modes, signals
-    are routed sequentially within each bus.
-
-    Args:
-        groups: List of BusGroup objects
-        mode: Routing mode
-
-    Returns:
-        List of batches, where each batch is a list of net IDs to route together
-    """
-    if mode == BusRoutingMode.PARALLEL:
-        # Route signals at the same bit position together across buses
-        # This promotes parallel trace alignment
-        max_width = max((g.width for g in groups), default=0)
-        batches: list[list[int]] = []
-
-        for i in range(max_width):
-            batch: list[int] = []
-            for group in groups:
-                if i < len(group.signals):
-                    batch.append(group.signals[i].net_id)
-            if batch:
-                batches.append(batch)
-
-        return batches
-
-    else:
-        # STACKED or BUNDLED: route each bus as a unit
-        batches = []
-        for group in groups:
-            batches.append(group.get_net_ids())
-        return batches
-
-
 @dataclass
 class BusRoutingConfig:
     """Configuration for bus routing.
