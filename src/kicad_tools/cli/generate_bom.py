@@ -34,6 +34,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli.runner import find_kicad_cli
+
 KICAD_SCRIPTS = Path(__file__).resolve().parent
 
 
@@ -157,29 +159,6 @@ class BOMLine:
             return self.components[0].get_field(name)
         return ""
 
-
-def find_kicad_cli() -> Path | None:
-    """Find kicad-cli executable."""
-    # Check common locations on macOS
-    locations = [
-        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-        "/usr/local/bin/kicad-cli",
-        "/opt/homebrew/bin/kicad-cli",
-    ]
-
-    for loc in locations:
-        if Path(loc).exists():
-            return Path(loc)
-
-    # Try PATH
-    try:
-        result = subprocess.run(["which", "kicad-cli"], capture_output=True, text=True)
-        if result.returncode == 0:
-            return Path(result.stdout.strip())
-    except Exception:
-        pass
-
-    return None
 
 
 def extract_components_from_schematic(sch_path: Path, sheet_name: str = "") -> list[Component]:

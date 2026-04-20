@@ -7,7 +7,6 @@ Wraps kicad-cli for generating Gerber files with manufacturer presets.
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -22,6 +21,7 @@ from kicad_tools.exceptions import (
     ExportError,
 )
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
+from kicad_tools.cli.runner import find_kicad_cli
 
 logger = logging.getLogger(__name__)
 
@@ -115,31 +115,6 @@ MANUFACTURER_PRESETS: dict[str, ManufacturerPreset] = {
     "oshpark": OSHPARK_PRESET,
 }
 
-
-def find_kicad_cli() -> Path | None:
-    """Find kicad-cli executable."""
-    # Check PATH first
-    cli = shutil.which("kicad-cli")
-    if cli:
-        return Path(cli)
-
-    # Check common locations
-    common_paths = [
-        # macOS
-        Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"),
-        # Linux
-        Path("/usr/bin/kicad-cli"),
-        Path("/usr/local/bin/kicad-cli"),
-        # Windows
-        Path("C:/Program Files/KiCad/8.0/bin/kicad-cli.exe"),
-        Path("C:/Program Files/KiCad/7.0/bin/kicad-cli.exe"),
-    ]
-
-    for path in common_paths:
-        if path.exists():
-            return path
-
-    return None
 
 
 def get_kicad_cli_version(kicad_cli: Path) -> str | None:

@@ -14,6 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.sexp import SExp, parse_string
 
 logger = logging.getLogger(__name__)
@@ -391,27 +392,6 @@ class Netlist:
             "signal_net_count": len(self.nets) - len(power_nets),
         }
 
-
-def find_kicad_cli() -> Path | None:
-    """Find kicad-cli executable."""
-    locations = [
-        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
-        "/usr/local/bin/kicad-cli",
-        "/opt/homebrew/bin/kicad-cli",
-    ]
-
-    for loc in locations:
-        if Path(loc).exists():
-            return Path(loc)
-
-    try:
-        result = subprocess.run(["which", "kicad-cli"], capture_output=True, text=True)
-        if result.returncode == 0:
-            return Path(result.stdout.strip())
-    except Exception:
-        pass
-
-    return None
 
 
 def build_netlist_from_schematic(sch_path: str | Path) -> Netlist:
