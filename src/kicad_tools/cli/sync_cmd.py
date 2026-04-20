@@ -261,7 +261,12 @@ def _output_changes_table(changes, dry_run: bool) -> None:
     for change in changes:
         status = "(would apply)" if dry_run else "(applied)"
         if change.change_type == "update_footprint":
-            status = "(manual - footprint change invalidates routing)"
+            if dry_run:
+                status = "(would swap)"
+            elif change.applied:
+                status = "(swapped)"
+            else:
+                status = "(failed - see error)"
         elif change.change_type == "add_footprint":
             if dry_run:
                 status = "(would add)"
