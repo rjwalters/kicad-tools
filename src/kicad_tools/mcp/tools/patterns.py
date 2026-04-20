@@ -13,8 +13,8 @@ from typing import Any, Literal
 from kicad_tools.exceptions import FileNotFoundError as KiCadFileNotFoundError
 from kicad_tools.exceptions import ParseError
 from kicad_tools.patterns import (
-    PatternAdapter,
     PatternValidator,
+    adapt_pattern as _adapt_pattern,
     get_component_requirements,
     list_components,
 )
@@ -184,8 +184,7 @@ def adapt_pattern(
         >>> print(result["parameters"]["input_cap"])
         '10uF'
     """
-    adapter = PatternAdapter()
-    params = adapter.adapt(
+    params = _adapt_pattern(
         pattern_type,
         component_mpn,
         **(overrides or {}),

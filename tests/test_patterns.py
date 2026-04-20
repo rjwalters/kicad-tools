@@ -4,18 +4,22 @@ Tests for pattern validation, adaptation, and schema types.
 Includes tests for:
 - Schema types (Placement, PlacementRule, PatternSpec)
 - Validation (PatternValidator, ValidationViolation)
-- Adaptation (PatternAdapter, AdaptedPatternParams)
+- Adaptation (adapt_pattern, adapt_ldo_pattern, etc.)
 - Constraint patterns (SPI, UART, Ethernet, Analog, Protection)
 """
 
 import pytest
 
 from kicad_tools.intent import InterfaceCategory
+from kicad_tools.patterns.adaptation import _format_capacitance
 from kicad_tools.patterns import (
-    # Validation and adaptation
+    # Adaptation
     AdaptedPatternParams,
+    adapt_buck_pattern,
+    adapt_decoupling_pattern,
+    adapt_ldo_pattern,
+    adapt_pattern,
     ComponentRequirements,
-    PatternAdapter,
     PatternSpec,
     PatternValidationResult,
     PatternValidator,
@@ -320,12 +324,11 @@ class TestComponentDatabase:
 
 
 class TestPatternAdapter:
-    """Tests for PatternAdapter."""
+    """Tests for pattern adaptation functions."""
 
     def test_adapt_ldo_pattern(self):
         """Test adapting LDO pattern for AMS1117."""
-        adapter = PatternAdapter()
-        params = adapter.adapt_ldo_pattern("AMS1117-3.3")
+        params = adapt_ldo_pattern("AMS1117-3.3")
 
         assert params.pattern_type == "LDO"
         assert params.component_mpn == "AMS1117-3.3"
@@ -334,8 +337,7 @@ class TestPatternAdapter:
 
     def test_adapt_buck_pattern(self):
         """Test adapting buck pattern for LM2596."""
-        adapter = PatternAdapter()
-        params = adapter.adapt_buck_pattern("LM2596-5.0")
+        params = adapt_buck_pattern("LM2596-5.0")
 
         assert params.pattern_type == "BuckConverter"
         assert params.parameters["inductor"] == "33uH"
@@ -343,16 +345,14 @@ class TestPatternAdapter:
 
     def test_adapt_decoupling_pattern(self):
         """Test adapting decoupling pattern for STM32."""
-        adapter = PatternAdapter()
-        params = adapter.adapt_decoupling_pattern("STM32F405RGT6")
+        params = adapt_decoupling_pattern("STM32F405RGT6")
 
         assert params.pattern_type == "Decoupling"
         assert "100nF" in params.parameters["capacitors"]
 
     def test_adapt_with_overrides(self):
         """Test adapting with parameter overrides."""
-        adapter = PatternAdapter()
-        params = adapter.adapt_ldo_pattern(
+        params = adapt_ldo_pattern(
             "AMS1117-3.3",
             input_cap="22uF",
         )
@@ -360,8 +360,7 @@ class TestPatternAdapter:
 
     def test_adapt_unknown_component_uses_defaults(self):
         """Test that unknown components use default values."""
-        adapter = PatternAdapter()
-        params = adapter.adapt_ldo_pattern("UNKNOWN-LDO-123")
+        params = adapt_ldo_pattern("UNKNOWN-LDO-123")
 
         # Should still work with defaults
         assert params.pattern_type == "LDO"
@@ -369,27 +368,24 @@ class TestPatternAdapter:
         assert any("not in database" in note for note in params.notes)
 
     def test_generic_adapt_method(self):
-        """Test the generic adapt() method."""
-        adapter = PatternAdapter()
-
-        ldo_params = adapter.adapt("LDO", "AMS1117-3.3")
+        """Test the generic adapt_pattern() function."""
+        ldo_params = adapt_pattern("LDO", "AMS1117-3.3")
         assert ldo_params.pattern_type == "LDO"
 
-        buck_params = adapter.adapt("BuckConverter", "LM2596-5.0")
+        buck_params = adapt_pattern("BuckConverter", "LM2596-5.0")
         assert buck_params.pattern_type == "BuckConverter"
 
     def test_adapt_invalid_pattern_type(self):
         """Test that invalid pattern type raises ValueError."""
-        adapter = PatternAdapter()
         with pytest.raises(ValueError, match="Unknown pattern type"):
-            adapter.adapt("InvalidType", "AMS1117-3.3")
+            adapt_pattern("InvalidType", "AMS1117-3.3")
 
     def test_format_capacitance(self):
         """Test capacitance formatting."""
-        assert PatternAdapter._format_capacitance(10.0) == "10uF"
-        assert PatternAdapter._format_capacitance(0.1) == "100nF"
-        assert PatternAdapter._format_capacitance(0.000022) == "22pF"
-        assert PatternAdapter._format_capacitance(4.7) == "4.7uF"
+        assert _format_capacitance(10.0) == "10uF"
+        assert _format_capacitance(0.1) == "100nF"
+        assert _format_capacitance(0.000022) == "22pF"
+        assert _format_capacitance(4.7) == "4.7uF"
 
 
 class TestAdaptedPatternParams:
