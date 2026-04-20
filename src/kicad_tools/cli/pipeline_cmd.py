@@ -1428,16 +1428,6 @@ Examples:
         default=None,
         help="Path to root .kicad_sch file (overrides auto-discovery)",
     )
-    parser.add_argument(
-        "--zones",
-        action="store_true",
-        default=False,
-        help=(
-            "Include zone fill step. Disabled by default due to data corruption "
-            "risk (see issue #1392). Use --step zones to fill zones only."
-        ),
-    )
-
     args = parser.parse_args(argv)
 
     input_path = Path(args.input).resolve()
@@ -1524,14 +1514,7 @@ Examples:
     if args.step:
         steps = [PipelineStep(args.step)]
     else:
-        # Filter out ZONES unless --zones is explicitly passed
-        steps = [s for s in ALL_STEPS if s != PipelineStep.ZONES or args.zones]
-        if not args.zones and not ctx.quiet:
-            console = Console(quiet=False)
-            console.print(
-                "  [dim]zones: skipped by default (data corruption risk). "
-                "Use --zones to include.[/dim]"
-            )
+        steps = list(ALL_STEPS)
 
     results = run_pipeline(ctx, steps)
 
