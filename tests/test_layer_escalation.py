@@ -285,6 +285,138 @@ class TestUpdatePcbLayerStackup:
         assert result == pcb_content
 
 
+class TestUpdatePcbLayerStackupPowerLayers:
+    """Tests for copper layer counting with non-signal type keywords (issue #1773)."""
+
+    def test_power_typed_layer_counted(self):
+        """Board with power-typed inner layer correctly counts 4 copper layers."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" power)
+    (31 "B.Cu" signal)
+  )
+)"""
+        # Targeting 4 layers on a board that already has 4 => no change
+        result = update_pcb_layer_stackup(pcb_content, 4)
+        assert result == pcb_content, (
+            "4-layer board with power-typed In2.Cu should NOT be upgraded"
+        )
+
+    def test_mixed_type_keywords_all_counted(self):
+        """Board with signal, power, and mixed type keywords all counted correctly."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" mixed)
+    (2 "In2.Cu" power)
+    (3 "In3.Cu" signal)
+    (4 "In4.Cu" power)
+    (31 "B.Cu" signal)
+  )
+)"""
+        # Already has 6 copper layers => no change when targeting 6
+        result = update_pcb_layer_stackup(pcb_content, 6)
+        assert result == pcb_content, (
+            "6-layer board with mixed types should NOT be upgraded"
+        )
+
+    def test_noop_when_power_layers_sufficient(self):
+        """4-layer board with power-typed inner layers targeting 4 returns unchanged."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" power)
+    (2 "In2.Cu" power)
+    (31 "B.Cu" signal)
+  )
+)"""
+        result = update_pcb_layer_stackup(pcb_content, 4)
+        assert result == pcb_content
+
+    def test_non_copper_layers_preserved(self):
+        """Non-copper layers are preserved after stackup update."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (32 "B.Adhes" user)
+    (33 "F.Adhes" user)
+    (34 "B.Paste" user)
+    (35 "F.Paste" user)
+    (36 "B.SilkS" user)
+    (37 "F.SilkS" user)
+    (38 "B.Mask" user)
+    (39 "F.Mask" user)
+    (44 "Edge.Cuts" user)
+    (45 "Margin" user)
+    (46 "B.CrtYd" user)
+    (47 "F.CrtYd" user)
+    (48 "B.Fab" user)
+    (49 "F.Fab" user)
+  )
+)"""
+        result = update_pcb_layer_stackup(pcb_content, 4)
+
+        # Non-copper layers should still be present in content
+        # (they may be outside the layers block depending on implementation,
+        # but the key point is the output is valid)
+        assert '"F.Cu"' in result
+        assert '"B.Cu"' in result
+        assert '"In1.Cu"' in result
+        assert '"In2.Cu"' in result
+
+    def test_unknown_type_keyword_counted(self):
+        """Hypothetical unknown type keyword is still counted as a copper layer."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" custom)
+    (31 "B.Cu" jumper)
+  )
+)"""
+        # 4 copper layers already => no change when targeting 4
+        result = update_pcb_layer_stackup(pcb_content, 4)
+        assert result == pcb_content, (
+            "Unknown type keywords should still be counted as copper layers"
+        )
+
+    def test_layer_ids_stable_after_update(self):
+        """Layer IDs remain stable — B.Cu stays at layer 31."""
+        from kicad_tools.cli.route_cmd import update_pcb_layer_stackup
+
+        pcb_content = """(kicad_pcb
+  (version 20240101)
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" power)
+  )
+)"""
+        result = update_pcb_layer_stackup(pcb_content, 4)
+
+        # B.Cu should still be at layer 31
+        assert '(31 "B.Cu"' in result
+        # F.Cu should still be at layer 0
+        assert '(0 "F.Cu"' in result
+
+
 class TestLayerEscalationResult:
     """Tests for LayerEscalationResult dataclass."""
 

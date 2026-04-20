@@ -572,8 +572,9 @@ def update_pcb_layer_stackup(pcb_content: str, target_layers: int) -> str:
         new_layers = "\n    ".join(layer_defs[target_layers])
         return f"(layers\n    {new_layers}\n  )"
 
-    # Check if we need to update
-    current_layers = pcb_content.count('.Cu" signal')
+    # Check if we need to update — count ALL copper layers regardless of type
+    # (signal, power, mixed, etc.) not just those marked "signal"
+    current_layers = len(re.findall(r'\(\d+\s+"[^"]*\.Cu"\s+\w+', pcb_content))
     if current_layers >= target_layers:
         return pcb_content
 
