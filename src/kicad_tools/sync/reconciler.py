@@ -794,10 +794,13 @@ class Reconciler:
 
         # Step 3: Add the new footprint BEFORE removing the old one.
         # This ensures we never lose the old footprint if add_footprint fails.
+        # Use a temporary reference to avoid duplicate references in _footprints,
+        # which would cause remove_footprint(ref) to delete BOTH old and new.
+        temp_ref = f"__SWAP_TEMP__{ref}"
         try:
             new_fp = pcb.add_footprint(
                 library_id=new_fp_name,
-                reference=ref,
+                reference=temp_ref,
                 x=old_position[0],
                 y=old_position[1],
                 rotation=old_rotation,
@@ -813,8 +816,12 @@ class Reconciler:
                 applied=False,
             )
 
-        # Step 4: Remove the old footprint only after the new one was added successfully
+        # Step 4: Remove the old footprint only after the new one was added successfully.
+        # The old footprint has ref; the new one has temp_ref, so only the old is removed.
         pcb.remove_footprint(ref)
+
+        # Rename the new footprint from the temporary reference to the real one
+        pcb.update_footprint_reference(temp_ref, ref)
 
         # Step 5: Re-assign nets from old pads to new pads by pad number
         new_pad_count = len(new_fp.pads)

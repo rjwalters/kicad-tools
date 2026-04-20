@@ -1113,16 +1113,20 @@ class TestReconcilerApplyUpdateFootprint:
         # Verify old footprint was removed
         mock_pcb.remove_footprint.assert_called_once_with("C1")
 
-        # Verify new footprint was added at same position/rotation/layer
+        # Verify new footprint was added with a temporary reference to avoid
+        # remove_footprint accidentally deleting both old and new
         mock_pcb.add_footprint.assert_called_once_with(
             library_id="Capacitor_SMD:C_0805_2012Metric",
-            reference="C1",
+            reference="__SWAP_TEMP__C1",
             x=50.0,
             y=30.0,
             rotation=90.0,
             layer="F.Cu",
             value="100nF",
         )
+
+        # Verify the temporary reference was renamed to the real one
+        mock_pcb.update_footprint_reference.assert_called_once_with("__SWAP_TEMP__C1", "C1")
 
         # Verify net assignment was called for each pad
         mock_pcb.assign_net_to_footprint_pad.assert_any_call("C1", "1", "GND")
@@ -1646,6 +1650,106 @@ class TestReconcilerApplyUpdateFootprintIntegration:
 
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
+
+
+class TestUpdateFootprintSwapRegression:
+    """Regression test for duplicate-reference bug during footprint swap.
+
+    When add_footprint and remove_footprint both use the same reference,
+    remove_footprint filters _footprints by name and deletes ALL matching
+    entries -- including the just-added new footprint.  The fix uses a
+    temporary reference for the new footprint, removes the old one, then
+    renames the new one to the correct reference.
+    """
+
+    def test_remove_does_not_delete_new_footprint(self, tmp_path):
+        """Verify that the swap keeps exactly one footprint with the target ref.
+
+        Uses a real PCB._footprints list (not mocks) to prove that the
+        temporary-reference strategy avoids the accidental double-delete.
+        """
+        from kicad_tools.schema.pcb import PCB
+
+        # Load a real PCB with one footprint (R1)
+        from tests.conftest import MINIMAL_PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(pcb_file))
+
+        # Sanity: we start with exactly one footprint "R1"
+        assert pcb.get_footprint("R1") is not None
+        assert len([fp for fp in pcb.footprints if fp.reference == "R1"]) == 1
+
+        # Simulate the temp-ref swap pattern used by _apply_update_footprint:
+        # 1. Add new footprint with a temporary reference
+        temp_ref = "__SWAP_TEMP__R1"
+        # We cannot call add_footprint (needs KiCad libs), so replicate the
+        # critical _footprints bookkeeping directly.
+        from kicad_tools.schema.pcb import Footprint
+
+        new_fp = Footprint(
+            name="Resistor_SMD:R_0805_2012Metric",
+            layer="F.Cu",
+            position=(50.0, 50.0),
+            rotation=0.0,
+            reference=temp_ref,
+            value="10k",
+        )
+        pcb._footprints.append(new_fp)
+
+        # 2. Remove old footprint by its real reference
+        removed = pcb.remove_footprint("R1")
+        assert removed is True
+
+        # 3. The new footprint (temp_ref) must still be present
+        remaining = [fp for fp in pcb._footprints if fp.reference == temp_ref]
+        assert len(remaining) == 1, (
+            "Temporary-reference footprint was incorrectly removed by remove_footprint('R1')"
+        )
+
+        # 4. No footprint with the original reference should remain
+        assert pcb.get_footprint("R1") is None
+
+        # 5. Rename temp -> real (manually, since the test footprint has no
+        #    sexp node -- the real code path uses update_footprint_reference
+        #    which handles both sexp and _footprints)
+        remaining[0].reference = "R1"
+        assert pcb.get_footprint("R1") is not None
+        assert pcb.get_footprint("R1") is remaining[0]
+
+    def test_old_pattern_would_delete_both(self, tmp_path):
+        """Demonstrate that using the SAME reference for add then remove loses
+        the new footprint -- the exact bug this fix prevents."""
+        from kicad_tools.schema.pcb import PCB, Footprint
+        from tests.conftest import MINIMAL_PCB
+
+        pcb_file = tmp_path / "test.kicad_pcb"
+        pcb_file.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(pcb_file))
+
+        # Simulate the OLD (broken) pattern: add new fp with the SAME ref
+        new_fp = Footprint(
+            name="Resistor_SMD:R_0805_2012Metric",
+            layer="F.Cu",
+            position=(50.0, 50.0),
+            rotation=0.0,
+            reference="R1",
+            value="10k",
+        )
+        pcb._footprints.append(new_fp)
+
+        # Both footprints now have reference "R1"
+        assert len([fp for fp in pcb._footprints if fp.reference == "R1"]) == 2
+
+        # remove_footprint("R1") wipes ALL of them from _footprints
+        pcb.remove_footprint("R1")
+
+        r1_remaining = [fp for fp in pcb._footprints if fp.reference == "R1"]
+        assert len(r1_remaining) == 0, (
+            "This test documents the bug: remove_footprint deletes ALL "
+            "footprints sharing the same reference, including the new one."
+        )
 
 
 class TestReconcilerSaveMapping:
